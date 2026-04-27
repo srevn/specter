@@ -1,0 +1,4 @@
+[[watch]]
+name = "build"
+path = "/"
+command = ["echo"]

@@ -1,0 +1,15 @@
+[[watch]]
+name    = "build"
+path    = "/"
+command = ["make"]
+
+[[watch]]
+name    = "lint"
+path    = "/"
+command = ["clippy"]
+
+[[watch]]
+name    = "fmt"
+path    = "/"
+command = ["fmt", "$path"]
+scope   = "per-stable-file"

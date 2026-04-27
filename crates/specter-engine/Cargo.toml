@@ -1,0 +1,20 @@
+[package]
+name                   = "specter-engine"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[dependencies]
+specter-core = { path = "../specter-core" }
+slotmap.workspace      = true
+smallvec.workspace     = true
+tinyvec.workspace      = true
+
+[dev-dependencies]
+specter-core = { path = "../specter-core", features = ["testkit"] }
+compact_str.workspace = true
+proptest.workspace    = true
+
+[lints]
+workspace = true

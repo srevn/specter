@@ -1,0 +1,25 @@
+[package]
+name                   = "specter-core"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[features]
+default = []
+testkit = []
+
+[dependencies]
+slotmap.workspace         = true
+globset.workspace         = true
+compact_str.workspace     = true
+smallvec.workspace        = true
+tinyvec.workspace         = true
+string-interner.workspace = true
+siphasher.workspace       = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

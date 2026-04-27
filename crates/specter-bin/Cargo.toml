@@ -1,0 +1,36 @@
+[package]
+name                   = "specter-bin"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[lib]
+name = "specter_bin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "specter"
+path = "src/main.rs"
+
+[dependencies]
+specter-core     = { path = "../specter-core" }
+specter-engine   = { path = "../specter-engine" }
+specter-sensor   = { path = "../specter-sensor" }
+specter-actuator = { path = "../specter-actuator" }
+specter-config   = { path = "../specter-config" }
+clap.workspace               = true
+crossbeam.workspace          = true
+compact_str.workspace        = true
+signal-hook.workspace        = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+nix.workspace      = true
+slotmap.workspace  = true
+tempfile.workspace = true
+specter-sensor   = { path = "../specter-sensor", features = ["testkit"] }
+
+[lints]
+workspace = true

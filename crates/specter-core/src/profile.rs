@@ -1,0 +1,516 @@
+//! `Profile`, `ProfileMap`, and burst types.
+//!
+//! `Profile.config_hash` is computed at construction from
+//! `(config, max_settle)` and is the lifetime-stable identity of the Profile.
+//! `ProfileMap` keeps `(resource, config_hash) → ProfileId` and updates
+//! `Resource.profiles` in lockstep — `attach`/`detach` are the only mutators
+//! of either index.
+
+use crate::effect::DedupKey;
+use crate::ids::{ProfileId, ResourceId, TimerId};
+use crate::op::ProbeCorrelation;
+use crate::scan_config::{ScanConfig, compute_config_hash};
+use crate::snapshot::tree::TreeSnapshot;
+use crate::tree::Tree;
+use slotmap::{SecondaryMap, SlotMap};
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
+use tinyvec::TinyVec;
+
+/// One stability cycle. A `Burst` lives `Idle → Active(Burst) → Idle`;
+/// its `phase` walks `Settling → Probing [→ Draining]` and its `intent`
+/// (`Standard | Seed`) decides the terminal action.
+///
+/// Burst-level state (`started`, `attempts`, `intent`, `forced`,
+/// `burst_deadline`) survives phase transitions; `settle_timer` is `None`
+/// outside `Settling` (and at `Seed` construction); `phase` carries
+/// phase-specific data (the `Probing` correlation). `Draining` is a unit
+/// variant — the stable snapshot lives on `Profile.current`, see the
+/// variant docs below.
+#[derive(Debug)]
+pub struct Burst {
+    pub started: Instant,
+    pub attempts: u32,
+    pub settle_timer: Option<TimerId>,
+    pub burst_deadline: TimerId,
+    pub phase: BurstPhase,
+    pub intent: BurstIntent,
+    pub forced: bool,
+    /// Resources whose `FsEvent` drove (or is driving) this burst.
+    /// Populated cumulatively across the whole burst lifecycle:
+    /// • `start_standard_burst` initialises with `{ event_resource }`.
+    /// • Every `on_fs_event` during `Active` adds `event_resource`.
+    /// Cleared when the `Burst` is dropped (`finish_burst_to_idle`).
+    /// Used to compute the LCA target at every `transition_to_probing`
+    /// and as the closure source for `force_walk_resources`.
+    pub dirty_resources: BTreeSet<ResourceId>,
+    /// Since-last-probe cut of `dirty_resources`. The walker uses this to
+    /// refuse mtime-skip on event-dirty paths, closing the coarse-mtime
+    /// hole. Same accumulation rule as `dirty_resources`, but cleared at
+    /// every `transition_to_probing` (the engine ships its current contents
+    /// as `force_walk` to the walker, then resets).
+    pub force_walk_resources: BTreeSet<ResourceId>,
+    /// `target_resource` of the most recently emitted probe in this burst.
+    /// Mirrors the latest `ProbeRequest.target_resource`. Read by the
+    /// Draining→Probing reconfirm path (`dirty_resources` is empty there,
+    /// so LCA would degenerate to the anchor — reuse the prior target
+    /// instead) and by `dispatch_standard_ok` to know which subtree of
+    /// `Profile.current` to compare against `response_subtree` for the
+    /// stability verdict. `None` until the first probe emits.
+    pub probe_target: Option<ResourceId>,
+}
+
+#[derive(Debug)]
+pub enum BurstPhase {
+    /// Waiting for events to stop. `settle_timer` on the burst is armed.
+    Settling,
+    /// Probe in flight. `correlation` matches the outstanding `ProbeRequest`
+    /// (type-system closure on the pending-event race).
+    Probing { correlation: ProbeCorrelation },
+    /// Self-stable; descendants pending. The stable snapshot lives on
+    /// `Profile.current` — `dispatch_standard_ok` updates `current` to the
+    /// stable response immediately before transitioning here, so the
+    /// reconfirm probe (Draining → Probing on `dirty_descendants → 0`)
+    /// compares against `Profile.current`. Holding a duplicate
+    /// `TreeSnapshot` on the variant would only invite drift between the
+    /// two references.
+    Draining,
+}
+
+/// Profile state machine.
+///
+/// Three lifecycle states, mutually exclusive by construction:
+/// - `Idle`: no probe in flight, no burst, no descent. Reads/writes baseline
+///   and current as-is.
+/// - `Pending(DescentState)`: anchor doesn't yet exist on disk; the engine
+///   is probing the deepest existing prefix and advancing one path
+///   component per response. The anchor's `Profile.resource` slot is
+///   `DescentScaffold`-roled and carries no `watch_demand` from this
+///   Profile (the prefix carries the `+1`). See `DescentState` invariants.
+/// - `Active(Burst)`: anchor is materialized; a stability burst is in
+///   flight.
+///
+/// Pending and Active are mutually exclusive by variant — a Profile cannot
+/// hold both a descent probe and a burst-driven probe at the same time
+/// (I5 enforcement for the Pending lifecycle is the
+/// `Option<ProbeCorrelation>` slot inside `DescentState`).
+///
+/// `non_exhaustive` keeps wildcard arms compiling at downstream call sites
+/// when a future variant lands.
+#[non_exhaustive]
+#[derive(Debug, Default)]
+pub enum ProfileState {
+    #[default]
+    Idle,
+    /// Pending-path descent in flight. The anchor (`Profile.resource`) is
+    /// `DescentScaffold`-roled and carries no `watch_demand` from this
+    /// Profile; `DescentState.current_prefix` does. When the anchor
+    /// materializes (descent's last component arrives) the engine
+    /// transitions Pending → Idle (releasing the prefix's contribution and
+    /// bumping the anchor's), then immediately Idle → Active(Seed) via
+    /// `start_seed_burst`.
+    Pending(DescentState),
+    Active(Burst),
+}
+
+/// State for a Profile undergoing pending-path descent.
+///
+/// Lives inline on `ProfileState::Pending` for the duration of descent.
+///
+/// Invariants:
+/// - `current_prefix` carries a `+1` `watch_demand` contribution from this
+///   Profile (added at descent registration / advancement; dropped at
+///   descent end or rewind).
+/// - `remaining_components` is non-empty (the anchor itself is the last
+///   component). Empty `remaining_components` is a state-machine bug; the
+///   defensive check in the descent dispatch transitions the Profile back
+///   to `Idle`.
+/// - `probe_correlation.is_some()` ⇔ exactly one descent probe in flight
+///   (I5 for the Pending lifecycle).
+#[derive(Clone, Debug)]
+pub struct DescentState {
+    /// Deepest existing ancestor currently Watched. The Profile
+    /// contributes `+1` to this Resource's `watch_demand`.
+    pub current_prefix: ResourceId,
+    /// Path components from `current_prefix` (exclusive) down to the
+    /// anchor (inclusive). Single-component segments (no `/`).
+    pub remaining_components: Vec<String>,
+    /// Outstanding probe correlation. `None` when no probe is in flight
+    /// (descent is awaiting a `StructureChanged` event at the prefix).
+    pub probe_correlation: Option<ProbeCorrelation>,
+}
+
+/// `Standard` — event-driven burst; preserves baseline; fires Effect on stable.
+/// `Seed` — fresh Profile or post-Effect rebase; sets baseline; no Effect.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum BurstIntent {
+    #[default]
+    Standard,
+    Seed,
+}
+
+#[derive(Debug)]
+pub struct Profile {
+    pub resource: ResourceId,
+    pub config: ScanConfig,
+    pub config_hash: u64,
+    pub state: ProfileState,
+    pub baseline: Option<TreeSnapshot>,
+    pub current: Option<TreeSnapshot>,
+    pub dirty_descendants: u32,
+    pub sub_refcount: u32,
+    pub max_settle: Duration,
+    /// Settle interval driving `start_standard_burst` and the backoff base.
+    /// Cached on construction from the first attached Sub; the engine
+    /// recomputes this as `min(remaining_subs.settles)` on `attach_sub`
+    /// (existing Profile) and `detach_sub`.
+    pub settle: Duration,
+    /// True iff the last Sub on this Profile was detached while a burst was
+    /// in flight. The active burst runs to completion; `finish_burst_to_idle`
+    /// checks this flag, suppresses Effect emission, and reaps the Profile.
+    pub reap_pending: bool,
+    /// Cached parent Resource that this Profile contributes a watch to.
+    /// `attach_sub` sets it; `detach_sub` releases the contribution via the
+    /// cached id without re-deriving the parent. `None` if the anchor is
+    /// itself a root (no parent in the Tree) — root rename detection is then
+    /// unavailable.
+    pub watch_root_parent: Option<ResourceId>,
+    /// Tracks whether this Profile currently holds a `+1` contribution on
+    /// `resource.watch_demand` — set on the path that called
+    /// `add_watch_demand(anchor)` (immediate-Seed in `attach_sub_inner`
+    /// or descent's anchor materialization), cleared on the matching
+    /// `sub_watch_demand(anchor)` (anchor terminal event, reap).
+    ///
+    /// The flag distinguishes three reap-time lifecycle states that
+    /// otherwise look identical in the Profile/descent registry:
+    /// **materialized** (`true` ⇒ release anchor), **pending**
+    /// (descent in flight ⇒ release descent prefix instead), and
+    /// **purged** (`false`, descent already removed by
+    /// `Input::WatchOpRejected` ⇒ no contribution to release; the clamp
+    /// already did it).
+    ///
+    /// Without this flag a heuristic like `baseline.is_some() ||
+    /// current.is_some()` undercounts `dispatch_seed_vanished` paths
+    /// (which clear the snapshots while leaving the anchor's contribution
+    /// intact) and a heuristic like `tree.get(anchor).watch_demand > 0`
+    /// overcounts in multi-Profile sharing (would steal another
+    /// Profile's contribution).
+    pub anchor_contribution: bool,
+    /// Per-`DedupKey` `dir_hash` (or `leaf_hash`) of the hierarchical
+    /// snapshot the engine fired against on the most recent successful
+    /// Effect emission for that key.
+    ///
+    /// After `EffectComplete::Ok` settles, the next stable verdict will
+    /// compare `Profile.current.dir_hash()` (or per-file leaf hash) against
+    /// the entry here; an identical hash means the post-burst state is the
+    /// same one we already fired against, so suppress the duplicate fire.
+    /// Cleared on `EffectComplete::Failed` — the failed Effect leaves no
+    /// observation to deduplicate against.
+    pub last_emitted_dir_hash: BTreeMap<DedupKey, u128>,
+    /// True iff any attached Sub on this Profile has
+    /// `EffectScope::PerStableFile`.
+    ///
+    /// The engine sets/clears this on `attach_sub`/`detach_sub` by
+    /// recomputing over `SubRegistry::at(profile_id)` (cheap: typical
+    /// Profile has 1-2 Subs). The walker-side reconciler reads it to
+    /// decide whether covered Leaf children get `add_watch_demand`
+    /// (per-file FDs for in-place edit detection).
+    ///
+    /// `false` is the v1 default (no per-file FDs for Subtree-only
+    /// Profiles).
+    pub has_per_file_sub: bool,
+}
+
+impl Profile {
+    /// Construct a fresh Profile: state `Idle`, no baseline/current,
+    /// refcounts at zero, no reap pending, no watch-root parent recorded.
+    /// `config_hash` is computed from `(config, max_settle)` and is stable
+    /// for the Profile's lifetime — there is no path to a Profile with an
+    /// unset or stale hash.
+    #[must_use]
+    pub fn new(
+        resource: ResourceId,
+        config: ScanConfig,
+        max_settle: Duration,
+        settle: Duration,
+    ) -> Self {
+        let config_hash = compute_config_hash(&config, max_settle);
+        Self {
+            resource,
+            config,
+            config_hash,
+            state: ProfileState::Idle,
+            baseline: None,
+            current: None,
+            dirty_descendants: 0,
+            sub_refcount: 0,
+            max_settle,
+            settle,
+            reap_pending: false,
+            watch_root_parent: None,
+            anchor_contribution: false,
+            last_emitted_dir_hash: BTreeMap::new(),
+            has_per_file_sub: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ProfileMap {
+    profiles: SlotMap<ProfileId, Profile>,
+    by_resource: SecondaryMap<ResourceId, TinyVec<[(u64, ProfileId); 1]>>,
+}
+
+impl ProfileMap {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Look up an existing Profile by `(resource, config_hash)`. Returns
+    /// `None` if no Profile at this resource matches the hash.
+    #[must_use]
+    pub fn find(&self, resource: ResourceId, config_hash: u64) -> Option<ProfileId> {
+        self.by_resource
+            .get(resource)?
+            .iter()
+            .find(|(h, _)| *h == config_hash)
+            .map(|(_, id)| *id)
+    }
+
+    /// Insert a fresh Profile and write back-references on both the Tree
+    /// (`Resource.profiles`) and the `ProfileMap` (`by_resource`). Caller
+    /// has verified `find` returns `None` for `(profile.resource,
+    /// profile.config_hash)`; a debug-build assertion guards against repeat.
+    ///
+    /// Panics if `profile.resource` is stale (no live Tree slot). The Engine
+    /// must construct the Resource before attaching a Profile to it.
+    pub fn attach(&mut self, tree: &mut Tree, profile: Profile) -> ProfileId {
+        let resource = profile.resource;
+        let hash = profile.config_hash;
+        debug_assert!(
+            self.find(resource, hash).is_none(),
+            "ProfileMap::attach called twice for the same (resource, config_hash) — caller must `find` first",
+        );
+        let id = self.profiles.insert(profile);
+        // SecondaryMap::entry returns None only if the key has been removed
+        // from a primary-tracked SlotMap with a generation that no longer
+        // matches. For a freshly-minted ResourceId, we expect `Some`.
+        self.by_resource
+            .entry(resource)
+            .expect("ProfileMap::attach: resource is stale (slot was reaped)")
+            .or_default()
+            .push((hash, id));
+        tree.get_mut(resource)
+            .expect("ProfileMap::attach: resource has no live Tree slot")
+            .profiles
+            .push((hash, id));
+        id
+    }
+
+    /// Remove a Profile and clear back-references on both indices. The
+    /// caller is responsible for any subsequent `tree.try_reap(resource)`
+    /// once it confirms no other anchors remain.
+    pub fn detach(&mut self, tree: &mut Tree, id: ProfileId) -> Option<Profile> {
+        let p = self.profiles.remove(id)?;
+        if let Some(v) = self.by_resource.get_mut(p.resource) {
+            v.retain(|(h, pid)| !(*pid == id && *h == p.config_hash));
+        }
+        if let Some(r) = tree.get_mut(p.resource) {
+            r.profiles
+                .retain(|(h, pid)| !(*pid == id && *h == p.config_hash));
+        }
+        Some(p)
+    }
+
+    #[must_use]
+    pub fn get(&self, id: ProfileId) -> Option<&Profile> {
+        self.profiles.get(id)
+    }
+
+    pub fn get_mut(&mut self, id: ProfileId) -> Option<&mut Profile> {
+        self.profiles.get_mut(id)
+    }
+
+    /// Iterator over the Profiles attached at `resource`, in
+    /// `Resource.profiles` insertion order.
+    pub fn at(&self, resource: ResourceId) -> impl Iterator<Item = ProfileId> + '_ {
+        self.by_resource
+            .get(resource)
+            .into_iter()
+            .flatten()
+            .map(|(_, id)| *id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (ProfileId, &Profile)> {
+        self.profiles.iter()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.profiles.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.profiles.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Profile, ProfileMap, ProfileState, ScanConfig, compute_config_hash};
+    use crate::resource::ResourceRole;
+    use crate::tree::Tree;
+    use std::time::Duration;
+
+    const SETTLE: Duration = Duration::from_millis(100);
+    const MAX_SETTLE: Duration = Duration::from_secs(6);
+
+    fn cfg() -> ScanConfig {
+        ScanConfig::builder().build()
+    }
+
+    #[test]
+    fn new_profile_starts_idle_with_zero_refcounts() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
+        assert!(matches!(p.state, ProfileState::Idle));
+        assert!(p.baseline.is_none());
+        assert!(p.current.is_none());
+        assert_eq!(p.dirty_descendants, 0);
+        assert_eq!(p.sub_refcount, 0);
+        assert_eq!(p.max_settle, MAX_SETTLE);
+        assert_eq!(p.settle, SETTLE);
+    }
+
+    /// `last_emitted_dir_hash` defaults to an empty map; engine fills it on
+    /// first successful Effect emission.
+    #[test]
+    fn new_profile_initialises_last_emitted_dir_hash_empty() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
+        assert!(p.last_emitted_dir_hash.is_empty());
+    }
+
+    /// `has_per_file_sub` defaults to false; engine sets it on `attach_sub`
+    /// when a `PerStableFile` Sub lands.
+    #[test]
+    fn new_profile_initialises_has_per_file_sub_false() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
+        assert!(!p.has_per_file_sub);
+    }
+
+    #[test]
+    fn config_hash_matches_compute_config_hash() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let c = cfg();
+        let expected = compute_config_hash(&c, MAX_SETTLE);
+        let p = Profile::new(r, c, MAX_SETTLE, SETTLE);
+        assert_eq!(p.config_hash, expected);
+    }
+
+    #[test]
+    fn attach_writes_both_indices() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
+        let h = p.config_hash;
+        let pid = profiles.attach(&mut tree, p);
+
+        assert_eq!(profiles.find(r, h), Some(pid));
+        assert_eq!(tree.get(r).unwrap().profiles(), &[(h, pid)]);
+    }
+
+    #[test]
+    fn attach_anchors_resource_against_reap() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let _pid = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE));
+
+        tree.vacate(r);
+        assert!(!tree.try_reap(r), "Profile-anchored resource must not reap");
+    }
+
+    #[test]
+    fn detach_clears_back_references() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
+        let h = p.config_hash;
+        let pid = profiles.attach(&mut tree, p);
+
+        let detached = profiles.detach(&mut tree, pid);
+        assert!(detached.is_some(), "detach yields the removed Profile");
+        assert!(profiles.find(r, h).is_none());
+        assert!(tree.get(r).unwrap().profiles().is_empty());
+    }
+
+    #[test]
+    fn detach_then_reap_succeeds_when_no_other_anchors() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let pid = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE));
+
+        profiles.detach(&mut tree, pid);
+        tree.vacate(r);
+        assert!(tree.try_reap(r));
+        assert!(tree.get(r).is_none());
+    }
+
+    #[test]
+    fn at_iterates_profiles_attached_at_resource() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+
+        let pid_a = profiles.attach(
+            &mut tree,
+            Profile::new(r, cfg(), Duration::from_secs(6), SETTLE),
+        );
+        // Different max_settle ⇒ different config_hash ⇒ distinct Profile.
+        let pid_b = profiles.attach(
+            &mut tree,
+            Profile::new(r, cfg(), Duration::from_secs(12), SETTLE),
+        );
+
+        let mut got: Vec<_> = profiles.at(r).collect();
+        got.sort();
+        let mut expected = vec![pid_a, pid_b];
+        expected.sort();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn distinct_resources_get_distinct_profiles() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r1 = tree.ensure(None, "a", ResourceRole::User);
+        let r2 = tree.ensure(None, "b", ResourceRole::User);
+
+        let p1 = profiles.attach(&mut tree, Profile::new(r1, cfg(), MAX_SETTLE, SETTLE));
+        let p2 = profiles.attach(&mut tree, Profile::new(r2, cfg(), MAX_SETTLE, SETTLE));
+        assert_ne!(p1, p2);
+        assert_eq!(profiles.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "called twice")]
+    fn attach_duplicate_panics_in_debug() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r = tree.ensure(None, "x", ResourceRole::User);
+        let _pid = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE));
+        // Caller failed to `find` first; second attach hits debug_assert.
+        let _pid2 = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE));
+    }
+}

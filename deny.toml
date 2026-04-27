@@ -1,0 +1,28 @@
+[graph]
+all-features = true
+
+[bans]
+multiple-versions = "warn"
+
+deny = [
+  { name = "tokio" },
+  { name = "tokio-util" },
+  { name = "async-std" },
+  { name = "mio" },
+  { name = "polling" },
+  { name = "smol" },
+  { name = "futures-util" },
+  { name = "hashbrown", wrappers = ["string-interner"] },
+  { name = "nix", wrappers = ["specter-sensor", "specter-actuator", "specter-bin"] },
+  { name = "specter-engine",   wrappers = ["specter-bin"] },
+  { name = "specter-sensor",   wrappers = ["specter-bin"] },
+  { name = "specter-actuator", wrappers = ["specter-bin"] },
+]
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]

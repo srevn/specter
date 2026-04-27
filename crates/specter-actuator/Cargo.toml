@@ -1,0 +1,26 @@
+[package]
+name                   = "specter-actuator"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[dependencies]
+specter-core = { path = "../specter-core" }
+crossbeam.workspace = true
+nix.workspace = true
+libc.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+compact_str.workspace = true
+smallvec.workspace = true
+slotmap.workspace = true
+
+[features]
+default = []
+testkit = []
+
+[lints]
+workspace = true

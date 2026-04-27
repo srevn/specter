@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members  = ["crates/*"]
+
+[workspace.package]
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.95"
+license      = "MIT OR Apache-2.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[workspace.dependencies]
+# core
+slotmap         = "1"
+globset         = "0.4"
+compact_str     = "0.9"
+smallvec        = "1"
+tinyvec         = { version = "1", features = ["alloc"] }
+string-interner = "0.20"
+siphasher 	    = "1"
+
+# sensor
+nix       = { version = "0.31", features = ["event", "fs", "resource", "signal"] }
+libc      = "0.2"
+crossbeam = "0.8"
+
+# config / bin
+serde              = { version = "1", features = ["derive"] }
+toml               = "1"
+clap               = { version = "4", features = ["derive"] }
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+signal-hook        = "0.4"
+
+# dev
+proptest = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code                   = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery  = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc      = "allow"
+missing_panics_doc      = "allow"
+redundant_pub_crate = "allow"
+single_match_else   = "allow"
+option_if_let_else  = "allow"
+match_same_arms     = "allow"

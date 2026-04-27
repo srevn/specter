@@ -1,0 +1,25 @@
+[package]
+name                   = "specter-sensor"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[features]
+default = []
+testkit = []
+
+[dependencies]
+specter-core = { path = "../specter-core" }
+compact_str.workspace = true
+crossbeam.workspace   = true
+slotmap.workspace     = true
+tracing.workspace     = true
+nix.workspace  = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
