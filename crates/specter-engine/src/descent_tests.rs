@@ -907,3 +907,195 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
         out.diagnostics,
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// Probe-channel discipline (post-refactor invariants)
+//
+// I5 ("at most one outstanding probe per Profile") moved from a structural
+// type-law (mutual exclusion of `BurstPhase::Verifying { ... }` and
+// `DescentPhase::Probing { ... }`) to a field-discipline (single
+// `Profile.pending_probe` slot). The tests below pin the post-refactor
+// invariants: clear-on-cancel, recovery-overlap accounting, and the
+// cancel-first contract on `release_descent_prefix_claim`.
+// ───────────────────────────────────────────────────────────────────────
+
+/// `on_watch_op_rejected` descent purge: cancel-then-release ordering
+/// closes the probe channel and emits exactly one `ProbeOp::Cancel`. The
+/// Profile transitions Pending → Idle in the same step.
+#[test]
+fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
+    use specter_core::{ProfileState, WatchOp, WatchOpts};
+    let (mut e, _sid, pid) = setup_pending_one_level();
+    let foo = e.tree().lookup(None, "foo").unwrap();
+    assert!(
+        e.pending_probe(pid).is_some(),
+        "descent probe in flight after attach",
+    );
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Pending(_),
+    ));
+
+    let out = e.step(
+        Input::WatchOpRejected {
+            resource: foo,
+            op: WatchOp::Watch {
+                resource: foo,
+                path: PathBuf::from("foo"),
+                opts: WatchOpts::default(),
+            },
+            errno: 24,
+        },
+        Instant::now(),
+    );
+
+    // Field-discipline: channel closed atomically with the purge.
+    assert!(
+        e.pending_probe(pid).is_none(),
+        "channel closed by cancel-before-release",
+    );
+    // Profile transitioned via `release_descent_prefix_claim`.
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Idle,
+    ));
+    // Exactly one Cancel for the Profile (idempotency check).
+    let cancels = out
+        .probe_ops
+        .iter()
+        .filter(|op| matches!(op, ProbeOp::Cancel { profile } if *profile == pid))
+        .count();
+    assert_eq!(
+        cancels, 1,
+        "exactly one Cancel emitted for the in-flight descent probe; got {:?}",
+        out.probe_ops,
+    );
+}
+
+/// `enter_pending_descent` recovery-overlap invariant: when invoked from
+/// `start_pending_recovery`, the parent already carries `+1 STRUCTURE` from
+/// `Profile.watch_root_parent`. The helper bumps `+1` again for the descent
+/// contribution; refcount sums to `+2`. Verifies the helper's pre-condition
+/// assertion AND the documented post-condition.
+#[test]
+fn enter_pending_descent_recovery_overlap_invariant() {
+    use specter_core::{ClassSet, ProfileState};
+    // Build the recovery scenario by hand:
+    //   1. Attach a Sub at /foo/bar (Pending — bar doesn't exist yet).
+    //   2. Materialize bar via descent, landing the Profile in Idle with
+    //      Profile.watch_root_parent = Some(foo) and foo.watch_demand = +1.
+    //   3. Drop bar (anchor terminal) → Profile remains Idle, anchor
+    //      contribution gone, watch_root_parent contribution persists.
+    //   4. Call enter_pending_descent at foo with [bar] as remaining.
+    let (mut e, _sid, pid) = setup_pending_one_level();
+    let foo = e.tree().lookup(None, "foo").unwrap();
+
+    // Step 1+2: Drive descent to materialization. The probe response with
+    // `bar` as a Dir entry materializes the anchor.
+    let corr = e.pending_probe(pid).expect("descent probe in flight");
+    let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: corr,
+            result: ProbeResult::Ok(snap),
+        }),
+        Instant::now(),
+    );
+    let _bar = e.tree().lookup(Some(foo), "bar").unwrap();
+    // Post-materialization: Profile is Active(Seed Verifying); bar carries
+    // events_union; foo carries STRUCTURE from watch_root_parent.
+    assert_eq!(
+        e.profiles().get(pid).unwrap().watch_root_parent,
+        Some(foo),
+        "watch_root_parent cached at foo on materialization",
+    );
+    assert!(
+        e.tree().get(foo).unwrap().watch_demand >= 1,
+        "foo carries STRUCTURE from watch_root_parent",
+    );
+
+    // Settle the Seed burst (Vanished closes it without emitting an Effect).
+    let seed_corr = e.pending_probe(pid).expect("Seed probe in flight");
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: seed_corr,
+            result: ProbeResult::Vanished,
+        }),
+        Instant::now(),
+    );
+    // dispatch_seed_vanished routes to finalize_anchor_lost: anchor
+    // contribution released, baseline/current cleared, Profile lands Idle.
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Idle,
+    ));
+    assert!(
+        e.pending_probe(pid).is_none(),
+        "channel closed after Seed Vanished",
+    );
+    let foo_demand_pre = e.tree().get(foo).unwrap().watch_demand;
+    // Bar's anchor contribution was released; only watch_root_parent's
+    // STRUCTURE on foo remains.
+    assert_eq!(
+        foo_demand_pre, 1,
+        "foo.watch_demand reflects only the watch_root_parent contribution",
+    );
+
+    // Step 4: Call enter_pending_descent directly to simulate the
+    // `start_pending_recovery` re-entry path. The helper's debug_assert
+    // pins Profile=Idle + closed-channel; both hold.
+    let mut out = specter_core::StepOutput::default();
+    e.enter_pending_descent(pid, foo, vec!["bar".to_string()], &mut out);
+
+    // Recovery overlap: foo's watch_demand is now +2 (watch_root_parent
+    // STRUCTURE + descent STRUCTURE). The helper opened the channel and
+    // emitted a descent probe.
+    assert_eq!(
+        e.tree().get(foo).unwrap().watch_demand,
+        foo_demand_pre + 1,
+        "recovery overlap: descent +1 on top of watch_root_parent +1",
+    );
+    assert!(
+        e.pending_probe(pid).is_some(),
+        "channel re-opened by enter_pending_descent",
+    );
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Pending(_),
+    ));
+    // The descent probe was emitted at foo (the parent / new prefix).
+    assert!(
+        out.probe_ops.iter().any(|op| matches!(op,
+            ProbeOp::Probe { request } if request.target_resource == foo
+                && request.profile == pid)),
+        "descent probe emitted at the parent prefix; got {:?}",
+        out.probe_ops,
+    );
+    // ClassSet::STRUCTURE is correct for the descent contribution by D9.
+    let _ = ClassSet::STRUCTURE;
+}
+
+/// Cancel-first contract on `release_descent_prefix_claim`: invoking the
+/// helper on a Pending Profile with an open probe channel fires the
+/// debug_assert. The four production cancel-paths each call
+/// `cancel_pending_probe` first — this test guards against future
+/// regressions that bypass the order.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "debug_assert! is compiled out in release"
+)]
+#[should_panic(expected = "probe channel must be closed")]
+fn release_descent_prefix_claim_panics_on_open_channel() {
+    let (mut e, _sid, pid) = setup_pending_one_level();
+    assert!(
+        e.pending_probe(pid).is_some(),
+        "descent probe in flight (pre-condition for the assertion)",
+    );
+
+    // Direct invocation without the prior cancel — assertion fires.
+    let mut out = specter_core::StepOutput::default();
+    e.release_descent_prefix_claim(pid, &mut out);
+}

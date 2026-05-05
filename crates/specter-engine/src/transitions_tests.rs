@@ -550,6 +550,105 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
     assert_eq!(cancels, 1);
 }
 
+/// Field-discipline pin for `event_drives_batching`: an FsEvent during
+/// Verifying closes the probe channel atomically with the Cancel emission.
+/// Pre-refactor the close was implicit in the `BurstPhase::Verifying { ... }
+/// → Batching { ... }` variant rewrite; post-refactor it must clear the
+/// per-Profile `pending_probe` slot explicitly.
+#[test]
+fn event_drives_batching_clears_pending_probe() {
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    assert!(
+        e.pending_probe(pid).is_some(),
+        "Seed probe in flight after attach",
+    );
+
+    let _ = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Modified,
+        },
+        Instant::now(),
+    );
+
+    assert!(
+        e.pending_probe(pid).is_none(),
+        "channel closed atomically with Verifying → Batching transition",
+    );
+}
+
+/// Field-discipline pin for `finalize_anchor_lost`: an anchor terminal
+/// event during Verifying cancels the in-flight probe and clears the
+/// channel. Replaces the pre-refactor `was_verifying` snapshot's role.
+#[test]
+fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    assert!(
+        e.pending_probe(pid).is_some(),
+        "Seed probe in flight after attach",
+    );
+
+    let out = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+
+    assert!(
+        e.pending_probe(pid).is_none(),
+        "anchor terminal during Verifying closes the channel",
+    );
+    let cancels = out
+        .probe_ops
+        .iter()
+        .filter(|op| matches!(op, ProbeOp::Cancel { profile } if *profile == pid))
+        .count();
+    assert_eq!(
+        cancels, 1,
+        "exactly one Cancel emitted; got {:?}",
+        out.probe_ops
+    );
+}
+
+/// Single-diagnostic guarantee for stale `ProbeResponse`. Pre-refactor
+/// the dispatch had two stale-detection layers (state-shape mismatch and
+/// inner-correlation mismatch) that could both fire on degenerate inputs.
+/// Post-refactor the top-level `pending_probe == Some(received)` check is
+/// the sole gate — exactly one diagnostic per stale response.
+#[test]
+fn stale_probe_response_emits_exactly_one_diagnostic() {
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let bogus = specter_core::ProbeCorrelation(99_999);
+    let snap = dir_tree_snap(root, vec![]);
+
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: bogus,
+            result: ProbeResult::Ok(snap),
+        }),
+        Instant::now(),
+    );
+
+    let stale_count = out
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(d, Diagnostic::StaleProbeResponse { profile, .. } if *profile == pid))
+        .count();
+    assert_eq!(
+        stale_count, 1,
+        "exactly one StaleProbeResponse diagnostic; got {:?}",
+        out.diagnostics,
+    );
+    // Live channel untouched: the legitimate Seed probe is still in flight.
+    assert!(
+        e.pending_probe(pid).is_some(),
+        "live channel untouched by stale response",
+    );
+}
+
 /// D8 — anchor events bypass the L5 class filter unconditionally.
 /// Profile has events = EMPTY (nothing in the mask); a `MetadataChanged`
 /// at the anchor still drives the lifecycle path (burst start), and no
@@ -2441,18 +2540,18 @@ mod props {
                     outstanding,
                 );
 
-                // Structurally: at most one Probing phase = one correlation.
+                // Field-discipline I5: at most one outstanding probe per
+                // Profile, expressed as a single `Option<ProbeCorrelation>`
+                // slot. The `Option`-typed field makes `<= 1` trivially
+                // true; the assertion is a regression guard for any
+                // future change that broadens the slot's shape (e.g.,
+                // accidentally introducing per-state probe correlations
+                // again).
                 if let Some(p) = e.profiles.get(pid) {
-                    let probing_count = match &p.state {
-                        ProfileState::Active(b) => match &b.phase {
-                            BurstPhase::Verifying => 1,
-                            _ => 0,
-                        },
-                        _ => 0,
-                    };
+                    let probing_count = u32::from(p.pending_probe.is_some());
                     prop_assert!(
                         probing_count <= 1,
-                        "I5 structural: probing phases on Profile",
+                        "I5 field-discipline: pending_probe carries at most one outstanding probe",
                     );
                 }
             }

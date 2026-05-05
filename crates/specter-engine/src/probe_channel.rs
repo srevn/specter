@@ -204,3 +204,137 @@ impl Engine {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Engine;
+    use specter_core::{ClassSet, Profile, ResourceRole, ScanConfig, StepOutput};
+    use std::time::Duration;
+
+    const SETTLE: Duration = Duration::from_millis(100);
+    const MAX_SETTLE: Duration = Duration::from_secs(6);
+
+    /// Attach a fresh `Idle` Profile at a synthetic anchor, returning the
+    /// engine and the new `ProfileId`. The Profile carries no Subs and no
+    /// claims — purely a vehicle for exercising the probe-channel slot in
+    /// isolation.
+    fn fresh_engine_with_idle_profile() -> (Engine, specter_core::ProfileId) {
+        let mut e = Engine::new();
+        let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+        let pid = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(
+                r,
+                ScanConfig::builder().build(),
+                MAX_SETTLE,
+                SETTLE,
+                ClassSet::EMPTY,
+            ),
+        );
+        (e, pid)
+    }
+
+    /// Double-open is a state-machine bug (I5 violation). Debug builds fire
+    /// the assertion in `mint_probe_correlation`; release builds silently
+    /// overwrite (the now-orphaned probe's response staless against the
+    /// new correlation).
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "I5 violated")]
+    fn mint_probe_correlation_panics_on_double_open() {
+        let (mut e, pid) = fresh_engine_with_idle_profile();
+        let _ = e.mint_probe_correlation(pid).expect("first mint succeeds");
+        let _ = e.mint_probe_correlation(pid); // panics: I5 violated
+    }
+
+    /// Closed channel + cancel = no-op. The helper's idempotence is
+    /// load-bearing — `event_drives_batching` invokes it on every event,
+    /// regardless of whether a probe is in flight.
+    #[test]
+    fn cancel_pending_probe_idempotent_on_closed_channel() {
+        let (mut e, pid) = fresh_engine_with_idle_profile();
+        assert!(e.pending_probe(pid).is_none(), "channel starts closed");
+        let mut out = StepOutput::default();
+        e.cancel_pending_probe(pid, &mut out);
+        assert!(
+            out.probe_ops.is_empty(),
+            "no Cancel emitted on closed channel",
+        );
+        assert!(e.pending_probe(pid).is_none(), "channel remains closed");
+    }
+
+    /// Open channel + cancel = single Cancel emission + slot cleared. Pairs
+    /// with the idempotence test above to fully spec the helper's contract.
+    #[test]
+    fn cancel_pending_probe_emits_and_clears_on_open_channel() {
+        use specter_core::ProbeOp;
+        let (mut e, pid) = fresh_engine_with_idle_profile();
+        let corr = e.mint_probe_correlation(pid).expect("mint succeeds");
+        assert_eq!(e.pending_probe(pid), Some(corr));
+
+        let mut out = StepOutput::default();
+        e.cancel_pending_probe(pid, &mut out);
+
+        assert_eq!(out.probe_ops.len(), 1, "exactly one Cancel emitted");
+        assert!(
+            matches!(out.probe_ops[0], ProbeOp::Cancel { profile } if profile == pid),
+            "Cancel targets the same Profile",
+        );
+        assert!(e.pending_probe(pid).is_none(), "channel closed post-cancel");
+    }
+
+    /// Cancel is per-Profile: closing one Profile's channel doesn't touch
+    /// another's. Cross-Profile concurrency is necessary for descent fan-out
+    /// at `on_descent_event` (multiple Pending Profiles awaiting siblings
+    /// under one prefix).
+    #[test]
+    fn cancel_pending_probe_is_per_profile() {
+        let mut e = Engine::new();
+        let r1 = e.tree.ensure(None, "a", ResourceRole::User);
+        let r2 = e.tree.ensure(None, "b", ResourceRole::User);
+        let cfg = ScanConfig::builder().build();
+        let pid1 = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(r1, cfg.clone(), MAX_SETTLE, SETTLE, ClassSet::EMPTY),
+        );
+        let pid2 = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(r2, cfg, MAX_SETTLE, SETTLE, ClassSet::EMPTY),
+        );
+        let c1 = e.mint_probe_correlation(pid1).unwrap();
+        let c2 = e.mint_probe_correlation(pid2).unwrap();
+
+        let mut out = StepOutput::default();
+        e.cancel_pending_probe(pid1, &mut out);
+
+        assert!(e.pending_probe(pid1).is_none());
+        assert_eq!(
+            e.pending_probe(pid2),
+            Some(c2),
+            "pid2's channel untouched by pid1's cancel",
+        );
+        assert_ne!(c1, c2, "correlations are distinct across Profiles");
+    }
+
+    /// Stale `pid` (post-detach) — both helpers no-op without panic.
+    /// `cancel_pending_probe` defends against late `WatchOpRejected`
+    /// purges arriving after `reap_profile` already detached.
+    #[test]
+    fn helpers_noop_on_stale_pid() {
+        let (mut e, pid) = fresh_engine_with_idle_profile();
+        let _ = e.profiles.detach(&mut e.tree, pid);
+
+        assert!(
+            e.mint_probe_correlation(pid).is_none(),
+            "mint returns None for stale pid",
+        );
+
+        let mut out = StepOutput::default();
+        e.cancel_pending_probe(pid, &mut out);
+        assert!(out.probe_ops.is_empty(), "cancel no-ops on stale pid");
+        assert!(e.pending_probe(pid).is_none(), "accessor returns None");
+    }
+}
