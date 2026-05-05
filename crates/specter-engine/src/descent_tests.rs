@@ -825,3 +825,85 @@ fn on_watch_op_rejected_clears_pending_state() {
     ));
     assert!(e.descent_state(pid).is_none());
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// F-LOW-1 regression: descent empty-remaining defensive arm
+//
+// `dispatch_descent_ok`'s defensive empty-remaining arm pre-fix
+// transitioned the Profile to Idle but did NOT release the prefix's
+// STRUCTURE contribution. The DescentState invariant says
+// `remaining_components` is non-empty, so this arm is unreachable in
+// normal operation — but if it ever fires (state-machine corruption),
+// the prefix's `watch_demand` retains its +1 with no Profile
+// attributing it. The trichotomy then classifies the Profile as
+// "purged" (anchor_contribution=false, state=Idle) and reap_profile
+// skips the release. Net: leaked watch_demand on the prefix.
+//
+// Post-fix: the arm emits Diagnostic::DescentInvariantViolation and
+// calls release_descent_prefix_claim — symmetric with
+// dispatch_descent_vanished's root branch.
+// ───────────────────────────────────────────────────────────────────────
+#[test]
+fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
+    use specter_core::{DescentState, ProfileState};
+    // Build the engine with a Pending Profile, then poke
+    // `remaining_components` to empty to construct the
+    // invariant-violating state directly. (`materialize_path_or_pending`
+    // is the canonical producer of Pending Profiles and never produces
+    // empty remaining; the only way to test the defensive arm is via
+    // direct fixture construction, which is the point — the arm exists
+    // for future-proofing, and we want the test to lock in its
+    // benign-failure contract.)
+    let (mut e, _sid, pid) = setup_pending_one_level();
+    let foo = e.tree().lookup(None, "foo").unwrap();
+    let corr = e.descent_state(pid).unwrap().probe_correlation.unwrap();
+
+    // Snapshot pre-state.
+    let prefix = e.descent_state(pid).unwrap().current_prefix;
+    assert_eq!(prefix, foo);
+    assert_eq!(
+        e.tree().get(foo).unwrap().watch_demand,
+        1,
+        "descent prefix carries +1 STRUCTURE",
+    );
+
+    // Direct mutation to construct the invariant-violating state.
+    // descent_tests.rs is a sibling crate module (not an integration
+    // test), so `pub(crate)` engine fields are reachable.
+    e.profiles.get_mut(pid).unwrap().state = ProfileState::Pending(DescentState {
+        current_prefix: prefix,
+        remaining_components: Vec::new(),
+        probe_correlation: Some(corr),
+    });
+
+    // Dispatch the probe response — descent_ok hits the defensive arm.
+    let snap = dir_snap_with(vec![]);
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: corr,
+            result: ProbeResult::Ok(snap),
+        }),
+        Instant::now(),
+    );
+
+    // Profile transitioned to Idle.
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Idle
+    ));
+    // Prefix's watch_demand released — pre-fix this leaked.
+    assert_eq!(
+        e.tree().get(foo).map_or(0, |r| r.watch_demand),
+        0,
+        "prefix watch_demand released by defensive arm",
+    );
+    // Diagnostic surfaces.
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(d,
+            Diagnostic::DescentInvariantViolation { profile, prefix: pfx }
+                if *profile == pid && *pfx == foo)),
+        "DescentInvariantViolation emitted; got {:?}",
+        out.diagnostics,
+    );
+}

@@ -336,3 +336,162 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         "recovery emits descent probe at watch_root_parent",
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// F-MED-1 regression: detach Pending Profile with in-flight descent probe
+//
+// Pre-fix `reap_profile`'s Pending branch released the prefix's
+// `watch_demand` and detached the Profile, but did NOT emit
+// `ProbeOp::Cancel`. The prober finishes the syscall and ships a
+// `ProbeResponse` for a now-detached Profile, which the engine drops as
+// `StaleProbeResponse` — wasted prober capacity and I/O.
+//
+// Post-fix `reap_profile` checks `descent_state.probe_correlation` and
+// emits `ProbeOp::Cancel` before `release_descent_prefix_claim` (which
+// transitions the Profile to Idle and loses the correlation).
+// ───────────────────────────────────────────────────────────────────────
+#[test]
+fn detach_pending_profile_with_inflight_descent_emits_cancel() {
+    let mut e = Engine::new();
+    let var = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    e.tree_mut().get_mut(var).unwrap().kind = ResourceKind::Dir;
+
+    let req = SubAttachRequest::for_path(
+        "watch".into(),
+        PathBuf::from("var/log/myapp"),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+    );
+    let now = Instant::now();
+    let (sid, attach_out) = e.attach_sub(req, now);
+    let pid = e.subs().get(sid).unwrap().profile;
+
+    // Profile is Pending with an in-flight descent probe.
+    let initial_corr = first_probe_corr(&attach_out).expect("descent probe at attach");
+    let inflight = matches!(
+        &e.profiles().get(pid).expect("Profile attached").state,
+        ProfileState::Pending(d) if d.probe_correlation == Some(initial_corr)
+    );
+    assert!(
+        inflight,
+        "descent state carries the outstanding probe correlation",
+    );
+
+    // Detach without delivering a probe response.
+    let detach_out = e.detach_sub(sid, now);
+
+    // Profile is reaped.
+    assert!(
+        e.profiles().get(pid).is_none(),
+        "Profile reaped on detach (Pending+sub_refcount==0)",
+    );
+    // ProbeOp::Cancel emitted for the in-flight descent probe.
+    let cancel_present = detach_out
+        .probe_ops
+        .iter()
+        .any(|op| matches!(op, ProbeOp::Cancel { profile } if *profile == pid));
+    assert!(
+        cancel_present,
+        "ProbeOp::Cancel emitted for in-flight descent probe; got {:?}",
+        detach_out.probe_ops,
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// F-HIGH-1 regression: anchor terminal event on a Pending Profile
+//
+// `was_active = !matches!(state, Idle)` historically included Pending,
+// so a terminal event at a Pending Profile's anchor (degenerate path:
+// `prefix == anchor` from `materialize_path_or_pending`'s None branch,
+// reachable only via test-fixture relative-path attaches against an
+// empty Tree) routed through `finish_burst_to_idle` and underflowed
+// `sub_suppress` (Pending never bumped suppress_count).
+//
+// Production reach is sealed by the FS_ROOT_SEG bootstrap: absolute
+// paths always have at least the bootstrapped root pre-existing, so
+// `prefix_idx >= Some(0)` and the None branch never fires. This test
+// uses the relative-path test fixture to construct the degenerate state
+// and asserts no panic.
+//
+// Post-fix:
+//   - `covering_profiles` filters Pending at the source.
+//   - `finalize_anchor_lost` early-returns on Pending defensively.
+//   - `finish_burst_to_idle` tightens `was_active` to `Active(_)`.
+// ───────────────────────────────────────────────────────────────────────
+#[test]
+fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
+    let mut e = Engine::new();
+    // Relative-path attach against an empty Tree triggers
+    // `materialize_path_or_pending`'s None branch — anchor and prefix
+    // are the same Resource (degenerate fixture).
+    let req = SubAttachRequest::for_path(
+        "watch".into(),
+        PathBuf::from("foo"),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+    );
+    let now = Instant::now();
+    let (sid, _attach_out) = e.attach_sub(req, now);
+    let pid = e.subs().get(sid).unwrap().profile;
+
+    // Confirm the degenerate setup: prefix == anchor.
+    let p = e.profiles().get(pid).expect("Profile attached");
+    let anchor = p.resource;
+    let prefix = match &p.state {
+        ProfileState::Pending(d) => d.current_prefix,
+        s => panic!("expected Pending, got {s:?}"),
+    };
+    assert_eq!(prefix, anchor, "fixture: prefix == anchor");
+    assert!(
+        e.tree().get(anchor).unwrap().watch_demand >= 1,
+        "prefix bumped its STRUCTURE contribution",
+    );
+
+    // Dispatch FsEvent::Removed at the anchor (== prefix). Routing:
+    //   - descents_at_prefix(anchor) finds [P]; on_descent_event
+    //     short-circuits (probe still in flight from attach — I5).
+    //   - covering_profiles filters Pending → no per-Profile dispatch.
+    //   - finalize_anchor_lost is NOT called for P.
+    // Pre-fix this routed through finish_burst_to_idle → sub_suppress
+    // (underflow because Pending never bumped suppress_count). Post-fix:
+    // no panic. The Profile remains Pending; no Unsuppress is emitted.
+    let out = e.step(
+        Input::FsEvent {
+            resource: anchor,
+            event: FsEvent::Removed,
+        },
+        now,
+    );
+
+    // Profile still Pending — covering-Profile fan-out skipped P.
+    let still_pending = matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Pending(_),
+    );
+    assert!(
+        still_pending,
+        "Pending Profile not coerced through anchor-terminal-event path",
+    );
+    // No suppress underflow ⇒ no Unsuppress emitted (suppress_count
+    // was never bumped on this Resource).
+    let unsuppress_count = out
+        .watch_ops
+        .iter()
+        .filter(|op| matches!(op, specter_core::WatchOp::Unsuppress { .. }))
+        .count();
+    assert_eq!(unsuppress_count, 0);
+    // suppress_count remains untouched — Pending never bumped it.
+    assert_eq!(
+        e.tree().get(anchor).unwrap().suppress_count,
+        0,
+        "suppress_count untouched (Pending never bumped it)",
+    );
+}

@@ -1096,3 +1096,203 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
         .count();
     assert_eq!(unwatch_count, 1);
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// F-CRIT-1 regression: anchor terminal event on Active+reap_pending
+//
+// Pre-fix `on_anchor_terminal_event` captured `had_anchor_contribution` as
+// a local BEFORE `finish_burst_to_idle`, then released after — but for
+// Active+reap_pending Profiles `finish_burst_to_idle` invokes
+// `reap_profile` which itself releases the anchor. The captured local
+// then drove a *second* `sub_watch_demand` on a counter that had already
+// hit zero: panic in debug, silent state corruption in release. In the
+// multi-Profile case the double-release consumed the co-anchored
+// Profile's contribution before its own release underflowed.
+//
+// Post-fix:
+//   - `finalize_anchor_lost` releases BEFORE `finish_burst_to_idle`.
+//   - The Commit-1 helper is idempotent — the post-finish call inside
+//     `reap_profile` sees `anchor_contribution=false` and no-ops.
+//   - Counter-existence check in the helper makes a stray decrement
+//     attempt benign (counter==0 ⇒ flag-clear only).
+// ───────────────────────────────────────────────────────────────────────
+
+/// Drive the F-CRIT-1 setup: attach P + surviving child, kick off a
+/// Standard burst, advance to Probing, detach to set reap_pending, then
+/// dispatch the supplied FsEvent at the anchor. Returns the resulting
+/// StepOutput. Surviving child fixture keeps the anchor slot alive past
+/// `reap_profile`'s `try_reap`, exposing any post-finish refcount
+/// mistake on a still-live counter.
+fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceId, ProfileId) {
+    let mut e = Engine::new();
+    let (root, _child, sid, pid, _attach_out) = setup_with_surviving_child(&mut e);
+
+    let t1 = Instant::now();
+    e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    let _ = e.detach_sub(sid, t1);
+    assert!(e.profiles().get(pid).unwrap().reap_pending);
+
+    let t2 = t1 + SETTLE * 2;
+    while let Some(id) = e.pop_expired(t2) {
+        e.step(Input::TimerExpired(id), t2);
+    }
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Active(specter_core::Burst {
+            phase: specter_core::BurstPhase::Probing { .. },
+            ..
+        })
+    ));
+
+    let out = e.step(Input::FsEvent { resource: root, event }, t2);
+    assert!(
+        e.profiles().get(pid).is_none(),
+        "Profile reaped after anchor terminal event ({event:?}) without panic",
+    );
+    let unwatch_count = out
+        .watch_ops
+        .iter()
+        .filter(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == root))
+        .count();
+    assert_eq!(
+        unwatch_count, 1,
+        "exactly one Unwatch on anchor for {event:?} — no double release; got {:?}",
+        out.watch_ops,
+    );
+    (e, root, pid)
+}
+
+#[test]
+fn anchor_terminal_removed_with_reap_pending_active_burst_no_double_release() {
+    drive_anchor_terminal_with_reap_pending(FsEvent::Removed);
+}
+
+#[test]
+fn anchor_terminal_renamed_with_reap_pending_active_burst_no_double_release() {
+    drive_anchor_terminal_with_reap_pending(FsEvent::Renamed);
+}
+
+#[test]
+fn anchor_terminal_revoked_with_reap_pending_active_burst_no_double_release() {
+    drive_anchor_terminal_with_reap_pending(FsEvent::Revoked);
+}
+
+#[test]
+fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
+    // Two Profiles co-anchored at the same Resource (different
+    // config_hash). P has reap_pending + Active(Probing); Q is Idle.
+    // Pre-fix: P's double-release decremented the counter past Q's
+    // contribution; Q's later release would underflow. Post-fix: each
+    // Profile's anchor flag clears exactly once and the counter walks
+    // 2 → 1 → 0 cleanly.
+    let mut e = Engine::new();
+    let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+
+    // Two Subs at the same anchor with different config_hash —
+    // different max_settle yields a fresh Profile.
+    let attach_p = SubAttachRequest::for_resource(
+        "P".into(),
+        root,
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        ClassSet::CONTENT,
+    );
+    let attach_q = SubAttachRequest::for_resource(
+        "Q".into(),
+        root,
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE + Duration::from_secs(1),
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        ClassSet::CONTENT,
+    );
+    let (sid_p, attach_out_p) = e.attach_sub(attach_p, Instant::now());
+    let (_sid_q, attach_out_q) = e.attach_sub(attach_q, Instant::now());
+    let pid_p = e.subs().get(sid_p).unwrap().profile;
+    let pid_q = e
+        .profiles()
+        .iter()
+        .find(|(pid, _)| *pid != pid_p)
+        .map(|(pid, _)| pid)
+        .expect("Q profile minted");
+
+    // Each Profile contributed +1 to root.watch_demand.
+    assert_eq!(e.tree().get(root).unwrap().watch_demand, 2);
+
+    // Drive both to Idle via a Seed burst so the surviving-child
+    // invariant holds.
+    let snap_p = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
+    complete_seed_burst(&mut e, pid_p, &attach_out_p, snap_p);
+    let snap_q = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
+    complete_seed_burst(&mut e, pid_q, &attach_out_q, snap_q);
+
+    // Kick off a Standard burst on P.
+    let t1 = Instant::now();
+    e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    // Detach P to set reap_pending. Q stays alive.
+    let _ = e.detach_sub(sid_p, t1);
+    assert!(e.profiles().get(pid_p).unwrap().reap_pending);
+    assert!(!e.profiles().get(pid_q).unwrap().reap_pending);
+
+    // Advance P to Probing.
+    let t2 = t1 + SETTLE * 2;
+    while let Some(id) = e.pop_expired(t2) {
+        e.step(Input::TimerExpired(id), t2);
+    }
+
+    // FsEvent::Removed at root: covering_profiles returns [P, Q],
+    // each routes through finalize_anchor_lost.
+    let out = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Removed,
+        },
+        t2,
+    );
+
+    // P reaped; Q remains Idle with anchor_contribution cleared.
+    assert!(e.profiles().get(pid_p).is_none(), "P reaped");
+    let q = e.profiles().get(pid_q).expect("Q survives");
+    assert!(
+        !q.anchor_contribution,
+        "Q's anchor_contribution cleared by terminal event",
+    );
+    assert!(matches!(q.state, ProfileState::Idle));
+
+    // Counter walked 2 → 1 → 0 cleanly. Anchor slot is reaped because
+    // the surviving-child only kept it alive while P+Q were attached;
+    // Q.anchor_contribution=false leaves only the child anchor, which
+    // does keep root alive — confirm via watch_demand counter.
+    let final_counter = e.tree().get(root).map_or(0, |r| r.watch_demand);
+    assert_eq!(
+        final_counter, 0,
+        "root.watch_demand zeroed by both Profiles' terminal events",
+    );
+    let unwatch_count = out
+        .watch_ops
+        .iter()
+        .filter(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == root))
+        .count();
+    assert_eq!(
+        unwatch_count, 1,
+        "exactly one Unwatch on root (1→0 edge); got {:?}",
+        out.watch_ops,
+    );
+}
