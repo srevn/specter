@@ -60,8 +60,8 @@
 use crate::coverage::covers;
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use specter_core::{
-    ChildEntry, Diagnostic, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap, ResourceId,
-    ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot, splice,
+    ChildEntry, DedupKey, Diagnostic, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
+    ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot, splice,
 };
 use std::sync::Arc;
 
@@ -307,6 +307,15 @@ pub(crate) fn graft(
         );
     }
 
+    // walk_pair may have reaped covered descendants via delete_child.
+    // PerFile dedup entries keyed at reaped slots become stale — slotmap
+    // generations make stale ids non-resolving, so the entries never
+    // affect correctness, but they accumulate as memory for the
+    // Profile's lifetime. Run the hygiene purge across every Profile
+    // (one bursts's deletes can stale entries in *any* covering
+    // Profile's map, not just `profile_id`'s).
+    purge_per_file_dedup_for_reaped_slots(profiles, tree);
+
     // Splice the response into current. Rebuilds DirSnapshots along the
     // path from anchor to target, Arc-shares everything off-path,
     // short-circuits when per-level hashes match. Mutable borrow now —
@@ -329,6 +338,40 @@ pub(crate) fn graft(
     }
     if let Some(p) = profiles.get_mut(profile_id) {
         p.current = Some(result.into_snapshot());
+    }
+}
+
+/// Drop `last_emitted_dir_hash` entries whose `PerFile` key references a
+/// reaped Tree slot. `Subtree`-keyed entries are unaffected — their
+/// `(SubId, ProfileId)` key is bounded by Profile lifecycle (the whole
+/// map drops at `reap_profile`), and the engine's only natural lifecycle
+/// hook for `PerFile` keys is at the Resource level.
+///
+/// `PerFile` entries become stale when [`reconcile::delete_child`] reaps
+/// a covered leaf via `tree.try_reap`. Slotmap increments the slot's
+/// generation on removal, so a stale `ResourceId` never resolves and the
+/// stale entry can never collide with a future allocation — this purge
+/// is hygiene, not a correctness fix. Without it, the map accumulates
+/// unreachable entries proportional to the file-churn rate over the
+/// Profile's lifetime.
+///
+/// Call site: [`graft`], after `walk_pair` runs (the only path that can
+/// reap covered leaves). Other reap paths (descent rewind, watch-root
+/// parent release, Profile reap) target Dir / scaffold slots which are
+/// never `PerFile` targets, so those paths don't need this hook.
+///
+/// Cost: `O(profiles × dedup_size_per_profile)` per call. Typical v1
+/// configs are 1–2 profiles with small dedup maps; the cost is
+/// negligible compared to the rest of the graft work.
+fn purge_per_file_dedup_for_reaped_slots(profiles: &mut ProfileMap, tree: &Tree) {
+    for (_, p) in profiles.iter_mut() {
+        if p.last_emitted_dir_hash.is_empty() {
+            continue;
+        }
+        p.last_emitted_dir_hash.retain(|k, _| match *k {
+            DedupKey::PerFile { resource, .. } => tree.get(resource).is_some(),
+            DedupKey::Subtree { .. } => true,
+        });
     }
 }
 
@@ -472,9 +515,9 @@ mod tests {
     use super::{graft, walk_pair};
     use compact_str::CompactString;
     use specter_core::{
-        ChildEntry, ClassSet, DirChild, DirMeta, DirSnapshot, EntryKind, LeafEntry, Profile,
-        ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree,
-        TreeSnapshot, WatchOp,
+        ChildEntry, ClassSet, DedupKey, DirChild, DirMeta, DirSnapshot, EntryKind, LeafEntry,
+        Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubId,
+        Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -807,6 +850,253 @@ mod tests {
             panic!("expected Dir snapshot");
         };
         assert_eq!(arc.dir_hash(), response.dir_hash());
+    }
+
+    // ---------------------------------------------------------------------------
+    // graft — last_emitted_dir_hash lifecycle (PR 3)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn graft_purges_per_file_dedup_when_descendant_is_reaped() {
+        // Setup: per-file Profile (has_per_file_fds=true) covers root with
+        // a covered descendant `a.rs`. Pre-populate `last_emitted_dir_hash`
+        // with a PerFile entry keyed at `a.rs`'s ResourceId — simulates a
+        // prior PerStableFile Effect having fired against the leaf.
+        // Probe response deletes `a.rs`. graft's walk_pair → delete_child
+        // reaps the slot; the new purge hook drops the now-stale
+        // PerFile entry.
+        let (mut tree, mut profiles, root, pid) = anchor(true);
+        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        tree.get_mut(a_rs_id).unwrap().kind = ResourceKind::File;
+
+        // Prior current = root with a.rs as covered leaf; baseline matches
+        // so the diff has no ops other than the delete.
+        let prior_current = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        profiles.get_mut(pid).unwrap().current =
+            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+
+        // Pre-populate the dedup map. SubId::default() is fine — the
+        // purge filter doesn't inspect the sub field.
+        let stale_key = DedupKey::PerFile {
+            sub: SubId::default(),
+            resource: a_rs_id,
+        };
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(stale_key.clone(), 0xdead_beef_u128);
+
+        // a.rs needs a watch_demand contribution so delete_child's
+        // sub_watch_demand path is reachable; the per-file Profile would
+        // have placed one there at attach via reconcile's create_child
+        // pass. Simulate that here directly.
+        crate::refcounts::add_watch_demand(
+            &mut tree,
+            a_rs_id,
+            ClassSet::CONTENT,
+            &mut StepOutput::default(),
+        );
+
+        // Probe response: a.rs is gone.
+        let response = dir_snap(root, 200, vec![]);
+
+        let mut out = StepOutput::default();
+        graft(
+            pid,
+            root,
+            Arc::clone(&response),
+            &mut tree,
+            &mut profiles,
+            &mut out,
+        );
+
+        assert!(
+            tree.get(a_rs_id).is_none(),
+            "delete_child must have reaped a.rs slot",
+        );
+        let p = profiles.get(pid).unwrap();
+        assert!(
+            !p.last_emitted_dir_hash.contains_key(&stale_key),
+            "stale PerFile entry must be purged after slot reap",
+        );
+    }
+
+    #[test]
+    fn graft_preserves_per_file_dedup_for_live_descendants() {
+        // Complement: slots that survive graft retain their dedup
+        // entries. a.rs's content changes (different leaf hash) but the
+        // slot persists — the entry must NOT be purged.
+        let (mut tree, mut profiles, root, pid) = anchor(true);
+        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        tree.get_mut(a_rs_id).unwrap().kind = ResourceKind::File;
+
+        let prior_current = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        profiles.get_mut(pid).unwrap().current =
+            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+
+        let live_key = DedupKey::PerFile {
+            sub: SubId::default(),
+            resource: a_rs_id,
+        };
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(live_key.clone(), 0x1234_5678_u128);
+
+        // Response: same a.rs name+inode (no delete). Bumped root mtime
+        // forces graft to walk the level rather than equal-hash early-out.
+        let response = dir_snap(root, 200, vec![("a.rs", leaf(EntryKind::File, 1))]);
+
+        let mut out = StepOutput::default();
+        graft(
+            pid,
+            root,
+            Arc::clone(&response),
+            &mut tree,
+            &mut profiles,
+            &mut out,
+        );
+
+        assert!(
+            tree.get(a_rs_id).is_some(),
+            "a.rs slot still live (no delete in response)",
+        );
+        let p = profiles.get(pid).unwrap();
+        assert!(
+            p.last_emitted_dir_hash.contains_key(&live_key),
+            "live PerFile entry must be preserved across graft",
+        );
+    }
+
+    #[test]
+    fn graft_preserves_subtree_dedup_unconditionally() {
+        // Subtree-keyed entries are bounded by Profile lifecycle, not
+        // Resource lifecycle. The purge hook must leave them alone even
+        // when arbitrary descendants get reaped.
+        use specter_core::ProfileId;
+
+        let (mut tree, mut profiles, root, pid) = anchor(false);
+        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        tree.get_mut(a_rs_id).unwrap().kind = ResourceKind::File;
+
+        let prior_current = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        profiles.get_mut(pid).unwrap().current =
+            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+
+        // Subtree key references a *Profile*, not a Resource. SubId
+        // and ProfileId values are arbitrary for this test.
+        let subtree_key = DedupKey::Subtree {
+            sub: SubId::default(),
+            profile: ProfileId::default(),
+        };
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(subtree_key.clone(), 0xfeed_face_u128);
+
+        // Probe response deletes a.rs. The reap fires; the purge runs;
+        // the Subtree entry should survive.
+        let response = dir_snap(root, 200, vec![]);
+        let mut out = StepOutput::default();
+        graft(
+            pid,
+            root,
+            Arc::clone(&response),
+            &mut tree,
+            &mut profiles,
+            &mut out,
+        );
+
+        let p = profiles.get(pid).unwrap();
+        assert!(
+            p.last_emitted_dir_hash.contains_key(&subtree_key),
+            "Subtree-keyed entries are bounded by Profile lifecycle, \
+             not Resource lifecycle — purge must leave them alone",
+        );
+    }
+
+    #[test]
+    fn graft_purges_per_file_dedup_across_all_profiles() {
+        // Multi-Profile case: a single FsEvent cascade reaps a covered
+        // descendant. Both Profiles' dedup maps may carry PerFile entries
+        // at the reaped slot; the purge runs across every Profile, not
+        // just the one being grafted.
+        let (mut tree, mut profiles, root, pid_a) = anchor(true);
+        // Second User Profile sharing the same anchor at a different
+        // config_hash. `max_settle` is part of `config_hash`, so a
+        // different value forks a distinct Profile.
+        let pid_b = profiles.attach(
+            &mut tree,
+            Profile::new(
+                root,
+                ScanConfig::builder().recursive(true).build(),
+                Duration::from_secs(12),
+                Duration::from_millis(50),
+                ClassSet::CONTENT,
+            ),
+        );
+        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        tree.get_mut(a_rs_id).unwrap().kind = ResourceKind::File;
+
+        // Both Profiles record a PerFile entry against a.rs.
+        for &pid in &[pid_a, pid_b] {
+            profiles.get_mut(pid).unwrap().current = Some(TreeSnapshot::Dir(dir_snap(
+                root,
+                100,
+                vec![("a.rs", leaf(EntryKind::File, 1))],
+            )));
+            profiles.get_mut(pid).unwrap().last_emitted_dir_hash.insert(
+                DedupKey::PerFile {
+                    sub: SubId::default(),
+                    resource: a_rs_id,
+                },
+                0x00c0_ffee_u128,
+            );
+        }
+
+        // Match the per-file Profile's contribution on the slot.
+        crate::refcounts::add_watch_demand(
+            &mut tree,
+            a_rs_id,
+            ClassSet::CONTENT,
+            &mut StepOutput::default(),
+        );
+
+        let response = dir_snap(root, 200, vec![]);
+        let mut out = StepOutput::default();
+        graft(
+            pid_a,
+            root,
+            Arc::clone(&response),
+            &mut tree,
+            &mut profiles,
+            &mut out,
+        );
+
+        assert!(tree.get(a_rs_id).is_none(), "a.rs reaped");
+        let stale_key = DedupKey::PerFile {
+            sub: SubId::default(),
+            resource: a_rs_id,
+        };
+        assert!(
+            !profiles
+                .get(pid_a)
+                .unwrap()
+                .last_emitted_dir_hash
+                .contains_key(&stale_key),
+            "Profile A's stale entry must be purged",
+        );
+        assert!(
+            !profiles
+                .get(pid_b)
+                .unwrap()
+                .last_emitted_dir_hash
+                .contains_key(&stale_key),
+            "Profile B's stale entry (cross-Profile) must also be purged",
+        );
     }
 
     // ---------------------------------------------------------------------------

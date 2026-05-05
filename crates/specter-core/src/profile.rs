@@ -373,6 +373,10 @@ impl ProfileMap {
         self.profiles.iter()
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (ProfileId, &mut Profile)> {
+        self.profiles.iter_mut()
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.profiles.len()
