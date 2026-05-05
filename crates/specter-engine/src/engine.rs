@@ -540,6 +540,20 @@ impl Engine {
             "reap_profile: Pending + anchor_contribution must be mutually exclusive",
         );
 
+        // Cancel any in-flight descent probe BEFORE the descent-prefix
+        // helper transitions the Profile to Idle (which drops the
+        // correlation). Without this, the prober ships a ProbeResponse
+        // for a now-detached Profile, the engine drops it as
+        // StaleProbeResponse — wasted prober capacity and I/O.
+        // Mirrors `on_watch_op_rejected`'s descent-purge pattern.
+        if let Some(d) = self.descent_state(profile_id)
+            && d.probe_correlation.is_some()
+        {
+            out.probe_ops.push(ProbeOp::Cancel {
+                profile: profile_id,
+            });
+        }
+
         // Release every claim this Profile may hold. Helpers are
         // idempotent — no-op when the corresponding flag is unset (or
         // counter is zero, post-clamp).
