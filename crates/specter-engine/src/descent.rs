@@ -307,11 +307,22 @@ impl crate::Engine {
         let remaining = descent.remaining_components.clone();
 
         if remaining.is_empty() {
-            // Defensive: pending descent with no remaining components is
-            // a state-machine bug. Transition Pending → Idle.
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.state = ProfileState::Idle;
-            }
+            // The DescentState invariant (core/profile.rs) says
+            // `remaining_components` is non-empty: the anchor itself is
+            // the last component, and descent transitions Pending → Idle
+            // on materialization rather than emptying the vec. If we
+            // ever reach this arm, it's a state-machine bug. Take the
+            // conservative recovery path: surface the breach via a
+            // Diagnostic and release the prefix claim symmetrically
+            // (clears state to Idle AND releases the +1 watch_demand
+            // contribution, matching `dispatch_descent_vanished`'s
+            // root branch). Without the release, the prefix's counter
+            // would leak.
+            out.diagnostics.push(Diagnostic::DescentInvariantViolation {
+                profile: profile_id,
+                prefix,
+            });
+            self.release_descent_prefix_claim(profile_id, out);
             return;
         }
 

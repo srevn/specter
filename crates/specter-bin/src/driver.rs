@@ -397,6 +397,11 @@ pub fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::AttachPathInvalid { hint } => {
             tracing::error!(hint, "attach path invalid; request dropped");
         }
+        Diagnostic::DescentInvariantViolation { profile, prefix } => tracing::error!(
+            ?profile,
+            ?prefix,
+            "descent invariant violation: remaining_components empty",
+        ),
     }
 }
 
