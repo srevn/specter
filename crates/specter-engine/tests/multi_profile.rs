@@ -305,8 +305,15 @@ fn parent_in_draining_reconfirms_after_child_settles() {
 
     // Drain timers; both Profiles transition Settling → Probing.
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
 
     let parent_probe_corr = match &e.profiles().get(pid_parent).unwrap().state {

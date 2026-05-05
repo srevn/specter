@@ -236,8 +236,15 @@ fn config_diff_mid_burst_remove_defers_reap() {
 
     // Drain settle to enter Probing.
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
     let std_corr = match &e.profiles().get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {

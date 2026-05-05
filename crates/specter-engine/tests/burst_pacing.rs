@@ -128,14 +128,21 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     // `last_event + SETTLE` (well below `burst_deadline = now + MAX_SETTLE`).
     let probe_emit = last_event + SETTLE;
     let probe_correlation = loop {
-        let id = match e.pop_expired(probe_emit) {
-            Some(id) => id,
+        let entry = match e.pop_expired(probe_emit) {
+            Some(entry) => entry,
             None => panic!(
                 "settle timer did not fire within `last_event + settle`; \
                  the conflation regressed: events should re-arm the debounce."
             ),
         };
-        let out = e.step(Input::TimerExpired(id), probe_emit);
+        let out = e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            probe_emit,
+        );
         if let Some(c) = first_probe_correlation(&out) {
             break c;
         }
@@ -220,8 +227,15 @@ fn sustained_unstable_response_storm_paces_at_settle() {
     for cycle in 0u32..3 {
         // Drain settle timer → Verifying.
         let probe_correlation = loop {
-            let id = e.pop_expired(response_at).expect("settle timer pending");
-            let out = e.step(Input::TimerExpired(id), response_at);
+            let entry = e.pop_expired(response_at).expect("settle timer pending");
+            let out = e.step(
+                Input::TimerExpired {
+                    profile: entry.profile,
+                    kind: entry.kind,
+                    id: entry.id,
+                },
+                response_at,
+            );
             if let Some(c) = first_probe_correlation(&out) {
                 break c;
             }

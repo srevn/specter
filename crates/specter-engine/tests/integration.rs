@@ -284,8 +284,15 @@ fn drive_standard_burst_to_stable(
 /// fired in the process.
 fn drain_to_probe_correlation(e: &mut Engine, t: Instant) -> Option<ProbeCorrelation> {
     let mut last_correlation = None;
-    while let Some(id) = e.pop_expired(t) {
-        let out = e.step(Input::TimerExpired(id), t);
+    while let Some(entry) = e.pop_expired(t) {
+        let out = e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t,
+        );
         if let Some(c) = first_probe_correlation(&out) {
             last_correlation = Some(c);
         }

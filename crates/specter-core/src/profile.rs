@@ -162,6 +162,25 @@ pub enum BurstIntent {
     Seed,
 }
 
+/// Discriminator for a scheduled timer's role within a Burst's lifecycle.
+///
+/// `Settle` — debounce timer armed during [`BurstPhase::Batching`]. Expiry
+/// drives Batching → Verifying.
+/// `BurstDeadline` — Burst-level max-settle timer armed at Burst start.
+/// Expiry sets `Burst.forced = true` and dispatches by current phase.
+///
+/// Carried alongside [`TimerId`] on the engine's heap entry and on
+/// [`crate::input::Input::TimerExpired`] so dispatch routes directly on
+/// the kind without re-deriving from Profile state. The [`TimerId`]
+/// continues to act as the lazy-invalidation epoch — `kind` only narrows
+/// the validation slot, it does not replace it.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum TimerKind {
+    #[default]
+    Settle,
+    BurstDeadline,
+}
+
 #[derive(Debug)]
 pub struct Profile {
     pub resource: ResourceId,

@@ -23,7 +23,7 @@ use specter_core::{
     CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
     EffectScope, EntryKind, FsEvent, Input, LeafEntry, Placeholder, ProbeKind, ProbeOp,
     ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, TreeSnapshot, WatchOp,
+    StepOutput, TimerKind, TreeSnapshot, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -372,8 +372,15 @@ fn standard_burst_stable_emits_effect_and_idles() {
         now,
     );
     // Settle fires.
-    while let Some(id) = e.pop_expired(now + SETTLE) {
-        e.step(Input::TimerExpired(id), now + SETTLE);
+    while let Some(entry) = e.pop_expired(now + SETTLE) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            now + SETTLE,
+        );
     }
     // We're in Probing; pick up the correlation.
     let correlation = match &e.profiles.get(pid).unwrap().state {
@@ -467,8 +474,15 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         t1,
     );
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
     let std_corr = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
@@ -518,8 +532,15 @@ fn standard_burst_force_fires_on_max_settle() {
     );
     // Burst deadline fires before settle.
     let deadline = now + MAX_SETTLE + Duration::from_millis(1);
-    while let Some(id) = e.pop_expired(deadline) {
-        e.step(Input::TimerExpired(id), deadline);
+    while let Some(entry) = e.pop_expired(deadline) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            deadline,
+        );
     }
     // After force-fire, we're either in Probing (forced=true) or already
     // Idle if the deadline race resolved both timers. Drive the response
@@ -897,8 +918,15 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
         now,
     );
     // Pop the settle timer.
-    let id = e.pop_expired(now + SETTLE).expect("settle timer ready");
-    let out = e.step(Input::TimerExpired(id), now + SETTLE);
+    let entry = e.pop_expired(now + SETTLE).expect("settle timer ready");
+    let out = e.step(
+        Input::TimerExpired {
+            profile: entry.profile,
+            kind: entry.kind,
+            id: entry.id,
+        },
+        now + SETTLE,
+    );
     let p = e.profiles.get(pid).unwrap();
     assert!(matches!(
         p.state,
@@ -917,7 +945,14 @@ fn timer_expired_stale_id_emits_diagnostic() {
     let mut e = Engine::new();
     use slotmap::KeyData;
     let bogus = specter_core::TimerId::from(KeyData::from_ffi(99_999));
-    let out = e.step(Input::TimerExpired(bogus), Instant::now());
+    let out = e.step(
+        Input::TimerExpired {
+            profile: specter_core::ProfileId::default(),
+            kind: specter_core::TimerKind::Settle,
+            id: bogus,
+        },
+        Instant::now(),
+    );
     let stale = out
         .diagnostics
         .iter()
@@ -1057,8 +1092,15 @@ fn effect_emission_carries_diff_when_needs_diff() {
     let mut effect_out = None;
     for _ in 0..6 {
         t += SETTLE * 4; // big enough to cover backoff
-        while let Some(id) = e.pop_expired(t) {
-            e.step(Input::TimerExpired(id), t);
+        while let Some(entry) = e.pop_expired(t) {
+            e.step(
+                Input::TimerExpired {
+                    profile: entry.profile,
+                    kind: entry.kind,
+                    id: entry.id,
+                },
+                t,
+            );
         }
         let correlation = match &e.profiles.get(pid).unwrap().state {
             ProfileState::Active(b) => match b.phase {
@@ -1556,8 +1598,15 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
 
     // Drain the settle timer to advance to Probing.
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
@@ -1753,8 +1802,15 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
 
     // Drain settle.
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
     let std_corr = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
@@ -1784,8 +1840,15 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     );
     // Now drain the rescheduled settle and inject the same snapshot.
     let t3 = t2 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t3) {
-        e.step(Input::TimerExpired(id), t3);
+    while let Some(entry) = e.pop_expired(t3) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t3,
+        );
     }
     let std_corr2 = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
@@ -1891,8 +1954,15 @@ fn per_stable_file_skips_dir_entries() {
         t1,
     );
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
     let std_corr = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
@@ -1923,8 +1993,15 @@ fn per_stable_file_skips_dir_entries() {
         t2,
     );
     let t3 = t2 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t3) {
-        e.step(Input::TimerExpired(id), t3);
+    while let Some(entry) = e.pop_expired(t3) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t3,
+        );
     }
     let std_corr2 = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
@@ -1996,7 +2073,14 @@ fn drive_to_first_effect(
         },
         _ => panic!("expected Active"),
     };
-    let _ = e.step(Input::TimerExpired(settle_timer), now + SETTLE);
+    let _ = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::Settle,
+            id: settle_timer,
+        },
+        now + SETTLE,
+    );
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
             BurstPhase::Verifying { correlation } => correlation,
@@ -2023,7 +2107,14 @@ fn drive_to_first_effect(
         },
         _ => panic!("expected Active(Batching)"),
     };
-    let _ = e.step(Input::TimerExpired(settle_timer2), now + SETTLE + SETTLE);
+    let _ = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::Settle,
+            id: settle_timer2,
+        },
+        now + SETTLE + SETTLE,
+    );
     let correlation2 = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
             BurstPhase::Verifying { correlation } => correlation,
@@ -2268,8 +2359,15 @@ mod props {
             Action::AdvanceTime(ms) => {
                 *t += Duration::from_millis(u64::from(ms));
                 let mut combined = StepOutput::default();
-                while let Some(id) = e.pop_expired(*t) {
-                    let s = e.step(Input::TimerExpired(id), *t);
+                while let Some(entry) = e.pop_expired(*t) {
+                    let s = e.step(
+                        Input::TimerExpired {
+                            profile: entry.profile,
+                            kind: entry.kind,
+                            id: entry.id,
+                        },
+                        *t,
+                    );
                     for c in s.probe_ops.iter().filter_map(|op| match op {
                         ProbeOp::Probe { request } => Some(request.correlation),
                         _ => None,

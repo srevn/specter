@@ -15,11 +15,11 @@
 
 use crate::refcounts::add_watch_demand;
 use crate::stability::StabilityIndex;
-use crate::timer::TimerHeap;
+use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
     BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Effect, Input, ProbeCorrelation,
     ProbeOp, Profile, ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub,
-    SubAttachRequest, SubId, SubRegistry, TimerId, Tree, WatchOp, compute_config_hash,
+    SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree, WatchOp, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -115,8 +115,8 @@ impl Engine {
             Input::ProbeResponse(resp) => {
                 self.on_probe_response(resp, now, &mut out);
             }
-            Input::TimerExpired(id) => {
-                self.on_timer_expired(id, &mut out);
+            Input::TimerExpired { profile, kind, id } => {
+                self.on_timer_expired(profile, kind, id, &mut out);
             }
             Input::EffectComplete { sub, key, result } => {
                 self.on_effect_complete(sub, key, &result, now, &mut out);
@@ -639,8 +639,10 @@ impl Engine {
 
     /// Pop the earliest expired-and-still-referenced timer. Stale entries
     /// (cancelled because the Profile's burst was reset) are silently
-    /// dropped.
-    pub fn pop_expired(&mut self, now: Instant) -> Option<TimerId> {
+    /// dropped. The returned [`TimerEntry`] carries the owning profile,
+    /// kind, and id together — the bin forwards it to
+    /// [`Input::TimerExpired`] without any rediscovery.
+    pub fn pop_expired(&mut self, now: Instant) -> Option<TimerEntry> {
         loop {
             let top = self.timers.peek_top()?;
             if top.deadline > now {
@@ -650,8 +652,8 @@ impl Engine {
                 .timers
                 .pop_top()
                 .expect("peek_top returned Some; pop_top must too");
-            if Self::is_timer_referenced(&self.profiles, entry.profile, entry.id) {
-                return Some(entry.id);
+            if Self::is_timer_referenced(&self.profiles, entry.profile, entry.kind, entry.id) {
+                return Some(entry);
             }
             // Stale — silently drop, continue draining.
         }
@@ -664,31 +666,34 @@ impl Engine {
         ProbeCorrelation(self.next_correlation)
     }
 
-    /// Whether `id` is referenced by `profile`'s active burst — `pop_expired`
-    /// uses this to filter stale heap heads. Only `Active` Profiles
-    /// schedule timers; `Idle` and `Pending` Profiles never do.
-    #[allow(clippy::match_same_arms)]
-    fn is_timer_referenced(profiles: &ProfileMap, profile: ProfileId, id: TimerId) -> bool {
+    /// Whether `id` is the live timer for `profile`'s `kind` slot —
+    /// `pop_expired` uses this to filter stale heap heads, and
+    /// `on_timer_expired` re-runs it as defense-in-depth for direct
+    /// `step(Input::TimerExpired)` callers (tests, fuzzers).
+    ///
+    /// `kind` narrows the comparison: `Settle` checks the
+    /// `BurstPhase::Batching` slot only (no settle timer exists in any
+    /// other phase); `BurstDeadline` checks the Burst-level field. Only
+    /// `Active` Profiles schedule timers; `Idle` and `Pending` Profiles
+    /// own neither slot.
+    pub(crate) fn is_timer_referenced(
+        profiles: &ProfileMap,
+        profile: ProfileId,
+        kind: TimerKind,
+        id: TimerId,
+    ) -> bool {
         let Some(p) = profiles.get(profile) else {
             return false;
         };
-        match &p.state {
-            ProfileState::Idle => false,
-            // Descent is event-driven (no settle timer, no burst
-            // deadline). The arm is structurally redundant with the
-            // wildcard but documents that Pending intentionally has no
-            // timers.
-            ProfileState::Pending(_) => false,
-            ProfileState::Active(burst) => {
-                let phase_match = matches!(
-                    &burst.phase,
-                    BurstPhase::Batching { settle_timer } if *settle_timer == id,
-                );
-                phase_match || burst.burst_deadline == id
-            }
-            // `non_exhaustive` ProfileState: future variants conservatively
-            // treat the timer as unreferenced (drains it).
-            _ => false,
+        let ProfileState::Active(burst) = &p.state else {
+            return false;
+        };
+        match kind {
+            TimerKind::Settle => matches!(
+                &burst.phase,
+                BurstPhase::Batching { settle_timer } if *settle_timer == id,
+            ),
+            TimerKind::BurstDeadline => burst.burst_deadline == id,
         }
     }
 
@@ -804,7 +809,7 @@ mod tests {
     use specter_core::{
         DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeKind, ProbeOp,
         ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ResourceId, ScanConfig, StepOutput,
-        SubId, SubRegistryDiff, TimerId, WatchOp, WatchOpts,
+        SubId, SubRegistryDiff, TimerId, TimerKind, WatchOp, WatchOpts,
     };
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -863,7 +868,14 @@ mod tests {
     #[test]
     fn step_timer_expired_stale_id_diagnoses() {
         let mut e = Engine::new();
-        let out = e.step(Input::TimerExpired(TimerId::default()), Instant::now());
+        let out = e.step(
+            Input::TimerExpired {
+                profile: ProfileId::default(),
+                kind: TimerKind::Settle,
+                id: TimerId::default(),
+            },
+            Instant::now(),
+        );
         let has_diag = out
             .diagnostics
             .iter()
@@ -943,7 +955,8 @@ mod tests {
         let mut e = Engine::new();
         let now = Instant::now();
         let when = now + Duration::from_millis(100);
-        e.timers.schedule(when, ProfileId::default());
+        e.timers
+            .schedule(when, ProfileId::default(), TimerKind::Settle);
         assert_eq!(e.next_deadline(), Some(when));
     }
 
@@ -952,7 +965,8 @@ mod tests {
         let mut e = Engine::new();
         let now = Instant::now();
         let when = now + Duration::from_secs(10);
-        e.timers.schedule(when, ProfileId::default());
+        e.timers
+            .schedule(when, ProfileId::default(), TimerKind::Settle);
         assert_eq!(e.pop_expired(now), None);
         assert_eq!(e.timers.len(), 1, "future-dated entries are not drained");
     }
@@ -967,9 +981,12 @@ mod tests {
         let past = now
             .checked_sub(Duration::from_millis(1))
             .expect("test clock has room for sub-millisecond rewind");
-        e.timers.schedule(past, ProfileId::default());
-        e.timers.schedule(past, ProfileId::default());
-        e.timers.schedule(past, ProfileId::default());
+        e.timers
+            .schedule(past, ProfileId::default(), TimerKind::Settle);
+        e.timers
+            .schedule(past, ProfileId::default(), TimerKind::Settle);
+        e.timers
+            .schedule(past, ProfileId::default(), TimerKind::Settle);
 
         assert_eq!(e.pop_expired(now), None);
         assert_eq!(e.timers.len(), 0, "stale heads were drained");
@@ -984,9 +1001,13 @@ mod tests {
         let past = now
             .checked_sub(Duration::from_millis(1))
             .expect("test clock has room for sub-millisecond rewind");
-        e.timers.schedule(past, ProfileId::default());
         e.timers
-            .schedule(now + Duration::from_secs(10), ProfileId::default());
+            .schedule(past, ProfileId::default(), TimerKind::Settle);
+        e.timers.schedule(
+            now + Duration::from_secs(10),
+            ProfileId::default(),
+            TimerKind::Settle,
+        );
 
         assert_eq!(e.pop_expired(now), None);
         assert_eq!(e.timers.len(), 1, "future entry remains");

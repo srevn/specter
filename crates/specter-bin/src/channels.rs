@@ -203,13 +203,21 @@ mod tests {
         for _ in 0..2048 {
             chans
                 .sensor_in_tx
-                .send(Input::TimerExpired(specter_core::TimerId::default()))
+                .send(Input::TimerExpired {
+                    profile: specter_core::ProfileId::default(),
+                    kind: specter_core::TimerKind::Settle,
+                    id: specter_core::TimerId::default(),
+                })
                 .expect("unbounded sensor_in_tx send");
         }
         for _ in 0..2048 {
             chans
                 .effect_in_tx
-                .send(Input::TimerExpired(specter_core::TimerId::default()))
+                .send(Input::TimerExpired {
+                    profile: specter_core::ProfileId::default(),
+                    kind: specter_core::TimerKind::Settle,
+                    id: specter_core::TimerId::default(),
+                })
                 .expect("unbounded effect_in_tx send");
         }
     }
@@ -347,12 +355,16 @@ mod tests {
         }
         watcher_side
             .sensor_in_tx
-            .send(Input::TimerExpired(specter_core::TimerId::default()))
+            .send(Input::TimerExpired {
+                profile: specter_core::ProfileId::default(),
+                kind: specter_core::TimerKind::Settle,
+                id: specter_core::TimerId::default(),
+            })
             .expect("sensor_in_tx clone outlives Channels");
         // Engine side's receiver picks the message up.
         assert!(matches!(
             engine_side.sensor_in_rx.try_recv(),
-            Ok(Input::TimerExpired(_)),
+            Ok(Input::TimerExpired { .. }),
         ));
         // No watch_ops were sent — channel is empty (not disconnected; the
         // engine_side still holds a watch_ops_tx clone too).

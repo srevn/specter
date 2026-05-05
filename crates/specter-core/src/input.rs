@@ -1,8 +1,9 @@
 //! Engine input variants and the normalized `FsEvent`.
 
 use crate::effect::{DedupKey, EffectOutcome};
-use crate::ids::{ResourceId, SubId, TimerId};
+use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::op::{ProbeResponse, WatchOp};
+use crate::profile::TimerKind;
 use crate::sub::SubRegistryDiff;
 
 /// Normalized filesystem event. `kqueue` / `inotify` / `FSEvents` flags fold
@@ -26,7 +27,15 @@ pub enum Input {
         event: FsEvent,
     },
     ProbeResponse(ProbeResponse),
-    TimerExpired(TimerId),
+    /// Engine timer fired. `profile` and `kind` are stamped at schedule
+    /// time and routed back unchanged; `id` is the lazy-invalidation
+    /// epoch that disambiguates a live timer from a superseded one for
+    /// the same `(profile, kind)` slot.
+    TimerExpired {
+        profile: ProfileId,
+        kind: TimerKind,
+        id: TimerId,
+    },
     EffectComplete {
         sub: SubId,
         key: DedupKey,

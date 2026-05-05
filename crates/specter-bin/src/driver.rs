@@ -156,9 +156,19 @@ impl EngineDriver {
             }
         }
 
-        // Drain expired timers.
-        while let Some(t) = self.engine.pop_expired(now) {
-            let out = self.engine.step(Input::TimerExpired(t), now);
+        // Drain expired timers. The engine hands back a `TimerEntry`
+        // pre-validated against the owning Profile's burst slot; we
+        // forward (profile, kind, id) verbatim so the engine's dispatch
+        // routes directly without re-deriving owner/role.
+        while let Some(entry) = self.engine.pop_expired(now) {
+            let out = self.engine.step(
+                Input::TimerExpired {
+                    profile: entry.profile,
+                    kind: entry.kind,
+                    id: entry.id,
+                },
+                now,
+            );
             self.forward(out);
         }
 

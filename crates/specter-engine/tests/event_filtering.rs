@@ -1000,8 +1000,15 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
 
     // Drain the settle timer to advance to Probing.
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
     let correlation = match &e.profiles().get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
@@ -1061,8 +1068,15 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
     assert!(e.profiles().get(pid).unwrap().reap_pending);
 
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
     let correlation = match &e.profiles().get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
@@ -1134,8 +1148,15 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
     assert!(e.profiles().get(pid).unwrap().reap_pending);
 
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
@@ -1254,8 +1275,15 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
 
     // Advance P to Probing.
     let t2 = t1 + SETTLE * 2;
-    while let Some(id) = e.pop_expired(t2) {
-        e.step(Input::TimerExpired(id), t2);
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
     }
 
     // FsEvent::Removed at root: covering_profiles returns [P, Q],

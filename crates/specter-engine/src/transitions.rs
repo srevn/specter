@@ -16,8 +16,8 @@ use crate::refcounts::clamp_watch_demand_to_zero;
 use specter_core::{
     BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect,
     EffectOutcome, EffectScope, FsEvent, ProbeOp, ProbeResponse, ProbeResult, ProfileId,
-    ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TreeSnapshot,
-    WatchOp,
+    ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind,
+    TreeSnapshot, WatchOp,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -284,38 +284,29 @@ impl Engine {
     }
 
     /// Dispatch a [`Input::TimerExpired`].
-    pub(crate) fn on_timer_expired(&mut self, id: specter_core::TimerId, out: &mut StepOutput) {
-        let Some(profile_id) = self.find_profile_referencing_timer(id) else {
+    ///
+    /// `kind` tells us which transition this timer drives — settle expiry
+    /// (Batching → Verifying) or burst-deadline expiry (force-fire). The
+    /// `id` epoch survives the validation re-check that
+    /// [`Engine::is_timer_referenced`] performs against the live burst
+    /// slot for that `kind`; `pop_expired` already ran the same check
+    /// before `step` was called, so the production path runs it twice
+    /// (cheap), and any direct `step(Input::TimerExpired)` from a test
+    /// or fuzzer falls through the same gate.
+    pub(crate) fn on_timer_expired(
+        &mut self,
+        profile: ProfileId,
+        kind: TimerKind,
+        id: TimerId,
+        out: &mut StepOutput,
+    ) {
+        if !Self::is_timer_referenced(&self.profiles, profile, kind, id) {
             out.diagnostics.push(Diagnostic::StaleTimer { id });
             return;
-        };
-
-        let (is_settle, is_burst_deadline, phase_kind) = {
-            let Some(p) = self.profiles.get(profile_id) else {
-                out.diagnostics.push(Diagnostic::StaleTimer { id });
-                return;
-            };
-            let ProfileState::Active(burst) = &p.state else {
-                out.diagnostics.push(Diagnostic::StaleTimer { id });
-                return;
-            };
-            let (phase_kind, settle_match) = match &burst.phase {
-                BurstPhase::Batching { settle_timer } => (PhaseKind::Batching, *settle_timer == id),
-                BurstPhase::Verifying { .. } => (PhaseKind::Verifying, false),
-                BurstPhase::Draining => (PhaseKind::Draining, false),
-            };
-            (settle_match, burst.burst_deadline == id, phase_kind)
-        };
-
-        if is_settle {
-            // The Batching phase's settle_timer fires → advance to Verifying.
-            // Stale settle timers (different phase, or different timer id)
-            // are filtered by the variant-data match above.
-            self.transition_to_verifying(profile_id, out);
-        } else if is_burst_deadline {
-            self.handle_burst_deadline(profile_id, phase_kind, out);
-        } else {
-            out.diagnostics.push(Diagnostic::StaleTimer { id });
+        }
+        match kind {
+            TimerKind::Settle => self.transition_to_verifying(profile, out),
+            TimerKind::BurstDeadline => self.handle_burst_deadline(profile, out),
         }
     }
 
@@ -945,25 +936,29 @@ impl Engine {
     /// `burst_deadline` row — sets `forced := true` and either
     /// transitions the phase (Batching/Draining → Verifying) or, if a
     /// probe is already in flight (Verifying), waits for the response.
-    fn handle_burst_deadline(
-        &mut self,
-        profile_id: ProfileId,
-        phase: PhaseKind,
-        out: &mut StepOutput,
-    ) {
-        if let Some(p) = self.profiles.get_mut(profile_id)
+    ///
+    /// Reads phase inline while flipping `forced`: the caller has
+    /// already validated the timer is live (via `is_timer_referenced`),
+    /// so the `Active` arm is the only reachable one — but the
+    /// `let-else` keeps the borrow scope tight and the `non_exhaustive`
+    /// `ProfileState` future-safe.
+    fn handle_burst_deadline(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        let needs_verify = if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(burst) = &mut p.state
         {
             burst.forced = true;
-        }
-        match phase {
-            PhaseKind::Batching | PhaseKind::Draining => {
-                self.transition_to_verifying(profile_id, out);
+            match &burst.phase {
+                BurstPhase::Batching { .. } | BurstPhase::Draining => true,
+                // Verifying: probe in flight; no second emission. The
+                // response, when it arrives, dispatches with
+                // `forced = true`.
+                BurstPhase::Verifying { .. } => false,
             }
-            PhaseKind::Verifying => {
-                // Probe in flight; no second emission. The response, when
-                // it arrives, dispatches with `forced = true`.
-            }
+        } else {
+            return;
+        };
+        if needs_verify {
+            self.transition_to_verifying(profile_id, out);
         }
     }
 
@@ -1270,24 +1265,6 @@ impl Engine {
         out
     }
 
-    /// Find the Profile whose Burst references `id`. O(active profiles).
-    /// Acceptable for v1 — typical workloads have few simultaneous Active
-    /// profiles.
-    fn find_profile_referencing_timer(&self, id: specter_core::TimerId) -> Option<ProfileId> {
-        for (pid, p) in self.profiles.iter() {
-            if let ProfileState::Active(burst) = &p.state {
-                let phase_match = matches!(
-                    &burst.phase,
-                    BurstPhase::Batching { settle_timer } if *settle_timer == id,
-                );
-                if phase_match || burst.burst_deadline == id {
-                    return Some(pid);
-                }
-            }
-        }
-        None
-    }
-
     /// Mint a fresh `CorrelationId` for an Effect. Engine-monotonic, sharing
     /// the same counter as `next_probe_correlation` — the spaces don't
     /// collide because they're typed differently.
@@ -1295,13 +1272,6 @@ impl Engine {
         self.next_correlation = self.next_correlation.saturating_add(1);
         CorrelationId(self.next_correlation)
     }
-}
-
-#[derive(Copy, Clone)]
-enum PhaseKind {
-    Batching,
-    Verifying,
-    Draining,
 }
 
 /// Snapshot of `on_probe_response`'s routing decision. Computed under a

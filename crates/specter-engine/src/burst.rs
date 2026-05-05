@@ -31,8 +31,8 @@ use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
     Burst, BurstIntent, BurstPhase, DirSnapshot, ProbeCorrelation, ProbeKind, ProbeOp,
-    ProbeRequest, Profile, ProfileId, ProfileState, ResourceId, ResourceKind, StepOutput, Tree,
-    TreeSnapshot,
+    ProbeRequest, Profile, ProfileId, ProfileState, ResourceId, ResourceKind, StepOutput,
+    TimerKind, Tree, TreeSnapshot,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -72,7 +72,9 @@ impl Engine {
             .as_ref()
             .and_then(|s| s.subtree_at(resource, &self.tree));
 
-        let burst_deadline = self.timers.schedule(now + max_settle, profile_id);
+        let burst_deadline =
+            self.timers
+                .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
         let correlation = self.next_probe_correlation();
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
@@ -124,8 +126,12 @@ impl Engine {
         let settle = p.settle;
         let max_settle = p.max_settle;
 
-        let settle_timer = self.timers.schedule(now + settle, profile_id);
-        let burst_deadline = self.timers.schedule(now + max_settle, profile_id);
+        let settle_timer = self
+            .timers
+            .schedule(now + settle, profile_id, TimerKind::Settle);
+        let burst_deadline =
+            self.timers
+                .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
         let mut dirty = BTreeSet::new();
         dirty.insert(event_resource);
@@ -184,7 +190,9 @@ impl Engine {
             });
         }
 
-        let settle_timer = self.timers.schedule(now + settle, profile_id);
+        let settle_timer = self
+            .timers
+            .schedule(now + settle, profile_id, TimerKind::Settle);
 
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(burst) = &mut p.state
@@ -214,7 +222,9 @@ impl Engine {
         let Some(settle) = self.profiles.get(profile_id).map(|p| p.settle) else {
             return;
         };
-        let settle_timer = self.timers.schedule(now + settle, profile_id);
+        let settle_timer = self
+            .timers
+            .schedule(now + settle, profile_id, TimerKind::Settle);
 
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(burst) = &mut p.state
