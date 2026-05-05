@@ -486,6 +486,44 @@ fn ancestor_chain(
 // splice
 // ---------------------------------------------------------------------------
 
+/// Outcome of [`splice`].
+///
+/// The carried [`TreeSnapshot`] is always the view the caller should adopt
+/// as the new current — the variants only differentiate whether the splice
+/// path encountered a contract violation the caller should surface as a
+/// diagnostic.
+#[derive(Debug)]
+pub enum SpliceResult {
+    /// Splice succeeded. The new view integrates `replacement` at `target`
+    /// (or is the trivial wholesale-replace when prior was `None` /
+    /// `File(_)` / target-equals-anchor).
+    Spliced(TreeSnapshot),
+    /// Splice could not navigate from the prior anchor down to `target`
+    /// (target outside anchor's tree subtree, or path crossed a
+    /// `subtree: None` intermediate). The carried snapshot is the prior
+    /// unchanged — `replacement` was not integrated. Caller emits
+    /// [`crate::Diagnostic::SpliceCrossedUncovered`] so the contract
+    /// violation is visible in operator logs.
+    ///
+    /// Engine contract: "graft only into observed subtrees". Reaching
+    /// this variant in v1 implies a state-machine bug; the variant
+    /// exists to surface it without crashing the engine.
+    CrossedUncovered(TreeSnapshot),
+}
+
+impl SpliceResult {
+    /// Consume the result and return its carried [`TreeSnapshot`].
+    /// Equivalent for the caller in both variants — the variant tag is
+    /// the only difference, and is consulted before this call to decide
+    /// whether to emit a Diagnostic.
+    #[must_use]
+    pub fn into_snapshot(self) -> TreeSnapshot {
+        match self {
+            Self::Spliced(s) | Self::CrossedUncovered(s) => s,
+        }
+    }
+}
+
 /// Tree-zipper splice that replaces the subtree at `target`.
 ///
 /// Produces a new [`TreeSnapshot`] whose subtree at `target` equals
@@ -493,91 +531,108 @@ fn ancestor_chain(
 /// Rebuilds at most `depth(target)` `DirSnapshot`s along the
 /// path-to-anchor.
 ///
-/// Returns `TreeSnapshot::Dir(replacement)` (Arc-cheap) for the trivial
-/// cases:
+/// Returns [`SpliceResult::Spliced`] with `TreeSnapshot::Dir(replacement)`
+/// (Arc-cheap) for the trivial cases:
 /// - `prior == None` (first graft).
 /// - `prior == Some(File(_))` (kind change at the anchor).
 /// - `target == prior.root_resource` and the hashes differ (new root).
 ///
-/// Returns `TreeSnapshot::Dir(prior)` (no allocation) when:
+/// Returns [`SpliceResult::Spliced`] with `TreeSnapshot::Dir(prior)`
+/// (no allocation) when:
 /// - `target == prior.root_resource` and `dir_hash` matches (G7-trivial).
 /// - The recursive splice short-circuited at every level via `Arc::ptr_eq`
 ///   or `dir_hash` equality (G7 propagation).
 ///
-/// Defensive fallback: if the path from anchor to target can't be resolved
-/// in `tree`, returns `TreeSnapshot::Dir(replacement)` — the engine's
-/// contract is "graft only into observed subtrees", so this path indicates a
-/// contract violation. We prefer a wholesale replace over corrupting the
-/// prior.
+/// Returns [`SpliceResult::CrossedUncovered`] carrying the prior unchanged
+/// when the engine's "graft only into observed subtrees" contract is
+/// violated:
+/// - `target` is outside the anchor's tree subtree (parent walk bottoms
+///   out before reaching `anchor`).
+/// - The path from anchor to target crosses a `subtree: None` intermediate
+///   (snapshot coverage gap), a missing entry, or a slot reaped mid-graft.
+///
+/// Structurally unreachable in v1. The CrossedUncovered fallback preserves
+/// the prior view (no integration); the caller emits a Diagnostic so the
+/// contract breach is observable.
 #[must_use]
 pub fn splice(
     prior: Option<TreeSnapshot>,
     target: ResourceId,
     replacement: Arc<DirSnapshot>,
     tree: &Tree,
-) -> TreeSnapshot {
+) -> SpliceResult {
     let Some(TreeSnapshot::Dir(root)) = prior else {
         // None or File(_) prior: replace wholesale.
-        return TreeSnapshot::Dir(replacement);
+        return SpliceResult::Spliced(TreeSnapshot::Dir(replacement));
     };
     let anchor = root.root_resource;
     if target == anchor {
         if root.dir_hash() == replacement.dir_hash() {
-            return TreeSnapshot::Dir(root);
+            return SpliceResult::Spliced(TreeSnapshot::Dir(root));
         }
-        return TreeSnapshot::Dir(replacement);
+        return SpliceResult::Spliced(TreeSnapshot::Dir(replacement));
     }
 
     let Some(chain) = ancestor_chain(target, anchor, tree) else {
-        return TreeSnapshot::Dir(replacement);
+        // Target outside anchor's tree subtree. Keep prior unchanged;
+        // surface the contract violation. Behaviour change vs. pre-PR:
+        // the prior `wholesale-replace with replacement` left
+        // `Profile.current` rooted at `target` (not anchor), violating
+        // the snapshot navigation invariants. Keeping prior preserves
+        // the invariant and lets the next observation converge.
+        return SpliceResult::CrossedUncovered(TreeSnapshot::Dir(root));
     };
 
     // chain is [anchor, mid_1, ..., mid_k, target]; we already consumed
     // the anchor as `root`, so descend with chain[1..].
-    let new_root = splice_dir(&root, &chain[1..], replacement, tree);
-    if Arc::ptr_eq(&new_root, &root) {
-        TreeSnapshot::Dir(root)
-    } else {
-        TreeSnapshot::Dir(new_root)
+    match splice_dir(&root, &chain[1..], replacement, tree) {
+        Some(new_root) => {
+            if Arc::ptr_eq(&new_root, &root) {
+                SpliceResult::Spliced(TreeSnapshot::Dir(root))
+            } else {
+                SpliceResult::Spliced(TreeSnapshot::Dir(new_root))
+            }
+        }
+        None => SpliceResult::CrossedUncovered(TreeSnapshot::Dir(root)),
     }
 }
 
+/// Recursive splice helper. Returns `Some(arc)` on a successful per-level
+/// rebuild (or G7 short-circuit); returns `None` when navigation can't
+/// proceed (slot reaped mid-graft, snapshot coverage gap, or missing
+/// entry). The top-level [`splice`] translates `None` into
+/// [`SpliceResult::CrossedUncovered`] preserving the prior unchanged.
 fn splice_dir(
     prior: &Arc<DirSnapshot>,
     rest: &[ResourceId],
     replacement: Arc<DirSnapshot>,
     tree: &Tree,
-) -> Arc<DirSnapshot> {
+) -> Option<Arc<DirSnapshot>> {
     let Some((&next_id, deeper)) = rest.split_first() else {
         // We're at target. G7-leaf: hash-equal ⇒ keep prior Arc; the
         // splice is a no-op observationally.
         if prior.dir_hash() == replacement.dir_hash() {
-            return Arc::clone(prior);
+            return Some(Arc::clone(prior));
         }
-        return replacement;
+        return Some(replacement);
     };
-    let Some(name) = tree.name(next_id) else {
-        // Slot reaped mid-graft. Engine contract says this can't happen
-        // for an observed subtree; fall back to prior unchanged.
-        return Arc::clone(prior);
-    };
-    let prior_child: Option<Arc<DirSnapshot>> = prior.entries.get(name).and_then(|c| match c {
+    // Slot reaped mid-graft. Engine contract says this can't happen for
+    // an observed subtree; surface as CrossedUncovered.
+    let name = tree.name(next_id)?;
+    // Path crossed an uncovered branch (subtree=None) or missing entry.
+    // We don't synthesise empty intermediates — that would lie to
+    // dir_hash. Surface as CrossedUncovered; the engine keeps its prior
+    // view and converges on the next probe.
+    let pc: Arc<DirSnapshot> = prior.entries.get(name).and_then(|c| match c {
         ChildEntry::Dir(dc) => dc.subtree.clone(),
         ChildEntry::Leaf(_) => None,
-    });
-    let Some(pc) = prior_child else {
-        // Path crossed an uncovered branch (subtree=None) or a missing
-        // entry. We don't synthesise empty intermediates — that would lie
-        // to dir_hash. Fall back to prior; the engine re-probes if it
-        // needs the deeper view.
-        return Arc::clone(prior);
-    };
-    let new_child = splice_dir(&pc, deeper, replacement, tree);
+    })?;
+    let new_child = splice_dir(&pc, deeper, replacement, tree)?;
 
     // G7 per-level: child unchanged ⇒ parent unchanged; propagate
     // Arc::ptr_eq up the spine without rebuilding.
     if Arc::ptr_eq(&new_child, &pc) || new_child.dir_hash() == pc.dir_hash() {
-        return Arc::clone(prior);
+        return Some(Arc::clone(prior));
     }
 
     let mut new_entries = prior.entries.clone();
@@ -593,12 +648,12 @@ fn splice_dir(
     // conceptually "still the same observation as prior, with one child
     // subtree spliced in", and `captured_with` is constant within a
     // Profile by construction.
-    Arc::new(DirSnapshot::new(
+    Some(Arc::new(DirSnapshot::new(
         prior.root_resource,
         prior.root_meta,
         prior.captured_with,
         new_entries,
-    ))
+    )))
 }
 
 // ---------------------------------------------------------------------------

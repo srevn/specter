@@ -160,6 +160,26 @@ pub enum Diagnostic {
         profile: ProfileId,
         prefix: ResourceId,
     },
+    /// `splice` could not navigate from the prior snapshot's anchor down
+    /// to `target`. Two structural causes:
+    /// - `target` is outside the anchor's tree subtree (e.g., stale
+    ///   `ResourceId`, or a scope contraction that revoked coverage of
+    ///   the probed path).
+    /// - The path crossed a `subtree: None` intermediate (snapshot
+    ///   coverage gap — the walker stored the entry but did not recurse).
+    ///
+    /// Engine contract is "graft only into observed subtrees", so this
+    /// path indicates a contract violation. The variant exists to
+    /// surface the breach in operator logs; the engine falls back to
+    /// keeping its prior view (no integration of `replacement`) and
+    /// converges on the next probe.
+    ///
+    /// Structurally unreachable in v1; the variant is defense-in-depth
+    /// against future scope changes that might reach it.
+    SpliceCrossedUncovered {
+        profile: ProfileId,
+        target: ResourceId,
+    },
 }
 
 impl Default for Diagnostic {

@@ -43,7 +43,8 @@ pub use scan_config::{
 };
 pub use snapshot::EntryKind;
 pub use snapshot::tree::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, TreeSnapshot, diff_tree, splice,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot, diff_tree,
+    splice,
 };
 pub use sub::{
     ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, Placeholder, Sub,

@@ -402,6 +402,12 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?prefix,
             "descent invariant violation: remaining_components empty",
         ),
+        Diagnostic::SpliceCrossedUncovered { profile, target } => tracing::warn!(
+            ?profile,
+            ?target,
+            "splice crossed uncovered subtree (graft contract violation; \
+             prior view kept, response dropped)",
+        ),
     }
 }
 

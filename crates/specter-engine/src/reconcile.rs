@@ -60,8 +60,8 @@
 use crate::coverage::covers;
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use specter_core::{
-    ChildEntry, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap, ResourceId, ResourceKind,
-    ResourceRole, StepOutput, Tree, TreeSnapshot, splice,
+    ChildEntry, Diagnostic, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap, ResourceId,
+    ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot, splice,
 };
 use std::sync::Arc;
 
@@ -311,10 +311,24 @@ pub(crate) fn graft(
     // path from anchor to target, Arc-shares everything off-path,
     // short-circuits when per-level hashes match. Mutable borrow now —
     // the prior and the walk_pair borrow are released.
+    //
+    // `SpliceResult::CrossedUncovered` flags the engine-contract
+    // violation "graft only into observed subtrees" (target outside
+    // anchor's tree subtree, or coverage gap on the path-to-target).
+    // Carrier is the prior unchanged; the response is intentionally
+    // dropped on the floor and the next probe converges. Surface the
+    // breach via Diagnostic so operator logs see it instead of a silent
+    // information loss.
     let prior_current = profiles.get_mut(profile_id).and_then(|p| p.current.take());
-    let new_current = splice(prior_current, target, response_arc, tree);
+    let result = splice(prior_current, target, response_arc, tree);
+    if matches!(result, SpliceResult::CrossedUncovered(_)) {
+        out.diagnostics.push(Diagnostic::SpliceCrossedUncovered {
+            profile: profile_id,
+            target,
+        });
+    }
     if let Some(p) = profiles.get_mut(profile_id) {
-        p.current = Some(new_current);
+        p.current = Some(result.into_snapshot());
     }
 }
 
@@ -793,5 +807,66 @@ mod tests {
             panic!("expected Dir snapshot");
         };
         assert_eq!(arc.dir_hash(), response.dir_hash());
+    }
+
+    // ---------------------------------------------------------------------------
+    // graft — CrossedUncovered surfaces a Diagnostic
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn graft_emits_diagnostic_when_path_crosses_uncovered_intermediate() {
+        // Setup: Tree has root → a → b (all live slots). The Profile's
+        // `current` snapshot is anchored at root with entry "a" carrying
+        // `subtree=None` (uncovered — engine never observed below "a").
+        // A probe response arrives for target `b`. Splice navigates the
+        // tree chain anchor→a→b successfully but cannot navigate the
+        // *snapshot*'s coverage path — `prior.entries["a"].subtree`
+        // is None — so it returns CrossedUncovered. Graft must emit
+        // Diagnostic::SpliceCrossedUncovered AND keep the prior `current`
+        // unchanged so the anchor-rooted invariant on `Profile.current`
+        // is preserved.
+        let (mut tree, mut profiles, root, pid) = anchor(false);
+        let a_id = tree.ensure(Some(root), "a", ResourceRole::User);
+        tree.get_mut(a_id).unwrap().kind = ResourceKind::Dir;
+        let b_id = tree.ensure(Some(a_id), "b", ResourceRole::User);
+        tree.get_mut(b_id).unwrap().kind = ResourceKind::Dir;
+
+        let prior_current = dir_snap(root, 100, vec![("a", dir_child(2, None))]);
+        profiles.get_mut(pid).unwrap().current =
+            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+
+        let response = dir_snap(b_id, 200, vec![]);
+
+        let mut out = StepOutput::default();
+        graft(
+            pid,
+            b_id,
+            Arc::clone(&response),
+            &mut tree,
+            &mut profiles,
+            &mut out,
+        );
+
+        let has_diag = out.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                specter_core::Diagnostic::SpliceCrossedUncovered { profile, target }
+                if *profile == pid && *target == b_id
+            )
+        });
+        assert!(
+            has_diag,
+            "graft must emit SpliceCrossedUncovered when splice can't \
+             navigate the snapshot's coverage path",
+        );
+
+        let p = profiles.get(pid).unwrap();
+        let TreeSnapshot::Dir(current_arc) = p.current.as_ref().unwrap() else {
+            panic!("expected Dir snapshot");
+        };
+        assert!(
+            Arc::ptr_eq(current_arc, &prior_current),
+            "graft kept prior current unchanged on CrossedUncovered",
+        );
     }
 }
