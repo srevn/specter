@@ -17,9 +17,10 @@ use crate::refcounts::add_watch_demand;
 use crate::stability::StabilityIndex;
 use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
-    BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Effect, Input, ProbeCorrelation,
-    ProbeOp, Profile, ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub,
-    SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree, WatchOp, compute_config_hash,
+    BurstPhase, ClassSet, DedupKey, DescentPhase, DescentState, Diagnostic, Effect, Input,
+    ProbeCorrelation, ProbeOp, Profile, ProfileId, ProfileMap, ProfileState, ResourceId,
+    StepOutput, Sub, SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree, WatchOp,
+    compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -288,7 +289,7 @@ impl Engine {
                 p.state = ProfileState::Pending(DescentState {
                     current_prefix: prefix,
                     remaining_components: remaining,
-                    probe_correlation: Some(correlation),
+                    phase: DescentPhase::Probing { correlation },
                 });
             }
             self.emit_descent_probe(profile_id, prefix, correlation, out);
@@ -547,7 +548,7 @@ impl Engine {
         // StaleProbeResponse — wasted prober capacity and I/O.
         // Mirrors `on_watch_op_rejected`'s descent-purge pattern.
         if let Some(d) = self.descent_state(profile_id)
-            && d.probe_correlation.is_some()
+            && matches!(d.phase, DescentPhase::Probing { .. })
         {
             out.probe_ops.push(ProbeOp::Cancel {
                 profile: profile_id,

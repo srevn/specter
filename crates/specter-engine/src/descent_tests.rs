@@ -98,7 +98,7 @@ fn descent_one_level_advances_on_created_entry() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     assert!(e.descent_state(pid).is_some());
     let descent = e.descent_state(pid).unwrap();
-    let correlation = descent.probe_correlation.expect("first probe in flight");
+    let correlation = descent.probe_correlation().expect("first probe in flight");
     assert_eq!(descent.remaining_components, vec!["bar".to_string()]);
 
     // Inject a probe response showing `bar` now exists.
@@ -146,7 +146,7 @@ fn descent_two_levels_advances_progressively() {
 
     // First probe at /foo. Inject "bar" appears.
     let descent = e.descent_state(pid).unwrap();
-    let corr1 = descent.probe_correlation.unwrap();
+    let corr1 = descent.probe_correlation().unwrap();
     assert_eq!(
         descent.remaining_components,
         vec!["bar".to_string(), "baz".to_string()]
@@ -165,7 +165,7 @@ fn descent_two_levels_advances_progressively() {
     // Now descent should be at /foo/bar with remaining=[baz].
     let descent = e.descent_state(pid).expect("still pending");
     assert_eq!(descent.remaining_components, vec!["baz".to_string()]);
-    let corr2 = descent.probe_correlation.expect("fresh probe");
+    let corr2 = descent.probe_correlation().expect("fresh probe");
     assert_ne!(corr1, corr2, "fresh correlation per descent step");
 
     // Inject "baz" appears.
@@ -186,7 +186,7 @@ fn descent_two_levels_advances_progressively() {
 #[test]
 fn descent_no_progress_keeps_pending() {
     let (mut e, _sid, pid) = setup_pending_one_level();
-    let corr = e.descent_state(pid).unwrap().probe_correlation.unwrap();
+    let corr = e.descent_state(pid).unwrap().probe_correlation().unwrap();
 
     // Snapshot with unrelated entries (no "bar").
     let snap = dir_snap_with(vec![("other.c", EntryKind::File, 1)]);
@@ -202,14 +202,14 @@ fn descent_no_progress_keeps_pending() {
     // Still pending; no new probe.
     let descent = e.descent_state(pid).unwrap();
     assert_eq!(descent.remaining_components, vec!["bar".to_string()]);
-    assert!(descent.probe_correlation.is_none(), "no probe in flight");
+    assert!(descent.probe_correlation().is_none(), "no probe in flight");
 }
 
 #[test]
 fn descent_event_at_prefix_emits_fresh_probe() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     // Drain the in-flight probe.
-    let corr = e.descent_state(pid).unwrap().probe_correlation.unwrap();
+    let corr = e.descent_state(pid).unwrap().probe_correlation().unwrap();
     let snap = dir_snap_with(vec![("other.c", EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -220,7 +220,7 @@ fn descent_event_at_prefix_emits_fresh_probe() {
         Instant::now(),
     );
     // No probe in flight now.
-    assert!(e.descent_state(pid).unwrap().probe_correlation.is_none());
+    assert!(e.descent_state(pid).unwrap().probe_correlation().is_none());
 
     // Inject a StructureChanged at /foo (the prefix).
     let foo = e.tree().lookup(None, "foo").unwrap();
@@ -238,14 +238,14 @@ fn descent_event_at_prefix_emits_fresh_probe() {
         .iter()
         .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid));
     assert!(probe_for_pid, "descent probe emitted on prefix event");
-    assert!(e.descent_state(pid).unwrap().probe_correlation.is_some());
+    assert!(e.descent_state(pid).unwrap().probe_correlation().is_some());
 }
 
 #[test]
 fn descent_event_during_in_flight_probe_drops() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     // probe is in flight from setup
-    assert!(e.descent_state(pid).unwrap().probe_correlation.is_some());
+    assert!(e.descent_state(pid).unwrap().probe_correlation().is_some());
 
     let foo = e.tree().lookup(None, "foo").unwrap();
     let out = e.step(
@@ -268,7 +268,7 @@ fn descent_event_during_in_flight_probe_drops() {
 #[test]
 fn descent_failed_retains_state() {
     let (mut e, _sid, pid) = setup_pending_one_level();
-    let corr = e.descent_state(pid).unwrap().probe_correlation.unwrap();
+    let corr = e.descent_state(pid).unwrap().probe_correlation().unwrap();
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -287,13 +287,13 @@ fn descent_failed_retains_state() {
     // Still pending; no probe in flight.
     let descent = e.descent_state(pid).unwrap();
     assert_eq!(descent.remaining_components, vec!["bar".to_string()]);
-    assert!(descent.probe_correlation.is_none());
+    assert!(descent.probe_correlation().is_none());
 }
 
 #[test]
 fn descent_anchor_kind_set_from_entry() {
     let (mut e, _sid, pid) = setup_pending_one_level();
-    let corr = e.descent_state(pid).unwrap().probe_correlation.unwrap();
+    let corr = e.descent_state(pid).unwrap().probe_correlation().unwrap();
     let foo = e.tree().lookup(None, "foo").unwrap();
     let bar = e.tree().lookup(Some(foo), "bar").expect("scaffold exists");
 
@@ -348,7 +348,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         .expect("absolute attach against empty Tree is pending");
     assert_eq!(descent.current_prefix, root);
     assert_eq!(descent.remaining_components, vec!["tmp".to_string()]);
-    assert!(descent.probe_correlation.is_some());
+    assert!(descent.probe_correlation().is_some());
 
     // The FS-root carries the descent's watch_demand contribution; the
     // anchor scaffold doesn't (descent hasn't materialized it yet).
@@ -494,7 +494,7 @@ fn descent_probe_uses_minimal_scan_config() {
 #[test]
 fn descent_materialization_sets_anchor_contribution_flag() {
     let (mut e, _sid, pid) = setup_pending_one_level();
-    let corr = e.descent_state(pid).unwrap().probe_correlation.unwrap();
+    let corr = e.descent_state(pid).unwrap().probe_correlation().unwrap();
     let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -634,7 +634,7 @@ fn descent_state_helper_returns_some_for_pending() {
     let (e, _sid, pid) = setup_pending_one_level();
     let descent = e.descent_state(pid).expect("Pending state populated");
     assert_eq!(descent.remaining_components, vec!["bar".to_string()]);
-    assert!(descent.probe_correlation.is_some());
+    assert!(descent.probe_correlation().is_some());
 }
 
 /// `Engine::descent_state` returns `None` for an unknown `ProfileId`.
@@ -661,7 +661,7 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
         e.profiles().get(pid).unwrap().state,
         ProfileState::Pending(_)
     ));
-    let corr = e.descent_state(pid).unwrap().probe_correlation.unwrap();
+    let corr = e.descent_state(pid).unwrap().probe_correlation().unwrap();
     let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -780,7 +780,7 @@ fn detach_sub_pending_profile_reaps_immediately() {
 #[test]
 fn on_probe_response_routes_descent_via_state_match() {
     let (mut e, _sid, pid) = setup_pending_one_level();
-    let corr = e.descent_state(pid).unwrap().probe_correlation.unwrap();
+    let corr = e.descent_state(pid).unwrap().probe_correlation().unwrap();
     let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -850,7 +850,7 @@ fn on_watch_op_rejected_clears_pending_state() {
 // ───────────────────────────────────────────────────────────────────────
 #[test]
 fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
-    use specter_core::{DescentState, ProfileState};
+    use specter_core::{DescentPhase, DescentState, ProfileState};
     // Build the engine with a Pending Profile, then poke
     // `remaining_components` to empty to construct the
     // invariant-violating state directly. (`materialize_path_or_pending`
@@ -861,7 +861,7 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
     // benign-failure contract.)
     let (mut e, _sid, pid) = setup_pending_one_level();
     let foo = e.tree().lookup(None, "foo").unwrap();
-    let corr = e.descent_state(pid).unwrap().probe_correlation.unwrap();
+    let corr = e.descent_state(pid).unwrap().probe_correlation().unwrap();
 
     // Snapshot pre-state.
     let prefix = e.descent_state(pid).unwrap().current_prefix;
@@ -878,7 +878,7 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
     e.profiles.get_mut(pid).unwrap().state = ProfileState::Pending(DescentState {
         current_prefix: prefix,
         remaining_components: Vec::new(),
-        probe_correlation: Some(corr),
+        phase: DescentPhase::Probing { correlation: corr },
     });
 
     // Dispatch the probe response — descent_ok hits the defensive arm.

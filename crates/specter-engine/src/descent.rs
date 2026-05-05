@@ -3,11 +3,11 @@
 //! Pending descent runs **outside** the Burst lifecycle. A Profile whose
 //! anchor doesn't yet exist on the filesystem lives in
 //! `ProfileState::Pending(DescentState)`. The descent emits its own probes
-//! (the correlation lives on `DescentState`,
-//! not on a Burst), advances one path component per probe response, and
-//! ends by materializing the anchor — at which point the Profile
-//! transitions Pending → Idle and immediately Idle → Active(Seed) to
-//! establish its baseline.
+//! (the correlation lives on `DescentState.phase`, not on a Burst),
+//! advances one path component per probe response, and ends by
+//! materializing the anchor — at which point the Profile transitions
+//! Pending → Idle and immediately Idle → Active(Seed) to establish its
+//! baseline.
 //!
 //! **Why a parallel state machine?** Burst semantics don't fit:
 //! - Probe target ≠ `Profile.resource` during descent (probes go to the
@@ -19,9 +19,10 @@
 //!   fresh probe with no settle wait).
 //! - I5 stays intact: at most one outstanding probe per Profile.
 //!   `Pending` and `Active` are mutually exclusive `ProfileState`
-//!   variants (the compiler proves it); within `Pending`, the
-//!   `Option<ProbeCorrelation>` slot on `DescentState` enforces "at most
-//!   one descent probe in flight."
+//!   variants (the compiler proves it); within `Pending`,
+//!   `DescentState.phase` is the discriminator —
+//!   `DescentPhase::Probing { correlation }` is the only way to encode
+//!   an in-flight probe (parallel to `BurstPhase::Verifying`).
 //!
 //! **Lifecycle.**
 //! 1. `Engine::attach_sub` with a path-based request walks the path; if
@@ -49,9 +50,9 @@
 
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use specter_core::{
-    ClassSet, DescentState, Diagnostic, EntryKind, ProbeCorrelation, ProbeKind, ProbeOp,
-    ProbeRequest, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput,
-    TreeSnapshot,
+    ClassSet, DescentPhase, DescentState, Diagnostic, EntryKind, ProbeCorrelation, ProbeKind,
+    ProbeOp, ProbeRequest, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
+    StepOutput, TreeSnapshot,
 };
 use std::time::Instant;
 
@@ -199,9 +200,11 @@ impl crate::Engine {
         cur
     }
 
-    /// Build a fresh probe at `prefix` for a pending Profile and emit it.
-    /// Mints a fresh correlation, stores it on `DescentState`, and pushes
-    /// the `ProbeOp::Probe` into `out.probe_ops`.
+    /// Build a fresh probe at `prefix` for a pending Profile and push
+    /// it onto `out.probe_ops`. The caller is responsible for minting
+    /// the `correlation` and stashing it on `DescentState.phase`
+    /// (`DescentPhase::Probing { correlation }`) BEFORE calling — this
+    /// helper takes `&self` and does not mutate state.
     ///
     /// `prefix` must be live in the Tree; callers verify via
     /// `tree.get(prefix).is_some()` (the descent's invariant: the
@@ -271,7 +274,7 @@ impl crate::Engine {
         // Mark no probe in flight; subsequent advancement may emit a
         // fresh one.
         if let Some(d) = self.descent_state_mut(profile_id) {
-            d.probe_correlation = None;
+            d.phase = DescentPhase::AwaitingEvent;
         }
 
         match result {
@@ -436,7 +439,7 @@ impl crate::Engine {
             if let Some(d) = self.descent_state_mut(profile_id) {
                 d.current_prefix = new_resource;
                 d.remaining_components = new_remaining;
-                d.probe_correlation = Some(correlation);
+                d.phase = DescentPhase::Probing { correlation };
             }
 
             sub_watch_demand(
@@ -499,7 +502,7 @@ impl crate::Engine {
                     p.state = ProfileState::Pending(DescentState {
                         current_prefix: parent_id,
                         remaining_components: new_remaining,
-                        probe_correlation: Some(correlation),
+                        phase: DescentPhase::Probing { correlation },
                     });
                 }
 
@@ -564,7 +567,7 @@ impl crate::Engine {
     ) {
         let prefix = match self.descent_state(profile_id) {
             Some(d) => {
-                if d.probe_correlation.is_some() {
+                if matches!(d.phase, DescentPhase::Probing { .. }) {
                     return; // probe in flight; let it pick up the change
                 }
                 d.current_prefix
@@ -574,7 +577,7 @@ impl crate::Engine {
 
         let correlation = self.next_probe_correlation();
         if let Some(d) = self.descent_state_mut(profile_id) {
-            d.probe_correlation = Some(correlation);
+            d.phase = DescentPhase::Probing { correlation };
         }
         self.emit_descent_probe(profile_id, prefix, correlation, out);
     }

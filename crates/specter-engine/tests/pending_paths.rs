@@ -373,7 +373,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let initial_corr = first_probe_corr(&attach_out).expect("descent probe at attach");
     let inflight = matches!(
         &e.profiles().get(pid).expect("Profile attached").state,
-        ProfileState::Pending(d) if d.probe_correlation == Some(initial_corr)
+        ProfileState::Pending(d) if d.probe_correlation() == Some(initial_corr)
     );
     assert!(
         inflight,

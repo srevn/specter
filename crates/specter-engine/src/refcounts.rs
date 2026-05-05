@@ -315,8 +315,8 @@ mod tests {
         sub_suppress, sub_watch_demand,
     };
     use specter_core::{
-        ClassSet, DescentState, Profile, ProfileMap, ProfileState, ResourceKind, ResourceRole,
-        ScanConfig, StepOutput, Tree, WatchOp, WatchOpts,
+        ClassSet, DescentPhase, DescentState, Profile, ProfileMap, ProfileState, ResourceKind,
+        ResourceRole, ScanConfig, StepOutput, Tree, WatchOp, WatchOpts,
     };
     use std::time::Duration;
 
@@ -824,7 +824,7 @@ mod tests {
         profiles.get_mut(pid).unwrap().state = ProfileState::Pending(DescentState {
             current_prefix: prefix,
             remaining_components: vec!["anchor".to_string()],
-            probe_correlation: None,
+            phase: DescentPhase::AwaitingEvent,
         });
 
         assert_eq!(
@@ -871,7 +871,7 @@ mod tests {
         profiles.get_mut(p_c).unwrap().state = ProfileState::Pending(DescentState {
             current_prefix: r,
             remaining_components: vec!["x".to_string()],
-            probe_correlation: None,
+            phase: DescentPhase::AwaitingEvent,
         });
 
         // Anchor of A (CONTENT) | parent-edge of B (STRUCTURE) | descent of C (STRUCTURE)

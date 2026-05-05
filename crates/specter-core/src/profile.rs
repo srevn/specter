@@ -105,8 +105,9 @@ pub enum BurstPhase {
 ///
 /// Pending and Active are mutually exclusive by variant — a Profile cannot
 /// hold both a descent probe and a burst-driven probe at the same time
-/// (I5 enforcement for the Pending lifecycle is the
-/// `Option<ProbeCorrelation>` slot inside `DescentState`).
+/// (I5 enforcement for the Pending lifecycle is `DescentState.phase`,
+/// whose `Probing { correlation }` variant is the only way to encode an
+/// in-flight descent probe).
 ///
 /// `non_exhaustive` keeps wildcard arms compiling at downstream call sites
 /// when a future variant lands.
@@ -138,8 +139,11 @@ pub enum ProfileState {
 ///   component). Empty `remaining_components` is a state-machine bug; the
 ///   defensive check in the descent dispatch transitions the Profile back
 ///   to `Idle`.
-/// - `probe_correlation.is_some()` ⇔ exactly one descent probe in flight
-///   (I5 for the Pending lifecycle).
+/// - `phase` is the correlation token of the input the descent is
+///   currently waiting on — `Probing { correlation }` proves a probe is
+///   in flight; `AwaitingEvent` proves none is. Type-system closure on
+///   I5 for the Pending lifecycle: the engine cannot construct a
+///   Pending state with two probes simultaneously.
 #[derive(Clone, Debug)]
 pub struct DescentState {
     /// Deepest existing ancestor currently Watched. The Profile
@@ -148,9 +152,38 @@ pub struct DescentState {
     /// Path components from `current_prefix` (exclusive) down to the
     /// anchor (inclusive). Single-component segments (no `/`).
     pub remaining_components: Vec<String>,
-    /// Outstanding probe correlation. `None` when no probe is in flight
-    /// (descent is awaiting a `StructureChanged` event at the prefix).
-    pub probe_correlation: Option<ProbeCorrelation>,
+    /// What the descent is currently waiting on — see [`DescentPhase`].
+    pub phase: DescentPhase,
+}
+
+impl DescentState {
+    /// Outstanding probe correlation, if a descent probe is in flight.
+    /// Convenience over destructuring `phase`; equivalent to
+    /// `match self.phase { DescentPhase::Probing { correlation } =>
+    /// Some(correlation), DescentPhase::AwaitingEvent => None }`.
+    #[must_use]
+    pub const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
+        match self.phase {
+            DescentPhase::AwaitingEvent => None,
+            DescentPhase::Probing { correlation } => Some(correlation),
+        }
+    }
+}
+
+/// What a `Pending` descent is waiting on. Mirrors [`BurstPhase`]'s
+/// discipline for active bursts: the variant data IS the correlation
+/// token of the input the descent is currently waiting on.
+///
+/// `AwaitingEvent` — no probe in flight; descent is waiting for a
+/// `StructureChanged` event at `current_prefix` to trigger the next
+/// probe (`on_descent_event`).
+/// `Probing { correlation }` — descent probe in flight; the response
+/// must carry a matching `correlation` to dispatch (I5 closure for the
+/// Pending lifecycle, parallel to `BurstPhase::Verifying`).
+#[derive(Clone, Debug)]
+pub enum DescentPhase {
+    AwaitingEvent,
+    Probing { correlation: ProbeCorrelation },
 }
 
 /// `Standard` — event-driven burst; preserves baseline; fires Effect on stable.

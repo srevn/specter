@@ -1285,7 +1285,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     let initial_corr = e
         .descent_state(pid)
         .unwrap()
-        .probe_correlation
+        .probe_correlation()
         .expect("first probe in flight");
     let initial_demand = e.tree.get(foo).unwrap().watch_demand;
     assert_eq!(initial_demand, 1);

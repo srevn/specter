@@ -14,10 +14,10 @@ use crate::Engine;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use crate::refcounts::clamp_watch_demand_to_zero;
 use specter_core::{
-    BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect,
-    EffectOutcome, EffectScope, FsEvent, ProbeOp, ProbeResponse, ProbeResult, ProfileId,
-    ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind,
-    TreeSnapshot, WatchOp,
+    BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, DescentPhase,
+    Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, ProbeOp, ProbeResponse, ProbeResult,
+    ProfileId, ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId,
+    TimerKind, TreeSnapshot, WatchOp,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -190,7 +190,7 @@ impl Engine {
             p.state = ProfileState::Pending(specter_core::DescentState {
                 current_prefix: parent,
                 remaining_components: vec![anchor_name],
-                probe_correlation: Some(correlation),
+                phase: DescentPhase::Probing { correlation },
             });
         }
         self.emit_descent_probe(profile_id, parent, correlation, out);
@@ -222,7 +222,10 @@ impl Engine {
             };
             match &p.state {
                 ProfileState::Pending(descent)
-                    if descent.probe_correlation == Some(received_correlation) =>
+                    if matches!(
+                        &descent.phase,
+                        DescentPhase::Probing { correlation } if *correlation == received_correlation,
+                    ) =>
                 {
                     ProbeDispatch::Descent
                 }
@@ -477,7 +480,7 @@ impl Engine {
             if let ProfileState::Pending(d) = &p.state
                 && d.current_prefix == resource
             {
-                descent_claimers.push((pid, d.probe_correlation.is_some()));
+                descent_claimers.push((pid, matches!(d.phase, DescentPhase::Probing { .. })));
             }
         }
 

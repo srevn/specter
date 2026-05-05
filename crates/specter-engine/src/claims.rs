@@ -95,10 +95,11 @@ impl Engine {
     /// `DescentScaffold` role is no longer load-bearing once no descent
     /// claims it.
     ///
-    /// Note: the descent's `probe_correlation`, if any, is dropped along
-    /// with the state transition. Callers that need to cancel an in-flight
-    /// probe (e.g., `reap_profile`, `on_watch_op_rejected`) MUST emit
-    /// `ProbeOp::Cancel` before calling this helper.
+    /// Note: the descent's `phase` (and any in-flight probe correlation
+    /// it carries) is dropped along with the state transition. Callers
+    /// that need to cancel an in-flight probe (e.g., `reap_profile`,
+    /// `on_watch_op_rejected`) MUST emit `ProbeOp::Cancel` before
+    /// calling this helper.
     pub(crate) fn release_descent_prefix_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(prefix) = self.descent_state(pid).map(|d| d.current_prefix) else {
             return;
