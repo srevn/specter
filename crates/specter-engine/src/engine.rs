@@ -116,7 +116,7 @@ impl Engine {
                 self.on_probe_response(resp, now, &mut out);
             }
             Input::TimerExpired(id) => {
-                self.on_timer_expired(id, now, &mut out);
+                self.on_timer_expired(id, &mut out);
             }
             Input::EffectComplete { sub, key, result } => {
                 self.on_effect_complete(sub, key, &result, now, &mut out);
@@ -126,7 +126,7 @@ impl Engine {
                 op,
                 errno,
             } => {
-                self.on_watch_op_rejected(resource, op, errno, now, &mut out);
+                self.on_watch_op_rejected(resource, op, errno, &mut out);
             }
             Input::ConfigDiff(diff) => {
                 self.on_config_diff(diff, now, &mut out);
@@ -680,7 +680,11 @@ impl Engine {
             // timers.
             ProfileState::Pending(_) => false,
             ProfileState::Active(burst) => {
-                burst.settle_timer == Some(id) || burst.burst_deadline == id
+                let phase_match = matches!(
+                    &burst.phase,
+                    BurstPhase::Batching { settle_timer } if *settle_timer == id,
+                );
+                phase_match || burst.burst_deadline == id
             }
             // `non_exhaustive` ProfileState: future variants conservatively
             // treat the timer as unreferenced (drains it).
@@ -728,12 +732,6 @@ impl Engine {
         }
     }
 }
-
-// `BurstPhase` is reachable from this module via the `is_timer_referenced`
-// path — re-export-friendly type usage.
-const _: fn() = || {
-    let _ = BurstPhase::Settling;
-};
 
 /// Local lifecycle classifier for `detach_sub_inner`. Three
 /// outcomes when a Profile loses its last Sub:

@@ -13,7 +13,8 @@
 //! - Probe target ≠ `Profile.resource` during descent (probes go to the
 //!   deepest existing prefix, not the anchor).
 //! - There's no Effect to fire — the Profile has no baseline yet.
-//! - `settle_timer` and `burst_deadline` are stability concerns; descent
+//! - The settle timer (carried inside `BurstPhase::Batching`) and
+//!   `burst_deadline` are stability concerns; descent
 //!   is event-driven (a `StructureChanged` at the prefix triggers a
 //!   fresh probe with no settle wait).
 //! - I5 stays intact: at most one outstanding probe per Profile.

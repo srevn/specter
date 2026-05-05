@@ -7,14 +7,24 @@
 //! post-`EffectComplete` re-probe path.
 //!
 //! - `start_seed_burst` / `start_standard_burst` — Idle → Active.
-//! - `transition_to_settling` / `transition_to_probing` /
+//! - `event_drives_batching` (FsEvent during Active) /
+//!   `unstable_response_drives_batching` (probe-unstable response) /
+//!   `transition_to_verifying` (settle-timer expiry, burst-deadline,
+//!   Draining → Verifying reconfirm) /
 //!   `transition_to_draining` — Active → Active phase swaps.
 //! - `finish_burst_to_idle` — Active → Idle, single point of `-suppress` and
 //!   `propagate(-1)`.
 //!
+//! The two batching helpers exist as a deliberate split rather than one
+//! helper with a runtime flag: each caller has **static knowledge** of
+//! whether a probe is in flight (only `event_drives_batching` may need to
+//! emit `ProbeOp::Cancel`). Encoding that knowledge as helper identity
+//! makes a stray Cancel on the just-responded path structurally
+//! impossible.
+//!
 //! Probe emission lives in `emit_probe_op`, which both Seed-start and
-//! `transition_to_probing` route through; the only Probe-emission ever done
-//! by the engine.
+//! `transition_to_verifying` route through; the only Probe-emission ever
+//! done by the engine.
 
 use crate::Engine;
 use crate::refcounts::{add_suppress, sub_suppress};
@@ -27,7 +37,7 @@ use specter_core::{
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 impl Engine {
     /// Start a Seed burst: no settle wait, immediate Probe.
@@ -67,11 +77,8 @@ impl Engine {
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.state = ProfileState::Active(Burst {
-                started: now,
-                attempts: 0,
-                settle_timer: None,
                 burst_deadline,
-                phase: BurstPhase::Probing { correlation },
+                phase: BurstPhase::Verifying { correlation },
                 intent: BurstIntent::Seed,
                 forced: false,
                 dirty_resources: BTreeSet::new(),
@@ -94,7 +101,7 @@ impl Engine {
 
     /// Start a Standard burst: schedule settle + `burst_deadline`,
     /// `+suppress`, propagate(+1). No Probe — that fires on `settle_timer`
-    /// expiry via `transition_to_probing`.
+    /// expiry via `transition_to_verifying`.
     ///
     /// `event_resource` is the `FsEvent`'s source. It seeds both
     /// `dirty_resources` (basis for the next probe's LCA) and
@@ -127,11 +134,8 @@ impl Engine {
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.state = ProfileState::Active(Burst {
-                started: now,
-                attempts: 0,
-                settle_timer: Some(settle_timer),
                 burst_deadline,
-                phase: BurstPhase::Settling,
+                phase: BurstPhase::Batching { settle_timer },
                 intent: BurstIntent::Standard,
                 forced: false,
                 dirty_resources: dirty,
@@ -144,14 +148,24 @@ impl Engine {
         let _ = self.stability.propagate(&mut self.profiles, profile_id, 1);
     }
 
-    /// Phase: any → `Settling`. Emits `ProbeOp::Cancel` iff exiting `Probing`;
-    /// reschedules `settle_timer` with backoff; `++attempts`.
-    /// `intent` and `forced` are preserved; the `BurstPhase::Probing`
-    /// correlation, if any, is dropped (the late `ProbeResponse` arrives
-    /// stale).
-    pub(crate) fn transition_to_settling(
+    /// Caller: `drive_burst` Active branch — an `FsEvent` arrived during a
+    /// burst. Cancels any in-flight verify (iff the prior phase was
+    /// `Verifying`), accumulates the event into `dirty_resources` and
+    /// `force_walk_resources`, arms a fresh settle timer, and writes
+    /// `phase = Batching { settle_timer }`. `intent`, `forced`, and the
+    /// `burst_deadline` are preserved.
+    ///
+    /// Why this is one of two batching mutators rather than a single
+    /// helper with a flag: the caller has static knowledge that the
+    /// engine has not just received a probe response. If the prior phase
+    /// was `Verifying`, a verify is in flight and we must Cancel it. If
+    /// the prior phase was `Batching` or `Draining`, no probe is in
+    /// flight. Encoding that as a runtime flag is a category error — the
+    /// caller always knows the right answer.
+    pub(crate) fn event_drives_batching(
         &mut self,
         profile_id: ProfileId,
+        event_resource: ResourceId,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -161,35 +175,59 @@ impl Engine {
         let ProfileState::Active(burst) = &p.state else {
             return;
         };
-
-        let was_probing = matches!(burst.phase, BurstPhase::Probing { .. });
-        let next_attempts = burst.attempts.saturating_add(1);
+        let was_verifying = matches!(burst.phase, BurstPhase::Verifying { .. });
         let settle = p.settle;
-        let burst_started = burst.started;
-        let max_settle = p.max_settle;
 
-        if was_probing {
+        if was_verifying {
             out.probe_ops.push(ProbeOp::Cancel {
                 profile: profile_id,
             });
         }
 
-        let delay = settle_backoff(settle, next_attempts, burst_started, max_settle, now);
-        let new_settle_timer = self.timers.schedule(now + delay, profile_id);
+        let settle_timer = self.timers.schedule(now + settle, profile_id);
 
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(burst) = &mut p.state
         {
-            burst.attempts = next_attempts;
-            burst.settle_timer = Some(new_settle_timer);
-            burst.phase = BurstPhase::Settling;
+            burst.dirty_resources.insert(event_resource);
+            burst.force_walk_resources.insert(event_resource);
+            burst.phase = BurstPhase::Batching { settle_timer };
         }
     }
 
-    /// Phase: `Settling` (or `Draining`) → `Probing`. Mints a fresh
+    /// Caller: `dispatch_standard_ok` not-stable + not-forced — a verify
+    /// just responded with an unstable verdict. By construction no probe
+    /// is in flight (the caller is in the response handler), so this
+    /// helper structurally cannot emit `ProbeOp::Cancel`. Arms a fresh
+    /// settle timer and writes `phase = Batching { settle_timer }`.
+    ///
+    /// `dirty_resources` is intentionally preserved so the next verify
+    /// re-targets the same LCA; `force_walk_resources` is already empty
+    /// (cleared at the prior `transition_to_verifying`, and no `FsEvent`
+    /// can have arrived during `Verifying` without first routing through
+    /// `event_drives_batching`).
+    pub(crate) fn unstable_response_drives_batching(
+        &mut self,
+        profile_id: ProfileId,
+        now: Instant,
+    ) {
+        let Some(settle) = self.profiles.get(profile_id).map(|p| p.settle) else {
+            return;
+        };
+        let settle_timer = self.timers.schedule(now + settle, profile_id);
+
+        if let Some(p) = self.profiles.get_mut(profile_id)
+            && let ProfileState::Active(burst) = &mut p.state
+        {
+            burst.phase = BurstPhase::Batching { settle_timer };
+        }
+    }
+
+    /// Phase: `Batching` (or `Draining`) → `Verifying`. Mints a fresh
     /// correlation; emits `ProbeOp::Probe`. The just-fired `settle_timer`
     /// is no longer referenced (lazy invalidation drops the heap entry on
-    /// `pop_expired`).
+    /// `pop_expired` once the prior `Batching` variant — and with it the
+    /// `TimerId` — is overwritten by the assignment below).
     ///
     /// Standard probes target the LCA of the burst's `dirty_resources`,
     /// ship `current.subtree_at(target)` as the walker's mtime-skip
@@ -197,17 +235,12 @@ impl Engine {
     /// walker re-walks paths whose kqueue actually fired since the last
     /// probe, and propagate `Burst.forced` so the walker bypasses
     /// mtime-skip on a force-fire (max-settle deadline elapsed). Seed
-    /// probes target the anchor; the Draining → Probing reconfirm reuses
-    /// `Burst.probe_target` (`dirty_resources` is empty by then so LCA
-    /// would degenerate to anchor and lose the correct subtree).
+    /// probes target the anchor; the Draining → Verifying reconfirm
+    /// reuses `Burst.probe_target` (`dirty_resources` is empty by then so
+    /// LCA would degenerate to anchor and lose the correct subtree).
     /// `force_walk_resources` is consumed by this emission; new events
     /// accumulate into the cleared set.
-    pub(crate) fn transition_to_probing(
-        &mut self,
-        profile_id: ProfileId,
-        _now: Instant,
-        out: &mut StepOutput,
-    ) {
+    pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
@@ -246,8 +279,7 @@ impl Engine {
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(b) = &mut p.state
         {
-            b.settle_timer = None;
-            b.phase = BurstPhase::Probing { correlation };
+            b.phase = BurstPhase::Verifying { correlation };
             b.probe_target = Some(target);
             b.force_walk_resources.clear();
         }
@@ -288,11 +320,11 @@ impl Engine {
     ///
     /// **Draining-exit driver.** `propagate(-1)` returns ancestors whose
     /// `dirty_descendants` just hit zero AND are in `BurstPhase::Draining`.
-    /// The Engine drives each through `transition_to_probing` in the same
-    /// step — the reconfirm probe compares against the Profile's `current`
-    /// (set when `dispatch_standard_ok` entered Draining). Same-step
-    /// ordering means the `StepOutput` reflects the cascade: child's burst
-    /// end → parent reconfirm Probe in one `step` call.
+    /// The Engine drives each through `transition_to_verifying` in the
+    /// same step — the reconfirm probe compares against the Profile's
+    /// `current` (set when `dispatch_standard_ok` entered Draining).
+    /// Same-step ordering means the `StepOutput` reflects the cascade:
+    /// child's burst end → parent reconfirm Probe in one `step` call.
     ///
     /// **Reap-pending.** If the Profile's `reap_pending` flag is set (its
     /// last Sub was detached mid-burst), `Engine::reap_profile` runs in the
@@ -301,7 +333,6 @@ impl Engine {
     pub(crate) fn finish_burst_to_idle(
         &mut self,
         profile_id: ProfileId,
-        now: Instant,
         out: &mut StepOutput,
     ) {
         let Some(p) = self.profiles.get(profile_id) else {
@@ -340,12 +371,12 @@ impl Engine {
         if was_standard {
             let hit_zero = self.stability.propagate(&mut self.profiles, profile_id, -1);
 
-            // Draining → Probing reconfirm for ancestors whose count just
-            // hit zero. `transition_to_probing` mints a fresh correlation
-            // and emits Probe; the response routes through
+            // Draining → Verifying reconfirm for ancestors whose count
+            // just hit zero. `transition_to_verifying` mints a fresh
+            // correlation and emits Probe; the response routes through
             // `dispatch_standard_ok` as a normal Standard burst.
             for ancestor in hit_zero {
-                self.transition_to_probing(ancestor, now, out);
+                self.transition_to_verifying(ancestor, out);
             }
         }
 
@@ -408,22 +439,22 @@ impl Engine {
     }
 }
 
-/// Copy projection of `BurstPhase` for `transition_to_probing`'s `(intent,
-/// phase)` match — `BurstPhase::Probing` carries a `ProbeCorrelation` we
-/// don't need at the dispatch site. Mirrors the private decl in
-/// `transitions.rs::on_timer_expired`; both kept locally to keep the
-/// match-site code inline-readable.
+/// Copy projection of `BurstPhase` for `transition_to_verifying`'s
+/// `(intent, phase)` match — neither `Batching`'s `TimerId` nor
+/// `Verifying`'s `ProbeCorrelation` is needed at the dispatch site.
+/// Mirrors the private decl in `transitions.rs::on_timer_expired`; both
+/// kept locally to keep the match-site code inline-readable.
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum PhaseKind {
-    Settling,
-    Probing,
+    Batching,
+    Verifying,
     Draining,
 }
 
 const fn phase_kind(p: &BurstPhase) -> PhaseKind {
     match p {
-        BurstPhase::Settling => PhaseKind::Settling,
-        BurstPhase::Probing { .. } => PhaseKind::Probing,
+        BurstPhase::Batching { .. } => PhaseKind::Batching,
+        BurstPhase::Verifying { .. } => PhaseKind::Verifying,
         BurstPhase::Draining => PhaseKind::Draining,
     }
 }
@@ -545,29 +576,6 @@ fn is_ancestor_or_self(target: ResourceId, r: ResourceId, tree: &Tree) -> bool {
     false
 }
 
-/// Settle backoff curve.
-///
-/// `delay := min(settle * 2^attempts, remaining_max_settle)`.
-/// `attempts.min(31)` clamps the shift to the Duration-multiplier domain;
-/// `saturating_mul` and saturating subtraction handle the boundary cases
-/// without panicking. `remaining_max_settle = burst.started + max_settle - now`,
-/// saturating at zero — once `burst_deadline` has elapsed, the next-firing
-/// settle delay is zero, but force-fire takes over via the deadline-row
-/// `transition_to_probing` regardless.
-fn settle_backoff(
-    settle: Duration,
-    attempts: u32,
-    burst_started: Instant,
-    max_settle: Duration,
-    now: Instant,
-) -> Duration {
-    let factor = 2_u32.saturating_pow(attempts.min(31));
-    let backoff = settle.saturating_mul(factor);
-    let elapsed = now.saturating_duration_since(burst_started);
-    let remaining = max_settle.saturating_sub(elapsed);
-    backoff.min(remaining)
-}
-
 #[cfg(test)]
 mod tests {
     // Tests prioritize readability over the workspace's pedantic style budget.
@@ -615,17 +623,15 @@ mod tests {
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, Instant::now(), &mut out);
 
-        // Profile transitioned to Active(Seed Probing).
+        // Profile transitioned to Active(Seed Verifying).
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
             ProfileState::Active(b) => b,
             _ => panic!("expected Active"),
         };
         assert_eq!(burst.intent, BurstIntent::Seed);
-        assert!(burst.settle_timer.is_none());
-        assert!(matches!(burst.phase, BurstPhase::Probing { .. }));
+        assert!(matches!(burst.phase, BurstPhase::Verifying { .. }));
         assert!(!burst.forced);
-        assert_eq!(burst.attempts, 0);
 
         // Output: one Probe + one Suppress.
         let probes = out
@@ -662,8 +668,7 @@ mod tests {
             _ => panic!("expected Active"),
         };
         assert_eq!(burst.intent, BurstIntent::Standard);
-        assert!(burst.settle_timer.is_some());
-        assert!(matches!(burst.phase, BurstPhase::Settling));
+        assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
 
         // Heap holds settle_timer + burst_deadline.
         assert_eq!(e.timers.len(), 2);
@@ -679,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_to_probing_mints_correlation_and_emits_probe() {
+    fn transition_to_verifying_mints_correlation_and_emits_probe() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_standard_burst(
@@ -690,17 +695,16 @@ mod tests {
         );
         out.probe_ops.clear();
 
-        e.transition_to_probing(pid, Instant::now(), &mut out);
+        e.transition_to_verifying(pid, &mut out);
 
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
             ProfileState::Active(b) => b,
             _ => panic!("expected Active"),
         };
-        assert!(burst.settle_timer.is_none(), "settle_timer dropped");
         let correlation = match burst.phase {
-            BurstPhase::Probing { correlation } => correlation,
-            _ => panic!("expected Probing phase"),
+            BurstPhase::Verifying { correlation } => correlation,
+            _ => panic!("expected Verifying phase"),
         };
 
         // Output: one Probe whose correlation matches.
@@ -712,13 +716,16 @@ mod tests {
     }
 
     #[test]
-    fn transition_to_settling_emits_cancel_when_exiting_probing() {
+    fn event_during_verifying_emits_cancel_and_resets_batching() {
+        // FsEvent during Verifying: Cancel emitted; phase becomes Batching
+        // with a fresh settle_timer; intent preserved.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_seed_burst(pid, Instant::now(), &mut out); // Seed → Probing
+        e.start_seed_burst(pid, Instant::now(), &mut out); // Seed → Verifying
         out.probe_ops.clear();
+        let r = e.profiles.get(pid).unwrap().resource;
 
-        e.transition_to_settling(pid, Instant::now(), &mut out);
+        e.event_drives_batching(pid, r, Instant::now(), &mut out);
 
         // One Cancel emitted for the in-flight probe.
         let cancel_count = out
@@ -728,36 +735,29 @@ mod tests {
             .count();
         assert_eq!(cancel_count, 1);
 
-        // Profile in Active(Settling); attempts incremented; intent preserved.
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
             ProfileState::Active(b) => b,
             _ => panic!("expected Active"),
         };
-        assert!(matches!(burst.phase, BurstPhase::Settling));
-        assert_eq!(burst.attempts, 1);
+        assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
         assert_eq!(
             burst.intent,
             BurstIntent::Seed,
-            "intent preserved across Probing → Settling",
+            "intent preserved across Verifying → Batching",
         );
-        assert!(burst.settle_timer.is_some());
     }
 
     #[test]
-    fn transition_to_settling_no_cancel_from_settling() {
+    fn event_during_batching_does_not_emit_cancel() {
+        // Already in Batching: a fresh FsEvent reschedules without Cancel.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_standard_burst(
-            pid,
-            e.profiles.get(pid).unwrap().resource,
-            Instant::now(),
-            &mut out,
-        );
+        let r = e.profiles.get(pid).unwrap().resource;
+        e.start_standard_burst(pid, r, Instant::now(), &mut out);
         out.probe_ops.clear();
 
-        // Already in Settling: a fresh FsEvent reschedules without Cancel.
-        e.transition_to_settling(pid, Instant::now(), &mut out);
+        e.event_drives_batching(pid, r, Instant::now(), &mut out);
 
         let cancels = out
             .probe_ops
@@ -766,12 +766,78 @@ mod tests {
             .count();
         assert_eq!(cancels, 0);
 
+        // Still Batching; intent preserved.
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
             ProfileState::Active(b) => b,
             _ => panic!("expected Active"),
         };
-        assert_eq!(burst.attempts, 1);
+        assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
+        assert_eq!(burst.intent, BurstIntent::Standard);
+    }
+
+    #[test]
+    fn unstable_response_does_not_emit_cancel() {
+        // Standard burst → Batching → Verifying → simulated unstable
+        // response → Batching. The transition emits NO Cancel — the helper
+        // structurally refuses to emit one because the verify just
+        // responded.
+        let (mut e, pid) = engine_with_profile();
+        let mut out = StepOutput::default();
+        let resource = e.profiles.get(pid).unwrap().resource;
+        let now = Instant::now();
+        e.start_standard_burst(pid, resource, now, &mut out);
+        e.transition_to_verifying(pid, &mut out);
+        out.probe_ops.clear();
+
+        e.unstable_response_drives_batching(pid, now);
+
+        assert!(out.probe_ops.is_empty());
+        let phase = match &e.profiles.get(pid).unwrap().state {
+            ProfileState::Active(burst) => &burst.phase,
+            _ => panic!("expected Active"),
+        };
+        assert!(matches!(phase, BurstPhase::Batching { .. }));
+    }
+
+    #[test]
+    fn event_storm_during_batching_does_not_amplify_settle() {
+        // Fire ten FsEvents at 50 ms intervals during a Standard burst.
+        // The settle timer's deadline must equal `last_event + settle`,
+        // not be amplified by the prior backoff curve. This is the
+        // direct assertion that the conflation has been removed.
+        let (mut e, pid) = engine_with_profile();
+        let mut out = StepOutput::default();
+        let r = e.profiles.get(pid).unwrap().resource;
+        let t0 = Instant::now();
+        e.start_standard_burst(pid, r, t0, &mut out);
+
+        let mut last_event = t0;
+        for k in 1..=10 {
+            last_event = t0 + Duration::from_millis(50 * k);
+            out.probe_ops.clear();
+            e.event_drives_batching(pid, r, last_event, &mut out);
+        }
+
+        let phase = match &e.profiles.get(pid).unwrap().state {
+            ProfileState::Active(b) => &b.phase,
+            _ => panic!("expected Active"),
+        };
+        let settle_timer = match phase {
+            BurstPhase::Batching { settle_timer } => *settle_timer,
+            _ => panic!("expected Batching"),
+        };
+        let deadline = e
+            .timers
+            .iter()
+            .find(|entry| entry.id == settle_timer)
+            .map(|entry| entry.deadline)
+            .expect("settle timer present in heap");
+        assert_eq!(
+            deadline,
+            last_event + SETTLE,
+            "settle timer pinned at last_event + settle, not amplified",
+        );
     }
 
     #[test]
@@ -781,7 +847,7 @@ mod tests {
         e.start_seed_burst(pid, Instant::now(), &mut out);
         out.watch_ops.clear();
 
-        e.finish_burst_to_idle(pid, Instant::now(), &mut out);
+        e.finish_burst_to_idle(pid, &mut out);
 
         assert!(matches!(
             e.profiles.get(pid).unwrap().state,
@@ -799,7 +865,7 @@ mod tests {
     fn finish_burst_to_idle_on_idle_is_noop() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.finish_burst_to_idle(pid, Instant::now(), &mut out);
+        e.finish_burst_to_idle(pid, &mut out);
         assert!(out.watch_ops.is_empty());
         assert!(out.probe_ops.is_empty());
     }
@@ -813,71 +879,17 @@ mod tests {
             ProfileState::Active(b) => b.burst_deadline,
             _ => panic!(),
         };
+        let r = e.profiles.get(pid).unwrap().resource;
 
-        e.transition_to_settling(pid, Instant::now(), &mut out);
+        e.event_drives_batching(pid, r, Instant::now(), &mut out);
         let burst_deadline_after = match &e.profiles.get(pid).unwrap().state {
             ProfileState::Active(b) => b.burst_deadline,
             _ => panic!(),
         };
         assert_eq!(
             burst_deadline_initial, burst_deadline_after,
-            "burst_deadline does not reschedule across Probing → Settling",
+            "burst_deadline does not reschedule across Verifying → Batching",
         );
-    }
-
-    #[test]
-    fn settle_backoff_doubles_with_attempts() {
-        // attempts = 1 → 2x settle; attempts = 2 → 4x settle. Verified through
-        // the heap deadline difference.
-        let (mut e, pid) = engine_with_profile();
-        let mut out = StepOutput::default();
-        let now = Instant::now();
-        e.start_standard_burst(pid, e.profiles.get(pid).unwrap().resource, now, &mut out);
-
-        // First reset (Settling → Settling): attempts 0 → 1; delay = settle * 2.
-        e.transition_to_settling(pid, now, &mut out);
-        let burst1 = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b,
-            _ => panic!(),
-        };
-        assert_eq!(burst1.attempts, 1);
-
-        // Second reset: attempts 1 → 2; delay = settle * 4.
-        e.transition_to_settling(pid, now, &mut out);
-        let burst2 = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b,
-            _ => panic!(),
-        };
-        assert_eq!(burst2.attempts, 2);
-    }
-
-    #[test]
-    fn settle_backoff_clamps_to_remaining_max_settle() {
-        // After the burst started, advance `now` past max_settle. The next
-        // transition_to_settling sees `remaining_max_settle == 0`, so the
-        // delay is zero (capped, not the doubled backoff).
-        let (mut e, pid) = engine_with_profile();
-        let mut out = StepOutput::default();
-        let start = Instant::now();
-        e.start_standard_burst(pid, e.profiles.get(pid).unwrap().resource, start, &mut out);
-
-        let very_late = start + MAX_SETTLE + Duration::from_secs(1);
-        e.transition_to_settling(pid, very_late, &mut out);
-
-        let burst = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b,
-            _ => panic!(),
-        };
-        let new_settle_id = burst.settle_timer.expect("rescheduled");
-        let entry = e
-            .timers
-            .peek_top()
-            .copied()
-            .expect("at least one timer in heap");
-        // The earliest-deadline timer must be the one we just scheduled (now +
-        // 0). The deadline equals very_late.
-        let _ = new_settle_id;
-        assert!(entry.deadline <= very_late);
     }
 
     #[test]
@@ -899,7 +911,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // LCA + force_walk + transition_to_probing
+    // LCA + force_walk + transition_to_verifying
     // ---------------------------------------------------------------------------
 
     use crate::burst::{build_force_walk, lca_target};
@@ -992,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_to_probing_standard_uses_lca() {
+    fn transition_to_verifying_standard_uses_lca() {
         let (mut e, pid, _root, a, b) = engine_with_two_children();
         let mut out = StepOutput::default();
         let now = Instant::now();
@@ -1004,7 +1016,7 @@ mod tests {
             b_burst.force_walk_resources.insert(b);
         }
         let mut probe_out = StepOutput::default();
-        e.transition_to_probing(pid, now, &mut probe_out);
+        e.transition_to_verifying(pid, &mut probe_out);
 
         let req = probe_out
             .probe_ops
@@ -1021,15 +1033,16 @@ mod tests {
     }
 
     #[test]
-    fn transition_to_probing_clears_force_walk_resources() {
+    fn transition_to_verifying_clears_force_walk_resources() {
         let (mut e, pid, _root, a, _b) = engine_with_two_children();
         let mut out = StepOutput::default();
         let now = Instant::now();
         e.start_standard_burst(pid, a, now, &mut out);
-        e.transition_to_probing(pid, now, &mut out);
+        e.transition_to_verifying(pid, &mut out);
 
-        // After transition_to_probing, force_walk_resources should be cleared
-        // (consumed by this emission); subsequent events accumulate fresh.
+        // After transition_to_verifying, force_walk_resources should be
+        // cleared (consumed by this emission); subsequent events accumulate
+        // fresh.
         let burst = match &e.profiles.get(pid).unwrap().state {
             ProfileState::Active(b) => b,
             _ => panic!(),

@@ -72,6 +72,14 @@ impl TimerHeap {
         self.inner.pop().map(|r| r.0)
     }
 
+    /// Iterate every entry currently in the heap, including stale entries
+    /// that lazy invalidation has not yet collected. Order is unspecified
+    /// (`BinaryHeap` exposes its internal layout, not the priority order).
+    /// Intended for tests and debug introspection.
+    pub fn iter(&self) -> impl Iterator<Item = &TimerEntry> {
+        self.inner.iter().map(|r| &r.0)
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.inner.len()

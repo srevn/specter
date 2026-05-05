@@ -485,9 +485,6 @@ mod tests {
         )));
         profiles.get_mut(p_mid).unwrap().current = Some(stable_snapshot);
         profiles.get_mut(p_mid).unwrap().state = ProfileState::Active(Burst {
-            started: Instant::now(),
-            attempts: 0,
-            settle_timer: None,
             burst_deadline: TimerId::default(),
             phase: BurstPhase::Draining,
             intent: BurstIntent::Standard,

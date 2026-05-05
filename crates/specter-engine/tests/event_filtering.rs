@@ -1006,8 +1006,8 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
     }
     let correlation = match &e.profiles().get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            specter_core::BurstPhase::Probing { correlation } => correlation,
-            _ => panic!("expected Probing"),
+            specter_core::BurstPhase::Verifying { correlation } => correlation,
+            _ => panic!("expected Verifying"),
         },
         _ => panic!("expected Active"),
     };
@@ -1067,7 +1067,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
     }
     let correlation = match &e.profiles().get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            specter_core::BurstPhase::Probing { correlation } => correlation,
+            specter_core::BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -1141,7 +1141,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
         ProfileState::Active(specter_core::Burst {
-            phase: specter_core::BurstPhase::Probing { .. },
+            phase: specter_core::BurstPhase::Verifying { .. },
             ..
         })
     ));

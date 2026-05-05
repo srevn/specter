@@ -149,7 +149,7 @@ impl Engine {
             }
 
             if is_terminal && is_anchor {
-                self.on_anchor_terminal_event(profile_id, now, out);
+                self.on_anchor_terminal_event(profile_id, out);
             } else {
                 // Modified/StructureChanged/MetadataChanged anywhere that
                 // passes the filter, or terminal at a covered descendant
@@ -227,7 +227,9 @@ impl Engine {
                     ProbeDispatch::Descent
                 }
                 ProfileState::Active(burst) => match &burst.phase {
-                    BurstPhase::Probing { correlation } if *correlation == received_correlation => {
+                    BurstPhase::Verifying { correlation }
+                        if *correlation == received_correlation =>
+                    {
                         ProbeDispatch::Burst {
                             intent: burst.intent,
                             forced: burst.forced,
@@ -254,22 +256,22 @@ impl Engine {
             }
             ProbeDispatch::Burst { intent, forced } => match (intent, response.result) {
                 (BurstIntent::Seed, ProbeResult::Ok(tree_snap)) => {
-                    self.dispatch_seed_ok(profile_id, tree_snap, now, out);
+                    self.dispatch_seed_ok(profile_id, tree_snap, out);
                 }
                 (BurstIntent::Seed, ProbeResult::Vanished) => {
-                    self.dispatch_seed_vanished(profile_id, now, out);
+                    self.dispatch_seed_vanished(profile_id, out);
                 }
                 (BurstIntent::Seed, ProbeResult::Failed { errno }) => {
-                    self.dispatch_seed_failed(profile_id, errno, now, out);
+                    self.dispatch_seed_failed(profile_id, errno, out);
                 }
                 (BurstIntent::Standard, ProbeResult::Ok(tree_snap)) => {
                     self.dispatch_standard_ok(profile_id, tree_snap, forced, now, out);
                 }
                 (BurstIntent::Standard, ProbeResult::Vanished) => {
-                    self.dispatch_standard_vanished(profile_id, now, out);
+                    self.dispatch_standard_vanished(profile_id, out);
                 }
                 (BurstIntent::Standard, ProbeResult::Failed { errno }) => {
-                    self.dispatch_standard_failed(profile_id, errno, now, out);
+                    self.dispatch_standard_failed(profile_id, errno, out);
                 }
             },
             ProbeDispatch::Stale => {
@@ -285,7 +287,6 @@ impl Engine {
     pub(crate) fn on_timer_expired(
         &mut self,
         id: specter_core::TimerId,
-        now: Instant,
         out: &mut StepOutput,
     ) {
         let Some(profile_id) = self.find_profile_referencing_timer(id) else {
@@ -302,29 +303,23 @@ impl Engine {
                 out.diagnostics.push(Diagnostic::StaleTimer { id });
                 return;
             };
-            let phase_kind = match &burst.phase {
-                BurstPhase::Settling => PhaseKind::Settling,
-                BurstPhase::Probing { .. } => PhaseKind::Probing,
-                BurstPhase::Draining => PhaseKind::Draining,
+            let (phase_kind, settle_match) = match &burst.phase {
+                BurstPhase::Batching { settle_timer } => {
+                    (PhaseKind::Batching, *settle_timer == id)
+                }
+                BurstPhase::Verifying { .. } => (PhaseKind::Verifying, false),
+                BurstPhase::Draining => (PhaseKind::Draining, false),
             };
-            (
-                burst.settle_timer == Some(id),
-                burst.burst_deadline == id,
-                phase_kind,
-            )
+            (settle_match, burst.burst_deadline == id, phase_kind)
         };
 
         if is_settle {
-            // Settle timer fires during Settling → transition to Probing.
-            // Stale settle timers (settle_timer field is None or non-matching)
-            // are filtered upstream by `is_settle == true`.
-            if matches!(phase_kind, PhaseKind::Settling) {
-                self.transition_to_probing(profile_id, now, out);
-            } else {
-                out.diagnostics.push(Diagnostic::StaleTimer { id });
-            }
+            // The Batching phase's settle_timer fires → advance to Verifying.
+            // Stale settle timers (different phase, or different timer id)
+            // are filtered by the variant-data match above.
+            self.transition_to_verifying(profile_id, out);
         } else if is_burst_deadline {
-            self.handle_burst_deadline(profile_id, phase_kind, now, out);
+            self.handle_burst_deadline(profile_id, phase_kind, out);
         } else {
             out.diagnostics.push(Diagnostic::StaleTimer { id });
         }
@@ -472,7 +467,6 @@ impl Engine {
         resource: ResourceId,
         _op: WatchOp,
         errno: i32,
-        now: Instant,
         out: &mut StepOutput,
     ) {
         out.diagnostics
@@ -514,7 +508,7 @@ impl Engine {
         // `suppress_count` so this decrement balances the burst-start's
         // `add_suppress`.
         for pid in anchor_claimers {
-            self.finalize_anchor_lost(pid, now, out);
+            self.finalize_anchor_lost(pid, out);
             out.diagnostics.push(Diagnostic::ProfileClaimPurged {
                 profile: pid,
                 claim: ClaimKind::Anchor,
@@ -557,8 +551,10 @@ impl Engine {
     }
 
     /// Start a new burst (Seed if no baseline yet, Standard if baseline
-    /// established); Active → accumulate the event into `dirty_resources`
-    /// + `force_walk_resources` and reset settle.
+    /// established); Active → fold the event through `event_drives_batching`
+    /// (which accumulates `dirty_resources` + `force_walk_resources`,
+    /// emits a Cancel iff a probe was in flight, and arms a fresh settle
+    /// timer).
     ///
     /// `event_resource` is the `FsEvent`'s source. It seeds (Idle path) or
     /// accumulates (Active path) the event-tracking sets the next probe
@@ -587,17 +583,7 @@ impl Engine {
                 }
             }
             ProfileState::Active(_) => {
-                // Accumulate the event into `dirty_resources` (LCA basis)
-                // and `force_walk_resources` (since-last-probe walker
-                // hint) before transitioning. The next probe at this
-                // burst's `transition_to_probing` consumes both.
-                if let Some(p) = self.profiles.get_mut(profile_id)
-                    && let ProfileState::Active(burst) = &mut p.state
-                {
-                    burst.dirty_resources.insert(event_resource);
-                    burst.force_walk_resources.insert(event_resource);
-                }
-                self.transition_to_settling(profile_id, now, out);
+                self.event_drives_batching(profile_id, event_resource, now, out);
             }
             // `ProfileState` non_exhaustive: Pending Profiles never reach
             // here — `covering_profiles` filters them at the source — but
@@ -611,13 +597,8 @@ impl Engine {
     /// Thin wrapper over `finalize_anchor_lost` — the FsEvent dispatcher
     /// and the WatchOpRejected purge (Commit 3) share the same
     /// "anchor's FD is gone, finalize the burst" logic.
-    fn on_anchor_terminal_event(
-        &mut self,
-        profile_id: ProfileId,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
-        self.finalize_anchor_lost(profile_id, now, out);
+    fn on_anchor_terminal_event(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        self.finalize_anchor_lost(profile_id, out);
     }
 
     /// Finalize the loss of a Profile's anchor: cancel any in-flight
@@ -647,7 +628,6 @@ impl Engine {
     pub(crate) fn finalize_anchor_lost(
         &mut self,
         profile_id: ProfileId,
-        now: Instant,
         out: &mut StepOutput,
     ) {
         let Some(p) = self.profiles.get(profile_id) else {
@@ -656,13 +636,13 @@ impl Engine {
         if matches!(p.state, ProfileState::Pending(_)) {
             return;
         }
-        let was_probing = matches!(
+        let was_verifying = matches!(
             &p.state,
-            ProfileState::Active(b) if matches!(b.phase, BurstPhase::Probing { .. }),
+            ProfileState::Active(b) if matches!(b.phase, BurstPhase::Verifying { .. }),
         );
         let was_active = matches!(p.state, ProfileState::Active(_));
 
-        if was_probing {
+        if was_verifying {
             out.probe_ops.push(ProbeOp::Cancel {
                 profile: profile_id,
             });
@@ -678,7 +658,7 @@ impl Engine {
         self.release_anchor_claim(profile_id, out);
 
         if was_active {
-            self.finish_burst_to_idle(profile_id, now, out);
+            self.finish_burst_to_idle(profile_id, out);
         }
     }
 
@@ -698,11 +678,10 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         snapshot: TreeSnapshot,
-        now: Instant,
         out: &mut StepOutput,
     ) {
         // Seed always targets anchor — `probe_target` was set to the
-        // anchor at `start_seed_burst` / `transition_to_probing`.
+        // anchor at `start_seed_burst` / `transition_to_verifying`.
         let target = match self.profiles.get(profile_id) {
             Some(p) => match &p.state {
                 ProfileState::Active(b) => b.probe_target.unwrap_or(p.resource),
@@ -745,7 +724,7 @@ impl Engine {
             p.baseline = p.current.clone();
         }
 
-        self.finish_burst_to_idle(profile_id, now, out);
+        self.finish_burst_to_idle(profile_id, out);
         // No Effect fires from a fresh-Profile Seed burst — B3 gates on
         // `last_emitted_dir_hash` non-empty, which fresh Seeds never have.
     }
@@ -792,12 +771,7 @@ impl Engine {
     /// `StructureChanged` → `start_pending_recovery` → descent →
     /// `dispatch_descent_ok` (anchor materialization, which re-bumps
     /// `anchor.watch_demand` with the Profile's mask).
-    fn dispatch_seed_vanished(
-        &mut self,
-        profile_id: ProfileId,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
+    fn dispatch_seed_vanished(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
@@ -814,7 +788,7 @@ impl Engine {
         // the trichotomy invariant `!(Pending && anchor_contribution)`
         // across the eventual `start_pending_recovery` transition.
         self.release_anchor_claim(profile_id, out);
-        self.finish_burst_to_idle(profile_id, now, out);
+        self.finish_burst_to_idle(profile_id, out);
     }
 
     /// (Seed, Failed).
@@ -822,13 +796,7 @@ impl Engine {
     /// Symmetric with `dispatch_standard_failed`: the probe failed at the
     /// anchor; release the anchor's `watch_demand` contribution. See
     /// `dispatch_seed_vanished` for the trichotomy-invariant rationale.
-    fn dispatch_seed_failed(
-        &mut self,
-        profile_id: ProfileId,
-        errno: i32,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
+    fn dispatch_seed_failed(&mut self, profile_id: ProfileId, errno: i32, out: &mut StepOutput) {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
@@ -842,7 +810,7 @@ impl Engine {
             errno,
         });
         self.release_anchor_claim(profile_id, out);
-        self.finish_burst_to_idle(profile_id, now, out);
+        self.finish_burst_to_idle(profile_id, out);
     }
 
     /// (Standard, Ok).
@@ -909,7 +877,7 @@ impl Engine {
             // Row 3: stable + dirty=0 → fire Effect, → Idle. baseline pinned
             // (advances on next EffectComplete::Ok Seed).
             self.emit_effects(profile_id, forced, out);
-            self.finish_burst_to_idle(profile_id, now, out);
+            self.finish_burst_to_idle(profile_id, out);
         } else if is_stable {
             // Row 4: stable + dirty>0 → Draining. The stable snapshot lives
             // on `Profile.current` (just spliced in by graft); the reconfirm
@@ -920,10 +888,12 @@ impl Engine {
             // Row 5: not-stable + forced → fire Effect with forced=true,
             // → Idle.
             self.emit_effects(profile_id, true, out);
-            self.finish_burst_to_idle(profile_id, now, out);
+            self.finish_burst_to_idle(profile_id, out);
         } else {
-            // Row 5 else: not-stable + !forced → reschedule settle, → Settling.
-            self.transition_to_settling(profile_id, now, out);
+            // Row 5 else: not-stable + !forced → re-arm debounce in
+            // `Batching`. By construction no probe is in flight (we're
+            // inside the response handler), so no Cancel is emitted.
+            self.unstable_response_drives_batching(profile_id, now);
         }
     }
 
@@ -940,12 +910,7 @@ impl Engine {
     /// and skips a redundant release. Without this ordering the post-
     /// `finish` release would underflow the now-zero `watch_demand`
     /// counter (debug-assert panic; release-build silent leak).
-    fn dispatch_standard_vanished(
-        &mut self,
-        profile_id: ProfileId,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
+    fn dispatch_standard_vanished(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
@@ -958,7 +923,7 @@ impl Engine {
             intent: BurstIntent::Standard,
         });
         self.release_anchor_claim(profile_id, out);
-        self.finish_burst_to_idle(profile_id, now, out);
+        self.finish_burst_to_idle(profile_id, out);
     }
 
     /// (Standard, Failed).
@@ -969,7 +934,6 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         errno: i32,
-        now: Instant,
         out: &mut StepOutput,
     ) {
         if self.profiles.get(profile_id).is_none() {
@@ -985,17 +949,16 @@ impl Engine {
             errno,
         });
         self.release_anchor_claim(profile_id, out);
-        self.finish_burst_to_idle(profile_id, now, out);
+        self.finish_burst_to_idle(profile_id, out);
     }
 
     /// `burst_deadline` row — sets `forced := true` and either
-    /// transitions the phase (Settling/Draining → Probing) or, if a probe
-    /// is already in flight (Probing), waits for the response.
+    /// transitions the phase (Batching/Draining → Verifying) or, if a
+    /// probe is already in flight (Verifying), waits for the response.
     fn handle_burst_deadline(
         &mut self,
         profile_id: ProfileId,
         phase: PhaseKind,
-        now: Instant,
         out: &mut StepOutput,
     ) {
         if let Some(p) = self.profiles.get_mut(profile_id)
@@ -1004,10 +967,10 @@ impl Engine {
             burst.forced = true;
         }
         match phase {
-            PhaseKind::Settling | PhaseKind::Draining => {
-                self.transition_to_probing(profile_id, now, out);
+            PhaseKind::Batching | PhaseKind::Draining => {
+                self.transition_to_verifying(profile_id, out);
             }
-            PhaseKind::Probing => {
+            PhaseKind::Verifying => {
                 // Probe in flight; no second emission. The response, when
                 // it arrives, dispatches with `forced = true`.
             }
@@ -1322,10 +1285,14 @@ impl Engine {
     /// profiles.
     fn find_profile_referencing_timer(&self, id: specter_core::TimerId) -> Option<ProfileId> {
         for (pid, p) in self.profiles.iter() {
-            if let ProfileState::Active(burst) = &p.state
-                && (burst.settle_timer == Some(id) || burst.burst_deadline == id)
-            {
-                return Some(pid);
+            if let ProfileState::Active(burst) = &p.state {
+                let phase_match = matches!(
+                    &burst.phase,
+                    BurstPhase::Batching { settle_timer } if *settle_timer == id,
+                );
+                if phase_match || burst.burst_deadline == id {
+                    return Some(pid);
+                }
             }
         }
         None
@@ -1342,8 +1309,8 @@ impl Engine {
 
 #[derive(Copy, Clone)]
 enum PhaseKind {
-    Settling,
-    Probing,
+    Batching,
+    Verifying,
     Draining,
 }
 

@@ -312,8 +312,8 @@ fn parent_in_draining_reconfirms_after_child_settles() {
 
     let parent_probe_corr = match &e.profiles().get(pid_parent).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
-            _ => panic!("expected Probing"),
+            BurstPhase::Verifying { correlation } => correlation,
+            _ => panic!("expected Verifying"),
         },
         _ => panic!("expected Active"),
     };
@@ -341,12 +341,12 @@ fn parent_in_draining_reconfirms_after_child_settles() {
 
     // Drive child to stable. Child's finish_burst_to_idle calls
     // propagate(-1) which returns parent's id (Draining), and the
-    // engine immediately calls transition_to_probing on parent —
+    // engine immediately calls transition_to_verifying on parent —
     // emitting the reconfirm probe in the same StepOutput.
     let child_probe_corr = match &e.profiles().get(pid_child).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
-            _ => panic!("expected Probing"),
+            BurstPhase::Verifying { correlation } => correlation,
+            _ => panic!("expected Verifying"),
         },
         _ => panic!("expected Active"),
     };
@@ -370,7 +370,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     assert!(matches!(
         e.profiles().get(pid_parent).unwrap().state,
         ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Probing { .. },
+            phase: BurstPhase::Verifying { .. },
             ..
         }),
     ));
@@ -425,14 +425,14 @@ fn co_located_profiles_share_suppress_count() {
     // Drive both Seeds.
     let corr_a = match &e.profiles().get(pid_a).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
     };
     let corr_b = match &e.profiles().get(pid_b).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),

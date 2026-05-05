@@ -121,8 +121,8 @@ fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> 
 fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId, root: ResourceId) {
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
-            _ => panic!("expected Probing"),
+            BurstPhase::Verifying { correlation } => correlation,
+            _ => panic!("expected Verifying"),
         },
         _ => panic!("expected Active"),
     };
@@ -191,7 +191,7 @@ fn engine_dispatch_through_shim_matches_v4_behaviour() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -217,7 +217,7 @@ fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -250,7 +250,7 @@ fn probe_response_seed_vanished_clears_baseline_and_diagnoses() {
     let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -284,7 +284,7 @@ fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
     let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -379,8 +379,8 @@ fn standard_burst_stable_emits_effect_and_idles() {
     // We're in Probing; pick up the correlation.
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
-            _ => panic!("expected Probing"),
+            BurstPhase::Verifying { correlation } => correlation,
+            _ => panic!("expected Verifying"),
         },
         _ => panic!("expected Active"),
     };
@@ -444,7 +444,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     // Seed → Idle.
     let seed_corr = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -473,7 +473,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     }
     let std_corr = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -526,7 +526,7 @@ fn standard_burst_force_fires_on_max_settle() {
     // Idle if the deadline race resolved both timers. Drive the response
     // back if needed.
     if let ProfileState::Active(burst) = &e.profiles.get(pid).unwrap().state
-        && let BurstPhase::Probing { correlation } = burst.phase
+        && let BurstPhase::Verifying { correlation } = burst.phase
     {
         // Inject a not-stable response to test the forced effect emission.
         let snap = dir_tree_snap(root, vec![("new.rs", EntryKind::File, 99)]);
@@ -569,9 +569,9 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
     assert_eq!(
         burst.intent,
         BurstIntent::Seed,
-        "intent preserved across Probing → Settling",
+        "intent preserved across Verifying → Batching",
     );
-    assert!(matches!(burst.phase, BurstPhase::Settling));
+    assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
     let cancels = out
         .probe_ops
         .iter()
@@ -949,7 +949,7 @@ fn effect_complete_ok_in_idle_starts_seed_burst() {
         _ => panic!(),
     };
     assert_eq!(burst.intent, BurstIntent::Seed);
-    assert!(matches!(burst.phase, BurstPhase::Probing { .. }));
+    assert!(matches!(burst.phase, BurstPhase::Verifying { .. }));
     let probes = out
         .probe_ops
         .iter()
@@ -1063,7 +1063,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
         }
         let correlation = match &e.profiles.get(pid).unwrap().state {
             ProfileState::Active(b) => match b.phase {
-                BurstPhase::Probing { correlation } => correlation,
+                BurstPhase::Verifying { correlation } => correlation,
                 _ => continue,
             },
             _ => break,
@@ -1097,7 +1097,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -1444,8 +1444,8 @@ fn seed_vanished_then_reap_releases_anchor_via_contribution_flag() {
     // Drive Seed Vanished to fire the reap.
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
-            _ => panic!("expected Probing"),
+            BurstPhase::Verifying { correlation } => correlation,
+            _ => panic!("expected Verifying"),
         },
         _ => panic!("expected Active"),
     };
@@ -1562,7 +1562,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
     }
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!("expected Active"),
@@ -1728,7 +1728,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     // Complete Seed with empty baseline.
     let seed_corr = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -1759,7 +1759,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     }
     let std_corr = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -1790,7 +1790,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     }
     let std_corr2 = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -1867,7 +1867,7 @@ fn per_stable_file_skips_dir_entries() {
     // re-appear as `created` later.
     let seed_corr = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -1897,7 +1897,7 @@ fn per_stable_file_skips_dir_entries() {
     }
     let std_corr = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -1929,7 +1929,7 @@ fn per_stable_file_skips_dir_entries() {
     }
     let std_corr2 = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -1989,21 +1989,24 @@ fn drive_to_first_effect(
         },
         now,
     );
-    // Drain settle timer → Probing.
+    // Drain settle timer → Verifying.
     let settle_timer = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b.settle_timer.unwrap(),
+        ProfileState::Active(b) => match &b.phase {
+            BurstPhase::Batching { settle_timer } => *settle_timer,
+            _ => panic!("expected Batching"),
+        },
         _ => panic!("expected Active"),
     };
     let _ = e.step(Input::TimerExpired(settle_timer), now + SETTLE);
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
-            _ => panic!("expected Probing"),
+            BurstPhase::Verifying { correlation } => correlation,
+            _ => panic!("expected Verifying"),
         },
         _ => panic!("expected Active"),
     };
     // First probe — response differs from Seed baseline ⇒ not-stable ⇒
-    // Settling.
+    // Batching.
     let snap1 = dir_tree_snap(root, vec![("a.rs", EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -2013,16 +2016,19 @@ fn drive_to_first_effect(
         }),
         now + SETTLE,
     );
-    // Drain settle timer → Probing again.
+    // Drain settle timer → Verifying again.
     let settle_timer2 = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b.settle_timer.unwrap(),
-        _ => panic!("expected Active(Settling)"),
+        ProfileState::Active(b) => match &b.phase {
+            BurstPhase::Batching { settle_timer } => *settle_timer,
+            _ => panic!("expected Batching"),
+        },
+        _ => panic!("expected Active(Batching)"),
     };
     let _ = e.step(Input::TimerExpired(settle_timer2), now + SETTLE + SETTLE);
     let correlation2 = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
-            _ => panic!("expected Probing"),
+            BurstPhase::Verifying { correlation } => correlation,
+            _ => panic!("expected Verifying"),
         },
         _ => panic!("expected Active"),
     };
@@ -2108,7 +2114,7 @@ fn b3_recovery_seed_no_prior_emit_does_not_fire() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     let correlation = match &e.profiles.get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),
@@ -2476,7 +2482,7 @@ mod props {
                 if let Some(p) = e.profiles.get(pid) {
                     let probing_count = match &p.state {
                         ProfileState::Active(b) => match &b.phase {
-                            BurstPhase::Probing { .. } => 1,
+                            BurstPhase::Verifying { .. } => 1,
                             _ => 0,
                         },
                         _ => 0,

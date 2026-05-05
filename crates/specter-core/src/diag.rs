@@ -26,8 +26,8 @@ pub enum ClaimKind {
 /// exact variant + fields produced by a given dropped Input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Diagnostic {
-    /// `ProbeResponse` for a Profile not in `BurstPhase::Probing`, or for a
-    /// `Probing` whose `correlation` doesn't match the response.
+    /// `ProbeResponse` for a Profile not in `BurstPhase::Verifying`, or for a
+    /// `Verifying` whose `correlation` doesn't match the response.
     StaleProbeResponse {
         profile: ProfileId,
         correlation: ProbeCorrelation,

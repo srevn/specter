@@ -199,7 +199,7 @@ pub(super) fn run_worker<F>(
         // correlation) means our `(profile, correlation)` no longer
         // matches the latest expectation. Skip the syscall *and* the
         // response — the engine has structurally exited
-        // `BurstPhase::Probing` on cancel-emit, so a missing response
+        // `BurstPhase::Verifying` on cancel-emit, so a missing response
         // is harmless.
         let still_wanted = expected
             .lock()

@@ -720,7 +720,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     // anchor's contribution still held. Then detach.
     let corr = match e.profiles().get(pid).and_then(|p| match &p.state {
         specter_core::ProfileState::Active(b) => match &b.phase {
-            specter_core::BurstPhase::Probing { correlation } => Some(*correlation),
+            specter_core::BurstPhase::Verifying { correlation } => Some(*correlation),
             _ => None,
         },
         _ => None,

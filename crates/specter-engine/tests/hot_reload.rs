@@ -242,7 +242,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
     }
     let std_corr = match &e.profiles().get(pid).unwrap().state {
         ProfileState::Active(b) => match b.phase {
-            BurstPhase::Probing { correlation } => correlation,
+            BurstPhase::Verifying { correlation } => correlation,
             _ => panic!(),
         },
         _ => panic!(),

@@ -15,24 +15,28 @@ use crate::sub::ClassSet;
 use crate::tree::Tree;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tinyvec::TinyVec;
 
 /// One stability cycle. A `Burst` lives `Idle → Active(Burst) → Idle`;
-/// its `phase` walks `Settling → Probing [→ Draining]` and its `intent`
-/// (`Standard | Seed`) decides the terminal action.
+/// its `phase` walks `Batching → Verifying [→ Draining → Verifying]` and
+/// its `intent` (`Standard | Seed`) decides the terminal action.
 ///
-/// Burst-level state (`started`, `attempts`, `intent`, `forced`,
-/// `burst_deadline`) survives phase transitions; `settle_timer` is `None`
-/// outside `Settling` (and at `Seed` construction); `phase` carries
-/// phase-specific data (the `Probing` correlation). `Draining` is a unit
-/// variant — the stable snapshot lives on `Profile.current`, see the
-/// variant docs below.
+/// Burst-level state (`intent`, `forced`, `burst_deadline`) survives every
+/// phase transition; `phase` carries the **correlation token of the input
+/// the burst is currently waiting on**:
+/// - `Batching { settle_timer }` — armed debounce timer; the burst is
+///   waiting for a quiet gap (or a fresh `FsEvent` to extend it).
+/// - `Verifying { correlation }` — probe in flight; the burst is waiting
+///   for the matching `ProbeResponse`.
+/// - `Draining` — self-stable, descendant Profiles still resolving;
+///   correlated externally by `Profile.dirty_descendants`.
+///
+/// `dirty_resources` and `force_walk_resources` are accumulators consumed
+/// at every `transition_to_verifying`; `probe_target` survives Verifying
+/// → Draining → Verifying so the reconfirm probe reuses the original LCA.
 #[derive(Debug)]
 pub struct Burst {
-    pub started: Instant,
-    pub attempts: u32,
-    pub settle_timer: Option<TimerId>,
     pub burst_deadline: TimerId,
     pub phase: BurstPhase,
     pub intent: BurstIntent,
@@ -42,36 +46,44 @@ pub struct Burst {
     /// • `start_standard_burst` initialises with `{ event_resource }`.
     /// • Every `on_fs_event` during `Active` adds `event_resource`.
     /// Cleared when the `Burst` is dropped (`finish_burst_to_idle`).
-    /// Used to compute the LCA target at every `transition_to_probing`
+    /// Used to compute the LCA target at every `transition_to_verifying`
     /// and as the closure source for `force_walk_resources`.
     pub dirty_resources: BTreeSet<ResourceId>,
     /// Since-last-probe cut of `dirty_resources`. The walker uses this to
     /// refuse mtime-skip on event-dirty paths, closing the coarse-mtime
     /// hole. Same accumulation rule as `dirty_resources`, but cleared at
-    /// every `transition_to_probing` (the engine ships its current contents
-    /// as `force_walk` to the walker, then resets).
+    /// every `transition_to_verifying` (the engine ships its current
+    /// contents as `force_walk` to the walker, then resets).
     pub force_walk_resources: BTreeSet<ResourceId>,
     /// `target_resource` of the most recently emitted probe in this burst.
     /// Mirrors the latest `ProbeRequest.target_resource`. Read by the
-    /// Draining→Probing reconfirm path (`dirty_resources` is empty there,
-    /// so LCA would degenerate to the anchor — reuse the prior target
-    /// instead) and by `dispatch_standard_ok` to know which subtree of
-    /// `Profile.current` to compare against `response_subtree` for the
-    /// stability verdict. `None` until the first probe emits.
+    /// Draining→Verifying reconfirm path (`dirty_resources` is empty
+    /// there, so LCA would degenerate to the anchor — reuse the prior
+    /// target instead) and by `dispatch_standard_ok` to know which
+    /// subtree of `Profile.current` to compare against `response_subtree`
+    /// for the stability verdict. `None` until the first probe emits.
     pub probe_target: Option<ResourceId>,
 }
 
+/// What the burst is waiting on, as a discriminator.
+///
+/// Phase variant data is the correlation token of the input the burst is
+/// currently waiting on: a `TimerId` for `Batching`, a `ProbeCorrelation`
+/// for `Verifying`. `Draining` is correlated externally by
+/// `Profile.dirty_descendants` and carries no token of its own.
 #[derive(Debug)]
 pub enum BurstPhase {
-    /// Waiting for events to stop. `settle_timer` on the burst is armed.
-    Settling,
-    /// Probe in flight. `correlation` matches the outstanding `ProbeRequest`
-    /// (type-system closure on the pending-event race).
-    Probing { correlation: ProbeCorrelation },
+    /// Activity-gap detection. `settle_timer` is the armed debounce
+    /// timer; an `FsEvent` reschedules it (`event_drives_batching`),
+    /// timer expiry advances to `Verifying` (`transition_to_verifying`).
+    Batching { settle_timer: TimerId },
+    /// Probe in flight. `correlation` matches the outstanding
+    /// `ProbeRequest` (type-system closure on the pending-event race).
+    Verifying { correlation: ProbeCorrelation },
     /// Self-stable; descendants pending. The stable snapshot lives on
-    /// `Profile.current` — `dispatch_standard_ok` updates `current` to the
-    /// stable response immediately before transitioning here, so the
-    /// reconfirm probe (Draining → Probing on `dirty_descendants → 0`)
+    /// `Profile.current` — `dispatch_standard_ok` updates `current` to
+    /// the stable response immediately before transitioning here, so the
+    /// reconfirm probe (Draining → Verifying on `dirty_descendants → 0`)
     /// compares against `Profile.current`. Holding a duplicate
     /// `TreeSnapshot` on the variant would only invite drift between the
     /// two references.

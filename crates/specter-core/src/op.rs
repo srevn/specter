@@ -46,7 +46,7 @@ pub enum ProbeKind {
 /// The Sensor's Prober pool is stateless re Profile — every field needed
 /// to perform the syscall lives on the message. `scan_config` is cloned at
 /// emission time; `correlation` pairs the response with the engine-side
-/// `BurstPhase::Probing` slot. Cloning is allocation-cheap on the hot path:
+/// `BurstPhase::Verifying` slot. Cloning is allocation-cheap on the hot path:
 /// `baseline_subtree` is `Arc::clone` and `force_walk` is a small
 /// `BTreeSet`.
 #[derive(Clone, Debug)]
