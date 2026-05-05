@@ -233,7 +233,6 @@ impl crate::Engine {
         // ancestors), `max_depth = None` (irrelevant when
         // `recursive=false`). The Seed burst that follows anchor
         // materialization uses the Profile's real config.
-        let _ = &profile.config;
         let scan_config = specter_core::ScanConfig::builder()
             .recursive(false)
             .hidden(true)

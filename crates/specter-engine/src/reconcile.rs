@@ -60,8 +60,8 @@
 use crate::coverage::covers;
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use specter_core::{
-    ChildEntry, DirChild, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap, ResourceId,
-    ResourceKind, ResourceRole, StepOutput, Tree, TreeSnapshot, splice,
+    ChildEntry, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap, ResourceId, ResourceKind,
+    ResourceRole, StepOutput, Tree, TreeSnapshot, splice,
 };
 use std::sync::Arc;
 
@@ -219,14 +219,28 @@ pub(crate) fn walk_pair(
             let Some(child_id) = tree.lookup(Some(current_id), name.as_str()) else {
                 continue;
             };
-            if let (Some(ps), Some(ns)) = (p_dc.subtree.as_deref(), n_dc.subtree.as_deref())
-                && ps.dir_hash() != ns.dir_hash()
-            {
-                walk_pair(Some(ps), ns, child_id, profile, tree, profiles, out);
+            match (p_dc.subtree.as_deref(), n_dc.subtree.as_deref()) {
+                (Some(ps), Some(ns)) if ps.dir_hash() != ns.dir_hash() => {
+                    walk_pair(Some(ps), ns, child_id, profile, tree, profiles, out);
+                }
+                (Some(_), Some(_)) | (None, None) => {
+                    // Hashes match (covered both sides) or both sides
+                    // uncovered: no delta to emit at this Dir slot.
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    // Coverage flip on the same Dir slot. Structurally
+                    // unreachable in v1: a Profile's coverage rule is
+                    // pinned by `config_hash`, so a scope change forks a
+                    // new Profile rather than flipping subtree presence
+                    // at the same slot for the same Profile. The
+                    // debug_assert pins the invariant; if a future change
+                    // makes it reachable, tests shout.
+                    debug_assert!(
+                        false,
+                        "walk_pair: coverage flip on same Dir slot is unreachable in v1",
+                    );
+                }
             }
-            // (None, _) / (_, None): coverage flip on the same dir. Engine
-            // emits no delta for the flip itself; a subsequent re-probe
-            // resolves once scope changes.
         }
         // Same-inode Leaf-Leaf: content may have changed (caller's diff
         // path emits the per-leaf Effect); no Watch delta because file FDs
@@ -307,7 +321,6 @@ pub(crate) fn graft(
 /// Extract the `dir_hash` of `current.subtree_at(target)` or `current` itself
 /// for File-anchored Profiles. Returns `None` when there is no prior
 /// observation at `target` (covered-in-this-probe path; treat as not-stable).
-#[allow(dead_code)]
 pub(crate) fn current_target_hash(
     profile: &Profile,
     target: ResourceId,
@@ -435,22 +448,8 @@ fn create_child(
     }
 }
 
-#[allow(dead_code)]
 const fn same_inode_device(a: &ChildEntry, b: &ChildEntry) -> bool {
     a.inode() == b.inode() && a.device() == b.device()
-}
-
-#[allow(dead_code)]
-const fn same_inode_device_dc(a: &DirChild, b: &DirChild) -> bool {
-    a.inode == b.inode && a.device == b.device
-}
-
-#[allow(dead_code)]
-const fn res_kind_for(k: EntryKind) -> ResourceKind {
-    match k {
-        EntryKind::Dir => ResourceKind::Dir,
-        _ => ResourceKind::File,
-    }
 }
 
 #[cfg(test)]
@@ -465,7 +464,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use std::time::{Duration, Instant, UNIX_EPOCH};
+    use std::time::{Duration, UNIX_EPOCH};
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
@@ -503,13 +502,7 @@ mod tests {
         for (name, child) in entries {
             map.insert(CompactString::new(name), child);
         }
-        Arc::new(DirSnapshot::new(
-            resource,
-            meta(inode),
-            Instant::now(),
-            0,
-            map,
-        ))
+        Arc::new(DirSnapshot::new(resource, meta(inode), 0, map))
     }
 
     fn anchor(per_file: bool) -> (Tree, ProfileMap, ResourceId, specter_core::ProfileId) {

@@ -330,11 +330,7 @@ impl Engine {
     /// last Sub was detached mid-burst), `Engine::reap_profile` runs in the
     /// same step after `propagate(-1)` to release watch contributions,
     /// parent edges, and Tree slot.
-    pub(crate) fn finish_burst_to_idle(
-        &mut self,
-        profile_id: ProfileId,
-        out: &mut StepOutput,
-    ) {
+    pub(crate) fn finish_burst_to_idle(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
@@ -558,14 +554,15 @@ pub(crate) fn build_force_walk(
 ) -> BTreeSet<PathBuf> {
     set.iter()
         .copied()
-        .filter(|&r| is_ancestor_or_self(target, r, tree))
+        .filter(|&r| r_is_at_or_under(r, target, tree))
         .filter_map(|r| tree.path_of(r))
         .collect()
 }
 
-/// Returns true iff `target` is `r` or one of `r`'s ancestors (i.e., `r`
-/// is at or below `target` in the Tree).
-fn is_ancestor_or_self(target: ResourceId, r: ResourceId, tree: &Tree) -> bool {
+/// Returns true iff `r` is `target` or a descendant of `target` (i.e., `r`
+/// lies in `target`'s subtree). The walk goes `r → parent(r) → ...` until
+/// it hits `target` (true) or runs out of ancestors (false).
+fn r_is_at_or_under(r: ResourceId, target: ResourceId, tree: &Tree) -> bool {
     let mut cur = Some(r);
     while let Some(c) = cur {
         if c == target {

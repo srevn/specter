@@ -42,7 +42,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 /// File probe. Single `lstat` against `target_path`.
 ///
@@ -144,7 +144,6 @@ pub(super) fn probe_dir(
     ProbeResult::Ok(TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
         target_resource,
         root_meta,
-        Instant::now(),
         captured_with,
         entries,
     ))))
@@ -357,7 +356,6 @@ fn walk_subdir(
     Some(Arc::new(DirSnapshot::new(
         ResourceId::default(),
         root_meta,
-        Instant::now(),
         captured_with,
         entries,
     )))

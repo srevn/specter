@@ -43,7 +43,6 @@ fn dir_snap(root: ResourceId) -> TreeSnapshot {
             inode: 0,
             device: 0,
         },
-        Instant::now(),
         0,
         BTreeMap::new(),
     )))

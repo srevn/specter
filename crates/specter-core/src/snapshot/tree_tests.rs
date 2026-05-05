@@ -10,7 +10,7 @@ use compact_str::CompactString;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -51,7 +51,6 @@ fn make_dir(
     Arc::new(DirSnapshot::new(
         resource,
         root_meta,
-        Instant::now(),
         captured_with,
         entries,
     ))
@@ -648,8 +647,8 @@ fn splice_at_anchor_equal_hash_keeps_prior_arc() {
     let mut tree = Tree::new();
     let id = tree.ensure(None, "anchor", ResourceRole::User);
     let prior = make_dir(id, meta(1, 1, 0), 0, BTreeMap::new());
-    // Construct a structurally-identical replacement (same fields except
-    // captured_at). dir_hash excludes captured_at, so hashes match.
+    // Construct a structurally-identical replacement; dir_hash folds the
+    // observable identity so hashes match.
     let replacement = make_dir(id, meta(1, 1, 0), 0, BTreeMap::new());
     assert_eq!(prior.dir_hash(), replacement.dir_hash());
     let s = splice(

@@ -284,11 +284,7 @@ impl Engine {
     }
 
     /// Dispatch a [`Input::TimerExpired`].
-    pub(crate) fn on_timer_expired(
-        &mut self,
-        id: specter_core::TimerId,
-        out: &mut StepOutput,
-    ) {
+    pub(crate) fn on_timer_expired(&mut self, id: specter_core::TimerId, out: &mut StepOutput) {
         let Some(profile_id) = self.find_profile_referencing_timer(id) else {
             out.diagnostics.push(Diagnostic::StaleTimer { id });
             return;
@@ -304,9 +300,7 @@ impl Engine {
                 return;
             };
             let (phase_kind, settle_match) = match &burst.phase {
-                BurstPhase::Batching { settle_timer } => {
-                    (PhaseKind::Batching, *settle_timer == id)
-                }
+                BurstPhase::Batching { settle_timer } => (PhaseKind::Batching, *settle_timer == id),
                 BurstPhase::Verifying { .. } => (PhaseKind::Verifying, false),
                 BurstPhase::Draining => (PhaseKind::Draining, false),
             };
@@ -625,11 +619,7 @@ impl Engine {
     /// work: a Pending Profile carries no anchor contribution and
     /// participates in no burst-suppress accounting, so
     /// `finish_burst_to_idle`'s `sub_suppress` would underflow.
-    pub(crate) fn finalize_anchor_lost(
-        &mut self,
-        profile_id: ProfileId,
-        out: &mut StepOutput,
-    ) {
+    pub(crate) fn finalize_anchor_lost(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };

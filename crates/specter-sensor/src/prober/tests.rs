@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn fresh_expected() -> ExpectedMap {
@@ -480,7 +480,6 @@ fn mtime_skip_does_not_match_when_mtime_differs() {
             mtime: std::time::UNIX_EPOCH,
             ..baseline.root_meta
         },
-        Instant::now(),
         baseline.captured_with,
         baseline.entries.clone(),
     ));
@@ -525,7 +524,6 @@ fn mtime_skip_does_not_match_when_inode_differs() {
             inode: baseline.root_meta.inode.wrapping_add(1),
             ..baseline.root_meta
         },
-        Instant::now(),
         baseline.captured_with,
         baseline.entries.clone(),
     ));
@@ -567,7 +565,6 @@ fn mtime_skip_does_not_match_when_device_differs() {
             device: baseline.root_meta.device.wrapping_add(1),
             ..baseline.root_meta
         },
-        Instant::now(),
         baseline.captured_with,
         baseline.entries.clone(),
     ));

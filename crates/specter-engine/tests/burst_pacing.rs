@@ -18,9 +18,9 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DirMeta, DirSnapshot,
-    EffectScope, FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse,
-    ProbeResult, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, TreeSnapshot,
+    ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope,
+    FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, TreeSnapshot,
 };
 use specter_engine::{Engine, SubAttachRequest};
 use std::collections::BTreeMap;
@@ -42,7 +42,6 @@ fn empty_dir_snap(root: ResourceId) -> TreeSnapshot {
             inode: 0,
             device: 0,
         },
-        Instant::now(),
         0,
         BTreeMap::<CompactString, ChildEntry>::new(),
     )))
@@ -248,7 +247,6 @@ fn sustained_unstable_response_storm_paces_at_settle() {
                 inode: 0,
                 device: 0,
             },
-            Instant::now(),
             0,
             entries,
         )));

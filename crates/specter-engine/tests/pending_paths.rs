@@ -59,7 +59,6 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
             inode: 0,
             device: 0,
         },
-        Instant::now(),
         0,
         map,
     )))

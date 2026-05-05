@@ -53,7 +53,7 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 // ---------------------------------------------------------------------------
 // DirMeta
@@ -240,7 +240,6 @@ impl ChildEntry {
 pub struct DirSnapshot {
     pub root_resource: ResourceId,
     pub root_meta: DirMeta,
-    pub captured_at: Instant,
     pub captured_with: u64,
     pub entries: BTreeMap<CompactString, ChildEntry>,
     dir_hash: OnceLock<u128>,
@@ -254,14 +253,12 @@ impl DirSnapshot {
     pub const fn new(
         root_resource: ResourceId,
         root_meta: DirMeta,
-        captured_at: Instant,
         captured_with: u64,
         entries: BTreeMap<CompactString, ChildEntry>,
     ) -> Self {
         Self {
             root_resource,
             root_meta,
-            captured_at,
             captured_with,
             entries,
             dir_hash: OnceLock::new(),
@@ -282,7 +279,6 @@ impl Clone for DirSnapshot {
         let out = Self::new(
             self.root_resource,
             self.root_meta,
-            self.captured_at,
             self.captured_with,
             self.entries.clone(),
         );
@@ -295,9 +291,7 @@ impl Clone for DirSnapshot {
 
 impl PartialEq for DirSnapshot {
     fn eq(&self, other: &Self) -> bool {
-        // Excludes `captured_at` (timing artifact: two snapshots with
-        // identical entries and metadata but constructed at different
-        // instants are equal) and the `dir_hash` cache (derived view).
+        // Excludes the `dir_hash` cache (derived view).
         self.root_resource == other.root_resource
             && self.root_meta == other.root_meta
             && self.captured_with == other.captured_with
@@ -308,8 +302,7 @@ impl Eq for DirSnapshot {}
 
 impl std::fmt::Debug for DirSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Excludes `captured_at` (timing artifact, not part of identity)
-        // and `dir_hash` (cached derived view); `finish_non_exhaustive`
+        // Excludes `dir_hash` (cached derived view); `finish_non_exhaustive`
         // states the omission honestly.
         f.debug_struct("DirSnapshot")
             .field("root_resource", &self.root_resource)
@@ -447,24 +440,7 @@ fn subtree_at_impl(
     let TreeSnapshot::Dir(root) = snap else {
         return None;
     };
-    let anchor = root.root_resource;
-
-    // Build the chain [target, ..., anchor] by walking `tree.parent`.
-    // None ⇒ target isn't in anchor's subtree (parent walk bottoms out
-    // before reaching anchor).
-    let mut chain: SmallVec<[ResourceId; 8]> = SmallVec::new();
-    let mut cur = target;
-    loop {
-        chain.push(cur);
-        if cur == anchor {
-            break;
-        }
-        match tree.parent(cur) {
-            Some(p) => cur = p,
-            None => return None,
-        }
-    }
-    chain.reverse();
+    let chain = ancestor_chain(target, root.root_resource, tree)?;
 
     // Descend from `root` by following segment names. `chain[0] == anchor`
     // matches `root` already, so we start at `chain[1]`.
@@ -478,6 +454,32 @@ fn subtree_at_impl(
         current = Arc::clone(next);
     }
     Some(current)
+}
+
+/// Walk `tree.parent` from `target` up to `anchor` and return the
+/// inclusive chain `[anchor, mid_1, ..., target]`. Returns `None` when
+/// `target` is not in `anchor`'s subtree (the parent walk bottoms out
+/// before reaching `anchor`).
+///
+/// Sole helper for navigation that needs to follow the path from an
+/// anchor down to one of its descendants — `subtree_at_impl` consumes
+/// it as the descent guide for snapshot navigation; `splice` consumes
+/// it to know which intermediate `DirSnapshot`s need rebuilding.
+fn ancestor_chain(
+    target: ResourceId,
+    anchor: ResourceId,
+    tree: &Tree,
+) -> Option<SmallVec<[ResourceId; 8]>> {
+    let mut chain: SmallVec<[ResourceId; 8]> = SmallVec::new();
+    let mut cur = target;
+    loop {
+        chain.push(cur);
+        if cur == anchor {
+            chain.reverse();
+            return Some(chain);
+        }
+        cur = tree.parent(cur)?;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +528,7 @@ pub fn splice(
         return TreeSnapshot::Dir(replacement);
     }
 
-    let Some(chain) = chain_from_anchor(anchor, target, tree) else {
+    let Some(chain) = ancestor_chain(target, anchor, tree) else {
         return TreeSnapshot::Dir(replacement);
     };
 
@@ -537,23 +539,6 @@ pub fn splice(
         TreeSnapshot::Dir(root)
     } else {
         TreeSnapshot::Dir(new_root)
-    }
-}
-
-fn chain_from_anchor(
-    anchor: ResourceId,
-    target: ResourceId,
-    tree: &Tree,
-) -> Option<SmallVec<[ResourceId; 8]>> {
-    let mut chain: SmallVec<[ResourceId; 8]> = SmallVec::new();
-    let mut cur = target;
-    loop {
-        chain.push(cur);
-        if cur == anchor {
-            chain.reverse();
-            return Some(chain);
-        }
-        cur = tree.parent(cur)?;
     }
 }
 
@@ -604,14 +589,13 @@ fn splice_dir(
             subtree: Some(new_child),
         }),
     );
-    // Preserve prior's captured_at / captured_with on the rebuilt parent:
-    // it is conceptually "still the same observation as prior, with one
-    // child subtree spliced in". captured_with is constant within a
-    // Profile by construction; captured_at is observational.
+    // Preserve prior's `captured_with` on the rebuilt parent: it is
+    // conceptually "still the same observation as prior, with one child
+    // subtree spliced in", and `captured_with` is constant within a
+    // Profile by construction.
     Arc::new(DirSnapshot::new(
         prior.root_resource,
         prior.root_meta,
-        prior.captured_at,
         prior.captured_with,
         new_entries,
     ))

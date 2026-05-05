@@ -61,7 +61,6 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
             inode: 0,
             device: 0,
         },
-        Instant::now(),
         0,
         map,
     )))

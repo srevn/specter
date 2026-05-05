@@ -202,7 +202,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use std::time::{Duration, Instant, UNIX_EPOCH};
+    use std::time::{Duration, UNIX_EPOCH};
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
@@ -479,7 +479,6 @@ mod tests {
                 inode: 0,
                 device: 0,
             },
-            Instant::now(),
             0,
             BTreeMap::<CompactString, ChildEntry>::new(),
         )));
