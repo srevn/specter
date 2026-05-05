@@ -592,6 +592,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
     #[should_panic(expected = "called twice")]
     fn attach_duplicate_panics_in_debug() {
         let mut tree = Tree::new();
