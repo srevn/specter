@@ -735,11 +735,9 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let (resource, events_union, had_anchor_contribution) = match self.profiles.get(profile_id)
-        {
-            Some(p) => (p.resource, p.events_union, p.anchor_contribution),
-            None => return,
-        };
+        if self.profiles.get(profile_id).is_none() {
+            return;
+        }
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = None;
             p.current = None;
@@ -748,23 +746,11 @@ impl Engine {
             profile: profile_id,
             intent: BurstIntent::Seed,
         });
-        // Release the anchor's contribution BEFORE finish_burst_to_idle
-        // so any deferred `reap_profile` (reap_pending) sees a cleared
-        // flag and doesn't try to release the same contribution twice.
-        // Clear `anchor_contribution` before the call so the multi-
-        // contributor recompute excludes this Profile's mask.
-        if had_anchor_contribution {
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.anchor_contribution = false;
-            }
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                resource,
-                events_union,
-                out,
-            );
-        }
+        // Release BEFORE finish_burst_to_idle so any deferred
+        // `reap_profile` (reap_pending) sees a cleared flag — preserves
+        // the trichotomy invariant `!(Pending && anchor_contribution)`
+        // across the eventual `start_pending_recovery` transition.
+        self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, now, out);
     }
 
@@ -780,11 +766,9 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let (resource, events_union, had_anchor_contribution) = match self.profiles.get(profile_id)
-        {
-            Some(p) => (p.resource, p.events_union, p.anchor_contribution),
-            None => return,
-        };
+        if self.profiles.get(profile_id).is_none() {
+            return;
+        }
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = None;
             p.current = None;
@@ -794,18 +778,7 @@ impl Engine {
             intent: BurstIntent::Seed,
             errno,
         });
-        if had_anchor_contribution {
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.anchor_contribution = false;
-            }
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                resource,
-                events_union,
-                out,
-            );
-        }
+        self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, now, out);
     }
 
@@ -903,11 +876,9 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let (resource, events_union, had_anchor_contribution) = match self.profiles.get(profile_id)
-        {
-            Some(p) => (p.resource, p.events_union, p.anchor_contribution),
-            None => return,
-        };
+        if self.profiles.get(profile_id).is_none() {
+            return;
+        }
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = None;
             p.current = None;
@@ -916,18 +887,7 @@ impl Engine {
             profile: profile_id,
             intent: BurstIntent::Standard,
         });
-        if had_anchor_contribution {
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.anchor_contribution = false;
-            }
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                resource,
-                events_union,
-                out,
-            );
-        }
+        self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, now, out);
     }
 
@@ -942,11 +902,9 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let (resource, events_union, had_anchor_contribution) = match self.profiles.get(profile_id)
-        {
-            Some(p) => (p.resource, p.events_union, p.anchor_contribution),
-            None => return,
-        };
+        if self.profiles.get(profile_id).is_none() {
+            return;
+        }
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = None;
             p.current = None;
@@ -956,18 +914,7 @@ impl Engine {
             intent: BurstIntent::Standard,
             errno,
         });
-        if had_anchor_contribution {
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.anchor_contribution = false;
-            }
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                resource,
-                events_union,
-                out,
-            );
-        }
+        self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, now, out);
     }
 

@@ -13,7 +13,7 @@
 //! corresponding `on_*` handler. `attach_sub` is the engine's public
 //! Sub-attachment API.
 
-use crate::refcounts::{add_watch_demand, sub_watch_demand};
+use crate::refcounts::add_watch_demand;
 use crate::stability::StabilityIndex;
 use crate::timer::TimerHeap;
 use specter_core::{
@@ -503,122 +503,49 @@ impl Engine {
     /// `ProfileMap`, try-reap the anchor Resource, and emit a
     /// `ReapPendingResolved` Diagnostic.
     ///
-    /// **Per-Resource union recompute.** Each `sub_watch_demand` call
-    /// triggers a recompute of the target Resource's `events_union` if
-    /// the post-decrement refcount is still > 0 (multi-Profile sharing).
-    /// The recompute reads each Profile's bookkeeping flags
-    /// (`anchor_contribution`, `watch_root_parent`, `state ==
-    /// Pending(d)`) to attribute contributions; this Profile's flags must
-    /// be cleared **before** the call so the recompute models the
-    /// post-release state. Each release block clears its flag inline.
+    /// **Trichotomy.** A Profile holds at most one of {anchor contribution,
+    /// descent prefix contribution} at any time:
+    ///
+    ///   - **Materialized** (immediate-Seed bumped anchor, or descent
+    ///     advanced through anchor materialization): the Profile owns +1
+    ///     on `anchor.watch_demand` and +1 on
+    ///     `watch_root_parent.watch_demand` (when the anchor has a
+    ///     parent). No `ProfileState::Pending(_)` payload.
+    ///   - **Pending**: the Profile owns +1 on
+    ///     `descent.current_prefix.watch_demand` and nothing else
+    ///     (`watch_root_parent` is set only at materialization;
+    ///     `anchor_contribution` only flips at the same site).
+    ///   - **Purged** (post-WatchOpRejected purge): the Profile owns no
+    ///     contributions; the clamp atomically released them and the
+    ///     associated bookkeeping was cleaned up by the purge fan-out.
+    ///
+    /// Each release helper is idempotent and counter-aware, so calling
+    /// all three in any order yields the correct net effect for any
+    /// trichotomy state.
     ///
     /// Sole call sites: `detach_sub_inner` (Idle / Pending Profile,
     /// immediate reap) and `finish_burst_to_idle` (deferred reap when
     /// `reap_pending` was set mid-burst).
     pub(crate) fn reap_profile(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        // Snapshot what we need to release. The set of contributions a
-        // Profile holds at reap time varies by lifecycle state:
-        //
-        //   - **Materialized** (immediate-Seed bumped anchor, or descent
-        //     advanced through anchor materialization): the Profile owns
-        //     +1 on `anchor.watch_demand` and +1 on
-        //     `watch_root_parent.watch_demand` (when the anchor has a
-        //     parent). No `ProfileState::Pending(_)` payload.
-        //   - **Pending**: the Profile owns +1 on
-        //     `descent.current_prefix.watch_demand` and nothing else
-        //     (`watch_root_parent` is set only at materialization;
-        //     `anchor_contribution` only flips at the same site).
-        //   - **Purged** (post-WatchOpRejected purge): the Profile owns
-        //     no contributions; the clamp atomically released them and
-        //     the descent state was reset to `Idle` by the purge.
-        //
-        // `anchor_contribution` and `ProfileState::Pending(_)` partition
-        // these three cases exactly. The trichotomy debug_assert below
-        // pins the invariant in code, not just prose.
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
         let anchor = p.resource;
-        let watch_root_parent = p.watch_root_parent;
-        let events_union = p.events_union;
-        let had_anchor_contribution = p.anchor_contribution;
-        let descent_prefix = match &p.state {
-            ProfileState::Pending(d) => Some(d.current_prefix),
-            _ => None,
-        };
 
-        // The Pending state and the anchor contribution are mutually
-        // exclusive: descent flips Pending → Idle and bumps the anchor
-        // atomically in `dispatch_descent_ok`'s anchor branch. A
-        // Profile that is both Pending AND `anchor_contribution = true`
-        // is a state-machine bug.
+        // Trichotomy invariant: Pending and anchor_contribution are
+        // mutually exclusive. Descent flips Pending → Idle and bumps the
+        // anchor atomically in `dispatch_descent_ok`'s anchor branch.
         debug_assert!(
-            !(descent_prefix.is_some() && had_anchor_contribution),
+            !(matches!(p.state, ProfileState::Pending(_)) && p.anchor_contribution),
             "reap_profile: Pending + anchor_contribution must be mutually exclusive",
         );
 
-        if let Some(prefix) = descent_prefix {
-            // Pending Profile: only the descent's prefix carries this
-            // Profile's contribution. Anchor was never bumped.
-            //
-            // Clear `state` to Idle BEFORE `sub_watch_demand` so the
-            // recompute correctly excludes this Profile's STRUCTURE
-            // contribution to the prefix in multi-contributor cases.
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.state = ProfileState::Idle;
-            }
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                prefix,
-                ClassSet::STRUCTURE,
-                out,
-            );
-            self.tree.try_reap(prefix);
-        } else if had_anchor_contribution {
-            // Materialized Profile: release the anchor's contribution.
-            // Clear `anchor_contribution` BEFORE the call so the
-            // recompute excludes this Profile's mask.
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.anchor_contribution = false;
-            }
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                anchor,
-                events_union,
-                out,
-            );
-        }
-        // Purged Profile: nothing to release; the clamp already did it.
-
-        // Watch-root parent's contribution. Set only at anchor
-        // materialization, so `Some(parent_id)` is reachable only
-        // alongside `had_anchor_contribution`. The double-check on the
-        // flag is deliberately absent — the field's `Option` already
-        // encodes the contribution's presence.
-        //
-        // Clear `watch_root_parent` BEFORE `sub_watch_demand` so the
-        // recompute excludes this Profile's STRUCTURE contribution to
-        // the parent.
-        if let Some(parent_id) = watch_root_parent {
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.watch_root_parent = None;
-            }
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                parent_id,
-                ClassSet::STRUCTURE,
-                out,
-            );
-            // The parent may now have no contributions; `try_reap` is
-            // gated by `has_anchors`, which checks the parent's role +
-            // children + profiles. WatchRootParent role survives reap
-            // until contributions hit zero AND no children/Profiles
-            // anchor it.
-            self.tree.try_reap(parent_id);
-        }
+        // Release every claim this Profile may hold. Helpers are
+        // idempotent — no-op when the corresponding flag is unset (or
+        // counter is zero, post-clamp).
+        self.release_descent_prefix_claim(profile_id, out);
+        self.release_anchor_claim(profile_id, out);
+        self.release_watch_root_parent_claim(profile_id, out);
 
         // Detach the Profile from the registry.
         let _ = self.profiles.detach(&mut self.tree, profile_id);

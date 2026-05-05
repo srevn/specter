@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod burst;
+mod claims;
 mod coverage;
 mod descent;
 mod engine;
