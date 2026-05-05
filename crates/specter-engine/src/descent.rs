@@ -202,6 +202,11 @@ impl crate::Engine {
     /// Dispatch a `ProbeResponse` for a Profile whose state is
     /// `ProfileState::Pending`. `on_probe_response` matches on `&p.state`
     /// and routes here if the Pending arm wins.
+    ///
+    /// The probe channel (`Profile.pending_probe`) was closed at the top
+    /// of `on_probe_response` before this call. The descent's variant
+    /// payload (`d.phase`) is kept in sync here for the dual-write window
+    /// — Commit D drops the variant entirely.
     pub(crate) fn dispatch_descent_probe(
         &mut self,
         profile_id: ProfileId,
@@ -209,16 +214,6 @@ impl crate::Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // Close the probe channel: the response just arrived, so the
-        // engine-side slot must clear before any dispatch arm opens a
-        // fresh one (advance / rewind paths re-mint via
-        // `mint_probe_correlation`, which I5-asserts a closed channel).
-        // The variant clear (`d.phase = AwaitingEvent`) coexists with
-        // the `pending_probe = None` clear during the dual-write phase
-        // (Commit B); both serve I5 against different readers.
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.pending_probe = None;
-        }
         if let Some(d) = self.descent_state_mut(profile_id) {
             d.phase = DescentPhase::AwaitingEvent;
         }
@@ -520,20 +515,21 @@ impl crate::Engine {
     /// Handle an `FsEvent` arriving at a descent's `current_prefix`.
     /// Triggers a fresh probe (no settle wait — descent is event-driven).
     /// I5: drops the event if a probe is already in flight (the in-flight
-    /// probe will pick up the change in its response).
+    /// probe will pick up the change in its response). The "in flight"
+    /// signal is the engine-level probe channel slot
+    /// (`Profile.pending_probe`); the descent's variant payload (`d.phase`)
+    /// is dual-written but no longer the source of truth.
     pub(crate) fn on_descent_event(
         &mut self,
         profile_id: ProfileId,
         _now: Instant,
         out: &mut StepOutput,
     ) {
+        if self.pending_probe(profile_id).is_some() {
+            return;
+        }
         let prefix = match self.descent_state(profile_id) {
-            Some(d) => {
-                if matches!(d.phase, DescentPhase::Probing { .. }) {
-                    return; // probe in flight; let it pick up the change
-                }
-                d.current_prefix
-            }
+            Some(d) => d.current_prefix,
             None => return,
         };
 

@@ -206,11 +206,14 @@ impl Engine {
 
     /// Dispatch a [`ProbeResponse`].
     ///
-    /// A single `match &p.state` decides between Pending (descent dispatch)
-    /// and Active(Probing) (burst dispatch). The variants are mutually
-    /// exclusive by type — the compiler rules out any "Profile is in both"
-    /// race, and there is exactly one place to reason about probe correlation
-    /// matching.
+    /// I5 staleness is decided once, against the per-Profile probe channel
+    /// (`Profile.pending_probe`): the response is live iff the slot holds
+    /// the received correlation. After the live check the channel is closed
+    /// before any dispatch arm runs — descent advance, post-Effect Seed,
+    /// and Draining → Verifying reconfirm all re-mint via
+    /// [`Engine::mint_probe_correlation`], which I5-asserts an empty slot.
+    /// State-machine identity (`Pending` vs `Active`) then routes the live
+    /// response to the descent or burst dispatch family.
     pub(crate) fn on_probe_response(
         &mut self,
         response: ProbeResponse,
@@ -218,48 +221,55 @@ impl Engine {
         out: &mut StepOutput,
     ) {
         let profile_id = response.profile;
-        let received_correlation = response.correlation;
+        let received = response.correlation;
 
-        let dispatch = {
-            let Some(p) = self.profiles.get(profile_id) else {
+        // Single I5 stale-detection check, anchored to the Profile-level
+        // probe channel. Catches every stale path: stale ProfileId, response
+        // after Cancel, response after a fresh mint (release-build I5
+        // overwrite — see `mint_probe_correlation`), out-of-order response.
+        let is_live = self
+            .profiles
+            .get(profile_id)
+            .is_some_and(|p| p.pending_probe == Some(received));
+        if !is_live {
+            out.diagnostics.push(Diagnostic::StaleProbeResponse {
+                profile: profile_id,
+                correlation: received,
+            });
+            return;
+        }
+
+        // Close the channel BEFORE dispatching. Dispatch arms may re-open a
+        // fresh channel (descent advance / rewind, anchor-materialization
+        // → Seed, Draining → Verifying reconfirm); they MUST see a closed
+        // channel on entry, otherwise the I5 debug_assert in
+        // `mint_probe_correlation` fires.
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.pending_probe = None;
+        }
+
+        // Route on state-machine identity. The live `pending_probe` belongs
+        // to either a descent (`Pending`) or a burst (`Active`); the
+        // wildcard absorbs `Idle` (defensive — should not occur with
+        // `pending_probe = Some(_)`) and any future `non_exhaustive`
+        // variant.
+        let dispatch = match self.profiles.get(profile_id).map(|p| &p.state) {
+            Some(ProfileState::Pending(_)) => ProbeDispatch::Descent,
+            Some(ProfileState::Active(burst)) => ProbeDispatch::Burst {
+                intent: burst.intent,
+                forced: burst.forced,
+            },
+            _ => {
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
                     profile: profile_id,
-                    correlation: received_correlation,
+                    correlation: received,
                 });
                 return;
-            };
-            match &p.state {
-                ProfileState::Pending(descent)
-                    if matches!(
-                        &descent.phase,
-                        DescentPhase::Probing { correlation } if *correlation == received_correlation,
-                    ) =>
-                {
-                    ProbeDispatch::Descent
-                }
-                ProfileState::Active(burst) => match &burst.phase {
-                    BurstPhase::Verifying { correlation }
-                        if *correlation == received_correlation =>
-                    {
-                        ProbeDispatch::Burst {
-                            intent: burst.intent,
-                            forced: burst.forced,
-                        }
-                    }
-                    _ => ProbeDispatch::Stale,
-                },
-                // Pending with non-matching correlation, Idle, or any
-                // future `non_exhaustive` variant: response is stale.
-                _ => ProbeDispatch::Stale,
             }
         };
 
         match dispatch {
             ProbeDispatch::Descent => {
-                // Descent close runs inside `dispatch_descent_probe`
-                // (adjacent to the variant clear during the dual-write
-                // phase). See its body for the pending_probe = None /
-                // d.phase = AwaitingEvent pair.
                 let arm = match response.result {
                     ProbeResult::Ok(tree_snap) => crate::descent::ProbeResultArm::Ok(tree_snap),
                     ProbeResult::Vanished => crate::descent::ProbeResultArm::Vanished,
@@ -269,48 +279,26 @@ impl Engine {
                 };
                 self.dispatch_descent_probe(profile_id, arm, now, out);
             }
-            ProbeDispatch::Burst { intent, forced } => {
-                // Close the burst-side probe channel BEFORE dispatching.
-                // The dispatch arms may open a fresh channel
-                // (`dispatch_seed_ok` post-rebase wouldn't but
-                // `dispatch_standard_ok`'s Draining-exit cascade in
-                // `finish_burst_to_idle` re-enters `transition_to_verifying`
-                // for ancestors); they MUST see a closed channel
-                // entering, otherwise `mint_probe_correlation`'s I5
-                // assertion would fire. Commit C centralizes this
-                // pre-dispatch close at the top of `on_probe_response`
-                // for both arms; the descent arm currently routes its
-                // close through `dispatch_descent_probe`.
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.pending_probe = None;
+            ProbeDispatch::Burst { intent, forced } => match (intent, response.result) {
+                (BurstIntent::Seed, ProbeResult::Ok(tree_snap)) => {
+                    self.dispatch_seed_ok(profile_id, tree_snap, out);
                 }
-                match (intent, response.result) {
-                    (BurstIntent::Seed, ProbeResult::Ok(tree_snap)) => {
-                        self.dispatch_seed_ok(profile_id, tree_snap, out);
-                    }
-                    (BurstIntent::Seed, ProbeResult::Vanished) => {
-                        self.dispatch_seed_vanished(profile_id, out);
-                    }
-                    (BurstIntent::Seed, ProbeResult::Failed { errno }) => {
-                        self.dispatch_seed_failed(profile_id, errno, out);
-                    }
-                    (BurstIntent::Standard, ProbeResult::Ok(tree_snap)) => {
-                        self.dispatch_standard_ok(profile_id, tree_snap, forced, now, out);
-                    }
-                    (BurstIntent::Standard, ProbeResult::Vanished) => {
-                        self.dispatch_standard_vanished(profile_id, out);
-                    }
-                    (BurstIntent::Standard, ProbeResult::Failed { errno }) => {
-                        self.dispatch_standard_failed(profile_id, errno, out);
-                    }
+                (BurstIntent::Seed, ProbeResult::Vanished) => {
+                    self.dispatch_seed_vanished(profile_id, out);
                 }
-            }
-            ProbeDispatch::Stale => {
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    profile: profile_id,
-                    correlation: received_correlation,
-                });
-            }
+                (BurstIntent::Seed, ProbeResult::Failed { errno }) => {
+                    self.dispatch_seed_failed(profile_id, errno, out);
+                }
+                (BurstIntent::Standard, ProbeResult::Ok(tree_snap)) => {
+                    self.dispatch_standard_ok(profile_id, tree_snap, forced, now, out);
+                }
+                (BurstIntent::Standard, ProbeResult::Vanished) => {
+                    self.dispatch_standard_vanished(profile_id, out);
+                }
+                (BurstIntent::Standard, ProbeResult::Failed { errno }) => {
+                    self.dispatch_standard_failed(profile_id, errno, out);
+                }
+            },
         }
     }
 
@@ -1302,19 +1290,18 @@ impl Engine {
 
 /// Snapshot of `on_probe_response`'s routing decision. Computed under a
 /// short `&self.profiles` borrow, then dispatched under `&mut self`.
-/// Three variants:
-/// - `Descent`: the response matches `ProfileState::Pending(d)` where
-///   `d.probe_correlation == Some(received)`. Routes to
-///   `dispatch_descent_probe`.
-/// - `Burst { intent, forced }`: the response matches
-///   `ProfileState::Active(b)` with `b.phase == Probing { correlation }`
-///   and the correlation matches. The intent + forced flags are
-///   captured here so the dispatch arm can act on them.
-/// - `Stale`: no live channel matches — emits `StaleProbeResponse`.
+/// Two variants:
+/// - `Descent`: the live response targets `ProfileState::Pending(_)`. Routes
+///   to `dispatch_descent_probe`.
+/// - `Burst { intent, forced }`: the live response targets
+///   `ProfileState::Active(_)`. The intent + forced flags are captured here
+///   so the dispatch arm can act on them.
+///
+/// Stale responses are filtered before this enum is constructed (top-level
+/// `pending_probe == Some(received)` check in `on_probe_response`).
 enum ProbeDispatch {
     Descent,
     Burst { intent: BurstIntent, forced: bool },
-    Stale,
 }
 
 /// Resolve an Effect's `cwd` from the Profile's anchor path + kind.
