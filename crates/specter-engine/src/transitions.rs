@@ -14,9 +14,10 @@ use crate::Engine;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use crate::refcounts::clamp_watch_demand_to_zero;
 use specter_core::{
-    BurstIntent, BurstPhase, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect, EffectOutcome,
-    EffectScope, FsEvent, ProbeOp, ProbeResponse, ProbeResult, ProfileId, ProfileState, ResourceId,
-    ResourceKind, StepOutput, SubId, SubRegistryDiff, TreeSnapshot, WatchOp,
+    BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect,
+    EffectOutcome, EffectScope, FsEvent, ProbeOp, ProbeResponse, ProbeResult, ProfileId,
+    ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TreeSnapshot,
+    WatchOp,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -443,57 +444,113 @@ impl Engine {
     /// Dispatch a [`Input::WatchOpRejected`].
     ///
     /// The Sensor failed to install a kernel watch (typically `EMFILE` /
-    /// `ENFILE` on FD exhaustion). The Engine clamps `watch_demand := 0`
-    /// on `resource` — losing every contributing Profile's watch demand
-    /// atomically — and waits for reconciliation on the parent's next
-    /// `StructureChanged` to rebuild the contributions. Heavy reset, but
-    /// rare; v1 doesn't engineer per-Profile contribution tracking.
+    /// `ENFILE` on FD exhaustion). Three things must happen:
+    ///
+    /// 1. Clamp `watch_demand := 0` and `events_union := EMPTY` on
+    ///    `resource` so the engine's view of "is this slot watched?"
+    ///    matches reality.
+    /// 2. Walk every Profile that holds a per-Profile claim on
+    ///    `resource` (anchor / watch-root parent / descent prefix) and
+    ///    clean up its bookkeeping — otherwise the Profile flag
+    ///    contradicts the post-clamp counter, and any subsequent
+    ///    Profile-driven release path would either see the wrong union
+    ///    on recompute or silently drift further out of sync.
+    /// 3. Emit one `ProfileClaimPurged` Diagnostic per affected
+    ///    (Profile, claim_kind) pair, plus the umbrella
+    ///    `WatchOpRejected` diagnostic.
+    ///
+    /// A single resource may be claimed by multiple Profiles via
+    /// different roles — anchor of P, watch-root parent of Q, descent
+    /// prefix of R — so the fan-out walks all three claim slots
+    /// independently.
     ///
     /// Stale resources (already Unwatched, queue-race) are a no-op +
-    /// Diagnostic.
+    /// `WatchOpRejected` diagnostic; the per-claim walk yields nothing
+    /// because Profile back-references would have been cleared at reap.
     pub(crate) fn on_watch_op_rejected(
         &mut self,
         resource: ResourceId,
         _op: WatchOp,
         errno: i32,
-        _now: Instant,
+        now: Instant,
         out: &mut StepOutput,
     ) {
-        // Always emit the diagnostic for log readability. The clamp helper
-        // is a no-op when `watch_demand == 0`, so it's safe to call
-        // unconditionally.
         out.diagnostics
             .push(Diagnostic::WatchOpRejected { resource, errno });
+
+        // Snapshot every claimer BEFORE any mutation. Borrow checker
+        // (we'll mutate self.profiles in the loop) and we want a stable
+        // view of the pre-clamp world: a Profile that's `Pending(d)`
+        // with `d.current_prefix == resource` must be detected here,
+        // because the helpers we run below transition the Profile to
+        // Idle.
+        let mut anchor_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
+        let mut parent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
+        let mut descent_claimers: smallvec::SmallVec<[(ProfileId, bool); 2]> =
+            smallvec::SmallVec::new();
+        for (pid, p) in self.profiles.iter() {
+            if p.anchor_contribution && p.resource == resource {
+                anchor_claimers.push(pid);
+            }
+            if p.watch_root_parent == Some(resource) {
+                parent_claimers.push(pid);
+            }
+            if let ProfileState::Pending(d) = &p.state
+                && d.current_prefix == resource
+            {
+                descent_claimers.push((pid, d.probe_correlation.is_some()));
+            }
+        }
+
+        // Atomic counter zero. Helpers below see counter == 0 ⇒
+        // flag-clear only, no `sub_watch_demand` ⇒ no underflow.
         clamp_watch_demand_to_zero(&mut self.tree, resource, out);
 
-        // Vacate any descents whose `current_prefix == resource`. The
-        // clamp atomically zeroed the prefix's `watch_demand`, dropping
-        // every descent's contribution at once. A subsequent
-        // `sub_watch_demand` (probe-Ok-advance, probe-Vanished-rewind, or
-        // reap path) would underflow the now-zero counter — purge the
-        // descent state to close that race. Cancel any in-flight probe
-        // so the prober can skip the syscall under load (best-effort);
-        // the late ProbeResponse, if it still arrives, is dropped since
-        // the Profile no longer matches a Probing slot.
-        let purge_targets = self.descents_at_prefix(resource);
-        for pid in purge_targets {
-            let had_inflight = self
-                .descent_state(pid)
-                .is_some_and(|d| d.probe_correlation.is_some());
-            // Transition Pending → Idle. The `Profile.anchor_contribution`
-            // flag stays false (descent never bumps the anchor; the prefix
-            // carried the contribution and the WatchOpRejected clamp already
-            // zeroed it). Profile is now stuck Idle without an anchor —
-            // operator recovery is required.
-            if let Some(p) = self.profiles.get_mut(pid) {
-                p.state = ProfileState::Idle;
-            }
+        // Anchor claimers: synthesise an anchor-loss. `finalize_anchor_lost`
+        // cancels any in-flight Active probe, releases the anchor flag
+        // (counter-aware no-op on the post-clamp counter), and finishes
+        // the burst to Idle. `finish_burst_to_idle` decrements
+        // `suppress_count`; the clamp deliberately does NOT zero
+        // `suppress_count` so this decrement balances the burst-start's
+        // `add_suppress`.
+        for pid in anchor_claimers {
+            self.finalize_anchor_lost(pid, now, out);
+            out.diagnostics.push(Diagnostic::ProfileClaimPurged {
+                profile: pid,
+                claim: ClaimKind::Anchor,
+                resource,
+                errno,
+            });
+        }
+
+        // Watch-root parent claimers: clear the flag. The Profile's
+        // anchor stays watched (different `resource`), but auto-recovery
+        // on rename / recreation is no longer possible — operator
+        // restart is required to re-establish the parent watch.
+        for pid in parent_claimers {
+            self.release_watch_root_parent_claim(pid, out);
+            out.diagnostics.push(Diagnostic::ProfileClaimPurged {
+                profile: pid,
+                claim: ClaimKind::WatchRootParent,
+                resource,
+                errno,
+            });
+        }
+
+        // Descent claimers: cancel any in-flight probe, then release
+        // the prefix claim (transitions Profile → Idle). Without the
+        // probe cancel, a late `ProbeResponse` would arrive after the
+        // Profile transitions out of Pending and drop with
+        // `StaleProbeResponse` — wasted I/O.
+        for (pid, had_inflight) in descent_claimers {
             if had_inflight {
                 out.probe_ops.push(ProbeOp::Cancel { profile: pid });
             }
-            out.diagnostics.push(Diagnostic::PendingDescentVacated {
+            self.release_descent_prefix_claim(pid, out);
+            out.diagnostics.push(Diagnostic::ProfileClaimPurged {
                 profile: pid,
-                prefix: resource,
+                claim: ClaimKind::DescentPrefix,
+                resource,
                 errno,
             });
         }

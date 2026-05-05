@@ -275,21 +275,31 @@ pub fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
     }
 }
 
-/// Clamp `Resource.watch_demand` (and `suppress_count`, `events_union`,
-/// `kind`) to their zero values atomically, dropping every contribution at
-/// once. Sole legitimate use: `Input::WatchOpRejected` recovery — the
-/// Sensor failed to install the kernel watch, so the Engine has to revert
-/// to "this Resource is not watched at all" and let reconciliation rebuild
-/// contributions from each covering Profile on the parent's next
-/// `StructureChanged`.
+/// Clamp `Resource.watch_demand` (plus `events_union` and `kind`) to
+/// zero atomically, dropping every kernel-watch contribution at once.
+/// Sole legitimate use: `Input::WatchOpRejected` recovery — the Sensor
+/// failed to install the kernel watch, so the Engine has to revert to
+/// "this Resource is not watched at all". The matching per-Profile
+/// claim cleanup is the caller's responsibility (see
+/// `Engine::on_watch_op_rejected`'s fan-out).
 ///
 /// Emits `WatchOp::Unwatch` iff `watch_demand` was previously > 0; the
 /// Sensor's idempotence guards repeats. `events_union` is reset to
 /// `ClassSet::EMPTY` so the next 0→1 contribution starts the union fresh.
 /// `kind` is reset to `Unknown` so the next probe can stamp it from the
-/// response. A stale `ResourceId` (slot already reaped) is a no-op + no
-/// emission; the caller emits the corresponding `Diagnostic` at the call
-/// site.
+/// response.
+///
+/// **`suppress_count` is deliberately preserved.** Suppression is
+/// in-engine bookkeeping for in-flight burst phases; it tracks
+/// `start_*_burst` ↔ `finish_burst_to_idle` symmetry on the Profile
+/// side, not the kernel-watch existence. Zeroing it would underflow
+/// `sub_suppress` when the affected Profile's burst eventually
+/// finishes (`finalize_anchor_lost` → `finish_burst_to_idle` →
+/// `sub_suppress`). The caller's per-claim fan-out drives the
+/// burst-end machinery; suppress decrements come for free from there.
+///
+/// A stale `ResourceId` (slot already reaped) is a no-op + no emission;
+/// the caller emits the corresponding `Diagnostic` at the call site.
 pub fn clamp_watch_demand_to_zero(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
     let Some(res) = tree.get_mut(r) else {
         return;
@@ -299,7 +309,6 @@ pub fn clamp_watch_demand_to_zero(tree: &mut Tree, r: ResourceId, out: &mut Step
         return;
     }
     res.watch_demand = 0;
-    res.suppress_count = 0;
     res.kind = ResourceKind::Unknown;
     res.events_union = ClassSet::EMPTY;
     out.watch_ops.push(WatchOp::Unwatch { resource: r });
@@ -669,7 +678,13 @@ mod tests {
     }
 
     #[test]
-    fn clamp_watch_demand_to_zero_zeros_suppress_too() {
+    fn clamp_watch_demand_to_zero_preserves_suppress_count() {
+        // Suppression is in-engine bookkeeping for in-flight burst phases;
+        // clamp tracks the kernel-watch existence (FD lifetime) only.
+        // Zeroing suppress_count would break the start_*_burst ↔
+        // finish_burst_to_idle symmetry on the Profile side and
+        // underflow sub_suppress when the affected Profile's burst
+        // eventually finishes via finalize_anchor_lost.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         add_watch_demand(&mut tree, r, ClassSet::CONTENT, &mut out);
@@ -680,13 +695,25 @@ mod tests {
 
         clamp_watch_demand_to_zero(&mut tree, r, &mut out);
 
-        assert_eq!(tree.get(r).unwrap().suppress_count, 0);
+        assert_eq!(
+            tree.get(r).unwrap().suppress_count,
+            2,
+            "clamp leaves suppress_count untouched — the Profile's burst-end \
+             machinery decrements it symmetrically",
+        );
         let unwatch_count = out
             .watch_ops
             .iter()
             .filter(|op| matches!(op, WatchOp::Unwatch { .. }))
             .count();
         assert_eq!(unwatch_count, 1);
+        // No Unsuppress emit either — the clamp is silent on suppress.
+        let unsuppress_count = out
+            .watch_ops
+            .iter()
+            .filter(|op| matches!(op, WatchOp::Unsuppress { .. }))
+            .count();
+        assert_eq!(unsuppress_count, 0);
     }
 
     // ---------------------------------------------------------------------------

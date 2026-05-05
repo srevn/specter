@@ -19,10 +19,11 @@
 use crate::{Engine, SubAttachRequest};
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClassSet, CommandTemplate, DedupKey,
-    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent,
-    Input, LeafEntry, Placeholder, ProbeKind, ProbeOp, ProbeResponse, ProbeResult, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, TreeSnapshot, WatchOp,
+    ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet, CommandTemplate,
+    DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind,
+    FsEvent, Input, LeafEntry, Placeholder, ProbeKind, ProbeOp, ProbeResponse, ProbeResult,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, TreeSnapshot,
+    WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1281,13 +1282,17 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         "ProbeOp::Cancel emitted for the in-flight descent probe",
     );
 
-    // PendingDescentVacated diagnostic surfaces (in addition to WatchOpRejected).
+    // ProfileClaimPurged{DescentPrefix} surfaces (in addition to WatchOpRejected).
     assert!(
         result.diagnostics.iter().any(
-            |d| matches!(d, Diagnostic::PendingDescentVacated { profile, prefix, errno }
-                if *profile == pid && *prefix == foo && *errno == 24)
+            |d| matches!(d, Diagnostic::ProfileClaimPurged {
+                profile, claim, resource, errno
+            } if *profile == pid
+                && *claim == ClaimKind::DescentPrefix
+                && *resource == foo
+                && *errno == 24)
         ),
-        "PendingDescentVacated diagnostic emitted",
+        "ProfileClaimPurged{{DescentPrefix}} diagnostic emitted",
     );
 
     // Late `ProbeResponse` for the cancelled correlation arrives — must
@@ -1310,11 +1315,12 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
 }
 
 #[test]
-fn watch_op_rejected_without_descent_does_not_emit_purge_diagnostic() {
-    // Materialized Profile (no descent) — WatchOpRejected just clamps
-    // watch_demand and emits the standard Diagnostic; no
-    // PendingDescentVacated.
-    let (mut e, _pid, _sid, r, _now) = engine_with_attached_sub();
+fn watch_op_rejected_for_anchored_profile_emits_anchor_claim_purged() {
+    // Materialized Profile, WatchOpRejected at its anchor — emits
+    // ProfileClaimPurged{Anchor} (Commit 3 fan-out) + WatchOpRejected.
+    // Pre-Commit-3 this path emitted only WatchOpRejected; the anchor
+    // claim was left in inconsistent state.
+    let (mut e, pid, _sid, r, _now) = engine_with_attached_sub();
     let result = e.step(
         Input::WatchOpRejected {
             resource: r,
@@ -1328,17 +1334,21 @@ fn watch_op_rejected_without_descent_does_not_emit_purge_diagnostic() {
         Instant::now(),
     );
     assert!(
-        !result
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::PendingDescentVacated { .. })),
-        "non-descent WatchOpRejected does not emit purge diagnostic",
+        result.diagnostics.iter().any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
+            profile, claim, resource, ..
+        } if *profile == pid && *claim == ClaimKind::Anchor && *resource == r)),
+        "ProfileClaimPurged{{Anchor}} emitted for anchored Profile",
     );
     assert!(
         result
             .diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::WatchOpRejected { .. })),
+    );
+    // Anchor flag cleared.
+    assert!(
+        !e.profiles.get(pid).unwrap().anchor_contribution,
+        "anchor_contribution cleared by purge",
     );
 }
 
@@ -1396,9 +1406,14 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     let purged_count = result
         .diagnostics
         .iter()
-        .filter(|d| matches!(d, Diagnostic::PendingDescentVacated { .. }))
+        .filter(|d| matches!(d, Diagnostic::ProfileClaimPurged {
+            claim: ClaimKind::DescentPrefix, ..
+        }))
         .count();
-    assert_eq!(purged_count, 2, "one PendingDescentVacated per descent");
+    assert_eq!(
+        purged_count, 2,
+        "one ProfileClaimPurged{{DescentPrefix}} per descent",
+    );
 }
 
 // ---- P11.0: anchor_contribution flag drives reap correctness ----

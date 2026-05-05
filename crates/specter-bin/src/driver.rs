@@ -382,15 +382,17 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?profile,
             "reap-pending Profile resolved (Sub removed mid-burst)",
         ),
-        Diagnostic::PendingDescentVacated {
+        Diagnostic::ProfileClaimPurged {
             profile,
-            prefix,
+            claim,
+            resource,
             errno,
         } => tracing::warn!(
             ?profile,
-            ?prefix,
+            ?claim,
+            ?resource,
             errno,
-            "pending descent vacated (WatchOpRejected at prefix)",
+            "profile claim purged (WatchOpRejected at claimed resource)",
         ),
         Diagnostic::AttachPathInvalid { hint } => {
             tracing::error!(hint, "attach path invalid; request dropped");

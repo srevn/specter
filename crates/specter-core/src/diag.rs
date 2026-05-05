@@ -9,6 +9,19 @@ use crate::input::FsEvent;
 use crate::op::ProbeCorrelation;
 use crate::profile::BurstIntent;
 
+/// Which Profile-side claim was the subject of a [`Diagnostic::ProfileClaimPurged`]
+/// emission. Each claim type has a dedicated bookkeeping field on
+/// [`crate::profile::Profile`]:
+/// - [`Self::Anchor`] ⇔ `Profile.anchor_contribution = true`
+/// - [`Self::WatchRootParent`] ⇔ `Profile.watch_root_parent == Some(_)`
+/// - [`Self::DescentPrefix`] ⇔ `Profile.state == Pending(_)`
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaimKind {
+    Anchor,
+    WatchRootParent,
+    DescentPrefix,
+}
+
 /// Engine-emitted diagnostic. Equality is structural so tests can pin the
 /// exact variant + fields produced by a given dropped Input.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,19 +114,30 @@ pub enum Diagnostic {
     /// `Profile.reap_pending` was set; the burst completed and the Profile
     /// has been reaped. Informational — not an error.
     ReapPendingResolved { profile: ProfileId },
-    /// A pending-path descent was abandoned because the kernel rejected
-    /// the watch on its prefix (`Input::WatchOpRejected` arrived for the
-    /// resource the descent was probing). The clamp atomically zeroed
-    /// `watch_demand`, dropping the descent's contribution; the engine
-    /// drops the descent state to prevent a downstream
-    /// `sub_watch_demand` underflow when the late probe response or a
-    /// rewind would otherwise try to release the already-released
-    /// contribution. Recovery is operator-driven (re-attach via SIGHUP)
-    /// or, if the parent ancestor is itself watched, automatic via the
-    /// next reconciliation.
-    PendingDescentVacated {
+    /// A Profile's claim on `resource` was purged because the kernel
+    /// rejected the watch on it (`Input::WatchOpRejected` arrived,
+    /// clamping `watch_demand := 0`). One emission per affected
+    /// (Profile, claim_kind) pair — a single rejection at a multi-claim
+    /// resource (anchor of P, watch-root-parent of Q, descent prefix of
+    /// R) emits three.
+    ///
+    /// - [`ClaimKind::Anchor`]: the Profile lost its anchor watch. The
+    ///   engine cancels any in-flight burst probe and finishes the
+    ///   burst to Idle. Recovery is via the `watch_root_parent`'s next
+    ///   `StructureChanged` (if still watched) or operator restart.
+    /// - [`ClaimKind::WatchRootParent`]: the Profile loses its
+    ///   parent-edge recovery channel. Anchor stays watched (different
+    ///   `resource`); auto-recovery on rename/recreation is no longer
+    ///   possible.
+    /// - [`ClaimKind::DescentPrefix`]: the descent is abandoned. The
+    ///   engine cancels any in-flight descent probe and transitions the
+    ///   Profile to Idle. Recovery is operator-driven (re-attach via
+    ///   SIGHUP) or, if a parent ancestor is itself watched, automatic
+    ///   via the next reconciliation.
+    ProfileClaimPurged {
         profile: ProfileId,
-        prefix: ResourceId,
+        claim: ClaimKind,
+        resource: ResourceId,
         errno: i32,
     },
     /// A path-based attach request carried a malformed `PathBuf` —
