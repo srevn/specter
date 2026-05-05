@@ -307,7 +307,15 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let was_active = !matches!(p.state, ProfileState::Idle);
+        // Tightened from `!matches!(state, Idle)` to `Active(_)`: the
+        // burst-end machinery (`sub_suppress`, `propagate(-1)`) is
+        // Active-specific. Pending Profiles never bumped the anchor's
+        // suppress_count or the ancestor `dirty_descendants`; running
+        // this on Pending would underflow `sub_suppress`. The only
+        // documented caller-side guard that this defends against is
+        // `finalize_anchor_lost` if a future change relaxes its Pending
+        // early-return.
+        let was_active = matches!(p.state, ProfileState::Active(_));
         let resource = p.resource;
         if !was_active {
             return;

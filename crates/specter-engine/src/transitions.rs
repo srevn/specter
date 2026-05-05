@@ -12,7 +12,7 @@
 
 use crate::Engine;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
-use crate::refcounts::{clamp_watch_demand_to_zero, sub_watch_demand};
+use crate::refcounts::clamp_watch_demand_to_zero;
 use specter_core::{
     BurstIntent, BurstPhase, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect, EffectOutcome,
     EffectScope, FsEvent, ProbeOp, ProbeResponse, ProbeResult, ProfileId, ProfileState, ResourceId,
@@ -542,33 +542,52 @@ impl Engine {
                 }
                 self.transition_to_settling(profile_id, now, out);
             }
-            ProfileState::Pending(_) => {
-                // Defense-in-depth: events at a Pending Profile's anchor
-                // are structurally unreachable. The anchor's
-                // `watch_demand` is 0 during Pending (the prefix carries
-                // it instead), so `on_fs_event`'s head guard
-                // `watch_demand == 0 => EventOnUnwatchedResource` short-
-                // circuits before dispatch. Events at the descent's
-                // current_prefix were already routed to `on_descent_event`
-                // by the descent fan-out earlier in `on_fs_event`. If a
-                // path does reach here in a future routing change,
-                // dropping silently is the conservative choice — Pending
-                // has no burst to drive.
-            }
-            // `ProfileState` non_exhaustive: treat unknown future state as
-            // Idle (no-op driver). The Engine cannot construct such a state
-            // in v1.
+            // `ProfileState` non_exhaustive: Pending Profiles never reach
+            // here — `covering_profiles` filters them at the source — but
+            // the wildcard arm absorbs both Pending (defensively) and any
+            // future variant.
             _ => {}
         }
     }
 
-    /// Anchor terminal event (Removed/Renamed/Revoked).
-    /// Drops baseline/current, releases the anchor's `watch_demand`
-    /// contribution, and for Active Profiles cancels the in-flight probe
-    /// and finishes the burst to Idle. The Idle case is *not* a no-op:
-    /// stale baseline/current would survive otherwise, and the Profile's
-    /// watch contribution would point at a gone slot.
+    /// Anchor terminal event (Removed/Renamed/Revoked at `Profile.resource`).
+    /// Thin wrapper over `finalize_anchor_lost` — the FsEvent dispatcher
+    /// and the WatchOpRejected purge (Commit 3) share the same
+    /// "anchor's FD is gone, finalize the burst" logic.
     fn on_anchor_terminal_event(
+        &mut self,
+        profile_id: ProfileId,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        self.finalize_anchor_lost(profile_id, now, out);
+    }
+
+    /// Finalize the loss of a Profile's anchor: cancel any in-flight
+    /// probe, release the anchor's `watch_demand` contribution, drop the
+    /// stale `baseline` / `current` snapshots, and finish the burst to
+    /// Idle if Active.
+    ///
+    /// **Ordering.** The anchor release runs BEFORE `finish_burst_to_idle`,
+    /// so any deferred `reap_profile` (`reap_pending`) sees a cleared
+    /// `anchor_contribution` flag and skips its redundant release inside
+    /// `reap_profile::release_anchor_claim`. This mirrors the
+    /// `dispatch_*_vanished/failed` discipline (transitions.rs ~750).
+    /// Reverse-ordering would have `finish_burst_to_idle` invoke
+    /// `reap_profile`, which would release the anchor; the post-`finish`
+    /// release would then see a counter that's already zero and (pre
+    /// counter-existence-check) underflow `sub_watch_demand`. The helper
+    /// + ordering combination removes both failure modes.
+    ///
+    /// **Pending exclusion.** `ProfileState::Pending` is defensive here
+    /// — `covering_profiles` already filters Pending Profiles at the
+    /// source, so the FsEvent path can't deliver a Pending Profile.
+    /// `on_watch_op_rejected` (Commit 3) calls this directly after
+    /// iterating the full registry, where the guard does load-bearing
+    /// work: a Pending Profile carries no anchor contribution and
+    /// participates in no burst-suppress accounting, so
+    /// `finish_burst_to_idle`'s `sub_suppress` would underflow.
+    pub(crate) fn finalize_anchor_lost(
         &mut self,
         profile_id: ProfileId,
         now: Instant,
@@ -577,14 +596,14 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
+        if matches!(p.state, ProfileState::Pending(_)) {
+            return;
+        }
         let was_probing = matches!(
             &p.state,
             ProfileState::Active(b) if matches!(b.phase, BurstPhase::Probing { .. }),
         );
-        let was_active = !matches!(p.state, ProfileState::Idle);
-        let had_anchor_contribution = p.anchor_contribution;
-        let events_union = p.events_union;
-        let resource = p.resource;
+        let was_active = matches!(p.state, ProfileState::Active(_));
 
         if was_probing {
             out.probe_ops.push(ProbeOp::Cancel {
@@ -592,37 +611,17 @@ impl Engine {
             });
         }
 
-        if was_active {
-            self.finish_burst_to_idle(profile_id, now, out);
-        }
-
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = None;
             p.current = None;
         }
 
-        // Release this Profile's `watch_demand` contribution on the
-        // anchor. The contribution was added at attach_sub time (or via
-        // descent's anchor materialization) and lives until either this
-        // terminal event or reap. Multi-Profile (P5) handles co-located
-        // contributions via the same refcount path. Kind is left alone
-        // — `Unknown` is set lazily by the next probe (or by recovery
-        // via the watch-root-parent path) when the anchor reappears.
-        //
-        // Clear `anchor_contribution = false` BEFORE `sub_watch_demand`
-        // so the per-Resource `events_union` recompute (multi-contributor
-        // case) excludes this Profile's mask from the post-release union.
-        if had_anchor_contribution {
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.anchor_contribution = false;
-            }
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                resource,
-                events_union,
-                out,
-            );
+        // Release BEFORE finish_burst_to_idle. See the ordering note
+        // above.
+        self.release_anchor_claim(profile_id, out);
+
+        if was_active {
+            self.finish_burst_to_idle(profile_id, now, out);
         }
     }
 
@@ -1216,6 +1215,17 @@ impl Engine {
     /// Walk `resource` and its strict ancestors looking for Profiles whose
     /// `covers` predicate accepts `resource`. Returns the matching
     /// Profiles in encounter order. P4 single-Profile resolves to 0 or 1.
+    ///
+    /// **Pending Profiles are filtered at the source.** A Pending
+    /// Profile's anchor (`Profile.resource`) is `DescentScaffold`-roled
+    /// and carries no `watch_demand` from this Profile — the descent
+    /// prefix carries it instead. Events at the prefix route via
+    /// `descents_at_prefix` / `on_descent_event`; events at the anchor
+    /// or its descendants are structurally unreachable in production
+    /// (the anchor's `watch_demand` is 0 ⇒ head guard short-circuits).
+    /// Filtering here makes the routing contract explicit:
+    /// covering-Profile dispatch (Standard burst, anchor terminal event)
+    /// only sees Profiles with a materialized anchor.
     fn covering_profiles(&self, resource: ResourceId) -> smallvec::SmallVec<[ProfileId; 2]> {
         let mut out: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         let mut cur = Some(resource);
@@ -1224,6 +1234,9 @@ impl Engine {
                 let Some(p) = self.profiles.get(pid) else {
                     continue;
                 };
+                if matches!(p.state, ProfileState::Pending(_)) {
+                    continue;
+                }
                 if crate::coverage::covers(p, resource, &self.tree) && !out.contains(&pid) {
                     out.push(pid);
                 }
