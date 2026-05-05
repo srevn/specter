@@ -118,13 +118,7 @@ fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> 
 /// state). Returns the response correlation. After this, Profile.current
 /// and Profile.baseline are set.
 fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId, root: ResourceId) {
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!("expected Verifying"),
-        },
-        _ => panic!("expected Active"),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     let snap = dir_tree_snap(root, vec![]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -188,13 +182,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
 #[test]
 fn engine_dispatch_through_shim_matches_v4_behaviour() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     // One-Leaf TreeSnapshot — the shim flattens to one V4 Entry.
     let snap = dir_tree_snap(root, vec![("main.rs", EntryKind::File, 100)]);
     let out = e.step(
@@ -214,13 +202,7 @@ fn engine_dispatch_through_shim_matches_v4_behaviour() {
 #[test]
 fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     let snap = dir_tree_snap(root, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -247,13 +229,7 @@ fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
 #[test]
 fn probe_response_seed_vanished_clears_baseline_and_diagnoses() {
     let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
@@ -281,13 +257,7 @@ fn probe_response_seed_vanished_clears_baseline_and_diagnoses() {
 #[test]
 fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
     let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
@@ -383,13 +353,7 @@ fn standard_burst_stable_emits_effect_and_idles() {
         );
     }
     // We're in Probing; pick up the correlation.
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!("expected Verifying"),
-        },
-        _ => panic!("expected Active"),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     // Reproduce the seed-burst's empty snapshot — both shim to the same
     // V4 content_hash (entries.len() == 0), so `stable_against` holds.
     let snap = dir_tree_snap(root, vec![]);
@@ -448,13 +412,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
     // Seed → Idle.
-    let seed_corr = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let seed_corr = e.pending_probe(pid).expect("Verifying probe in flight");
     let snap = file_tree_snap(EntryKind::File, 0, std::time::UNIX_EPOCH, 1);
     e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -484,13 +442,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
             t2,
         );
     }
-    let std_corr = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
@@ -545,9 +497,7 @@ fn standard_burst_force_fires_on_max_settle() {
     // After force-fire, we're either in Probing (forced=true) or already
     // Idle if the deadline race resolved both timers. Drive the response
     // back if needed.
-    if let ProfileState::Active(burst) = &e.profiles.get(pid).unwrap().state
-        && let BurstPhase::Verifying { correlation } = burst.phase
-    {
+    if let Some(correlation) = e.pending_probe(pid) {
         // Inject a not-stable response to test the forced effect emission.
         let snap = dir_tree_snap(root, vec![("new.rs", EntryKind::File, 99)]);
         let out = e.step(
@@ -983,7 +933,7 @@ fn effect_complete_ok_in_idle_starts_seed_burst() {
         _ => panic!(),
     };
     assert_eq!(burst.intent, BurstIntent::Seed);
-    assert!(matches!(burst.phase, BurstPhase::Verifying { .. }));
+    assert!(matches!(burst.phase, BurstPhase::Verifying));
     let probes = out
         .probe_ops
         .iter()
@@ -1102,13 +1052,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
                 t,
             );
         }
-        let correlation = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => match b.phase {
-                BurstPhase::Verifying { correlation } => correlation,
-                _ => continue,
-            },
-            _ => break,
-        };
+        let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 profile: pid,
@@ -1136,13 +1080,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
 #[test]
 fn seed_burst_descendants_watched_via_first_probe() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     // First-probe response with one File and one Dir descendant.
     // Only the Dir gets a Watch op; the File materializes without an FD
     // contribution.
@@ -1282,11 +1220,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         iter.next().expect("profile exists").0
     };
     assert!(e.descent_state(pid).is_some());
-    let initial_corr = e
-        .descent_state(pid)
-        .unwrap()
-        .probe_correlation()
-        .expect("first probe in flight");
+    let initial_corr = e.pending_probe(pid).expect("first probe in flight");
     let initial_demand = e.tree.get(foo).unwrap().watch_demand;
     assert_eq!(initial_demand, 1);
 
@@ -1356,9 +1290,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
 #[test]
 fn watch_op_rejected_for_anchored_profile_emits_anchor_claim_purged() {
     // Materialized Profile, WatchOpRejected at its anchor — emits
-    // ProfileClaimPurged{Anchor} (Commit 3 fan-out) + WatchOpRejected.
-    // Pre-Commit-3 this path emitted only WatchOpRejected; the anchor
-    // claim was left in inconsistent state.
+    // ProfileClaimPurged{Anchor} + WatchOpRejected.
     let (mut e, pid, _sid, r, _now) = engine_with_attached_sub();
     let result = e.step(
         Input::WatchOpRejected {
@@ -1483,13 +1415,7 @@ fn seed_vanished_then_reap_releases_anchor_via_contribution_flag() {
     assert!(e.profiles.get(pid).unwrap().reap_pending);
 
     // Drive Seed Vanished to fire the reap.
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!("expected Verifying"),
-        },
-        _ => panic!("expected Active"),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
@@ -1608,13 +1534,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
             t2,
         );
     }
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!("expected Active"),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
 
     // Inject stable response. Profile should reap; no Effect emitted.
     let snap = dir_tree_snap(root, vec![]);
@@ -1774,13 +1694,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     let pid = e.subs.get(sid).unwrap().profile;
 
     // Complete Seed with empty baseline.
-    let seed_corr = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let seed_corr = e.pending_probe(pid).expect("Verifying probe in flight");
     e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
@@ -1812,13 +1726,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
             t2,
         );
     }
-    let std_corr = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
 
     // Inject stable response with 2 file entries.
     let snap = dir_tree_snap(
@@ -1850,13 +1758,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
             t3,
         );
     }
-    let std_corr2 = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let std_corr2 = e.pending_probe(pid).expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
@@ -1927,13 +1829,7 @@ fn per_stable_file_skips_dir_entries() {
     // Seed completes against a snapshot already containing one Dir
     // (`subdir`). After Seed, `subdir` is in the baseline and won't
     // re-appear as `created` later.
-    let seed_corr = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let seed_corr = e.pending_probe(pid).expect("Verifying probe in flight");
     let seed_snap = dir_tree_snap(r, vec![("subdir", EntryKind::Dir, 10)]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -1964,13 +1860,7 @@ fn per_stable_file_skips_dir_entries() {
             t2,
         );
     }
-    let std_corr = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
 
     // Mixed snapshot: subdir (modified — different mtime), newdir (new
     // Dir), main.rs (new File). Diff = created=[newdir, main.rs],
@@ -2003,13 +1893,7 @@ fn per_stable_file_skips_dir_entries() {
             t3,
         );
     }
-    let std_corr2 = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let std_corr2 = e.pending_probe(pid).expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
@@ -2081,13 +1965,7 @@ fn drive_to_first_effect(
         },
         now + SETTLE,
     );
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!("expected Verifying"),
-        },
-        _ => panic!("expected Active"),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     // First probe — response differs from Seed baseline ⇒ not-stable ⇒
     // Batching.
     let snap1 = dir_tree_snap(root, vec![("a.rs", EntryKind::File, 1)]);
@@ -2115,13 +1993,7 @@ fn drive_to_first_effect(
         },
         now + SETTLE + SETTLE,
     );
-    let correlation2 = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!("expected Verifying"),
-        },
-        _ => panic!("expected Active"),
-    };
+    let correlation2 = e.pending_probe(pid).expect("Verifying probe in flight");
     // Second probe — same content ⇒ stable ⇒ Effect.
     let snap2 = dir_tree_snap(root, vec![("a.rs", EntryKind::File, 1)]);
     e.step(
@@ -2202,13 +2074,7 @@ fn b3_recovery_seed_no_prior_emit_does_not_fire() {
     // b3_seed_drift_observed returns false ⇒ no Effect (preserves
     // "fresh Seed never fires Effect").
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    let correlation = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     let snap = dir_tree_snap(root, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -2579,7 +2445,7 @@ mod props {
                 if let Some(p) = e.profiles.get(pid) {
                     let probing_count = match &p.state {
                         ProfileState::Active(b) => match &b.phase {
-                            BurstPhase::Verifying { .. } => 1,
+                            BurstPhase::Verifying => 1,
                             _ => 0,
                         },
                         _ => 0,

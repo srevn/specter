@@ -345,9 +345,10 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
 // `ProbeResponse` for a now-detached Profile, which the engine drops as
 // `StaleProbeResponse` — wasted prober capacity and I/O.
 //
-// Post-fix `reap_profile` checks `descent_state.probe_correlation` and
-// emits `ProbeOp::Cancel` before `release_descent_prefix_claim` (which
-// transitions the Profile to Idle and loses the correlation).
+// Post-fix `reap_profile` invokes `cancel_pending_probe` (which checks
+// `Profile.pending_probe` and emits `ProbeOp::Cancel` if the channel is
+// open) before `release_descent_prefix_claim` (which transitions the
+// Profile to Idle).
 // ───────────────────────────────────────────────────────────────────────
 #[test]
 fn detach_pending_profile_with_inflight_descent_emits_cancel() {
@@ -371,12 +372,14 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
 
     // Profile is Pending with an in-flight descent probe.
     let initial_corr = first_probe_corr(&attach_out).expect("descent probe at attach");
-    let inflight = matches!(
+    let is_pending = matches!(
         &e.profiles().get(pid).expect("Profile attached").state,
-        ProfileState::Pending(d) if d.probe_correlation() == Some(initial_corr)
+        ProfileState::Pending(_)
     );
-    assert!(
-        inflight,
+    assert!(is_pending, "Profile is in Pending state");
+    assert_eq!(
+        e.pending_probe(pid),
+        Some(initial_corr),
         "descent state carries the outstanding probe correlation",
     );
 

@@ -316,13 +316,9 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         );
     }
 
-    let parent_probe_corr = match &e.profiles().get(pid_parent).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!("expected Verifying"),
-        },
-        _ => panic!("expected Active"),
-    };
+    let parent_probe_corr = e
+        .pending_probe(pid_parent)
+        .expect("Verifying probe in flight");
     assert!(
         e.profiles().get(pid_parent).unwrap().dirty_descendants >= 1,
         "child burst contributes dirty before parent stabilizes",
@@ -349,13 +345,9 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     // propagate(-1) which returns parent's id (Draining), and the
     // engine immediately calls transition_to_verifying on parent —
     // emitting the reconfirm probe in the same StepOutput.
-    let child_probe_corr = match &e.profiles().get(pid_child).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!("expected Verifying"),
-        },
-        _ => panic!("expected Active"),
-    };
+    let child_probe_corr = e
+        .pending_probe(pid_child)
+        .expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid_child,
@@ -376,7 +368,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     assert!(matches!(
         e.profiles().get(pid_parent).unwrap().state,
         ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Verifying { .. },
+            phase: BurstPhase::Verifying,
             ..
         }),
     ));
@@ -429,20 +421,8 @@ fn co_located_profiles_share_suppress_count() {
     assert_eq!(e.tree().get(r).unwrap().suppress_count, 2);
 
     // Drive both Seeds.
-    let corr_a = match &e.profiles().get(pid_a).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
-    let corr_b = match &e.profiles().get(pid_b).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let corr_a = e.pending_probe(pid_a).expect("Verifying probe in flight");
+    let corr_b = e.pending_probe(pid_b).expect("Verifying probe in flight");
 
     // Finish A's Seed first; suppress goes 2→1, no Unsuppress.
     let out_a = e.step(

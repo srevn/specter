@@ -81,7 +81,7 @@ impl Engine {
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.state = ProfileState::Active(Burst {
                 burst_deadline,
-                phase: BurstPhase::Verifying { correlation },
+                phase: BurstPhase::Verifying,
                 intent: BurstIntent::Seed,
                 forced: false,
                 dirty_resources: BTreeSet::new(),
@@ -293,7 +293,7 @@ impl Engine {
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(b) = &mut p.state
         {
-            b.phase = BurstPhase::Verifying { correlation };
+            b.phase = BurstPhase::Verifying;
             b.probe_target = Some(target);
             b.force_walk_resources.clear();
         }
@@ -404,14 +404,12 @@ impl Engine {
             self.reap_profile(profile_id, out);
         }
     }
-
 }
 
 /// Copy projection of `BurstPhase` for `transition_to_verifying`'s
-/// `(intent, phase)` match — neither `Batching`'s `TimerId` nor
-/// `Verifying`'s `ProbeCorrelation` is needed at the dispatch site.
-/// Mirrors the private decl in `transitions.rs::on_timer_expired`; both
-/// kept locally to keep the match-site code inline-readable.
+/// `(intent, phase)` match — `Batching`'s `TimerId` is irrelevant at the
+/// dispatch site, and `Verifying` is now unit (the probe correlation
+/// lives on `Profile.pending_probe`).
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum PhaseKind {
     Batching,
@@ -422,7 +420,7 @@ enum PhaseKind {
 const fn phase_kind(p: &BurstPhase) -> PhaseKind {
     match p {
         BurstPhase::Batching { .. } => PhaseKind::Batching,
-        BurstPhase::Verifying { .. } => PhaseKind::Verifying,
+        BurstPhase::Verifying => PhaseKind::Verifying,
         BurstPhase::Draining => PhaseKind::Draining,
     }
 }
@@ -599,7 +597,7 @@ mod tests {
             _ => panic!("expected Active"),
         };
         assert_eq!(burst.intent, BurstIntent::Seed);
-        assert!(matches!(burst.phase, BurstPhase::Verifying { .. }));
+        assert!(matches!(burst.phase, BurstPhase::Verifying));
         assert!(!burst.forced);
 
         // Output: one Probe + one Suppress.
@@ -666,15 +664,13 @@ mod tests {
 
         e.transition_to_verifying(pid, &mut out);
 
-        let p = e.profiles.get(pid).unwrap();
-        let burst = match &p.state {
-            ProfileState::Active(b) => b,
+        match &e.profiles.get(pid).unwrap().state {
+            ProfileState::Active(b) => assert!(matches!(b.phase, BurstPhase::Verifying)),
             _ => panic!("expected Active"),
-        };
-        let correlation = match burst.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!("expected Verifying phase"),
-        };
+        }
+        let correlation = e
+            .pending_probe(pid)
+            .expect("Verifying probe in flight on probe channel");
 
         // Output: one Probe whose correlation matches.
         let probe_correlation = out.probe_ops.iter().find_map(|op| match op {

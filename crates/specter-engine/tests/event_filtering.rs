@@ -1010,13 +1010,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
             t2,
         );
     }
-    let correlation = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            specter_core::BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!("expected Verifying"),
-        },
-        _ => panic!("expected Active"),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
 
     // Inject Vanished. Pre-fix: `dispatch_standard_vanished` called
     // `finish_burst_to_idle` first (which called `reap_profile`,
@@ -1078,13 +1072,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
             t2,
         );
     }
-    let correlation = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            specter_core::BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -1105,26 +1093,6 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
         .count();
     assert_eq!(unwatch_count, 1);
 }
-
-// ───────────────────────────────────────────────────────────────────────
-// F-CRIT-1 regression: anchor terminal event on Active+reap_pending
-//
-// Pre-fix `on_anchor_terminal_event` captured `had_anchor_contribution` as
-// a local BEFORE `finish_burst_to_idle`, then released after — but for
-// Active+reap_pending Profiles `finish_burst_to_idle` invokes
-// `reap_profile` which itself releases the anchor. The captured local
-// then drove a *second* `sub_watch_demand` on a counter that had already
-// hit zero: panic in debug, silent state corruption in release. In the
-// multi-Profile case the double-release consumed the co-anchored
-// Profile's contribution before its own release underflowed.
-//
-// Post-fix:
-//   - `finalize_anchor_lost` releases BEFORE `finish_burst_to_idle`.
-//   - The Commit-1 helper is idempotent — the post-finish call inside
-//     `reap_profile` sees `anchor_contribution=false` and no-ops.
-//   - Counter-existence check in the helper makes a stray decrement
-//     attempt benign (counter==0 ⇒ flag-clear only).
-// ───────────────────────────────────────────────────────────────────────
 
 /// Drive the F-CRIT-1 setup: attach P + surviving child, kick off a
 /// Standard burst, advance to Probing, detach to set reap_pending, then
@@ -1161,7 +1129,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
         ProfileState::Active(specter_core::Burst {
-            phase: specter_core::BurstPhase::Verifying { .. },
+            phase: specter_core::BurstPhase::Verifying,
             ..
         })
     ));

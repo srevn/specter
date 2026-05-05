@@ -15,10 +15,10 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    BurstPhase, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta,
-    DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp,
-    ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    SubAttachRequest, SubRegistryDiff, TreeSnapshot, WatchOp,
+    ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
+    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp, ProbeResponse,
+    ProbeResult, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
+    SubRegistryDiff, TreeSnapshot, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -246,13 +246,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
             t2,
         );
     }
-    let std_corr = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => match b.phase {
-            BurstPhase::Verifying { correlation } => correlation,
-            _ => panic!(),
-        },
-        _ => panic!(),
-    };
+    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
 
     // Inject stable response. Profile reaps; no Effect.
     let out = e.step(

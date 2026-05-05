@@ -112,10 +112,15 @@ impl Engine {
         }
     }
 
-    /// Read accessor for `Profile.pending_probe`. Returns `None` for stale
-    /// `pid` or a closed channel.
+    /// Read accessor for `Profile.pending_probe`. Returns `None` for a
+    /// stale `pid` or a closed channel. Mirrors the read API previously
+    /// served by `DescentState::probe_correlation()` and the
+    /// `BurstPhase::Verifying { correlation }` destructure — both deleted
+    /// in favour of this single Profile-level slot. `pub` so integration
+    /// tests in the engine crate's `tests/` directory can query the
+    /// channel state via the engine's public surface.
     #[must_use]
-    pub(crate) fn pending_probe(&self, pid: ProfileId) -> Option<ProbeCorrelation> {
+    pub fn pending_probe(&self, pid: ProfileId) -> Option<ProbeCorrelation> {
         self.profiles.get(pid)?.pending_probe
     }
 

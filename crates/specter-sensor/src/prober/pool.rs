@@ -198,9 +198,9 @@ pub(super) fn run_worker<F>(
         // a `cancel` since then (or a fresh `submit` with a new
         // correlation) means our `(profile, correlation)` no longer
         // matches the latest expectation. Skip the syscall *and* the
-        // response — the engine has structurally exited
-        // `BurstPhase::Verifying` on cancel-emit, so a missing response
-        // is harmless.
+        // response — the engine has structurally closed the per-Profile
+        // probe channel on cancel-emit, so a missing response is
+        // harmless.
         let still_wanted = expected
             .lock()
             .expect("prober expected map poisoned")

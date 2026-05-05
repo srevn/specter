@@ -17,9 +17,9 @@ use crate::refcounts::add_watch_demand;
 use crate::stability::StabilityIndex;
 use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
-    BurstPhase, ClassSet, DedupKey, DescentPhase, DescentState, Diagnostic, Effect, Input, ProbeOp,
-    Profile, ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest,
-    SubId, SubRegistry, TimerId, TimerKind, Tree, WatchOp, compute_config_hash,
+    BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Effect, Input, ProbeOp, Profile,
+    ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest, SubId,
+    SubRegistry, TimerId, TimerKind, Tree, WatchOp, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -290,7 +290,6 @@ impl Engine {
                 p.state = ProfileState::Pending(DescentState {
                     current_prefix: prefix,
                     remaining_components: remaining,
-                    phase: DescentPhase::Probing { correlation },
                 });
             }
             self.emit_probe_op(

@@ -14,10 +14,10 @@ use crate::Engine;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use crate::refcounts::clamp_watch_demand_to_zero;
 use specter_core::{
-    BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, DescentPhase,
-    Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, ProbeResponse, ProbeResult, ProfileId,
-    ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind,
-    TreeSnapshot, WatchOp,
+    BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect,
+    EffectOutcome, EffectScope, FsEvent, ProbeResponse, ProbeResult, ProfileId, ProfileState,
+    ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot,
+    WatchOp,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -192,7 +192,6 @@ impl Engine {
             p.state = ProfileState::Pending(specter_core::DescentState {
                 current_prefix: parent,
                 remaining_components: vec![anchor_name],
-                phase: DescentPhase::Probing { correlation },
             });
         }
         self.emit_probe_op(
@@ -597,8 +596,8 @@ impl Engine {
 
     /// Anchor terminal event (Removed/Renamed/Revoked at `Profile.resource`).
     /// Thin wrapper over `finalize_anchor_lost` — the FsEvent dispatcher
-    /// and the WatchOpRejected purge (Commit 3) share the same
-    /// "anchor's FD is gone, finalize the burst" logic.
+    /// and the WatchOpRejected purge share the same "anchor's FD is gone,
+    /// finalize the burst" logic.
     fn on_anchor_terminal_event(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         self.finalize_anchor_lost(profile_id, out);
     }
@@ -612,7 +611,7 @@ impl Engine {
     /// so any deferred `reap_profile` (`reap_pending`) sees a cleared
     /// `anchor_contribution` flag and skips its redundant release inside
     /// `reap_profile::release_anchor_claim`. This mirrors the
-    /// `dispatch_*_vanished/failed` discipline (transitions.rs ~750).
+    /// `dispatch_*_vanished/failed` discipline.
     /// Reverse-ordering would have `finish_burst_to_idle` invoke
     /// `reap_profile`, which would release the anchor; the post-`finish`
     /// release would then see a counter that's already zero and (pre
@@ -622,11 +621,11 @@ impl Engine {
     /// **Pending exclusion.** `ProfileState::Pending` is defensive here
     /// — `covering_profiles` already filters Pending Profiles at the
     /// source, so the FsEvent path can't deliver a Pending Profile.
-    /// `on_watch_op_rejected` (Commit 3) calls this directly after
-    /// iterating the full registry, where the guard does load-bearing
-    /// work: a Pending Profile carries no anchor contribution and
-    /// participates in no burst-suppress accounting, so
-    /// `finish_burst_to_idle`'s `sub_suppress` would underflow.
+    /// `on_watch_op_rejected` calls this directly after iterating the
+    /// full registry, where the guard does load-bearing work: a
+    /// Pending Profile carries no anchor contribution and participates
+    /// in no burst-suppress accounting, so `finish_burst_to_idle`'s
+    /// `sub_suppress` would underflow.
     pub(crate) fn finalize_anchor_lost(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
@@ -966,7 +965,7 @@ impl Engine {
                 // Verifying: probe in flight; no second emission. The
                 // response, when it arrives, dispatches with
                 // `forced = true`.
-                BurstPhase::Verifying { .. } => false,
+                BurstPhase::Verifying => false,
             }
         } else {
             return;

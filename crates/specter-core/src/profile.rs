@@ -27,8 +27,10 @@ use tinyvec::TinyVec;
 /// the burst is currently waiting on**:
 /// - `Batching { settle_timer }` — armed debounce timer; the burst is
 ///   waiting for a quiet gap (or a fresh `FsEvent` to extend it).
-/// - `Verifying { correlation }` — probe in flight; the burst is waiting
-///   for the matching `ProbeResponse`.
+/// - `Verifying` — probe in flight. The probe correlation lives on
+///   [`Profile::pending_probe`] (the per-Profile probe-channel slot, the
+///   single source of truth for "what probe?"); this variant carries no
+///   payload of its own.
 /// - `Draining` — self-stable, descendant Profiles still resolving;
 ///   correlated externally by `Profile.dirty_descendants`.
 ///
@@ -67,19 +69,24 @@ pub struct Burst {
 
 /// What the burst is waiting on, as a discriminator.
 ///
-/// Phase variant data is the correlation token of the input the burst is
-/// currently waiting on: a `TimerId` for `Batching`, a `ProbeCorrelation`
-/// for `Verifying`. `Draining` is correlated externally by
-/// `Profile.dirty_descendants` and carries no token of its own.
+/// `Batching` carries its own correlation token (`settle_timer: TimerId`)
+/// because timer correlation is per-Burst and has no peer slot to live on.
+/// `Verifying` is unit: the probe correlation lives on
+/// [`Profile::pending_probe`] — the per-Profile probe-channel slot — so the
+/// burst phase only encodes "probe in flight" as state-machine identity.
+/// `Draining` is correlated externally by `Profile.dirty_descendants` and
+/// carries no token of its own.
 #[derive(Debug)]
 pub enum BurstPhase {
     /// Activity-gap detection. `settle_timer` is the armed debounce
     /// timer; an `FsEvent` reschedules it (`event_drives_batching`),
     /// timer expiry advances to `Verifying` (`transition_to_verifying`).
     Batching { settle_timer: TimerId },
-    /// Probe in flight. `correlation` matches the outstanding
-    /// `ProbeRequest` (type-system closure on the pending-event race).
-    Verifying { correlation: ProbeCorrelation },
+    /// Probe in flight. The matching `ProbeCorrelation` lives on
+    /// [`Profile::pending_probe`]; this variant is unit because the
+    /// Profile-side slot is the single source of truth (encoding the
+    /// correlation twice would invite drift).
+    Verifying,
     /// Self-stable; descendants pending. The stable snapshot lives on
     /// `Profile.current` — `dispatch_standard_ok` updates `current` to
     /// the stable response immediately before transitioning here, so the
@@ -103,11 +110,12 @@ pub enum BurstPhase {
 /// - `Active(Burst)`: anchor is materialized; a stability burst is in
 ///   flight.
 ///
-/// Pending and Active are mutually exclusive by variant — a Profile cannot
-/// hold both a descent probe and a burst-driven probe at the same time
-/// (I5 enforcement for the Pending lifecycle is `DescentState.phase`,
-/// whose `Probing { correlation }` variant is the only way to encode an
-/// in-flight descent probe).
+/// I5 (at most one outstanding probe per Profile) is enforced as a
+/// **field discipline** on [`Profile::pending_probe`]: that slot holds the
+/// correlation of the in-flight probe, regardless of which lifecycle state
+/// drives it. Pending and Active remain mutually exclusive at the type
+/// level, so the dispatch site routes a live response on state identity
+/// alone (see [`crate::Engine::on_probe_response`]).
 ///
 /// `non_exhaustive` keeps wildcard arms compiling at downstream call sites
 /// when a future variant lands.
@@ -139,11 +147,12 @@ pub enum ProfileState {
 ///   component). Empty `remaining_components` is a state-machine bug; the
 ///   defensive check in the descent dispatch transitions the Profile back
 ///   to `Idle`.
-/// - `phase` is the correlation token of the input the descent is
-///   currently waiting on — `Probing { correlation }` proves a probe is
-///   in flight; `AwaitingEvent` proves none is. Type-system closure on
-///   I5 for the Pending lifecycle: the engine cannot construct a
-///   Pending state with two probes simultaneously.
+///
+/// I5 ("at most one outstanding probe per Profile") for the Pending
+/// lifecycle is enforced by the per-Profile probe channel slot
+/// ([`Profile::pending_probe`]) — the same slot used for Active bursts.
+/// The descent's variant payload holds no probe-correlation data of its
+/// own.
 #[derive(Clone, Debug)]
 pub struct DescentState {
     /// Deepest existing ancestor currently Watched. The Profile
@@ -152,38 +161,6 @@ pub struct DescentState {
     /// Path components from `current_prefix` (exclusive) down to the
     /// anchor (inclusive). Single-component segments (no `/`).
     pub remaining_components: Vec<String>,
-    /// What the descent is currently waiting on — see [`DescentPhase`].
-    pub phase: DescentPhase,
-}
-
-impl DescentState {
-    /// Outstanding probe correlation, if a descent probe is in flight.
-    /// Convenience over destructuring `phase`; equivalent to
-    /// `match self.phase { DescentPhase::Probing { correlation } =>
-    /// Some(correlation), DescentPhase::AwaitingEvent => None }`.
-    #[must_use]
-    pub const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
-        match self.phase {
-            DescentPhase::AwaitingEvent => None,
-            DescentPhase::Probing { correlation } => Some(correlation),
-        }
-    }
-}
-
-/// What a `Pending` descent is waiting on. Mirrors [`BurstPhase`]'s
-/// discipline for active bursts: the variant data IS the correlation
-/// token of the input the descent is currently waiting on.
-///
-/// `AwaitingEvent` — no probe in flight; descent is waiting for a
-/// `StructureChanged` event at `current_prefix` to trigger the next
-/// probe (`on_descent_event`).
-/// `Probing { correlation }` — descent probe in flight; the response
-/// must carry a matching `correlation` to dispatch (I5 closure for the
-/// Pending lifecycle, parallel to `BurstPhase::Verifying`).
-#[derive(Clone, Debug)]
-pub enum DescentPhase {
-    AwaitingEvent,
-    Probing { correlation: ProbeCorrelation },
 }
 
 /// `Standard` — event-driven burst; preserves baseline; fires Effect on stable.

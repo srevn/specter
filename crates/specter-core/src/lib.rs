@@ -35,8 +35,7 @@ pub use op::{
 };
 pub use output::StepOutput;
 pub use profile::{
-    Burst, BurstIntent, BurstPhase, DescentPhase, DescentState, Profile, ProfileMap, ProfileState,
-    TimerKind,
+    Burst, BurstIntent, BurstPhase, DescentState, Profile, ProfileMap, ProfileState, TimerKind,
 };
 pub use resource::{Resource, ResourceKind, ResourceRole};
 pub use scan_config::{
