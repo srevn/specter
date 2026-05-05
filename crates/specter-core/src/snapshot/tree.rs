@@ -116,6 +116,34 @@ impl LeafEntry {
     pub fn leaf_hash(&self) -> u128 {
         *self.leaf_hash.get_or_init(|| compute_leaf_hash(self))
     }
+
+    /// Pre-populate the lazy `leaf_hash` cache with `h` and return `self`.
+    ///
+    /// Sole intended caller is the walker, which transfers a cached hash
+    /// from a prior `LeafEntry` whose identity fields are known to match
+    /// (the lookup goes through [`DirSnapshot::leaf_hash_if_unchanged`]).
+    /// Skips the SipHash24 fold the engine would otherwise pay on the
+    /// next stability comparison (and on the parent's `dir_hash` fold,
+    /// which reads each child leaf's hash transitively).
+    ///
+    /// **Precondition.** `h` must equal `compute_leaf_hash(self)` for
+    /// `self`'s identity fields (kind, size, mtime, inode, device).
+    /// Passing any other value poisons the cache permanently — every
+    /// subsequent [`leaf_hash`](Self::leaf_hash) reads the stale value,
+    /// breaking stability comparison and parent `dir_hash` folds.
+    ///
+    /// Idempotent: setting an already-populated cell discards the new
+    /// value (the `Err` arm of `OnceLock::set`); call sites prepopulate
+    /// the cache before any reader has had a chance to fill it via
+    /// [`leaf_hash`](Self::leaf_hash).
+    #[must_use]
+    pub fn with_cached_hash(self, h: u128) -> Self {
+        // OnceLock::set on a fresh cell never errors. The discard is
+        // intentional — preserving the cached value is an optimisation,
+        // not load-bearing for correctness.
+        let _ = self.leaf_hash.set(h);
+        self
+    }
 }
 
 impl Clone for LeafEntry {
@@ -271,6 +299,37 @@ impl DirSnapshot {
     #[must_use]
     pub fn dir_hash(&self) -> u128 {
         *self.dir_hash.get_or_init(|| compute_dir_hash(self))
+    }
+
+    /// Look up `name` and return the prior leaf's cached `leaf_hash` iff
+    /// the prior entry is a `Leaf`, its identity fields match `fresh`,
+    /// and its hash cache is already populated.
+    ///
+    /// Used by the walker to transfer cache across re-enumeration: when
+    /// a parent directory's mtime bumps but a child leaf is observably
+    /// unchanged, the prior leaf's hash is reusable for the freshly-
+    /// `lstat`ed leaf. The result composes with
+    /// [`LeafEntry::with_cached_hash`].
+    ///
+    /// Returns `None` for: missing entry, kind mismatch (`Dir` at this
+    /// name), any identity-field difference (the leaf changed), or a
+    /// prior leaf whose hash was never computed (rare — most baselines
+    /// have had `dir_hash()` called on the parent, which forces every
+    /// child leaf hash; the no-cache case falls back to lazy computation
+    /// in the engine, identical to the pre-optimization behaviour).
+    ///
+    /// Identity equality goes through [`LeafEntry`]'s `PartialEq`, which
+    /// deliberately excludes the cache.
+    #[must_use]
+    pub fn leaf_hash_if_unchanged(&self, name: &str, fresh: &LeafEntry) -> Option<u128> {
+        let ChildEntry::Leaf(prior) = self.entries.get(name)? else {
+            return None;
+        };
+        if prior == fresh {
+            prior.leaf_hash.get().copied()
+        } else {
+            None
+        }
     }
 }
 

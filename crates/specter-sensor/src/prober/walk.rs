@@ -224,8 +224,6 @@ fn enumerate_dir(
         };
         let file_type = cmeta.file_type();
         let is_dir = file_type.is_dir();
-        let is_file = file_type.is_file();
-        let is_symlink = file_type.is_symlink();
 
         // Pattern semantics: directories are always covered (we descend
         // through them); files (and symlinks/other) are gated by the
@@ -239,66 +237,117 @@ fn enumerate_dir(
 
         let key = CompactString::new(name_str);
         let child_entry = if is_dir {
-            // Cross-fs and depth gates for recursion.
-            let recurse = config.recursive
-                && depth + 1 < config.max_depth.unwrap_or(u32::MAX)
-                && cmeta.dev() == root_dev;
-            if recurse {
-                // Pull the child's prior subtree from baseline so
-                // mtime-skip composes recursively. BTreeMap key match by
-                // string segment is the snapshot's native lookup.
-                let child_baseline = baseline
-                    .and_then(|b| b.entries.get(name_str))
-                    .and_then(|c| match c {
-                        ChildEntry::Dir(dc) => dc.subtree.as_ref(),
-                        ChildEntry::Leaf(_) => None,
-                    });
-                let sub = walk_subdir(
-                    &child_path,
-                    anchor_path,
-                    config,
-                    captured_with,
-                    child_baseline,
-                    force_walk,
-                    forced,
-                    depth + 1,
-                    root_dev,
-                );
-                ChildEntry::Dir(DirChild {
-                    inode: cmeta.ino(),
-                    device: cmeta.dev(),
-                    subtree: sub,
-                })
-            } else {
-                // Uncovered branch: not recursive, beyond max_depth, or
-                // cross-fs. Walker stores the entry but does not recurse.
-                ChildEntry::Dir(DirChild {
-                    inode: cmeta.ino(),
-                    device: cmeta.dev(),
-                    subtree: None,
-                })
-            }
+            build_dir_child(
+                &child_path,
+                anchor_path,
+                config,
+                captured_with,
+                baseline,
+                force_walk,
+                forced,
+                depth,
+                root_dev,
+                &cmeta,
+                name_str,
+            )
         } else {
-            let kind = if is_file {
-                EntryKind::File
-            } else if is_symlink {
-                EntryKind::Symlink
-            } else {
-                EntryKind::Other
-            };
-            ChildEntry::Leaf(LeafEntry::new(
-                kind,
-                cmeta.len(),
-                cmeta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                cmeta.ino(),
-                cmeta.dev(),
-            ))
+            build_leaf_child(&cmeta, file_type, name_str, baseline)
         };
 
         entries.insert(key, child_entry);
     }
 
     entries
+}
+
+/// Build a `ChildEntry::Dir` for one directory dirent. Recurses via
+/// [`walk_subdir`] when the entry is in-scope (recursive walk, within
+/// `max_depth`, same filesystem); emits `subtree: None` for uncovered
+/// branches.
+#[allow(clippy::too_many_arguments)]
+fn build_dir_child(
+    child_path: &Path,
+    anchor_path: &Path,
+    config: &ScanConfig,
+    captured_with: u64,
+    baseline: Option<&DirSnapshot>,
+    force_walk: &BTreeSet<PathBuf>,
+    forced: bool,
+    depth: u32,
+    root_dev: u64,
+    cmeta: &std::fs::Metadata,
+    name: &str,
+) -> ChildEntry {
+    let recurse = config.recursive
+        && depth + 1 < config.max_depth.unwrap_or(u32::MAX)
+        && cmeta.dev() == root_dev;
+    if !recurse {
+        // Uncovered branch: not recursive, beyond max_depth, or cross-fs.
+        // Walker stores the entry but does not recurse.
+        return ChildEntry::Dir(DirChild {
+            inode: cmeta.ino(),
+            device: cmeta.dev(),
+            subtree: None,
+        });
+    }
+    // Pull the child's prior subtree from baseline so mtime-skip composes
+    // recursively. BTreeMap key match by string segment is the snapshot's
+    // native lookup.
+    let child_baseline = baseline
+        .and_then(|b| b.entries.get(name))
+        .and_then(|c| match c {
+            ChildEntry::Dir(dc) => dc.subtree.as_ref(),
+            ChildEntry::Leaf(_) => None,
+        });
+    let sub = walk_subdir(
+        child_path,
+        anchor_path,
+        config,
+        captured_with,
+        child_baseline,
+        force_walk,
+        forced,
+        depth + 1,
+        root_dev,
+    );
+    ChildEntry::Dir(DirChild {
+        inode: cmeta.ino(),
+        device: cmeta.dev(),
+        subtree: sub,
+    })
+}
+
+/// Build a `ChildEntry::Leaf` for one non-directory dirent. Transfers
+/// the baseline's cached `leaf_hash` when the prior entry's identity
+/// matches — re-enumeration of an unchanged leaf skips the SipHash24
+/// fold the engine would otherwise pay during stability comparison.
+/// Cache miss falls back to lazy compute on the engine thread, identical
+/// to pre-optimisation behaviour.
+fn build_leaf_child(
+    cmeta: &std::fs::Metadata,
+    file_type: std::fs::FileType,
+    name: &str,
+    baseline: Option<&DirSnapshot>,
+) -> ChildEntry {
+    let kind = if file_type.is_file() {
+        EntryKind::File
+    } else if file_type.is_symlink() {
+        EntryKind::Symlink
+    } else {
+        EntryKind::Other
+    };
+    let leaf = LeafEntry::new(
+        kind,
+        cmeta.len(),
+        cmeta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        cmeta.ino(),
+        cmeta.dev(),
+    );
+    let leaf = match baseline.and_then(|b| b.leaf_hash_if_unchanged(name, &leaf)) {
+        Some(h) => leaf.with_cached_hash(h),
+        None => leaf,
+    };
+    ChildEntry::Leaf(leaf)
 }
 
 /// Recursive helper: probe one level deeper.

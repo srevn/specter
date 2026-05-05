@@ -398,6 +398,112 @@ fn leaf_hash_known_good_golden() {
 const GOLDEN_LEAF_HASH: u128 = 0x8b04_357b_6b61_4546_6947_f1f3_280d_d31b;
 
 // ---------------------------------------------------------------------------
+// Leaf-hash cache transfer
+//
+// Pin the contract that lets the walker reuse a baseline leaf's
+// `leaf_hash` cache when the freshly-stat'd leaf has identical identity
+// fields. The poison sentinel `POISON` is intentionally NOT the hash any
+// real fold would produce — observing it on a downstream read proves the
+// cached value flowed through (rather than being recomputed by accident).
+// ---------------------------------------------------------------------------
+
+const POISON: u128 = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
+
+#[test]
+fn with_cached_hash_populates_uncached_cell() {
+    let l = leaf(EntryKind::File, 10, 1, 7, 0).with_cached_hash(POISON);
+    // `leaf_hash()` must read the prepopulated value, not recompute.
+    assert_eq!(l.leaf_hash(), POISON);
+}
+
+#[test]
+fn with_cached_hash_no_op_when_cache_already_filled() {
+    // OnceLock::set's `Err` arm is silently discarded — first writer wins.
+    // The doc comment on `with_cached_hash` calls this out; pin it.
+    let l = leaf(EntryKind::File, 10, 1, 7, 0);
+    let real = l.leaf_hash();
+    let l = l.with_cached_hash(POISON);
+    assert_eq!(l.leaf_hash(), real);
+    assert_ne!(l.leaf_hash(), POISON);
+}
+
+#[test]
+fn leaf_hash_if_unchanged_returns_cached_on_match() {
+    let mut entries = BTreeMap::new();
+    let prior = leaf(EntryKind::File, 10, 1, 7, 0);
+    let cached = prior.leaf_hash();
+    entries.insert(name("a.c"), ChildEntry::Leaf(prior));
+    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, entries);
+
+    let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
+    assert_eq!(d.leaf_hash_if_unchanged("a.c", &fresh), Some(cached));
+}
+
+#[test]
+fn leaf_hash_if_unchanged_returns_none_when_missing() {
+    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
+    let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
+    assert!(d.leaf_hash_if_unchanged("missing", &fresh).is_none());
+}
+
+#[test]
+fn leaf_hash_if_unchanged_returns_none_when_entry_is_dir() {
+    let mut entries = BTreeMap::new();
+    entries.insert(name("a"), dir(7, 0, None));
+    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, entries);
+    let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
+    assert!(d.leaf_hash_if_unchanged("a", &fresh).is_none());
+}
+
+#[test]
+fn leaf_hash_if_unchanged_returns_none_on_any_field_mismatch() {
+    fn lookup(prior: LeafEntry, fresh: &LeafEntry) -> Option<u128> {
+        let _ = prior.leaf_hash(); // populate cache so a missing return value
+        // unambiguously means identity-mismatch, not uncached prior.
+        let mut entries = BTreeMap::new();
+        entries.insert(name("a.c"), ChildEntry::Leaf(prior));
+        let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, entries);
+        d.leaf_hash_if_unchanged("a.c", fresh)
+    }
+
+    let baseline = || leaf(EntryKind::File, 10, 1, 7, 0);
+    assert!(
+        lookup(baseline(), &leaf(EntryKind::Symlink, 10, 1, 7, 0)).is_none(),
+        "kind mismatch must defeat inheritance"
+    );
+    assert!(
+        lookup(baseline(), &leaf(EntryKind::File, 11, 1, 7, 0)).is_none(),
+        "size mismatch must defeat inheritance"
+    );
+    assert!(
+        lookup(baseline(), &leaf(EntryKind::File, 10, 2, 7, 0)).is_none(),
+        "mtime mismatch must defeat inheritance"
+    );
+    assert!(
+        lookup(baseline(), &leaf(EntryKind::File, 10, 1, 8, 0)).is_none(),
+        "inode mismatch must defeat inheritance"
+    );
+    assert!(
+        lookup(baseline(), &leaf(EntryKind::File, 10, 1, 7, 1)).is_none(),
+        "device mismatch must defeat inheritance"
+    );
+}
+
+#[test]
+fn leaf_hash_if_unchanged_returns_none_when_prior_uncached() {
+    // A baseline whose leaf was never folded — `dir_hash()` not called
+    // on the parent. This is rare in production but documented as the
+    // graceful fallback to lazy compute on the engine thread.
+    let mut entries = BTreeMap::new();
+    let prior = leaf(EntryKind::File, 10, 1, 7, 0);
+    // Deliberately do NOT call `prior.leaf_hash()`; cache stays empty.
+    entries.insert(name("a.c"), ChildEntry::Leaf(prior));
+    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, entries);
+    let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
+    assert!(d.leaf_hash_if_unchanged("a.c", &fresh).is_none());
+}
+
+// ---------------------------------------------------------------------------
 // TreeSnapshot::stable_against
 // ---------------------------------------------------------------------------
 
