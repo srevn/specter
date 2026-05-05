@@ -713,7 +713,14 @@ impl Engine {
 
         match snapshot {
             TreeSnapshot::Dir(arc) => {
-                graft(profile_id, target, arc, &mut self.tree, &mut self.profiles, out);
+                graft(
+                    profile_id,
+                    target,
+                    arc,
+                    &mut self.tree,
+                    &mut self.profiles,
+                    out,
+                );
             }
             TreeSnapshot::File(leaf) => {
                 // File-anchored Profile: the leaf *is* the snapshot. No
@@ -882,7 +889,14 @@ impl Engine {
         // (current update). For File anchors, replace wholesale.
         match snapshot {
             TreeSnapshot::Dir(arc) => {
-                graft(profile_id, target, arc, &mut self.tree, &mut self.profiles, out);
+                graft(
+                    profile_id,
+                    target,
+                    arc,
+                    &mut self.tree,
+                    &mut self.profiles,
+                    out,
+                );
             }
             TreeSnapshot::File(leaf) => {
                 if let Some(p) = self.profiles.get_mut(profile_id) {

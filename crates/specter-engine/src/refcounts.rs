@@ -190,11 +190,7 @@ pub fn sub_watch_demand(
 /// wider union than strictly necessary. The kernel mask stays slightly
 /// wider than reality until the next refcount op converges. Acceptable for
 /// v1; per-(Profile, Resource) tracking is a v2 predicate-layer concern.
-fn recompute_resource_events(
-    tree: &Tree,
-    profiles: &ProfileMap,
-    resource: ResourceId,
-) -> ClassSet {
+fn recompute_resource_events(tree: &Tree, profiles: &ProfileMap, resource: ResourceId) -> ClassSet {
     let mut union = ClassSet::EMPTY;
     for (_, p) in profiles.iter() {
         union |= profile_contribution_for(p, resource, tree);
@@ -231,9 +227,7 @@ fn profile_contribution_for(profile: &Profile, resource: ResourceId, tree: &Tree
     // don't double-count an anchor at depth 0; the predicate filters by
     // `Profile.resource != resource`.
     if profile.resource != resource && covers(profile, resource, tree) {
-        let kind = tree
-            .get(resource)
-            .map_or(ResourceKind::Unknown, |r| r.kind);
+        let kind = tree.get(resource).map_or(ResourceKind::Unknown, |r| r.kind);
         let is_dir = matches!(kind, ResourceKind::Dir);
         if is_dir || profile.has_per_file_fds {
             union |= profile.events_union;

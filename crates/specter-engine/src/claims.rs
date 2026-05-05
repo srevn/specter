@@ -64,11 +64,7 @@ impl Engine {
     /// slot — the parent's `WatchRootParent` role is the only thing
     /// keeping it alive when no User Profile is anchored at or below it,
     /// and that's now stale.
-    pub(crate) fn release_watch_root_parent_claim(
-        &mut self,
-        pid: ProfileId,
-        out: &mut StepOutput,
-    ) {
+    pub(crate) fn release_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(pid) else {
             return;
         };
@@ -81,7 +77,13 @@ impl Engine {
         }
 
         if self.tree.get(parent).is_some_and(|r| r.watch_demand > 0) {
-            sub_watch_demand(&mut self.tree, &self.profiles, parent, ClassSet::STRUCTURE, out);
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                parent,
+                ClassSet::STRUCTURE,
+                out,
+            );
         }
 
         self.tree.try_reap(parent);
@@ -107,7 +109,13 @@ impl Engine {
         }
 
         if self.tree.get(prefix).is_some_and(|r| r.watch_demand > 0) {
-            sub_watch_demand(&mut self.tree, &self.profiles, prefix, ClassSet::STRUCTURE, out);
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                prefix,
+                ClassSet::STRUCTURE,
+                out,
+            );
         }
 
         self.tree.try_reap(prefix);

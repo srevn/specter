@@ -149,7 +149,13 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "log.txt", ResourceRole::User);
         mark(&mut tree, r, ResourceKind::File);
-        let p = Profile::new(r, ScanConfig::builder().build(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(
+            r,
+            ScanConfig::builder().build(),
+            MAX_SETTLE,
+            SETTLE,
+            NO_EVENTS,
+        );
         assert!(covers(&p, r, &tree));
     }
 

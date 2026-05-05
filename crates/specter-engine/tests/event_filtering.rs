@@ -185,9 +185,9 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
 
     // The seed response emits a Watch op for the per-file FD.
     let saw_per_file_watch = seed_out.watch_ops.iter().any(|op| match op {
-        WatchOp::Watch {
-            resource, opts, ..
-        } => *resource == file_id && opts.events == ClassSet::DEFAULT_SUBTREE_ROOT,
+        WatchOp::Watch { resource, opts, .. } => {
+            *resource == file_id && opts.events == ClassSet::DEFAULT_SUBTREE_ROOT
+        }
         _ => false,
     });
     assert!(
@@ -644,9 +644,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
         .iter()
         .rev()
         .find_map(|op| match op {
-            WatchOp::Watch {
-                resource, opts, ..
-            } if *resource == root => Some(opts.events),
+            WatchOp::Watch { resource, opts, .. } if *resource == root => Some(opts.events),
             _ => None,
         })
         .expect("Profile A's attach emits a Watch on root");
@@ -678,9 +676,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
         .watch_ops
         .iter()
         .find_map(|op| match op {
-            WatchOp::Watch {
-                resource, opts, ..
-            } if *resource == root => Some(opts.events),
+            WatchOp::Watch { resource, opts, .. } if *resource == root => Some(opts.events),
             _ => None,
         })
         .expect("Profile B's attach emits a fresh Watch on root (D11 mask widening)");
@@ -1150,7 +1146,13 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
         })
     ));
 
-    let out = e.step(Input::FsEvent { resource: root, event }, t2);
+    let out = e.step(
+        Input::FsEvent {
+            resource: root,
+            event,
+        },
+        t2,
+    );
     assert!(
         e.profiles().get(pid).is_none(),
         "Profile reaped after anchor terminal event ({event:?}) without panic",

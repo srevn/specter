@@ -207,7 +207,8 @@ fn rewatch_with_same_mask_preserves_registration() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter().any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
+        out.iter()
+            .any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
         "post no-op rewatch, write should still fire Modified; got {out:?}"
     );
 
@@ -294,7 +295,8 @@ fn unwatch_then_watch_starts_fresh() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter().any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
+        out.iter()
+            .any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
         "post unwatch+watch, write should fire Modified; got {out:?}"
     );
 

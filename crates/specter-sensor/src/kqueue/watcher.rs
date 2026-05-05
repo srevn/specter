@@ -113,11 +113,7 @@ impl FsWatcher for KqueueWatcher {
         // overwrites the prior fflags atomically without affecting the
         // EV_DISABLE bit (per kqueue man page).
         if self.by_resource.contains_key(r) {
-            let kind = self
-                .kinds
-                .get(r)
-                .copied()
-                .unwrap_or(ResourceKind::Unknown);
+            let kind = self.kinds.get(r).copied().unwrap_or(ResourceKind::Unknown);
             let new_fflags = translate::class_set_to_fflags(opts.events, kind);
             let cached_fflags = self.registered_fflags.get(r).copied().unwrap_or(0);
             if new_fflags == cached_fflags {

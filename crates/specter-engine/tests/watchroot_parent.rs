@@ -16,8 +16,8 @@
 
 use specter_core::{
     ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope, Input, ProbeOp, ProbeResponse,
-    ProbeResult, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, TreeSnapshot,
-    WatchOp,
+    ProbeResult, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
+    TreeSnapshot, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;

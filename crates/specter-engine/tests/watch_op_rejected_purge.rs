@@ -210,9 +210,11 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
     let anchor_purge_count = purge_out
         .diagnostics
         .iter()
-        .filter(|d| matches!(d, Diagnostic::ProfileClaimPurged {
+        .filter(|d| {
+            matches!(d, Diagnostic::ProfileClaimPurged {
             claim: ClaimKind::Anchor, resource, ..
-        } if *resource == root))
+        } if *resource == root)
+        })
         .count();
     assert_eq!(anchor_purge_count, 2, "one purge per Profile");
 
@@ -254,9 +256,7 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
     // Build a parent / anchor pair.
     let parent = e.tree_mut().ensure(None, "var", ResourceRole::User);
     e.tree_mut().get_mut(parent).unwrap().kind = ResourceKind::Dir;
-    let anchor = e
-        .tree_mut()
-        .ensure(Some(parent), "log", ResourceRole::User);
+    let anchor = e.tree_mut().ensure(Some(parent), "log", ResourceRole::User);
     e.tree_mut().get_mut(anchor).unwrap().kind = ResourceKind::Dir;
 
     let (sid, pid, attach_out) = attach_subtree_root(&mut e, "watch", anchor, MAX_SETTLE);

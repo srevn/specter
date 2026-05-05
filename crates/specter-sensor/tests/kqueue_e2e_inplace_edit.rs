@@ -18,7 +18,6 @@
 //! `it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves`.
 
 #![allow(clippy::missing_const_for_fn)]
-
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
@@ -136,10 +135,7 @@ fn in_place_edit_does_not_fire_on_dir_watch_alone() {
     std::fs::write(&file_path, "v2 with more bytes").unwrap();
 
     let mut out = Vec::new();
-    let _ = w.poll_until(
-        Some(Instant::now() + Duration::from_millis(300)),
-        &mut out,
-    );
+    let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(300)), &mut out);
 
     // The dir's STRUCTURE watch must NOT fire on an in-place edit. If
     // it does, the documented design assumption (APFS/HFS+ doesn't bump

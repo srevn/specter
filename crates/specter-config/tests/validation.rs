@@ -128,9 +128,8 @@ fn issue_kind_invalid_enum_scope() {
 
 #[test]
 fn issue_kind_events_empty() {
-    let toml = format!(
-        "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nevents = []"
-    );
+    let toml =
+        format!("[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nevents = []");
     assert_kinds(&toml, &[IssueKind::EventsEmpty]);
 }
 

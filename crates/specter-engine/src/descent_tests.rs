@@ -556,7 +556,13 @@ fn profile_state_default_is_idle() {
     use specter_core::{Profile, ProfileState, ScanConfig};
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "anchor", ResourceRole::User);
-    let p = Profile::new(r, ScanConfig::builder().build(), MAX_SETTLE, SETTLE, NO_EVENTS);
+    let p = Profile::new(
+        r,
+        ScanConfig::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        NO_EVENTS,
+    );
     assert!(matches!(p.state, ProfileState::Idle));
 }
 

@@ -83,7 +83,9 @@ pub(super) const fn class_set_to_fflags(events: ClassSet, kind: ResourceKind) ->
 #[cfg(test)]
 mod tests {
     use super::{IDENTITY_FLOOR, class_set_to_fflags};
-    use libc::{NOTE_ATTRIB, NOTE_DELETE, NOTE_EXTEND, NOTE_LINK, NOTE_RENAME, NOTE_REVOKE, NOTE_WRITE};
+    use libc::{
+        NOTE_ATTRIB, NOTE_DELETE, NOTE_EXTEND, NOTE_LINK, NOTE_RENAME, NOTE_REVOKE, NOTE_WRITE,
+    };
     use specter_core::{ClassSet, ResourceKind};
 
     /// `IDENTITY_FLOOR` membership is a load-bearing invariant for D7;
@@ -200,10 +202,7 @@ mod tests {
     #[test]
     fn structure_and_content_on_dir_only_structure_applies() {
         // STRUCTURE | CONTENT on Dir: STRUCTURE wins; CONTENT is no-op.
-        let f = class_set_to_fflags(
-            ClassSet::STRUCTURE | ClassSet::CONTENT,
-            ResourceKind::Dir,
-        );
+        let f = class_set_to_fflags(ClassSet::STRUCTURE | ClassSet::CONTENT, ResourceKind::Dir);
         assert_eq!(f, IDENTITY_FLOOR | NOTE_WRITE | NOTE_EXTEND | NOTE_LINK);
     }
 

@@ -19,11 +19,11 @@
 use crate::{Engine, SubAttachRequest};
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet, CommandTemplate,
-    DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind,
-    FsEvent, Input, LeafEntry, Placeholder, ProbeKind, ProbeOp, ProbeResponse, ProbeResult,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, TreeSnapshot,
-    WatchOp,
+    ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet,
+    CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
+    EffectScope, EntryKind, FsEvent, Input, LeafEntry, Placeholder, ProbeKind, ProbeOp,
+    ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, TreeSnapshot, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -603,10 +603,7 @@ fn fs_event_metadatachanged_at_anchor_bypasses_class_filter() {
         "anchor events bypass the L5 class filter (D8)",
     );
     assert!(
-        matches!(
-            e.profiles.get(pid).unwrap().state,
-            ProfileState::Active(_),
-        ),
+        matches!(e.profiles.get(pid).unwrap().state, ProfileState::Active(_),),
         "MetadataChanged at the anchor drives a burst even on EMPTY mask",
     );
 }
@@ -1284,14 +1281,15 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
 
     // ProfileClaimPurged{DescentPrefix} surfaces (in addition to WatchOpRejected).
     assert!(
-        result.diagnostics.iter().any(
-            |d| matches!(d, Diagnostic::ProfileClaimPurged {
+        result
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
                 profile, claim, resource, errno
             } if *profile == pid
                 && *claim == ClaimKind::DescentPrefix
                 && *resource == foo
-                && *errno == 24)
-        ),
+                && *errno == 24)),
         "ProfileClaimPurged{{DescentPrefix}} diagnostic emitted",
     );
 
@@ -1334,7 +1332,10 @@ fn watch_op_rejected_for_anchored_profile_emits_anchor_claim_purged() {
         Instant::now(),
     );
     assert!(
-        result.diagnostics.iter().any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
+        result
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
             profile, claim, resource, ..
         } if *profile == pid && *claim == ClaimKind::Anchor && *resource == r)),
         "ProfileClaimPurged{{Anchor}} emitted for anchored Profile",
@@ -1406,9 +1407,15 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     let purged_count = result
         .diagnostics
         .iter()
-        .filter(|d| matches!(d, Diagnostic::ProfileClaimPurged {
-            claim: ClaimKind::DescentPrefix, ..
-        }))
+        .filter(|d| {
+            matches!(
+                d,
+                Diagnostic::ProfileClaimPurged {
+                    claim: ClaimKind::DescentPrefix,
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(
         purged_count, 2,
