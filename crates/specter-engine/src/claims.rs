@@ -95,15 +95,26 @@ impl Engine {
     /// `DescentScaffold` role is no longer load-bearing once no descent
     /// claims it.
     ///
-    /// Note: the descent's `phase` (and any in-flight probe correlation
-    /// it carries) is dropped along with the state transition. Callers
-    /// that need to cancel an in-flight probe (e.g., `reap_profile`,
-    /// `on_watch_op_rejected`) MUST emit `ProbeOp::Cancel` before
-    /// calling this helper.
+    /// **Cancel-first contract.** Callers that may have an in-flight probe
+    /// (e.g., `reap_profile`, `on_watch_op_rejected` descent purge) MUST
+    /// invoke [`Engine::cancel_pending_probe`] before this helper. The
+    /// debug_assert below catches any future regression: in release builds
+    /// a missed cancel leaks one `ProbeOp::Cancel` emission, and the
+    /// prober's eventual response is dropped as `StaleProbeResponse` —
+    /// benign degradation, but worth surfacing loudly in dev / CI.
     pub(crate) fn release_descent_prefix_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(prefix) = self.descent_state(pid).map(|d| d.current_prefix) else {
             return;
         };
+
+        debug_assert!(
+            self.profiles
+                .get(pid)
+                .is_some_and(|p| p.pending_probe.is_none()),
+            "release_descent_prefix_claim: probe channel must be closed before release; \
+             caller must invoke cancel_pending_probe (or take the response-dispatch path) \
+             first to avoid losing the Cancel emission (profile = {pid:?})",
+        );
 
         if let Some(p) = self.profiles.get_mut(pid) {
             p.state = ProfileState::Idle;

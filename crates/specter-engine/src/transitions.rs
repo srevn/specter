@@ -164,8 +164,16 @@ impl Engine {
     /// Re-enter pending descent for an Idle Profile whose anchor is
     /// currently absent. Triggered by an event at the Profile's
     /// `watch_root_parent` ("Watch root deletion" recovery).
-    /// The Profile's anchor segment is added as the sole remaining
-    /// component; descent emits a probe at the parent.
+    /// The Profile's anchor segment becomes the sole remaining component;
+    /// `enter_pending_descent` emits the descent probe at the parent.
+    ///
+    /// **Recovery overlap.** The parent already holds `+1 STRUCTURE` from
+    /// `Profile.watch_root_parent` (set at the original anchor materialization,
+    /// never cleared on `on_anchor_terminal_event`). The helper bumps another
+    /// `+1` for the descent contribution; the refcount sums to `+2`. The
+    /// descent contribution drops at re-materialization while the
+    /// `watch_root_parent` contribution persists — see the rustdoc on
+    /// `enter_pending_descent` for the full lifecycle.
     fn start_pending_recovery(
         &mut self,
         profile_id: ProfileId,
@@ -178,29 +186,7 @@ impl Engine {
         let Some(anchor_name) = self.tree.name(anchor).map(str::to_string) else {
             return;
         };
-        // Bump the parent's watch_demand for the descent's contribution.
-        // The parent already has +1 from `Profile.watch_root_parent`; the
-        // descent contribution is in addition (the refcount sums). D9 —
-        // descent prefix contributions are always STRUCTURE regardless of
-        // the Sub's user mask.
-        crate::refcounts::add_watch_demand(&mut self.tree, parent, ClassSet::STRUCTURE, out);
-
-        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
-            return;
-        };
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.state = ProfileState::Pending(specter_core::DescentState {
-                current_prefix: parent,
-                remaining_components: vec![anchor_name],
-            });
-        }
-        self.emit_probe_op(
-            profile_id,
-            parent,
-            correlation,
-            crate::probe_channel::ProbeEmissionParams::Descent,
-            out,
-        );
+        self.enter_pending_descent(profile_id, parent, vec![anchor_name], out);
     }
 
     /// Dispatch a [`ProbeResponse`].
@@ -1279,8 +1265,9 @@ impl Engine {
     }
 
     /// Mint a fresh `CorrelationId` for an Effect. Engine-monotonic, sharing
-    /// the same counter as `next_probe_correlation` — the spaces don't
-    /// collide because they're typed differently.
+    /// the same `Engine.next_correlation` counter as
+    /// [`Engine::mint_probe_correlation`] — the typed wrappers
+    /// ([`CorrelationId`] vs `ProbeCorrelation`) keep the spaces disjoint.
     const fn next_effect_correlation(&mut self) -> CorrelationId {
         self.next_correlation = self.next_correlation.saturating_add(1);
         CorrelationId(self.next_correlation)

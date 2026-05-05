@@ -267,38 +267,22 @@ impl Engine {
             .map_or(ClassSet::EMPTY, |p| p.events_union);
 
         if let Some((prefix, remaining)) = pending_components {
-            // Pending descent. Bump the prefix's watch_demand with a
-            // `STRUCTURE` contribution (D9 — the prefix is infrastructure;
-            // it always wants to see directory-entry changes regardless
-            // of the Sub's user mask). Profile.state stays Idle while
-            // the descent runs; the anchor materializes via
-            // `dispatch_descent_ok`'s anchor branch, which then sets up
-            // the watch-root-parent contribution and starts the Seed
-            // burst. Setting watch_root_parent here would bump
-            // watch_demand on a `DescentScaffold` slot that doesn't
-            // exist on disk yet, generating a `WatchOpRejected` from
-            // the Sensor.
+            // Pending descent. Profile.state stays Idle while the descent
+            // runs; the anchor materializes via `dispatch_descent_ok`'s
+            // anchor branch, which then sets up the watch-root-parent
+            // contribution and starts the Seed burst. Setting
+            // watch_root_parent here would bump watch_demand on a
+            // `DescentScaffold` slot that doesn't exist on disk yet,
+            // generating a `WatchOpRejected` from the Sensor.
+            //
+            // Parent-edge work runs ahead of `enter_pending_descent` — the
+            // helper deliberately omits it (the recovery path's call site
+            // doesn't need it) and the Idle → Pending refcount sequence
+            // (add_watch_demand → mint → state → emit) lives inside the
+            // helper.
             self.compute_and_set_parent_edge(profile_id);
             self.recompute_dependent_parent_edges(profile_id);
-
-            add_watch_demand(&mut self.tree, prefix, ClassSet::STRUCTURE, out);
-
-            let Some(correlation) = self.mint_probe_correlation(profile_id) else {
-                return sub_id;
-            };
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.state = ProfileState::Pending(DescentState {
-                    current_prefix: prefix,
-                    remaining_components: remaining,
-                });
-            }
-            self.emit_probe_op(
-                profile_id,
-                prefix,
-                correlation,
-                crate::probe_channel::ProbeEmissionParams::Descent,
-                out,
-            );
+            self.enter_pending_descent(profile_id, prefix, remaining, out);
         } else {
             // Immediate-Seed path. Anchor exists; bump its watch_demand
             // with the Profile's events_union (the user-declared mask),

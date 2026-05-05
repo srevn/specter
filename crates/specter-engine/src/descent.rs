@@ -198,6 +198,70 @@ impl crate::Engine {
         cur
     }
 
+    /// Enter `ProfileState::Pending` against `prefix` with `remaining`
+    /// path components (single-component segments, anchor last). Bumps the
+    /// prefix's `STRUCTURE` `watch_demand` contribution (D9), opens the
+    /// probe channel, writes the descent state, and emits the descent
+    /// probe — the four-step Idle → Pending entry sequence as a single
+    /// helper.
+    ///
+    /// **Pre-condition.** Profile must be `Idle` with a closed probe
+    /// channel. The debug_assert below catches any caller passing a
+    /// non-Idle Profile or one with `pending_probe.is_some()`.
+    ///
+    /// **Caller responsibility.** Parent-edge work (`compute_and_set_parent_edge`,
+    /// `recompute_dependent_parent_edges`) is NOT done here — the fresh-attach
+    /// path needs it on first entry; the recovery path doesn't (the parent
+    /// edges already exist on the recovering Profile). Keeping the helper
+    /// minimal preserves that contract.
+    ///
+    /// **Recovery-overlap invariant.** When called from `start_pending_recovery`,
+    /// the Profile already holds a `+1 STRUCTURE` contribution on the
+    /// parent via `Profile.watch_root_parent` (set at the original anchor
+    /// materialization, never cleared on `on_anchor_terminal_event`). This
+    /// helper bumps `+1 STRUCTURE` again on the same resource, giving `+2`.
+    /// At re-materialization the descent contribution is subbed and the
+    /// `watch_root_parent` contribution persists — `set_watch_root_parent`
+    /// is idempotent on the recovery path (`engine.rs::set_watch_root_parent`
+    /// short-circuits when the cache already points at the same parent).
+    pub(crate) fn enter_pending_descent(
+        &mut self,
+        profile_id: ProfileId,
+        prefix: ResourceId,
+        remaining: Vec<String>,
+        out: &mut StepOutput,
+    ) {
+        debug_assert!(
+            self.profiles.get(profile_id).is_some_and(|p| {
+                matches!(p.state, ProfileState::Idle) && p.pending_probe.is_none()
+            }),
+            "enter_pending_descent: Profile must be Idle with closed probe channel; \
+             caller must invoke cancel_pending_probe (or take the response-dispatch path) \
+             and release prior state before re-entering descent (profile = {profile_id:?})",
+        );
+
+        add_watch_demand(&mut self.tree, prefix, ClassSet::STRUCTURE, out);
+
+        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+            return;
+        };
+
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.state = ProfileState::Pending(DescentState {
+                current_prefix: prefix,
+                remaining_components: remaining,
+            });
+        }
+
+        self.emit_probe_op(
+            profile_id,
+            prefix,
+            correlation,
+            crate::probe_channel::ProbeEmissionParams::Descent,
+            out,
+        );
+    }
+
     /// Dispatch a `ProbeResponse` for a Profile whose state is
     /// `ProfileState::Pending`. `on_probe_response` matches on `&p.state`
     /// and routes here if the Pending arm wins. The probe channel
@@ -507,9 +571,8 @@ impl crate::Engine {
     /// Triggers a fresh probe (no settle wait — descent is event-driven).
     /// I5: drops the event if a probe is already in flight (the in-flight
     /// probe will pick up the change in its response). The "in flight"
-    /// signal is the engine-level probe channel slot
-    /// (`Profile.pending_probe`); the descent's variant payload (`d.phase`)
-    /// is dual-written but no longer the source of truth.
+    /// signal is the per-Profile probe-channel slot
+    /// ([`crate::Engine::pending_probe`] reads `Profile.pending_probe`).
     pub(crate) fn on_descent_event(
         &mut self,
         profile_id: ProfileId,
