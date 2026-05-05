@@ -22,21 +22,20 @@
 //! makes a stray Cancel on the just-responded path structurally
 //! impossible.
 //!
-//! Probe emission lives in `emit_probe_op`, which both Seed-start and
-//! `transition_to_verifying` route through; the only Probe-emission ever
-//! done by the engine.
+//! Probe emission flows through `probe_channel::emit_probe_op` (single
+//! source for `ProbeOp::Probe` construction); `start_seed_burst` and
+//! `transition_to_verifying` build a `ProbeEmissionParams::Burst` and
+//! route through it.
 
 use crate::Engine;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
-    Burst, BurstIntent, BurstPhase, DirSnapshot, ProbeCorrelation, ProbeKind, ProbeOp,
-    ProbeRequest, Profile, ProfileId, ProfileState, ResourceId, ResourceKind, StepOutput,
-    TimerKind, Tree, TreeSnapshot,
+    Burst, BurstIntent, BurstPhase, Profile, ProfileId, ProfileState, ResourceId, ResourceKind,
+    StepOutput, TimerKind, Tree, TreeSnapshot,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
 impl Engine {
@@ -75,7 +74,9 @@ impl Engine {
         let burst_deadline =
             self.timers
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
-        let correlation = self.next_probe_correlation();
+        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+            return;
+        };
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.state = ProfileState::Active(Burst {
@@ -93,10 +94,12 @@ impl Engine {
         self.emit_probe_op(
             profile_id,
             resource,
-            baseline_subtree,
-            BTreeSet::new(),
-            false,
             correlation,
+            crate::probe_channel::ProbeEmissionParams::Burst {
+                baseline_subtree,
+                force_walk: BTreeSet::new(),
+                forced: false,
+            },
             out,
         );
     }
@@ -178,17 +181,16 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let ProfileState::Active(burst) = &p.state else {
+        let ProfileState::Active(_) = &p.state else {
             return;
         };
-        let was_verifying = matches!(burst.phase, BurstPhase::Verifying { .. });
         let settle = p.settle;
 
-        if was_verifying {
-            out.probe_ops.push(ProbeOp::Cancel {
-                profile: profile_id,
-            });
-        }
+        // Idempotent: emits Cancel iff the probe channel is open
+        // (Verifying ⇒ pending_probe = Some(_)). For Batching / Draining
+        // entries, no probe is in flight and the helper is a no-op —
+        // matching the prior `was_verifying` snapshot's role.
+        self.cancel_pending_probe(profile_id, out);
 
         let settle_timer = self
             .timers
@@ -285,7 +287,9 @@ impl Engine {
         // force_walk paths (filtered to subtree(target); engine-side close).
         let force_walk_paths = build_force_walk(&force_set, target, &self.tree);
 
-        let correlation = self.next_probe_correlation();
+        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+            return;
+        };
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(b) = &mut p.state
         {
@@ -297,10 +301,12 @@ impl Engine {
         self.emit_probe_op(
             profile_id,
             target,
-            baseline_subtree,
-            force_walk_paths,
-            forced,
             correlation,
+            crate::probe_channel::ProbeEmissionParams::Burst {
+                baseline_subtree,
+                force_walk: force_walk_paths,
+                forced,
+            },
             out,
         );
     }
@@ -399,50 +405,6 @@ impl Engine {
         }
     }
 
-    /// Build and push a `ProbeOp::Probe` for `profile_id`. The single
-    /// canonical Burst-driven probe-emission helper: every Standard /
-    /// Seed probe routes through here with its `target` / `baseline` /
-    /// `force_walk` / `forced` fields explicit. Descent's
-    /// `emit_descent_probe` keeps its specialised form (override
-    /// `scan_config`, no baseline, no `force_walk`, not forced).
-    ///
-    /// Resolves the probe kind from the target's `ResourceKind`
-    /// (`Unknown` defaults to `Directory` — the more permissive choice;
-    /// the Sensor returns `Vanished` on kind mismatch, which the Engine
-    /// then handles as Removed).
-    pub(crate) fn emit_probe_op(
-        &self,
-        profile_id: ProfileId,
-        target_resource: ResourceId,
-        baseline_subtree: Option<Arc<DirSnapshot>>,
-        force_walk: BTreeSet<PathBuf>,
-        forced: bool,
-        correlation: ProbeCorrelation,
-        out: &mut StepOutput,
-    ) {
-        let Some(p) = self.profiles.get(profile_id) else {
-            return;
-        };
-        let kind = match self.tree.get(target_resource).map(|r| r.kind) {
-            Some(ResourceKind::File) => ProbeKind::File,
-            _ => ProbeKind::Directory,
-        };
-        let target_path = self.tree.path_of(target_resource).unwrap_or_default();
-        out.probe_ops.push(ProbeOp::Probe {
-            request: ProbeRequest {
-                profile: profile_id,
-                correlation,
-                kind,
-                target_resource,
-                target_path,
-                scan_config: p.config.clone(),
-                captured_with: p.config_hash,
-                baseline_subtree,
-                force_walk,
-                forced,
-            },
-        });
-    }
 }
 
 /// Copy projection of `BurstPhase` for `transition_to_verifying`'s

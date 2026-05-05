@@ -8,6 +8,7 @@ mod claims;
 mod coverage;
 mod descent;
 mod engine;
+mod probe_channel;
 mod reconcile;
 mod refcounts;
 mod stability;

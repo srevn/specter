@@ -15,9 +15,9 @@ use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use crate::refcounts::clamp_watch_demand_to_zero;
 use specter_core::{
     BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, DescentPhase,
-    Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, ProbeOp, ProbeResponse, ProbeResult,
-    ProfileId, ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId,
-    TimerKind, TreeSnapshot, WatchOp,
+    Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, ProbeResponse, ProbeResult, ProfileId,
+    ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind,
+    TreeSnapshot, WatchOp,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -185,7 +185,9 @@ impl Engine {
         // the Sub's user mask.
         crate::refcounts::add_watch_demand(&mut self.tree, parent, ClassSet::STRUCTURE, out);
 
-        let correlation = self.next_probe_correlation();
+        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+            return;
+        };
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.state = ProfileState::Pending(specter_core::DescentState {
                 current_prefix: parent,
@@ -193,7 +195,13 @@ impl Engine {
                 phase: DescentPhase::Probing { correlation },
             });
         }
-        self.emit_descent_probe(profile_id, parent, correlation, out);
+        self.emit_probe_op(
+            profile_id,
+            parent,
+            correlation,
+            crate::probe_channel::ProbeEmissionParams::Descent,
+            out,
+        );
     }
 
     /// Dispatch a [`ProbeResponse`].
@@ -248,6 +256,10 @@ impl Engine {
 
         match dispatch {
             ProbeDispatch::Descent => {
+                // Descent close runs inside `dispatch_descent_probe`
+                // (adjacent to the variant clear during the dual-write
+                // phase). See its body for the pending_probe = None /
+                // d.phase = AwaitingEvent pair.
                 let arm = match response.result {
                     ProbeResult::Ok(tree_snap) => crate::descent::ProbeResultArm::Ok(tree_snap),
                     ProbeResult::Vanished => crate::descent::ProbeResultArm::Vanished,
@@ -257,26 +269,42 @@ impl Engine {
                 };
                 self.dispatch_descent_probe(profile_id, arm, now, out);
             }
-            ProbeDispatch::Burst { intent, forced } => match (intent, response.result) {
-                (BurstIntent::Seed, ProbeResult::Ok(tree_snap)) => {
-                    self.dispatch_seed_ok(profile_id, tree_snap, out);
+            ProbeDispatch::Burst { intent, forced } => {
+                // Close the burst-side probe channel BEFORE dispatching.
+                // The dispatch arms may open a fresh channel
+                // (`dispatch_seed_ok` post-rebase wouldn't but
+                // `dispatch_standard_ok`'s Draining-exit cascade in
+                // `finish_burst_to_idle` re-enters `transition_to_verifying`
+                // for ancestors); they MUST see a closed channel
+                // entering, otherwise `mint_probe_correlation`'s I5
+                // assertion would fire. Commit C centralizes this
+                // pre-dispatch close at the top of `on_probe_response`
+                // for both arms; the descent arm currently routes its
+                // close through `dispatch_descent_probe`.
+                if let Some(p) = self.profiles.get_mut(profile_id) {
+                    p.pending_probe = None;
                 }
-                (BurstIntent::Seed, ProbeResult::Vanished) => {
-                    self.dispatch_seed_vanished(profile_id, out);
+                match (intent, response.result) {
+                    (BurstIntent::Seed, ProbeResult::Ok(tree_snap)) => {
+                        self.dispatch_seed_ok(profile_id, tree_snap, out);
+                    }
+                    (BurstIntent::Seed, ProbeResult::Vanished) => {
+                        self.dispatch_seed_vanished(profile_id, out);
+                    }
+                    (BurstIntent::Seed, ProbeResult::Failed { errno }) => {
+                        self.dispatch_seed_failed(profile_id, errno, out);
+                    }
+                    (BurstIntent::Standard, ProbeResult::Ok(tree_snap)) => {
+                        self.dispatch_standard_ok(profile_id, tree_snap, forced, now, out);
+                    }
+                    (BurstIntent::Standard, ProbeResult::Vanished) => {
+                        self.dispatch_standard_vanished(profile_id, out);
+                    }
+                    (BurstIntent::Standard, ProbeResult::Failed { errno }) => {
+                        self.dispatch_standard_failed(profile_id, errno, out);
+                    }
                 }
-                (BurstIntent::Seed, ProbeResult::Failed { errno }) => {
-                    self.dispatch_seed_failed(profile_id, errno, out);
-                }
-                (BurstIntent::Standard, ProbeResult::Ok(tree_snap)) => {
-                    self.dispatch_standard_ok(profile_id, tree_snap, forced, now, out);
-                }
-                (BurstIntent::Standard, ProbeResult::Vanished) => {
-                    self.dispatch_standard_vanished(profile_id, out);
-                }
-                (BurstIntent::Standard, ProbeResult::Failed { errno }) => {
-                    self.dispatch_standard_failed(profile_id, errno, out);
-                }
-            },
+            }
             ProbeDispatch::Stale => {
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
                     profile: profile_id,
@@ -468,8 +496,7 @@ impl Engine {
         // Idle.
         let mut anchor_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         let mut parent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
-        let mut descent_claimers: smallvec::SmallVec<[(ProfileId, bool); 2]> =
-            smallvec::SmallVec::new();
+        let mut descent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         for (pid, p) in self.profiles.iter() {
             if p.anchor_contribution && p.resource == resource {
                 anchor_claimers.push(pid);
@@ -480,7 +507,7 @@ impl Engine {
             if let ProfileState::Pending(d) = &p.state
                 && d.current_prefix == resource
             {
-                descent_claimers.push((pid, matches!(d.phase, DescentPhase::Probing { .. })));
+                descent_claimers.push(pid);
             }
         }
 
@@ -519,15 +546,14 @@ impl Engine {
             });
         }
 
-        // Descent claimers: cancel any in-flight probe, then release
+        // Descent claimers: close the probe channel (idempotent —
+        // emits Cancel iff a descent probe was in flight), then release
         // the prefix claim (transitions Profile → Idle). Without the
-        // probe cancel, a late `ProbeResponse` would arrive after the
-        // Profile transitions out of Pending and drop with
+        // cancel-before-release, a late `ProbeResponse` would arrive
+        // after the Profile transitions out of Pending and drop with
         // `StaleProbeResponse` — wasted I/O.
-        for (pid, had_inflight) in descent_claimers {
-            if had_inflight {
-                out.probe_ops.push(ProbeOp::Cancel { profile: pid });
-            }
+        for pid in descent_claimers {
+            self.cancel_pending_probe(pid, out);
             self.release_descent_prefix_claim(pid, out);
             out.diagnostics.push(Diagnostic::ProfileClaimPurged {
                 profile: pid,
@@ -620,17 +646,14 @@ impl Engine {
         if matches!(p.state, ProfileState::Pending(_)) {
             return;
         }
-        let was_verifying = matches!(
-            &p.state,
-            ProfileState::Active(b) if matches!(b.phase, BurstPhase::Verifying { .. }),
-        );
         let was_active = matches!(p.state, ProfileState::Active(_));
 
-        if was_verifying {
-            out.probe_ops.push(ProbeOp::Cancel {
-                profile: profile_id,
-            });
-        }
+        // Idempotent: emits Cancel iff the probe channel is open
+        // (Active+Verifying ⇒ pending_probe = Some(_)). For
+        // Active+Batching/Draining no probe is in flight and the helper
+        // is a no-op — replaces the prior `was_verifying` snapshot's
+        // role with field-discipline equivalence.
+        self.cancel_pending_probe(profile_id, out);
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = None;

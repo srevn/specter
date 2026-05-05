@@ -17,10 +17,9 @@ use crate::refcounts::add_watch_demand;
 use crate::stability::StabilityIndex;
 use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
-    BurstPhase, ClassSet, DedupKey, DescentPhase, DescentState, Diagnostic, Effect, Input,
-    ProbeCorrelation, ProbeOp, Profile, ProfileId, ProfileMap, ProfileState, ResourceId,
-    StepOutput, Sub, SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree, WatchOp,
-    compute_config_hash,
+    BurstPhase, ClassSet, DedupKey, DescentPhase, DescentState, Diagnostic, Effect, Input, ProbeOp,
+    Profile, ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest,
+    SubId, SubRegistry, TimerId, TimerKind, Tree, WatchOp, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -284,7 +283,9 @@ impl Engine {
 
             add_watch_demand(&mut self.tree, prefix, ClassSet::STRUCTURE, out);
 
-            let correlation = self.next_probe_correlation();
+            let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+                return sub_id;
+            };
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.state = ProfileState::Pending(DescentState {
                     current_prefix: prefix,
@@ -292,7 +293,13 @@ impl Engine {
                     phase: DescentPhase::Probing { correlation },
                 });
             }
-            self.emit_descent_probe(profile_id, prefix, correlation, out);
+            self.emit_probe_op(
+                profile_id,
+                prefix,
+                correlation,
+                crate::probe_channel::ProbeEmissionParams::Descent,
+                out,
+            );
         } else {
             // Immediate-Seed path. Anchor exists; bump its watch_demand
             // with the Profile's events_union (the user-declared mask),
@@ -541,19 +548,14 @@ impl Engine {
             "reap_profile: Pending + anchor_contribution must be mutually exclusive",
         );
 
-        // Cancel any in-flight descent probe BEFORE the descent-prefix
-        // helper transitions the Profile to Idle (which drops the
-        // correlation). Without this, the prober ships a ProbeResponse
-        // for a now-detached Profile, the engine drops it as
-        // StaleProbeResponse — wasted prober capacity and I/O.
-        // Mirrors `on_watch_op_rejected`'s descent-purge pattern.
-        if let Some(d) = self.descent_state(profile_id)
-            && matches!(d.phase, DescentPhase::Probing { .. })
-        {
-            out.probe_ops.push(ProbeOp::Cancel {
-                profile: profile_id,
-            });
-        }
+        // Close the probe channel BEFORE the descent-prefix helper
+        // transitions the Profile to Idle. Idempotent: emits Cancel
+        // iff a probe was in flight (Pending+Probing for this call
+        // path; Active+Verifying never reaches `reap_profile`'s entry
+        // — `finish_burst_to_idle` runs `reap_profile` only after the
+        // burst response cleared the channel). Mirrors
+        // `on_watch_op_rejected`'s descent-purge pattern.
+        self.cancel_pending_probe(profile_id, out);
 
         // Release every claim this Profile may hold. Helpers are
         // idempotent — no-op when the corresponding flag is unset (or
@@ -658,13 +660,6 @@ impl Engine {
             }
             // Stale — silently drop, continue draining.
         }
-    }
-
-    /// Mint a fresh `ProbeCorrelation` token. Engine-monotonic; saturating
-    /// at `u64::MAX` (unreachable in any realistic deployment).
-    pub(crate) const fn next_probe_correlation(&mut self) -> ProbeCorrelation {
-        self.next_correlation = self.next_correlation.saturating_add(1);
-        ProbeCorrelation(self.next_correlation)
     }
 
     /// Whether `id` is the live timer for `profile`'s `kind` slot —
@@ -1016,16 +1011,61 @@ mod tests {
     }
 
     #[test]
-    fn next_probe_correlation_is_monotonic() {
+    fn mint_probe_correlation_is_monotonic_per_profile() {
+        // Three Profiles, each minted once: the shared
+        // `Engine.next_correlation` counter advances monotonically
+        // across mints regardless of which Profile owns each open
+        // channel. Pinning to discrete Profiles avoids the I5
+        // double-open assertion (one open channel per Profile).
         let mut e = Engine::new();
-        let a = e.next_probe_correlation();
-        let b = e.next_probe_correlation();
-        let c = e.next_probe_correlation();
+        let r1 = e.tree.ensure(None, "x", specter_core::ResourceRole::User);
+        let r2 = e.tree.ensure(None, "y", specter_core::ResourceRole::User);
+        let r3 = e.tree.ensure(None, "z", specter_core::ResourceRole::User);
+        let cfg = ScanConfig::builder().build();
+        let pid1 = e.profiles.attach(
+            &mut e.tree,
+            specter_core::Profile::new(
+                r1,
+                cfg.clone(),
+                Duration::from_secs(6),
+                Duration::from_millis(50),
+                specter_core::ClassSet::EMPTY,
+            ),
+        );
+        let pid2 = e.profiles.attach(
+            &mut e.tree,
+            specter_core::Profile::new(
+                r2,
+                cfg.clone(),
+                Duration::from_secs(6),
+                Duration::from_millis(50),
+                specter_core::ClassSet::EMPTY,
+            ),
+        );
+        let pid3 = e.profiles.attach(
+            &mut e.tree,
+            specter_core::Profile::new(
+                r3,
+                cfg,
+                Duration::from_secs(6),
+                Duration::from_millis(50),
+                specter_core::ClassSet::EMPTY,
+            ),
+        );
+
+        let a = e.mint_probe_correlation(pid1).expect("pid1 is live");
+        let b = e.mint_probe_correlation(pid2).expect("pid2 is live");
+        let c = e.mint_probe_correlation(pid3).expect("pid3 is live");
         assert!(a < b);
         assert!(b < c);
         assert_eq!(a, ProbeCorrelation(1));
         assert_eq!(b, ProbeCorrelation(2));
         assert_eq!(c, ProbeCorrelation(3));
+
+        // Slots populated symmetrically.
+        assert_eq!(e.pending_probe(pid1), Some(a));
+        assert_eq!(e.pending_probe(pid2), Some(b));
+        assert_eq!(e.pending_probe(pid3), Some(c));
     }
 
     #[test]

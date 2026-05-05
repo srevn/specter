@@ -50,9 +50,8 @@
 
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use specter_core::{
-    ClassSet, DescentPhase, DescentState, Diagnostic, EntryKind, ProbeCorrelation, ProbeKind,
-    ProbeOp, ProbeRequest, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    StepOutput, TreeSnapshot,
+    ClassSet, DescentPhase, DescentState, Diagnostic, EntryKind, ProfileId, ProfileState,
+    ResourceId, ResourceKind, ResourceRole, StepOutput, TreeSnapshot,
 };
 use std::time::Instant;
 
@@ -200,67 +199,6 @@ impl crate::Engine {
         cur
     }
 
-    /// Build a fresh probe at `prefix` for a pending Profile and push
-    /// it onto `out.probe_ops`. The caller is responsible for minting
-    /// the `correlation` and stashing it on `DescentState.phase`
-    /// (`DescentPhase::Probing { correlation }`) BEFORE calling — this
-    /// helper takes `&self` and does not mutate state.
-    ///
-    /// `prefix` must be live in the Tree; callers verify via
-    /// `tree.get(prefix).is_some()` (the descent's invariant: the
-    /// prefix carries a `watch_demand` contribution while pending, which
-    /// implies a live slot).
-    pub(crate) fn emit_descent_probe(
-        &self,
-        profile_id: ProfileId,
-        prefix: ResourceId,
-        correlation: ProbeCorrelation,
-        out: &mut StepOutput,
-    ) {
-        let Some(profile) = self.profiles.get(profile_id) else {
-            return;
-        };
-        let kind = match self.tree.get(prefix).map(|r| r.kind) {
-            Some(ResourceKind::File) => ProbeKind::File,
-            _ => ProbeKind::Directory,
-        };
-        let target_path = self.tree.path_of(prefix).unwrap_or_default();
-        // Descent probes only need the immediate children of `prefix` to
-        // search for the next segment — a recursive walk is wasted I/O,
-        // and the user's pattern would filter out the very file we're
-        // looking for. Override the Profile's `ScanConfig` to a minimal
-        // single-level enumeration: `recursive = false` (no descent into
-        // children), `pattern = None` (don't filter — we're looking for
-        // any segment by name), `exclude = []` (don't hide ancestors of
-        // the anchor), `hidden = true` (don't skip dot-prefixed
-        // ancestors), `max_depth = None` (irrelevant when
-        // `recursive=false`). The Seed burst that follows anchor
-        // materialization uses the Profile's real config.
-        let scan_config = specter_core::ScanConfig::builder()
-            .recursive(false)
-            .hidden(true)
-            .max_depth(None)
-            .build();
-        out.probe_ops.push(ProbeOp::Probe {
-            request: ProbeRequest {
-                profile: profile_id,
-                correlation,
-                kind,
-                target_resource: prefix,
-                target_path,
-                scan_config,
-                // Profile identity is stable across descent (the Profile's
-                // `config_hash` reflects its real ScanConfig, not this
-                // descent override). The walker stamps it onto the
-                // synthesised `DirSnapshot`; descent shim discards it.
-                captured_with: profile.config_hash,
-                baseline_subtree: None,
-                force_walk: std::collections::BTreeSet::new(),
-                forced: false,
-            },
-        });
-    }
-
     /// Dispatch a `ProbeResponse` for a Profile whose state is
     /// `ProfileState::Pending`. `on_probe_response` matches on `&p.state`
     /// and routes here if the Pending arm wins.
@@ -271,8 +209,16 @@ impl crate::Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // Mark no probe in flight; subsequent advancement may emit a
-        // fresh one.
+        // Close the probe channel: the response just arrived, so the
+        // engine-side slot must clear before any dispatch arm opens a
+        // fresh one (advance / rewind paths re-mint via
+        // `mint_probe_correlation`, which I5-asserts a closed channel).
+        // The variant clear (`d.phase = AwaitingEvent`) coexists with
+        // the `pending_probe = None` clear during the dual-write phase
+        // (Commit B); both serve I5 against different readers.
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.pending_probe = None;
+        }
         if let Some(d) = self.descent_state_mut(profile_id) {
             d.phase = DescentPhase::AwaitingEvent;
         }
@@ -434,7 +380,9 @@ impl crate::Engine {
             // Update descent state BEFORE sub_watch_demand so the recompute
             // (multi-contributor case) attributes the prefix's STRUCTURE
             // contribution to the new prefix, not the old one.
-            let correlation = self.next_probe_correlation();
+            let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+                return;
+            };
             let new_remaining: Vec<String> = remaining[1..].to_vec();
             if let Some(d) = self.descent_state_mut(profile_id) {
                 d.current_prefix = new_resource;
@@ -451,7 +399,13 @@ impl crate::Engine {
             );
             add_watch_demand(&mut self.tree, new_resource, ClassSet::STRUCTURE, out);
 
-            self.emit_descent_probe(profile_id, new_resource, correlation, out);
+            self.emit_probe_op(
+                profile_id,
+                new_resource,
+                correlation,
+                crate::probe_channel::ProbeEmissionParams::Descent,
+                out,
+            );
         }
     }
 
@@ -497,7 +451,9 @@ impl crate::Engine {
                     new_remaining.insert(0, name);
                 }
 
-                let correlation = self.next_probe_correlation();
+                let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+                    return;
+                };
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.state = ProfileState::Pending(DescentState {
                         current_prefix: parent_id,
@@ -518,7 +474,13 @@ impl crate::Engine {
 
                 add_watch_demand(&mut self.tree, parent_id, ClassSet::STRUCTURE, out);
 
-                self.emit_descent_probe(profile_id, parent_id, correlation, out);
+                self.emit_probe_op(
+                    profile_id,
+                    parent_id,
+                    correlation,
+                    crate::probe_channel::ProbeEmissionParams::Descent,
+                    out,
+                );
             }
             None => {
                 // Root prefix vanished — no rewind target. Clear the
@@ -575,11 +537,19 @@ impl crate::Engine {
             None => return,
         };
 
-        let correlation = self.next_probe_correlation();
+        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+            return;
+        };
         if let Some(d) = self.descent_state_mut(profile_id) {
             d.phase = DescentPhase::Probing { correlation };
         }
-        self.emit_descent_probe(profile_id, prefix, correlation, out);
+        self.emit_probe_op(
+            profile_id,
+            prefix,
+            correlation,
+            crate::probe_channel::ProbeEmissionParams::Descent,
+            out,
+        );
     }
 }
 

@@ -220,6 +220,21 @@ pub struct Profile {
     pub config: ScanConfig,
     pub config_hash: u64,
     pub state: ProfileState,
+    /// Engine-side slot for the **probe channel** — the per-Profile
+    /// communication primitive between the engine and the Prober pool.
+    /// Holds the correlation token of an outstanding `ProbeRequest`, or
+    /// `None` if no probe is in flight.
+    ///
+    /// **Discipline.** Open via `Engine::mint_probe_correlation`; close
+    /// via the response-dispatch path (top of `Engine::on_probe_response`)
+    /// or via `Engine::cancel_pending_probe`. Open for at most one
+    /// outstanding request, regardless of which lifecycle state
+    /// (`Pending` or `Active`) drives the emission.
+    ///
+    /// **Sibling channels.** Distinct from the *watch channel*
+    /// (per-Resource, refcounted via `watch_demand`) and the *effect
+    /// channel* (per-(Sub, DedupKey), coalesced in the Actuator).
+    pub pending_probe: Option<ProbeCorrelation>,
     pub baseline: Option<TreeSnapshot>,
     pub current: Option<TreeSnapshot>,
     pub dirty_descendants: u32,
@@ -318,6 +333,7 @@ impl Profile {
             config,
             config_hash,
             state: ProfileState::Idle,
+            pending_probe: None,
             baseline: None,
             current: None,
             dirty_descendants: 0,
