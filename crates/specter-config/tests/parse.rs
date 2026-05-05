@@ -1,7 +1,7 @@
 //! Integration tests: parse + validate against TOML fixtures.
 
 use specter_config::{Config, ConfigError, IssueKind};
-use specter_core::{ArgPart, EffectScope, Placeholder};
+use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -44,6 +44,7 @@ fn full_fixture_round_trips_every_field() {
     assert!(w.scan.pattern.is_some());
     assert_eq!(w.scan.exclude.len(), 2);
     assert_eq!(w.scan.max_depth, Some(5));
+    assert_eq!(w.events, ClassSet::STRUCTURE | ClassSet::CONTENT);
     assert_eq!(w.command.argv.len(), 3);
     assert_eq!(w.command.argv[0].parts[0], ArgPart::literal("make"));
     assert_eq!(w.command.argv[1].parts[0], ArgPart::literal("--input="));
@@ -63,6 +64,9 @@ fn three_watches_preserves_source_order() {
     let names: Vec<&str> = cfg.watches.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(names, vec!["build", "lint", "fmt"]);
     assert_eq!(cfg.watches[2].scope, EffectScope::PerStableFile);
+    assert_eq!(cfg.watches[0].events, ClassSet::DEFAULT_SUBTREE_ROOT);
+    assert_eq!(cfg.watches[1].events, ClassSet::DEFAULT_SUBTREE_ROOT);
+    assert_eq!(cfg.watches[2].events, ClassSet::DEFAULT_PER_FILE);
 }
 
 #[test]
@@ -135,6 +139,7 @@ fn all_defaults_fixture_applies_documented_defaults() {
     assert_eq!(w.scope, EffectScope::SubtreeRoot);
     assert_eq!(w.settle, Duration::from_millis(200));
     assert_eq!(w.max_settle, Duration::from_secs(12));
+    assert_eq!(w.events, ClassSet::DEFAULT_SUBTREE_ROOT);
 }
 
 #[test]

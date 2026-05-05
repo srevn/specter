@@ -17,9 +17,9 @@ use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use crate::stability::StabilityIndex;
 use crate::timer::TimerHeap;
 use specter_core::{
-    BurstPhase, DedupKey, DescentState, Diagnostic, Effect, Input, ProbeCorrelation, ProbeOp,
-    Profile, ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest,
-    SubId, SubRegistry, TimerId, Tree, WatchOp, compute_config_hash,
+    BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Effect, Input, ProbeCorrelation,
+    ProbeOp, Profile, ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub,
+    SubAttachRequest, SubId, SubRegistry, TimerId, Tree, WatchOp, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -199,11 +199,17 @@ impl Engine {
             self.tree.set_role(anchor, specter_core::ResourceRole::User);
         }
 
-        let cfg_hash = compute_config_hash(&req.config, req.max_settle);
+        let cfg_hash = compute_config_hash(&req.config, req.max_settle, req.events);
         let profile_id = if let Some(pid) = self.profiles.find(anchor, cfg_hash) {
             pid
         } else {
-            let p = Profile::new(anchor, req.config.clone(), req.max_settle, req.settle);
+            let p = Profile::new(
+                anchor,
+                req.config.clone(),
+                req.max_settle,
+                req.settle,
+                req.events,
+            );
             self.profiles.attach(&mut self.tree, p)
         };
 
@@ -222,6 +228,7 @@ impl Engine {
                 req.scope,
                 req.settle,
                 req.max_settle,
+                req.events,
             )
         });
 
@@ -230,43 +237,41 @@ impl Engine {
         }
 
         if !is_fresh_profile {
-            // Existing Profile: recompute settle.
-            // `min(existing, new_sub.settle)` is the cheapest correct
-            // update — the Sub joins an existing burst lifecycle (or
-            // shares the Idle baseline). No fresh Watch / Probe / parent-
-            // edge work.
+            // Existing Profile: recompute settle. `min(existing,
+            // new_sub.settle)` is the cheapest correct update — the Sub
+            // joins an existing burst lifecycle (or shares the Idle
+            // baseline). No fresh Watch / Probe / parent-edge work.
+            //
+            // Under D3 the events mask folds into `config_hash`, so a
+            // Sub joining an existing Profile shares its mask by
+            // construction — `events_union` and `has_per_file_fds` are
+            // invariant for the Profile's lifetime. No retroactive
+            // per-leaf `watch_demand` bump is needed (the prior B2
+            // recompute machinery is removed).
             if let Some(p) = self.profiles.get_mut(profile_id)
                 && req.settle < p.settle
             {
                 p.settle = req.settle;
             }
-            // Bundle B2: a `PerStableFile` Sub joining an existing Profile
-            // flips `has_per_file_sub` from false to true ⇒ retroactively
-            // bump per-leaf watch_demand on every covered Leaf the Profile
-            // already observed (the Subs already in flight don't see the
-            // PerStableFile carve-out otherwise; they'd lack per-file FDs
-            // until the next probe walked the leaves anew).
-            if self.recompute_has_per_file_sub(profile_id) {
-                let now_on = self
-                    .profiles
-                    .get(profile_id)
-                    .is_some_and(|p| p.has_per_file_sub);
-                self.update_per_leaf_watch_demand(profile_id, now_on, out);
-            }
             return sub_id;
         }
-        // Fresh Profile: recompute the flag (sets it to true if this very
-        // first Sub is PerStableFile). No retroactive bump needed — the
-        // Profile has no `current` yet; the Seed burst's `walk_pair` runs
-        // with the flag set and emits per-leaf watches as it materialises.
-        let _ = self.recompute_has_per_file_sub(profile_id);
 
         // ===== Fresh Profile path =====
 
+        // Capture the Profile's mask before any &mut borrows. Used as the
+        // anchor's contribution (immediate-Seed path); the descent prefix
+        // path uses `STRUCTURE` per D9 instead.
+        let events_union = self
+            .profiles
+            .get(profile_id)
+            .map_or(ClassSet::EMPTY, |p| p.events_union);
+
         if let Some((prefix, remaining)) = pending_components {
-            // Pending descent. Bump the prefix's watch_demand; emit the
-            // first descent probe. Profile.state stays Idle while the
-            // descent runs; the anchor materializes via
+            // Pending descent. Bump the prefix's watch_demand with a
+            // `STRUCTURE` contribution (D9 — the prefix is infrastructure;
+            // it always wants to see directory-entry changes regardless
+            // of the Sub's user mask). Profile.state stays Idle while
+            // the descent runs; the anchor materializes via
             // `dispatch_descent_ok`'s anchor branch, which then sets up
             // the watch-root-parent contribution and starts the Seed
             // burst. Setting watch_root_parent here would bump
@@ -276,7 +281,7 @@ impl Engine {
             self.compute_and_set_parent_edge(profile_id);
             self.recompute_dependent_parent_edges(profile_id);
 
-            add_watch_demand(&mut self.tree, prefix, out);
+            add_watch_demand(&mut self.tree, prefix, ClassSet::STRUCTURE, out);
 
             let correlation = self.next_probe_correlation();
             if let Some(p) = self.profiles.get_mut(profile_id) {
@@ -288,10 +293,11 @@ impl Engine {
             }
             self.emit_descent_probe(profile_id, prefix, correlation, out);
         } else {
-            // Immediate-Seed path. Anchor exists; bump its
-            // watch_demand, set up the watch-root parent, compute parent
-            // edges, start the Seed burst.
-            add_watch_demand(&mut self.tree, anchor, out);
+            // Immediate-Seed path. Anchor exists; bump its watch_demand
+            // with the Profile's events_union (the user-declared mask),
+            // set up the watch-root parent (STRUCTURE per D9), compute
+            // parent edges, start the Seed burst.
+            add_watch_demand(&mut self.tree, anchor, events_union, out);
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.anchor_contribution = true;
             }
@@ -355,7 +361,13 @@ impl Engine {
                 .set_role(parent_id, specter_core::ResourceRole::WatchRootParent);
         }
 
-        add_watch_demand(&mut self.tree, parent_id, out);
+        // D9 — the watch-root parent is engine infrastructure (used to
+        // detect anchor reappearance after a `rm -rf` of the anchor).
+        // Contribution is `STRUCTURE` regardless of the Sub's user mask.
+        // The corresponding bookkeeping flag is `Profile.watch_root_parent
+        // == Some(parent_id)`, written below; the recompute path reads
+        // that flag to attribute this contribution back to the Profile.
+        add_watch_demand(&mut self.tree, parent_id, ClassSet::STRUCTURE, out);
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.watch_root_parent = Some(parent_id);
@@ -447,19 +459,16 @@ impl Engine {
                 });
             }
             // Recompute Profile.settle = min(remaining_subs.settles).
+            //
+            // Under D3 every Sub on a Profile shares the same `events`
+            // mask (events folds into `config_hash`); detaching one Sub
+            // cannot flip `Profile.has_per_file_fds` or
+            // `Profile.events_union`. The prior B2 retroactive-bump
+            // machinery is therefore unreachable and has been removed —
+            // a future v2 predicate-layer change would re-introduce it
+            // shaped around per-Sub contributions, not the broken
+            // recompute-per-attach pattern.
             self.recompute_profile_settle(profile_id);
-            // Bundle B2: detaching the *last* `PerStableFile` Sub flips
-            // `has_per_file_sub` from true to false ⇒ retroactively
-            // release per-leaf watch_demand on every covered Leaf so the
-            // Tree converges to the post-detach equilibrium without
-            // waiting for a new probe.
-            if self.recompute_has_per_file_sub(profile_id) {
-                let now_on = self
-                    .profiles
-                    .get(profile_id)
-                    .is_some_and(|p| p.has_per_file_sub);
-                self.update_per_leaf_watch_demand(profile_id, now_on, out);
-            }
             return;
         }
 
@@ -494,6 +503,15 @@ impl Engine {
     /// `ProfileMap`, try-reap the anchor Resource, and emit a
     /// `ReapPendingResolved` Diagnostic.
     ///
+    /// **Per-Resource union recompute.** Each `sub_watch_demand` call
+    /// triggers a recompute of the target Resource's `events_union` if
+    /// the post-decrement refcount is still > 0 (multi-Profile sharing).
+    /// The recompute reads each Profile's bookkeeping flags
+    /// (`anchor_contribution`, `watch_root_parent`, `state ==
+    /// Pending(d)`) to attribute contributions; this Profile's flags must
+    /// be cleared **before** the call so the recompute models the
+    /// post-release state. Each release block clears its flag inline.
+    ///
     /// Sole call sites: `detach_sub_inner` (Idle / Pending Profile,
     /// immediate reap) and `finish_burst_to_idle` (deferred reap when
     /// `reap_pending` was set mid-burst).
@@ -522,6 +540,7 @@ impl Engine {
         };
         let anchor = p.resource;
         let watch_root_parent = p.watch_root_parent;
+        let events_union = p.events_union;
         let had_anchor_contribution = p.anchor_contribution;
         let descent_prefix = match &p.state {
             ProfileState::Pending(d) => Some(d.current_prefix),
@@ -541,31 +560,58 @@ impl Engine {
         if let Some(prefix) = descent_prefix {
             // Pending Profile: only the descent's prefix carries this
             // Profile's contribution. Anchor was never bumped.
-            sub_watch_demand(&mut self.tree, prefix, out);
+            //
+            // Clear `state` to Idle BEFORE `sub_watch_demand` so the
+            // recompute correctly excludes this Profile's STRUCTURE
+            // contribution to the prefix in multi-contributor cases.
+            if let Some(p) = self.profiles.get_mut(profile_id) {
+                p.state = ProfileState::Idle;
+            }
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                prefix,
+                ClassSet::STRUCTURE,
+                out,
+            );
             self.tree.try_reap(prefix);
         } else if had_anchor_contribution {
             // Materialized Profile: release the anchor's contribution.
-            sub_watch_demand(&mut self.tree, anchor, out);
+            // Clear `anchor_contribution` BEFORE the call so the
+            // recompute excludes this Profile's mask.
+            if let Some(p) = self.profiles.get_mut(profile_id) {
+                p.anchor_contribution = false;
+            }
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                anchor,
+                events_union,
+                out,
+            );
         }
         // Purged Profile: nothing to release; the clamp already did it.
-
-        // Transition Pending → Idle before detach so the lifecycle
-        // observation is explicit at the reap site (the Profile is
-        // about to leave the registry; this write is short-lived but
-        // makes the state-machine progression readable).
-        if descent_prefix.is_some()
-            && let Some(p) = self.profiles.get_mut(profile_id)
-        {
-            p.state = ProfileState::Idle;
-        }
 
         // Watch-root parent's contribution. Set only at anchor
         // materialization, so `Some(parent_id)` is reachable only
         // alongside `had_anchor_contribution`. The double-check on the
         // flag is deliberately absent — the field's `Option` already
         // encodes the contribution's presence.
+        //
+        // Clear `watch_root_parent` BEFORE `sub_watch_demand` so the
+        // recompute excludes this Profile's STRUCTURE contribution to
+        // the parent.
         if let Some(parent_id) = watch_root_parent {
-            sub_watch_demand(&mut self.tree, parent_id, out);
+            if let Some(p) = self.profiles.get_mut(profile_id) {
+                p.watch_root_parent = None;
+            }
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                parent_id,
+                ClassSet::STRUCTURE,
+                out,
+            );
             // The parent may now have no contributions; `try_reap` is
             // gated by `has_anchors`, which checks the parent's role +
             // children + profiles. WatchRootParent role survives reap
@@ -592,63 +638,6 @@ impl Engine {
         out.diagnostics.push(Diagnostic::ReapPendingResolved {
             profile: profile_id,
         });
-    }
-
-    /// Bundle B2 — recompute `Profile.has_per_file_sub` over the Profile's
-    /// current Sub set. Returns `true` iff the flag flipped. Called at every
-    /// `attach_sub_inner` / `detach_sub_inner` so the flag tracks the
-    /// per-file scope's presence in real time.
-    ///
-    /// O(subs-on-profile); bounded by `max_settle`-partitioning, typically 1–2.
-    pub(crate) fn recompute_has_per_file_sub(&mut self, profile_id: ProfileId) -> bool {
-        let any_per_file = self
-            .subs
-            .at(profile_id)
-            .iter()
-            .filter_map(|sid| self.subs.get(*sid))
-            .any(|s| matches!(s.scope, specter_core::EffectScope::PerStableFile));
-        let prev = self.profiles.get(profile_id).map(|p| p.has_per_file_sub);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.has_per_file_sub = any_per_file;
-        }
-        prev != Some(any_per_file)
-    }
-
-    /// Bundle B2 — retroactively bump (`bump = true`) or release
-    /// (`bump = false`) per-leaf `watch_demand` contributions for every
-    /// covered Leaf in the Profile's current `TreeSnapshot::Dir`. Called
-    /// when `has_per_file_sub` flips on Sub attach or detach so users who
-    /// add a `PerStableFile` Sub to an existing Profile see consistent
-    /// per-file FD coverage on the very next event.
-    ///
-    /// Borrow-discipline: collect covered leaf `ResourceId`s under `&self`,
-    /// then mutate `&mut self.tree` (closure-form would borrow both at
-    /// once and not compile).
-    pub(crate) fn update_per_leaf_watch_demand(
-        &mut self,
-        profile_id: ProfileId,
-        bump: bool,
-        out: &mut StepOutput,
-    ) {
-        let resources_to_update: Vec<ResourceId> = {
-            let Some(profile) = self.profiles.get(profile_id) else {
-                return;
-            };
-            let Some(specter_core::TreeSnapshot::Dir(root_arc)) = profile.current.as_ref() else {
-                return;
-            };
-            let anchor = profile.resource;
-            let mut acc = Vec::new();
-            collect_covered_leaves(profile, &self.tree, root_arc, anchor, &mut acc);
-            acc
-        };
-        for r in resources_to_update {
-            if bump {
-                crate::refcounts::add_watch_demand(&mut self.tree, r, out);
-            } else {
-                crate::refcounts::sub_watch_demand(&mut self.tree, r, out);
-            }
-        }
     }
 
     /// Recompute `Profile.settle = min(remaining_subs.settles)` after a
@@ -818,40 +807,6 @@ const _: fn() = || {
 enum DetachLifecycle {
     ReapNow,
     DeferToBurstEnd,
-}
-
-/// Bundle B2 helper — DFS over `dir.entries`, collecting every covered Leaf's
-/// `ResourceId` for retroactive `watch_demand` bump / release. The walk is
-/// recursive across `ChildEntry::Dir` subtrees (when the walker observed
-/// them — uncovered branches stop the descent gracefully).
-///
-/// Read-only on `Tree` (just `lookup` + `covers`); the caller mutates the
-/// Tree separately under `&mut`. See `update_per_leaf_watch_demand` for the
-/// borrow discipline.
-fn collect_covered_leaves(
-    profile: &Profile,
-    tree: &Tree,
-    dir: &specter_core::DirSnapshot,
-    parent: ResourceId,
-    out: &mut Vec<ResourceId>,
-) {
-    for (name, child) in &dir.entries {
-        let Some(resource) = tree.lookup(Some(parent), name.as_str()) else {
-            continue;
-        };
-        match child {
-            specter_core::ChildEntry::Leaf(_) => {
-                if crate::coverage::covers(profile, resource, tree) {
-                    out.push(resource);
-                }
-            }
-            specter_core::ChildEntry::Dir(dc) => {
-                if let Some(sub) = dc.subtree.as_deref() {
-                    collect_covered_leaves(profile, tree, sub, resource, out);
-                }
-            }
-        }
-    }
 }
 
 /// Decompose an attach path into Tree segments. `RootDir` becomes the
@@ -1269,6 +1224,7 @@ mod tests {
             ScanConfig::builder().build(),
             Duration::from_secs(1),
             Duration::from_millis(50),
+            specter_core::ClassSet::EMPTY,
         );
         let pid = e.profiles.attach(&mut e.tree, profile);
 

@@ -41,6 +41,8 @@ pub enum IssueKind {
     MaxDepthZero,
     DuplicateName,
     InvalidEnum,
+    EventsEmpty,
+    DuplicateEventClass,
 }
 
 impl ConfigError {
@@ -138,5 +140,7 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::MaxDepthZero => "max-depth-zero",
         IssueKind::DuplicateName => "duplicate-name",
         IssueKind::InvalidEnum => "invalid-enum",
+        IssueKind::EventsEmpty => "events-empty",
+        IssueKind::DuplicateEventClass => "duplicate-event-class",
     }
 }

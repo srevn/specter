@@ -46,8 +46,8 @@ pub use snapshot::tree::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, TreeSnapshot, diff_tree, splice,
 };
 pub use sub::{
-    ArgPart, ArgTemplate, CommandTemplate, EffectScope, Placeholder, Sub, SubAttachRequest,
-    SubRegistry, SubRegistryDiff,
+    ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, Placeholder, Sub,
+    SubAttachRequest, SubRegistry, SubRegistryDiff,
 };
 pub use time::{Clock, SystemClock};
 pub use tree::Tree;

@@ -4,7 +4,7 @@
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
-use specter_core::{FsEvent, ResourceId, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ResourceId, WatchOpts};
 use specter_sensor::{FsWatcher, KqueueWatcher};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -15,6 +15,17 @@ fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)>
     out
 }
 
+/// Build a [`WatchOpts`] with only `events` overridden — these tests
+/// watch a directory and expect `StructureChanged` on child writes, so
+/// they all pass [`ClassSet::STRUCTURE`].
+const fn dir_opts() -> WatchOpts {
+    WatchOpts {
+        follow_symlinks: false,
+        recursive: false,
+        events: ClassSet::STRUCTURE,
+    }
+}
+
 #[test]
 fn suppress_silences_subsequent_events() {
     let tmp = TempDir::new().unwrap();
@@ -22,7 +33,7 @@ fn suppress_silences_subsequent_events() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    w.watch(r, tmp.path(), WatchOpts::default()).unwrap();
+    w.watch(r, tmp.path(), dir_opts()).unwrap();
     w.suppress(r);
 
     std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
@@ -64,7 +75,7 @@ fn suppress_then_unwatch_then_unsuppress_does_not_panic() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    w.watch(r, tmp.path(), WatchOpts::default()).unwrap();
+    w.watch(r, tmp.path(), dir_opts()).unwrap();
     w.suppress(r);
     w.unwatch(r);
     // EV_ENABLE on a closed fd hits ENOENT inside ffi; the watcher logs
@@ -80,7 +91,7 @@ fn double_suppress_is_idempotent_at_kernel_level() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    w.watch(r, tmp.path(), WatchOpts::default()).unwrap();
+    w.watch(r, tmp.path(), dir_opts()).unwrap();
     w.suppress(r);
     w.suppress(r); // No error; kernel re-applies EV_DISABLE harmlessly.
 

@@ -90,37 +90,76 @@ pub(crate) fn trigger_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<
     kevent_change(kq, &ev.0)
 }
 
-/// Register a vnode watch with the full NOTE-mask, edge-triggered.
-/// `udata` carries the engine's `ResourceId.as_ffi()` so events round-trip
-/// the id without the watcher needing a separate fd↔id map.
-pub(crate) fn register_vnode(kq: &OwnedFd, target: &OwnedFd, r: ResourceId) -> io::Result<()> {
-    vnode_change(kq, target, r, libc::EV_ADD | libc::EV_CLEAR)
+/// Register a vnode watch with the caller-supplied fflags mask,
+/// edge-triggered. `udata` carries the engine's `ResourceId.as_ffi()` so
+/// events round-trip the id without the watcher needing a separate fd↔id
+/// map.
+///
+/// `fflags` is the caller's responsibility — the kqueue translator
+/// (`super::translate::class_set_to_fflags`) is the single producer of the
+/// mask in the watcher's `watch()` path. The same call doubles as a
+/// re-registration: `EV_ADD` on an existing `(fd, EVFILT_VNODE)` entry
+/// overwrites the prior fflags without affecting other kevent state
+/// (notably the `EV_DISABLE` bit, which is preserved per the kqueue man
+/// page). The watcher exploits this to update the registered mask
+/// without closing or reopening the fd.
+pub(crate) fn register_vnode(
+    kq: &OwnedFd,
+    target: &OwnedFd,
+    r: ResourceId,
+    fflags: u32,
+) -> io::Result<()> {
+    vnode_change(kq, target, r, libc::EV_ADD | libc::EV_CLEAR, fflags)
 }
 
 /// `EV_DISABLE` — silences delivery without removing the registration.
-pub(crate) fn disable_vnode(kq: &OwnedFd, target: &OwnedFd, r: ResourceId) -> io::Result<()> {
-    vnode_change(kq, target, r, libc::EV_DISABLE)
+///
+/// `fflags` should be the **currently-registered** mask for this vnode
+/// (the value the watcher's `registered_fflags` cache holds). Passing
+/// the live mask matters: empirically, macOS xnu's `EV_DISABLE` /
+/// `EV_ENABLE` paths overwrite the registered fflags with whatever the
+/// caller supplies — passing `0` would silently clear `NOTE_WRITE` /
+/// `NOTE_ATTRIB` / etc. on the next re-enable. FreeBSD preserves fflags
+/// across disable/enable per `kqueue_register`, so the value is a no-op
+/// there. Treating both backends identically (always pass the cached
+/// mask) is correct on both. Only the disable bit is intentionally
+/// changed.
+pub(crate) fn disable_vnode(
+    kq: &OwnedFd,
+    target: &OwnedFd,
+    r: ResourceId,
+    fflags: u32,
+) -> io::Result<()> {
+    vnode_change(kq, target, r, libc::EV_DISABLE, fflags)
 }
 
 /// `EV_ENABLE` — restores delivery on a previously disabled
-/// registration.
-pub(crate) fn enable_vnode(kq: &OwnedFd, target: &OwnedFd, r: ResourceId) -> io::Result<()> {
-    vnode_change(kq, target, r, libc::EV_ENABLE)
+/// registration. See [`disable_vnode`] for the fflags-passthrough
+/// rationale.
+pub(crate) fn enable_vnode(
+    kq: &OwnedFd,
+    target: &OwnedFd,
+    r: ResourceId,
+    fflags: u32,
+) -> io::Result<()> {
+    vnode_change(kq, target, r, libc::EV_ENABLE, fflags)
 }
 
-fn vnode_change(kq: &OwnedFd, target: &OwnedFd, r: ResourceId, flags: u16) -> io::Result<()> {
+#[allow(clippy::similar_names)]
+fn vnode_change(
+    kq: &OwnedFd,
+    target: &OwnedFd,
+    r: ResourceId,
+    flags: u16,
+    fflags: u32,
+) -> io::Result<()> {
     let mut ev = Kevent::zeroed();
     // `OwnedFd` guarantees a non-negative raw fd, so the cast widens
     // (`i32` → `usize`) without sign-loss.
     ev.0.ident = usize::try_from(target.as_raw_fd()).unwrap_or(0);
     ev.0.filter = libc::EVFILT_VNODE;
     ev.0.flags = flags;
-    ev.0.fflags = libc::NOTE_DELETE
-        | libc::NOTE_RENAME
-        | libc::NOTE_WRITE
-        | libc::NOTE_EXTEND
-        | libc::NOTE_ATTRIB
-        | libc::NOTE_REVOKE;
+    ev.0.fflags = fflags;
     ev.0.udata = r.data().as_ffi() as *mut _;
     kevent_change(kq, &ev.0)
 }

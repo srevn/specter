@@ -365,7 +365,6 @@ impl Engine {
     /// (`Unknown` defaults to `Directory` — the more permissive choice;
     /// the Sensor returns `Vanished` on kind mismatch, which the Engine
     /// then handles as Removed).
-    #[allow(clippy::too_many_arguments)] // probe-emission tuple is irreducible without churn
     pub(crate) fn emit_probe_op(
         &self,
         profile_id: ProfileId,
@@ -565,7 +564,6 @@ fn settle_backoff(
 mod tests {
     // Tests prioritize readability over the workspace's pedantic style budget.
     #![allow(
-        clippy::doc_markdown,
         clippy::manual_let_else,
         clippy::match_wildcard_for_single_variants,
         clippy::missing_const_for_fn,
@@ -575,13 +573,14 @@ mod tests {
 
     use crate::Engine;
     use specter_core::{
-        BurstIntent, BurstPhase, ProbeOp, Profile, ProfileState, ResourceKind, ResourceRole,
-        ScanConfig, StepOutput, WatchOp,
+        BurstIntent, BurstPhase, ClassSet, ProbeOp, Profile, ProfileState, ResourceKind,
+        ResourceRole, ScanConfig, StepOutput, WatchOp,
     };
     use std::time::{Duration, Instant};
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
+    const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     /// Build an Engine with a single Profile anchored at `/anchor`. Returns the
     /// Engine + the `ProfileId`.
@@ -596,6 +595,7 @@ mod tests {
                 ScanConfig::builder().recursive(true).build(),
                 MAX_SETTLE,
                 SETTLE,
+                NO_EVENTS,
             ),
         );
         (e, pid)
@@ -919,6 +919,7 @@ mod tests {
                 ScanConfig::builder().recursive(true).build(),
                 MAX_SETTLE,
                 SETTLE,
+                NO_EVENTS,
             ),
         );
         (e, pid, root, a, b)

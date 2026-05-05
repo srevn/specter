@@ -3,7 +3,6 @@
 //! in-flight Effect race after detach.
 
 #![allow(
-    clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::manual_let_else,
     clippy::match_wildcard_for_single_variants,
@@ -16,9 +15,9 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    BurstPhase, ChildEntry, CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp, ProbeResponse,
-    ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    BurstPhase, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta,
+    DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp,
+    ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
     SubAttachRequest, SubRegistryDiff, TreeSnapshot, WatchOp,
 };
 use specter_engine::Engine;
@@ -29,6 +28,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
+const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn empty_command() -> CommandTemplate {
     CommandTemplate::new([specter_core::ArgTemplate::new([
@@ -83,6 +83,7 @@ fn config_diff_add_sub_to_existing_profile() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -99,6 +100,7 @@ fn config_diff_add_sub_to_existing_profile() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     ));
     let out = e.step(Input::ConfigDiff(diff), now);
 
@@ -134,6 +136,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let now = Instant::now();
     let (sid_a, attach_out) = e.attach_sub(req, now);
@@ -191,6 +194,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -279,6 +283,7 @@ fn effect_complete_after_detach_drops_silently() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -351,6 +356,7 @@ fn config_diff_modified_remove_then_add() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -385,6 +391,7 @@ fn config_diff_modified_remove_then_add() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
     ));
     let _out = e.step(Input::ConfigDiff(diff), now);

@@ -105,12 +105,15 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
 mod tests {
     use super::*;
     use specter_core::{
-        GlobPattern, Profile, ResourceKind, ResourceRole, ScanConfig, ScanConfigBuilder,
+        ClassSet, GlobPattern, Profile, ResourceKind, ResourceRole, ScanConfig, ScanConfigBuilder,
     };
     use std::time::Duration;
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
+    /// Coverage is orthogonal to the events filter; tests use an empty
+    /// mask to keep `Profile::new`'s `has_per_file_fds` derivation off.
+    const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     /// Mark `id`'s `ResourceKind` so the pattern check has a stable answer.
     fn mark(tree: &mut Tree, id: ResourceId, kind: ResourceKind) {
@@ -122,7 +125,7 @@ mod tests {
     fn anchor(tree: &mut Tree, segment: &str, builder: ScanConfigBuilder) -> (ResourceId, Profile) {
         let r = tree.ensure(None, segment, ResourceRole::User);
         mark(tree, r, ResourceKind::Dir);
-        let p = Profile::new(r, builder.build(), MAX_SETTLE, SETTLE);
+        let p = Profile::new(r, builder.build(), MAX_SETTLE, SETTLE, NO_EVENTS);
         (r, p)
     }
 
@@ -146,7 +149,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "log.txt", ResourceRole::User);
         mark(&mut tree, r, ResourceKind::File);
-        let p = Profile::new(r, ScanConfig::builder().build(), MAX_SETTLE, SETTLE);
+        let p = Profile::new(r, ScanConfig::builder().build(), MAX_SETTLE, SETTLE, NO_EVENTS);
         assert!(covers(&p, r, &tree));
     }
 
@@ -162,6 +165,7 @@ mod tests {
             ScanConfig::builder().pattern(glob("*.rs")).build(),
             MAX_SETTLE,
             SETTLE,
+            NO_EVENTS,
         );
         assert!(covers(&p, r, &tree));
     }
@@ -184,7 +188,13 @@ mod tests {
         mark(&mut tree, parent, ResourceKind::Dir);
         let anchor_id = tree.ensure(Some(parent), "anchor", ResourceRole::User);
         mark(&mut tree, anchor_id, ResourceKind::Dir);
-        let profile = Profile::new(anchor_id, recursive_unbounded().build(), MAX_SETTLE, SETTLE);
+        let profile = Profile::new(
+            anchor_id,
+            recursive_unbounded().build(),
+            MAX_SETTLE,
+            SETTLE,
+            NO_EVENTS,
+        );
         assert!(!covers(&profile, parent, &tree));
     }
 

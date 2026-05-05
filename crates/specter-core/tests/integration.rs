@@ -7,13 +7,14 @@
 //! seam.
 
 use specter_core::{
-    ArgPart, ArgTemplate, CommandTemplate, EffectScope, GlobPattern, Placeholder, Profile,
-    ProfileMap, ResourceRole, ScanConfig, Sub, SubRegistry, Tree, compute_config_hash,
+    ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, GlobPattern, Placeholder,
+    Profile, ProfileMap, ResourceRole, ScanConfig, Sub, SubRegistry, Tree, compute_config_hash,
 };
 use std::time::Duration;
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
+const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn bare_cfg() -> ScanConfig {
     ScanConfig::builder().build()
@@ -34,11 +35,14 @@ fn shared_profile_via_config_hash() {
 
     let r = tree.ensure(None, "/anchor", ResourceRole::User);
     let cfg = bare_cfg();
-    let hash = compute_config_hash(&cfg, MAX_SETTLE);
+    let hash = compute_config_hash(&cfg, MAX_SETTLE, NO_EVENTS);
 
     // Sub A: creates the Profile (find = None).
     let pid_a = profiles.find(r, hash).unwrap_or_else(|| {
-        profiles.attach(&mut tree, Profile::new(r, cfg.clone(), MAX_SETTLE, SETTLE))
+        profiles.attach(
+            &mut tree,
+            Profile::new(r, cfg.clone(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        )
     });
     profiles.get_mut(pid_a).unwrap().sub_refcount += 1;
     let _sid_a = subs.insert(|id| {
@@ -50,6 +54,7 @@ fn shared_profile_via_config_hash() {
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
+            NO_EVENTS,
         )
     });
 
@@ -74,11 +79,11 @@ fn distinct_profile_for_distinct_max_settle() {
 
     let pid_short = profiles.attach(
         &mut tree,
-        Profile::new(r, bare_cfg(), Duration::from_secs(6), SETTLE),
+        Profile::new(r, bare_cfg(), Duration::from_secs(6), SETTLE, NO_EVENTS),
     );
     let pid_long = profiles.attach(
         &mut tree,
-        Profile::new(r, bare_cfg(), Duration::from_secs(12), SETTLE),
+        Profile::new(r, bare_cfg(), Duration::from_secs(12), SETTLE, NO_EVENTS),
     );
 
     assert_ne!(pid_short, pid_long);
@@ -100,8 +105,14 @@ fn distinct_profile_for_distinct_pattern() {
         .pattern(GlobPattern::compile("*.txt").unwrap())
         .build();
 
-    let pid_rs = profiles.attach(&mut tree, Profile::new(r, cfg_rs, MAX_SETTLE, SETTLE));
-    let pid_txt = profiles.attach(&mut tree, Profile::new(r, cfg_txt, MAX_SETTLE, SETTLE));
+    let pid_rs = profiles.attach(
+        &mut tree,
+        Profile::new(r, cfg_rs, MAX_SETTLE, SETTLE, NO_EVENTS),
+    );
+    let pid_txt = profiles.attach(
+        &mut tree,
+        Profile::new(r, cfg_txt, MAX_SETTLE, SETTLE, NO_EVENTS),
+    );
 
     assert_ne!(pid_rs, pid_txt);
 }
@@ -112,14 +123,17 @@ fn detach_clears_back_references_on_both_sides() {
     let mut profiles = ProfileMap::new();
 
     let r = tree.ensure(None, "/anchor", ResourceRole::User);
-    let pid = profiles.attach(&mut tree, Profile::new(r, bare_cfg(), MAX_SETTLE, SETTLE));
+    let pid = profiles.attach(
+        &mut tree,
+        Profile::new(r, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+    );
 
     profiles.detach(&mut tree, pid);
 
     assert!(profiles.get(pid).is_none());
     assert!(
         profiles
-            .find(r, compute_config_hash(&bare_cfg(), MAX_SETTLE))
+            .find(r, compute_config_hash(&bare_cfg(), MAX_SETTLE, NO_EVENTS))
             .is_none()
     );
     assert!(tree.get(r).unwrap().profiles().is_empty());
@@ -136,7 +150,7 @@ fn rename_after_detach_yields_fresh_id() {
     let id_old = tree.ensure(Some(parent), "foo.c", ResourceRole::User);
     let pid = profiles.attach(
         &mut tree,
-        Profile::new(id_old, bare_cfg(), MAX_SETTLE, SETTLE),
+        Profile::new(id_old, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
     );
 
     // Rename: engine detaches the Profile, then vacates + try_reaps the slot.
@@ -156,7 +170,10 @@ fn recreate_at_anchored_slot_keeps_id() {
     let mut profiles = ProfileMap::new();
     let parent = tree.ensure(None, "/dir", ResourceRole::User);
     let id = tree.ensure(Some(parent), "foo.c", ResourceRole::User);
-    let _pid = profiles.attach(&mut tree, Profile::new(id, bare_cfg(), MAX_SETTLE, SETTLE));
+    let _pid = profiles.attach(
+        &mut tree,
+        Profile::new(id, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+    );
 
     // Vacate without detach: slot is anchored by Profile, try_reap refused.
     tree.vacate(id);

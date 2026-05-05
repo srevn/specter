@@ -3,7 +3,6 @@
 //! with `MockSensor`-style direct ProbeResponse injection.
 
 #![allow(
-    clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::manual_let_else,
     clippy::match_wildcard_for_single_variants,
@@ -17,8 +16,8 @@
 use crate::Engine;
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, Input,
-    LeafEntry, ProbeOp, ProbeResponse, ProbeResult, ResourceId, ResourceKind, ResourceRole,
+    ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind,
+    Input, LeafEntry, ProbeOp, ProbeResponse, ProbeResult, ResourceId, ResourceKind, ResourceRole,
     ScanConfig, SubAttachRequest, TreeSnapshot,
 };
 use std::collections::BTreeMap;
@@ -28,6 +27,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
+const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn cfg() -> ScanConfig {
     ScanConfig::builder().recursive(true).build()
@@ -87,6 +87,7 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -139,6 +140,7 @@ fn descent_two_levels_advances_progressively() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -329,6 +331,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -387,6 +390,7 @@ fn second_absolute_attach_reuses_fs_root() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let req2 = SubAttachRequest::for_path(
         "b".into(),
@@ -396,6 +400,7 @@ fn second_absolute_attach_reuses_fs_root() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (_, _) = e.attach_sub(req1, Instant::now());
     let (_, _) = e.attach_sub(req2, Instant::now());
@@ -422,6 +427,7 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -459,6 +465,7 @@ fn descent_probe_uses_minimal_scan_config() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (_sid, out) = e.attach_sub(req, Instant::now());
 
@@ -549,7 +556,7 @@ fn profile_state_default_is_idle() {
     use specter_core::{Profile, ProfileState, ScanConfig};
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "anchor", ResourceRole::User);
-    let p = Profile::new(r, ScanConfig::builder().build(), MAX_SETTLE, SETTLE);
+    let p = Profile::new(r, ScanConfig::builder().build(), MAX_SETTLE, SETTLE, NO_EVENTS);
     assert!(matches!(p.state, ProfileState::Idle));
 }
 
@@ -568,6 +575,7 @@ fn descent_state_helper_returns_none_for_idle() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -602,6 +610,7 @@ fn descent_state_helper_returns_none_for_active() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -696,6 +705,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;

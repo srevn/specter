@@ -11,6 +11,7 @@
 //! reads `source` directly via `core::hash::hasher`.
 
 use crate::hash::hasher;
+use crate::sub::ClassSet;
 use compact_str::CompactString;
 use globset::{Glob, GlobMatcher};
 use std::cmp::Ordering;
@@ -155,16 +156,19 @@ pub enum ConfigError {
     InvalidGlob { source: String, message: String },
 }
 
-/// Canonical hash of `(ScanConfig, max_settle)` (I7).
+/// Canonical hash of `(ScanConfig, max_settle, events)` (I7 + D3).
 /// The single hashing entry point in `core`/`engine` — all other paths
 /// route through this for `config_hash` derivation.
 ///
 /// Inputs are folded in fixed order through [`crate::hash::hasher`]:
 ///   `recursive`, `hidden`, `len(exclude)` as `u32`, each `exclude.source`,
 ///   pattern presence-byte plus optional source, `max_depth`,
-///   `max_settle.as_nanos()`.
+///   `max_settle.as_nanos()`, `events.bits()`.
+///
+/// `events` is folded last so two Subs differing only on event-class mask
+/// fork separate Profiles (design D3, "Profile-union infection" defence).
 #[must_use]
-pub fn compute_config_hash(scan: &ScanConfig, max_settle: Duration) -> u64 {
+pub fn compute_config_hash(scan: &ScanConfig, max_settle: Duration, events: ClassSet) -> u64 {
     let mut h = hasher();
 
     scan.recursive.hash(&mut h);
@@ -191,13 +195,14 @@ pub fn compute_config_hash(scan: &ScanConfig, max_settle: Duration) -> u64 {
 
     scan.max_depth.hash(&mut h);
     max_settle.as_nanos().hash(&mut h);
+    events.bits().hash(&mut h);
 
     h.finish()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, GlobPattern, ScanConfig, compute_config_hash};
+    use super::{ClassSet, ConfigError, GlobPattern, ScanConfig, compute_config_hash};
     use std::time::Duration;
 
     fn glob(source: &str) -> GlobPattern {
@@ -205,6 +210,7 @@ mod tests {
     }
 
     const SETTLE: Duration = Duration::from_secs(6);
+    const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     #[test]
     fn glob_compile_failure_returns_invalid_glob() {
@@ -255,8 +261,8 @@ mod tests {
         let a = ScanConfig::builder().recursive(true).build();
         let b = ScanConfig::builder().recursive(true).build();
         assert_eq!(
-            compute_config_hash(&a, SETTLE),
-            compute_config_hash(&b, SETTLE),
+            compute_config_hash(&a, SETTLE, NO_EVENTS),
+            compute_config_hash(&b, SETTLE, NO_EVENTS),
         );
     }
 
@@ -273,8 +279,8 @@ mod tests {
             .exclude(glob("a"))
             .build();
         assert_eq!(
-            compute_config_hash(&a, SETTLE),
-            compute_config_hash(&b, SETTLE),
+            compute_config_hash(&a, SETTLE, NO_EVENTS),
+            compute_config_hash(&b, SETTLE, NO_EVENTS),
         );
     }
 
@@ -282,8 +288,8 @@ mod tests {
     fn hash_distinguishes_max_settle() {
         let cfg = ScanConfig::builder().build();
         assert_ne!(
-            compute_config_hash(&cfg, Duration::from_secs(1)),
-            compute_config_hash(&cfg, Duration::from_secs(2)),
+            compute_config_hash(&cfg, Duration::from_secs(1), NO_EVENTS),
+            compute_config_hash(&cfg, Duration::from_secs(2), NO_EVENTS),
         );
     }
 
@@ -292,8 +298,8 @@ mod tests {
         let a = ScanConfig::builder().recursive(true).build();
         let b = ScanConfig::builder().recursive(false).build();
         assert_ne!(
-            compute_config_hash(&a, SETTLE),
-            compute_config_hash(&b, SETTLE),
+            compute_config_hash(&a, SETTLE, NO_EVENTS),
+            compute_config_hash(&b, SETTLE, NO_EVENTS),
         );
     }
 
@@ -302,8 +308,8 @@ mod tests {
         let a = ScanConfig::builder().hidden(true).build();
         let b = ScanConfig::builder().hidden(false).build();
         assert_ne!(
-            compute_config_hash(&a, SETTLE),
-            compute_config_hash(&b, SETTLE),
+            compute_config_hash(&a, SETTLE, NO_EVENTS),
+            compute_config_hash(&b, SETTLE, NO_EVENTS),
         );
     }
 
@@ -313,12 +319,12 @@ mod tests {
         let b = ScanConfig::builder().pattern(glob("*.txt")).build();
         let c = ScanConfig::builder().build();
         assert_ne!(
-            compute_config_hash(&a, SETTLE),
-            compute_config_hash(&b, SETTLE),
+            compute_config_hash(&a, SETTLE, NO_EVENTS),
+            compute_config_hash(&b, SETTLE, NO_EVENTS),
         );
         assert_ne!(
-            compute_config_hash(&a, SETTLE),
-            compute_config_hash(&c, SETTLE),
+            compute_config_hash(&a, SETTLE, NO_EVENTS),
+            compute_config_hash(&c, SETTLE, NO_EVENTS),
         );
     }
 
@@ -328,12 +334,12 @@ mod tests {
         let b = ScanConfig::builder().max_depth(Some(4)).build();
         let c = ScanConfig::builder().max_depth(None).build();
         assert_ne!(
-            compute_config_hash(&a, SETTLE),
-            compute_config_hash(&b, SETTLE),
+            compute_config_hash(&a, SETTLE, NO_EVENTS),
+            compute_config_hash(&b, SETTLE, NO_EVENTS),
         );
         assert_ne!(
-            compute_config_hash(&a, SETTLE),
-            compute_config_hash(&c, SETTLE),
+            compute_config_hash(&a, SETTLE, NO_EVENTS),
+            compute_config_hash(&c, SETTLE, NO_EVENTS),
         );
     }
 
@@ -342,20 +348,57 @@ mod tests {
         let a = ScanConfig::builder().exclude(glob("a")).build();
         let b = ScanConfig::builder().build();
         assert_ne!(
-            compute_config_hash(&a, SETTLE),
-            compute_config_hash(&b, SETTLE),
+            compute_config_hash(&a, SETTLE, NO_EVENTS),
+            compute_config_hash(&b, SETTLE, NO_EVENTS),
+        );
+    }
+
+    /// D3 — `events` is part of `config_hash`. Two Subs differing only on
+    /// the class mask must fork separate Profiles ("Profile-union
+    /// infection" defence — see design §4.1).
+    #[test]
+    fn hash_distinguishes_events_mask() {
+        let cfg = ScanConfig::builder().build();
+        let empty = compute_config_hash(&cfg, SETTLE, ClassSet::EMPTY);
+        let content = compute_config_hash(&cfg, SETTLE, ClassSet::CONTENT);
+        let metadata = compute_config_hash(&cfg, SETTLE, ClassSet::METADATA);
+        let content_meta =
+            compute_config_hash(&cfg, SETTLE, ClassSet::CONTENT | ClassSet::METADATA);
+        // Pairwise distinct — every distinct mask produces a distinct hash.
+        assert_ne!(empty, content);
+        assert_ne!(empty, metadata);
+        assert_ne!(empty, content_meta);
+        assert_ne!(content, metadata);
+        assert_ne!(content, content_meta);
+        assert_ne!(metadata, content_meta);
+    }
+
+    /// `compute_config_hash` is order-stable across `events` mask: the
+    /// canonical bit representation determines the fold, not call order.
+    #[test]
+    fn hash_events_is_canonical_over_or_order() {
+        let cfg = ScanConfig::builder().build();
+        let a = ClassSet::CONTENT | ClassSet::METADATA;
+        let b = ClassSet::METADATA | ClassSet::CONTENT;
+        assert_eq!(
+            compute_config_hash(&cfg, SETTLE, a),
+            compute_config_hash(&cfg, SETTLE, b),
         );
     }
 
     /// Golden test — pins `SipHash` key + canonical encoding. Drift here is a
     /// *breaking* change for any persisted Profile hash; rotate intentionally
     /// and update only this constant.
+    ///
+    /// The constant rotates exactly once when D3 lands (events folded last):
+    /// `events.bits()` == 0 for `ClassSet::EMPTY`, so the new hash differs
+    /// from the old by exactly the appended `0u8.hash()` step.
     #[test]
     fn hash_known_good() {
         let cfg = ScanConfig::builder().build();
-        let h = compute_config_hash(&cfg, Duration::from_secs(1));
+        let h = compute_config_hash(&cfg, Duration::from_secs(1), ClassSet::EMPTY);
         assert_eq!(h, GOLDEN_HASH);
     }
 
-    const GOLDEN_HASH: u64 = 0x6886_85B9_DE56_65F6;
+    const GOLDEN_HASH: u64 = 0x35A4_7E13_BE87_7324;
 }

@@ -8,6 +8,7 @@
 //! engine writes them directly.
 
 use crate::ids::{ProfileId, ResourceId};
+use crate::sub::ClassSet;
 use std::collections::BTreeMap;
 use string_interner::symbol::SymbolU32;
 use tinyvec::TinyVec;
@@ -21,6 +22,18 @@ pub struct Resource {
     pub kind: ResourceKind,
     pub watch_demand: u32,
     pub suppress_count: u32,
+    /// Per-Resource OR of every covering Profile's contribution (R2 / D4).
+    /// The kqueue translator (sensor side) reads this off `WatchOpts.events`
+    /// to compute fflags. Maintained by the engine's refcount helpers in
+    /// lockstep with `watch_demand` — added on +1, recomputed on −1 when
+    /// the refcount stays non-zero, cleared on 1→0 alongside the
+    /// `Unwatch` op.
+    ///
+    /// `pub` (not `pub(crate)`) — same visibility as `watch_demand` and
+    /// `suppress_count`. The engine reads it directly via
+    /// `tree.get(r).events_union`; the sensor never reads it (it sees the
+    /// per-resource mask through `WatchOp::Watch.opts.events`).
+    pub events_union: ClassSet,
     pub role: ResourceRole,
 }
 
@@ -50,6 +63,7 @@ impl Resource {
             kind: ResourceKind::Unknown,
             watch_demand: 0,
             suppress_count: 0,
+            events_union: ClassSet::EMPTY,
             role,
         }
     }
@@ -91,7 +105,7 @@ impl Resource {
 
 #[cfg(test)]
 mod tests {
-    use super::{Resource, ResourceKind, ResourceRole};
+    use super::{ClassSet, Resource, ResourceKind, ResourceRole};
     use crate::ids::ResourceId;
     use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
 
@@ -137,5 +151,14 @@ mod tests {
     fn defaults_for_kind_and_role() {
         assert_eq!(ResourceKind::default(), ResourceKind::Unknown);
         assert_eq!(ResourceRole::default(), ResourceRole::User);
+    }
+
+    /// Fresh `Resource` initialises `events_union` to `EMPTY`. Refcount
+    /// helpers OR contributions onto this field as covering Profiles
+    /// attach (R2 / D4).
+    #[test]
+    fn fresh_resource_events_union_is_empty() {
+        let r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        assert_eq!(r.events_union, ClassSet::EMPTY);
     }
 }

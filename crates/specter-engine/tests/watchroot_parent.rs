@@ -4,7 +4,6 @@
 //! `detach_sub` reap.
 
 #![allow(
-    clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::manual_let_else,
     clippy::match_wildcard_for_single_variants,
@@ -16,8 +15,9 @@
 )]
 
 use specter_core::{
-    CommandTemplate, DirMeta, DirSnapshot, EffectScope, Input, ProbeOp, ProbeResponse, ProbeResult,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, TreeSnapshot, WatchOp,
+    ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope, Input, ProbeOp, ProbeResponse,
+    ProbeResult, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, TreeSnapshot,
+    WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -26,6 +26,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
+const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn empty_command() -> CommandTemplate {
     CommandTemplate::new([specter_core::ArgTemplate::new([
@@ -67,6 +68,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -99,6 +101,7 @@ fn root_anchor_has_no_watch_root_parent() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -122,6 +125,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, attach_out) = e.attach_sub(req, now);
     let pid = e.subs().get(sid).unwrap().profile;
@@ -180,6 +184,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -192,6 +197,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -224,6 +230,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -242,6 +249,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );

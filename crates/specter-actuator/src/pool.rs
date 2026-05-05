@@ -69,7 +69,12 @@ impl SubprocessActuator {
     }
 
     /// Test-only constructor with a custom shutdown grace.
-    #[cfg(test)]
+    ///
+    /// Gated to match the test module (`cfg(all(test, feature = "testkit"))`)
+    /// — without `testkit`, the test module that consumes this constructor
+    /// is excluded too, so the function would otherwise be flagged as
+    /// dead code under `cargo test --lib` (no features).
+    #[cfg(all(test, feature = "testkit"))]
     pub(crate) fn new_with_grace(concurrency: usize, grace: Duration) -> Self {
         let mut s = Self::new(concurrency);
         s.shutdown_grace = grace;
@@ -242,7 +247,6 @@ pub(crate) fn wait_loop(
 
 #[cfg(all(test, feature = "testkit"))]
 #[allow(
-    clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::missing_const_for_fn,
     clippy::needless_pass_by_value,

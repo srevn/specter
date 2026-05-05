@@ -3,22 +3,30 @@
 use crate::ids::{ProfileId, ResourceId};
 use crate::scan_config::ScanConfig;
 use crate::snapshot::tree::{DirSnapshot, TreeSnapshot};
+use crate::sub::ClassSet;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Per-watch hints carried alongside `WatchOp::Watch`.
 ///
-/// Engine emission sites pass `WatchOpts::default()` in v1; both fields are
-/// reserved for v2 backends that can honor them (`inotify`, `FSEvents`,
-/// `ReadDirectoryChangesW`). The kqueue Watcher ignores both fields: kqueue
-/// does not support kernel-side recursive watches — recursion is
-/// engine-driven via reconciliation — and `O_NOFOLLOW` is unconditionally
-/// applied. The fields exist so v2 can opt in without a trait-shape break.
+/// `events` is the L3 carrier for the per-Resource event-class union (R2 /
+/// D4): the engine ships `Resource.events_union` on every `Watch` op, the
+/// sensor diffs the cached per-FD mask, and re-registers iff different.
+/// Default is `ClassSet::EMPTY`, which the sensor degrades to
+/// identity-floor-only (`NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE`).
+///
+/// `follow_symlinks` and `recursive` are reserved for v2 backends that can
+/// honor them (`inotify`, `FSEvents`, `ReadDirectoryChangesW`). The kqueue
+/// Watcher ignores both: kqueue does not support kernel-side recursive
+/// watches — recursion is engine-driven via reconciliation — and
+/// `O_NOFOLLOW` is unconditionally applied. The fields exist so v2 can opt
+/// in without a trait-shape break.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct WatchOpts {
     pub follow_symlinks: bool,
     pub recursive: bool,
+    pub events: ClassSet,
 }
 
 /// Engine-monotonic correlation token — pairs each `ProbeRequest` with the

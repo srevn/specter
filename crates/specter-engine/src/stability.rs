@@ -196,8 +196,9 @@ mod tests {
     use proptest::prelude::*;
     use slotmap::KeyData;
     use specter_core::{
-        Burst, BurstIntent, BurstPhase, ChildEntry, DirMeta, DirSnapshot, ProbeCorrelation,
-        Profile, ProfileState, ResourceKind, ResourceRole, ScanConfig, TimerId, TreeSnapshot,
+        Burst, BurstIntent, BurstPhase, ChildEntry, ClassSet, DirMeta, DirSnapshot,
+        ProbeCorrelation, Profile, ProfileState, ResourceKind, ResourceRole, ScanConfig, TimerId,
+        TreeSnapshot,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -205,6 +206,11 @@ mod tests {
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
+    /// Test-default events mask. Stability is orthogonal to the event-class
+    /// filter; an empty mask gives a Profile with `has_per_file_fds = false`,
+    /// matching the prior test invariants where per-file FDs were not in
+    /// scope.
+    const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     fn pid(n: u64) -> ProfileId {
         ProfileId::from(KeyData::from_ffi(n))
@@ -245,7 +251,7 @@ mod tests {
         let mut profiles = ProfileMap::new();
         let r = tree.ensure(None, "root", ResourceRole::User);
         mark_dir(&mut tree, r);
-        let pid = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE));
+        let pid = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
         assert!(StabilityIndex::compute_parent(&tree, &profiles, pid).is_none());
     }
 
@@ -259,9 +265,9 @@ mod tests {
         for r in [root, a, b] {
             mark_dir(&mut tree, r);
         }
-        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE));
-        let p_a = profiles.attach(&mut tree, Profile::new(a, cfg(), MAX_SETTLE, SETTLE));
-        let p_b = profiles.attach(&mut tree, Profile::new(b, cfg(), MAX_SETTLE, SETTLE));
+        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_a = profiles.attach(&mut tree, Profile::new(a, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_b = profiles.attach(&mut tree, Profile::new(b, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
 
         assert_eq!(
             StabilityIndex::compute_parent(&tree, &profiles, p_b),
@@ -297,9 +303,10 @@ mod tests {
                 ScanConfig::builder().recursive(false).build(),
                 MAX_SETTLE,
                 SETTLE,
+                NO_EVENTS,
             ),
         );
-        let p_b = profiles.attach(&mut tree, Profile::new(b, cfg(), MAX_SETTLE, SETTLE));
+        let p_b = profiles.attach(&mut tree, Profile::new(b, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
         // p_root's covers(b) is false (depth > 1, recursive=false), so it's
         // not a candidate. No covering ancestor.
         assert_eq!(StabilityIndex::compute_parent(&tree, &profiles, p_b), None);
@@ -315,11 +322,11 @@ mod tests {
         mark_dir(&mut tree, r);
         let p_a = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), Duration::from_secs(6), SETTLE),
+            Profile::new(r, cfg(), Duration::from_secs(6), SETTLE, NO_EVENTS),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), Duration::from_secs(12), SETTLE),
+            Profile::new(r, cfg(), Duration::from_secs(12), SETTLE, NO_EVENTS),
         );
         // Both at root; root has no Profile *ancestor*; compute_parent walks
         // ancestors of root.resource (none — root is a Tree root).
@@ -341,13 +348,13 @@ mod tests {
         // max_settle (makes them separate Profiles).
         let p_root_a = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg(), Duration::from_secs(6), SETTLE),
+            Profile::new(root, cfg(), Duration::from_secs(6), SETTLE, NO_EVENTS),
         );
         let p_root_b = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg(), Duration::from_secs(12), SETTLE),
+            Profile::new(root, cfg(), Duration::from_secs(12), SETTLE, NO_EVENTS),
         );
-        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE));
+        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
 
         let smaller = std::cmp::min(p_root_a, p_root_b);
         assert_eq!(
@@ -364,8 +371,8 @@ mod tests {
         let leaf = tree.ensure(Some(root), "leaf", ResourceRole::User);
         mark_dir(&mut tree, root);
         mark_dir(&mut tree, leaf);
-        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE));
-        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE));
+        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
 
         let mut idx = StabilityIndex::new();
         idx.set_parent(p_leaf, p_root);
@@ -384,9 +391,9 @@ mod tests {
         for r in [root, mid, leaf] {
             mark_dir(&mut tree, r);
         }
-        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE));
-        let p_mid = profiles.attach(&mut tree, Profile::new(mid, cfg(), MAX_SETTLE, SETTLE));
-        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE));
+        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_mid = profiles.attach(&mut tree, Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
 
         let mut idx = StabilityIndex::new();
         idx.set_parent(p_mid, p_root);
@@ -416,9 +423,9 @@ mod tests {
         for r in [root, mid, leaf] {
             mark_dir(&mut tree, r);
         }
-        let _p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE));
-        let p_mid = profiles.attach(&mut tree, Profile::new(mid, cfg(), MAX_SETTLE, SETTLE));
-        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE));
+        let _p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_mid = profiles.attach(&mut tree, Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
 
         // Synthesize an Active(Draining) state on p_mid. The snapshot lives
         // on `Profile.current` (set by `dispatch_standard_ok` before
@@ -473,8 +480,8 @@ mod tests {
         let leaf = tree.ensure(Some(root), "leaf", ResourceRole::User);
         mark_dir(&mut tree, root);
         mark_dir(&mut tree, leaf);
-        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE));
-        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE));
+        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
 
         let mut idx = StabilityIndex::new();
         idx.set_parent(p_leaf, p_root);
@@ -498,8 +505,8 @@ mod tests {
         let leaf = tree.ensure(Some(root), "leaf", ResourceRole::User);
         mark_dir(&mut tree, root);
         mark_dir(&mut tree, leaf);
-        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE));
-        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE));
+        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
 
         let mut idx = StabilityIndex::new();
         idx.set_parent(p_leaf, p_root);
@@ -530,9 +537,9 @@ mod tests {
         for r in [root, mid, leaf] {
             mark_dir(&mut tree, r);
         }
-        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE));
-        let p_mid = profiles.attach(&mut tree, Profile::new(mid, cfg(), MAX_SETTLE, SETTLE));
-        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE));
+        let p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_mid = profiles.attach(&mut tree, Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
 
         let mut idx = StabilityIndex::new();
         idx.set_parent(p_leaf, p_mid);
@@ -562,8 +569,8 @@ mod tests {
         for r in [root, mid, leaf] {
             mark_dir(&mut tree, r);
         }
-        let _p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE));
-        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE));
+        let _p_root = profiles.attach(&mut tree, Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
+        let p_leaf = profiles.attach(&mut tree, Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
 
         let mut idx = StabilityIndex::new();
         if let Some(parent) = StabilityIndex::compute_parent(&tree, &profiles, p_leaf) {
@@ -572,7 +579,7 @@ mod tests {
         // p_leaf's edge currently points at p_root.
 
         // Add p_mid; it interposes between p_leaf and p_root.
-        let p_mid = profiles.attach(&mut tree, Profile::new(mid, cfg(), MAX_SETTLE, SETTLE));
+        let p_mid = profiles.attach(&mut tree, Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS));
         idx.recompute_parent_edges_for_subset(&tree, &profiles, [p_leaf]);
 
         assert_eq!(idx.parent_of(p_leaf), Some(p_mid));

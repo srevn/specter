@@ -9,7 +9,6 @@
 
 // Tests prioritize readability over the workspace's pedantic style budget.
 #![allow(
-    clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::manual_let_else,
     clippy::match_wildcard_for_single_variants,
@@ -24,10 +23,11 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, BurstIntent, ChildEntry, CommandTemplate, Diagnostic, DirChild, DirMeta,
-    DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, Placeholder,
-    ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, Profile, ProfileMap,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, TreeSnapshot, WatchOp,
+    ArgPart, ArgTemplate, BurstIntent, ChildEntry, ClassSet, CommandTemplate, Diagnostic, DirChild,
+    DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
+    Placeholder, ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, Profile,
+    ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, TreeSnapshot,
+    WatchOp,
 };
 use specter_engine::{Engine, StabilityIndex, SubAttachRequest, covers};
 use std::collections::BTreeMap;
@@ -36,6 +36,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
+const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn cfg_recursive() -> ScanConfig {
     ScanConfig::builder().recursive(true).build()
@@ -74,11 +75,12 @@ fn covers_drives_compute_parent() {
                 ScanConfig::builder().recursive(false).build(),
                 MAX_SETTLE,
                 SETTLE,
+                NO_EVENTS,
             ),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE),
+            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
         );
 
         assert!(!covers(profiles.get(p_root).unwrap(), b, &tree));
@@ -97,11 +99,11 @@ fn covers_drives_compute_parent() {
         }
         let p_root = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE),
+            Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE),
+            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
         );
 
         assert!(covers(profiles.get(p_root).unwrap(), b, &tree));
@@ -124,15 +126,15 @@ fn compute_parent_then_propagate_round_trip() {
     }
     let p_root = profiles.attach(
         &mut tree,
-        Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE),
+        Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
     );
     let p_mid = profiles.attach(
         &mut tree,
-        Profile::new(mid, cfg_recursive(), MAX_SETTLE, SETTLE),
+        Profile::new(mid, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
     );
     let p_leaf = profiles.attach(
         &mut tree,
-        Profile::new(leaf, cfg_recursive(), MAX_SETTLE, SETTLE),
+        Profile::new(leaf, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
     );
 
     let mut idx = StabilityIndex::new();
@@ -177,6 +179,7 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
                 .build(),
             MAX_SETTLE,
             SETTLE,
+            NO_EVENTS,
         ),
     );
     let profile = profiles.get(p).unwrap();
@@ -308,6 +311,7 @@ fn golden_path_full_lifecycle() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
 
@@ -409,6 +413,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid, out) = e.attach_sub(req, Instant::now());
     let correlation = first_probe_correlation(&out).expect("Seed probe");
@@ -445,6 +450,7 @@ fn pending_event_race_late_probe_response_discarded() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
     let pid = pid_of(&e, sid);
@@ -491,6 +497,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
     let pid = pid_of(&e, sid);
@@ -533,6 +540,7 @@ fn force_fire_emits_effect_with_forced_true() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
     let pid = pid_of(&e, sid);
@@ -598,6 +606,7 @@ fn step_output_is_sorted() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
     let pid = pid_of(&e, sid);

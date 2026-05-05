@@ -10,16 +10,28 @@
 //! Default field-order drop:
 //! - `by_resource` drops every watched fd (kernel removes vnode
 //!   registrations as each fd closes).
-//! - `suppressed` and `kinds` drop their bookkeeping (no fds).
+//! - `suppressed`, `kinds`, and `registered_fflags` drop their
+//!   bookkeeping (no fds).
 //! - `kq` (Arc) decrements; if last, the kqueue fd closes, kernel-reaping
 //!   the `EVFILT_USER` ident and any queued events.
 //!
 //! Wake handles holding Arc clones keep the kqueue fd alive past the
 //! watcher's drop — `wake()` from those becomes a no-op-equivalent (no
 //! consumer drains the resulting event), with no UB.
+//!
+//! # Per-FD mask cache
+//!
+//! Under R2 / D11, the engine emits `WatchOp::Watch` whenever
+//! `Resource.events_union` changes, *not* only on the 0→1 refcount edge.
+//! The watcher caches the post-translation kqueue fflags per resource
+//! (`registered_fflags`) so a re-`watch()` with an unchanged mask skips
+//! the syscall entirely, and a re-`watch()` with a widened/narrowed mask
+//! re-registers via `EV_ADD` (which overwrites the prior fflags) without
+//! closing or reopening the fd. The cache is invalidated only on
+//! `unwatch` and `clamp_watch_demand_to_zero`-driven Unwatch ops.
 
 use crate::kqueue::wake::KqueueWakeHandle;
-use crate::kqueue::{fd, ffi, normalize};
+use crate::kqueue::{fd, ffi, normalize, translate};
 use crate::{FsWatcher, WakeHandle};
 use slotmap::SecondaryMap;
 use specter_core::{FsEvent, ResourceId, ResourceKind, WatchOpts};
@@ -47,11 +59,20 @@ pub struct KqueueWatcher {
     suppressed: SecondaryMap<ResourceId, ()>,
     /// Per-resource kind cache: populated at `watch()` from `fstat`,
     /// consumed by `normalize::kevent_to_fs_event` to disambiguate
-    /// `NOTE_WRITE` on Dir vs File. Mirrors the engine's `Resource.kind`
+    /// `NOTE_WRITE` on Dir vs File and by `translate::class_set_to_fflags`
+    /// to compute the per-FD mask. Mirrors the engine's `Resource.kind`
     /// independently — drift between the two is acceptable (the engine
     /// uses its `kind` for `covers` / `EffectScope` semantics; the
-    /// watcher uses this one purely for event normalization).
+    /// watcher uses this one purely for event normalization and mask
+    /// translation).
     kinds: SecondaryMap<ResourceId, ResourceKind>,
+    /// Per-resource kqueue fflags cache: populated alongside `by_resource`
+    /// from the L4 translator's output (`class_set_to_fflags(opts.events,
+    /// kind)`). Used by `watch()` to diff the incoming mask against the
+    /// installed one so unchanged re-registrations skip the syscall, and
+    /// changed ones re-register via `EV_ADD` without reopening the fd.
+    /// Cleared in lockstep with `by_resource` on `unwatch()`.
+    registered_fflags: SecondaryMap<ResourceId, u32>,
     /// `Arc` so wake handles can hold their own clones without
     /// borrowing from the watcher; drop of the last clone closes the
     /// kqueue fd.
@@ -70,33 +91,118 @@ impl KqueueWatcher {
             by_resource: SecondaryMap::new(),
             suppressed: SecondaryMap::new(),
             kinds: SecondaryMap::new(),
+            registered_fflags: SecondaryMap::new(),
             kq,
         })
     }
 }
 
 impl FsWatcher for KqueueWatcher {
-    fn watch(&mut self, r: ResourceId, path: &Path, _opts: WatchOpts) -> io::Result<()> {
-        // 1) Open. 2) Stat. 3) Register. 4) Insert. Each step's failure
-        //    drops anything earlier (the OwnedFd auto-closes), so a
-        //    partially-failed `watch` leaves zero state.
+    /// Two paths share this entry point: a fresh-watch (no FD held for
+    /// `r`) and a re-watch (engine emitted a fresh `WatchOp::Watch`
+    /// because `Resource.events_union` changed at non-zero refcount, per
+    /// D11). The two diverge on whether `by_resource` already holds an
+    /// `OwnedFd` for `r`; the re-watch path skips open/stat and reuses
+    /// the existing FD, diffing the cached fflags against the
+    /// translator's output.
+    fn watch(&mut self, r: ResourceId, path: &Path, opts: WatchOpts) -> io::Result<()> {
+        // ── Re-watch path ───────────────────────────────────────────
+        // FD already held: compute the new fflags from the cached kind
+        // + incoming events; diff against the installed mask; re-register
+        // iff different. EV_ADD on an existing (fd, EVFILT_VNODE) entry
+        // overwrites the prior fflags atomically without affecting the
+        // EV_DISABLE bit (per kqueue man page).
+        if self.by_resource.contains_key(r) {
+            let kind = self
+                .kinds
+                .get(r)
+                .copied()
+                .unwrap_or(ResourceKind::Unknown);
+            let new_fflags = translate::class_set_to_fflags(opts.events, kind);
+            let cached_fflags = self.registered_fflags.get(r).copied().unwrap_or(0);
+            if new_fflags == cached_fflags {
+                tracing::trace!(
+                    ?r,
+                    ?opts,
+                    fflags = format_args!("{cached_fflags:#x}"),
+                    "kqueue re-watch noop (mask unchanged)"
+                );
+                return Ok(());
+            }
+            // Re-register on the same FD. The borrow on `by_resource`
+            // is scoped to the single syscall; NLL drops it before the
+            // subsequent `registered_fflags` mutation.
+            {
+                let fd = self
+                    .by_resource
+                    .get(r)
+                    .expect("by_resource.contains_key(r) was true");
+                ffi::register_vnode(&self.kq, fd, r, new_fflags)?;
+            }
+            self.registered_fflags.insert(r, new_fflags);
+            // Defensive: per design §10.5, re-applying EV_DISABLE after
+            // EV_ADD preserves the suppression bit on platforms whose
+            // EV_ADD semantics differ subtly from FreeBSD's. The kqueue
+            // man page on macOS / FreeBSD documents preservation, so the
+            // call is redundant in practice — kept as forward-compat
+            // defense. Errors here are non-fatal: the prior disable bit
+            // either survived (defense was unneeded) or didn't (race
+            // window we'd report as a Diagnostic next probe). Pass
+            // `new_fflags` (the just-installed mask) so EV_DISABLE on
+            // macOS doesn't clobber the registration.
+            if self.suppressed.contains_key(r)
+                && let Some(fd) = self.by_resource.get(r)
+                && let Err(e) = ffi::disable_vnode(&self.kq, fd, r, new_fflags)
+            {
+                tracing::warn!(
+                    ?r,
+                    error = ?e,
+                    "kqueue defensive EV_DISABLE post re-register failed; suppression may be lost",
+                );
+            }
+            tracing::debug!(
+                ?r,
+                ?opts,
+                old_fflags = format_args!("{cached_fflags:#x}"),
+                new_fflags = format_args!("{new_fflags:#x}"),
+                "kqueue re-register (mask changed)"
+            );
+            return Ok(());
+        }
+
+        // ── Fresh-watch path ────────────────────────────────────────
+        // 1) Open. 2) Stat. 3) Translate. 4) Register. 5) Insert. Each
+        // step's failure drops anything earlier (the OwnedFd auto-closes)
+        // so a partially-failed `watch` leaves zero state.
         let fd = fd::open_for_watch(path)?;
         let kind = fd::stat_kind(&fd)?;
-        ffi::register_vnode(&self.kq, &fd, r)?;
+        let fflags = translate::class_set_to_fflags(opts.events, kind);
+        ffi::register_vnode(&self.kq, &fd, r, fflags)?;
         self.by_resource.insert(r, fd);
         self.kinds.insert(r, kind);
+        self.registered_fflags.insert(r, fflags);
         // Fresh watch starts unsuppressed by construction; nothing to
         // do on `suppressed`.
-        tracing::debug!(?r, ?path, ?kind, "kqueue watch");
+        tracing::debug!(
+            ?r,
+            ?path,
+            ?kind,
+            ?opts,
+            fflags = format_args!("{fflags:#x}"),
+            "kqueue watch"
+        );
         Ok(())
     }
 
     fn unwatch(&mut self, r: ResourceId) {
         // Drop the OwnedFd — kernel auto-removes the vnode registration
-        // when the fd closes. Idempotent on stale ids.
+        // when the fd closes. Idempotent on stale ids. The fflags cache
+        // tracks the FD's lifetime exactly: clear it whenever we drop
+        // the FD so a subsequent re-watch starts fresh.
         let removed = self.by_resource.remove(r).is_some();
         self.suppressed.remove(r);
         self.kinds.remove(r);
+        self.registered_fflags.remove(r);
         tracing::debug!(?r, removed, "kqueue unwatch");
     }
 
@@ -105,7 +211,11 @@ impl FsWatcher for KqueueWatcher {
             tracing::warn!(?r, "kqueue suppress on unwatched resource (race; dropped)");
             return;
         };
-        if let Err(e) = ffi::disable_vnode(&self.kq, fd, r) {
+        // Pass the cached fflags so macOS's EV_DISABLE path preserves
+        // the registered mask (FreeBSD ignores fflags on disable; macOS
+        // overwrites). See `ffi::disable_vnode` for the platform note.
+        let fflags = self.registered_fflags.get(r).copied().unwrap_or(0);
+        if let Err(e) = ffi::disable_vnode(&self.kq, fd, r, fflags) {
             tracing::warn!(?r, error = ?e, "kqueue EV_DISABLE failed (likely race; dropped)");
             return;
         }
@@ -121,7 +231,10 @@ impl FsWatcher for KqueueWatcher {
             );
             return;
         };
-        if let Err(e) = ffi::enable_vnode(&self.kq, fd, r) {
+        // See `suppress` — pass cached fflags so EV_ENABLE preserves
+        // the registered mask on macOS.
+        let fflags = self.registered_fflags.get(r).copied().unwrap_or(0);
+        if let Err(e) = ffi::enable_vnode(&self.kq, fd, r, fflags) {
             tracing::warn!(?r, error = ?e, "kqueue EV_ENABLE failed (likely race; dropped)");
             return;
         }

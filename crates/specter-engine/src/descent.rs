@@ -48,8 +48,9 @@
 
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use specter_core::{
-    DescentState, Diagnostic, EntryKind, ProbeCorrelation, ProbeKind, ProbeOp, ProbeRequest,
-    ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput, TreeSnapshot,
+    ClassSet, DescentState, Diagnostic, EntryKind, ProbeCorrelation, ProbeKind, ProbeOp,
+    ProbeRequest, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput,
+    TreeSnapshot,
 };
 use std::time::Instant;
 
@@ -357,15 +358,33 @@ impl crate::Engine {
             // contribution (deferred from `attach_sub_inner` because the
             // anchor's parent didn't exist on disk during pending);
             // transition Pending → Idle; start Seed burst.
+            //
+            // Sub the prefix's STRUCTURE contribution BEFORE clearing
+            // the descent state's Pending status: the recompute (multi-
+            // contributor case) reads `Profile.state == Pending(d) &&
+            // d.current_prefix == prefix` to attribute this Profile's
+            // STRUCTURE contribution. Cleanest sequencing: transition
+            // state to Idle FIRST, then sub_watch_demand sees a clean
+            // post-release world. The anchor materialization writes are
+            // also moved up so the Profile is in a consistent state for
+            // the upcoming refcount ops on the anchor.
             self.tree.set_role(new_resource, ResourceRole::User);
-            sub_watch_demand(&mut self.tree, prefix, out);
-            add_watch_demand(&mut self.tree, new_resource, out);
+
+            // Capture the Profile's user mask now; used as the anchor's
+            // contribution (D-anchor). The Profile's events_union is
+            // invariant (D3 / R1), so this is a one-time read.
+            let events_union = self
+                .profiles
+                .get(profile_id)
+                .map_or(ClassSet::EMPTY, |p| p.events_union);
+
+            // Transition Pending → Idle and set anchor_contribution = true
+            // BEFORE the refcount ops so the recompute sees the post-
+            // transition contribution attribution: the prefix's STRUCTURE
+            // contribution is gone (state no longer Pending), the anchor's
+            // mask contribution is owed (anchor_contribution = true).
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.anchor_contribution = true;
-                // Transition Pending → Idle so the upcoming
-                // `start_seed_burst` (which debug-asserts on Idle) sees
-                // a clean state. Bundling the flag write keeps the
-                // mutation atomic.
                 p.state = ProfileState::Idle;
             }
 
@@ -378,6 +397,15 @@ impl crate::Engine {
                 "descent anchor materialization: Profile.resource diverges from descent anchor",
             );
 
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                prefix,
+                ClassSet::STRUCTURE,
+                out,
+            );
+            add_watch_demand(&mut self.tree, new_resource, events_union, out);
+
             // Watch-root-parent contribution. The anchor's parent now exists
             // on disk; install the contribution and cache the parent id.
             self.set_watch_root_parent(profile_id, new_resource, out);
@@ -388,9 +416,10 @@ impl crate::Engine {
             // Advance one level. Sub the old prefix's contribution; add
             // the new prefix's. Refresh the descent state and emit a
             // fresh probe.
-            sub_watch_demand(&mut self.tree, prefix, out);
-            add_watch_demand(&mut self.tree, new_resource, out);
-
+            //
+            // Update descent state BEFORE sub_watch_demand so the recompute
+            // (multi-contributor case) attributes the prefix's STRUCTURE
+            // contribution to the new prefix, not the old one.
             let correlation = self.next_probe_correlation();
             let new_remaining: Vec<String> = remaining[1..].to_vec();
             if let Some(d) = self.descent_state_mut(profile_id) {
@@ -398,6 +427,16 @@ impl crate::Engine {
                 d.remaining_components = new_remaining;
                 d.probe_correlation = Some(correlation);
             }
+
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                prefix,
+                ClassSet::STRUCTURE,
+                out,
+            );
+            add_watch_demand(&mut self.tree, new_resource, ClassSet::STRUCTURE, out);
+
             self.emit_descent_probe(profile_id, new_resource, correlation, out);
         }
     }
@@ -418,28 +457,31 @@ impl crate::Engine {
             prefix,
         });
 
-        // Sub the prefix's contribution; vacate; reap if no anchors.
-        sub_watch_demand(&mut self.tree, prefix, out);
+        // Capture the prior remaining-components and the prefix's
+        // segment name BEFORE we mutate descent state. The vanished
+        // prefix's segment becomes the first remaining component on
+        // rewind.
         let parent = self.tree.parent(prefix);
-        self.tree.vacate(prefix);
-        self.tree.try_reap(prefix);
+        let prior_remaining: Vec<String> = self
+            .descent_state(profile_id)
+            .map(|s| s.remaining_components.clone())
+            .unwrap_or_default();
+        let prefix_name = self.tree.name(prefix).map(str::to_string);
 
         match parent {
             Some(parent_id) => {
                 // Rewind. The vanished prefix's segment becomes the
                 // *first* remaining component (we're descending into it
-                // from the parent again). Bump parent's watch_demand,
-                // emit a probe.
-                let prior_remaining: Vec<String> = self
-                    .descent_state(profile_id)
-                    .map(|s| s.remaining_components.clone())
-                    .unwrap_or_default();
+                // from the parent again).
+                //
+                // Update descent state BEFORE sub_watch_demand so the
+                // recompute attributes this Profile's STRUCTURE
+                // contribution to the new prefix (parent_id), not the
+                // vanished one.
                 let mut new_remaining = prior_remaining;
-                if let Some(name) = self.tree.name(prefix).map(str::to_string) {
+                if let Some(name) = prefix_name {
                     new_remaining.insert(0, name);
                 }
-
-                add_watch_demand(&mut self.tree, parent_id, out);
 
                 let correlation = self.next_probe_correlation();
                 if let Some(p) = self.profiles.get_mut(profile_id) {
@@ -449,16 +491,39 @@ impl crate::Engine {
                         probe_correlation: Some(correlation),
                     });
                 }
+
+                sub_watch_demand(
+                    &mut self.tree,
+                    &self.profiles,
+                    prefix,
+                    ClassSet::STRUCTURE,
+                    out,
+                );
+                self.tree.vacate(prefix);
+                self.tree.try_reap(prefix);
+
+                add_watch_demand(&mut self.tree, parent_id, ClassSet::STRUCTURE, out);
+
                 self.emit_descent_probe(profile_id, parent_id, correlation, out);
             }
             None => {
-                // Root prefix vanished — no rewind target. Leave the
-                // descent state with no probe in flight; recovery is on
-                // the next attach_sub for this path or operator
-                // intervention. v1 accepts.
-                if let Some(d) = self.descent_state_mut(profile_id) {
-                    d.probe_correlation = None;
+                // Root prefix vanished — no rewind target. Clear the
+                // descent state to Idle BEFORE sub_watch_demand so the
+                // recompute correctly excludes this Profile's
+                // contribution. The Profile is now stuck Idle without
+                // an anchor — operator recovery is required.
+                if let Some(p) = self.profiles.get_mut(profile_id) {
+                    p.state = ProfileState::Idle;
                 }
+                sub_watch_demand(
+                    &mut self.tree,
+                    &self.profiles,
+                    prefix,
+                    ClassSet::STRUCTURE,
+                    out,
+                );
+                self.tree.vacate(prefix);
+                self.tree.try_reap(prefix);
             }
         }
     }

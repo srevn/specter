@@ -14,7 +14,7 @@ use crate::Engine;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use crate::refcounts::{clamp_watch_demand_to_zero, sub_watch_demand};
 use specter_core::{
-    BurstIntent, BurstPhase, CorrelationId, DedupKey, Diagnostic, Effect, EffectOutcome,
+    BurstIntent, BurstPhase, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect, EffectOutcome,
     EffectScope, FsEvent, ProbeOp, ProbeResponse, ProbeResult, ProfileId, ProfileState, ResourceId,
     ResourceKind, StepOutput, SubId, SubRegistryDiff, TreeSnapshot, WatchOp,
 };
@@ -26,16 +26,25 @@ impl Engine {
     /// Dispatch a normalized [`FsEvent`] for `resource`.
     ///
     /// Routing:
-    /// 1. `MetadataChanged` drops with diagnostic (v1 events filter).
-    /// 2. Pending descents whose `current_prefix == resource` get a
-    ///    fresh descent probe (`on_descent_event`). This includes the
-    ///    case where the prefix is also a `WatchRootParent` for some
-    ///    Profile.
+    /// 1. Idempotence guard — `watch_demand == 0` ⇒ `EventOnUnwatchedResource`
+    ///    + drop (race between `Unwatch` and the Sensor's drain).
+    /// 2. Pending descents whose `current_prefix == resource` get a fresh
+    ///    descent probe (`on_descent_event`). Descent prefix watches register
+    ///    STRUCTURE-only (D9), so any event reaching here is structurally
+    ///    relevant by L4 — descent dispatch is unfiltered.
     /// 3. Idle Profiles whose `watch_root_parent == resource` and whose
-    ///    anchor is currently absent (`current.is_none()`) re-enter
-    ///    pending descent — auto-recapture on anchor reappearance.
-    /// 4. Covering Profiles (anchor or descendant) drive the standard
-    ///    burst flow.
+    ///    anchor is currently absent (`current.is_none()`) re-enter pending
+    ///    descent — auto-recapture on anchor reappearance. Same D9 STRUCTURE
+    ///    floor applies.
+    /// 4. Per-covering-Profile dispatch with class-aware filter (L5):
+    ///    - Anchor events bypass the filter unconditionally per design D8 —
+    ///      lifecycle signal continuity trumps user opt-out.
+    ///    - Descendant events whose class (per [`fs_event_to_class`]) is
+    ///      not in the Profile's `events_union` drop with
+    ///      `EventClassDropped` BEFORE driving the burst (per design §6.1
+    ///      — class filter sits before dirty-set bumps).
+    ///    - Terminal-on-anchor → `on_anchor_terminal_event`. Anything else
+    ///      that passes the filter → `drive_burst`.
     pub(crate) fn on_fs_event(
         &mut self,
         resource: ResourceId,
@@ -43,14 +52,6 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // MetadataChanged is not configurable in v1; the engine drops it
-        // with a Diagnostic for visibility.
-        if matches!(event, FsEvent::MetadataChanged) {
-            out.diagnostics
-                .push(Diagnostic::MetadataChangedIgnored { resource });
-            return;
-        }
-
         // Idempotence: an FsEvent for a Resource with `watch_demand == 0`
         // is a race between Unwatch and the Sensor's drain.
         let watch_demand = self.tree.get(resource).map_or(0, |r| r.watch_demand);
@@ -62,7 +63,9 @@ impl Engine {
 
         // Route events at descent prefixes to `on_descent_event`. Multiple
         // Profiles may share one prefix (two Subs awaiting siblings under
-        // the same scaffold); fan out to each.
+        // the same scaffold); fan out to each. Descent prefix watches
+        // register STRUCTURE-only (D9), so any event reaching here is
+        // structurally relevant by L4 — no class filter applies.
         let descent_owners = self.descents_at_prefix(resource);
         for pid in &descent_owners {
             self.on_descent_event(*pid, now, out);
@@ -73,7 +76,9 @@ impl Engine {
         // for this Profile so an anchor reappearance is detected
         // automatically. Pending and Idle are mutually exclusive
         // ProfileState variants — the `matches!(p.state, ProfileState::Idle)`
-        // filter already excludes Pending Profiles.
+        // filter already excludes Pending Profiles. The watch-root-parent
+        // watch registers STRUCTURE-only (D9) — recovery dispatch is
+        // unfiltered, same rationale as descent above.
         let recovery_targets: Vec<ProfileId> = self
             .profiles
             .iter()
@@ -105,22 +110,49 @@ impl Engine {
             return;
         }
 
+        // L5 class-aware routing. Compute the event's class once from the
+        // resource's kind; per-Profile dispatch consults the Profile's
+        // `events_union` (D3 — every Sub on a Profile shares the same
+        // mask, so the union is each Sub's mask).
+        let resource_kind = self
+            .tree
+            .get(resource)
+            .map_or(ResourceKind::Unknown, |r| r.kind);
+        let event_class = fs_event_to_class(event, resource_kind);
         let is_terminal = matches!(
             event,
             FsEvent::Removed | FsEvent::Renamed | FsEvent::Revoked
         );
 
         for profile_id in covering {
-            let is_anchor = self
+            let Some((is_anchor, profile_events)) = self
                 .profiles
                 .get(profile_id)
-                .is_some_and(|p| p.resource == resource);
+                .map(|p| (p.resource == resource, p.events_union))
+            else {
+                continue;
+            };
+
+            // D8 — anchor events bypass the class filter unconditionally
+            // (lifecycle: anchor disappearance recovery, anchor reappearance
+            // detection, etc.). §6.1 — descendant events whose class is
+            // not in the Profile's `events_union` drop here, before
+            // `drive_burst` extends `dirty_resources` / `force_walk_resources`.
+            if !is_anchor && !profile_events.intersects(event_class) {
+                out.diagnostics.push(Diagnostic::EventClassDropped {
+                    resource,
+                    event,
+                    profile: profile_id,
+                });
+                continue;
+            }
 
             if is_terminal && is_anchor {
                 self.on_anchor_terminal_event(profile_id, now, out);
             } else {
-                // Modified/StructureChanged anywhere, or terminal at a
-                // covered descendant: drive the burst forward. Descendant
+                // Modified/StructureChanged/MetadataChanged anywhere that
+                // passes the filter, or terminal at a covered descendant
+                // whose class matches: drive the burst forward. Descendant
                 // terminal events drive the burst; the next probe response
                 // reconciles the slot via the diff-against-prior pass.
                 self.drive_burst(profile_id, resource, now, out);
@@ -147,8 +179,10 @@ impl Engine {
         };
         // Bump the parent's watch_demand for the descent's contribution.
         // The parent already has +1 from `Profile.watch_root_parent`; the
-        // descent contribution is in addition (the refcount sums).
-        crate::refcounts::add_watch_demand(&mut self.tree, parent, out);
+        // descent contribution is in addition (the refcount sums). D9 —
+        // descent prefix contributions are always STRUCTURE regardless of
+        // the Sub's user mask.
+        crate::refcounts::add_watch_demand(&mut self.tree, parent, ClassSet::STRUCTURE, out);
 
         let correlation = self.next_probe_correlation();
         if let Some(p) = self.profiles.get_mut(profile_id) {
@@ -549,6 +583,7 @@ impl Engine {
         );
         let was_active = !matches!(p.state, ProfileState::Idle);
         let had_anchor_contribution = p.anchor_contribution;
+        let events_union = p.events_union;
         let resource = p.resource;
 
         if was_probing {
@@ -573,11 +608,21 @@ impl Engine {
         // contributions via the same refcount path. Kind is left alone
         // — `Unknown` is set lazily by the next probe (or by recovery
         // via the watch-root-parent path) when the anchor reappears.
+        //
+        // Clear `anchor_contribution = false` BEFORE `sub_watch_demand`
+        // so the per-Resource `events_union` recompute (multi-contributor
+        // case) excludes this Profile's mask from the post-release union.
         if had_anchor_contribution {
-            sub_watch_demand(&mut self.tree, resource, out);
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.anchor_contribution = false;
             }
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                resource,
+                events_union,
+                out,
+            );
         }
     }
 
@@ -612,9 +657,7 @@ impl Engine {
 
         match snapshot {
             TreeSnapshot::Dir(arc) => {
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    graft(p, target, arc, &mut self.tree, out);
-                }
+                graft(profile_id, target, arc, &mut self.tree, &mut self.profiles, out);
             }
             TreeSnapshot::File(leaf) => {
                 // File-anchored Profile: the leaf *is* the snapshot. No
@@ -673,12 +716,30 @@ impl Engine {
     }
 
     /// (Seed, Vanished).
+    ///
+    /// Symmetric with `dispatch_standard_vanished` (treats Vanished as an
+    /// anchor-disappearance signal): releases the anchor's `watch_demand`
+    /// contribution so the trichotomy invariant in `reap_profile` —
+    /// `!(Pending && anchor_contribution)` — survives the eventual
+    /// `start_pending_recovery` transition.
+    ///
+    /// Recovery does not depend on the anchor's FD: the kqueue
+    /// registration auto-detached on the inode disappearing, and
+    /// re-acquisition flows through `watch_root_parent`'s
+    /// `StructureChanged` → `start_pending_recovery` → descent →
+    /// `dispatch_descent_ok` (anchor materialization, which re-bumps
+    /// `anchor.watch_demand` with the Profile's mask).
     fn dispatch_seed_vanished(
         &mut self,
         profile_id: ProfileId,
         now: Instant,
         out: &mut StepOutput,
     ) {
+        let (resource, events_union, had_anchor_contribution) = match self.profiles.get(profile_id)
+        {
+            Some(p) => (p.resource, p.events_union, p.anchor_contribution),
+            None => return,
+        };
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = None;
             p.current = None;
@@ -687,14 +748,31 @@ impl Engine {
             profile: profile_id,
             intent: BurstIntent::Seed,
         });
+        // Release the anchor's contribution BEFORE finish_burst_to_idle
+        // so any deferred `reap_profile` (reap_pending) sees a cleared
+        // flag and doesn't try to release the same contribution twice.
+        // Clear `anchor_contribution` before the call so the multi-
+        // contributor recompute excludes this Profile's mask.
+        if had_anchor_contribution {
+            if let Some(p) = self.profiles.get_mut(profile_id) {
+                p.anchor_contribution = false;
+            }
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                resource,
+                events_union,
+                out,
+            );
+        }
         self.finish_burst_to_idle(profile_id, now, out);
-        // For P4 single-Sub Profiles: anchor stays Watched (`watch_demand`
-        // > 0 from attach_sub). The next event would re-drive a burst.
-        // P5 will refine the "Resource → Unwatched if no children/Subs"
-        // condition once descent scaffolds land.
     }
 
     /// (Seed, Failed).
+    ///
+    /// Symmetric with `dispatch_standard_failed`: the probe failed at the
+    /// anchor; release the anchor's `watch_demand` contribution. See
+    /// `dispatch_seed_vanished` for the trichotomy-invariant rationale.
     fn dispatch_seed_failed(
         &mut self,
         profile_id: ProfileId,
@@ -702,6 +780,11 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
+        let (resource, events_union, had_anchor_contribution) = match self.profiles.get(profile_id)
+        {
+            Some(p) => (p.resource, p.events_union, p.anchor_contribution),
+            None => return,
+        };
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = None;
             p.current = None;
@@ -711,6 +794,18 @@ impl Engine {
             intent: BurstIntent::Seed,
             errno,
         });
+        if had_anchor_contribution {
+            if let Some(p) = self.profiles.get_mut(profile_id) {
+                p.anchor_contribution = false;
+            }
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                resource,
+                events_union,
+                out,
+            );
+        }
         self.finish_burst_to_idle(profile_id, now, out);
     }
 
@@ -758,9 +853,7 @@ impl Engine {
         // (current update). For File anchors, replace wholesale.
         match snapshot {
             TreeSnapshot::Dir(arc) => {
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    graft(p, target, arc, &mut self.tree, out);
-                }
+                graft(profile_id, target, arc, &mut self.tree, &mut self.profiles, out);
             }
             TreeSnapshot::File(leaf) => {
                 if let Some(p) = self.profiles.get_mut(profile_id) {
@@ -792,14 +885,27 @@ impl Engine {
     }
 
     /// (Standard, Vanished).
+    ///
+    /// Treat as Removed at anchor: release the anchor's `watch_demand`
+    /// contribution. Standard bursts always run on materialized Profiles
+    /// (`drive_burst` routes baseline-less `FsEvent`s to Seed instead), so
+    /// the guard is effectively unconditional in v1 — kept for robustness
+    /// against future routing changes.
+    ///
+    /// Release runs BEFORE `finish_burst_to_idle` so any deferred
+    /// `reap_profile` (`reap_pending`) sees `anchor_contribution=false`
+    /// and skips a redundant release. Without this ordering the post-
+    /// `finish` release would underflow the now-zero `watch_demand`
+    /// counter (debug-assert panic; release-build silent leak).
     fn dispatch_standard_vanished(
         &mut self,
         profile_id: ProfileId,
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let (resource, had_anchor_contribution) = match self.profiles.get(profile_id) {
-            Some(p) => (p.resource, p.anchor_contribution),
+        let (resource, events_union, had_anchor_contribution) = match self.profiles.get(profile_id)
+        {
+            Some(p) => (p.resource, p.events_union, p.anchor_contribution),
             None => return,
         };
         if let Some(p) = self.profiles.get_mut(profile_id) {
@@ -810,22 +916,25 @@ impl Engine {
             profile: profile_id,
             intent: BurstIntent::Standard,
         });
-        self.finish_burst_to_idle(profile_id, now, out);
-        // Treat as Removed at anchor: release watch contribution if we
-        // hold one. Standard bursts always run on materialized Profiles
-        // (drive_burst routes baseline-less FsEvents to Seed instead),
-        // so this is effectively unconditional in v1; the guard mirrors
-        // the discipline used in `on_anchor_terminal_event` for
-        // robustness against future routing changes.
         if had_anchor_contribution {
-            sub_watch_demand(&mut self.tree, resource, out);
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.anchor_contribution = false;
             }
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                resource,
+                events_union,
+                out,
+            );
         }
+        self.finish_burst_to_idle(profile_id, now, out);
     }
 
     /// (Standard, Failed).
+    ///
+    /// See `dispatch_standard_vanished` for the release-before-finish
+    /// ordering rationale.
     fn dispatch_standard_failed(
         &mut self,
         profile_id: ProfileId,
@@ -833,8 +942,9 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let (resource, had_anchor_contribution) = match self.profiles.get(profile_id) {
-            Some(p) => (p.resource, p.anchor_contribution),
+        let (resource, events_union, had_anchor_contribution) = match self.profiles.get(profile_id)
+        {
+            Some(p) => (p.resource, p.events_union, p.anchor_contribution),
             None => return,
         };
         if let Some(p) = self.profiles.get_mut(profile_id) {
@@ -846,13 +956,19 @@ impl Engine {
             intent: BurstIntent::Standard,
             errno,
         });
-        self.finish_burst_to_idle(profile_id, now, out);
         if had_anchor_contribution {
-            sub_watch_demand(&mut self.tree, resource, out);
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.anchor_contribution = false;
             }
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                resource,
+                events_union,
+                out,
+            );
         }
+        self.finish_burst_to_idle(profile_id, now, out);
     }
 
     /// `burst_deadline` row — sets `forced := true` and either
@@ -1028,7 +1144,6 @@ impl Engine {
     /// in the Tree (defensive — reconcile runs before this and materializes
     /// covered entries), a fresh Resource is created with no `watch_demand`
     /// contribution.
-    #[allow(clippy::too_many_arguments)] // path/pattern/scope tuple is irreducible without churn
     fn emit_effects_per_stable_file(
         &mut self,
         sub_id: SubId,
@@ -1233,6 +1348,36 @@ fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> PathBuf {
             .filter(|p| !p.as_os_str().is_empty())
             .map_or_else(|| anchor_path.to_path_buf(), Path::to_path_buf),
         ResourceKind::Dir | ResourceKind::Unknown => anchor_path.to_path_buf(),
+    }
+}
+
+/// L5 event-class assignment. Maps an [`FsEvent`] + the resource's
+/// [`ResourceKind`] to the [`ClassSet`] bit it represents.
+///
+/// Non-terminal events have a fixed class regardless of kind:
+/// - [`FsEvent::Modified`] → [`ClassSet::CONTENT`]
+/// - [`FsEvent::MetadataChanged`] → [`ClassSet::METADATA`]
+/// - [`FsEvent::StructureChanged`] → [`ClassSet::STRUCTURE`]
+///
+/// Identity events ([`FsEvent::Removed`] / [`FsEvent::Renamed`] /
+/// [`FsEvent::Revoked`]) fold by kind per design §2.1 + D7:
+/// - `Dir` → [`ClassSet::STRUCTURE`] (the directory's place in its parent
+///   changed).
+/// - `File` → [`ClassSet::CONTENT`] (the file's identity changed —
+///   kqexec mapping).
+/// - `Unknown` → [`ClassSet::CONTENT`] ("treat as file" default; matches
+///   the L4 translator's `Unknown` branch).
+///
+/// Pure / `const fn`; consulted at the L5 entry filter in [`Engine::on_fs_event`].
+const fn fs_event_to_class(event: FsEvent, kind: ResourceKind) -> ClassSet {
+    match event {
+        FsEvent::Modified => ClassSet::CONTENT,
+        FsEvent::MetadataChanged => ClassSet::METADATA,
+        FsEvent::StructureChanged => ClassSet::STRUCTURE,
+        FsEvent::Removed | FsEvent::Renamed | FsEvent::Revoked => match kind {
+            ResourceKind::Dir => ClassSet::STRUCTURE,
+            ResourceKind::File | ResourceKind::Unknown => ClassSet::CONTENT,
+        },
     }
 }
 

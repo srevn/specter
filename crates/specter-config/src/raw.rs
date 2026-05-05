@@ -22,4 +22,5 @@ pub(crate) struct RawWatch {
     pub max_settle_ms: Option<u64>,
     pub scope: Option<String>,
     pub max_depth: Option<u32>,
+    pub events: Option<Vec<String>>,
 }

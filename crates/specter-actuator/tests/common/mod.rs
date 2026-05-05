@@ -3,7 +3,6 @@
 
 #![allow(
     dead_code,
-    clippy::doc_markdown,
     clippy::manual_assert,
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,

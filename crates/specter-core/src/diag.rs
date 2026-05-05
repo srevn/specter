@@ -5,6 +5,7 @@
 //! (a few small fields) and carries enough context to log meaningfully.
 
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
+use crate::input::FsEvent;
 use crate::op::ProbeCorrelation;
 use crate::profile::BurstIntent;
 
@@ -43,10 +44,27 @@ pub enum Diagnostic {
         intent: BurstIntent,
         errno: i32,
     },
-    /// `FsEvent::MetadataChanged` arrived. v1's hard-coded `events` default
-    /// excludes attribute-only changes; the Engine drops with this variant
-    /// for visibility.
-    MetadataChangedIgnored { resource: ResourceId },
+    /// `FsEvent` arrived for a covered descendant whose class (per the
+    /// L5 `fs_event_to_class` mapping) is not in the covering Profile's
+    /// `events_union`. The user opted out of this class via `Sub.events`,
+    /// so the engine drops the event before it can drive a burst (per
+    /// design §6.1 — class filter sits before dirty-set bumps).
+    ///
+    /// Distinct from [`Self::EventNoConsumer`] (no covering Profile at
+    /// all): there *is* a covering Profile, but the class filter rejects.
+    /// Distinct from the prior v1 `MetadataChangedIgnored`: that variant
+    /// hard-coded "always drop METADATA"; this one carries the dropped
+    /// event + Profile so logs can disambiguate user opt-out from race.
+    ///
+    /// Anchor-on-Profile events bypass this filter unconditionally per
+    /// design D8 — lifecycle continuity (anchor terminal events drive
+    /// `on_anchor_terminal_event`; non-terminal anchor events drive the
+    /// burst) trumps the user's class opt-out.
+    EventClassDropped {
+        resource: ResourceId,
+        event: FsEvent,
+        profile: ProfileId,
+    },
     /// `FsEvent` arrived for a Resource whose `watch_demand == 0` — race
     /// between `Unwatch` op and the Sensor's kqueue drain. True "stale FD"
     /// race; the engine cannot route this event anywhere.

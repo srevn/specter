@@ -267,4 +267,57 @@ mod tests {
         let order: Vec<SubId> = d.modified.iter().map(|(id, _)| *id).collect();
         assert_eq!(order, vec![id(1), id(2)]);
     }
+
+    #[test]
+    fn events_change_marks_modified_in_diff() {
+        let old_blocks = [block("a", "echo")];
+        let new_blocks = [format!(
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
+             command = [\"echo\"]\nevents = [\"content\"]"
+        )];
+        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+        let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let ids = ids_of(&[("a", id(1))]);
+        let d = diff(&old, &new, &ids);
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert_eq!(d.modified.len(), 1);
+        assert_eq!(d.modified[0].0, id(1));
+        assert_eq!(d.modified[0].1.events, specter_core::ClassSet::CONTENT);
+    }
+
+    #[test]
+    fn explicit_events_equal_to_default_yields_no_diff() {
+        // A user adding `events = ["structure", "content"]` cosmetically
+        // (matching the implicit subtree-root default) must not churn
+        // the Profile.
+        let old_blocks = [block("a", "echo")];
+        let new_blocks = [format!(
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
+             command = [\"echo\"]\nevents = [\"structure\", \"content\"]"
+        )];
+        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+        let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+        let d = diff(&old, &new, &ids_of(&[("a", id(1))]));
+        assert!(d.modified.is_empty(), "got {:?}", d.modified);
+    }
+
+    #[test]
+    fn events_class_order_does_not_affect_diff() {
+        // Class set is bitmask-equality, not list-order — the parser
+        // collapses both orderings to the same ClassSet.
+        let old_blocks = [format!(
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
+             command = [\"echo\"]\nevents = [\"structure\", \"content\"]"
+        )];
+        let new_blocks = [format!(
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
+             command = [\"echo\"]\nevents = [\"content\", \"structure\"]"
+        )];
+        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+        let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+        let d = diff(&old, &new, &ids_of(&[("a", id(1))]));
+        assert!(d.modified.is_empty(), "got {:?}", d.modified);
+    }
 }

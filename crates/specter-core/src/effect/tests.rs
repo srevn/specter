@@ -2,7 +2,6 @@
 //! all fixtures are inline; no I/O.
 
 #![allow(
-    clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::missing_const_for_fn,
     clippy::too_many_lines
@@ -13,7 +12,7 @@ use crate::diff::{Diff, EntryRef, Rename};
 use crate::effect::CorrelationId;
 use crate::ids::{ProfileId, SubId};
 use crate::snapshot::EntryKind;
-use crate::sub::{ArgPart, ArgTemplate, CommandTemplate, EffectScope, Placeholder, Sub};
+use crate::sub::{ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, Placeholder, Sub};
 use compact_str::CompactString;
 use smallvec::smallvec;
 use std::path::Path;
@@ -28,6 +27,7 @@ fn sub(name: &str, scope: EffectScope, argv: Vec<ArgTemplate>) -> Sub {
         scope,
         Duration::from_millis(100),
         Duration::from_secs(6),
+        ClassSet::EMPTY,
     )
 }
 

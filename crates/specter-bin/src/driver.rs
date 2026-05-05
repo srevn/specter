@@ -340,9 +340,15 @@ pub fn log_diagnostic(d: &Diagnostic) {
             intent,
             errno,
         } => tracing::warn!(?profile, ?intent, errno, "probe failed"),
-        Diagnostic::MetadataChangedIgnored { resource } => tracing::warn!(
+        Diagnostic::EventClassDropped {
+            resource,
+            event,
+            profile,
+        } => tracing::trace!(
             ?resource,
-            "MetadataChanged dropped (v1 events filter excludes attribute changes)",
+            ?event,
+            ?profile,
+            "fs event dropped (class not in profile.events_union)",
         ),
         Diagnostic::EventOnUnwatchedResource { resource } => {
             tracing::warn!(?resource, "FsEvent on unwatched resource (race; dropped)");

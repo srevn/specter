@@ -127,6 +127,34 @@ fn issue_kind_invalid_enum_scope() {
 }
 
 #[test]
+fn issue_kind_events_empty() {
+    let toml = format!(
+        "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nevents = []"
+    );
+    assert_kinds(&toml, &[IssueKind::EventsEmpty]);
+}
+
+#[test]
+fn issue_kind_duplicate_event_class() {
+    let toml = format!(
+        "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
+         events = [\"content\", \"content\"]"
+    );
+    assert_kinds(&toml, &[IssueKind::DuplicateEventClass]);
+}
+
+#[test]
+fn issue_kind_invalid_enum_event_class() {
+    // Unknown event-class strings reuse `InvalidEnum`, the same family
+    // as scope/log-level — keeps the operator-experience symmetrical.
+    let toml = format!(
+        "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
+         events = [\"strcuture\"]"
+    );
+    assert_kinds(&toml, &[IssueKind::InvalidEnum]);
+}
+
+#[test]
 fn kitchen_sink_collects_five_distinct_issues() {
     let toml = "[[watch]]\nname = \"\"\npath = \"src\"\ncommand = []\nsettle_ms = 0\nmax_depth = 0";
     let err = Config::from_str(toml).unwrap_err();

@@ -3,7 +3,6 @@
 //! anchor materialization triggers a Seed burst.
 
 #![allow(
-    clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::manual_let_else,
     clippy::match_wildcard_for_single_variants,
@@ -16,7 +15,7 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, CommandTemplate, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
+    ChildEntry, ClassSet, CommandTemplate, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
     EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse,
     ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
     SubAttachRequest, TreeSnapshot,
@@ -29,6 +28,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
+const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn empty_command() -> CommandTemplate {
     CommandTemplate::new([specter_core::ArgTemplate::new([
@@ -93,6 +93,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let now = Instant::now();
     let (sid, attach_out) = e.attach_sub(req, now);
@@ -183,6 +184,7 @@ fn pending_path_failed_probe_retains_state() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -227,6 +229,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -281,6 +284,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let now = Instant::now();
     let (sid, attach_out) = e.attach_sub(req, now);

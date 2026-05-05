@@ -4,7 +4,6 @@
 
 // Tests prioritize readability over the workspace's pedantic style budget.
 #![allow(
-    clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::manual_let_else,
     clippy::match_wildcard_for_single_variants,
@@ -20,7 +19,7 @@
 use crate::{Engine, SubAttachRequest};
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, CommandTemplate, DedupKey,
+    ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClassSet, CommandTemplate, DedupKey,
     Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent,
     Input, LeafEntry, Placeholder, ProbeKind, ProbeOp, ProbeResponse, ProbeResult, ProfileState,
     ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, TreeSnapshot, WatchOp,
@@ -31,6 +30,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
+/// Default events mask for transition tests. Empty mask gives a Profile
+/// with `has_per_file_fds = false`, matching the prior tests' assumption
+/// that per-file FDs are out of scope unless the test specifically opts
+/// into PerStableFile + a CONTENT/METADATA mask. Per design D3, events
+/// fold into `config_hash` so two test fixtures differing only on `events`
+/// fork separate Profiles (intentional partition).
+const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn empty_command() -> CommandTemplate {
     CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
@@ -65,6 +71,7 @@ fn engine_with_attached_sub() -> (
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid, _out) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -161,6 +168,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid2, out) = e.attach_sub(req, now);
     assert_eq!(e.profiles.get(pid).unwrap().sub_refcount, pre_refcount + 1);
@@ -428,6 +436,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -570,8 +579,13 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
     assert_eq!(cancels, 1);
 }
 
+/// D8 — anchor events bypass the L5 class filter unconditionally.
+/// Profile has events = EMPTY (nothing in the mask); a `MetadataChanged`
+/// at the anchor still drives the lifecycle path (burst start), and no
+/// `EventClassDropped` is emitted. This guards the lifecycle-continuity
+/// invariant: anchor events never get filtered out by user mask choice.
 #[test]
-fn fs_event_metadatachanged_emits_diagnostic() {
+fn fs_event_metadatachanged_at_anchor_bypasses_class_filter() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid, root);
     let out = e.step(
@@ -581,16 +595,165 @@ fn fs_event_metadatachanged_emits_diagnostic() {
         },
         Instant::now(),
     );
-    let has_diag = out
-        .diagnostics
-        .iter()
-        .any(|d| matches!(d, Diagnostic::MetadataChangedIgnored { .. }));
-    assert!(has_diag);
-    // No state change.
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
+        "anchor events bypass the L5 class filter (D8)",
+    );
+    assert!(
+        matches!(
+            e.profiles.get(pid).unwrap().state,
+            ProfileState::Active(_),
+        ),
+        "MetadataChanged at the anchor drives a burst even on EMPTY mask",
+    );
+}
+
+/// §6.1 — descendant events whose class is not in the covering Profile's
+/// `events_union` drop with `EventClassDropped` BEFORE driving the burst.
+/// Profile has events = EMPTY ⇒ `intersects(any_class) == false`, so a
+/// `MetadataChanged` on a covered descendant drops cleanly without state
+/// mutation.
+#[test]
+fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+
+    // Materialize a covered descendant. Bump `watch_demand` so the event
+    // passes the `EventOnUnwatchedResource` head guard. The Profile's
+    // ScanConfig has `recursive(true)` so `covers(profile, child, tree)`
+    // is satisfied.
+    let child = e.tree.ensure(Some(root), "child.txt", ResourceRole::User);
+    e.tree.get_mut(child).unwrap().kind = ResourceKind::File;
+    e.tree.get_mut(child).unwrap().watch_demand = 1;
+
+    let out = e.step(
+        Input::FsEvent {
+            resource: child,
+            event: FsEvent::MetadataChanged,
+        },
+        Instant::now(),
+    );
+    let has_class_drop = out.diagnostics.iter().any(|d| {
+        matches!(
+            d,
+            Diagnostic::EventClassDropped {
+                resource,
+                event: FsEvent::MetadataChanged,
+                profile,
+            } if *resource == child && *profile == pid,
+        )
+    });
+    assert!(
+        has_class_drop,
+        "descendant MetadataChanged drops with EventClassDropped on EMPTY mask",
+    );
+    // No `MetadataChangedIgnored` lingers — the variant was deleted.
+    // No state mutation: the filter `continue`s before drive_burst.
     assert!(matches!(
         e.profiles.get(pid).unwrap().state,
         ProfileState::Idle,
     ));
+}
+
+/// L5 + D7 — identity events on a *descendant File* fold into the CONTENT
+/// class. A Profile excluding CONTENT (here: STRUCTURE-only on a Dir
+/// anchor) drops the descendant File `Removed` with `EventClassDropped`.
+/// The dropped event is not routed through `on_anchor_terminal_event`
+/// — that routing is anchor-only.
+#[test]
+fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
+    let mut e = Engine::new();
+    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    let now = Instant::now();
+    let req = SubAttachRequest {
+        name: String::from("test-sub"),
+        resource: r,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: ClassSet::STRUCTURE,
+    };
+    let (sid, _out) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+    complete_seed_burst(&mut e, pid, r);
+
+    let child = e.tree.ensure(Some(r), "f.txt", ResourceRole::User);
+    e.tree.get_mut(child).unwrap().kind = ResourceKind::File;
+    e.tree.get_mut(child).unwrap().watch_demand = 1;
+
+    let out = e.step(
+        Input::FsEvent {
+            resource: child,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+    let has_class_drop = out.diagnostics.iter().any(|d| {
+        matches!(
+            d,
+            Diagnostic::EventClassDropped {
+                event: FsEvent::Removed,
+                ..
+            },
+        )
+    });
+    assert!(
+        has_class_drop,
+        "Removed on a descendant File folds to CONTENT and drops on STRUCTURE-only mask",
+    );
+    // Profile remains Idle: dropped events do not extend dirty sets.
+    assert!(matches!(
+        e.profiles.get(pid).unwrap().state,
+        ProfileState::Idle,
+    ));
+    // Sanity: anchor's contribution is intact (we did NOT terminate).
+    assert!(e.profiles.get(pid).unwrap().anchor_contribution);
+    let _ = sid;
+}
+
+/// D8 — terminal events on the anchor route through
+/// `on_anchor_terminal_event` regardless of the Profile's `events_union`.
+/// Anchor is a Dir, events = EMPTY: the kqexec class for `Removed` on a
+/// Dir is STRUCTURE — not in the EMPTY mask — but anchor events bypass
+/// the filter. After the call, `anchor_contribution` is cleared and
+/// `baseline` / `current` are dropped.
+#[test]
+fn fs_event_anchor_terminal_bypasses_class_filter() {
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+    assert!(
+        e.profiles.get(pid).unwrap().anchor_contribution,
+        "anchor_contribution set after attach_sub_inner",
+    );
+
+    let out = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
+        "anchor terminal events bypass the L5 class filter (D8)",
+    );
+
+    let p = e.profiles.get(pid).unwrap();
+    assert!(
+        !p.anchor_contribution,
+        "anchor_contribution cleared by on_anchor_terminal_event",
+    );
+    assert!(p.baseline.is_none());
+    assert!(p.current.is_none());
+    assert!(matches!(p.state, ProfileState::Idle));
 }
 
 #[test]
@@ -870,6 +1033,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
         settle: SETTLE,
         command: diff_command(), // references $created
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (sid, _out) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -981,6 +1145,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let (_sid, out) = e.attach_sub(req, Instant::now());
     let probe_kind = out.probe_ops.iter().find_map(|op| match op {
@@ -1001,8 +1166,8 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
     let r = e.tree.ensure(None, "x", ResourceRole::User);
     e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
     let mut out = StepOutput::default();
-    crate::refcounts::add_watch_demand(&mut e.tree, r, &mut out);
-    crate::refcounts::add_watch_demand(&mut e.tree, r, &mut out);
+    crate::refcounts::add_watch_demand(&mut e.tree, r, NO_EVENTS, &mut out);
+    crate::refcounts::add_watch_demand(&mut e.tree, r, NO_EVENTS, &mut out);
     assert_eq!(e.tree.get(r).unwrap().watch_demand, 2);
 
     let result = e.step(
@@ -1070,6 +1235,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (_sid, _) = e.attach_sub(req, Instant::now());
     let pid = {
@@ -1191,6 +1357,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let req_b = SubAttachRequest::for_path(
         "b".into(),
@@ -1200,6 +1367,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (sid_a, _) = e.attach_sub(req_a, Instant::now());
     let (sid_b, _) = e.attach_sub(req_b, Instant::now());
@@ -1411,6 +1579,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             settle: Duration::from_millis(50),
             command: empty_command(),
             scope: EffectScope::SubtreeRoot,
+            events: NO_EVENTS,
         },
         now,
     );
@@ -1425,6 +1594,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             settle: Duration::from_millis(200),
             command: empty_command(),
             scope: EffectScope::SubtreeRoot,
+            events: NO_EVENTS,
         },
         now,
     );
@@ -1459,6 +1629,7 @@ fn config_diff_added_only_attaches_subs() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
     };
     let mut diff = specter_core::SubRegistryDiff::default();
     diff.added.push(req);
@@ -1494,6 +1665,7 @@ fn config_diff_removed_then_added_atomic() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let mut diff = specter_core::SubRegistryDiff::default();
     diff.removed.push(sid_a);
@@ -1526,6 +1698,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         settle: SETTLE,
         command: diff_command(),
         scope: EffectScope::PerStableFile,
+        events: NO_EVENTS,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -1662,6 +1835,7 @@ fn per_stable_file_skips_dir_entries() {
         settle: SETTLE,
         command: diff_command(),
         scope: EffectScope::PerStableFile,
+        events: NO_EVENTS,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -1930,10 +2104,18 @@ fn b3_recovery_seed_no_prior_emit_does_not_fire() {
 }
 
 #[test]
-fn b2_attach_per_stable_file_sets_has_per_file_sub_flag() {
-    // Fresh attach with PerStableFile scope flips `has_per_file_sub` to
-    // true on the Profile. The flag drives walk_pair's per-leaf Watch
-    // emission.
+fn has_per_file_fds_is_invariant_for_profile_lifetime() {
+    // Under D3 the events mask folds into `config_hash`, so every Sub on
+    // a Profile shares the same events by construction. `has_per_file_fds`
+    // is derived once at `Profile::new` from the events mask and never
+    // flips during the Profile's lifetime — the prior B2 recompute
+    // machinery (recompute_has_per_file_sub / update_per_leaf_watch_demand)
+    // is removed because it's structurally unreachable.
+    //
+    // This test pins the new invariant: a Profile constructed with a
+    // mask containing CONTENT (or METADATA) starts with the flag set,
+    // and a Sub attaching via the same `(resource, config_hash)` does
+    // not change it.
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
     e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
@@ -1946,22 +2128,19 @@ fn b2_attach_per_stable_file_sets_has_per_file_sub_flag() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::PerStableFile,
+        events: ClassSet::CONTENT,
     };
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs.get(sid).unwrap().profile;
     assert!(
-        e.profiles.get(pid).unwrap().has_per_file_sub,
-        "PerStableFile attach sets has_per_file_sub=true",
+        e.profiles.get(pid).unwrap().has_per_file_fds,
+        "CONTENT-mask Profile has has_per_file_fds = true at construction",
     );
-}
 
-#[test]
-fn b2_detach_last_per_stable_file_clears_flag() {
-    let mut e = Engine::new();
-    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
-    let req = SubAttachRequest {
-        name: String::from("formatter"),
+    // A Sub with the same `(resource, max_settle, scan, events)` shares
+    // the existing Profile (D3); the flag stays true.
+    let req2 = SubAttachRequest {
+        name: String::from("formatter-2"),
         resource: r,
         path: None,
         config: ScanConfig::builder().recursive(true).build(),
@@ -1969,13 +2148,28 @@ fn b2_detach_last_per_stable_file_clears_flag() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::PerStableFile,
+        events: ClassSet::CONTENT,
     };
-    let (sid, _out) = e.attach_sub(req, Instant::now());
-    let pid = e.subs.get(sid).unwrap().profile;
-    // We need to add a second Sub so the Profile survives detach (single-Sub
-    // detach reaps the Profile entirely).
-    let req2 = SubAttachRequest {
-        name: String::from("formatter2"),
+    let (_sid2, _) = e.attach_sub(req2, Instant::now());
+    assert!(e.profiles.get(pid).unwrap().has_per_file_fds);
+
+    // Detaching the second Sub leaves the Profile alive (sub_refcount > 0
+    // before detach); the flag still doesn't flip because the Profile's
+    // events mask is invariant.
+    let _ = e.detach_sub(sid, Instant::now());
+    assert!(e.profiles.get(pid).unwrap().has_per_file_fds);
+}
+
+#[test]
+fn structure_only_profile_has_per_file_fds_false() {
+    // Inverse case: a STRUCTURE-only mask leaves `has_per_file_fds`
+    // false. walk_pair then doesn't bump per-leaf watch_demand for
+    // covered files.
+    let mut e = Engine::new();
+    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    let req = SubAttachRequest {
+        name: String::from("ls-only"),
         resource: r,
         path: None,
         config: ScanConfig::builder().recursive(true).build(),
@@ -1983,16 +2177,11 @@ fn b2_detach_last_per_stable_file_clears_flag() {
         settle: SETTLE,
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
+        events: ClassSet::STRUCTURE,
     };
-    let (_sid2, _out) = e.attach_sub(req2, Instant::now());
-    assert!(e.profiles.get(pid).unwrap().has_per_file_sub);
-
-    // Detach the PerStableFile Sub.
-    let _ = e.detach_sub(sid, Instant::now());
-    assert!(
-        !e.profiles.get(pid).unwrap().has_per_file_sub,
-        "Detaching last PerStableFile Sub clears has_per_file_sub",
-    );
+    let (sid, _) = e.attach_sub(req, Instant::now());
+    let pid = e.subs.get(sid).unwrap().profile;
+    assert!(!e.profiles.get(pid).unwrap().has_per_file_fds);
 }
 
 // ---------- Property tests ----------
@@ -2157,6 +2346,7 @@ mod props {
             settle: SETTLE,
             command: empty_command(),
             scope: EffectScope::SubtreeRoot,
+            events: NO_EVENTS,
         };
         let (sid, out) = e.attach_sub(req, now);
         let last_correlation = out.probe_ops.iter().find_map(|op| match op {

@@ -1,17 +1,38 @@
 //! Real-fs round-trip. Each test sets up a watcher, runs one filesystem
 //! operation, and asserts that the corresponding `FsEvent` arrives at
 //! `poll_until`. macOS / FreeBSD only — kqueue is BSD-only.
+//!
+//! Each test passes the minimum [`ClassSet`] needed to fire the event it
+//! asserts on (per design D7's identity floor + class-aware mapping):
+//! - Terminal events (`Removed`, `Renamed`, `Revoked`) work with `EMPTY`
+//!   because `IDENTITY_FLOOR = NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE`
+//!   is OR-ed onto every registration.
+//! - `StructureChanged` on a Dir needs [`ClassSet::STRUCTURE`].
+//! - `Modified` on a File needs [`ClassSet::CONTENT`].
+//! - `MetadataChanged` needs [`ClassSet::METADATA`].
 
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
-use specter_core::{FsEvent, ResourceId, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ResourceId, WatchOpts};
 use specter_sensor::{FsWatcher, KqueueWatcher};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// Build a [`WatchOpts`] with the given event-class mask and sensible
+/// defaults for the rest of the fields. The kqueue watcher only consults
+/// `events`; the other fields are preserved so v2 backends can opt in
+/// without disturbing v1 fixtures.
+const fn opts(events: ClassSet) -> WatchOpts {
+    WatchOpts {
+        follow_symlinks: false,
+        recursive: false,
+        events,
+    }
+}
 
 /// Drain events from `w` until at least one matches `pred` or the
 /// deadline elapses. Returns the accumulated events. Loops with short
@@ -44,7 +65,7 @@ fn watch_dir_observes_structure_changed_on_create() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = fresh_id(&mut sm);
 
-    w.watch(r_dir, tmp.path(), WatchOpts::default())
+    w.watch(r_dir, tmp.path(), opts(ClassSet::STRUCTURE))
         .expect("watch dir ok");
 
     std::fs::write(tmp.path().join("foo.c"), "x").unwrap();
@@ -72,7 +93,7 @@ fn watch_file_observes_modified_on_write() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
-    w.watch(r_file, &path, WatchOpts::default())
+    w.watch(r_file, &path, opts(ClassSet::CONTENT))
         .expect("watch file ok");
 
     std::fs::write(&path, "updated more bytes here").unwrap();
@@ -100,6 +121,7 @@ fn watch_file_observes_removed_on_unlink() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
+    // EMPTY events suffice: NOTE_DELETE is in the identity floor.
     w.watch(r_file, &path, WatchOpts::default())
         .expect("watch file ok");
 
@@ -129,6 +151,7 @@ fn watch_file_observes_renamed_on_rename() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
+    // EMPTY events suffice: NOTE_RENAME is in the identity floor.
     w.watch(r_file, &src, WatchOpts::default()).unwrap();
 
     std::fs::rename(&src, &dst).unwrap();
@@ -156,7 +179,7 @@ fn watch_file_observes_metadata_changed_on_chmod() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
-    w.watch(r_file, &path, WatchOpts::default()).unwrap();
+    w.watch(r_file, &path, opts(ClassSet::METADATA)).unwrap();
 
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o600);
@@ -213,7 +236,10 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
-    w.watch(r_file, &path, WatchOpts::default()).unwrap();
+    // CONTENT so the kernel actually queues an event for the write
+    // below — exercising the late-event-drain path the test's contract
+    // covers.
+    w.watch(r_file, &path, opts(ClassSet::CONTENT)).unwrap();
 
     std::fs::write(&path, "changed").unwrap();
     w.unwatch(r_file);

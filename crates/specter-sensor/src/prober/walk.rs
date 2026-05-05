@@ -174,7 +174,6 @@ fn any_forced_under(path: &Path, force_walk: &BTreeSet<PathBuf>) -> bool {
 /// (in the case of an unreadable but enumerable parent — `read_dir`
 /// errored after `lstat` succeeded). Empty `BTreeMap` is the honest
 /// representation of "we tried, found nothing readable."
-#[allow(clippy::too_many_arguments)]
 fn enumerate_dir(
     path: &Path,
     anchor_path: &Path,
@@ -309,7 +308,6 @@ fn enumerate_dir(
 /// enumeration after a `read_dir` warn) and `None` for mid-walk
 /// `Vanished` / `Failed` / kind-flip cases — the parent emits
 /// `DirChild { subtree: None }` for `None` returns.
-#[allow(clippy::too_many_arguments)]
 fn walk_subdir(
     path: &Path,
     anchor_path: &Path,

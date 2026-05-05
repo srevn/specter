@@ -5,7 +5,6 @@
 //! probe.
 
 #![allow(
-    clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::manual_let_else,
     clippy::match_wildcard_for_single_variants,
@@ -20,10 +19,10 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    BurstPhase, ChildEntry, CommandTemplate, Diff, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse,
-    ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachRequest, TreeSnapshot, WatchOp,
+    BurstPhase, ChildEntry, ClassSet, CommandTemplate, Diff, DirChild, DirMeta, DirSnapshot,
+    EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeRequest,
+    ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachRequest, TreeSnapshot, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -32,6 +31,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
+const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn empty_command() -> CommandTemplate {
     CommandTemplate::new([specter_core::ArgTemplate::new([
@@ -96,6 +96,7 @@ fn two_profiles_one_resource_share_watch_demand() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (_sid_a, out_a) = e.attach_sub(req_a, Instant::now());
     let watch_count_a = out_a
@@ -113,6 +114,7 @@ fn two_profiles_one_resource_share_watch_demand() {
         SETTLE,
         empty_command(),
         EffectScope::SubtreeRoot,
+        NO_EVENTS,
     );
     let (_sid_b, out_b) = e.attach_sub(req_b, Instant::now());
     let watch_count_b = out_b
@@ -148,6 +150,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -173,6 +176,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -240,6 +244,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -263,6 +268,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -392,6 +398,7 @@ fn co_located_profiles_share_suppress_count() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );
@@ -406,6 +413,7 @@ fn co_located_profiles_share_suppress_count() {
             SETTLE,
             empty_command(),
             EffectScope::SubtreeRoot,
+            NO_EVENTS,
         ),
         now,
     );

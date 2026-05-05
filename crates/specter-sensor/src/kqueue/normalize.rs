@@ -5,7 +5,7 @@
 //! We emit at most one `FsEvent` per kevent by priority order:
 //!
 //! ```text
-//! Revoked > Removed > Renamed > StructureChanged > Modified > MetadataChanged
+//! Revoked > Removed > Renamed > <NOTE_LINK kind-aware> > StructureChanged > Modified > MetadataChanged
 //! ```
 //!
 //! The terminal flags (`NOTE_REVOKE` / `NOTE_DELETE` / `NOTE_RENAME`) are
@@ -16,12 +16,23 @@
 //! coalescing is acceptable because the engine's `Settling` state debounces
 //! either as "something changed; reschedule."
 //!
+//! `NOTE_LINK` is kind-aware (D10): on a Dir it's a structural signal
+//! (subdirectory created/removed via `..` backref count change); on a
+//! File it's a metadata signal (hardlink count change via `ln`/`unlink`).
+//! Placed before WRITE/EXTEND in the priority order so a coalesced
+//! `(LINK | WRITE)` kevent on a File maps to `MetadataChanged` rather
+//! than `Modified`. On a Dir both branches collapse to
+//! `StructureChanged` so ordering is observationally irrelevant — but
+//! placing LINK first makes the structural intent explicit.
+//!
 //! `flags` carries `EV_*` bits (e.g., `EV_EOF` from the kernel's
 //! auto-detach signal); v1 ignores them. The terminal `FsEvent` is the
 //! only signal the engine acts on, and `EV_EOF` always coincides with a
 //! terminal `fflag`.
 
-use libc::{NOTE_ATTRIB, NOTE_DELETE, NOTE_EXTEND, NOTE_RENAME, NOTE_REVOKE, NOTE_WRITE};
+use libc::{
+    NOTE_ATTRIB, NOTE_DELETE, NOTE_EXTEND, NOTE_LINK, NOTE_RENAME, NOTE_REVOKE, NOTE_WRITE,
+};
 use specter_core::{FsEvent, ResourceKind};
 
 /// Map a single kevent's flags into at most one `FsEvent`. Returns
@@ -42,6 +53,24 @@ pub(super) const fn kevent_to_fs_event(
     }
     if fflags & NOTE_RENAME != 0 {
         return Some(FsEvent::Renamed);
+    }
+
+    // D10 — NOTE_LINK is kind-aware. On a Dir, link-count changes via
+    // child-dir creation / removal (the parent's `..` backref count
+    // shifts); the engine treats that as `StructureChanged`. On a File,
+    // NOTE_LINK fires on hardlink ops (`ln`, `unlink` on a hardlinked
+    // inode) — a metadata signal under the design's class taxonomy.
+    //
+    // Placed before the WRITE/EXTEND arm so a coalesced `(LINK | WRITE)`
+    // kevent on a File yields MetadataChanged (LINK semantics dominate
+    // the hardlink-count interpretation). On a Dir both branches yield
+    // StructureChanged so ordering is observationally irrelevant — the
+    // explicit ordering documents intent.
+    if fflags & NOTE_LINK != 0 {
+        return Some(match kind {
+            ResourceKind::Dir => FsEvent::StructureChanged,
+            ResourceKind::File | ResourceKind::Unknown => FsEvent::MetadataChanged,
+        });
     }
 
     // Non-terminal: WRITE / EXTEND collapse based on resource kind. A

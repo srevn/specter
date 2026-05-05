@@ -84,6 +84,74 @@ fn normalize_attrib_with_write_emits_write() {
     );
 }
 
+// ── D10: NOTE_LINK is kind-aware ──────────────────────────────────
+
+#[test]
+fn normalize_link_on_dir_is_structure_changed() {
+    // D10: NOTE_LINK on a Dir == subdirectory was added/removed (the
+    // `..` backref count changed). Structural signal.
+    assert_eq!(
+        kevent_to_fs_event(0, libc::NOTE_LINK, ResourceKind::Dir),
+        Some(FsEvent::StructureChanged)
+    );
+}
+
+#[test]
+fn normalize_link_on_file_is_metadata_changed() {
+    // D10: NOTE_LINK on a File == hardlink count changed (via `ln`,
+    // `unlink` on a hardlinked inode). Metadata signal.
+    assert_eq!(
+        kevent_to_fs_event(0, libc::NOTE_LINK, ResourceKind::File),
+        Some(FsEvent::MetadataChanged)
+    );
+}
+
+#[test]
+fn normalize_link_on_unknown_defaults_to_metadata_changed() {
+    // Unknown defaults to File-shape per the watcher's defensive
+    // fallback. NOTE_LINK ⇒ MetadataChanged.
+    assert_eq!(
+        kevent_to_fs_event(0, libc::NOTE_LINK, ResourceKind::Unknown),
+        Some(FsEvent::MetadataChanged)
+    );
+}
+
+#[test]
+fn normalize_link_takes_priority_over_write_on_file() {
+    // D10 ordering: LINK before WRITE. On a File, a coalesced
+    // (LINK | WRITE) kevent maps to MetadataChanged — the link-count
+    // shift is the dominant signal even when content also changed in
+    // the same kernel batch.
+    let fflags = libc::NOTE_LINK | libc::NOTE_WRITE;
+    assert_eq!(
+        kevent_to_fs_event(0, fflags, ResourceKind::File),
+        Some(FsEvent::MetadataChanged)
+    );
+}
+
+#[test]
+fn normalize_link_with_write_on_dir_remains_structure_changed() {
+    // On a Dir, both LINK and WRITE map to StructureChanged. The LINK
+    // arm runs first per the priority order, but the result is
+    // observationally identical regardless of which arm fires.
+    let fflags = libc::NOTE_LINK | libc::NOTE_WRITE;
+    assert_eq!(
+        kevent_to_fs_event(0, fflags, ResourceKind::Dir),
+        Some(FsEvent::StructureChanged)
+    );
+}
+
+#[test]
+fn normalize_terminal_takes_priority_over_link() {
+    // Terminal flags (REVOKE / DELETE / RENAME) outrank LINK — once the
+    // vnode has been reaped, the link-count signal is moot.
+    let fflags = libc::NOTE_DELETE | libc::NOTE_LINK;
+    assert_eq!(
+        kevent_to_fs_event(0, fflags, ResourceKind::File),
+        Some(FsEvent::Removed)
+    );
+}
+
 #[test]
 fn normalize_no_actionable_signal_returns_none() {
     assert_eq!(kevent_to_fs_event(0, 0, ResourceKind::File), None);

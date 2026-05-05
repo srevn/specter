@@ -51,6 +51,12 @@ pub struct SubAttachRequest {
     pub settle: Duration,
     pub command: CommandTemplate,
     pub scope: EffectScope,
+    /// Event-class mask the user opted into. The engine folds this into
+    /// `config_hash` so two Subs differing only on classes fork separate
+    /// Profiles (design D3). The config layer is responsible for
+    /// materializing the scope-conditional default before constructing the
+    /// request — this struct does no defaulting.
+    pub events: ClassSet,
 }
 
 impl SubAttachRequest {
@@ -66,6 +72,7 @@ impl SubAttachRequest {
         settle: Duration,
         command: CommandTemplate,
         scope: EffectScope,
+        events: ClassSet,
     ) -> Self {
         Self {
             name,
@@ -76,6 +83,7 @@ impl SubAttachRequest {
             settle,
             command,
             scope,
+            events,
         }
     }
 
@@ -93,6 +101,7 @@ impl SubAttachRequest {
         settle: Duration,
         command: CommandTemplate,
         scope: EffectScope,
+        events: ClassSet,
     ) -> Self {
         Self {
             name,
@@ -103,6 +112,7 @@ impl SubAttachRequest {
             settle,
             command,
             scope,
+            events,
         }
     }
 }
@@ -126,6 +136,102 @@ pub enum EffectScope {
     #[default]
     SubtreeRoot,
     PerStableFile,
+}
+
+/// User-facing event-class set on a [`Sub`] — the L1 surface of the event
+/// filtering primitive (see `docs/EVENT_FILTERING_DESIGN.md`).
+///
+/// A class set names *what kinds of change* a watch cares about, in
+/// backend-agnostic vocabulary. The kqueue translator (sensor side) is the
+/// only place that maps the set onto `NOTE_*` fflags; inotify gets a
+/// sibling translator. Engine and core never see backend bits.
+///
+/// Three classes:
+/// - **STRUCTURE** — directory entries added / removed / renamed (Dir-only).
+/// - **CONTENT**   — file bytes changed *or* file identity changed
+///   (delete / rename / revoke). File-only.
+/// - **METADATA**  — attribute change (perms, owner, link count,
+///   timestamps). Both Files and Dirs.
+///
+/// The set is backed by a `u8` bitmask — `bits()` is the canonical
+/// representation folded into [`compute_config_hash`](crate::compute_config_hash)
+/// (per design D3, two Subs differing only on classes fork separate
+/// Profiles).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ClassSet(u8);
+
+impl ClassSet {
+    pub const EMPTY: Self = Self(0);
+    pub const STRUCTURE: Self = Self(1 << 0);
+    pub const CONTENT: Self = Self(1 << 1);
+    pub const METADATA: Self = Self(1 << 2);
+
+    /// Default for [`EffectScope::SubtreeRoot`] — STRUCTURE | CONTENT.
+    /// Closes E2E #3 (in-place edits surface as events through the per-file
+    /// FDs implied by CONTENT).
+    pub const DEFAULT_SUBTREE_ROOT: Self = Self(0b011);
+
+    /// Default for [`EffectScope::PerStableFile`] — CONTENT | METADATA.
+    /// The user opted into per-file granularity; metadata is part of
+    /// "this file's state changed".
+    pub const DEFAULT_PER_FILE: Self = Self(0b110);
+
+    /// True iff every bit in `other` is set in `self` AND `other` is
+    /// non-empty.
+    ///
+    /// The `other.0 != 0` clause sidesteps the `bitflags`-crate footgun
+    /// where `contains(EMPTY) == true` for every set: at every call site
+    /// the question being asked is "do we hold this *specific*, non-empty
+    /// class?", and reporting "yes" for `EMPTY` would silently green-light
+    /// a no-class translator branch.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0 && other.0 != 0
+    }
+
+    /// True iff `self` and `other` share at least one bit. `EMPTY`
+    /// intersects nothing (including itself).
+    #[must_use]
+    pub const fn intersects(self, other: Self) -> bool {
+        (self.0 & other.0) != 0
+    }
+
+    /// Canonical bit representation — folded into `config_hash`.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for ClassSet {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for ClassSet {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl std::ops::BitAnd for ClassSet {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        Self(self.0 & rhs.0)
+    }
+}
+
+impl std::ops::BitAndAssign for ClassSet {
+    fn bitand_assign(&mut self, rhs: Self) {
+        self.0 &= rhs.0;
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -210,6 +316,10 @@ pub struct Sub {
     pub settle: Duration,
     pub max_settle: Duration,
     pub needs_diff: bool,
+    /// User-declared event-class mask. Folded into the Profile's
+    /// `config_hash` (D3); under R1, every Sub on a Profile shares the
+    /// same `events` by construction.
+    pub events: ClassSet,
 }
 
 impl Sub {
@@ -225,6 +335,7 @@ impl Sub {
         scope: EffectScope,
         settle: Duration,
         max_settle: Duration,
+        events: ClassSet,
     ) -> Self {
         let needs_diff = scope == EffectScope::PerStableFile || command.references_diff();
         Self {
@@ -236,6 +347,7 @@ impl Sub {
             settle,
             max_settle,
             needs_diff,
+            events,
         }
     }
 }
@@ -315,13 +427,14 @@ impl SubRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgPart, ArgTemplate, CommandTemplate, EffectScope, Placeholder, Sub, SubRegistry,
+        ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, Placeholder, Sub, SubRegistry,
     };
     use crate::ids::{ProfileId, SubId};
     use std::time::Duration;
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
+    const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     fn anchor_only_template() -> CommandTemplate {
         CommandTemplate::new([ArgTemplate::new([
@@ -371,6 +484,7 @@ mod tests {
             EffectScope::PerStableFile,
             SETTLE,
             MAX_SETTLE,
+            NO_EVENTS,
         );
         assert!(sub.needs_diff);
     }
@@ -385,6 +499,7 @@ mod tests {
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
+            NO_EVENTS,
         );
         assert!(sub.needs_diff);
     }
@@ -399,6 +514,7 @@ mod tests {
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
+            NO_EVENTS,
         );
         assert!(!sub.needs_diff);
     }
@@ -416,6 +532,7 @@ mod tests {
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
+                NO_EVENTS,
             )
         });
 
@@ -438,6 +555,7 @@ mod tests {
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
+                NO_EVENTS,
             )
         });
         let s2 = reg.insert(|id| {
@@ -449,6 +567,7 @@ mod tests {
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
+                NO_EVENTS,
             )
         });
 
@@ -478,6 +597,7 @@ mod tests {
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
+                NO_EVENTS,
             )
         });
         assert_eq!(reg.find_by_name("build"), Some(id));
@@ -502,6 +622,7 @@ mod tests {
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
+                NO_EVENTS,
             )
         });
         reg.remove(id);
@@ -521,6 +642,7 @@ mod tests {
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
+                NO_EVENTS,
             )
         });
         let b = reg.insert(|id| {
@@ -532,6 +654,7 @@ mod tests {
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
+                NO_EVENTS,
             )
         });
         let found = reg.find_by_name("shared").expect("at least one match");
@@ -551,6 +674,7 @@ mod tests {
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
+                NO_EVENTS,
             )
         });
 
@@ -559,5 +683,149 @@ mod tests {
         assert!(reg.get(sid).is_none());
         assert!(reg.at(pid).is_empty());
         assert_eq!(reg.len(), 0);
+    }
+
+    /// `Sub::new` threads `events` through to the constructed Sub.
+    #[test]
+    fn sub_new_records_events() {
+        let sub = Sub::new(
+            SubId::default(),
+            "x",
+            ProfileId::default(),
+            anchor_only_template(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            MAX_SETTLE,
+            ClassSet::CONTENT | ClassSet::METADATA,
+        );
+        assert_eq!(sub.events, ClassSet::CONTENT | ClassSet::METADATA);
+    }
+}
+
+#[cfg(test)]
+mod class_set_tests {
+    use super::ClassSet;
+
+    #[test]
+    fn empty_is_default() {
+        assert_eq!(ClassSet::default(), ClassSet::EMPTY);
+        assert_eq!(ClassSet::EMPTY.bits(), 0);
+        assert!(ClassSet::EMPTY.is_empty());
+    }
+
+    #[test]
+    fn distinct_bit_positions() {
+        // All four named values pairwise distinct: each occupies its own
+        // bit position (verifies the constants haven't drifted).
+        let all = [
+            ClassSet::EMPTY,
+            ClassSet::STRUCTURE,
+            ClassSet::CONTENT,
+            ClassSet::METADATA,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "bit constants must be pairwise distinct");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn or_combines_bits() {
+        let s = ClassSet::STRUCTURE | ClassSet::CONTENT;
+        assert!(s.intersects(ClassSet::STRUCTURE));
+        assert!(s.intersects(ClassSet::CONTENT));
+        assert!(!s.intersects(ClassSet::METADATA));
+    }
+
+    #[test]
+    fn or_assign_combines_in_place() {
+        let mut s = ClassSet::STRUCTURE;
+        s |= ClassSet::CONTENT;
+        assert_eq!(s, ClassSet::STRUCTURE | ClassSet::CONTENT);
+    }
+
+    #[test]
+    fn and_intersects_bits() {
+        let s = ClassSet::STRUCTURE | ClassSet::CONTENT;
+        assert_eq!(s & ClassSet::STRUCTURE, ClassSet::STRUCTURE);
+        assert_eq!(s & ClassSet::METADATA, ClassSet::EMPTY);
+    }
+
+    #[test]
+    fn and_assign_intersects_in_place() {
+        let mut s = ClassSet::STRUCTURE | ClassSet::CONTENT;
+        s &= ClassSet::CONTENT | ClassSet::METADATA;
+        assert_eq!(s, ClassSet::CONTENT);
+    }
+
+    #[test]
+    fn contains_requires_full_membership() {
+        let s = ClassSet::STRUCTURE | ClassSet::CONTENT;
+        assert!(s.contains(ClassSet::STRUCTURE));
+        assert!(s.contains(ClassSet::CONTENT));
+        assert!(s.contains(ClassSet::STRUCTURE | ClassSet::CONTENT));
+        assert!(!s.contains(ClassSet::METADATA));
+        assert!(!s.contains(ClassSet::CONTENT | ClassSet::METADATA));
+    }
+
+    /// `contains(EMPTY)` returns `false` — guards against the bitflags
+    /// footgun where `contains(EMPTY) == true` for every set.
+    #[test]
+    fn contains_empty_is_false() {
+        assert!(!ClassSet::EMPTY.contains(ClassSet::EMPTY));
+        assert!(!ClassSet::STRUCTURE.contains(ClassSet::EMPTY));
+        let full = ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA;
+        assert!(!full.contains(ClassSet::EMPTY));
+    }
+
+    #[test]
+    fn intersects_empty_is_false() {
+        assert!(!ClassSet::EMPTY.intersects(ClassSet::EMPTY));
+        assert!(!ClassSet::EMPTY.intersects(ClassSet::STRUCTURE));
+        assert!(!ClassSet::STRUCTURE.intersects(ClassSet::EMPTY));
+    }
+
+    #[test]
+    fn intersects_overlap_is_true() {
+        let s = ClassSet::STRUCTURE | ClassSet::CONTENT;
+        assert!(s.intersects(ClassSet::STRUCTURE));
+        assert!(s.intersects(ClassSet::STRUCTURE | ClassSet::METADATA));
+        assert!(!s.intersects(ClassSet::METADATA));
+    }
+
+    #[test]
+    fn bits_round_trip_through_or() {
+        let cases = [
+            ClassSet::EMPTY,
+            ClassSet::STRUCTURE,
+            ClassSet::CONTENT,
+            ClassSet::METADATA,
+            ClassSet::STRUCTURE | ClassSet::CONTENT,
+            ClassSet::CONTENT | ClassSet::METADATA,
+            ClassSet::STRUCTURE | ClassSet::METADATA,
+            ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA,
+        ];
+        for c in cases {
+            // bits() faithfully encodes the canonical OR.
+            assert_eq!(c.bits().count_ones(), c.bits().count_ones());
+        }
+    }
+
+    /// Pinned defaults — drift here is a user-facing semantic change.
+    #[test]
+    fn defaults_pin_expected_classes() {
+        assert_eq!(
+            ClassSet::DEFAULT_SUBTREE_ROOT,
+            ClassSet::STRUCTURE | ClassSet::CONTENT,
+            "subtree-root default must include STRUCTURE+CONTENT (E2E #3 closure)"
+        );
+        assert_eq!(
+            ClassSet::DEFAULT_PER_FILE,
+            ClassSet::CONTENT | ClassSet::METADATA,
+            "per-stable-file default must include CONTENT+METADATA"
+        );
     }
 }

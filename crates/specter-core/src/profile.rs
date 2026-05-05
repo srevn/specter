@@ -11,6 +11,7 @@ use crate::ids::{ProfileId, ResourceId, TimerId};
 use crate::op::ProbeCorrelation;
 use crate::scan_config::{ScanConfig, compute_config_hash};
 use crate::snapshot::tree::TreeSnapshot;
+use crate::sub::ClassSet;
 use crate::tree::Tree;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::{BTreeMap, BTreeSet};
@@ -207,34 +208,47 @@ pub struct Profile {
     /// Cleared on `EffectComplete::Failed` — the failed Effect leaves no
     /// observation to deduplicate against.
     pub last_emitted_dir_hash: BTreeMap<DedupKey, u128>,
-    /// True iff any attached Sub on this Profile has
-    /// `EffectScope::PerStableFile`.
+    /// User-declared event-class mask for this Profile (R1 / D3). Under
+    /// D3 every Sub on a Profile shares the same `events` by construction
+    /// (mask folds into `config_hash`), so this field is the Sub's mask
+    /// — the "union" naming is structural: L1 contributions OR onto L2,
+    /// even though under D3 the OR is a no-op. The R2 chain (per-Resource
+    /// `events_union` aggregated across covering Profiles) reads this as
+    /// the per-Profile contribution.
+    pub events_union: ClassSet,
+    /// True iff covered Leaves need their own FDs. Derived at construction
+    /// from `events.intersects(CONTENT | METADATA)` and invariant for the
+    /// Profile's lifetime under D3 (events are part of `config_hash`, so a
+    /// mask change forks a new Profile rather than flipping this flag).
     ///
-    /// The engine sets/clears this on `attach_sub`/`detach_sub` by
-    /// recomputing over `SubRegistry::at(profile_id)` (cheap: typical
-    /// Profile has 1-2 Subs). The walker-side reconciler reads it to
-    /// decide whether covered Leaf children get `add_watch_demand`
-    /// (per-file FDs for in-place edit detection).
-    ///
-    /// `false` is the v1 default (no per-file FDs for Subtree-only
-    /// Profiles).
-    pub has_per_file_sub: bool,
+    /// The walker-side reconciler reads this to decide whether covered
+    /// Leaf children get `add_watch_demand` (per-file FDs for in-place
+    /// edit detection — closes E2E #3 by default for `subtree-root` Subs
+    /// whose default mask includes CONTENT).
+    pub has_per_file_fds: bool,
 }
 
 impl Profile {
     /// Construct a fresh Profile: state `Idle`, no baseline/current,
     /// refcounts at zero, no reap pending, no watch-root parent recorded.
-    /// `config_hash` is computed from `(config, max_settle)` and is stable
-    /// for the Profile's lifetime — there is no path to a Profile with an
-    /// unset or stale hash.
+    /// `config_hash` is computed from `(config, max_settle, events)` and
+    /// is stable for the Profile's lifetime — there is no path to a
+    /// Profile with an unset or stale hash.
+    ///
+    /// `events` becomes the Profile's `events_union` and drives
+    /// `has_per_file_fds` (true iff CONTENT or METADATA is in the mask).
+    /// Under D3 every Sub on a Profile shares the same `events`, so
+    /// `events_union` is invariant for the Profile's lifetime.
     #[must_use]
     pub fn new(
         resource: ResourceId,
         config: ScanConfig,
         max_settle: Duration,
         settle: Duration,
+        events: ClassSet,
     ) -> Self {
-        let config_hash = compute_config_hash(&config, max_settle);
+        let config_hash = compute_config_hash(&config, max_settle, events);
+        let has_per_file_fds = events.intersects(ClassSet::CONTENT | ClassSet::METADATA);
         Self {
             resource,
             config,
@@ -250,7 +264,8 @@ impl Profile {
             watch_root_parent: None,
             anchor_contribution: false,
             last_emitted_dir_hash: BTreeMap::new(),
-            has_per_file_sub: false,
+            events_union: events,
+            has_per_file_fds,
         }
     }
 }
@@ -359,13 +374,14 @@ impl ProfileMap {
 
 #[cfg(test)]
 mod tests {
-    use super::{Profile, ProfileMap, ProfileState, ScanConfig, compute_config_hash};
+    use super::{ClassSet, Profile, ProfileMap, ProfileState, ScanConfig, compute_config_hash};
     use crate::resource::ResourceRole;
     use crate::tree::Tree;
     use std::time::Duration;
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
+    const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     fn cfg() -> ScanConfig {
         ScanConfig::builder().build()
@@ -375,7 +391,7 @@ mod tests {
     fn new_profile_starts_idle_with_zero_refcounts() {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         assert!(matches!(p.state, ProfileState::Idle));
         assert!(p.baseline.is_none());
         assert!(p.current.is_none());
@@ -391,18 +407,51 @@ mod tests {
     fn new_profile_initialises_last_emitted_dir_hash_empty() {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         assert!(p.last_emitted_dir_hash.is_empty());
     }
 
-    /// `has_per_file_sub` defaults to false; engine sets it on `attach_sub`
-    /// when a `PerStableFile` Sub lands.
+    /// `has_per_file_fds` defaults to false when `events` excludes both
+    /// CONTENT and METADATA. Under D3 the flag is invariant for the
+    /// Profile's lifetime — set once at construction from the events mask.
     #[test]
-    fn new_profile_initialises_has_per_file_sub_false() {
+    fn new_profile_initialises_has_per_file_fds_false_for_empty_events() {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
-        assert!(!p.has_per_file_sub);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        assert!(!p.has_per_file_fds);
+        assert_eq!(p.events_union, ClassSet::EMPTY);
+    }
+
+    /// `has_per_file_fds` is true when CONTENT is in the mask (closes
+    /// E2E #3 by default for `subtree-root`).
+    #[test]
+    fn new_profile_has_per_file_fds_when_content_in_events() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT);
+        assert!(p.has_per_file_fds);
+        assert_eq!(p.events_union, ClassSet::CONTENT);
+    }
+
+    /// `has_per_file_fds` is also true when METADATA is in the mask (a
+    /// metadata-only watch needs per-file FDs for chmod / nlink signals).
+    #[test]
+    fn new_profile_has_per_file_fds_when_metadata_in_events() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA);
+        assert!(p.has_per_file_fds);
+    }
+
+    /// STRUCTURE-only watch does not flip `has_per_file_fds` — directory
+    /// entries are observed at the parent dir's FD, not at per-file FDs.
+    #[test]
+    fn new_profile_has_per_file_fds_false_for_structure_only() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE);
+        assert!(!p.has_per_file_fds);
     }
 
     #[test]
@@ -410,9 +459,20 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let c = cfg();
-        let expected = compute_config_hash(&c, MAX_SETTLE);
-        let p = Profile::new(r, c, MAX_SETTLE, SETTLE);
+        let expected = compute_config_hash(&c, MAX_SETTLE, NO_EVENTS);
+        let p = Profile::new(r, c, MAX_SETTLE, SETTLE, NO_EVENTS);
         assert_eq!(p.config_hash, expected);
+    }
+
+    /// Different `events` mask produces different `config_hash` (D3
+    /// partition-by-mask).
+    #[test]
+    fn config_hash_partitions_by_events() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p_content = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT);
+        let p_meta = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA);
+        assert_ne!(p_content.config_hash, p_meta.config_hash);
     }
 
     #[test]
@@ -420,7 +480,7 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         let h = p.config_hash;
         let pid = profiles.attach(&mut tree, p);
 
@@ -433,7 +493,10 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
-        let _pid = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE));
+        let _pid = profiles.attach(
+            &mut tree,
+            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
 
         tree.vacate(r);
         assert!(!tree.try_reap(r), "Profile-anchored resource must not reap");
@@ -444,7 +507,7 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         let h = p.config_hash;
         let pid = profiles.attach(&mut tree, p);
 
@@ -459,7 +522,10 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
-        let pid = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE));
+        let pid = profiles.attach(
+            &mut tree,
+            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
 
         profiles.detach(&mut tree, pid);
         tree.vacate(r);
@@ -475,12 +541,12 @@ mod tests {
 
         let pid_a = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), Duration::from_secs(6), SETTLE),
+            Profile::new(r, cfg(), Duration::from_secs(6), SETTLE, NO_EVENTS),
         );
         // Different max_settle ⇒ different config_hash ⇒ distinct Profile.
         let pid_b = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), Duration::from_secs(12), SETTLE),
+            Profile::new(r, cfg(), Duration::from_secs(12), SETTLE, NO_EVENTS),
         );
 
         let mut got: Vec<_> = profiles.at(r).collect();
@@ -497,8 +563,14 @@ mod tests {
         let r1 = tree.ensure(None, "a", ResourceRole::User);
         let r2 = tree.ensure(None, "b", ResourceRole::User);
 
-        let p1 = profiles.attach(&mut tree, Profile::new(r1, cfg(), MAX_SETTLE, SETTLE));
-        let p2 = profiles.attach(&mut tree, Profile::new(r2, cfg(), MAX_SETTLE, SETTLE));
+        let p1 = profiles.attach(
+            &mut tree,
+            Profile::new(r1, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
+        let p2 = profiles.attach(
+            &mut tree,
+            Profile::new(r2, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
         assert_ne!(p1, p2);
         assert_eq!(profiles.len(), 2);
     }
@@ -509,8 +581,14 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure(None, "x", ResourceRole::User);
-        let _pid = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE));
+        let _pid = profiles.attach(
+            &mut tree,
+            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
         // Caller failed to `find` first; second attach hits debug_assert.
-        let _pid2 = profiles.attach(&mut tree, Profile::new(r, cfg(), MAX_SETTLE, SETTLE));
+        let _pid2 = profiles.attach(
+            &mut tree,
+            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
     }
 }

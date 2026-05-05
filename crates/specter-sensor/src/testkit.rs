@@ -12,7 +12,7 @@
 
 use crate::{FsWatcher, Prober, WakeHandle};
 use slotmap::SecondaryMap;
-use specter_core::{FsEvent, ProbeRequest, ProfileId, ResourceId, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, WatchOpts};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -82,6 +82,34 @@ impl MockFsWatcher {
     /// read — subsequent watches succeed unless re-armed.
     pub const fn fail_next_watch(&mut self, errno: i32) {
         self.next_watch_errno = Some(errno);
+    }
+
+    /// Currently-registered event-class mask for `r`, derived from the
+    /// last lifecycle op in `calls`:
+    ///
+    /// - Returns `Some(events)` if the most recent op for `r` is a
+    ///   `Watch` (regardless of whether that `Watch` succeeded — see
+    ///   [`fail_next_watch`](Self::fail_next_watch)).
+    /// - Returns `None` if the most recent op is `Unwatch` or if `r` has
+    ///   no lifecycle ops in the call log.
+    ///
+    /// `Suppress` / `Unsuppress` ops do not affect the mask and are
+    /// skipped during the walk. Under R2 / D11 the engine emits a fresh
+    /// `WatchOp::Watch` whenever `Resource.events_union` widens or
+    /// narrows, so the latest `Watch` reflects the engine's current
+    /// per-Resource union.
+    #[must_use]
+    pub fn registered_events(&self, r: ResourceId) -> Option<ClassSet> {
+        for c in self.calls.iter().rev() {
+            match c {
+                WatcherCall::Watch { resource, opts, .. } if *resource == r => {
+                    return Some(opts.events);
+                }
+                WatcherCall::Unwatch { resource } if *resource == r => return None,
+                _ => {}
+            }
+        }
+        None
     }
 }
 
@@ -209,8 +237,8 @@ mod tests {
     use crate::{FsWatcher, Prober, WakeHandle};
     use slotmap::SlotMap;
     use specter_core::{
-        FsEvent, ProbeCorrelation, ProbeKind, ProbeRequest, ProfileId, ResourceId, ScanConfig,
-        WatchOpts,
+        ClassSet, FsEvent, ProbeCorrelation, ProbeKind, ProbeRequest, ProfileId, ResourceId,
+        ScanConfig, WatchOpts,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -342,6 +370,123 @@ mod tests {
         w.suppress(ids[0]);
         assert_eq!(w.calls.len(), 1);
         assert!(!w.suppressed.contains_key(ids[0]));
+    }
+
+    // ---------------------------------------------------------------- registered_events
+
+    /// `registered_events` reads the events on the latest `Watch` call.
+    /// Under R2 / D11 the engine emits a fresh `Watch` whenever
+    /// `Resource.events_union` changes, so the latest call reflects the
+    /// current per-Resource union.
+    #[test]
+    fn registered_events_returns_latest_watch_mask() {
+        let ids = fresh_resource_ids(1);
+        let mut w = MockFsWatcher::new();
+
+        let opts1 = WatchOpts {
+            events: ClassSet::CONTENT,
+            ..WatchOpts::default()
+        };
+        let opts2 = WatchOpts {
+            events: ClassSet::CONTENT | ClassSet::METADATA,
+            ..WatchOpts::default()
+        };
+
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), opts1).unwrap();
+        assert_eq!(w.registered_events(ids[0]), Some(ClassSet::CONTENT));
+
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), opts2).unwrap();
+        assert_eq!(
+            w.registered_events(ids[0]),
+            Some(ClassSet::CONTENT | ClassSet::METADATA),
+            "second Watch should overshadow the first"
+        );
+    }
+
+    #[test]
+    fn registered_events_returns_none_after_unwatch() {
+        let ids = fresh_resource_ids(1);
+        let mut w = MockFsWatcher::new();
+
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            WatchOpts {
+                events: ClassSet::STRUCTURE,
+                ..WatchOpts::default()
+            },
+        )
+        .unwrap();
+        w.unwatch(ids[0]);
+        assert_eq!(w.registered_events(ids[0]), None);
+    }
+
+    #[test]
+    fn registered_events_returns_none_for_never_watched() {
+        let ids = fresh_resource_ids(2);
+        let mut w = MockFsWatcher::new();
+
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), WatchOpts::default())
+            .unwrap();
+        // ids[1] was never watched; registered_events should return None.
+        assert_eq!(w.registered_events(ids[1]), None);
+    }
+
+    #[test]
+    fn registered_events_skips_suppress_unsuppress_ops() {
+        // Suppress / Unsuppress don't change the events mask; the helper
+        // walks past them to find the latest Watch.
+        let ids = fresh_resource_ids(1);
+        let mut w = MockFsWatcher::new();
+
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            WatchOpts {
+                events: ClassSet::CONTENT,
+                ..WatchOpts::default()
+            },
+        )
+        .unwrap();
+        w.suppress(ids[0]);
+        w.unsuppress(ids[0]);
+        assert_eq!(w.registered_events(ids[0]), Some(ClassSet::CONTENT));
+    }
+
+    #[test]
+    fn registered_events_after_rewatch_returns_new_mask_even_if_failed() {
+        // The latest `Watch` op's events are returned regardless of
+        // whether the call succeeded — `installed` tracks success, but
+        // the helper consumes the call log directly. This documents the
+        // contract for tests that arm `fail_next_watch` to simulate
+        // FD-pressure on a re-register.
+        let ids = fresh_resource_ids(1);
+        let mut w = MockFsWatcher::new();
+
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            WatchOpts {
+                events: ClassSet::CONTENT,
+                ..WatchOpts::default()
+            },
+        )
+        .unwrap();
+        w.fail_next_watch(libc::EMFILE);
+        let _ = w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            WatchOpts {
+                events: ClassSet::CONTENT | ClassSet::METADATA,
+                ..WatchOpts::default()
+            },
+        );
+        // Helper reads the call log — sees the failed Watch attempt
+        // with the widened mask.
+        assert_eq!(
+            w.registered_events(ids[0]),
+            Some(ClassSet::CONTENT | ClassSet::METADATA)
+        );
     }
 
     // ---------------------------------------------------------------- MockProber

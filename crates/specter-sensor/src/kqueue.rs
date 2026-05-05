@@ -19,6 +19,7 @@ compile_error!(
 mod fd;
 mod ffi;
 mod normalize;
+mod translate;
 mod wake;
 mod watcher;
 

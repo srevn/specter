@@ -1538,5 +1538,6 @@ fn worker_prober_concurrent_submit_is_safe() {
 fn prober_impls_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<WorkerProber>();
+    #[cfg(feature = "testkit")]
     assert_send_sync::<crate::testkit::MockProber>();
 }

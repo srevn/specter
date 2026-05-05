@@ -4,7 +4,7 @@ use crate::raw::{RawConfig, RawWatch};
 use crate::template;
 use compact_str::CompactString;
 use specter_core::{
-    self as core, ArgTemplate, CommandTemplate, EffectScope, GlobPattern, ScanConfig,
+    self as core, ArgTemplate, ClassSet, CommandTemplate, EffectScope, GlobPattern, ScanConfig,
     SubAttachRequest,
 };
 use std::collections::BTreeMap;
@@ -31,6 +31,14 @@ pub struct SubSpec {
     pub settle: Duration,
     pub max_settle: Duration,
     pub scan: ScanConfig,
+    /// User-declared event-class mask. Materialized by [`validate_watch`]
+    /// — explicit when the TOML carries an `events` array, otherwise the
+    /// scope-conditional default ([`ClassSet::DEFAULT_SUBTREE_ROOT`] for
+    /// `subtree-root`, [`ClassSet::DEFAULT_PER_FILE`] for
+    /// `per-stable-file`). Folded into the Profile's `config_hash` by the
+    /// engine — `PartialEq`-derived diffs ensure a hot-reload flip on
+    /// this field reaps the old Profile and attaches a fresh one.
+    pub events: ClassSet,
 }
 
 impl SubSpec {
@@ -44,6 +52,7 @@ impl SubSpec {
             self.settle,
             self.command.clone(),
             self.scope,
+            self.events,
         )
     }
 }
@@ -291,6 +300,17 @@ fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationI
         }
     };
 
+    // Parse `events` after scope so the default resolver can read scope.
+    // If scope itself failed validation, fall back to the default scope
+    // (SubtreeRoot) for the events default — this avoids a cascade of
+    // phantom errors; the scope error is already collected above.
+    let events = parse_events_field(
+        raw.events.as_deref(),
+        scope.unwrap_or_default(),
+        idx,
+        &mut errors,
+    );
+
     if raw.max_depth == Some(0) {
         errors.push(issue(
             "max_depth",
@@ -345,14 +365,84 @@ fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationI
         settle: Duration::from_millis(settle_ms),
         max_settle: Duration::from_millis(max_settle_ms),
         scan: sb.build(),
+        events,
     })
+}
+
+/// Parse the optional TOML `events = [...]` array into a [`ClassSet`].
+///
+/// - Field omitted → scope-conditional default
+///   ([`ClassSet::DEFAULT_SUBTREE_ROOT`] for `subtree-root`,
+///   [`ClassSet::DEFAULT_PER_FILE`] for `per-stable-file`).
+/// - Empty array → [`IssueKind::EventsEmpty`]. "I want zero classes" can
+///   only be a typo; toggling a watch off is removal-by-name.
+/// - Unknown value → [`IssueKind::InvalidEnum`].
+/// - Repeated value → [`IssueKind::DuplicateEventClass`].
+///
+/// Issues accumulate into `errors`; the partial [`ClassSet`] returned on
+/// the error path is discarded by the caller.
+fn parse_events_field(
+    raw: Option<&[String]>,
+    scope: EffectScope,
+    idx: usize,
+    errors: &mut Vec<ValidationIssue>,
+) -> ClassSet {
+    let Some(values) = raw else {
+        return match scope {
+            EffectScope::SubtreeRoot => ClassSet::DEFAULT_SUBTREE_ROOT,
+            EffectScope::PerStableFile => ClassSet::DEFAULT_PER_FILE,
+        };
+    };
+
+    if values.is_empty() {
+        errors.push(ValidationIssue::new(
+            Some(idx),
+            "events",
+            IssueKind::EventsEmpty,
+            "events array must not be empty (omit the field to take the \
+             scope-conditional default)"
+                .to_owned(),
+        ));
+        return ClassSet::EMPTY;
+    }
+
+    let mut out = ClassSet::EMPTY;
+    for v in values {
+        let bit = match v.as_str() {
+            "structure" => ClassSet::STRUCTURE,
+            "content" => ClassSet::CONTENT,
+            "metadata" => ClassSet::METADATA,
+            other => {
+                errors.push(ValidationIssue::new(
+                    Some(idx),
+                    "events",
+                    IssueKind::InvalidEnum,
+                    format!(
+                        "unknown event class `{other}` (expected `structure`, `content`, or `metadata`)"
+                    ),
+                ));
+                continue;
+            }
+        };
+        if out.intersects(bit) {
+            errors.push(ValidationIssue::new(
+                Some(idx),
+                "events",
+                IssueKind::DuplicateEventClass,
+                format!("event class `{v}` appears more than once"),
+            ));
+            continue;
+        }
+        out |= bit;
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Config, LogLevel, SubSpec};
     use crate::error::{ConfigError, IssueKind};
-    use specter_core::{ArgPart, EffectScope, Placeholder};
+    use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
     use std::time::Duration;
 
     const ROOT: &str = "/";
@@ -648,6 +738,138 @@ mod tests {
             &cfg.watches[0].path,
             "request carries the same path stored in SubSpec"
         );
+        assert_eq!(
+            req.events,
+            ClassSet::DEFAULT_SUBTREE_ROOT,
+            "to_attach_request threads the parsed events ClassSet through \
+             into the engine surface",
+        );
+    }
+
+    #[test]
+    fn events_default_for_subtree_root_scope_is_structure_plus_content() {
+        let cfg = Config::from_str(&minimal_toml("scope = \"subtree-root\"\n")).unwrap();
+        assert_eq!(cfg.watches[0].events, ClassSet::DEFAULT_SUBTREE_ROOT);
+    }
+
+    #[test]
+    fn events_default_for_subtree_root_when_scope_omitted() {
+        let cfg = Config::from_str(&minimal_toml("")).unwrap();
+        assert_eq!(cfg.watches[0].scope, EffectScope::SubtreeRoot);
+        assert_eq!(cfg.watches[0].events, ClassSet::DEFAULT_SUBTREE_ROOT);
+    }
+
+    #[test]
+    fn events_default_for_per_stable_file_scope_is_content_plus_metadata() {
+        let cfg = Config::from_str(&minimal_toml("scope = \"per-stable-file\"\n")).unwrap();
+        assert_eq!(cfg.watches[0].events, ClassSet::DEFAULT_PER_FILE);
+    }
+
+    #[test]
+    fn explicit_events_overrides_default() {
+        let cfg = Config::from_str(&minimal_toml("events = [\"structure\"]\n")).unwrap();
+        assert_eq!(cfg.watches[0].events, ClassSet::STRUCTURE);
+    }
+
+    #[test]
+    fn explicit_events_accepts_all_three_classes() {
+        let cfg = Config::from_str(&minimal_toml(
+            "events = [\"structure\", \"content\", \"metadata\"]\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.watches[0].events,
+            ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA,
+        );
+    }
+
+    #[test]
+    fn events_explicit_overrides_per_stable_file_default() {
+        let cfg = Config::from_str(&minimal_toml(
+            "scope = \"per-stable-file\"\nevents = [\"metadata\"]\n",
+        ))
+        .unwrap();
+        assert_eq!(cfg.watches[0].events, ClassSet::METADATA);
+    }
+
+    #[test]
+    fn unknown_event_class_rejected() {
+        let toml = minimal_toml("events = [\"strucutre\"]\n");
+        assert_only_kind(&toml, IssueKind::InvalidEnum);
+    }
+
+    #[test]
+    fn duplicate_event_class_rejected() {
+        let toml = minimal_toml("events = [\"structure\", \"structure\"]\n");
+        assert_only_kind(&toml, IssueKind::DuplicateEventClass);
+    }
+
+    #[test]
+    fn empty_events_array_rejected() {
+        // Distinct from "field omitted" (which takes the scope default);
+        // an explicit empty array is always a typo and earns its own
+        // IssueKind.
+        let toml = minimal_toml("events = []\n");
+        assert_only_kind(&toml, IssueKind::EventsEmpty);
+    }
+
+    #[test]
+    fn events_unknown_value_does_not_short_circuit_remaining_values() {
+        // Unknown values report individually — they don't poison the
+        // rest of the array. The watch still fails validation overall,
+        // but each issue is collected.
+        let toml = minimal_toml("events = [\"strucutre\", \"content\"]\n");
+        let err = Config::from_str(&toml).unwrap_err();
+        let errors = validation_errors(err);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, IssueKind::InvalidEnum);
+        assert!(errors[0].detail.contains("strucutre"));
+    }
+
+    #[test]
+    fn duplicate_event_class_emits_one_issue_per_extra_occurrence() {
+        let toml = minimal_toml("events = [\"content\", \"content\", \"content\"]\n");
+        let err = Config::from_str(&toml).unwrap_err();
+        let errors = validation_errors(err);
+        assert_eq!(errors.len(), 2);
+        assert!(
+            errors
+                .iter()
+                .all(|e| e.kind == IssueKind::DuplicateEventClass)
+        );
+    }
+
+    #[test]
+    fn invalid_scope_does_not_cascade_into_events_error() {
+        // When scope fails, events falls back to the SubtreeRoot default
+        // so we don't double-report a phantom events failure caused by
+        // the scope failure.
+        let toml = minimal_toml("scope = \"weekly\"\n");
+        let err = Config::from_str(&toml).unwrap_err();
+        let errors = validation_errors(err);
+        assert_eq!(errors.len(), 1, "got {errors:?}");
+        assert_eq!(errors[0].kind, IssueKind::InvalidEnum);
+        assert_eq!(errors[0].field, "scope");
+    }
+
+    #[test]
+    fn events_field_value_is_case_sensitive() {
+        // TOML enum values are kebab-case throughout — uppercase or
+        // mixed case is rejected, matching the existing `scope` parser.
+        for bad in ["Structure", "STRUCTURE", "Content", "Meta-Data"] {
+            let toml = minimal_toml(&format!("events = [\"{bad}\"]\n"));
+            assert_only_kind(&toml, IssueKind::InvalidEnum);
+        }
+    }
+
+    #[test]
+    fn explicit_events_does_not_alter_other_defaults() {
+        let cfg = Config::from_str(&minimal_toml("events = [\"structure\"]\n")).unwrap();
+        let w = &cfg.watches[0];
+        assert_eq!(w.scope, EffectScope::SubtreeRoot);
+        assert_eq!(w.settle, Duration::from_millis(200));
+        assert_eq!(w.max_settle, Duration::from_secs(12));
+        assert!(w.scan.recursive);
     }
 
     #[test]
