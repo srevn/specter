@@ -70,18 +70,30 @@ pub trait FsWatcher: Send {
     /// the parent's next `StructureChanged` to retry.
     fn watch(&mut self, r: ResourceId, path: &Path, opts: WatchOpts) -> io::Result<()>;
 
-    /// Remove a watch. Idempotent on stale ids — the kernel's vnode
-    /// registration is cleaned up by closing the underlying fd.
+    /// Remove a watch. Idempotent on stale ids. The sensor releases its
+    /// kernel-level registration (kqueue: closes the watched fd; inotify:
+    /// `inotify_rm_watch(wd)`) and clears every internal map keyed by
+    /// `r`. Pending kernel-level events for the resource (kqueue: queued
+    /// events on the closed fd; inotify: events queued on the soon-to-be-
+    /// reaped wd before `IN_IGNORED`) are sensor-internal and never cross
+    /// the trait boundary.
     fn unwatch(&mut self, r: ResourceId);
 
     /// Silence event delivery on a watched resource. Idempotent; no-op
-    /// (with `tracing::warn!`) if `r` is not currently watched. The
-    /// underlying kqueue registration is preserved — re-enabling restores
-    /// delivery without re-stat-ing.
+    /// (with `tracing::warn!`) if `r` is not currently watched.
+    ///
+    /// Backends with kernel-level disable (kqueue's `EV_DISABLE`)
+    /// preserve the registration; backends without (inotify) filter
+    /// delivery in user space using the same `(ResourceId)` key. Either
+    /// way, no re-stat happens on `unsuppress`, and the post-unsuppress
+    /// event stream includes any state-change-since-suppress signal the
+    /// kernel emits (kqueue: edge-triggered registration; inotify:
+    /// continuous delivery).
     fn suppress(&mut self, r: ResourceId);
 
     /// Restore event delivery. Idempotent; no-op (with `tracing::warn!`)
-    /// if `r` is not currently suppressed.
+    /// if `r` is not currently suppressed. See [`suppress`](Self::suppress)
+    /// for the kernel-level-disable vs user-space-filter discipline.
     fn unsuppress(&mut self, r: ResourceId);
 
     /// Block until the next event(s), the deadline, or a wake. Pushes
