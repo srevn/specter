@@ -1,6 +1,6 @@
 # Specter
 
-> Prove the absence of filesystem change.
+> Prove the absence of change.
 
 Specter watches paths, debounces bursts of events, and fires commands
 when the tree settles — not when "something happened," but when
@@ -157,9 +157,8 @@ crates/
   specter-actuator  # subprocess pool, coalescing, env vars
   specter-config    # TOML + CLI parse / validate / diff
   specter-bin       # wiring, signals, hot reload, drain order
-docs/               # design docs (decisions, plans, observability, …)
 etc/                # systemd / launchd / FreeBSD rc.d templates
-Makefile           # build + install conventions
+Makefile            # build + install conventions
 ```
 
 ## License

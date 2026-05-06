@@ -1,29 +1,25 @@
 #!/bin/sh
 #
-# Template — adapt paths to your install.
-# Copy to /usr/local/etc/rc.d/specter (mode 0755).
-# Enable in /etc/rc.conf with:  specter_enable="YES"
-#
 # PROVIDE: specter
 # REQUIRE: NETWORKING
 # KEYWORD: shutdown
+
+export PATH="/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin"
 
 . /etc/rc.subr
 
 name="specter"
 rcvar="${name}_enable"
+
 load_rc_config "${name}"
 
 : ${specter_enable:="NO"}
 : ${specter_user:="specter"}
-: ${specter_config:="/usr/local/etc/specter.toml"}
+: ${specter_config:="@SPECTER_CONF@"}
 : ${specter_logfile:="/var/log/specter.log"}
 
 pidfile="/var/run/${name}.pid"
-specter_program="/usr/local/bin/specter"
 command="/usr/sbin/daemon"
-command_args="-f -p ${pidfile} -o ${specter_logfile} -u ${specter_user} ${specter_program} --config ${specter_config}"
+command_args="-f -p ${pidfile} -o ${specter_logfile} -u ${specter_user} @SPECTER_BIN@ --config ${specter_config}"
 
-# daemon(8) does the fork + setsid + pidfile + log redirect for us.
-# We pass arguments to it; we don't daemonize ourselves.
 run_rc_command "$1"

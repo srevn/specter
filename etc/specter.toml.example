@@ -1,0 +1,32 @@
+# Specter configuration.
+#
+# Top-level sections:
+#   [log]     engine telemetry (subprocess output is per-watch — see
+#             log_output below)
+#   [[watch]] one entry per filesystem subscription
+
+[log]
+level       = "info"     # trace | debug | info | warn | error
+destination = "stderr"   # stderr | file  (when "file", path is required)
+# path      = "/var/log/specter.log"
+
+# Replace this example with one [[watch]] block per subscription. The
+# `name`, `path`, and `command` fields are required; everything else is
+# optional and shown below with its default.
+[[watch]]
+name    = "example"
+path    = "/srv/data"            # absolute; lenient — pending paths are OK
+command = ["echo", "$path"]      # argv; placeholders: $path $rel $anchor
+                                 # $created $deleted $modified
+                                 # $renamed_from $renamed_to
+
+# scope         = "subtree-root"             # | "per-stable-file"
+# recursive     = true
+# hidden        = false
+# settle_ms     = 200                        # ms of quiet before stable verdict
+# max_settle_ms = 12000                      # default = 60 × settle_ms, ≤ 1h
+# pattern       = "**/*.{c,h,rs}"
+# exclude       = ["target/**", "node_modules/**"]
+# max_depth     = 5                          # ≥ 1; omit for unbounded
+# events        = ["structure", "content"]   # default depends on scope
+# log_output    = false                      # forward child stdio to specter
