@@ -13,6 +13,33 @@ use std::io;
 use std::path::Path;
 use std::time::Instant;
 
+pub use specter_core::WatchFailure;
+
+/// Sensor-side extension on [`WatchFailure`] that classifies an
+/// `io::Error` from a watch-install syscall.
+///
+/// `WatchFailure` lives in `specter-core`, which is `libc`-banned per
+/// `deny.toml`, so the errno-name match cannot live there. This trait
+/// keeps the constructor reachable as `WatchFailure::from_io(&e)` while
+/// localising every `libc` reference to backends that actually link it.
+pub trait WatchFailureExt: Sized {
+    /// Map an `io::Error` (the kqueue / inotify watcher syscall surface)
+    /// into the typed variant. Backends call this at the trait boundary —
+    /// the kernel error vocabulary stops here.
+    fn from_io(e: &io::Error) -> Self;
+}
+
+impl WatchFailureExt for WatchFailure {
+    fn from_io(e: &io::Error) -> Self {
+        let errno = e.raw_os_error().unwrap_or(0);
+        match errno {
+            libc::EMFILE | libc::ENFILE | libc::ENOSPC => Self::Pressure { errno },
+            libc::ENOENT | libc::EACCES | libc::ELOOP | libc::ENOTDIR => Self::Resource { errno },
+            _ => Self::Invariant { errno },
+        }
+    }
+}
+
 /// Single-threaded filesystem watcher.
 ///
 /// One thread blocks in [`poll_until`](FsWatcher::poll_until); the
@@ -38,10 +65,10 @@ use std::time::Instant;
 ///     while let Ok(op) = ops_rx.try_recv() {
 ///         match op {
 ///             WatchOp::Watch { resource, path, kind, events } => {
-///                 if let Err(e) = watcher.watch(resource, &path, kind, events) {
-///                     // FD-pressure or similar — engine handles via
+///                 if let Err(failure) = watcher.watch(resource, &path, kind, events) {
+///                     // Pressure / Resource / Invariant — engine demuxes via
 ///                     // `Input::WatchOpRejected`.
-///                     engine_inbound.send(/* … */);
+///                     engine_inbound.send(/* … failure … */);
 ///                 }
 ///             }
 ///             WatchOp::Unwatch { resource } => watcher.unwatch(resource),
@@ -63,22 +90,24 @@ use std::time::Instant;
 /// by rescheduling on every event, so callers must not assume per-write
 /// delivery — only "at least one event when something changed."
 pub trait FsWatcher: Send {
-    /// Install (or re-register) a watch. Returns syscall errors
-    /// verbatim — `EMFILE` / `ENFILE` / `ENOENT` / `EACCES` propagate.
-    /// The bin packages a non-`Ok` return as
-    /// `Input::WatchOpRejected { resource, op, errno }` for the
-    /// engine, which clamps `watch_demand` to zero and waits for the
-    /// parent's next `StructureChanged` to retry.
+    /// Install (or re-register) a watch. Returns a typed
+    /// [`WatchFailure`] on rejection: backends classify their kernel
+    /// errno set (e.g. via [`WatchFailureExt::from_io`]) at the trait
+    /// boundary, and the engine demuxes on the variant rather than on
+    /// raw errno values. The bin packages a non-`Ok` return as
+    /// `Input::WatchOpRejected { resource, op, failure }` for the engine,
+    /// which clamps `watch_demand` to zero and waits for the parent's
+    /// next `StructureChanged` to retry.
     ///
     /// `kind` is the engine's authoritative classification of the slot
     /// (`File` / `Dir` / `Unknown`). The watcher's fresh-watch path
     /// uses it as a verification step against the inode the freshly
-    /// opened fd resolved to: a kind disagreement returns `ENOTDIR` /
-    /// `EISDIR` so the engine routes through the same FD-pressure
-    /// recovery path. `Unknown` is a wildcard — the watcher accepts
-    /// whatever inode resolves and caches the observed kind for
-    /// downstream normalization. Re-watch paths reuse the cached kind
-    /// and ignore this argument.
+    /// opened fd resolved to: a kind disagreement maps to
+    /// [`WatchFailure::Resource`] (`ENOTDIR` / `EISDIR`) so the engine
+    /// routes through the same path-fatal recovery channel. `Unknown` is
+    /// a wildcard — the watcher accepts whatever inode resolves and
+    /// caches the observed kind for downstream normalization. Re-watch
+    /// paths reuse the cached kind and ignore this argument.
     ///
     /// `events` is the per-Resource event-class union (R2 / D4). The
     /// watcher diffs it against the cached per-FD mask and re-registers
@@ -90,7 +119,7 @@ pub trait FsWatcher: Send {
         path: &Path,
         kind: ResourceKind,
         events: ClassSet,
-    ) -> io::Result<()>;
+    ) -> Result<(), WatchFailure>;
 
     /// Remove a watch. Idempotent on stale ids. The sensor releases its
     /// kernel-level registration (kqueue: closes the watched fd; inotify:

@@ -1278,7 +1278,7 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
                 kind: specter_core::ResourceKind::Unknown,
                 events: specter_core::ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );
@@ -1291,10 +1291,13 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
             .any(|op| matches!(op, WatchOp::Unwatch { .. }))
     );
     assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::WatchOpRejected { errno: 24, .. }))
+        result.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::WatchOpRejected {
+                failure: specter_core::WatchFailure::Pressure { errno: 24 },
+                ..
+            }
+        )),
     );
 }
 
@@ -1306,7 +1309,7 @@ fn watch_op_rejected_already_unwatched_emits_diagnostic_only() {
         Input::WatchOpRejected {
             resource: r,
             op: WatchOp::Unwatch { resource: r },
-            errno: 24,
+            failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );
@@ -1358,7 +1361,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
                 kind: specter_core::ResourceKind::Unknown,
                 events: specter_core::ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );
@@ -1385,11 +1388,11 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
             .diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
-                profile, claim, resource, errno
+                profile, claim, resource, failure
             } if *profile == pid
                 && *claim == ClaimKind::DescentPrefix
                 && *resource == foo
-                && *errno == 24)),
+                && *failure == specter_core::WatchFailure::Pressure { errno: 24 })),
         "ProfileClaimPurged{{DescentPrefix}} diagnostic emitted",
     );
 
@@ -1426,7 +1429,7 @@ fn watch_op_rejected_for_anchored_profile_emits_anchor_claim_purged() {
                 kind: specter_core::ResourceKind::Unknown,
                 events: specter_core::ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );
@@ -1499,7 +1502,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
                 kind: specter_core::ResourceKind::Unknown,
                 events: specter_core::ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );

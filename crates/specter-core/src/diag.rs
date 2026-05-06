@@ -6,7 +6,7 @@
 
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::input::FsEvent;
-use crate::op::ProbeCorrelation;
+use crate::op::{ProbeCorrelation, WatchFailure};
 use crate::profile::BurstIntent;
 
 /// Which Profile-side claim was the subject of a [`Diagnostic::ProfileClaimPurged`]
@@ -104,7 +104,14 @@ pub enum Diagnostic {
     /// via the `created` reconciliation. Variants where `watch_demand == 0`
     /// already (the Sensor's queue race) are reported here too with no state
     /// mutation.
-    WatchOpRejected { resource: ResourceId, errno: i32 },
+    ///
+    /// `failure` carries the typed kernel-error class (Pressure / Resource
+    /// / Invariant) — operators read the variant directly without
+    /// translating errno values per-platform.
+    WatchOpRejected {
+        resource: ResourceId,
+        failure: WatchFailure,
+    },
     /// Pending-path descent probe returned `Vanished` for `prefix`.
     /// The Engine rewinds descent to the next-existing ancestor of `prefix`.
     /// Repeated occurrences during scaffold tear-down are normal.
@@ -147,7 +154,7 @@ pub enum Diagnostic {
         profile: ProfileId,
         claim: ClaimKind,
         resource: ResourceId,
-        errno: i32,
+        failure: WatchFailure,
     },
     /// A path-based attach request carried a malformed `PathBuf` —
     /// empty, containing `.` / `..` (caller should canonicalize), or

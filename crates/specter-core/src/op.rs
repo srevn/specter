@@ -163,6 +163,57 @@ impl Default for WatchOp {
     }
 }
 
+/// Typed failure of a [`WatchOp::Watch`] install.
+///
+/// The engine demuxes on the variant — never on `errno` — so backends can
+/// map their kernel-specific errno values once at the trait boundary
+/// without forcing the engine to learn each kernel's vocabulary. Each
+/// variant names *what the engine should do*; the inner `errno` is
+/// diagnostic context, not a behavioural switch.
+///
+/// The `From<io::Error>` translation lives in `specter-sensor` (via
+/// `WatchFailureExt::from_io`) because errno-name matching needs `libc`,
+/// which is banned in `core` per `deny.toml`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum WatchFailure {
+    /// Backpressure: kernel resource limit reached. Engine clamps
+    /// `watch_demand := 0` on the affected resource and waits for natural
+    /// retry on the parent's next reconcile.
+    ///
+    /// kqueue: `EMFILE` / `ENFILE` from `open(O_EVTONLY)`.
+    /// inotify: `ENOSPC` from `inotify_add_watch` (`max_user_watches`).
+    Pressure { errno: i32 },
+
+    /// Path-fatal: the path doesn't resolve to an inode the engine
+    /// expects. Engine treats as terminal for the resource and re-resolves
+    /// via descent (anchor case ⇒ `finalize_anchor_lost`; descendant case
+    /// ⇒ clamp + wait for parent).
+    ///
+    /// kqueue: `ENOENT` / `EACCES` / `ELOOP` / `ENOTDIR`.
+    /// inotify: same set, plus `ENOTDIR` under `IN_ONLYDIR`.
+    Resource { errno: i32 },
+
+    /// Programmer error or trait-misuse: the watcher's invariant has been
+    /// violated. Engine logs at error level and clamps the slot; in
+    /// practice these never fire on a healthy bin. Examples: path with
+    /// embedded NUL, `EBADF` against the inotify_fd, double-mapping of
+    /// one wd to two `ResourceId`s (hardlink aliasing).
+    Invariant { errno: i32 },
+}
+
+impl WatchFailure {
+    /// Underlying errno carried by every variant. Convenience for
+    /// diagnostic logging — equivalent to a three-arm `match`.
+    #[must_use]
+    pub const fn errno(&self) -> i32 {
+        match self {
+            Self::Pressure { errno } | Self::Resource { errno } | Self::Invariant { errno } => {
+                *errno
+            }
+        }
+    }
+}
+
 // `ProbeRequest` carries baseline_subtree/force_walk/forced etc.
 // `Probe` is the dominant variant — every burst emits one — and boxing
 // it would add an allocation per probe with no observable benefit since

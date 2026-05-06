@@ -305,8 +305,7 @@ pub(crate) fn apply_watch_op<W: FsWatcher>(
             kind,
             events,
         } => {
-            if let Err(e) = watcher.watch(resource, &path, kind, events) {
-                let errno = e.raw_os_error().unwrap_or(0);
+            if let Err(failure) = watcher.watch(resource, &path, kind, events) {
                 let rejected = WatchOp::Watch {
                     resource,
                     path,
@@ -316,7 +315,7 @@ pub(crate) fn apply_watch_op<W: FsWatcher>(
                 let _ = sensor_in_tx.send(Input::WatchOpRejected {
                     resource,
                     op: rejected,
-                    errno,
+                    failure,
                 });
             }
         }
@@ -362,7 +361,7 @@ mod tests {
     use super::*;
     use crate::channels::Channels;
     use slotmap::SlotMap;
-    use specter_core::{ClassSet, ResourceId, ResourceKind};
+    use specter_core::{ClassSet, ResourceId, ResourceKind, WatchFailure};
     use specter_sensor::testkit::MockFsWatcher;
 
     /// Mint a fresh non-null `ResourceId`. Required because slotmap's
@@ -400,7 +399,7 @@ mod tests {
         let r = fresh_resource_id();
         // EMFILE = 24 on macOS / FreeBSD / Linux. Hard-coded so the
         // bin's tests don't pull `libc` as a direct dev-dep.
-        watcher.fail_next_watch(24);
+        watcher.fail_next_watch(WatchFailure::Pressure { errno: 24 });
         apply_watch_op(
             &mut watcher,
             WatchOp::Watch {
@@ -415,7 +414,9 @@ mod tests {
         let engine_side = chans.take_engine_side();
         let recv = engine_side.sensor_in_rx.try_recv().expect("rejection sent");
         match recv {
-            Input::WatchOpRejected { errno, .. } => assert_eq!(errno, 24),
+            Input::WatchOpRejected { failure, .. } => {
+                assert_eq!(failure, WatchFailure::Pressure { errno: 24 });
+            }
             other => panic!("expected WatchOpRejected, got {other:?}"),
         }
     }

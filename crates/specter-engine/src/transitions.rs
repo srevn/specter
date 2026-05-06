@@ -18,7 +18,7 @@ use specter_core::{
     BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect,
     EffectOutcome, EffectScope, FsEvent, ProbeResponse, ProbeResult, ProfileId, ProfileState,
     ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot,
-    WatchOp,
+    WatchFailure, WatchOp,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -539,11 +539,11 @@ impl Engine {
         &mut self,
         resource: ResourceId,
         _op: WatchOp,
-        errno: i32,
+        failure: WatchFailure,
         out: &mut StepOutput,
     ) {
         out.diagnostics
-            .push(Diagnostic::WatchOpRejected { resource, errno });
+            .push(Diagnostic::WatchOpRejected { resource, failure });
 
         // Snapshot every claimer BEFORE any mutation. Borrow checker
         // (we'll mutate self.profiles in the loop) and we want a stable
@@ -585,7 +585,7 @@ impl Engine {
                 profile: pid,
                 claim: ClaimKind::Anchor,
                 resource,
-                errno,
+                failure,
             });
         }
 
@@ -599,7 +599,7 @@ impl Engine {
                 profile: pid,
                 claim: ClaimKind::WatchRootParent,
                 resource,
-                errno,
+                failure,
             });
         }
 
@@ -616,7 +616,7 @@ impl Engine {
                 profile: pid,
                 claim: ClaimKind::DescentPrefix,
                 resource,
-                errno,
+                failure,
             });
         }
     }

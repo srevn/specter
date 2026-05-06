@@ -12,7 +12,7 @@
 use nix::sys::resource::{Resource, setrlimit};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, KqueueWatcher};
+use specter_sensor::{FsWatcher, KqueueWatcher, WatchFailure};
 use tempfile::TempDir;
 
 #[test]
@@ -40,11 +40,15 @@ fn watch_eventually_returns_emfile_under_low_rlimit() {
     let mut emfile_seen = false;
     for p in &paths {
         let r = sm.insert(());
-        if let Err(e) = w.watch(r, p, ResourceKind::File, ClassSet::EMPTY) {
-            let raw = e.raw_os_error();
+        if let Err(failure) = w.watch(r, p, ResourceKind::File, ClassSet::EMPTY) {
             assert!(
-                matches!(raw, Some(libc::EMFILE | libc::ENFILE)),
-                "expected EMFILE/ENFILE, got {raw:?} ({e})"
+                matches!(
+                    failure,
+                    WatchFailure::Pressure {
+                        errno: libc::EMFILE | libc::ENFILE,
+                    }
+                ),
+                "expected Pressure(EMFILE|ENFILE), got {failure:?}",
             );
             emfile_seen = true;
             break;

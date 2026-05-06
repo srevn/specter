@@ -218,8 +218,12 @@ fn watch_nonexistent_path_returns_enoent() {
         ResourceKind::Unknown,
         ClassSet::EMPTY,
     );
-    assert!(res.is_err());
-    assert_eq!(res.err().unwrap().raw_os_error(), Some(libc::ENOENT));
+    assert_eq!(
+        res,
+        Err(specter_sensor::WatchFailure::Resource {
+            errno: libc::ENOENT,
+        }),
+    );
 }
 
 #[test]

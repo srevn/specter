@@ -25,7 +25,7 @@ use specter_core::{
     DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation,
     ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ProfileState, ResourceId,
     ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, TreeSnapshot,
-    WatchOp,
+    WatchFailure, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -142,7 +142,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );
@@ -198,7 +198,7 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );
@@ -281,7 +281,7 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );
@@ -354,7 +354,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );

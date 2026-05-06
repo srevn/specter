@@ -11,7 +11,8 @@
 //! moment of the last edge.
 
 use crate::{
-    Diagnostic, Effect, FsEvent, Input, ProbeOp, ProbeResponse, ResourceId, StepOutput, WatchOp,
+    Diagnostic, Effect, FsEvent, Input, ProbeOp, ProbeResponse, ResourceId, StepOutput,
+    WatchFailure, WatchOp,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -112,13 +113,18 @@ impl MockSensor {
     }
 
     /// Mirror of [`fs_event`](Self::fs_event) for FD-pressure recovery —
-    /// wraps the rejected op + errno into the engine input shape.
+    /// wraps the rejected op + typed [`WatchFailure`] into the engine
+    /// input shape.
     #[must_use]
-    pub const fn watch_op_rejected(resource: ResourceId, op: WatchOp, errno: i32) -> Input {
+    pub const fn watch_op_rejected(
+        resource: ResourceId,
+        op: WatchOp,
+        failure: WatchFailure,
+    ) -> Input {
         Input::WatchOpRejected {
             resource,
             op,
-            errno,
+            failure,
         }
     }
 }
@@ -344,17 +350,21 @@ mod tests {
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         };
-        let input = MockSensor::watch_op_rejected(r, op, EMFILE);
+        let input = MockSensor::watch_op_rejected(
+            r,
+            op,
+            crate::WatchFailure::Pressure { errno: EMFILE },
+        );
         match input {
             Input::WatchOpRejected {
                 resource,
                 op: WatchOp::Watch { .. },
-                errno,
+                failure,
             } => {
                 assert_eq!(resource, r);
-                assert_eq!(errno, EMFILE);
+                assert_eq!(failure, crate::WatchFailure::Pressure { errno: EMFILE });
             }
-            _ => panic!("expected WatchOpRejected{{ Watch, EMFILE }}"),
+            _ => panic!("expected WatchOpRejected{{ Watch, Pressure(EMFILE) }}"),
         }
     }
 }

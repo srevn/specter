@@ -124,9 +124,9 @@ impl Engine {
             Input::WatchOpRejected {
                 resource,
                 op,
-                errno,
+                failure,
             } => {
-                self.on_watch_op_rejected(resource, op, errno, &mut out);
+                self.on_watch_op_rejected(resource, op, failure, &mut out);
             }
             Input::ConfigDiff(diff) => {
                 self.on_config_diff(diff, now, &mut out);
@@ -927,7 +927,7 @@ mod tests {
             Input::WatchOpRejected {
                 resource: ResourceId::default(),
                 op,
-                errno: 24,
+                failure: specter_core::WatchFailure::Pressure { errno: 24 },
             },
             Instant::now(),
         );
@@ -937,7 +937,10 @@ mod tests {
         let has_diag = out.diagnostics.iter().any(|d| {
             matches!(
                 d,
-                specter_core::Diagnostic::WatchOpRejected { errno: 24, .. }
+                specter_core::Diagnostic::WatchOpRejected {
+                    failure: specter_core::WatchFailure::Pressure { errno: 24 },
+                    ..
+                }
             )
         });
         assert!(has_diag);

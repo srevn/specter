@@ -822,7 +822,7 @@ fn on_watch_op_rejected_clears_pending_state() {
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );
@@ -956,7 +956,7 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
-            errno: 24,
+            failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
     );

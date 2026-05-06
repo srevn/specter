@@ -32,7 +32,7 @@
 
 use crate::kqueue::wake::KqueueWakeHandle;
 use crate::kqueue::{fd, ffi, normalize, translate};
-use crate::{FsWatcher, WakeHandle};
+use crate::{FsWatcher, WakeHandle, WatchFailure, WatchFailureExt};
 use slotmap::SecondaryMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use std::io;
@@ -95,9 +95,11 @@ impl KqueueWatcher {
             kq,
         })
     }
-}
 
-impl FsWatcher for KqueueWatcher {
+    /// Internal `watch` body returning the raw `io::Error` set; the
+    /// trait wrapper maps that into a typed [`WatchFailure`] at the
+    /// boundary so internal `?` propagation stays uniform.
+    ///
     /// Two paths share this entry point: a fresh-watch (no FD held for
     /// `r`) and a re-watch (engine emitted a fresh `WatchOp::Watch`
     /// because `Resource.events_union` changed at non-zero refcount, per
@@ -105,7 +107,7 @@ impl FsWatcher for KqueueWatcher {
     /// `OwnedFd` for `r`; the re-watch path skips open/stat and reuses
     /// the existing FD, diffing the cached fflags against the
     /// translator's output.
-    fn watch(
+    fn watch_inner(
         &mut self,
         r: ResourceId,
         path: &Path,
@@ -179,9 +181,10 @@ impl FsWatcher for KqueueWatcher {
                 observed = ?observed_kind,
                 "kqueue watch kind mismatch — engine expected != fstat",
             );
-            // Mirror the errno the engine's WatchFailure::Resource path
-            // (Phase A3) will route through: ENOTDIR is the canonical
-            // "kind disagreement" signal both kqueue and inotify use.
+            // ENOTDIR is the canonical "kind disagreement" signal both
+            // kqueue and inotify use; the trait wrapper classifies it
+            // as `WatchFailure::Resource` so the engine routes through
+            // the path-fatal recovery channel.
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
         }
         let fflags = translate::class_set_to_fflags(events, observed_kind);
@@ -198,6 +201,22 @@ impl FsWatcher for KqueueWatcher {
             "kqueue watch"
         );
         Ok(())
+    }
+}
+
+impl FsWatcher for KqueueWatcher {
+    /// Trait wrapper around [`Self::watch_inner`]: classifies the inner
+    /// `io::Error` into a typed [`WatchFailure`] at the boundary so the
+    /// engine demuxes on the variant rather than on raw errno values.
+    fn watch(
+        &mut self,
+        r: ResourceId,
+        path: &Path,
+        kind: ResourceKind,
+        events: ClassSet,
+    ) -> Result<(), WatchFailure> {
+        self.watch_inner(r, path, kind, events)
+            .map_err(|e| WatchFailure::from_io(&e))
     }
 
     fn unwatch(&mut self, r: ResourceId) {

@@ -10,7 +10,7 @@
 //! the `testkit` Cargo feature; consumers attach it under
 //! `[dev-dependencies]`.
 
-use crate::{FsWatcher, Prober, WakeHandle};
+use crate::{FsWatcher, Prober, WakeHandle, WatchFailure};
 use slotmap::SecondaryMap;
 use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, ResourceKind};
 use std::io;
@@ -61,10 +61,10 @@ pub struct MockFsWatcher {
     pub suppressed: SecondaryMap<ResourceId, ()>,
     /// Events queued for delivery on the next `poll_until` call.
     pub queued_events: Vec<(ResourceId, FsEvent)>,
-    /// Set by `fail_next_watch` to simulate FD pressure / EACCES /
-    /// ENOENT — the **next** `watch()` call returns `Err(errno)`
-    /// without modifying state. One-shot; consumed on read.
-    pub next_watch_errno: Option<i32>,
+    /// Set by `fail_next_watch` to simulate FD pressure / kind
+    /// mismatch / programmer error — the **next** `watch()` call returns
+    /// `Err(failure)` without modifying state. One-shot; consumed on read.
+    pub next_watch_failure: Option<WatchFailure>,
     /// Wake-counter shared with every cloned `MockWakeHandle`.
     pub waker: Arc<MockWaker>,
 }
@@ -90,10 +90,10 @@ impl MockFsWatcher {
         self.queued_events.push((r, ev));
     }
 
-    /// Cause the next `watch` call to fail with `errno`. Consumed on
+    /// Cause the next `watch` call to fail with `failure`. Consumed on
     /// read — subsequent watches succeed unless re-armed.
-    pub const fn fail_next_watch(&mut self, errno: i32) {
-        self.next_watch_errno = Some(errno);
+    pub const fn fail_next_watch(&mut self, failure: WatchFailure) {
+        self.next_watch_failure = Some(failure);
     }
 
     /// Currently-registered event-class mask for `r`, derived from the
@@ -134,15 +134,15 @@ impl FsWatcher for MockFsWatcher {
         path: &Path,
         kind: ResourceKind,
         events: ClassSet,
-    ) -> io::Result<()> {
+    ) -> Result<(), WatchFailure> {
         self.calls.push(WatcherCall::Watch {
             resource: r,
             path: path.to_owned(),
             kind,
             events,
         });
-        if let Some(errno) = self.next_watch_errno.take() {
-            return Err(io::Error::from_raw_os_error(errno));
+        if let Some(failure) = self.next_watch_failure.take() {
+            return Err(failure);
         }
         self.installed.insert(
             r,
@@ -262,7 +262,7 @@ impl Prober for MockProber {
 #[cfg(test)]
 mod tests {
     use super::{MockFsWatcher, MockProber, WatcherCall};
-    use crate::{FsWatcher, Prober, WakeHandle};
+    use crate::{FsWatcher, Prober, WakeHandle, WatchFailure};
     use slotmap::SlotMap;
     use specter_core::{
         ClassSet, FsEvent, ProbeCorrelation, ProbeKind, ProbeRequest, ProfileId, ResourceId,
@@ -304,7 +304,9 @@ mod tests {
     fn watch_returns_error_when_armed() {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
-        w.fail_next_watch(libc::EMFILE);
+        w.fail_next_watch(WatchFailure::Pressure {
+            errno: libc::EMFILE,
+        });
 
         let res = w.watch(
             ids[0],
@@ -312,8 +314,12 @@ mod tests {
             ResourceKind::Unknown,
             ClassSet::EMPTY,
         );
-        assert!(res.is_err());
-        assert_eq!(res.err().unwrap().raw_os_error(), Some(libc::EMFILE));
+        assert_eq!(
+            res,
+            Err(WatchFailure::Pressure {
+                errno: libc::EMFILE
+            })
+        );
         // The call is still recorded; the error short-circuits installation.
         assert_eq!(w.calls.len(), 1);
         assert!(!w.installed.contains_key(ids[0]));
@@ -530,7 +536,9 @@ mod tests {
             ClassSet::CONTENT,
         )
         .unwrap();
-        w.fail_next_watch(libc::EMFILE);
+        w.fail_next_watch(WatchFailure::Pressure {
+            errno: libc::EMFILE,
+        });
         let _ = w.watch(
             ids[0],
             &PathBuf::from("/tmp/a"),

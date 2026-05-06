@@ -478,8 +478,13 @@ pub fn log_diagnostic(d: &Diagnostic) {
                 "FsEvent had no consumer (watched, but no covering Profile / descent / recovery)"
             );
         }
-        Diagnostic::WatchOpRejected { resource, errno } => {
-            tracing::warn!(?resource, errno, "watch op rejected by sensor");
+        Diagnostic::WatchOpRejected { resource, failure } => {
+            tracing::warn!(
+                ?resource,
+                ?failure,
+                errno = failure.errno(),
+                "watch op rejected by sensor",
+            );
         }
         Diagnostic::PendingPathProbeVanished { profile, prefix } => {
             tracing::warn!(?profile, ?prefix, "pending-path descent probe Vanished");
@@ -502,12 +507,13 @@ pub fn log_diagnostic(d: &Diagnostic) {
             profile,
             claim,
             resource,
-            errno,
+            failure,
         } => tracing::warn!(
             ?profile,
             ?claim,
             ?resource,
-            errno,
+            ?failure,
+            errno = failure.errno(),
             "profile claim purged (WatchOpRejected at claimed resource)",
         ),
         Diagnostic::AttachPathInvalid { hint } => {
