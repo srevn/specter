@@ -329,7 +329,11 @@ fn probe_response_for_idle_profile_drops_with_diagnostic() {
 // ---- Standard burst dispatch ----
 
 #[test]
-fn standard_burst_stable_emits_effect_and_idles() {
+fn standard_burst_stable_emits_effect_and_awaits() {
+    // Stable verdict emits the Effect and transitions to
+    // `BurstPhase::Awaiting`; the engine waits for the completion before
+    // returning to Idle. Idle means "nothing in flight" — outstanding
+    // Effects keep the burst Active until they report back.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid, root);
     let now = Instant::now();
@@ -365,10 +369,16 @@ fn standard_burst_stable_emits_effect_and_idles() {
         }),
         now + SETTLE + Duration::from_millis(1),
     );
-    assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
-        ProfileState::Idle,
-    ));
+    let burst = match &e.profiles.get(pid).unwrap().state {
+        ProfileState::Active(b) => b,
+        _ => panic!("expected Active(Awaiting) after firing"),
+    };
+    assert_eq!(burst.intent, BurstIntent::Standard);
+    assert!(
+        matches!(burst.phase, BurstPhase::Awaiting { outstanding: 1, .. }),
+        "stable verdict transitions to Awaiting with one outstanding Effect; got {:?}",
+        burst.phase,
+    );
     assert_eq!(out.effects.len(), 1, "one Effect emitted at stable verdict");
     assert!(!out.effects[0].forced);
     // Resolver populated the command + env (P8: was placeholders before).
@@ -495,8 +505,8 @@ fn standard_burst_force_fires_on_max_settle() {
         );
     }
     // After force-fire, we're either in Probing (forced=true) or already
-    // Idle if the deadline race resolved both timers. Drive the response
-    // back if needed.
+    // Awaiting if the deadline race resolved both timers. Drive the
+    // response back if needed.
     if let Some(correlation) = e.pending_probe(pid) {
         // Inject a not-stable response to test the forced effect emission.
         let snap = dir_tree_snap(root, vec![("new.rs", EntryKind::File, 99)]);
@@ -508,10 +518,17 @@ fn standard_burst_force_fires_on_max_settle() {
             }),
             deadline,
         );
-        assert!(matches!(
-            e.profiles.get(pid).unwrap().state,
-            ProfileState::Idle,
-        ));
+        // Forced fire transitions to Awaiting (Effect in flight). The
+        // post-fire rebase happens when the eventual EffectComplete
+        // drives the Awaiting → Rebasing transition.
+        let phase = match &e.profiles.get(pid).unwrap().state {
+            ProfileState::Active(burst) => &burst.phase,
+            _ => panic!("expected Active(Awaiting)"),
+        };
+        assert!(
+            matches!(phase, BurstPhase::Awaiting { outstanding: 1, .. }),
+            "force-fired stable verdict transitions to Awaiting; got {phase:?}",
+        );
         assert_eq!(out.effects.len(), 1);
         assert!(
             out.effects[0].forced,
@@ -1010,9 +1027,21 @@ fn timer_expired_stale_id_emits_diagnostic() {
 }
 
 // ---- EffectComplete dispatch ----
+//
+// The engine does not return to Idle after firing Effects: the burst
+// stays `Active(Awaiting)` until each completion reports back, and the
+// post-Effect rebase happens in `BurstPhase::Rebasing` as a phase of
+// the same burst. `EffectComplete` arrivals route by phase: Awaiting
+// decrements / transitions; non-Awaiting emits
+// `EffectCompleteOutsideAwaiting`.
 
 #[test]
-fn effect_complete_ok_in_idle_starts_seed_burst() {
+fn effect_complete_ok_in_idle_diagnoses_outside_awaiting() {
+    // No path leaves Idle with an outstanding EffectComplete: the burst
+    // stays Active(Awaiting) until completions arrive. A completion
+    // landing in Idle is therefore unexpected (gate-deadline force-
+    // transition or anchor-loss) — emit `EffectCompleteOutsideAwaiting`
+    // and drop without state change.
     let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid, root);
     let out = e.step(
@@ -1026,50 +1055,31 @@ fn effect_complete_ok_in_idle_starts_seed_burst() {
         },
         Instant::now(),
     );
-    // Profile is in Active(Seed Probing).
-    let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b,
-        _ => panic!(),
-    };
-    assert_eq!(burst.intent, BurstIntent::Seed);
-    assert!(matches!(burst.phase, BurstPhase::Verifying));
-    let probes = out
-        .probe_ops
-        .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { .. }))
-        .count();
-    assert_eq!(probes, 1);
-}
-
-#[test]
-fn effect_complete_ok_in_active_drops_with_diagnostic() {
-    let (mut e, pid, sid, _root, _now) = engine_with_attached_sub();
-    // Profile is currently Active(Seed Probing).
-    let out = e.step(
-        Input::EffectComplete {
-            sub: sid,
-            key: DedupKey::Subtree {
-                sub: sid,
-                profile: pid,
-            },
-            result: EffectOutcome::Ok,
-        },
-        Instant::now(),
+    let has_diag = out.diagnostics.iter().any(|d| {
+        matches!(
+            d,
+            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p }
+                if *s == sid && *p == pid,
+        )
+    });
+    assert!(
+        has_diag,
+        "EffectComplete::Ok in Idle is a late completion and diagnoses",
     );
-    let has_diag = out
-        .diagnostics
-        .iter()
-        .any(|d| matches!(d, Diagnostic::EffectCompleteWhileActive { .. }));
-    assert!(has_diag);
-    // State unchanged.
+    // No probe emitted — the Profile stays Idle.
+    assert!(out.probe_ops.is_empty());
     assert!(matches!(
         e.profiles.get(pid).unwrap().state,
-        ProfileState::Active(_),
+        ProfileState::Idle,
     ));
 }
 
 #[test]
-fn effect_complete_failed_is_no_op() {
+fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
+    // Failed always clears `last_emitted_dir_hash[key]` regardless of
+    // phase — a failed Effect leaves no observable state to dedupe
+    // against. In Idle the completion is also "late" (the engine isn't
+    // tracking it), so it diagnoses with EffectCompleteOutsideAwaiting.
     let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid, root);
     let pre_baseline = e.profiles.get(pid).unwrap().baseline.is_some();
@@ -1087,7 +1097,14 @@ fn effect_complete_failed_is_no_op() {
         },
         Instant::now(),
     );
-    assert!(out.diagnostics.is_empty());
+    let has_diag = out.diagnostics.iter().any(|d| {
+        matches!(
+            d,
+            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p }
+                if *s == sid && *p == pid,
+        )
+    });
+    assert!(has_diag, "Failed in Idle diagnoses as late completion");
     assert!(out.effects.is_empty());
     assert!(out.probe_ops.is_empty());
     assert_eq!(

@@ -180,7 +180,6 @@ fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError>
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
     let issue = |field: &'static str, kind: IssueKind, detail: String| {

@@ -18,9 +18,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use tinyvec::TinyVec;
 
-/// One stability cycle. A `Burst` lives `Idle → Active(Burst) → Idle`;
-/// its `phase` walks `Batching → Verifying [→ Draining → Verifying]` and
-/// its `intent` (`Standard | Seed`) decides the terminal action.
+/// One fire cycle.
+///
+/// A `Burst` lives `Idle → Active(Burst) → Idle`; its `phase` walks
+/// `Batching → Verifying [→ Draining → Verifying] → Awaiting → Rebasing`
+/// and its `intent` (`Standard | Seed`) decides the terminal action.
 ///
 /// Burst-level state (`intent`, `forced`, `burst_deadline`) survives every
 /// phase transition; `phase` carries the **correlation token of the input
@@ -33,6 +35,14 @@ use tinyvec::TinyVec;
 ///   payload of its own.
 /// - `Draining` — self-stable, descendant Profiles still resolving;
 ///   correlated externally by `Profile.dirty_descendants`.
+/// - `Awaiting { outstanding, gate_deadline }` — Effects emitted; the
+///   engine is waiting for `outstanding` `EffectComplete` arrivals from
+///   the actuator. `gate_deadline` is a recovery timer for actuator
+///   hangs. Reaching `outstanding == 0` transitions to `Rebasing`.
+/// - `Rebasing` — post-fire probe in flight at the anchor. The probe's
+///   response captures the post-command tree as the new baseline; the
+///   correlation slot is the same `Profile::pending_probe` reused
+///   (Verifying and Rebasing are time-disjoint within one burst).
 ///
 /// `dirty_resources` and `force_walk_resources` are accumulators consumed
 /// at every `transition_to_verifying`; `probe_target` survives Verifying
@@ -76,6 +86,15 @@ pub struct Burst {
 /// burst phase only encodes "probe in flight" as state-machine identity.
 /// `Draining` is correlated externally by `Profile.dirty_descendants` and
 /// carries no token of its own.
+///
+/// `Awaiting { outstanding, gate_deadline }` is the post-fire phase: the
+/// engine has emitted Effects to the actuator and is waiting for their
+/// completions to drive `outstanding → 0`. `gate_deadline` is the
+/// safety-net `AwaitGateDeadline` timer — a hung child is recovered by
+/// force-transitioning to `Rebasing` once the timer expires. `Rebasing`
+/// is unit (post-fire probe in flight; correlation lives on
+/// [`Profile::pending_probe`], same slot Verifying used — they are
+/// time-disjoint within one burst by construction).
 #[derive(Debug)]
 pub enum BurstPhase {
     /// Activity-gap detection. `settle_timer` is the armed debounce
@@ -95,6 +114,24 @@ pub enum BurstPhase {
     /// `TreeSnapshot` on the variant would only invite drift between the
     /// two references.
     Draining,
+    /// Effects emitted; awaiting completion(s) from the actuator.
+    /// `outstanding` decrements on each `EffectComplete` for this
+    /// Profile's `DedupKey`s; reaching zero transitions to `Rebasing`
+    /// (or, when `Profile.reap_pending` is set, finishes the burst
+    /// directly without re-probing). `gate_deadline` is the recovery
+    /// timer for an actuator that never reports completion — its
+    /// expiry forces the burst into `Rebasing` so the engine can
+    /// re-establish a baseline against disk reality.
+    Awaiting {
+        outstanding: u32,
+        gate_deadline: TimerId,
+    },
+    /// Post-fire probe in flight. Correlation lives on
+    /// [`Profile::pending_probe`] (same slot Verifying uses — Verifying
+    /// and Rebasing are time-disjoint within one burst). The probe's
+    /// `Ok` response captures the post-command tree; `dispatch_rebase_ok`
+    /// then sets `baseline := current` and finishes the burst to Idle.
+    Rebasing,
 }
 
 /// Profile state machine.
@@ -177,7 +214,17 @@ pub enum BurstIntent {
 /// `Settle` — debounce timer armed during [`BurstPhase::Batching`]. Expiry
 /// drives Batching → Verifying.
 /// `BurstDeadline` — Burst-level max-settle timer armed at Burst start.
-/// Expiry sets `Burst.forced = true` and dispatches by current phase.
+/// Expiry sets `Burst.forced = true` and dispatches by current phase. The
+/// timer is structurally relevant only in pre-fire phases (`Batching`,
+/// `Verifying`, `Draining`); once the burst transitions to `Awaiting` the
+/// fire has already happened, the deadline is moot, and a stale fire is
+/// dropped silently by the validation in
+/// [`crate::Engine::is_timer_referenced`].
+/// `AwaitGateDeadline` — recovery timer armed at
+/// [`BurstPhase::Awaiting`] entry. Expiry indicates the actuator is
+/// taking longer than expected (likely a hung child); the engine
+/// force-transitions to `Rebasing` to re-establish a baseline against
+/// disk reality.
 ///
 /// Carried alongside [`TimerId`] on the engine's heap entry and on
 /// [`crate::input::Input::TimerExpired`] so dispatch routes directly on
@@ -189,6 +236,7 @@ pub enum TimerKind {
     #[default]
     Settle,
     BurstDeadline,
+    AwaitGateDeadline,
 }
 
 #[derive(Debug)]

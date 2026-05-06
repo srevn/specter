@@ -333,10 +333,10 @@ pub fn log_diagnostic(d: &Diagnostic) {
             "stale probe response (state mismatch)"
         ),
         Diagnostic::StaleTimer { id } => tracing::warn!(?id, "stale timer expiration"),
-        Diagnostic::EffectCompleteWhileActive { sub, profile } => tracing::warn!(
+        Diagnostic::EffectCompleteOutsideAwaiting { sub, profile } => tracing::warn!(
             ?sub,
             ?profile,
-            "effect_complete arrived while profile is Active; dropped",
+            "effect_complete arrived outside Awaiting (gate-deadline force-transition or anchor-loss); dropped",
         ),
         Diagnostic::EffectCompleteForUnknownSub { sub } => tracing::error!(
             ?sub,
@@ -417,6 +417,24 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?target,
             "splice crossed uncovered subtree (graft contract violation; \
              prior view kept, response dropped)",
+        ),
+        Diagnostic::EventAbsorbedByFireTail {
+            profile,
+            resource,
+            event,
+        } => tracing::trace!(
+            ?profile,
+            ?resource,
+            ?event,
+            "fs event absorbed by fire-tail (Awaiting/Rebasing); folded into post-fire rebase",
+        ),
+        Diagnostic::AwaitGateDeadlineElapsed {
+            profile,
+            outstanding,
+        } => tracing::warn!(
+            ?profile,
+            outstanding,
+            "await-gate deadline elapsed; force-transitioning to Rebasing (actuator likely hung)",
         ),
     }
 }

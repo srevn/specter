@@ -119,7 +119,7 @@ impl Engine {
                 self.on_timer_expired(profile, kind, id, &mut out);
             }
             Input::EffectComplete { sub, key, result } => {
-                self.on_effect_complete(sub, key, &result, now, &mut out);
+                self.on_effect_complete(sub, &key, &result, now, &mut out);
             }
             Input::WatchOpRejected {
                 resource,
@@ -650,11 +650,21 @@ impl Engine {
     /// `on_timer_expired` re-runs it as defense-in-depth for direct
     /// `step(Input::TimerExpired)` callers (tests, fuzzers).
     ///
-    /// `kind` narrows the comparison: `Settle` checks the
-    /// `BurstPhase::Batching` slot only (no settle timer exists in any
-    /// other phase); `BurstDeadline` checks the Burst-level field. Only
-    /// `Active` Profiles schedule timers; `Idle` and `Pending` Profiles
-    /// own neither slot.
+    /// `kind` narrows the comparison:
+    /// - `Settle` checks the `BurstPhase::Batching { settle_timer }`
+    ///   slot only — no settle timer exists in any other phase.
+    /// - `BurstDeadline` checks the Burst-level field, but only while
+    ///   the burst is in a pre-fire phase (`Batching` / `Verifying` /
+    ///   `Draining`). Once the burst transitions to `Awaiting` the
+    ///   deadline is moot (we have already fired); a stale fire is
+    ///   dropped silently here so `handle_burst_deadline` is never
+    ///   reached from a post-fire phase.
+    /// - `AwaitGateDeadline` checks the `BurstPhase::Awaiting
+    ///   { gate_deadline }` slot only. Late fires from `Rebasing` or
+    ///   beyond (where the phase has already advanced) are dropped.
+    ///
+    /// Only `Active` Profiles schedule timers; `Idle` and `Pending`
+    /// Profiles own none of these slots.
     pub(crate) fn is_timer_referenced(
         profiles: &ProfileMap,
         profile: ProfileId,
@@ -672,7 +682,17 @@ impl Engine {
                 &burst.phase,
                 BurstPhase::Batching { settle_timer } if *settle_timer == id,
             ),
-            TimerKind::BurstDeadline => burst.burst_deadline == id,
+            TimerKind::BurstDeadline => {
+                burst.burst_deadline == id
+                    && matches!(
+                        &burst.phase,
+                        BurstPhase::Batching { .. } | BurstPhase::Verifying | BurstPhase::Draining,
+                    )
+            }
+            TimerKind::AwaitGateDeadline => matches!(
+                &burst.phase,
+                BurstPhase::Awaiting { gate_deadline, .. } if *gate_deadline == id,
+            ),
         }
     }
 

@@ -341,17 +341,78 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         }),
     ));
 
-    // Drive child to stable. Child's finish_burst_to_idle calls
-    // propagate(-1) which returns parent's id (Draining), and the
-    // engine immediately calls transition_to_verifying on parent —
-    // emitting the reconfirm probe in the same StepOutput.
+    // Drive child's stable verdict — the post-stable path routes through
+    // Awaiting (effect emitted) → Rebasing (post-fire probe) → Idle.
+    // propagate(-1) runs at finish_burst_to_idle, i.e. at the end of
+    // the *full* fire-cycle, not at the stable verdict. That keeps the
+    // parent from reconfirming while the child's Effect is still
+    // mutating the disk.
     let child_probe_corr = e
         .pending_probe(pid_child)
         .expect("Verifying probe in flight");
-    let out = e.step(
+    let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid_child,
             correlation: child_probe_corr,
+            result: ProbeResult::Ok(dir_snap(foo, vec![])),
+        }),
+        t2,
+    );
+    // Stable verdict transitions to Awaiting; no reconfirm yet.
+    assert!(matches!(
+        e.profiles().get(pid_child).unwrap().state,
+        ProfileState::Active(specter_core::Burst {
+            phase: BurstPhase::Awaiting { outstanding: 1, .. },
+            ..
+        }),
+    ));
+    assert!(
+        !stable_out
+            .probe_ops
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid_parent),),
+        "parent does NOT reconfirm at child stable — child's Effect still in flight",
+    );
+    let child_effect = stable_out
+        .effects
+        .first()
+        .cloned()
+        .expect("child fired one Effect at stable verdict");
+    assert!(matches!(
+        e.profiles().get(pid_parent).unwrap().state,
+        ProfileState::Active(specter_core::Burst {
+            phase: BurstPhase::Draining,
+            ..
+        }),
+    ));
+
+    // Inject EffectComplete::Ok → child Awaiting → Rebasing.
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid_c,
+            key: child_effect.key.clone(),
+            result: specter_core::EffectOutcome::Ok,
+        },
+        t2,
+    );
+    let rebase_corr = e
+        .pending_probe(pid_child)
+        .expect("rebase probe in flight after EffectComplete");
+    // The rebase probe is on the child; parent still hasn't reconfirmed.
+    assert!(
+        !rebase_out
+            .probe_ops
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid_parent),),
+        "parent does NOT reconfirm during child Rebasing — burst not yet finished",
+    );
+
+    // Inject the rebase probe response → child finish_burst_to_idle →
+    // propagate(-1) → parent's reconfirm transition_to_verifying.
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid_child,
+            correlation: rebase_corr,
             result: ProbeResult::Ok(dir_snap(foo, vec![])),
         }),
         t2,
@@ -362,7 +423,10 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         .probe_ops
         .iter()
         .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid_parent));
-    assert!(reconfirm_emitted, "parent's reconfirm probe in same step");
+    assert!(
+        reconfirm_emitted,
+        "parent's reconfirm probe fires in the same step as child finish_burst_to_idle",
+    );
 
     // Parent's state is now Probing again (the reconfirm).
     assert!(matches!(

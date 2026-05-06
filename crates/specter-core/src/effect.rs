@@ -65,12 +65,12 @@ pub struct CorrelationId(pub u64);
 
 /// Coalescing identity.
 ///
-/// Both variants carry the owning Profile. `PerFile` was originally keyed by
-/// `(sub, resource)` alone — `sub` already determines `profile`, so the field
-/// adds no partitioning power, but makes the `key → profile` lookup constant-
-/// time symmetrically across both arms. The Phase 09 fire-cycle work needs
-/// that lookup at every `EffectComplete` to credit the per-Profile counter
-/// in `BurstPhase::Awaiting`.
+/// Both variants carry the owning Profile. The `profile` field on
+/// `PerFile` adds no partitioning power (the `sub` already determines
+/// the Profile), but it makes the `key → profile` lookup constant-time
+/// symmetrically across both arms — the engine credits the per-Profile
+/// `BurstPhase::Awaiting` counter on every `EffectComplete`, so this
+/// lookup is hot.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum DedupKey {
     PerFile {
@@ -130,10 +130,7 @@ mod dedup_key_tests {
             profile: p,
             resource: r,
         };
-        let subtree = DedupKey::Subtree {
-            sub: s,
-            profile: p,
-        };
+        let subtree = DedupKey::Subtree { sub: s, profile: p };
         assert_eq!(
             perfile.profile(),
             p,

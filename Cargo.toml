@@ -3,7 +3,8 @@ resolver = "3"
 members  = ["crates/*"]
 
 [workspace.package]
-version      = "0.0.0"
+name         = "specter"
+version      = "0.1.0"
 edition      = "2024"
 rust-version = "1.95"
 license      = "MIT OR Apache-2.0"
@@ -55,4 +56,5 @@ single_match_else   = "allow"
 option_if_let_else  = "allow"
 match_same_arms     = "allow"
 too_many_arguments  = "allow"
+too_many_lines      = "allow"
 doc_markdown        = "allow"

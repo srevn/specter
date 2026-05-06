@@ -156,7 +156,7 @@ impl Engine {
                 // whose class matches: drive the burst forward. Descendant
                 // terminal events drive the burst; the next probe response
                 // reconciles the slot via the diff-against-prior pass.
-                self.drive_burst(profile_id, resource, now, out);
+                self.drive_burst(profile_id, resource, event, now, out);
             }
         }
     }
@@ -234,15 +234,29 @@ impl Engine {
         }
 
         // Route on state-machine identity. The live `pending_probe` belongs
-        // to either a descent (`Pending`) or a burst (`Active`); the
-        // wildcard absorbs `Idle` (defensive — should not occur with
-        // `pending_probe = Some(_)`) and any future `non_exhaustive`
-        // variant.
+        // to either a descent (`Pending`) or a burst (`Active`); within
+        // `Active` the `Rebasing` phase carves out its own dispatch
+        // family (post-fire rebase, no stability verdict — graft +
+        // baseline := current + finish). The wildcard absorbs `Idle`
+        // (defensive — should not occur with `pending_probe = Some(_)`)
+        // and any future `non_exhaustive` variant.
         let dispatch = match self.profiles.get(profile_id).map(|p| &p.state) {
             Some(ProfileState::Pending(_)) => ProbeDispatch::Descent,
-            Some(ProfileState::Active(burst)) => ProbeDispatch::Burst {
-                intent: burst.intent,
-                forced: burst.forced,
+            Some(ProfileState::Active(burst)) => match &burst.phase {
+                BurstPhase::Rebasing => ProbeDispatch::Rebase,
+                // Verifying — pre-fire stability check. Awaiting /
+                // Batching / Draining never carry an in-flight probe,
+                // so a response targeting them slipped past the live
+                // check above — but the I5 field discipline guarantees
+                // that the slot held a Verifying-minted correlation,
+                // so route as Burst with the burst's recorded intent.
+                BurstPhase::Verifying
+                | BurstPhase::Batching { .. }
+                | BurstPhase::Draining
+                | BurstPhase::Awaiting { .. } => ProbeDispatch::Burst {
+                    intent: burst.intent,
+                    forced: burst.forced,
+                },
             },
             _ => {
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
@@ -264,9 +278,20 @@ impl Engine {
                 };
                 self.dispatch_descent_probe(profile_id, arm, now, out);
             }
+            ProbeDispatch::Rebase => match response.result {
+                ProbeResult::Ok(tree_snap) => {
+                    self.dispatch_rebase_ok(profile_id, tree_snap, out);
+                }
+                ProbeResult::Vanished => {
+                    self.dispatch_rebase_vanished(profile_id, out);
+                }
+                ProbeResult::Failed { errno } => {
+                    self.dispatch_rebase_failed(profile_id, errno, out);
+                }
+            },
             ProbeDispatch::Burst { intent, forced } => match (intent, response.result) {
                 (BurstIntent::Seed, ProbeResult::Ok(tree_snap)) => {
-                    self.dispatch_seed_ok(profile_id, tree_snap, out);
+                    self.dispatch_seed_ok(profile_id, tree_snap, now, out);
                 }
                 (BurstIntent::Seed, ProbeResult::Vanished) => {
                     self.dispatch_seed_vanished(profile_id, out);
@@ -311,79 +336,137 @@ impl Engine {
         match kind {
             TimerKind::Settle => self.transition_to_verifying(profile, out),
             TimerKind::BurstDeadline => self.handle_burst_deadline(profile, out),
+            TimerKind::AwaitGateDeadline => self.handle_gate_deadline(profile, out),
         }
     }
 
     /// Dispatch a [`Input::EffectComplete`].
-    // `key` is taken by-value because the B1 path consumes it as a map key
-    // (`p.last_emitted_dir_hash.remove(&key)`). Clippy reads the happy-path
-    // `EffectOutcome::Ok` arm where the value isn't used and suggests
-    // `&DedupKey`; the Failed-arm's borrow keeps the signature consistent
-    // across both arms.
-    #[allow(clippy::needless_pass_by_value)]
+    ///
+    /// The Profile is resolved from `key` ([`DedupKey::profile`] is O(1)
+    /// post-Phase-09 commit 2); the Sub registry is consulted only for
+    /// the unknown-Sub diagnostic.
+    ///
+    /// Failed arrivals always clear `last_emitted_dir_hash[key]` — a
+    /// failed Effect leaves no observable state to deduplicate against,
+    /// so the next stable verdict at the same `DedupKey` must fire.
+    /// This happens regardless of phase (Awaiting decrement, late
+    /// arrival, or unknown — the cleared entry is correct in every
+    /// case).
+    ///
+    /// The phase routing matches the fire-cycle's `Awaiting` counter:
+    /// - `Active(Awaiting { outstanding > 1, .. })` ⇒ decrement.
+    /// - `Active(Awaiting { outstanding ≤ 1, .. })` + `reap_pending`
+    ///   ⇒ finish the burst (the deferred reap inside
+    ///   `finish_burst_to_idle` runs in the same step).
+    /// - `Active(Awaiting { outstanding ≤ 1, .. })` + `!reap_pending`
+    ///   ⇒ `transition_to_rebasing` (post-fire probe at anchor; the
+    ///   eventual response rebases `baseline := current` and finishes).
+    /// - Anything else (Idle, Pending, Active in a non-Awaiting phase,
+    ///   stale Profile) ⇒ `EffectCompleteOutsideAwaiting` Diagnostic.
     pub(crate) fn on_effect_complete(
         &mut self,
         sub: SubId,
-        key: DedupKey,
+        key: &DedupKey,
         result: &EffectOutcome,
-        now: Instant,
+        _now: Instant,
         out: &mut StepOutput,
     ) {
-        let Some(s) = self.subs.get(sub) else {
-            out.diagnostics
-                .push(Diagnostic::EffectCompleteForUnknownSub { sub });
-            return;
-        };
-        let profile_id = s.profile;
+        // The Sub registry is consulted only for the unknown-Sub
+        // diagnostic in the `Diagnose` arm: a Sub detached mid-Awaiting
+        // (the reap-pending case) is gone from the registry by the time
+        // its Effects' completions arrive, but the Profile is still
+        // alive and waiting for the counter to drain — we must NOT
+        // short-circuit here, or the counter would never advance.
+        // `key.profile()` is O(1) post-Phase-09 commit 2 and never
+        // depends on the Sub registry.
+        let profile_id = key.profile();
 
-        match result {
-            EffectOutcome::Ok => {
-                let Some(p) = self.profiles.get(profile_id) else {
-                    return;
-                };
-                // reap-pending Profiles drop the result. The Profile's
-                // last Sub was detached mid-burst; firing a Seed reseed
-                // would race with the deferred reap. Even when the Sub
-                // is still in the registry (multi-Sub Profile mid-life),
-                // reap_pending implies sub_refcount == 0, so there's
-                // nothing to fire next.
-                if p.reap_pending {
-                    return;
+        // Failed clears the dedup entry regardless of state. The Failed
+        // Effect produced no observation worth deduplicating against, so
+        // the next stable verdict at the same key must fire fresh.
+        if matches!(result, EffectOutcome::Failed { .. })
+            && let Some(p) = self.profiles.get_mut(profile_id)
+        {
+            p.last_emitted_dir_hash.remove(key);
+        }
+
+        // Resolve the action under a short read borrow, then mutate.
+        // Reading `reap_pending` here means the AwaitAction::Reap branch
+        // sees the most recent flag value — covers the race where a Sub
+        // detaches between the prior `outstanding == N` step and this
+        // completion (the flag flips before this read).
+        let phase_action = match self
+            .profiles
+            .get(profile_id)
+            .map(|p| (&p.state, p.reap_pending))
+        {
+            Some((ProfileState::Active(burst), reap_pending)) => match &burst.phase {
+                BurstPhase::Awaiting { outstanding, .. } => {
+                    if *outstanding <= 1 {
+                        if reap_pending {
+                            AwaitAction::Reap
+                        } else {
+                            AwaitAction::Rebase
+                        }
+                    } else {
+                        AwaitAction::Decrement
+                    }
                 }
-                match &p.state {
-                    ProfileState::Idle => {
-                        // Post-Effect rebase via Seed burst. baseline and
-                        // current are advanced on the Seed's Ok response,
-                        // so the next Standard burst diffs against the
-                        // post-Effect state.
-                        self.start_seed_burst(profile_id, now, out);
-                    }
-                    ProfileState::Active(_) => {
-                        // Drop with Diagnostic. The active burst's own
-                        // EffectComplete::Ok will fire the next Seed.
-                        out.diagnostics.push(Diagnostic::EffectCompleteWhileActive {
-                            sub,
-                            profile: profile_id,
-                        });
-                    }
-                    // `ProfileState` is non_exhaustive at the crate
-                    // boundary; future variants drop with a Diagnostic.
-                    _ => {
-                        out.diagnostics.push(Diagnostic::EffectCompleteWhileActive {
-                            sub,
-                            profile: profile_id,
-                        });
-                    }
+                BurstPhase::Batching { .. }
+                | BurstPhase::Verifying
+                | BurstPhase::Draining
+                | BurstPhase::Rebasing => AwaitAction::Diagnose,
+            },
+            // Idle, Pending, stale Profile (None): not waiting for this
+            // completion — a late arrival the engine no longer tracks.
+            _ => AwaitAction::Diagnose,
+        };
+
+        match phase_action {
+            AwaitAction::Decrement => {
+                if let Some(p) = self.profiles.get_mut(profile_id)
+                    && let ProfileState::Active(burst) = &mut p.state
+                    && let BurstPhase::Awaiting {
+                        ref mut outstanding,
+                        ..
+                    } = burst.phase
+                {
+                    *outstanding = outstanding.saturating_sub(1);
                 }
             }
-            EffectOutcome::Failed { .. } => {
-                // Failed row: no baseline change, no Diagnostic.
-                // Bundle B1: clear the `last_emitted_dir_hash` entry for
-                // this DedupKey — the failed Effect leaves no observation
-                // to deduplicate against, so the next stable verdict at
-                // the same key must fire.
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.last_emitted_dir_hash.remove(&key);
+            AwaitAction::Rebase => {
+                self.transition_to_rebasing(profile_id, out);
+            }
+            AwaitAction::Reap => {
+                // Last completion AND reap_pending: skip Rebasing — there
+                // are no Subs left to fire for, so re-establishing a
+                // baseline against disk reality has no consumer. Routing
+                // through `finish_burst_to_idle` runs the burst-end
+                // machinery (sub_suppress, propagate(-1) for Standard
+                // bursts) and then dispatches `reap_profile` via the
+                // reap_pending check — calling `reap_profile` directly
+                // would skip those steps and leak the anchor's suppress
+                // contribution.
+                self.finish_burst_to_idle(profile_id, out);
+            }
+            AwaitAction::Diagnose => {
+                // An unknown Sub at the Diagnose arm is the actionable
+                // case: a completion for a Sub the engine never registered
+                // (or one that was already reaped without being in a
+                // burst). Reach for the Sub-keyed diagnostic since it
+                // tells operators the Sub identity. With Sub still in
+                // the registry, fall back to the phase-keyed
+                // `EffectCompleteOutsideAwaiting` — it pairs the
+                // unexpected late delivery with the owning Profile.
+                if self.subs.get(sub).is_none() {
+                    out.diagnostics
+                        .push(Diagnostic::EffectCompleteForUnknownSub { sub });
+                } else {
+                    out.diagnostics
+                        .push(Diagnostic::EffectCompleteOutsideAwaiting {
+                            sub,
+                            profile: profile_id,
+                        });
                 }
             }
         }
@@ -538,14 +621,21 @@ impl Engine {
     }
 
     /// Start a new burst (Seed if no baseline yet, Standard if baseline
-    /// established); Active → fold the event through `event_drives_batching`
-    /// (which accumulates `dirty_resources` + `force_walk_resources`,
-    /// emits a Cancel iff a probe was in flight, and arms a fresh settle
-    /// timer).
+    /// established); pre-fire `Active` → fold the event through
+    /// `event_drives_batching` (which accumulates `dirty_resources` +
+    /// `force_walk_resources`, emits a Cancel iff a probe was in flight,
+    /// and arms a fresh settle timer); post-fire `Active`
+    /// (`Awaiting` / `Rebasing`) → absorb the event with a diagnostic.
     ///
-    /// `event_resource` is the `FsEvent`'s source. It seeds (Idle path) or
-    /// accumulates (Active path) the event-tracking sets the next probe
-    /// uses to compute LCA + `force_walk`.
+    /// `event_resource` is the `FsEvent`'s source. It seeds (Idle path)
+    /// or accumulates (pre-fire Active path) the event-tracking sets
+    /// the next probe uses to compute LCA + `force_walk`. The post-fire
+    /// absorb path does not extend either set: the Rebasing probe at
+    /// the anchor captures whatever's on disk regardless, and a fresh
+    /// burst against an in-flight one would corrupt the fire-tail.
+    ///
+    /// `event` is threaded through purely for the absorb diagnostic so
+    /// the operator can correlate logs to the dropped FsEvent.
     ///
     /// The "no baseline → Seed" branch handles the degenerate
     /// post-`Vanished` Idle state where `current.is_none()` — a Standard
@@ -555,6 +645,7 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         event_resource: ResourceId,
+        event: FsEvent,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -569,9 +660,18 @@ impl Engine {
                     self.start_seed_burst(profile_id, now, out);
                 }
             }
-            ProfileState::Active(_) => {
-                self.event_drives_batching(profile_id, event_resource, now, out);
-            }
+            ProfileState::Active(burst) => match &burst.phase {
+                BurstPhase::Awaiting { .. } | BurstPhase::Rebasing => {
+                    out.diagnostics.push(Diagnostic::EventAbsorbedByFireTail {
+                        profile: profile_id,
+                        resource: event_resource,
+                        event,
+                    });
+                }
+                BurstPhase::Batching { .. } | BurstPhase::Verifying | BurstPhase::Draining => {
+                    self.event_drives_batching(profile_id, event_resource, now, out);
+                }
+            },
             // `ProfileState` non_exhaustive: Pending Profiles never reach
             // here — `covering_profiles` filters them at the source — but
             // the wildcard arm absorbs both Pending (defensively) and any
@@ -645,19 +745,24 @@ impl Engine {
     /// (Seed, Ok).
     ///
     /// Graft the response into `Profile.current` at the burst's
-    /// `probe_target` (= anchor for Seeds), then rebase
-    /// `Profile.baseline := Profile.current`. Bundle B3 (hash-only): if
-    /// the post-graft `current` diverges from a recorded
+    /// `probe_target` (= anchor for Seeds). Bundle B3 (hash-only): if the
+    /// post-graft `current` diverges from a recorded
     /// `last_emitted_dir_hash[Subtree]` for this Profile, fire
-    /// `emit_effects` once. This narrows "Seed bursts never fire Effects"
-    /// to "Seed bursts fire Effects only when `last_emitted_dir_hash[Subtree]`
-    /// diverges from the post-Seed view" — handles recovery / post-Effect
-    /// drift for `SubtreeRoot` scope. `PerStableFile` is a documented v1
-    /// limitation.
+    /// `emit_effects` once and route through the same fire-tail as a
+    /// Standard burst (`emit_effects` count > 0 ⇒ `transition_to_awaiting`;
+    /// the eventual rebase probe captures the post-command tree).
+    /// Otherwise rebase directly: `baseline := current` and finish.
+    ///
+    /// Fresh-attach Seed cannot enter the drift branch — `last_emitted_dir_hash`
+    /// is empty by construction at fresh attach, so `b3_seed_drift_observed`
+    /// returns false. The drift branch fires only on recovery / post-Effect
+    /// rebase paths where the Profile has already emitted at least one
+    /// Subtree key.
     fn dispatch_seed_ok(
         &mut self,
         profile_id: ProfileId,
         snapshot: TreeSnapshot,
+        now: Instant,
         out: &mut StepOutput,
     ) {
         // Seed always targets anchor — `probe_target` was set to the
@@ -691,26 +796,33 @@ impl Engine {
             }
         }
 
-        // Bundle B3 — fire Effect once on observed drift, before rebasing
-        // baseline. emit_effects' B1 path then runs against the freshly
-        // grafted current and updates `last_emitted_dir_hash` to the new
-        // post-fire hash, so the rebase below is consistent.
+        // Bundle B3 — fire Effect once on observed drift. emit_effects'
+        // B1 path runs against the freshly grafted current and updates
+        // `last_emitted_dir_hash` to the new post-fire hash. The rebase
+        // (`baseline := current`) happens in both branches below; on the
+        // drift-fires branch it must run before `transition_to_awaiting`
+        // so the Profile's view is consistent for any FsEvent absorbed
+        // during the post-fire tail (Awaiting/Rebasing).
         if self.b3_seed_drift_observed(profile_id) {
-            // The `EmitOutcome.count` is intentionally discarded here; the
-            // post-Effect rebase semantics still rely on `finish_burst_to_idle`
-            // running unconditionally. Phase 09's fire-cycle commit consumes
-            // the count to gate `Awaiting` entry.
-            let _ = self.emit_effects(profile_id, false, out);
+            let outcome = self.emit_effects(profile_id, false, out);
+            if outcome.count > 0 {
+                if let Some(p) = self.profiles.get_mut(profile_id) {
+                    p.baseline = p.current.clone();
+                }
+                self.transition_to_awaiting(profile_id, outcome.count, now);
+                return;
+            }
+            // Drift observed but emit produced no effects (B1 suppressed
+            // every key, or every Sub failed the scope filter). Treat as
+            // non-drift and fall through to the finish path.
         }
 
-        // Rebase: baseline := current (the grafted snapshot).
+        // Non-drift Seed (fresh attach, no-drift recovery, or B1-suppressed
+        // drift): rebase and finish. No Effect fires, no Awaiting tail.
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = p.current.clone();
         }
-
         self.finish_burst_to_idle(profile_id, out);
-        // No Effect fires from a fresh-Profile Seed burst — B3 gates on
-        // `last_emitted_dir_hash` non-empty, which fresh Seeds never have.
     }
 
     /// Bundle B3 — hash-only drift check at Seed-Ok. Returns true iff the
@@ -858,13 +970,17 @@ impl Engine {
         }
 
         if is_stable && dirty_zero {
-            // Row 3: stable + dirty=0 → fire Effect, → Idle. baseline pinned
-            // (advances on next EffectComplete::Ok Seed). The
-            // `EmitOutcome.count` is discarded here for now; Phase 09's
-            // fire-cycle commit consumes it to choose between Awaiting
-            // (count > 0) and finish_burst_to_idle (count == 0).
-            let _ = self.emit_effects(profile_id, forced, out);
-            self.finish_burst_to_idle(profile_id, out);
+            // Row 3: stable + dirty=0 → fire Effect. Awaiting on count > 0;
+            // finish-to-Idle on count == 0 (B1 suppressed everything, no
+            // Subs matched, or `reap_pending` skipped the emit). baseline
+            // is NOT pinned here on the firing branch — it will rebase
+            // when the Rebasing probe response lands (`dispatch_rebase_ok`).
+            let outcome = self.emit_effects(profile_id, forced, out);
+            if outcome.count > 0 {
+                self.transition_to_awaiting(profile_id, outcome.count, now);
+            } else {
+                self.finish_burst_to_idle(profile_id, out);
+            }
         } else if is_stable {
             // Row 4: stable + dirty>0 → Draining. The stable snapshot lives
             // on `Profile.current` (just spliced in by graft); the reconfirm
@@ -872,11 +988,16 @@ impl Engine {
             // snapshot on the phase variant.
             self.transition_to_draining(profile_id);
         } else if forced {
-            // Row 5: not-stable + forced → fire Effect with forced=true,
-            // → Idle. `EmitOutcome.count` discarded — same rationale as
-            // above.
-            let _ = self.emit_effects(profile_id, true, out);
-            self.finish_burst_to_idle(profile_id, out);
+            // Row 5: not-stable + forced → fire Effect with forced=true.
+            // Same Awaiting / finish-to-Idle branching as row 3 — `forced`
+            // overrides B1 inside `emit_effects`, but a Profile with no
+            // matching Subs still returns count == 0.
+            let outcome = self.emit_effects(profile_id, true, out);
+            if outcome.count > 0 {
+                self.transition_to_awaiting(profile_id, outcome.count, now);
+            } else {
+                self.finish_burst_to_idle(profile_id, out);
+            }
         } else {
             // Row 5 else: not-stable + !forced → re-arm debounce in
             // `Batching`. By construction no probe is in flight (we're
@@ -940,26 +1061,137 @@ impl Engine {
         self.finish_burst_to_idle(profile_id, out);
     }
 
+    /// (Rebase, Ok). Post-fire probe response — graft the post-command
+    /// snapshot into `Profile.current`, rebase `baseline := current`,
+    /// finish the burst to Idle. The Rebasing probe always targets the
+    /// anchor (set by `transition_to_rebasing`); no stability verdict
+    /// applies (we just fired, drift is expected).
+    ///
+    /// **No B3.** Recovery / post-Effect drift detection is gated on
+    /// Seed-Ok in v1; Rebasing is a phase of the Standard burst (or
+    /// the Seed burst's drift tail), not a fresh Seed, so the B3 hash
+    /// check would either fire-loop (every fire writes a new hash;
+    /// the next rebase would see drift; loop) or be silently a no-op
+    /// (the post-fire hash matches itself by construction). The
+    /// helper deliberately avoids `b3_seed_drift_observed` here.
+    fn dispatch_rebase_ok(
+        &mut self,
+        profile_id: ProfileId,
+        snapshot: TreeSnapshot,
+        out: &mut StepOutput,
+    ) {
+        let target = match self.profiles.get(profile_id) {
+            Some(p) => match &p.state {
+                ProfileState::Active(b) => b.probe_target.unwrap_or(p.resource),
+                _ => p.resource,
+            },
+            None => return,
+        };
+        match snapshot {
+            TreeSnapshot::Dir(arc) => {
+                graft(
+                    profile_id,
+                    target,
+                    arc,
+                    &mut self.tree,
+                    &mut self.profiles,
+                    out,
+                );
+            }
+            TreeSnapshot::File(leaf) => {
+                if let Some(p) = self.profiles.get_mut(profile_id) {
+                    p.current = Some(TreeSnapshot::File(leaf));
+                }
+            }
+        }
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.baseline = p.current.clone();
+        }
+        self.finish_burst_to_idle(profile_id, out);
+    }
+
+    /// (Rebase, Vanished). Anchor disappeared between fire and rebase.
+    /// Synonym path with `dispatch_standard_vanished`: clear baseline /
+    /// current, release the anchor watch contribution, finish the
+    /// burst. Diagnostic carries the burst's actual intent so logs can
+    /// distinguish Seed-driven (B3 drift) vs Standard-driven Rebasing.
+    fn dispatch_rebase_vanished(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        let intent = match self.profiles.get(profile_id) {
+            Some(p) => match &p.state {
+                ProfileState::Active(b) => b.intent,
+                _ => return,
+            },
+            None => return,
+        };
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.baseline = None;
+            p.current = None;
+        }
+        out.diagnostics.push(Diagnostic::ProbeVanished {
+            profile: profile_id,
+            intent,
+        });
+        self.release_anchor_claim(profile_id, out);
+        self.finish_burst_to_idle(profile_id, out);
+    }
+
+    /// (Rebase, Failed). Probe failed at the anchor between fire and
+    /// rebase. Same shape as `dispatch_rebase_vanished` — clear,
+    /// release, finish. Diagnostic carries the burst's actual intent.
+    fn dispatch_rebase_failed(&mut self, profile_id: ProfileId, errno: i32, out: &mut StepOutput) {
+        let intent = match self.profiles.get(profile_id) {
+            Some(p) => match &p.state {
+                ProfileState::Active(b) => b.intent,
+                _ => return,
+            },
+            None => return,
+        };
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.baseline = None;
+            p.current = None;
+        }
+        out.diagnostics.push(Diagnostic::ProbeFailed {
+            profile: profile_id,
+            intent,
+            errno,
+        });
+        self.release_anchor_claim(profile_id, out);
+        self.finish_burst_to_idle(profile_id, out);
+    }
+
     /// `burst_deadline` row — sets `forced := true` and either
     /// transitions the phase (Batching/Draining → Verifying) or, if a
     /// probe is already in flight (Verifying), waits for the response.
     ///
     /// Reads phase inline while flipping `forced`: the caller has
     /// already validated the timer is live (via `is_timer_referenced`),
-    /// so the `Active` arm is the only reachable one — but the
-    /// `let-else` keeps the borrow scope tight and the `non_exhaustive`
-    /// `ProfileState` future-safe.
+    /// which restricts to pre-fire phases — `is_timer_referenced` for
+    /// `BurstDeadline` returns false in `Awaiting` / `Rebasing`, so a
+    /// stale fire never reaches here.
     fn handle_burst_deadline(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let needs_verify = if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(burst) = &mut p.state
         {
-            burst.forced = true;
             match &burst.phase {
-                BurstPhase::Batching { .. } | BurstPhase::Draining => true,
+                BurstPhase::Batching { .. } | BurstPhase::Draining => {
+                    burst.forced = true;
+                    true
+                }
                 // Verifying: probe in flight; no second emission. The
                 // response, when it arrives, dispatches with
                 // `forced = true`.
-                BurstPhase::Verifying => false,
+                BurstPhase::Verifying => {
+                    burst.forced = true;
+                    false
+                }
+                // Awaiting / Rebasing: defense-in-depth no-op. The
+                // is_timer_referenced gate filters BurstDeadline out of
+                // post-fire phases, so the timer never fires here in
+                // production. If a future caller bypasses the gate (e.g.,
+                // a direct `step(Input::TimerExpired)` from a fuzzer),
+                // we still don't want to flip forced or transition —
+                // both would corrupt the in-flight fire-tail.
+                BurstPhase::Awaiting { .. } | BurstPhase::Rebasing => false,
             }
         } else {
             return;
@@ -967,6 +1199,30 @@ impl Engine {
         if needs_verify {
             self.transition_to_verifying(profile_id, out);
         }
+    }
+
+    /// `gate_deadline` row — actuator-hang recovery. Force-transitions
+    /// the burst from `Awaiting` to `Rebasing`. Late `EffectComplete`
+    /// arrivals (after this transition) land in
+    /// [`Diagnostic::EffectCompleteOutsideAwaiting`].
+    ///
+    /// Defensive: if the phase has already advanced (e.g., a race with
+    /// `finalize_anchor_lost`), the helper no-ops. The
+    /// `is_timer_referenced` gate already filters most non-Awaiting
+    /// fires; this guard handles the residual same-step ordering window.
+    fn handle_gate_deadline(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        let outstanding = match self.profiles.get(profile_id).map(|p| &p.state) {
+            Some(ProfileState::Active(b)) => match &b.phase {
+                BurstPhase::Awaiting { outstanding, .. } => *outstanding,
+                _ => return,
+            },
+            _ => return,
+        };
+        out.diagnostics.push(Diagnostic::AwaitGateDeadlineElapsed {
+            profile: profile_id,
+            outstanding,
+        });
+        self.transition_to_rebasing(profile_id, out);
     }
 
     /// Emit Effects at a Standard burst's stable verdict. Routes per scope:
@@ -980,11 +1236,10 @@ impl Engine {
     /// that no longer holds them.
     ///
     /// Returns an [`EmitOutcome`] whose `count` is the number of Effects
-    /// pushed onto `out.effects`. Callers in Phase 09 use this to decide
-    /// whether to enter the `Awaiting` phase (`count > 0`) or short-circuit
-    /// to `finish_burst_to_idle` (B1 suppressed everything, no Subs matched,
+    /// pushed onto `out.effects`. Callers consume this to decide whether
+    /// to enter the `Awaiting` phase (`count > 0`) or short-circuit to
+    /// `finish_burst_to_idle` (B1 suppressed everything, no Subs matched,
     /// or `reap_pending`).
-    #[allow(clippy::too_many_lines)] // diff/B1/scope-routing fan-out is irreducible without churn
     fn emit_effects(
         &mut self,
         profile_id: ProfileId,
@@ -1309,32 +1564,60 @@ impl Engine {
 /// `out.effects.push(...)` invocations that survived B1 suppression and
 /// Sub-scope routing — i.e., Effects that the Actuator will actually run.
 ///
-/// Phase 09's fire-cycle work consumes this to decide whether the Profile
-/// should enter the `Awaiting` phase (count > 0, at least one Effect is
-/// in flight) or short-circuit to `finish_burst_to_idle` (count == 0:
-/// B1 suppressed every emission, no Subs matched, or `reap_pending` was
+/// `dispatch_*_ok` consumes this to decide whether the Profile should
+/// enter the `Awaiting` phase (count > 0, at least one Effect is in
+/// flight) or short-circuit to `finish_burst_to_idle` (count == 0: B1
+/// suppressed every emission, no Subs matched, or `reap_pending` was
 /// set). The `#[must_use]` attribute prevents a future caller from
 /// silently dropping the count and re-introducing the post-emit
-/// "Idle-but-Effects-in-flight" leakage that Phase 09 fixes.
+/// "Idle-but-Effects-in-flight" leakage.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 #[must_use]
 pub(crate) struct EmitOutcome {
     pub count: u32,
 }
 
+/// Routing classifier for [`Engine::on_effect_complete`]. Computed under
+/// a short read borrow on `self.profiles`, then dispatched under
+/// `&mut self`. The four arms cover every legitimate outcome:
+///
+/// - `Decrement`: Awaiting with `outstanding > 1`. Subtract one and
+///   stay in Awaiting; more completions are still in flight.
+/// - `Rebase`: Awaiting with `outstanding ≤ 1` and `!reap_pending`.
+///   Last completion arrived; transition to Rebasing to capture the
+///   post-command tree as the new baseline.
+/// - `Reap`: Awaiting with `outstanding ≤ 1` and `reap_pending`. Last
+///   completion arrived AND the Profile lost its last Sub mid-burst;
+///   skip Rebasing and finish the burst (the deferred reap runs inside
+///   `finish_burst_to_idle`).
+/// - `Diagnose`: any non-Awaiting state (Idle, Pending, Active in
+///   another phase, stale Profile). Late completion the engine no
+///   longer tracks; emit `EffectCompleteOutsideAwaiting`.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum AwaitAction {
+    Decrement,
+    Rebase,
+    Reap,
+    Diagnose,
+}
+
 /// Snapshot of `on_probe_response`'s routing decision. Computed under a
 /// short `&self.profiles` borrow, then dispatched under `&mut self`.
-/// Two variants:
+/// Three variants:
 /// - `Descent`: the live response targets `ProfileState::Pending(_)`. Routes
 ///   to `dispatch_descent_probe`.
-/// - `Burst { intent, forced }`: the live response targets
-///   `ProfileState::Active(_)`. The intent + forced flags are captured here
-///   so the dispatch arm can act on them.
+/// - `Rebase`: the live response targets `ProfileState::Active(_)` with
+///   phase `BurstPhase::Rebasing`. Routes to `dispatch_rebase_*` (post-fire
+///   rebase — no stability verdict; graft + `baseline := current` + finish).
+/// - `Burst { intent, forced }`: the live response targets a pre-fire
+///   `Active` phase (`Verifying`). The intent + forced flags are captured
+///   here so the dispatch arm can act on them.
 ///
 /// Stale responses are filtered before this enum is constructed (top-level
 /// `pending_probe == Some(received)` check in `on_probe_response`).
 enum ProbeDispatch {
     Descent,
+    Rebase,
     Burst { intent: BurstIntent, forced: bool },
 }
 

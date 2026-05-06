@@ -260,6 +260,22 @@ impl Engine {
             return;
         };
 
+        // Post-fire phases never reach `transition_to_verifying`. The
+        // production callers (Settle expiry, BurstDeadline expiry,
+        // ancestor reconfirm from `finish_burst_to_idle`) are gated on
+        // pre-fire phases via `is_timer_referenced` and the `Draining`
+        // hit-zero check respectively. The early return keeps a stray
+        // call from minting a fresh probe correlation while an effect
+        // wait is still in flight (which would either trip the I5
+        // debug_assert in `mint_probe_correlation` or, in release,
+        // overwrite the post-fire correlation slot).
+        if matches!(
+            burst.phase,
+            BurstPhase::Awaiting { .. } | BurstPhase::Rebasing
+        ) {
+            return;
+        }
+
         let intent = burst.intent;
         let phase = phase_kind(&burst.phase);
         let prior_target = burst.probe_target;
@@ -276,6 +292,9 @@ impl Engine {
                 // lose the correct subtree.
                 prior_target.unwrap_or(p.resource)
             }
+            // PostFire is unreachable courtesy of the early-return guard
+            // above; routed alongside `Batching | Verifying` to keep the
+            // match exhaustive without a wildcard.
             (BurstIntent::Standard, _) => lca_target(p, &dirty_for_lca, &self.tree),
         };
 
@@ -327,6 +346,122 @@ impl Engine {
         if let ProfileState::Active(burst) = &mut p.state {
             burst.phase = BurstPhase::Draining;
         }
+    }
+
+    /// Phase: `Verifying` → `Awaiting`. The single source of the post-fire
+    /// transition: `dispatch_standard_ok` row 3 / row 5 and
+    /// `dispatch_seed_ok` B3-drift path call this immediately after
+    /// `emit_effects` returns a non-zero `EmitOutcome.count`. The match
+    /// is structural (count > 0) — callers know they pushed Effects.
+    ///
+    /// `outstanding` is the count of in-flight Effects this Profile owns
+    /// (the `EmitOutcome.count` from the just-completed
+    /// [`crate::Engine::emit_effects`] call). `EffectComplete` arrivals
+    /// decrement it; reaching zero advances to `Rebasing` (or, when
+    /// `Profile.reap_pending`, finishes the burst directly).
+    ///
+    /// **Gate timer.** Schedules an `AwaitGateDeadline` at `now +
+    /// max_settle * 4` as a recovery hatch for actuator hangs. The
+    /// multiplier (v1 default) gives a generous budget — the timer is
+    /// not meant to cap normal command runs, only to keep the engine
+    /// from wedging if the actuator never reports back. Operator-tunable
+    /// knobs are out of scope for v1.
+    ///
+    /// **`burst_deadline` hand-off.** The pre-fire `BurstDeadline` timer
+    /// (scheduled at burst start) stays in the heap but is no longer
+    /// structurally relevant — `is_timer_referenced` filters it out of
+    /// the post-fire phases, so a late expiry is dropped silently by
+    /// `pop_expired`. We do not cancel it eagerly: lazy invalidation is
+    /// the cheaper path and `BurstDeadline` carries no payload that
+    /// would leak.
+    pub(crate) fn transition_to_awaiting(
+        &mut self,
+        profile_id: ProfileId,
+        outstanding: u32,
+        now: Instant,
+    ) {
+        let Some(p) = self.profiles.get(profile_id) else {
+            return;
+        };
+        let max_settle = p.max_settle;
+
+        // v1 default: 4× max_settle. Saturating multiplication keeps the
+        // arithmetic total — `Duration::saturating_mul` clamps at
+        // `Duration::MAX`, leaving the deadline well beyond any
+        // reasonable wall-clock horizon.
+        let gate_deadline = self.timers.schedule(
+            now + max_settle.saturating_mul(4),
+            profile_id,
+            TimerKind::AwaitGateDeadline,
+        );
+
+        if let Some(p) = self.profiles.get_mut(profile_id)
+            && let ProfileState::Active(burst) = &mut p.state
+        {
+            burst.phase = BurstPhase::Awaiting {
+                outstanding,
+                gate_deadline,
+            };
+        }
+    }
+
+    /// Phase: `Awaiting` → `Rebasing`. The single source of the
+    /// post-effect rebase: `on_effect_complete` calls this when
+    /// `outstanding` reaches zero (and `reap_pending` is false), and
+    /// `handle_gate_deadline` calls it on the actuator-hang recovery
+    /// path.
+    ///
+    /// **Probe channel.** `mint_probe_correlation` opens a fresh probe
+    /// channel — I5 holds because Verifying closed the slot before
+    /// `emit_effects` ran, and Awaiting does not mint. The post-fire
+    /// probe targets the anchor (we want the freshest disk state of
+    /// the whole watched subtree, not the LCA of the now-stale
+    /// `dirty_resources`).
+    ///
+    /// **`baseline_subtree` for mtime-skip.** The Rebasing probe ships
+    /// `Profile.current` as `baseline_subtree`. For an idempotent
+    /// command (no writes), the directory's mtime is unchanged and the
+    /// walker mtime-skips, returning the prior snapshot — graft is a
+    /// no-op and `baseline := current` rebases the (unchanged) view.
+    /// For a non-idempotent command, mtime differs and the walker
+    /// re-walks, capturing the post-command tree as the new baseline.
+    ///
+    /// **`force_walk` empty.** Descendant FsEvents absorbed during the
+    /// fire-tail are not accumulated into `force_walk_resources`. v1
+    /// loss-of-fidelity carve-out: metadata-only descendant edits whose
+    /// mtime doesn't change can be missed by the rebase walker.
+    pub(crate) fn transition_to_rebasing(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        let Some(p) = self.profiles.get(profile_id) else {
+            return;
+        };
+        let resource = p.resource;
+        let baseline_subtree = p
+            .current
+            .as_ref()
+            .and_then(|s| s.subtree_at(resource, &self.tree));
+
+        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+            return;
+        };
+
+        if let Some(p) = self.profiles.get_mut(profile_id)
+            && let ProfileState::Active(burst) = &mut p.state
+        {
+            burst.phase = BurstPhase::Rebasing;
+            burst.probe_target = Some(resource);
+        }
+
+        self.emit_probe_op(
+            profile_id,
+            resource,
+            correlation,
+            crate::probe_channel::ProbeEmissionParams::Burst {
+                baseline_subtree,
+                force_walk: BTreeSet::new(),
+                forced: false,
+            },
+            out,
+        );
     }
 
     /// Active → Idle. Single source of `-suppress` and `propagate(-1)`.
@@ -409,12 +544,20 @@ impl Engine {
 /// Copy projection of `BurstPhase` for `transition_to_verifying`'s
 /// `(intent, phase)` match — `Batching`'s `TimerId` is irrelevant at the
 /// dispatch site, and `Verifying` is now unit (the probe correlation
-/// lives on `Profile.pending_probe`).
+/// lives on `Profile.pending_probe`). The post-fire phases
+/// (`Awaiting` / `Rebasing`) are filtered by an early-return guard at
+/// `transition_to_verifying`'s entry; the projection's `PostFire` arm
+/// exists for exhaustiveness only and is structurally unreachable.
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum PhaseKind {
     Batching,
     Verifying,
     Draining,
+    /// Defense-in-depth bucket for `Awaiting` and `Rebasing`. Reaching
+    /// `phase_kind` from a post-fire phase is a state-machine bug;
+    /// `transition_to_verifying`'s entry guard returns before this is
+    /// observed, but the match below must be exhaustive over `BurstPhase`.
+    PostFire,
 }
 
 const fn phase_kind(p: &BurstPhase) -> PhaseKind {
@@ -422,6 +565,7 @@ const fn phase_kind(p: &BurstPhase) -> PhaseKind {
         BurstPhase::Batching { .. } => PhaseKind::Batching,
         BurstPhase::Verifying => PhaseKind::Verifying,
         BurstPhase::Draining => PhaseKind::Draining,
+        BurstPhase::Awaiting { .. } | BurstPhase::Rebasing => PhaseKind::PostFire,
     }
 }
 

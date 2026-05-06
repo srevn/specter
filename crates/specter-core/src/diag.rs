@@ -37,10 +37,19 @@ pub enum Diagnostic {
     /// defense-in-depth signal for a direct `step(Input::TimerExpired)` call
     /// from a misbehaving caller.
     StaleTimer { id: TimerId },
-    /// `EffectComplete::Ok` arriving while the Profile is `Active`. The
-    /// active burst's eventual Effect's own `EffectComplete::Ok` will fire
-    /// the next Seed.
-    EffectCompleteWhileActive { sub: SubId, profile: ProfileId },
+    /// `EffectComplete` arrived for a Profile not in
+    /// [`crate::BurstPhase::Awaiting`]. Two paths reach here legitimately:
+    ///
+    /// - `gate_deadline` expired and force-transitioned to `Rebasing`
+    ///   (or, post-rebase, to Idle); a late completion arrives.
+    /// - `finalize_anchor_lost` dropped the burst mid-`Awaiting`;
+    ///   already-spawned actuator commands run to completion and report
+    ///   back even though the engine no longer tracks them.
+    ///
+    /// In both cases the engine drops the completion (no per-Profile
+    /// state to update — the burst is already over) and emits this
+    /// Diagnostic so operators can see the late arrival.
+    EffectCompleteOutsideAwaiting { sub: SubId, profile: ProfileId },
     /// `EffectComplete` for a Sub not in the registry.
     EffectCompleteForUnknownSub { sub: SubId },
     /// Probe returned `Vanished` during a `Seed` or `Standard` burst. The
@@ -179,6 +188,30 @@ pub enum Diagnostic {
     SpliceCrossedUncovered {
         profile: ProfileId,
         target: ResourceId,
+    },
+    /// `FsEvent` arrived while the Profile was in
+    /// [`crate::BurstPhase::Awaiting`] or [`crate::BurstPhase::Rebasing`]
+    /// — the post-fire tail of a burst. The engine absorbs the event:
+    /// no fresh burst, no settle re-arm, no `dirty_resources` extension.
+    /// The Rebasing probe captures the disk state (including whatever
+    /// triggered this event) into the new baseline, so the change is
+    /// folded into the fire-cycle's terminal rebase rather than driving
+    /// a second burst against an in-flight one. Informational; the
+    /// event is not lost, merely deferred.
+    EventAbsorbedByFireTail {
+        profile: ProfileId,
+        resource: ResourceId,
+        event: FsEvent,
+    },
+    /// `AwaitGateDeadline` timer elapsed before all outstanding
+    /// `EffectComplete`s arrived. Indicates the actuator likely has a
+    /// hung child or a slow command; the engine force-transitions the
+    /// burst to [`crate::BurstPhase::Rebasing`] so it can re-establish
+    /// a baseline against disk reality. Late completions land in
+    /// [`Self::EffectCompleteOutsideAwaiting`].
+    AwaitGateDeadlineElapsed {
+        profile: ProfileId,
+        outstanding: u32,
     },
 }
 

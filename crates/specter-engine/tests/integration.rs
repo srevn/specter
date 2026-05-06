@@ -381,7 +381,9 @@ fn golden_path_full_lifecycle() {
     assert_eq!(stable_out.effects.len(), 1);
     assert!(!stable_out.effects[0].forced);
 
-    // EffectComplete::Ok → Engine starts the next Seed burst (V4 fix).
+    // EffectComplete::Ok drives the burst out of Awaiting and into
+    // Rebasing — a fresh probe is emitted at the anchor to capture the
+    // post-command tree.
     let post_effect = e.step(
         Input::EffectComplete {
             sub: sid,
@@ -390,15 +392,15 @@ fn golden_path_full_lifecycle() {
         },
         t1 + SETTLE * 16,
     );
-    let next_seed_correlation =
-        first_probe_correlation(&post_effect).expect("post-Effect Seed Probe");
+    let rebase_correlation =
+        first_probe_correlation(&post_effect).expect("post-Effect rebase probe");
 
-    // Seed Ok with the same snapshot → Idle, baseline advances to post-
-    // Effect state.
+    // Rebase Ok with the same snapshot → Idle; baseline := current
+    // (the post-command tree).
     let _final_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
-            correlation: next_seed_correlation,
+            correlation: rebase_correlation,
             result: ProbeResult::Ok(snap_seed),
         }),
         t1 + SETTLE * 16 + Duration::from_millis(1),
