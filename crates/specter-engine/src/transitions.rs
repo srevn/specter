@@ -1733,10 +1733,10 @@ fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> PathBuf {
 /// [`FsEvent::Revoked`]) fold by kind per design §2.1 + D7:
 /// - `Dir` → [`ClassSet::STRUCTURE`] (the directory's place in its parent
 ///   changed).
-/// - `File` → [`ClassSet::CONTENT`] (the file's identity changed —
-///   kqexec mapping).
-/// - `Unknown` → [`ClassSet::CONTENT`] ("treat as file" default; matches
-///   the L4 translator's `Unknown` branch).
+/// - `File` (and `Unknown` via [`ResourceKind::effective`]) →
+///   [`ClassSet::CONTENT`] (the file's identity changed — kqexec
+///   mapping; the Unknown collapse matches the L4 translator's
+///   File-shape default).
 ///
 /// Pure / `const fn`; consulted at the L5 entry filter in [`Engine::on_fs_event`].
 const fn fs_event_to_class(event: FsEvent, kind: ResourceKind) -> ClassSet {
@@ -1744,10 +1744,13 @@ const fn fs_event_to_class(event: FsEvent, kind: ResourceKind) -> ClassSet {
         FsEvent::Modified => ClassSet::CONTENT,
         FsEvent::MetadataChanged => ClassSet::METADATA,
         FsEvent::StructureChanged => ClassSet::STRUCTURE,
-        FsEvent::Removed | FsEvent::Renamed | FsEvent::Revoked => match kind {
-            ResourceKind::Dir => ClassSet::STRUCTURE,
-            ResourceKind::File | ResourceKind::Unknown => ClassSet::CONTENT,
-        },
+        FsEvent::Removed | FsEvent::Renamed | FsEvent::Revoked => {
+            if matches!(kind.effective(), ResourceKind::Dir) {
+                ClassSet::STRUCTURE
+            } else {
+                ClassSet::CONTENT
+            }
+        }
     }
 }
 

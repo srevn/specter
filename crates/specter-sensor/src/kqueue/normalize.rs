@@ -55,6 +55,12 @@ pub(super) const fn kevent_to_fs_event(
         return Some(FsEvent::Renamed);
     }
 
+    // Resolve Unknown→File once via the canonical collapse (the kind
+    // cache may transiently desync; defensive folding matches the
+    // translator's mask decision so registration and event-shape stay
+    // consistent).
+    let effective = kind.effective();
+
     // D10 — NOTE_LINK is kind-aware. On a Dir, link-count changes via
     // child-dir creation / removal (the parent's `..` backref count
     // shifts); the engine treats that as `StructureChanged`. On a File,
@@ -67,9 +73,10 @@ pub(super) const fn kevent_to_fs_event(
     // StructureChanged so ordering is observationally irrelevant — the
     // explicit ordering documents intent.
     if fflags & NOTE_LINK != 0 {
-        return Some(match kind {
-            ResourceKind::Dir => FsEvent::StructureChanged,
-            ResourceKind::File | ResourceKind::Unknown => FsEvent::MetadataChanged,
+        return Some(if matches!(effective, ResourceKind::Dir) {
+            FsEvent::StructureChanged
+        } else {
+            FsEvent::MetadataChanged
         });
     }
 
@@ -79,13 +86,10 @@ pub(super) const fn kevent_to_fs_event(
     // current). A file's NOTE_WRITE is `Modified` (file content
     // changed; probe the file's kind/size/mtime).
     if fflags & (NOTE_WRITE | NOTE_EXTEND) != 0 {
-        return Some(match kind {
-            ResourceKind::Dir => FsEvent::StructureChanged,
-            // Defensive: `Unknown` (kind cache miss; not produced by
-            // the watcher's `watch()` path but possible if the kind
-            // cache is somehow desynced) defaults to Modified — the
-            // engine's diagnostic surface flags the underlying gap.
-            ResourceKind::File | ResourceKind::Unknown => FsEvent::Modified,
+        return Some(if matches!(effective, ResourceKind::Dir) {
+            FsEvent::StructureChanged
+        } else {
+            FsEvent::Modified
         });
     }
 

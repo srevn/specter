@@ -45,6 +45,34 @@ pub enum ResourceKind {
     Unknown,
 }
 
+impl ResourceKind {
+    /// "Effective" kind for backend-mask decisions: [`Self::Unknown`]
+    /// collapses to [`Self::File`].
+    ///
+    /// Single declaration of the "treat unclassified slots as File-shape"
+    /// convention shared by:
+    /// - `sensor::kqueue::translate::class_set_to_fflags` (CONTENT /
+    ///   METADATA branches register file bits on Unknown).
+    /// - `sensor::kqueue::normalize::kevent_to_fs_event`
+    ///   (NOTE_LINK / NOTE_WRITE on Unknown surface as File-shape
+    ///   FsEvents).
+    /// - `engine::transitions::fs_event_to_class` (terminal events on
+    ///   Unknown classify as CONTENT).
+    ///
+    /// Inotify's analogue (when the port lands) shares it. Note that
+    /// `compute_cwd` deliberately treats Unknown as Dir-shape (anchor
+    /// path itself, not its parent) — that's a different concern
+    /// (subprocess working directory), not a backend-mask decision, and
+    /// stays out of this helper.
+    #[must_use]
+    pub const fn effective(self) -> Self {
+        match self {
+            Self::Unknown => Self::File,
+            other => other,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ResourceRole {
     #[default]
@@ -151,6 +179,13 @@ mod tests {
     fn defaults_for_kind_and_role() {
         assert_eq!(ResourceKind::default(), ResourceKind::Unknown);
         assert_eq!(ResourceRole::default(), ResourceRole::User);
+    }
+
+    #[test]
+    fn effective_kind_collapses_unknown_to_file() {
+        assert_eq!(ResourceKind::Unknown.effective(), ResourceKind::File);
+        assert_eq!(ResourceKind::File.effective(), ResourceKind::File);
+        assert_eq!(ResourceKind::Dir.effective(), ResourceKind::Dir);
     }
 
     /// Fresh `Resource` initialises `events_union` to `EMPTY`. Refcount

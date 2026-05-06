@@ -22,11 +22,13 @@
 //! metadata signal (hardlink count change).
 //!
 //! `ResourceKind::Unknown` (defensive path; the sensor's own `fstat`
-//! couldn't classify the inode as Dir or Reg) is treated as File. The
-//! engine's reconciler stamps the correct kind on its next probe; if
-//! that flips Dir↔File the engine emits Unwatch + Watch and the FD is
-//! reopened with the corrected mask. This branch is effectively dead
-//! code in v1's flow but kept as forward-compatible defense.
+//! couldn't classify the inode as Dir or Reg) is treated as File via
+//! [`ResourceKind::effective`] — single source of truth for that
+//! convention. The engine's reconciler stamps the correct kind on its
+//! next probe; if that flips Dir↔File the engine emits Unwatch + Watch
+//! and the FD is reopened with the corrected mask. This branch is
+//! effectively dead code in v1's flow but kept as forward-compatible
+//! defense.
 
 use libc::{
     NOTE_ATTRIB, NOTE_DELETE, NOTE_EXTEND, NOTE_LINK, NOTE_RENAME, NOTE_REVOKE, NOTE_WRITE,
@@ -53,16 +55,18 @@ pub(super) const IDENTITY_FLOOR: u32 = NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE;
 #[must_use]
 pub(super) const fn class_set_to_fflags(events: ClassSet, kind: ResourceKind) -> u32 {
     let mut fflags = IDENTITY_FLOOR;
+    // Resolve the Unknown→File collapse once at the entry point; the
+    // branches below decide on `effective` so the convention isn't
+    // re-encoded per arm.
+    let effective = kind.effective();
 
     // STRUCTURE — Dir-only. NOTE_LINK lands here on Dirs (D10).
-    if events.intersects(ClassSet::STRUCTURE) && matches!(kind, ResourceKind::Dir) {
+    if events.intersects(ClassSet::STRUCTURE) && matches!(effective, ResourceKind::Dir) {
         fflags |= NOTE_WRITE | NOTE_EXTEND | NOTE_LINK;
     }
 
-    // CONTENT — File-only (Unknown defaults to File).
-    if events.intersects(ClassSet::CONTENT)
-        && matches!(kind, ResourceKind::File | ResourceKind::Unknown)
-    {
+    // CONTENT — File-only (Unknown collapses to File via `.effective()`).
+    if events.intersects(ClassSet::CONTENT) && matches!(effective, ResourceKind::File) {
         fflags |= NOTE_WRITE | NOTE_EXTEND;
     }
 
@@ -72,7 +76,7 @@ pub(super) const fn class_set_to_fflags(events: ClassSet, kind: ResourceKind) ->
     // Dir is *not* a metadata signal under D10.
     if events.intersects(ClassSet::METADATA) {
         fflags |= NOTE_ATTRIB;
-        if matches!(kind, ResourceKind::File | ResourceKind::Unknown) {
+        if matches!(effective, ResourceKind::File) {
             fflags |= NOTE_LINK;
         }
     }
