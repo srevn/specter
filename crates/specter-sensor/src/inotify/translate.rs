@@ -43,11 +43,6 @@
 //! kept as forward-compatible defence for the descent placeholder edge
 //! case.
 
-// Consumer lands in Phase B6 (`super::watcher::InotifyWatcher::watch`).
-// Tests below already exercise every branch; remove this allow when
-// B6's `watch` body wires the helper into the install path.
-#![allow(dead_code)]
-
 use libc::{
     IN_ATTRIB, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_DONT_FOLLOW,
     IN_EXCL_UNLINK, IN_MODIFY, IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO, IN_UNMOUNT,
