@@ -689,7 +689,7 @@ impl Engine {
 
     fn effect_sort_key(&self, e: &Effect) -> (SubId, ResourceId) {
         match &e.key {
-            DedupKey::PerFile { sub, resource } => (*sub, *resource),
+            DedupKey::PerFile { sub, resource, .. } => (*sub, *resource),
             DedupKey::Subtree { sub, profile } => {
                 let resource = self
                     .profiles

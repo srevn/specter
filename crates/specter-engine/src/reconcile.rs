@@ -876,9 +876,12 @@ mod tests {
             Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
 
         // Pre-populate the dedup map. SubId::default() is fine — the
-        // purge filter doesn't inspect the sub field.
+        // purge filter doesn't inspect the sub field. The `profile` field
+        // mirrors what production would store: the Profile that owns
+        // `last_emitted_dir_hash`.
         let stale_key = DedupKey::PerFile {
             sub: SubId::default(),
+            profile: pid,
             resource: a_rs_id,
         };
         profiles
@@ -937,6 +940,7 @@ mod tests {
 
         let live_key = DedupKey::PerFile {
             sub: SubId::default(),
+            profile: pid,
             resource: a_rs_id,
         };
         profiles
@@ -1041,7 +1045,9 @@ mod tests {
         let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
         tree.get_mut(a_rs_id).unwrap().kind = ResourceKind::File;
 
-        // Both Profiles record a PerFile entry against a.rs.
+        // Both Profiles record a PerFile entry against a.rs. Each entry's
+        // `profile` field is the owning Profile's own id — mirrors what
+        // `emit_effects_per_stable_file` writes in production.
         for &pid in &[pid_a, pid_b] {
             profiles.get_mut(pid).unwrap().current = Some(TreeSnapshot::Dir(dir_snap(
                 root,
@@ -1051,6 +1057,7 @@ mod tests {
             profiles.get_mut(pid).unwrap().last_emitted_dir_hash.insert(
                 DedupKey::PerFile {
                     sub: SubId::default(),
+                    profile: pid,
                     resource: a_rs_id,
                 },
                 0x00c0_ffee_u128,
@@ -1077,8 +1084,16 @@ mod tests {
         );
 
         assert!(tree.get(a_rs_id).is_none(), "a.rs reaped");
-        let stale_key = DedupKey::PerFile {
+        // Each Profile's stale key carries its own `profile` field (matching
+        // what was inserted above), so we look up per Profile.
+        let stale_key_a = DedupKey::PerFile {
             sub: SubId::default(),
+            profile: pid_a,
+            resource: a_rs_id,
+        };
+        let stale_key_b = DedupKey::PerFile {
+            sub: SubId::default(),
+            profile: pid_b,
             resource: a_rs_id,
         };
         assert!(
@@ -1086,7 +1101,7 @@ mod tests {
                 .get(pid_a)
                 .unwrap()
                 .last_emitted_dir_hash
-                .contains_key(&stale_key),
+                .contains_key(&stale_key_a),
             "Profile A's stale entry must be purged",
         );
         assert!(
@@ -1094,7 +1109,7 @@ mod tests {
                 .get(pid_b)
                 .unwrap()
                 .last_emitted_dir_hash
-                .contains_key(&stale_key),
+                .contains_key(&stale_key_b),
             "Profile B's stale entry (cross-Profile) must also be purged",
         );
     }

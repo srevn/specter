@@ -282,10 +282,11 @@ mod tests {
         ProfileId::from(KeyData::from_ffi(seed))
     }
 
-    fn make_effect_perfile(sub_seed: u64, res_seed: u64, corr: u64) -> Effect {
+    fn make_effect_perfile(sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64) -> Effect {
         Effect {
             key: DedupKey::PerFile {
                 sub: unique_sub_id(sub_seed),
+                profile: unique_profile_id(profile_seed),
                 resource: unique_resource_id(res_seed),
             },
             command: CommandResolved {
@@ -431,7 +432,7 @@ mod tests {
     #[test]
     fn submit_to_empty_slot_spawns_immediately() {
         let mut h = Harness::new(4);
-        h.submit(make_effect_perfile(1, 1, 1));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         assert_eq!(s.len(), 1);
         h.spawner
@@ -444,11 +445,11 @@ mod tests {
     #[test]
     fn submit_to_running_slot_replaces_pending() {
         let mut h = Harness::new(4);
-        h.submit(make_effect_perfile(1, 1, 1));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         // While the first is "running", submit two more on the same key.
-        h.submit(make_effect_perfile(1, 1, 2));
-        h.submit(make_effect_perfile(1, 1, 3));
+        h.submit(make_effect_perfile(1, 1, 1, 2));
+        h.submit(make_effect_perfile(1, 1, 1, 3));
         // No second spawn yet (first still "running").
         thread::sleep(Duration::from_millis(50));
         assert_eq!(h.spawner.spawns().len(), 1, "running blocks new spawn");
@@ -466,7 +467,7 @@ mod tests {
     #[test]
     fn reap_with_no_pending_emits_completion_and_clears_slot() {
         let mut h = Harness::new(4);
-        h.submit(make_effect_perfile(1, 1, 1));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
@@ -484,9 +485,9 @@ mod tests {
     #[test]
     fn concurrency_cap_blocks_excess() {
         let mut h = Harness::new(2);
-        h.submit(make_effect_perfile(1, 1, 1));
-        h.submit(make_effect_perfile(2, 2, 2));
-        h.submit(make_effect_perfile(3, 3, 3));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
+        h.submit(make_effect_perfile(2, 2, 2, 2));
+        h.submit(make_effect_perfile(3, 3, 3, 3));
         let s = h.wait_for_spawns(2, Duration::from_secs(1));
         assert_eq!(s.len(), 2, "only 2 spawns under cap=2");
         thread::sleep(Duration::from_millis(50));
@@ -508,8 +509,8 @@ mod tests {
     fn per_sub_serializes_two_per_file_keys() {
         let mut h = Harness::new(4);
         // Same Sub, different Resources → both PerFile keys, one Sub.
-        h.submit(make_effect_perfile(7, 1, 1));
-        h.submit(make_effect_perfile(7, 2, 2));
+        h.submit(make_effect_perfile(7, 7, 1, 1));
+        h.submit(make_effect_perfile(7, 7, 2, 2));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         thread::sleep(Duration::from_millis(50));
         assert_eq!(
@@ -529,8 +530,8 @@ mod tests {
     fn per_sub_does_not_serialize_distinct_subs() {
         let mut h = Harness::new(4);
         // Different Subs → no per-Sub gating.
-        h.submit(make_effect_perfile(1, 1, 1));
-        h.submit(make_effect_perfile(2, 2, 2));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
+        h.submit(make_effect_perfile(2, 2, 2, 2));
         let s = h.wait_for_spawns(2, Duration::from_secs(1));
         assert_eq!(s.len(), 2, "distinct Subs run concurrently");
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
@@ -543,7 +544,7 @@ mod tests {
     fn subtree_and_per_file_for_same_sub_serialize() {
         let mut h = Harness::new(4);
         h.submit(make_effect_subtree(5, 1, 1));
-        h.submit(make_effect_perfile(5, 2, 2));
+        h.submit(make_effect_perfile(5, 5, 2, 2));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         thread::sleep(Duration::from_millis(50));
         assert_eq!(
@@ -574,7 +575,7 @@ mod tests {
     #[test]
     fn shutdown_sigterms_running_then_drains_reap() {
         let mut h = Harness::new(4);
-        h.submit(make_effect_perfile(1, 1, 1));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         let pid = s[0].pid;
         // Trigger shutdown; it'll send SIGTERM then wait up to grace.
@@ -615,7 +616,7 @@ mod tests {
     fn shutdown_grace_expires_then_sigkills_stragglers() {
         // Use a short grace so the test runs quickly.
         let mut h = Harness::new_with_grace(4, Duration::from_millis(150));
-        h.submit(make_effect_perfile(1, 1, 1));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         let pid = s[0].pid;
 
@@ -668,7 +669,7 @@ mod tests {
         // grace (5s) configured, this test asserts that the SIGKILL lands
         // *well* before the grace would have elapsed.
         let mut h = Harness::new_with_grace(4, Duration::from_secs(5));
-        h.submit(make_effect_perfile(1, 1, 1));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         let pid = s[0].pid;
 
@@ -722,10 +723,10 @@ mod tests {
     #[test]
     fn shutdown_drops_pending_effects() {
         let mut h = Harness::new(1);
-        h.submit(make_effect_perfile(1, 1, 1));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         // Submit a second effect on the same key — it becomes pending.
-        h.submit(make_effect_perfile(1, 1, 2));
+        h.submit(make_effect_perfile(1, 1, 1, 2));
         thread::sleep(Duration::from_millis(50));
         assert_eq!(
             h.spawner.spawns().len(),
@@ -762,7 +763,7 @@ mod tests {
     fn spawn_failure_synthesizes_failed_outcome() {
         let mut h = Harness::new(4);
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
-        h.submit(make_effect_perfile(1, 1, 1));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
             Input::EffectComplete { result, .. } => {
@@ -787,11 +788,11 @@ mod tests {
         // subsequent submits would never spawn.
         let mut h = Harness::new(1);
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
-        h.submit(make_effect_perfile(1, 1, 1));
+        h.submit(make_effect_perfile(1, 1, 1, 1));
         h.wait_for_effect_completes(1, Duration::from_secs(1));
         // Clear the injection; submit again — should spawn.
         h.spawner.clear_spawn_error();
-        h.submit(make_effect_perfile(2, 2, 2));
+        h.submit(make_effect_perfile(2, 2, 2, 2));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         // Engine receives one more EffectComplete (the prior call drained
@@ -817,7 +818,7 @@ mod tests {
             }],
             ..Default::default()
         });
-        let mut e = make_effect_perfile(1, 1, 7);
+        let mut e = make_effect_perfile(1, 1, 1, 7);
         e.diff = Some(Arc::clone(&diff));
         h.submit(e);
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
@@ -846,7 +847,7 @@ mod tests {
     #[test]
     fn effect_without_diff_does_not_set_specter_diff_path() {
         let mut h = Harness::new(4);
-        let e = make_effect_perfile(1, 1, 1); // diff: None
+        let e = make_effect_perfile(1, 1, 1, 1); // diff: None
         h.submit(e);
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         assert!(s[0].env.iter().all(|(k, _)| k != "SPECTER_DIFF_PATH"));

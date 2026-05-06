@@ -27,6 +27,7 @@ fn assert_env_var_received(name: &str, expected: &str) {
         1,
         1,
         1,
+        1,
         vec!["/bin/sh".into(), "-c".into(), script],
         dir.path().to_path_buf(),
     );
@@ -96,6 +97,7 @@ fn child_receives_specter_diff_path_when_diff_present() {
     let mut e = perfile_effect(
         1,
         1,
+        1,
         next_corr(),
         vec!["/bin/sh".into(), "-c".into(), script],
         cwd,
@@ -127,7 +129,7 @@ fn child_does_not_receive_specter_diff_path_without_diff() {
         out = out_path.display()
     );
     let mut h = Harness::new(2);
-    let e = perfile_effect(1, 1, 1, vec!["/bin/sh".into(), "-c".into(), script], cwd);
+    let e = perfile_effect(1, 1, 1, 1, vec!["/bin/sh".into(), "-c".into(), script], cwd);
     h.submit(e);
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
@@ -159,6 +161,7 @@ fn tmp_diff_file_cleaned_up_after_completion() {
         ..Default::default()
     });
     let mut e = perfile_effect(
+        1,
         1,
         1,
         next_corr(),

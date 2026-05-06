@@ -64,10 +64,35 @@ impl Default for Effect {
 pub struct CorrelationId(pub u64);
 
 /// Coalescing identity.
+///
+/// Both variants carry the owning Profile. `PerFile` was originally keyed by
+/// `(sub, resource)` alone — `sub` already determines `profile`, so the field
+/// adds no partitioning power, but makes the `key → profile` lookup constant-
+/// time symmetrically across both arms. The Phase 09 fire-cycle work needs
+/// that lookup at every `EffectComplete` to credit the per-Profile counter
+/// in `BurstPhase::Awaiting`.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum DedupKey {
-    PerFile { sub: SubId, resource: ResourceId },
-    Subtree { sub: SubId, profile: ProfileId },
+    PerFile {
+        sub: SubId,
+        profile: ProfileId,
+        resource: ResourceId,
+    },
+    Subtree {
+        sub: SubId,
+        profile: ProfileId,
+    },
+}
+
+impl DedupKey {
+    /// The Profile that owns this key's emission record. Both variants
+    /// carry the field; the match is exhaustive and `const`.
+    #[must_use]
+    pub const fn profile(&self) -> ProfileId {
+        match *self {
+            Self::PerFile { profile, .. } | Self::Subtree { profile, .. } => profile,
+        }
+    }
 }
 
 impl Default for DedupKey {
@@ -87,4 +112,37 @@ pub enum EffectOutcome {
         exit_code: Option<i32>,
         signal: Option<i32>,
     },
+}
+
+#[cfg(test)]
+mod dedup_key_tests {
+    use super::DedupKey;
+    use crate::ids::{ProfileId, ResourceId, SubId};
+    use slotmap::KeyData;
+
+    #[test]
+    fn profile_returns_owning_profile_for_both_variants() {
+        let p = ProfileId::from(KeyData::from_ffi(7));
+        let s = SubId::from(KeyData::from_ffi(11));
+        let r = ResourceId::from(KeyData::from_ffi(13));
+        let perfile = DedupKey::PerFile {
+            sub: s,
+            profile: p,
+            resource: r,
+        };
+        let subtree = DedupKey::Subtree {
+            sub: s,
+            profile: p,
+        };
+        assert_eq!(
+            perfile.profile(),
+            p,
+            "PerFile.profile() returns the owning Profile",
+        );
+        assert_eq!(
+            subtree.profile(),
+            p,
+            "Subtree.profile() returns the owning Profile",
+        );
+    }
 }

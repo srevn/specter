@@ -16,6 +16,7 @@ fn non_existent_command_returns_failed() {
         1,
         1,
         1,
+        1,
         vec!["/no/such/binary".into()],
         std::env::temp_dir(),
     ));
@@ -37,6 +38,7 @@ fn non_existent_command_returns_failed() {
 fn non_zero_exit_returns_failed_with_exit_code() {
     let mut h = Harness::new(2);
     h.submit(perfile_effect(
+        1,
         1,
         1,
         1,
@@ -64,6 +66,7 @@ fn zero_exit_returns_ok() {
         1,
         1,
         1,
+        1,
         vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
         std::env::temp_dir(),
     ));
@@ -79,6 +82,7 @@ fn zero_exit_returns_ok() {
 fn nonexistent_cwd_returns_failed() {
     let mut h = Harness::new(2);
     h.submit(perfile_effect(
+        1,
         1,
         1,
         1,
@@ -102,7 +106,7 @@ fn nonexistent_cwd_returns_failed() {
 #[test]
 fn empty_argv_returns_failed() {
     let mut h = Harness::new(2);
-    h.submit(perfile_effect(1, 1, 1, vec![], std::env::temp_dir()));
+    h.submit(perfile_effect(1, 1, 1, 1, vec![], std::env::temp_dir()));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(2));
     match &completions[0] {
         Input::EffectComplete { result, .. } => assert!(matches!(

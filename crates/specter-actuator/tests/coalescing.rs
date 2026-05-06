@@ -24,6 +24,7 @@ fn three_effects_on_one_key_run_first_and_last() {
         1,
         1,
         1,
+        1,
         vec!["/bin/sh".into(), "-c".into(), script("eff1")],
         cwd.clone(),
     ));
@@ -32,11 +33,13 @@ fn three_effects_on_one_key_run_first_and_last() {
     h.submit(perfile_effect(
         1,
         1,
+        1,
         2,
         vec!["/bin/sh".into(), "-c".into(), script("eff2")],
         cwd.clone(),
     ));
     h.submit(perfile_effect(
+        1,
         1,
         1,
         3,
@@ -68,10 +71,12 @@ fn distinct_keys_run_concurrently_under_cap() {
         1,
         1,
         1,
+        1,
         vec!["/bin/sh".into(), "-c".into(), mk("a")],
         cwd.clone(),
     ));
     h.submit(perfile_effect(
+        2,
         2,
         2,
         2,

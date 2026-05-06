@@ -1201,6 +1201,7 @@ impl Engine {
 
             let dk = DedupKey::PerFile {
                 sub: sub_id,
+                profile: profile_id,
                 resource,
             };
             // Bundle B1 per-leaf suppression. `lookup_leaf_hash_in_current`

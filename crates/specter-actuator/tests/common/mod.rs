@@ -128,8 +128,13 @@ impl Drop for Harness {
 }
 
 /// Build a PerFile Effect with a literal `argv` and the given correlation.
+///
+/// `profile_seed` mints the `DedupKey::PerFile.profile` field via
+/// [`unique_profile_id`]; tests that don't care about Profile identity can
+/// pass any stable value (e.g., the same as `sub_seed`).
 pub fn perfile_effect(
     sub_seed: u64,
+    profile_seed: u64,
     res_seed: u64,
     corr: u64,
     argv: Vec<String>,
@@ -138,6 +143,7 @@ pub fn perfile_effect(
     Effect {
         key: DedupKey::PerFile {
             sub: unique_sub_id(sub_seed),
+            profile: unique_profile_id(profile_seed),
             resource: unique_resource_id(res_seed),
         },
         command: CommandResolved { argv },

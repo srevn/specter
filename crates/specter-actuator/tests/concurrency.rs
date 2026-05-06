@@ -23,6 +23,7 @@ fn cap_two_with_four_distinct_subs_serializes_two_at_a_time() {
         h.submit(perfile_effect(
             i + 1,
             i + 1,
+            i + 1,
             u64::from(i + 1),
             vec!["/bin/sh".into(), "-c".into(), script.clone()],
             cwd.clone(),
@@ -55,6 +56,7 @@ fn per_sub_serializes_per_file_burst() {
     for i in 0..4 {
         h.submit(perfile_effect(
             42, // same Sub
+            42,
             i + 1,
             u64::from(i + 1),
             vec!["/bin/sh".into(), "-c".into(), script.clone()],
@@ -82,6 +84,7 @@ fn distinct_subs_run_concurrently_under_cap() {
     for i in 0..4 {
         h.submit(perfile_effect(
             i + 1, // distinct Subs
+            i + 1,
             i + 1,
             u64::from(i + 1),
             vec!["/bin/sh".into(), "-c".into(), script.clone()],
@@ -111,10 +114,12 @@ fn engine_receives_one_effect_complete_per_spawn() {
         1,
         1,
         1,
+        1,
         vec!["/bin/sh".into(), "-c".into(), script.clone()],
         cwd.clone(),
     ));
     h.submit(perfile_effect(
+        2,
         2,
         2,
         2,

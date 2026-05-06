@@ -21,6 +21,7 @@ fn shutdown_drains_quick_exit_within_grace() {
         1,
         1,
         1,
+        1,
         vec!["/bin/sh".into(), "-c".into(), script],
         cwd,
     ));
@@ -51,6 +52,7 @@ fn shutdown_sigkills_term_resistant_child() {
     // Trap TERM (no-op) and loop. After SIGKILL it dies signal=9.
     let script = "trap '' TERM; while :; do sleep 0.05; done".to_string();
     h.submit(perfile_effect(
+        1,
         1,
         1,
         1,
