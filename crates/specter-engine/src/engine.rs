@@ -490,30 +490,35 @@ impl Engine {
     }
 
     /// Reap a Profile: release every contribution it holds (anchor watch,
-    /// watch-root parent watch, descent prefix watch), clear its parent
-    /// edge, recompute parent edges of any dependents, detach from
-    /// `ProfileMap`, try-reap the anchor Resource, and emit a
-    /// `ReapPendingResolved` Diagnostic.
+    /// watch-root parent watch, descent prefix watch, per-descendant
+    /// watches), clear its parent edge, recompute parent edges of any
+    /// dependents, detach from `ProfileMap`, try-reap the anchor Resource,
+    /// and emit a `ReapPendingResolved` Diagnostic.
     ///
-    /// **Trichotomy.** A Profile holds at most one of {anchor contribution,
-    /// descent prefix contribution} at any time:
+    /// **Quartet.** A Profile may hold up to four kinds of contribution
+    /// to per-Resource `watch_demand`:
     ///
-    ///   - **Materialized** (immediate-Seed bumped anchor, or descent
-    ///     advanced through anchor materialization): the Profile owns +1
-    ///     on `anchor.watch_demand` and +1 on
-    ///     `watch_root_parent.watch_demand` (when the anchor has a
-    ///     parent). No `ProfileState::Pending(_)` payload.
-    ///   - **Pending**: the Profile owns +1 on
-    ///     `descent.current_prefix.watch_demand` and nothing else
-    ///     (`watch_root_parent` is set only at materialization;
-    ///     `anchor_contribution` only flips at the same site).
-    ///   - **Purged** (post-WatchOpRejected purge): the Profile owns no
-    ///     contributions; the clamp atomically released them and the
-    ///     associated bookkeeping was cleaned up by the purge fan-out.
+    ///   - **Anchor** (1-to-1): `Profile.resource.watch_demand` carries
+    ///     `+1` from this Profile while `Profile.anchor_contribution`.
+    ///   - **Watch-root parent** (1-to-1): `Profile.watch_root_parent`'s
+    ///     resource carries `+1` `STRUCTURE` for anchor-reappearance
+    ///     detection.
+    ///   - **Descent prefix** (1-to-1): the deepest existing prefix on
+    ///     a Pending Profile's path carries `+1` `STRUCTURE`.
+    ///   - **Per-descendant** (1-to-N): every covered Tree slot in
+    ///     `Profile.current` carries `+1` (Dir always; Leaf under
+    ///     `has_per_file_fds`). The 1-to-N source-of-truth is the
+    ///     snapshot itself, not a per-Profile flag.
     ///
-    /// Each release helper is idempotent and counter-aware, so calling
-    /// all three in any order yields the correct net effect for any
-    /// trichotomy state.
+    /// **Trichotomy invariant** (preserved from prior shape, now within
+    /// the quartet). Anchor and descent-prefix are mutually exclusive at
+    /// any moment: either the Profile is `Pending` (descent prefix only)
+    /// or materialized (anchor + descendants + watch-root parent). The
+    /// clamp recovery path (`Input::WatchOpRejected`) leaves the Profile
+    /// with no contributions; the purge fan-out cleans up the
+    /// bookkeeping. Each release helper is idempotent and counter-aware,
+    /// so the call order is "all four, in any sequence" — none of them
+    /// fault if their corresponding bookkeeping is already cleared.
     ///
     /// Sole call sites: `detach_sub_inner` (Idle / Pending Profile,
     /// immediate reap) and `finish_burst_to_idle` (deferred reap when
@@ -542,9 +547,16 @@ impl Engine {
         self.cancel_pending_probe(profile_id, out);
 
         // Release every claim this Profile may hold. Helpers are
-        // idempotent — no-op when the corresponding flag is unset (or
-        // counter is zero, post-clamp).
+        // idempotent — no-op when the corresponding flag / snapshot is
+        // unset (or counter is zero, post-clamp). Order is by claim
+        // cardinality: 1-to-1 prefixed claims first, then the 1-to-N
+        // descendant walk, then the 1-to-1 anchor and parent. The
+        // descendant walk relies on `Profile.current` being intact, so
+        // it must run before any helper that clears the snapshot — but
+        // all helpers in this quartet leave `current` alone except the
+        // descendant helper itself (which `take()`s it).
         self.release_descent_prefix_claim(profile_id, out);
+        self.release_descendant_claim(profile_id, out);
         self.release_anchor_claim(profile_id, out);
         self.release_watch_root_parent_claim(profile_id, out);
 

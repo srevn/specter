@@ -33,8 +33,8 @@
 
 use crate::coverage::covers;
 use specter_core::{
-    ClassSet, Profile, ProfileMap, ProfileState, ResourceId, ResourceKind, StepOutput, Tree,
-    WatchOp, WatchOpts,
+    ClassSet, Profile, ProfileId, ProfileMap, ProfileState, ResourceId, ResourceKind, StepOutput,
+    Tree, WatchOp, WatchOpts,
 };
 
 /// `+watch_demand` on `r`, contributing `contribution` to `r.events_union`.
@@ -98,11 +98,17 @@ pub fn add_watch_demand(
 /// `profiles` is the registry the recompute walks. Callers pass
 /// `&self.profiles` after the releasing Profile's state-tracking flag
 /// (`anchor_contribution`, `state == Pending(d)`, or `watch_root_parent`)
-/// has been cleared, so the recompute models the post-release state. For
-/// descendant-only releases (reconcile's `delete_child`) there is no
-/// per-Profile flag to clear; v1 accepts a transient over-mask in the rare
-/// multi-Profile-overlapping-descendant case (the next refcount op
-/// converges).
+/// has been cleared, so the recompute models the post-release state.
+///
+/// `releasing_descendant` — when `Some(pid)`, the recompute (multi-
+/// contributor case) skips `pid`'s **descendant** contribution to `r`.
+/// This is the explicit signal for the descendant case where no
+/// per-Profile flag exists: `Profile.current.is_some()` is the proxy
+/// state, but during `reconcile::delete_child` it's still set while the
+/// contribution is being released — the parameter resolves the ambiguity
+/// precisely. Anchor / watch-root-parent / descent-prefix releases pass
+/// `None`; the corresponding flag-clear by the caller already excludes
+/// the releasing Profile's contribution of that kind.
 ///
 /// Underflow → `debug_assert!` panic in dev; in release the counter clamps
 /// at 0 and no op is emitted (the Sensor is already in the Unwatched
@@ -112,6 +118,7 @@ pub fn sub_watch_demand(
     profiles: &ProfileMap,
     r: ResourceId,
     contribution: ClassSet,
+    releasing_descendant: Option<ProfileId>,
     out: &mut StepOutput,
 ) {
     // Documentation-only at v1; the recompute walks all covering Profiles
@@ -146,7 +153,7 @@ pub fn sub_watch_demand(
     // contributions. The releasing Profile's state-tracking flag must be
     // cleared by the caller before this call; the recompute then yields
     // the correct post-release union.
-    let new_union = recompute_resource_events(tree, profiles, r);
+    let new_union = recompute_resource_events(tree, profiles, r, releasing_descendant);
     if new_union != prev_union {
         if let Some(res) = tree.get_mut(r) {
             res.events_union = new_union;
@@ -164,8 +171,8 @@ pub fn sub_watch_demand(
 }
 
 /// Walk every Profile in `profiles` and OR each Profile's contribution to
-/// `resource` into a running union. Three contribution sources, each
-/// matched to its dedicated bookkeeping field on `Profile`:
+/// `resource` into a running union. Four contribution sources, each
+/// matched to its dedicated bookkeeping on `Profile`:
 ///
 /// 1. **Anchor.** `Profile.anchor_contribution == true` AND
 ///    `Profile.resource == resource` ⇒ contributes `Profile.events_union`.
@@ -178,22 +185,36 @@ pub fn sub_watch_demand(
 ///    descent prefix watch exists so the engine sees the next path
 ///    segment materialize).
 /// 4. **Covered descendant.** `resource != Profile.resource` AND
+///    `Profile.current.is_some()` AND
+///    `Some(pid) != releasing_descendant` AND
 ///    `covers(Profile, resource, tree) == true` ⇒ contributes
 ///    `Profile.events_union` if the resource is a Dir (always-watched
 ///    under the reconciler's gating) or if `Profile.has_per_file_fds` is
 ///    true (per-file FD demand for in-place edit detection).
 ///
-/// The first three sources have precise per-(Profile, Resource) tracking
-/// via dedicated flags / state. The descendant source has only `covers`,
-/// which can transiently over-include during a release: in the rare
-/// multi-Profile-overlapping-descendant case, the recompute may report a
-/// wider union than strictly necessary. The kernel mask stays slightly
-/// wider than reality until the next refcount op converges. Acceptable for
-/// v1; per-(Profile, Resource) tracking is a v2 predicate-layer concern.
-fn recompute_resource_events(tree: &Tree, profiles: &ProfileMap, resource: ResourceId) -> ClassSet {
+/// The descendant clause has two gates beyond the topology check:
+/// - `Profile.current.is_some()` excludes Profiles that hold no descendant
+///   claims (Pending-without-Seed, post-Vanished-with-current-cleared,
+///   post-`release_descendant_claim`-take). The snapshot itself is the
+///   per-Profile bookkeeping for descendant claims; without `current`, the
+///   Profile claims no descendants regardless of topology.
+/// - `Some(pid) != releasing_descendant` is the explicit skip for the
+///   delete-during-graft case (`reconcile::delete_child` runs while
+///   `Profile.current` is still `Some`; the gate excludes this Profile's
+///   own descendant contribution from the post-decrement recompute).
+///
+/// Together the two gates close F-MED-4: the recompute reports the
+/// post-release union without depending on `current.is_some()` having
+/// flipped (graft hasn't taken `current` yet at `delete_child` time).
+fn recompute_resource_events(
+    tree: &Tree,
+    profiles: &ProfileMap,
+    resource: ResourceId,
+    releasing_descendant: Option<ProfileId>,
+) -> ClassSet {
     let mut union = ClassSet::EMPTY;
-    for (_, p) in profiles.iter() {
-        union |= profile_contribution_for(p, resource, tree);
+    for (pid, p) in profiles.iter() {
+        union |= profile_contribution_for(p, pid, resource, tree, releasing_descendant);
     }
     union
 }
@@ -201,7 +222,13 @@ fn recompute_resource_events(tree: &Tree, profiles: &ProfileMap, resource: Resou
 /// Single Profile's contribution to `resource`'s `events_union`. Computes
 /// the union of every applicable source per `recompute_resource_events`'s
 /// four-source enumeration. Pure read; no mutation.
-fn profile_contribution_for(profile: &Profile, resource: ResourceId, tree: &Tree) -> ClassSet {
+fn profile_contribution_for(
+    profile: &Profile,
+    pid: ProfileId,
+    resource: ResourceId,
+    tree: &Tree,
+    releasing_descendant: Option<ProfileId>,
+) -> ClassSet {
     let mut union = ClassSet::EMPTY;
 
     // 1. Anchor — requires the per-Profile `anchor_contribution` flag so
@@ -223,10 +250,18 @@ fn profile_contribution_for(profile: &Profile, resource: ResourceId, tree: &Tree
         union |= ClassSet::STRUCTURE;
     }
 
-    // 4. Covered descendant. The anchor case is handled separately so we
-    // don't double-count an anchor at depth 0; the predicate filters by
-    // `Profile.resource != resource`.
-    if profile.resource != resource && covers(profile, resource, tree) {
+    // 4. Covered descendant. Two gates beyond the topology check:
+    //    * `current.is_some()` — Profiles without a snapshot hold no
+    //      descendant claims by definition.
+    //    * `Some(pid) != releasing_descendant` — explicit skip for the
+    //      delete-during-graft case where `current` is still `Some` while
+    //      this Profile's descendant claim is being released.
+    let releasing_this = releasing_descendant == Some(pid);
+    if !releasing_this
+        && profile.current.is_some()
+        && profile.resource != resource
+        && covers(profile, resource, tree)
+    {
         let kind = tree.get(resource).map_or(ResourceKind::Unknown, |r| r.kind);
         let is_dir = matches!(kind, ResourceKind::Dir);
         if is_dir || profile.has_per_file_fds {
@@ -414,7 +449,7 @@ mod tests {
         add_watch_demand(&mut tree, r, ClassSet::CONTENT, &mut out);
         out.watch_ops.clear();
 
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, &mut out);
+        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
         assert_eq!(tree.get(r).unwrap().watch_demand, 0);
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::EMPTY);
         assert_eq!(out.watch_ops.len(), 1);
@@ -469,7 +504,7 @@ mod tests {
         // state. The recompute should then yield METADATA only.
         profiles.get_mut(p_a).unwrap().anchor_contribution = false;
         out.watch_ops.clear();
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, &mut out);
+        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
 
         assert_eq!(tree.get(r).unwrap().watch_demand, 1);
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::METADATA);
@@ -517,7 +552,7 @@ mod tests {
         out.watch_ops.clear();
 
         profiles.get_mut(p_a).unwrap().anchor_contribution = false;
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, &mut out);
+        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
 
         assert_eq!(tree.get(r).unwrap().watch_demand, 1);
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::CONTENT);
@@ -534,7 +569,7 @@ mod tests {
         let (mut tree, r) = fresh();
         let profiles = empty_profiles();
         let mut out = StepOutput::default();
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::EMPTY, &mut out);
+        sub_watch_demand(&mut tree, &profiles, r, ClassSet::EMPTY, None, &mut out);
     }
 
     #[test]
@@ -554,7 +589,7 @@ mod tests {
         assert!(tree.try_reap(r));
         let profiles = empty_profiles();
         let mut out = StepOutput::default();
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::EMPTY, &mut out);
+        sub_watch_demand(&mut tree, &profiles, r, ClassSet::EMPTY, None, &mut out);
         assert!(out.watch_ops.is_empty());
     }
 
@@ -616,7 +651,7 @@ mod tests {
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand, 1);
         assert_eq!(res.suppress_count, 1);
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, &mut out);
+        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand, 0);
         // suppress unchanged by the watch decrement.
@@ -719,7 +754,7 @@ mod tests {
         let (tree, r) = fresh();
         let profiles = empty_profiles();
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r),
+            recompute_resource_events(&tree, &profiles, r, None),
             ClassSet::EMPTY,
         );
     }
@@ -736,7 +771,7 @@ mod tests {
         profiles.get_mut(pid).unwrap().anchor_contribution = true;
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r),
+            recompute_resource_events(&tree, &profiles, r, None),
             ClassSet::CONTENT,
         );
     }
@@ -756,7 +791,7 @@ mod tests {
         assert!(!profiles.get(pid).unwrap().anchor_contribution);
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r),
+            recompute_resource_events(&tree, &profiles, r, None),
             ClassSet::EMPTY,
         );
     }
@@ -784,7 +819,7 @@ mod tests {
         profiles.get_mut(p_b).unwrap().anchor_contribution = true;
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r),
+            recompute_resource_events(&tree, &profiles, r, None),
             ClassSet::CONTENT | ClassSet::METADATA,
         );
     }
@@ -806,7 +841,7 @@ mod tests {
         // Recomputing on `parent` yields STRUCTURE only — the Profile is
         // contributing to its watch-root parent, not its anchor.
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, parent),
+            recompute_resource_events(&tree, &profiles, parent, None),
             ClassSet::STRUCTURE,
         );
     }
@@ -827,7 +862,7 @@ mod tests {
         });
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, prefix),
+            recompute_resource_events(&tree, &profiles, prefix, None),
             ClassSet::STRUCTURE,
         );
     }
@@ -875,9 +910,31 @@ mod tests {
         // Anchor of A (CONTENT) | parent-edge of B (STRUCTURE) | descent of C (STRUCTURE)
         // = CONTENT | STRUCTURE.
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r),
+            recompute_resource_events(&tree, &profiles, r, None),
             ClassSet::CONTENT | ClassSet::STRUCTURE,
         );
+    }
+
+    /// Stub `Profile.current` to a placeholder `TreeSnapshot::Dir` so the
+    /// descendant clause's `current.is_some()` gate is satisfied. Tests in
+    /// this module exercise the recompute logic in isolation; production
+    /// sets `current` via graft.
+    fn stub_current(profiles: &mut ProfileMap, pid: specter_core::ProfileId) {
+        use specter_core::{DirMeta, DirSnapshot, TreeSnapshot};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        use std::time::UNIX_EPOCH;
+        let snap = DirSnapshot::new(
+            specter_core::ResourceId::default(),
+            DirMeta {
+                mtime: UNIX_EPOCH,
+                inode: 0,
+                device: 0,
+            },
+            0,
+            BTreeMap::new(),
+        );
+        profiles.get_mut(pid).unwrap().current = Some(TreeSnapshot::Dir(Arc::new(snap)));
     }
 
     #[test]
@@ -891,14 +948,70 @@ mod tests {
         let sub = tree.ensure(Some(root), "sub", ResourceRole::User);
         tree.get_mut(sub).unwrap().kind = ResourceKind::Dir;
         let mut profiles = ProfileMap::new();
-        let _ = profiles.attach(
+        let pid = profiles.attach(
             &mut tree,
             Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE),
         );
+        // Descendant clause requires `current.is_some()` — a Profile with
+        // no snapshot holds no descendant claims by definition.
+        stub_current(&mut profiles, pid);
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, sub),
+            recompute_resource_events(&tree, &profiles, sub, None),
             ClassSet::STRUCTURE,
+        );
+    }
+
+    #[test]
+    fn recompute_excludes_descendant_when_current_is_none() {
+        // Profile covers `sub` topologically but `current.is_none()` ⇒
+        // descendant clause is gated off (the snapshot is the per-Profile
+        // bookkeeping for descendant claims).
+        let mut tree = Tree::new();
+        let root = tree.ensure(None, "root", ResourceRole::User);
+        tree.get_mut(root).unwrap().kind = ResourceKind::Dir;
+        let sub = tree.ensure(Some(root), "sub", ResourceRole::User);
+        tree.get_mut(sub).unwrap().kind = ResourceKind::Dir;
+        let mut profiles = ProfileMap::new();
+        let pid = profiles.attach(
+            &mut tree,
+            Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE),
+        );
+        assert!(profiles.get(pid).unwrap().current.is_none());
+
+        assert_eq!(
+            recompute_resource_events(&tree, &profiles, sub, None),
+            ClassSet::EMPTY,
+        );
+    }
+
+    #[test]
+    fn recompute_excludes_descendant_when_releasing_descendant_matches() {
+        // Profile covers `sub` and has `current = Some` — would normally
+        // contribute. The explicit `releasing_descendant: Some(pid)` skip
+        // closes F-MED-4: during `delete_child` mid-graft, `current` is
+        // still set while the Profile is releasing its claim.
+        let mut tree = Tree::new();
+        let root = tree.ensure(None, "root", ResourceRole::User);
+        tree.get_mut(root).unwrap().kind = ResourceKind::Dir;
+        let sub = tree.ensure(Some(root), "sub", ResourceRole::User);
+        tree.get_mut(sub).unwrap().kind = ResourceKind::Dir;
+        let mut profiles = ProfileMap::new();
+        let pid = profiles.attach(
+            &mut tree,
+            Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE),
+        );
+        stub_current(&mut profiles, pid);
+
+        // Without the skip: contributes STRUCTURE.
+        assert_eq!(
+            recompute_resource_events(&tree, &profiles, sub, None),
+            ClassSet::STRUCTURE,
+        );
+        // With the skip: this Profile's descendant contribution is excluded.
+        assert_eq!(
+            recompute_resource_events(&tree, &profiles, sub, Some(pid)),
+            ClassSet::EMPTY,
         );
     }
 
@@ -917,9 +1030,10 @@ mod tests {
             Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE),
         );
         assert!(!profiles.get(pid).unwrap().has_per_file_fds);
+        stub_current(&mut profiles, pid);
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, leaf),
+            recompute_resource_events(&tree, &profiles, leaf, None),
             ClassSet::EMPTY,
         );
     }
@@ -934,13 +1048,14 @@ mod tests {
         let leaf = tree.ensure(Some(root), "f.rs", ResourceRole::User);
         tree.get_mut(leaf).unwrap().kind = ResourceKind::File;
         let mut profiles = ProfileMap::new();
-        let _ = profiles.attach(
+        let pid = profiles.attach(
             &mut tree,
             Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
         );
+        stub_current(&mut profiles, pid);
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, leaf),
+            recompute_resource_events(&tree, &profiles, leaf, None),
             ClassSet::CONTENT,
         );
     }

@@ -729,9 +729,18 @@ impl Engine {
         // role with field-discipline equivalence.
         self.cancel_pending_probe(profile_id, out);
 
+        // Release per-descendant `watch_demand` contributions — the
+        // helper take-and-walks `Profile.current`, decrementing each
+        // covered Tree slot's counter. Must run BEFORE the anchor and
+        // burst-end paths so the recompute sees this Profile's
+        // descendant claims as gone (closes F-CRIT-1). The take leaves
+        // `current = None`, redundant with the explicit clear below
+        // but kept for clarity in the snapshot-drop semantic.
+        self.release_descendant_claim(profile_id, out);
+
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = None;
-            p.current = None;
+            // current is already None — release_descendant_claim took it.
         }
 
         // Release BEFORE finish_burst_to_idle. See the ordering note
@@ -891,14 +900,21 @@ impl Engine {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-            p.current = None;
-        }
         out.diagnostics.push(Diagnostic::ProbeVanished {
             profile: profile_id,
             intent: BurstIntent::Seed,
         });
+        // Release the per-descendant `watch_demand` contributions
+        // encoded in `Profile.current` (F-CRIT-1). The helper takes
+        // `current`, walks it, and runs the per-file dedup-hygiene
+        // purge. Must run BEFORE `release_anchor_claim` so the
+        // recompute (multi-Profile case) sees this Profile's
+        // descendant claims as released.
+        self.release_descendant_claim(profile_id, out);
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.baseline = None;
+            // current already None — release_descendant_claim took it.
+        }
         // Release BEFORE finish_burst_to_idle so any deferred
         // `reap_profile` (reap_pending) sees a cleared flag — preserves
         // the trichotomy invariant `!(Pending && anchor_contribution)`
@@ -916,15 +932,15 @@ impl Engine {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-            p.current = None;
-        }
         out.diagnostics.push(Diagnostic::ProbeFailed {
             profile: profile_id,
             intent: BurstIntent::Seed,
             errno,
         });
+        self.release_descendant_claim(profile_id, out);
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.baseline = None;
+        }
         self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
@@ -1044,14 +1060,14 @@ impl Engine {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-            p.current = None;
-        }
         out.diagnostics.push(Diagnostic::ProbeVanished {
             profile: profile_id,
             intent: BurstIntent::Standard,
         });
+        self.release_descendant_claim(profile_id, out);
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.baseline = None;
+        }
         self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
@@ -1069,15 +1085,15 @@ impl Engine {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-            p.current = None;
-        }
         out.diagnostics.push(Diagnostic::ProbeFailed {
             profile: profile_id,
             intent: BurstIntent::Standard,
             errno,
         });
+        self.release_descendant_claim(profile_id, out);
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.baseline = None;
+        }
         self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
@@ -1144,14 +1160,14 @@ impl Engine {
             return;
         }
         let intent = self.rebase_burst_intent(profile_id);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-            p.current = None;
-        }
         out.diagnostics.push(Diagnostic::ProbeVanished {
             profile: profile_id,
             intent,
         });
+        self.release_descendant_claim(profile_id, out);
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.baseline = None;
+        }
         self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
@@ -1165,15 +1181,15 @@ impl Engine {
             return;
         }
         let intent = self.rebase_burst_intent(profile_id);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-            p.current = None;
-        }
         out.diagnostics.push(Diagnostic::ProbeFailed {
             profile: profile_id,
             intent,
             errno,
         });
+        self.release_descendant_claim(profile_id, out);
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.baseline = None;
+        }
         self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }

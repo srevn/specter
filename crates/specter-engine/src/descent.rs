@@ -414,6 +414,7 @@ impl crate::Engine {
                 &self.profiles,
                 prefix,
                 ClassSet::STRUCTURE,
+                None,
                 out,
             );
             add_watch_demand(&mut self.tree, new_resource, events_union, out);
@@ -446,6 +447,7 @@ impl crate::Engine {
                 &self.profiles,
                 prefix,
                 ClassSet::STRUCTURE,
+                None,
                 out,
             );
             add_watch_demand(&mut self.tree, new_resource, ClassSet::STRUCTURE, out);
@@ -517,6 +519,7 @@ impl crate::Engine {
                     &self.profiles,
                     prefix,
                     ClassSet::STRUCTURE,
+                    None,
                     out,
                 );
                 self.tree.vacate(prefix);
@@ -546,6 +549,7 @@ impl crate::Engine {
                     &self.profiles,
                     prefix,
                     ClassSet::STRUCTURE,
+                    None,
                     out,
                 );
                 self.tree.vacate(prefix);

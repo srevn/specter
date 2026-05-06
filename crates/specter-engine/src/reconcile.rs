@@ -137,7 +137,10 @@ pub(crate) fn lookup_descendant(
 /// `events_union` as the per-Resource mask contribution (R2 / D4); the
 /// per-Resource union is the OR of every covering Profile's contribution.
 /// `sub_watch_demand` requires `&ProfileMap` for the on-decrement
-/// recompute.
+/// recompute, and an explicit `releasing_descendant: Some(profile_id)`
+/// signal so the recompute skips this Profile's descendant contribution
+/// even though `Profile.current` is still `Some` mid-graft (closes
+/// F-MED-4).
 ///
 /// Two-phase order:
 /// 1. Deletions in reverse-lex (leaves before parents) so `try_reap`'s
@@ -157,6 +160,7 @@ pub(crate) fn walk_pair(
     new: &DirSnapshot,
     current_id: ResourceId,
     profile: &Profile,
+    profile_id: ProfileId,
     tree: &mut Tree,
     profiles: &ProfileMap,
     out: &mut StepOutput,
@@ -182,6 +186,7 @@ pub(crate) fn walk_pair(
                     tree,
                     profiles,
                     profile,
+                    profile_id,
                     current_id,
                     name.as_str(),
                     prior_child,
@@ -203,6 +208,7 @@ pub(crate) fn walk_pair(
                 tree,
                 profiles,
                 profile,
+                profile_id,
                 current_id,
                 name.as_str(),
                 new_child,
@@ -221,7 +227,16 @@ pub(crate) fn walk_pair(
             };
             match (p_dc.subtree.as_deref(), n_dc.subtree.as_deref()) {
                 (Some(ps), Some(ns)) if ps.dir_hash() != ns.dir_hash() => {
-                    walk_pair(Some(ps), ns, child_id, profile, tree, profiles, out);
+                    walk_pair(
+                        Some(ps),
+                        ns,
+                        child_id,
+                        profile,
+                        profile_id,
+                        tree,
+                        profiles,
+                        out,
+                    );
                 }
                 (Some(_), Some(_)) | (None, None) => {
                     // Hashes match (covered both sides) or both sides
@@ -301,6 +316,7 @@ pub(crate) fn graft(
             &response_arc,
             target,
             profile,
+            profile_id,
             tree,
             profiles,
             out,
@@ -347,23 +363,24 @@ pub(crate) fn graft(
 /// map drops at `reap_profile`), and the engine's only natural lifecycle
 /// hook for `PerFile` keys is at the Resource level.
 ///
-/// `PerFile` entries become stale when [`reconcile::delete_child`] reaps
-/// a covered leaf via `tree.try_reap`. Slotmap increments the slot's
-/// generation on removal, so a stale `ResourceId` never resolves and the
-/// stale entry can never collide with a future allocation — this purge
-/// is hygiene, not a correctness fix. Without it, the map accumulates
-/// unreachable entries proportional to the file-churn rate over the
-/// Profile's lifetime.
+/// `PerFile` entries become stale when [`delete_child`] reaps a covered
+/// leaf via `tree.try_reap`. Slotmap increments the slot's generation on
+/// removal, so a stale `ResourceId` never resolves and the stale entry
+/// can never collide with a future allocation — this purge is hygiene,
+/// not a correctness fix. Without it, the map accumulates unreachable
+/// entries proportional to the file-churn rate over the Profile's
+/// lifetime.
 ///
-/// Call site: [`graft`], after `walk_pair` runs (the only path that can
-/// reap covered leaves). Other reap paths (descent rewind, watch-root
-/// parent release, Profile reap) target Dir / scaffold slots which are
-/// never `PerFile` targets, so those paths don't need this hook.
+/// Call sites: [`graft`] after `walk_pair` runs, and
+/// [`Engine::release_descendant_claim`] after the take-and-walk teardown.
+/// Both paths can reap covered leaves; other reap paths (descent rewind,
+/// watch-root parent release) target Dir / scaffold slots which are never
+/// `PerFile` targets, so those paths don't need this hook.
 ///
 /// Cost: `O(profiles × dedup_size_per_profile)` per call. Typical v1
 /// configs are 1–2 profiles with small dedup maps; the cost is
 /// negligible compared to the rest of the graft work.
-fn purge_per_file_dedup_for_reaped_slots(profiles: &mut ProfileMap, tree: &Tree) {
+pub(crate) fn purge_per_file_dedup_for_reaped_slots(profiles: &mut ProfileMap, tree: &Tree) {
     for (_, p) in profiles.iter_mut() {
         if p.last_emitted_dir_hash.is_empty() {
             continue;
@@ -403,14 +420,20 @@ pub(crate) fn current_target_hash(
 /// level.
 ///
 /// `sub_watch_demand` threads `profile.events_union` as the contribution
-/// (R2). The recompute path inside `sub_watch_demand` (multi-contributor
-/// case only) walks the registry; v1 doesn't track per-(Profile,
-/// Resource) contributions for descendants, so a transient over-mask is
-/// possible during release — accepted, the next refcount op converges.
-fn delete_child(
+/// (R2) and `Some(profile_id)` as the explicit `releasing_descendant`
+/// signal: during graft `Profile.current` is still `Some` while this
+/// helper runs, so the recompute would otherwise count this Profile's
+/// own descendant claim toward the post-decrement union (F-MED-4). The
+/// param skips that contribution precisely.
+///
+/// `pub(crate)` so [`Engine::release_descendant_claim`] can reuse the
+/// walk for whole-snapshot teardown — single source of truth for "walk
+/// covered descendants and release their `watch_demand`."
+pub(crate) fn delete_child(
     tree: &mut Tree,
     profiles: &ProfileMap,
     profile: &Profile,
+    profile_id: ProfileId,
     parent: ResourceId,
     name: &str,
     prior_child: &ChildEntry,
@@ -431,6 +454,7 @@ fn delete_child(
                 tree,
                 profiles,
                 profile,
+                profile_id,
                 resource,
                 cname.as_str(),
                 cchild,
@@ -440,14 +464,25 @@ fn delete_child(
     }
 
     // Phase 2: release this slot's watch contribution if we hold one.
+    // The counter-existence guard (`watch_demand > 0`) makes the helper
+    // safe over the take-then-walk path of `release_descendant_claim`,
+    // where multiple sub-walks may converge on a slot the previous
+    // iteration already drained.
     let releases_watch = match prior_child.kind() {
         EntryKind::Dir => covers(profile, resource, tree),
         EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
             covers(profile, resource, tree) && profile.has_per_file_fds
         }
     };
-    if releases_watch {
-        sub_watch_demand(tree, profiles, resource, profile.events_union, out);
+    if releases_watch && tree.get(resource).is_some_and(|r| r.watch_demand > 0) {
+        sub_watch_demand(
+            tree,
+            profiles,
+            resource,
+            profile.events_union,
+            Some(profile_id),
+            out,
+        );
     }
 
     // Reap only when fully drained — preserves multi-Profile contributions.
@@ -474,6 +509,7 @@ fn create_child(
     tree: &mut Tree,
     profiles: &ProfileMap,
     profile: &Profile,
+    profile_id: ProfileId,
     parent: ResourceId,
     name: &str,
     new_child: &ChildEntry,
@@ -501,7 +537,16 @@ fn create_child(
     if let ChildEntry::Dir(dc) = new_child
         && let Some(sub) = dc.subtree.as_deref()
     {
-        walk_pair(None, sub, resource, profile, tree, profiles, out);
+        walk_pair(
+            None,
+            sub,
+            resource,
+            profile,
+            profile_id,
+            tree,
+            profiles,
+            out,
+        );
     }
 }
 
@@ -630,6 +675,7 @@ mod tests {
             &new,
             root,
             profiles.get(pid).unwrap(),
+            pid,
             &mut tree,
             &profiles,
             &mut out,
@@ -657,6 +703,7 @@ mod tests {
             &new,
             root,
             profiles.get(pid).unwrap(),
+            pid,
             &mut tree,
             &profiles,
             &mut out,
@@ -685,6 +732,7 @@ mod tests {
             &new,
             root,
             profiles.get(pid).unwrap(),
+            pid,
             &mut tree,
             &profiles,
             &mut out,
@@ -723,6 +771,7 @@ mod tests {
             &new,
             root,
             profiles.get(pid).unwrap(),
+            pid,
             &mut tree,
             &profiles,
             &mut out,
@@ -753,6 +802,7 @@ mod tests {
             &new,
             root,
             profiles.get(pid).unwrap(),
+            pid,
             &mut tree,
             &profiles,
             &mut out,
@@ -788,6 +838,7 @@ mod tests {
             &new,
             root,
             profiles.get(pid).unwrap(),
+            pid,
             &mut tree,
             &profiles,
             &mut out,

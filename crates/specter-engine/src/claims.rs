@@ -29,8 +29,9 @@
 //! `debug_assert!(prev > 0)`. With it, the helper is safe in any state.
 
 use crate::Engine;
+use crate::reconcile::{delete_child, purge_per_file_dedup_for_reaped_slots};
 use crate::refcounts::sub_watch_demand;
-use specter_core::{ClassSet, ProfileId, ProfileState, StepOutput};
+use specter_core::{ClassSet, ProfileId, ProfileState, StepOutput, TreeSnapshot};
 
 impl Engine {
     /// Release the Profile's anchor `watch_demand` contribution if held.
@@ -55,7 +56,7 @@ impl Engine {
         }
 
         if self.tree.get(resource).is_some_and(|r| r.watch_demand > 0) {
-            sub_watch_demand(&mut self.tree, &self.profiles, resource, mask, out);
+            sub_watch_demand(&mut self.tree, &self.profiles, resource, mask, None, out);
         }
     }
 
@@ -82,6 +83,7 @@ impl Engine {
                 &self.profiles,
                 parent,
                 ClassSet::STRUCTURE,
+                None,
                 out,
             );
         }
@@ -126,10 +128,102 @@ impl Engine {
                 &self.profiles,
                 prefix,
                 ClassSet::STRUCTURE,
+                None,
                 out,
             );
         }
 
         self.tree.try_reap(prefix);
+    }
+
+    /// Release every per-descendant `watch_demand` contribution this
+    /// Profile holds — the fourth member of the claim quartet, completing
+    /// the symmetry with the three single-resource helpers above.
+    ///
+    /// **Take-and-walk.** Atomically takes `Profile.current` (sets to
+    /// `None`), then walks the taken snapshot in reverse-lex order
+    /// calling [`reconcile::delete_child`] on each top-level entry. The
+    /// helper recurses leaf-before-parent and releases the per-slot
+    /// `watch_demand` contribution with an explicit
+    /// `releasing_descendant: Some(profile_id)` signal, so the recompute
+    /// (multi-contributor case) skips this Profile's own descendant
+    /// contribution even though `current` was still observable mid-walk
+    /// (closes F-MED-4 by construction).
+    ///
+    /// **Idempotent.** `current.is_none()` ⇒ no-op. A second invocation
+    /// in the same step finds `None` after the first call's `take`.
+    /// Pending Profiles (no `current` by invariant) and File-anchored
+    /// Profiles (`TreeSnapshot::File`, no descendants) short-circuit on
+    /// the dispatch.
+    ///
+    /// **Counter-aware.** [`reconcile::delete_child`] gates each
+    /// `sub_watch_demand` on `tree.get(r).watch_demand > 0`, so
+    /// post-clamp slots (zero counter) skip without underflow.
+    ///
+    /// **Per-file dedup hygiene.** The walk reaps covered Leaves; their
+    /// `ResourceId`s may key entries in OTHER Profiles' (or this one's)
+    /// `last_emitted_dir_hash` map. Mirror [`graft`]'s post-walk purge
+    /// across the whole registry to drop the now-stale entries.
+    /// Cross-Profile sharing makes the registry-wide scan necessary —
+    /// a per-Profile purge would miss entries other Profiles wrote
+    /// against the same descendant slot.
+    ///
+    /// **Sole call sites.** [`Engine::reap_profile`] and the seven
+    /// `dispatch_*_vanished/failed` + `finalize_anchor_lost` sites in
+    /// `transitions.rs`. Closes F-CRIT-1 by completing the four-claim
+    /// release symmetry — every prior teardown path released the three
+    /// 1-to-1 claims (anchor / watch-root parent / descent prefix) but
+    /// left the 1-to-N descendant claims encoded in `Profile.current`
+    /// stranded in the Tree.
+    pub(crate) fn release_descendant_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
+        // Take the snapshot atomically. Idempotent: subsequent calls
+        // find `None` and short-circuit without further work.
+        let taken = self
+            .profiles
+            .get_mut(pid)
+            .and_then(|p| p.current.take());
+        let Some(snapshot) = taken else {
+            return;
+        };
+
+        // File-anchored Profiles hold no descendant claims (a Leaf has
+        // no descendants). The Dir arm is the only contributor.
+        let TreeSnapshot::Dir(arc) = snapshot else {
+            return;
+        };
+
+        // Dispatch the walk under a co-existing immutable borrow of the
+        // Profile (for `delete_child`'s `&Profile` arg) and the
+        // ProfileMap (for the recompute path's registry walk).
+        // `&mut self.tree` is a disjoint-field borrow.
+        {
+            let Some(profile) = self.profiles.get(pid) else {
+                return;
+            };
+            let anchor = profile.resource;
+            // Reverse-lex per level — `delete_child` handles its own
+            // internal reverse-lex within Dir children; this loop
+            // covers the top-level entries of the snapshot. Together
+            // they yield strict leaf-before-parent reap order, so
+            // `try_reap` sees a vacated child set when it processes
+            // each parent.
+            for (name, child) in arc.entries.iter().rev() {
+                delete_child(
+                    &mut self.tree,
+                    &self.profiles,
+                    profile,
+                    pid,
+                    anchor,
+                    name.as_str(),
+                    child,
+                    out,
+                );
+            }
+        }
+
+        // Cross-Profile dedup hygiene: covered Leaves reaped above may
+        // appear in any Profile's `last_emitted_dir_hash` keyed at
+        // their `ResourceId`. Mirrors graft's post-walk_pair purge.
+        purge_per_file_dedup_for_reaped_slots(&mut self.profiles, &self.tree);
     }
 }
