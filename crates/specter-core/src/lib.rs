@@ -31,7 +31,6 @@ pub use ids::{ProfileId, ResourceId, SubId, TimerId};
 pub use input::{FsEvent, Input};
 pub use op::{
     ProbeCorrelation, ProbeKind, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, WatchOp,
-    WatchOpts,
 };
 pub use output::StepOutput;
 pub use profile::{

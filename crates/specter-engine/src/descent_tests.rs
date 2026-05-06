@@ -805,7 +805,7 @@ fn on_probe_response_routes_descent_via_state_match() {
 /// `on_watch_op_rejected` purge transitions Pending → Idle.
 #[test]
 fn on_watch_op_rejected_clears_pending_state() {
-    use specter_core::{ProfileState, WatchOp, WatchOpts};
+    use specter_core::{ClassSet, ProfileState, ResourceKind, WatchOp};
     let (mut e, _sid, pid) = setup_pending_one_level();
     let foo = e.tree().lookup(None, "foo").unwrap();
     assert!(matches!(
@@ -819,7 +819,8 @@ fn on_watch_op_rejected_clears_pending_state() {
             op: WatchOp::Watch {
                 resource: foo,
                 path: std::path::PathBuf::from("foo"),
-                opts: WatchOpts::default(),
+                kind: ResourceKind::Unknown,
+                events: ClassSet::EMPTY,
             },
             errno: 24,
         },
@@ -934,7 +935,7 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
 /// Profile transitions Pending → Idle in the same step.
 #[test]
 fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
-    use specter_core::{ProfileState, WatchOp, WatchOpts};
+    use specter_core::{ClassSet, ProfileState, ResourceKind, WatchOp};
     let (mut e, _sid, pid) = setup_pending_one_level();
     let foo = e.tree().lookup(None, "foo").unwrap();
     assert!(
@@ -952,7 +953,8 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
             op: WatchOp::Watch {
                 resource: foo,
                 path: PathBuf::from("foo"),
-                opts: WatchOpts::default(),
+                kind: ResourceKind::Unknown,
+                events: ClassSet::EMPTY,
             },
             errno: 24,
         },

@@ -12,7 +12,7 @@
 
 use crate::{FsWatcher, Prober, WakeHandle};
 use slotmap::SecondaryMap;
-use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, ResourceKind};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -24,7 +24,8 @@ pub enum WatcherCall {
     Watch {
         resource: ResourceId,
         path: PathBuf,
-        opts: WatchOpts,
+        kind: ResourceKind,
+        events: ClassSet,
     },
     Unwatch {
         resource: ResourceId,
@@ -37,6 +38,17 @@ pub enum WatcherCall {
     },
 }
 
+/// Live record of an installed watch on the mock. One entry per
+/// successfully-`watch()`ed resource; cleared on `unwatch()`. Tests
+/// inspect this for the post-install state without walking the call
+/// log.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MockEntry {
+    pub path: PathBuf,
+    pub kind: ResourceKind,
+    pub events: ClassSet,
+}
+
 #[derive(Debug, Default)]
 pub struct MockFsWatcher {
     /// Append-only log of every mutator call. Ordering is the order of
@@ -44,7 +56,7 @@ pub struct MockFsWatcher {
     pub calls: Vec<WatcherCall>,
     /// Current installed-watch state: `r ∈ installed` ⇔ last `watch(r)`
     /// succeeded and no subsequent `unwatch(r)` cleared it.
-    pub installed: SecondaryMap<ResourceId, PathBuf>,
+    pub installed: SecondaryMap<ResourceId, MockEntry>,
     /// Current suppress state: present ⇔ last edge was `suppress`.
     pub suppressed: SecondaryMap<ResourceId, ()>,
     /// Events queued for delivery on the next `poll_until` call.
@@ -102,8 +114,10 @@ impl MockFsWatcher {
     pub fn registered_events(&self, r: ResourceId) -> Option<ClassSet> {
         for c in self.calls.iter().rev() {
             match c {
-                WatcherCall::Watch { resource, opts, .. } if *resource == r => {
-                    return Some(opts.events);
+                WatcherCall::Watch {
+                    resource, events, ..
+                } if *resource == r => {
+                    return Some(*events);
                 }
                 WatcherCall::Unwatch { resource } if *resource == r => return None,
                 _ => {}
@@ -114,16 +128,30 @@ impl MockFsWatcher {
 }
 
 impl FsWatcher for MockFsWatcher {
-    fn watch(&mut self, r: ResourceId, path: &Path, opts: WatchOpts) -> io::Result<()> {
+    fn watch(
+        &mut self,
+        r: ResourceId,
+        path: &Path,
+        kind: ResourceKind,
+        events: ClassSet,
+    ) -> io::Result<()> {
         self.calls.push(WatcherCall::Watch {
             resource: r,
             path: path.to_owned(),
-            opts,
+            kind,
+            events,
         });
         if let Some(errno) = self.next_watch_errno.take() {
             return Err(io::Error::from_raw_os_error(errno));
         }
-        self.installed.insert(r, path.to_owned());
+        self.installed.insert(
+            r,
+            MockEntry {
+                path: path.to_owned(),
+                kind,
+                events,
+            },
+        );
         Ok(())
     }
 
@@ -238,7 +266,7 @@ mod tests {
     use slotmap::SlotMap;
     use specter_core::{
         ClassSet, FsEvent, ProbeCorrelation, ProbeKind, ProbeRequest, ProfileId, ResourceId,
-        ScanConfig, WatchOpts,
+        ResourceKind, ScanConfig,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -253,15 +281,23 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        w.watch(ids[0], &PathBuf::from("/tmp/a"), WatchOpts::default())
-            .expect("watch ok");
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            ResourceKind::Unknown,
+            ClassSet::EMPTY,
+        )
+        .expect("watch ok");
 
         assert_eq!(w.calls.len(), 1);
         assert!(matches!(
             &w.calls[0],
             WatcherCall::Watch { resource, .. } if *resource == ids[0]
         ));
-        assert_eq!(w.installed.get(ids[0]).unwrap(), &PathBuf::from("/tmp/a"));
+        let entry = w.installed.get(ids[0]).expect("installed");
+        assert_eq!(entry.path, PathBuf::from("/tmp/a"));
+        assert_eq!(entry.kind, ResourceKind::Unknown);
+        assert_eq!(entry.events, ClassSet::EMPTY);
     }
 
     #[test]
@@ -270,7 +306,12 @@ mod tests {
         let mut w = MockFsWatcher::new();
         w.fail_next_watch(libc::EMFILE);
 
-        let res = w.watch(ids[0], &PathBuf::from("/tmp/a"), WatchOpts::default());
+        let res = w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            ResourceKind::Unknown,
+            ClassSet::EMPTY,
+        );
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().raw_os_error(), Some(libc::EMFILE));
         // The call is still recorded; the error short-circuits installation.
@@ -278,8 +319,13 @@ mod tests {
         assert!(!w.installed.contains_key(ids[0]));
 
         // One-shot — the next watch succeeds.
-        w.watch(ids[0], &PathBuf::from("/tmp/a"), WatchOpts::default())
-            .expect("second watch ok");
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            ResourceKind::Unknown,
+            ClassSet::EMPTY,
+        )
+        .expect("second watch ok");
         assert!(w.installed.contains_key(ids[0]));
     }
 
@@ -288,8 +334,13 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        w.watch(ids[0], &PathBuf::from("/tmp/a"), WatchOpts::default())
-            .unwrap();
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            ResourceKind::Unknown,
+            ClassSet::EMPTY,
+        )
+        .unwrap();
         w.suppress(ids[0]);
         assert!(w.suppressed.contains_key(ids[0]));
 
@@ -342,12 +393,17 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        w.watch(ids[0], &PathBuf::from("/tmp/a"), WatchOpts::default())
-            .unwrap();
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            ResourceKind::Unknown,
+            ClassSet::EMPTY,
+        )
+        .unwrap();
         w.suppress(ids[0]);
         w.unsuppress(ids[0]);
 
-        let kinds: Vec<&str> = w
+        let labels: Vec<&str> = w
             .calls
             .iter()
             .map(|c| match c {
@@ -357,7 +413,7 @@ mod tests {
                 WatcherCall::Unsuppress { .. } => "unsuppress",
             })
             .collect();
-        assert_eq!(kinds, vec!["watch", "suppress", "unsuppress"]);
+        assert_eq!(labels, vec!["watch", "suppress", "unsuppress"]);
         assert!(!w.suppressed.contains_key(ids[0])); // Net: unsuppressed.
     }
 
@@ -383,17 +439,22 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        let opts1 = WatchOpts {
-            events: ClassSet::CONTENT,
-        };
-        let opts2 = WatchOpts {
-            events: ClassSet::CONTENT | ClassSet::METADATA,
-        };
-
-        w.watch(ids[0], &PathBuf::from("/tmp/a"), opts1).unwrap();
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            ResourceKind::File,
+            ClassSet::CONTENT,
+        )
+        .unwrap();
         assert_eq!(w.registered_events(ids[0]), Some(ClassSet::CONTENT));
 
-        w.watch(ids[0], &PathBuf::from("/tmp/a"), opts2).unwrap();
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            ResourceKind::File,
+            ClassSet::CONTENT | ClassSet::METADATA,
+        )
+        .unwrap();
         assert_eq!(
             w.registered_events(ids[0]),
             Some(ClassSet::CONTENT | ClassSet::METADATA),
@@ -409,9 +470,8 @@ mod tests {
         w.watch(
             ids[0],
             &PathBuf::from("/tmp/a"),
-            WatchOpts {
-                events: ClassSet::STRUCTURE,
-            },
+            ResourceKind::Dir,
+            ClassSet::STRUCTURE,
         )
         .unwrap();
         w.unwatch(ids[0]);
@@ -423,8 +483,13 @@ mod tests {
         let ids = fresh_resource_ids(2);
         let mut w = MockFsWatcher::new();
 
-        w.watch(ids[0], &PathBuf::from("/tmp/a"), WatchOpts::default())
-            .unwrap();
+        w.watch(
+            ids[0],
+            &PathBuf::from("/tmp/a"),
+            ResourceKind::Unknown,
+            ClassSet::EMPTY,
+        )
+        .unwrap();
         // ids[1] was never watched; registered_events should return None.
         assert_eq!(w.registered_events(ids[1]), None);
     }
@@ -439,9 +504,8 @@ mod tests {
         w.watch(
             ids[0],
             &PathBuf::from("/tmp/a"),
-            WatchOpts {
-                events: ClassSet::CONTENT,
-            },
+            ResourceKind::File,
+            ClassSet::CONTENT,
         )
         .unwrap();
         w.suppress(ids[0]);
@@ -462,18 +526,16 @@ mod tests {
         w.watch(
             ids[0],
             &PathBuf::from("/tmp/a"),
-            WatchOpts {
-                events: ClassSet::CONTENT,
-            },
+            ResourceKind::File,
+            ClassSet::CONTENT,
         )
         .unwrap();
         w.fail_next_watch(libc::EMFILE);
         let _ = w.watch(
             ids[0],
             &PathBuf::from("/tmp/a"),
-            WatchOpts {
-                events: ClassSet::CONTENT | ClassSet::METADATA,
-            },
+            ResourceKind::File,
+            ClassSet::CONTENT | ClassSet::METADATA,
         );
         // Helper reads the call log — sees the failed Watch attempt
         // with the widened mask.

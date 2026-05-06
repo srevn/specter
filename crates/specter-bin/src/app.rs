@@ -302,14 +302,16 @@ pub(crate) fn apply_watch_op<W: FsWatcher>(
         WatchOp::Watch {
             resource,
             path,
-            opts,
+            kind,
+            events,
         } => {
-            if let Err(e) = watcher.watch(resource, &path, opts) {
+            if let Err(e) = watcher.watch(resource, &path, kind, events) {
                 let errno = e.raw_os_error().unwrap_or(0);
                 let rejected = WatchOp::Watch {
                     resource,
                     path,
-                    opts,
+                    kind,
+                    events,
                 };
                 let _ = sensor_in_tx.send(Input::WatchOpRejected {
                     resource,
@@ -360,7 +362,7 @@ mod tests {
     use super::*;
     use crate::channels::Channels;
     use slotmap::SlotMap;
-    use specter_core::{ResourceId, WatchOpts};
+    use specter_core::{ClassSet, ResourceId, ResourceKind};
     use specter_sensor::testkit::MockFsWatcher;
 
     /// Mint a fresh non-null `ResourceId`. Required because slotmap's
@@ -382,7 +384,8 @@ mod tests {
             WatchOp::Watch {
                 resource: r,
                 path: "/tmp".into(),
-                opts: WatchOpts::default(),
+                kind: ResourceKind::Unknown,
+                events: ClassSet::EMPTY,
             },
             &sides.sensor_in_tx,
         );
@@ -403,7 +406,8 @@ mod tests {
             WatchOp::Watch {
                 resource: r,
                 path: "/tmp".into(),
-                opts: WatchOpts::default(),
+                kind: ResourceKind::Unknown,
+                events: ClassSet::EMPTY,
             },
             &sides.sensor_in_tx,
         );
@@ -423,7 +427,12 @@ mod tests {
         let mut watcher = MockFsWatcher::new();
         let r = fresh_resource_id();
         watcher
-            .watch(r, std::path::Path::new("/tmp"), WatchOpts::default())
+            .watch(
+                r,
+                std::path::Path::new("/tmp"),
+                ResourceKind::Unknown,
+                ClassSet::EMPTY,
+            )
             .unwrap();
         apply_watch_op(
             &mut watcher,
@@ -440,7 +449,12 @@ mod tests {
         let mut watcher = MockFsWatcher::new();
         let r = fresh_resource_id();
         watcher
-            .watch(r, std::path::Path::new("/tmp"), WatchOpts::default())
+            .watch(
+                r,
+                std::path::Path::new("/tmp"),
+                ResourceKind::Unknown,
+                ClassSet::EMPTY,
+            )
             .unwrap();
         apply_watch_op(
             &mut watcher,
@@ -462,7 +476,8 @@ mod tests {
             .try_send(WatchOp::Watch {
                 resource: r,
                 path: "/tmp".into(),
-                opts: WatchOpts::default(),
+                kind: ResourceKind::Unknown,
+                events: ClassSet::EMPTY,
             })
             .unwrap();
         watcher.inject(r, specter_core::FsEvent::Modified);

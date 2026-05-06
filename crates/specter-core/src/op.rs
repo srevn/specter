@@ -1,24 +1,13 @@
 //! Watch and Probe ops, plus their request/response payloads.
 
 use crate::ids::{ProfileId, ResourceId};
+use crate::resource::ResourceKind;
 use crate::scan_config::ScanConfig;
 use crate::snapshot::tree::{DirSnapshot, TreeSnapshot};
 use crate::sub::ClassSet;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Per-watch hints carried alongside `WatchOp::Watch`.
-///
-/// `events` is the L3 carrier for the per-Resource event-class union: the
-/// engine ships `Resource.events_union` on every `Watch` op, the sensor
-/// diffs the cached per-FD mask, and re-registers iff different. Default
-/// is `ClassSet::EMPTY`, which the sensor degrades to identity-floor-only
-/// delivery (kqueue: `NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE`).
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct WatchOpts {
-    pub events: ClassSet,
-}
 
 /// Engine-monotonic correlation token — pairs each `ProbeRequest` with the
 /// `ProbeResponse` that answers it.
@@ -128,10 +117,29 @@ pub struct ProbeResponse {
 
 #[derive(Debug, Clone)]
 pub enum WatchOp {
+    /// Install (or re-register) a watch on `resource` at `path`.
+    ///
+    /// `kind` is the engine's authoritative classification of the slot
+    /// (`File` / `Dir` / `Unknown`). The sensor uses it as a verification
+    /// step against the inode its `O_PATH` / `open` fd resolved to —
+    /// rejecting installs where the path's on-disk kind diverges from
+    /// the engine's expectation. `Unknown` is a wildcard: the engine
+    /// emits it for slots it has not yet classified (descent prefix
+    /// placeholder, post-`add_watch_demand` before the first probe), and
+    /// the sensor accepts whatever inode resolves while caching the
+    /// observed kind for normalization / mask translation.
+    ///
+    /// `events` is the L3 carrier for the per-Resource event-class union
+    /// (R2 / D4): the engine ships `Resource.events_union` on every
+    /// `Watch` op, the sensor diffs the cached per-FD mask, and
+    /// re-registers iff different. `ClassSet::EMPTY` degrades to
+    /// identity-floor-only delivery (kqueue: `NOTE_DELETE | NOTE_RENAME
+    /// | NOTE_REVOKE`).
     Watch {
         resource: ResourceId,
         path: PathBuf,
-        opts: WatchOpts,
+        kind: ResourceKind,
+        events: ClassSet,
     },
     Unwatch {
         resource: ResourceId,

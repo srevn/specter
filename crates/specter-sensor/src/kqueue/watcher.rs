@@ -34,7 +34,7 @@ use crate::kqueue::wake::KqueueWakeHandle;
 use crate::kqueue::{fd, ffi, normalize, translate};
 use crate::{FsWatcher, WakeHandle};
 use slotmap::SecondaryMap;
-use specter_core::{FsEvent, ResourceId, ResourceKind, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::Path;
@@ -57,17 +57,17 @@ const EVENT_BATCH: usize = 64;
 pub struct KqueueWatcher {
     by_resource: SecondaryMap<ResourceId, OwnedFd>,
     suppressed: SecondaryMap<ResourceId, ()>,
-    /// Per-resource kind cache: populated at `watch()` from `fstat`,
-    /// consumed by `normalize::kevent_to_fs_event` to disambiguate
-    /// `NOTE_WRITE` on Dir vs File and by `translate::class_set_to_fflags`
-    /// to compute the per-FD mask. Mirrors the engine's `Resource.kind`
-    /// independently — drift between the two is acceptable (the engine
-    /// uses its `kind` for `covers` / `EffectScope` semantics; the
-    /// watcher uses this one purely for event normalization and mask
-    /// translation).
+    /// Per-resource kind cache: seeded at `watch()` from the engine's
+    /// `WatchOp::Watch.kind` (verified against an `fstat` of the freshly
+    /// opened fd; the cache stores the verified value). Consumed by
+    /// `normalize::kevent_to_fs_event` to disambiguate `NOTE_WRITE` on
+    /// Dir vs File and by `translate::class_set_to_fflags` to compute
+    /// the per-FD mask. The verification step closes the TOCTOU window
+    /// between the engine's classification and the kernel's
+    /// path-resolution at watch-install time.
     kinds: SecondaryMap<ResourceId, ResourceKind>,
     /// Per-resource kqueue fflags cache: populated alongside `by_resource`
-    /// from the L4 translator's output (`class_set_to_fflags(opts.events,
+    /// from the L4 translator's output (`class_set_to_fflags(events,
     /// kind)`). Used by `watch()` to diff the incoming mask against the
     /// installed one so unchanged re-registrations skip the syscall, and
     /// changed ones re-register via `EV_ADD` without reopening the fd.
@@ -105,7 +105,13 @@ impl FsWatcher for KqueueWatcher {
     /// `OwnedFd` for `r`; the re-watch path skips open/stat and reuses
     /// the existing FD, diffing the cached fflags against the
     /// translator's output.
-    fn watch(&mut self, r: ResourceId, path: &Path, opts: WatchOpts) -> io::Result<()> {
+    fn watch(
+        &mut self,
+        r: ResourceId,
+        path: &Path,
+        kind: ResourceKind,
+        events: ClassSet,
+    ) -> io::Result<()> {
         // ── Re-watch path ───────────────────────────────────────────
         // FD already held: compute the new fflags from the cached kind
         // + incoming events; diff against the installed mask; re-register
@@ -116,14 +122,19 @@ impl FsWatcher for KqueueWatcher {
         // the two-syscall race that an EV_ADD-then-EV_DISABLE sequence
         // exposed (per kqueue(2) § EV_ADD: "Adding an event automatically
         // enables it, unless overridden by the EV_DISABLE flag").
+        //
+        // The engine-supplied `kind` is ignored on the re-watch path:
+        // the cached kind (verified against `fstat` at fresh-watch time)
+        // is the authoritative value and is invariant for the FD's
+        // lifetime — re-watch never reopens.
         if self.by_resource.contains_key(r) {
-            let kind = self.kinds.get(r).copied().unwrap_or(ResourceKind::Unknown);
-            let new_fflags = translate::class_set_to_fflags(opts.events, kind);
+            let cached_kind = self.kinds.get(r).copied().unwrap_or(ResourceKind::Unknown);
+            let new_fflags = translate::class_set_to_fflags(events, cached_kind);
             let cached_fflags = self.registered_fflags.get(r).copied().unwrap_or(0);
             if new_fflags == cached_fflags {
                 tracing::trace!(
                     ?r,
-                    ?opts,
+                    ?events,
                     fflags = format_args!("{cached_fflags:#x}"),
                     "kqueue re-watch noop (mask unchanged)"
                 );
@@ -140,7 +151,7 @@ impl FsWatcher for KqueueWatcher {
             self.registered_fflags.insert(r, new_fflags);
             tracing::debug!(
                 ?r,
-                ?opts,
+                ?events,
                 suppressed,
                 old_fflags = format_args!("{cached_fflags:#x}"),
                 new_fflags = format_args!("{new_fflags:#x}"),
@@ -150,25 +161,39 @@ impl FsWatcher for KqueueWatcher {
         }
 
         // ── Fresh-watch path ────────────────────────────────────────
-        // 1) Open. 2) Stat. 3) Translate. 4) Register. 5) Insert. Each
-        // step's failure drops anything earlier (the OwnedFd auto-closes)
-        // so a partially-failed `watch` leaves zero state. Fresh watches
+        // 1) Open. 2) Stat + verify against engine's expected kind.
+        // 3) Translate. 4) Register. 5) Insert. Each step's failure
+        // drops anything earlier (the OwnedFd auto-closes) so a
+        // partially-failed `watch` leaves zero state. Fresh watches
         // start enabled — `suppressed` is populated by `suppress(r)`
-        // after the WatchOp ordering puts a `Watch` before any same-step
-        // `Suppress`, so any later silencing rides the dedicated
-        // `disable_vnode` syscall path.
+        // after the WatchOp ordering puts a `Watch` before any
+        // same-step `Suppress`, so any later silencing rides the
+        // dedicated `disable_vnode` syscall path.
         let fd = fd::open_for_watch(path)?;
-        let kind = fd::stat_kind(&fd)?;
-        let fflags = translate::class_set_to_fflags(opts.events, kind);
+        let observed_kind = fd::stat_kind(&fd)?;
+        if !kind.matches_or_unknown(observed_kind) {
+            tracing::warn!(
+                ?r,
+                ?path,
+                expected = ?kind,
+                observed = ?observed_kind,
+                "kqueue watch kind mismatch — engine expected != fstat",
+            );
+            // Mirror the errno the engine's WatchFailure::Resource path
+            // (Phase A3) will route through: ENOTDIR is the canonical
+            // "kind disagreement" signal both kqueue and inotify use.
+            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+        }
+        let fflags = translate::class_set_to_fflags(events, observed_kind);
         ffi::register_vnode(&self.kq, &fd, r, fflags, true)?;
         self.by_resource.insert(r, fd);
-        self.kinds.insert(r, kind);
+        self.kinds.insert(r, observed_kind);
         self.registered_fflags.insert(r, fflags);
         tracing::debug!(
             ?r,
             ?path,
-            ?kind,
-            ?opts,
+            kind = ?observed_kind,
+            ?events,
             fflags = format_args!("{fflags:#x}"),
             "kqueue watch"
         );

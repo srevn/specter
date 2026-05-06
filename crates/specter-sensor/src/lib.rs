@@ -8,7 +8,7 @@
 // surface narrow.
 #![warn(unsafe_code)]
 
-use specter_core::{FsEvent, ProbeRequest, ProfileId, ResourceId, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, ResourceKind};
 use std::io;
 use std::path::Path;
 use std::time::Instant;
@@ -37,8 +37,8 @@ use std::time::Instant;
 ///     // 1. Apply pending WatchOps from the channel.
 ///     while let Ok(op) = ops_rx.try_recv() {
 ///         match op {
-///             WatchOp::Watch { resource, path, opts } => {
-///                 if let Err(e) = watcher.watch(resource, &path, opts) {
+///             WatchOp::Watch { resource, path, kind, events } => {
+///                 if let Err(e) = watcher.watch(resource, &path, kind, events) {
 ///                     // FD-pressure or similar — engine handles via
 ///                     // `Input::WatchOpRejected`.
 ///                     engine_inbound.send(/* … */);
@@ -63,12 +63,34 @@ use std::time::Instant;
 /// by rescheduling on every event, so callers must not assume per-write
 /// delivery — only "at least one event when something changed."
 pub trait FsWatcher: Send {
-    /// Install a watch. Returns syscall errors verbatim — `EMFILE` /
-    /// `ENFILE` / `ENOENT` / `EACCES` propagate. The bin packages a
-    /// non-`Ok` return as `Input::WatchOpRejected { resource, op, errno }`
-    /// for the engine, which clamps `watch_demand` to zero and waits for
-    /// the parent's next `StructureChanged` to retry.
-    fn watch(&mut self, r: ResourceId, path: &Path, opts: WatchOpts) -> io::Result<()>;
+    /// Install (or re-register) a watch. Returns syscall errors
+    /// verbatim — `EMFILE` / `ENFILE` / `ENOENT` / `EACCES` propagate.
+    /// The bin packages a non-`Ok` return as
+    /// `Input::WatchOpRejected { resource, op, errno }` for the
+    /// engine, which clamps `watch_demand` to zero and waits for the
+    /// parent's next `StructureChanged` to retry.
+    ///
+    /// `kind` is the engine's authoritative classification of the slot
+    /// (`File` / `Dir` / `Unknown`). The watcher's fresh-watch path
+    /// uses it as a verification step against the inode the freshly
+    /// opened fd resolved to: a kind disagreement returns `ENOTDIR` /
+    /// `EISDIR` so the engine routes through the same FD-pressure
+    /// recovery path. `Unknown` is a wildcard — the watcher accepts
+    /// whatever inode resolves and caches the observed kind for
+    /// downstream normalization. Re-watch paths reuse the cached kind
+    /// and ignore this argument.
+    ///
+    /// `events` is the per-Resource event-class union (R2 / D4). The
+    /// watcher diffs it against the cached per-FD mask and re-registers
+    /// iff different; `ClassSet::EMPTY` degrades to identity-floor-only
+    /// delivery.
+    fn watch(
+        &mut self,
+        r: ResourceId,
+        path: &Path,
+        kind: ResourceKind,
+        events: ClassSet,
+    ) -> io::Result<()>;
 
     /// Remove a watch. Idempotent on stale ids. The sensor releases its
     /// kernel-level registration (kqueue: closes the watched fd; inotify:

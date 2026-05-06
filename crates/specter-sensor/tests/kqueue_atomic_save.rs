@@ -11,7 +11,7 @@
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
-use specter_core::{ClassSet, FsEvent, ResourceId, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, KqueueWatcher};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -33,15 +33,9 @@ fn atomic_save_emits_terminal_on_old_inode_and_structure_on_dir() {
     // StructureChanged. The file watch can stay with EMPTY events: the
     // identity floor (NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE) covers
     // the terminal event we assert on for the file's old inode.
-    w.watch(
-        r_dir,
-        tmp.path(),
-        WatchOpts {
-            events: ClassSet::STRUCTURE,
-        },
-    )
-    .expect("watch dir");
-    w.watch(r_file, &target, WatchOpts::default())
+    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
+        .expect("watch dir");
+    w.watch(r_file, &target, ResourceKind::File, ClassSet::EMPTY)
         .expect("watch file");
 
     // Atomic save: write staging file, then rename over target.

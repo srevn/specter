@@ -178,10 +178,7 @@ impl Engine {
     pub(crate) fn release_descendant_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Take the snapshot atomically. Idempotent: subsequent calls
         // find `None` and short-circuit without further work.
-        let taken = self
-            .profiles
-            .get_mut(pid)
-            .and_then(|p| p.current.take());
+        let taken = self.profiles.get_mut(pid).and_then(|p| p.current.take());
         let Some(snapshot) = taken else {
             return;
         };

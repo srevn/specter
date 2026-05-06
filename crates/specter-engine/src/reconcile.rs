@@ -538,14 +538,7 @@ fn create_child(
         && let Some(sub) = dc.subtree.as_deref()
     {
         walk_pair(
-            None,
-            sub,
-            resource,
-            profile,
-            profile_id,
-            tree,
-            profiles,
-            out,
+            None, sub, resource, profile, profile_id, tree, profiles, out,
         );
     }
 }

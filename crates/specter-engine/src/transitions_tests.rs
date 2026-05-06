@@ -1275,7 +1275,8 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
             op: WatchOp::Watch {
                 resource: r,
                 path: std::path::PathBuf::new(),
-                opts: specter_core::WatchOpts::default(),
+                kind: specter_core::ResourceKind::Unknown,
+                events: specter_core::ClassSet::EMPTY,
             },
             errno: 24,
         },
@@ -1354,7 +1355,8 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
             op: WatchOp::Watch {
                 resource: foo,
                 path: std::path::PathBuf::from("foo"),
-                opts: specter_core::WatchOpts::default(),
+                kind: specter_core::ResourceKind::Unknown,
+                events: specter_core::ClassSet::EMPTY,
             },
             errno: 24,
         },
@@ -1421,7 +1423,8 @@ fn watch_op_rejected_for_anchored_profile_emits_anchor_claim_purged() {
             op: WatchOp::Watch {
                 resource: r,
                 path: std::path::PathBuf::new(),
-                opts: specter_core::WatchOpts::default(),
+                kind: specter_core::ResourceKind::Unknown,
+                events: specter_core::ClassSet::EMPTY,
             },
             errno: 24,
         },
@@ -1493,7 +1496,8 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
             op: WatchOp::Watch {
                 resource: foo,
                 path: std::path::PathBuf::from("foo"),
-                opts: specter_core::WatchOpts::default(),
+                kind: specter_core::ResourceKind::Unknown,
+                events: specter_core::ClassSet::EMPTY,
             },
             errno: 24,
         },

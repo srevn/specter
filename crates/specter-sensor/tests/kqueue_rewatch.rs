@@ -4,22 +4,17 @@
 //! These tests exercise [`KqueueWatcher::watch`]'s re-watch path: a
 //! second `watch()` call on a resource that already holds an `OwnedFd`.
 //! The watcher diffs the cached fflags against the translator's output
-//! for the new `(opts.events, kind)` and re-registers via `EV_ADD` when
+//! for the new `(events, kind)` and re-registers via `EV_ADD` when
 //! they differ. macOS / FreeBSD only.
 
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
-use specter_core::{ClassSet, FsEvent, ResourceId, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, KqueueWatcher};
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-/// Build a [`WatchOpts`] with the given event-class mask.
-const fn opts(events: ClassSet) -> WatchOpts {
-    WatchOpts { events }
-}
 
 /// Drain at least one event matching `pred` or hit `overall` deadline.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
@@ -62,7 +57,8 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
 
     // First registration: CONTENT only. NOTE_ATTRIB is NOT installed, so
     // chmod must not fire MetadataChanged.
-    w.watch(r, &path, opts(ClassSet::CONTENT)).unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
+        .unwrap();
 
     // Drain any pending registration acks / spurious events.
     let _ = drain_for(&mut w, Duration::from_millis(100));
@@ -83,8 +79,13 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
     // Re-register with widened mask. Same path, same resource — the
     // watcher takes the re-watch path, diffs cached fflags vs new, and
     // re-registers via EV_ADD with NOTE_ATTRIB now in the mask.
-    w.watch(r, &path, opts(ClassSet::CONTENT | ClassSet::METADATA))
-        .unwrap();
+    w.watch(
+        r,
+        &path,
+        ResourceKind::File,
+        ClassSet::CONTENT | ClassSet::METADATA,
+    )
+    .unwrap();
 
     // Now chmod fires MetadataChanged.
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
@@ -121,7 +122,8 @@ fn rewatch_with_narrowed_mask_drops_classes() {
     w.watch(
         r,
         tmp.path(),
-        opts(ClassSet::STRUCTURE | ClassSet::METADATA),
+        ResourceKind::Dir,
+        ClassSet::STRUCTURE | ClassSet::METADATA,
     )
     .unwrap();
     let _ = drain_for(&mut w, Duration::from_millis(100));
@@ -143,7 +145,8 @@ fn rewatch_with_narrowed_mask_drops_classes() {
 
     // Narrow to STRUCTURE only. Re-watch path: re-registers without
     // NOTE_ATTRIB.
-    w.watch(r, tmp.path(), opts(ClassSet::STRUCTURE)).unwrap();
+    w.watch(r, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
+        .unwrap();
     let _ = drain_for(&mut w, Duration::from_millis(100));
 
     // chmod again — must NOT fire MetadataChanged anymore.
@@ -190,10 +193,11 @@ fn rewatch_with_same_mask_preserves_registration() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    let opts = opts(ClassSet::CONTENT);
-    w.watch(r, &path, opts).unwrap();
-    // Same opts twice: hits the cache-diff `noop` branch.
-    w.watch(r, &path, opts).unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
+        .unwrap();
+    // Same mask twice: hits the cache-diff `noop` branch.
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
+        .unwrap();
 
     std::fs::write(&path, "y").unwrap();
     let out = drain_until(
@@ -225,13 +229,19 @@ fn rewatch_preserves_suppress_state() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    w.watch(r, &path, opts(ClassSet::CONTENT)).unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
+        .unwrap();
     w.suppress(r);
     let _ = drain_for(&mut w, Duration::from_millis(100));
 
     // Re-watch with widened mask. Per §10.5, suppression is preserved.
-    w.watch(r, &path, opts(ClassSet::CONTENT | ClassSet::METADATA))
-        .unwrap();
+    w.watch(
+        r,
+        &path,
+        ResourceKind::File,
+        ClassSet::CONTENT | ClassSet::METADATA,
+    )
+    .unwrap();
 
     // Even though the new mask covers METADATA, chmod must not deliver
     // — delivery is still suppressed.
@@ -293,7 +303,8 @@ fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
     let r = sm.insert(());
 
     // Watch before any modification so the kernel filter is live.
-    w.watch(r, &path, opts(ClassSet::CONTENT)).unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
+        .unwrap();
 
     // Write — queues a NOTE_WRITE in the kernel filter. Drain it once so
     // we know the event landed; this also clears any registration-time
@@ -325,8 +336,13 @@ fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
     // Re-watch with a widened mask. The single-syscall change record
     // re-registers AND keeps the disable bit set; the buffered NOTE_WRITE
     // does not slip out.
-    w.watch(r, &path, opts(ClassSet::CONTENT | ClassSet::METADATA))
-        .unwrap();
+    w.watch(
+        r,
+        &path,
+        ResourceKind::File,
+        ClassSet::CONTENT | ClassSet::METADATA,
+    )
+    .unwrap();
     let post_rewatch = drain_for(&mut w, Duration::from_millis(300));
     assert!(
         !post_rewatch.iter().any(|(rid, _)| *rid == r),
@@ -337,11 +353,7 @@ fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
     // Sanity check: unsuppress reveals the buffered event(s), confirming
     // they were merely silenced (not lost) and the new mask took effect.
     w.unsuppress(r);
-    let restored = drain_until(
-        &mut w,
-        |(rid, _)| *rid == r,
-        Duration::from_secs(2),
-    );
+    let restored = drain_until(&mut w, |(rid, _)| *rid == r, Duration::from_secs(2));
     assert!(
         restored.iter().any(|(rid, _)| *rid == r),
         "unsuppress must flush buffered events; got {restored:?}",
@@ -362,11 +374,13 @@ fn unwatch_then_watch_starts_fresh() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    w.watch(r, &path, opts(ClassSet::CONTENT)).unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
+        .unwrap();
     w.unwatch(r);
     // Fresh watch (FD reopened, cache repopulated). Observable check:
     // a subsequent write fires Modified normally.
-    w.watch(r, &path, opts(ClassSet::CONTENT)).unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
+        .unwrap();
 
     std::fs::write(&path, "y").unwrap();
     let out = drain_until(

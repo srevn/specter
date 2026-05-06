@@ -23,16 +23,16 @@ pub struct Resource {
     pub watch_demand: u32,
     pub suppress_count: u32,
     /// Per-Resource OR of every covering Profile's contribution (R2 / D4).
-    /// The kqueue translator (sensor side) reads this off `WatchOpts.events`
-    /// to compute fflags. Maintained by the engine's refcount helpers in
-    /// lockstep with `watch_demand` — added on +1, recomputed on −1 when
-    /// the refcount stays non-zero, cleared on 1→0 alongside the
-    /// `Unwatch` op.
+    /// The kqueue translator (sensor side) reads this off
+    /// `WatchOp::Watch.events` to compute fflags. Maintained by the
+    /// engine's refcount helpers in lockstep with `watch_demand` — added
+    /// on +1, recomputed on −1 when the refcount stays non-zero, cleared
+    /// on 1→0 alongside the `Unwatch` op.
     ///
     /// `pub` (not `pub(crate)`) — same visibility as `watch_demand` and
     /// `suppress_count`. The engine reads it directly via
     /// `tree.get(r).events_union`; the sensor never reads it (it sees the
-    /// per-resource mask through `WatchOp::Watch.opts.events`).
+    /// per-resource mask through `WatchOp::Watch.events`).
     pub events_union: ClassSet,
     pub role: ResourceRole,
 }
@@ -70,6 +70,28 @@ impl ResourceKind {
             Self::Unknown => Self::File,
             other => other,
         }
+    }
+
+    /// Verification predicate for `WatchOp::Watch.kind` against the
+    /// inode the watcher's open fd resolved to.
+    ///
+    /// Returns `true` when `self` (the engine's expected kind on the
+    /// `WatchOp`) matches `observed` (the watcher's `fstat` of the
+    /// freshly opened fd), with [`Self::Unknown`] acting as a
+    /// wildcard. Backends use it from their fresh-watch path to reject
+    /// installs where the path's on-disk kind diverges from the
+    /// engine's expectation — closing the TOCTOU window between
+    /// `stat(path)` and `inotify_add_watch(path)` (linux) or
+    /// `open(path)` and `kevent(EV_ADD)` (kqueue).
+    ///
+    /// `Unknown` is the engine's sentinel for unclassified slots
+    /// (descent prefix placeholder, post-`add_watch_demand` before the
+    /// first probe). Treating it as a wildcard lets the watcher
+    /// proceed against whatever inode resolved and cache the observed
+    /// kind for downstream normalization / mask translation.
+    #[must_use]
+    pub const fn matches_or_unknown(self, observed: Self) -> bool {
+        matches!(self, Self::Unknown) || self as u8 == observed as u8
     }
 }
 
@@ -186,6 +208,38 @@ mod tests {
         assert_eq!(ResourceKind::Unknown.effective(), ResourceKind::File);
         assert_eq!(ResourceKind::File.effective(), ResourceKind::File);
         assert_eq!(ResourceKind::Dir.effective(), ResourceKind::Dir);
+    }
+
+    /// `matches_or_unknown` is the watcher-side verification predicate
+    /// for `WatchOp::Watch.kind`. It matches when both kinds agree OR
+    /// the expected kind is `Unknown` (the engine's wildcard).
+    #[test]
+    fn matches_or_unknown_accepts_exact_matches() {
+        assert!(ResourceKind::File.matches_or_unknown(ResourceKind::File));
+        assert!(ResourceKind::Dir.matches_or_unknown(ResourceKind::Dir));
+    }
+
+    #[test]
+    fn matches_or_unknown_rejects_kind_disagreement() {
+        assert!(!ResourceKind::File.matches_or_unknown(ResourceKind::Dir));
+        assert!(!ResourceKind::Dir.matches_or_unknown(ResourceKind::File));
+    }
+
+    #[test]
+    fn matches_or_unknown_treats_unknown_expected_as_wildcard() {
+        assert!(ResourceKind::Unknown.matches_or_unknown(ResourceKind::File));
+        assert!(ResourceKind::Unknown.matches_or_unknown(ResourceKind::Dir));
+        assert!(ResourceKind::Unknown.matches_or_unknown(ResourceKind::Unknown));
+    }
+
+    #[test]
+    fn matches_or_unknown_is_one_directional_in_unknown() {
+        // `expected` Unknown is a wildcard; `observed` Unknown is not —
+        // the watcher's fstat must always classify to a concrete kind,
+        // and a concrete-expected kind paired with an unknown-observed
+        // signals a broken sensor invariant rather than a wildcard.
+        assert!(!ResourceKind::File.matches_or_unknown(ResourceKind::Unknown));
+        assert!(!ResourceKind::Dir.matches_or_unknown(ResourceKind::Unknown));
     }
 
     /// Fresh `Resource` initialises `events_union` to `EMPTY`. Refcount

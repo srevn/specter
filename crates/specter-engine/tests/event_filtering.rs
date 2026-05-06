@@ -185,9 +185,9 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
 
     // The seed response emits a Watch op for the per-file FD.
     let saw_per_file_watch = seed_out.watch_ops.iter().any(|op| match op {
-        WatchOp::Watch { resource, opts, .. } => {
-            *resource == file_id && opts.events == ClassSet::DEFAULT_SUBTREE_ROOT
-        }
+        WatchOp::Watch {
+            resource, events, ..
+        } => *resource == file_id && *events == ClassSet::DEFAULT_SUBTREE_ROOT,
         _ => false,
     });
     assert!(
@@ -645,7 +645,9 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
         .iter()
         .rev()
         .find_map(|op| match op {
-            WatchOp::Watch { resource, opts, .. } if *resource == root => Some(opts.events),
+            WatchOp::Watch {
+                resource, events, ..
+            } if *resource == root => Some(*events),
             _ => None,
         })
         .expect("Profile A's attach emits a Watch on root");
@@ -677,7 +679,9 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
         .watch_ops
         .iter()
         .find_map(|op| match op {
-            WatchOp::Watch { resource, opts, .. } if *resource == root => Some(opts.events),
+            WatchOp::Watch {
+                resource, events, ..
+            } if *resource == root => Some(*events),
             _ => None,
         })
         .expect("Profile B's attach emits a fresh Watch on root (D11 mask widening)");
@@ -1484,7 +1488,10 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
     let p = e.profiles().get(pid).expect("Profile survives anchor loss");
     assert!(matches!(p.state, ProfileState::Idle));
     assert!(!p.anchor_contribution);
-    assert!(p.current.is_none(), "current taken by release_descendant_claim");
+    assert!(
+        p.current.is_none(),
+        "current taken by release_descendant_claim"
+    );
     assert!(
         e.tree().get(child).is_none(),
         "subdir reaped via release_descendant_claim on anchor terminal",
@@ -1662,7 +1669,10 @@ fn release_descendant_claim_multi_profile_preserves_others() {
     let snap_q = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
     complete_seed_burst(&mut e, pid_q, &attach_out_q, snap_q);
 
-    let subdir = e.tree().lookup(Some(root), "subdir").expect("subdir seeded");
+    let subdir = e
+        .tree()
+        .lookup(Some(root), "subdir")
+        .expect("subdir seeded");
     assert_eq!(
         e.tree().get(subdir).unwrap().watch_demand,
         2,
@@ -1783,7 +1793,10 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     let snap_q = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
     complete_seed_burst(&mut e, pid_q, &attach_out_q, snap_q);
 
-    let subdir = e.tree().lookup(Some(root), "subdir").expect("subdir seeded");
+    let subdir = e
+        .tree()
+        .lookup(Some(root), "subdir")
+        .expect("subdir seeded");
     assert_eq!(e.tree().get(subdir).unwrap().watch_demand, 2);
     assert_eq!(
         e.tree().get(subdir).unwrap().events_union,
@@ -1840,7 +1853,10 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     // - recompute(subdir, releasing_descendant=Some(P)): P skipped,
     //   Q contributes METADATA → events_union = METADATA.
     // - Without the skip: events_union = CONTENT | METADATA (over-mask).
-    assert!(e.tree().get(subdir).is_some(), "subdir survives, Q anchors it");
+    assert!(
+        e.tree().get(subdir).is_some(),
+        "subdir survives, Q anchors it"
+    );
     assert_eq!(
         e.tree().get(subdir).unwrap().watch_demand,
         1,

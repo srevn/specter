@@ -14,18 +14,13 @@
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
-use specter_core::{ClassSet, FsEvent, ResourceId, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, KqueueWatcher};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-/// Build a [`WatchOpts`] with the given event-class mask.
-const fn opts(events: ClassSet) -> WatchOpts {
-    WatchOpts { events }
-}
 
 /// Drain events from `w` until at least one matches `pred` or the
 /// deadline elapses. Returns the accumulated events. Loops with short
@@ -58,7 +53,7 @@ fn watch_dir_observes_structure_changed_on_create() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = fresh_id(&mut sm);
 
-    w.watch(r_dir, tmp.path(), opts(ClassSet::STRUCTURE))
+    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
         .expect("watch dir ok");
 
     std::fs::write(tmp.path().join("foo.c"), "x").unwrap();
@@ -86,7 +81,7 @@ fn watch_file_observes_modified_on_write() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
-    w.watch(r_file, &path, opts(ClassSet::CONTENT))
+    w.watch(r_file, &path, ResourceKind::File, ClassSet::CONTENT)
         .expect("watch file ok");
 
     std::fs::write(&path, "updated more bytes here").unwrap();
@@ -115,7 +110,7 @@ fn watch_file_observes_removed_on_unlink() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
     // EMPTY events suffice: NOTE_DELETE is in the identity floor.
-    w.watch(r_file, &path, WatchOpts::default())
+    w.watch(r_file, &path, ResourceKind::File, ClassSet::EMPTY)
         .expect("watch file ok");
 
     std::fs::remove_file(&path).unwrap();
@@ -145,7 +140,8 @@ fn watch_file_observes_renamed_on_rename() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
     // EMPTY events suffice: NOTE_RENAME is in the identity floor.
-    w.watch(r_file, &src, WatchOpts::default()).unwrap();
+    w.watch(r_file, &src, ResourceKind::File, ClassSet::EMPTY)
+        .unwrap();
 
     std::fs::rename(&src, &dst).unwrap();
 
@@ -172,7 +168,8 @@ fn watch_file_observes_metadata_changed_on_chmod() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
-    w.watch(r_file, &path, opts(ClassSet::METADATA)).unwrap();
+    w.watch(r_file, &path, ResourceKind::File, ClassSet::METADATA)
+        .unwrap();
 
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o600);
@@ -201,7 +198,9 @@ fn watch_path_with_nul_byte_returns_error() {
     let bad: &OsStr = OsStrExt::from_bytes(b"/tmp/has\0nul");
     let bad_path = std::path::Path::new(bad);
 
-    let res = w.watch(r, bad_path, WatchOpts::default());
+    // `Unknown` kind: open fails before fstat, so kind verification
+    // never runs.
+    let res = w.watch(r, bad_path, ResourceKind::Unknown, ClassSet::EMPTY);
     assert!(res.is_err());
 }
 
@@ -211,10 +210,13 @@ fn watch_nonexistent_path_returns_enoent() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = fresh_id(&mut sm);
 
+    // `Unknown` kind: open fails with ENOENT before fstat, so kind
+    // verification never runs.
     let res = w.watch(
         r,
         std::path::Path::new("/this/path/does/not/exist/specter"),
-        WatchOpts::default(),
+        ResourceKind::Unknown,
+        ClassSet::EMPTY,
     );
     assert!(res.is_err());
     assert_eq!(res.err().unwrap().raw_os_error(), Some(libc::ENOENT));
@@ -232,7 +234,8 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     // CONTENT so the kernel actually queues an event for the write
     // below — exercising the late-event-drain path the test's contract
     // covers.
-    w.watch(r_file, &path, opts(ClassSet::CONTENT)).unwrap();
+    w.watch(r_file, &path, ResourceKind::File, ClassSet::CONTENT)
+        .unwrap();
 
     std::fs::write(&path, "changed").unwrap();
     w.unwatch(r_file);

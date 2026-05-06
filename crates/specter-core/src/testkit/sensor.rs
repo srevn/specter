@@ -132,7 +132,9 @@ enum Edge {
 #[cfg(test)]
 mod tests {
     use super::MockSensor;
-    use crate::{Diagnostic, Input, ProbeOp, ResourceId, StepOutput, WatchOp, WatchOpts};
+    use crate::{
+        ClassSet, Diagnostic, Input, ProbeOp, ResourceId, ResourceKind, StepOutput, WatchOp,
+    };
     use slotmap::SlotMap;
     use std::path::PathBuf;
 
@@ -150,7 +152,8 @@ mod tests {
         step_one.watch_ops.push(WatchOp::Watch {
             resource: ids[0],
             path: PathBuf::from("/tmp/a"),
-            opts: WatchOpts::default(),
+            kind: ResourceKind::Unknown,
+            events: ClassSet::EMPTY,
         });
         step_one.probe_ops.push(ProbeOp::Cancel {
             profile: crate::ProfileId::default(),
@@ -202,7 +205,8 @@ mod tests {
         out.watch_ops.push(WatchOp::Watch {
             resource: watched,
             path: PathBuf::from("/tmp/x"),
-            opts: WatchOpts::default(),
+            kind: ResourceKind::Unknown,
+            events: ClassSet::EMPTY,
         });
         sensor.observe(&out);
 
@@ -227,7 +231,8 @@ mod tests {
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path: PathBuf::from("/tmp/z"),
-            opts: WatchOpts::default(),
+            kind: ResourceKind::Unknown,
+            events: ClassSet::EMPTY,
         });
 
         let mut sensor = MockSensor::default();
@@ -246,7 +251,8 @@ mod tests {
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path: PathBuf::from("/tmp/w"),
-            opts: WatchOpts::default(),
+            kind: ResourceKind::Unknown,
+            events: ClassSet::EMPTY,
         });
         out.watch_ops.push(WatchOp::Unwatch { resource: r });
 
@@ -266,13 +272,15 @@ mod tests {
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path: PathBuf::from("/tmp/w"),
-            opts: WatchOpts::default(),
+            kind: ResourceKind::Unknown,
+            events: ClassSet::EMPTY,
         });
         out.watch_ops.push(WatchOp::Unwatch { resource: r });
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path: PathBuf::from("/tmp/w"),
-            opts: WatchOpts::default(),
+            kind: ResourceKind::Unknown,
+            events: ClassSet::EMPTY,
         });
 
         let mut sensor = MockSensor::default();
@@ -333,7 +341,8 @@ mod tests {
         let op = WatchOp::Watch {
             resource: r,
             path: PathBuf::from("/tmp/p"),
-            opts: WatchOpts::default(),
+            kind: ResourceKind::Unknown,
+            events: ClassSet::EMPTY,
         };
         let input = MockSensor::watch_op_rejected(r, op, EMFILE);
         match input {

@@ -108,8 +108,8 @@ mod tests {
     }
 
     /// EMPTY × any-kind always degrades to identity-floor only. This is
-    /// the v1 fallback for fixture-defaulted `WatchOpts::default()` and
-    /// the shape the integration tests of P0/P1 still depend on.
+    /// the v1 fallback for fixture-defaulted `ClassSet::EMPTY` watches
+    /// and the shape the integration tests of P0/P1 still depend on.
     #[test]
     fn empty_class_set_yields_identity_floor_only() {
         for kind in [ResourceKind::Dir, ResourceKind::File, ResourceKind::Unknown] {

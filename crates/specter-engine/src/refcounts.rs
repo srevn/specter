@@ -34,7 +34,7 @@
 use crate::coverage::covers;
 use specter_core::{
     ClassSet, Profile, ProfileId, ProfileMap, ProfileState, ResourceId, ResourceKind, StepOutput,
-    Tree, WatchOp, WatchOpts,
+    Tree, WatchOp,
 };
 
 /// `+watch_demand` on `r`, contributing `contribution` to `r.events_union`.
@@ -72,10 +72,12 @@ pub fn add_watch_demand(
 
     if prev_refcount == 0 || new_union != prev_union {
         let path = tree.path_of(r).unwrap_or_default();
+        let kind = tree.get(r).map_or(ResourceKind::Unknown, |res| res.kind);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
-            opts: WatchOpts { events: new_union },
+            kind,
+            events: new_union,
         });
     }
 }
@@ -156,10 +158,12 @@ pub fn sub_watch_demand(
             res.events_union = new_union;
         }
         let path = tree.path_of(r).unwrap_or_default();
+        let kind = tree.get(r).map_or(ResourceKind::Unknown, |res| res.kind);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
-            opts: WatchOpts { events: new_union },
+            kind,
+            events: new_union,
         });
     }
 }
@@ -345,7 +349,7 @@ mod tests {
     };
     use specter_core::{
         ClassSet, DescentState, Profile, ProfileMap, ProfileState, ResourceKind, ResourceRole,
-        ScanConfig, StepOutput, Tree, WatchOp, WatchOpts,
+        ScanConfig, StepOutput, Tree, WatchOp,
     };
     use std::time::Duration;
 
@@ -369,7 +373,7 @@ mod tests {
     /// Last `WatchOp::Watch` emitted, for asserting on its `events`.
     fn last_watch_events(out: &StepOutput) -> Option<ClassSet> {
         out.watch_ops.iter().rev().find_map(|op| match op {
-            WatchOp::Watch { opts, .. } => Some(opts.events),
+            WatchOp::Watch { events, .. } => Some(*events),
             _ => None,
         })
     }
@@ -383,9 +387,11 @@ mod tests {
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::CONTENT);
         assert_eq!(out.watch_ops.len(), 1);
         match &out.watch_ops[0] {
-            WatchOp::Watch { resource, opts, .. } => {
+            WatchOp::Watch {
+                resource, events, ..
+            } => {
                 assert_eq!(*resource, r);
-                assert_eq!(opts.events, ClassSet::CONTENT);
+                assert_eq!(*events, ClassSet::CONTENT);
             }
             op => panic!("expected Watch, got {op:?}"),
         }
@@ -1052,13 +1058,5 @@ mod tests {
             recompute_resource_events(&tree, &profiles, leaf, None),
             ClassSet::CONTENT,
         );
-    }
-
-    /// Suppresses dead-code warnings in `cfg(test)` builds where some
-    /// `WatchOpts` field reads are exercised only via `last_watch_events`.
-    #[test]
-    fn watch_opts_default_is_class_empty() {
-        let opts = WatchOpts::default();
-        assert_eq!(opts.events, ClassSet::EMPTY);
     }
 }

@@ -21,14 +21,10 @@
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
-use specter_core::{ClassSet, FsEvent, ResourceId, WatchOpts};
+use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, KqueueWatcher};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-const fn opts(events: ClassSet) -> WatchOpts {
-    WatchOpts { events }
-}
 
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut KqueueWatcher,
@@ -75,9 +71,9 @@ fn in_place_edit_fires_modified_on_per_file_fd() {
     // Sub: dir with STRUCTURE, file with CONTENT.
     let r_dir = sm.insert(());
     let r_file = sm.insert(());
-    w.watch(r_dir, tmp.path(), opts(ClassSet::STRUCTURE))
+    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
         .expect("watch dir with STRUCTURE");
-    w.watch(r_file, &file_path, opts(ClassSet::CONTENT))
+    w.watch(r_file, &file_path, ResourceKind::File, ClassSet::CONTENT)
         .expect("watch file with CONTENT");
 
     // In-place edit. The shell's `>` redirect on macOS opens the
@@ -117,7 +113,7 @@ fn in_place_edit_does_not_fire_on_dir_watch_alone() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = sm.insert(());
-    w.watch(r_dir, tmp.path(), opts(ClassSet::STRUCTURE))
+    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
         .expect("watch dir");
 
     // Drain any registration ack noise so the post-edit drain is clean.

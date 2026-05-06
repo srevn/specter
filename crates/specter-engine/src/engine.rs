@@ -819,9 +819,9 @@ mod tests {
     use super::*;
     use slotmap::KeyData;
     use specter_core::{
-        DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeKind, ProbeOp,
-        ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ResourceId, ScanConfig, StepOutput,
-        SubId, SubRegistryDiff, TimerId, TimerKind, WatchOp, WatchOpts,
+        ClassSet, DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeKind, ProbeOp,
+        ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ResourceId, ResourceKind, ScanConfig,
+        StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind, WatchOp,
     };
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -1094,7 +1094,8 @@ mod tests {
         out.watch_ops.push(WatchOp::Watch {
             resource: r1,
             path: PathBuf::from("/x"),
-            opts: WatchOpts::default(),
+            kind: ResourceKind::Unknown,
+            events: ClassSet::EMPTY,
         });
         out.watch_ops.push(WatchOp::Unwatch { resource: r2 });
 
