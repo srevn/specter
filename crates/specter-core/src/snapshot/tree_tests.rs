@@ -2,7 +2,7 @@ use super::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot, diff_tree,
     splice,
 };
-use crate::diff::EntryRef;
+use crate::diff::{Diff, EntryRef, Rename};
 use crate::ids::ResourceId;
 use crate::resource::ResourceRole;
 use crate::snapshot::EntryKind;
@@ -126,7 +126,10 @@ fn leaf_entry_clone_preserves_cache() {
 
 // Compile-time assertion: the load-bearing concurrency properties of the
 // new types. `OnceLock<u128>` is `Sync`; if someone replaces it with
-// `Cell<...>` the build breaks here.
+// `Cell<...>` the build breaks here. `Diff` and friends are pinned too —
+// `Effect.diff: Option<Arc<Diff>>` shares them across threads, so a
+// regression that introduces an `Rc` or `*const` member here trips this
+// assertion at compile time rather than racing in production.
 #[allow(dead_code)]
 const _SEND_SYNC: fn() = || {
     fn assert_send<T: Send>() {}
@@ -143,6 +146,12 @@ const _SEND_SYNC: fn() = || {
     assert_sync::<DirSnapshot>();
     assert_send::<TreeSnapshot>();
     assert_sync::<TreeSnapshot>();
+    assert_send::<EntryRef>();
+    assert_sync::<EntryRef>();
+    assert_send::<Rename>();
+    assert_sync::<Rename>();
+    assert_send::<Diff>();
+    assert_sync::<Diff>();
 };
 
 // ---------------------------------------------------------------------------
@@ -1022,10 +1031,6 @@ fn splice_target_chain_through_uncovered_returns_crossed_uncovered_keeping_prior
 // diff_tree
 // ---------------------------------------------------------------------------
 
-fn empty_diff() -> bool {
-    true
-}
-
 #[test]
 fn diff_tree_self_is_empty() {
     let s = TreeSnapshot::Dir(make_dir(
@@ -1036,7 +1041,6 @@ fn diff_tree_self_is_empty() {
     ));
     let d = diff_tree(&s, &s);
     assert!(d.is_empty());
-    let _ = empty_diff(); // keep helper used
 }
 
 #[test]
@@ -1350,6 +1354,352 @@ fn diff_tree_same_name_kind_change() {
     assert_eq!(d.deleted[0].kind, EntryKind::File);
     assert_eq!(d.created.len(), 1);
     assert_eq!(d.created[0].kind, EntryKind::Dir);
+    assert!(d.renamed.is_empty(), "kind change is not a rename");
+}
+
+#[test]
+fn diff_tree_same_name_kind_change_dir_with_descendants() {
+    // Baseline: /foo (File). Current: /foo (Dir with two children).
+    // The kind-change arm must recurse into the new Dir's subtree so the
+    // descendants surface to the engine's per-stable-file emission path.
+    let new_dir = make_dir(
+        ResourceId::default(),
+        meta(2, 8, 0),
+        0,
+        BTreeMap::from_iter([
+            (
+                name("x"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 10, 0)),
+            ),
+            (
+                name("y"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 11, 0)),
+            ),
+        ]),
+    );
+    let a = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(1, 1, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("foo"),
+            ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 7, 0)),
+        )]),
+    ));
+    let b = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(2, 1, 0),
+        0,
+        BTreeMap::from_iter([(name("foo"), dir(8, 0, Some(new_dir)))]),
+    ));
+    let d = diff_tree(&a, &b);
+
+    let created_segs: Vec<_> = d.created.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(
+        created_segs,
+        vec!["foo", "foo/x", "foo/y"],
+        "kind change → Dir must surface descendants in lex order",
+    );
+    let deleted_segs: Vec<_> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(deleted_segs, vec!["foo"]);
+    assert!(d.renamed.is_empty());
+}
+
+#[test]
+fn diff_tree_same_name_kind_change_dir_to_file_with_prior_descendants() {
+    // Reverse direction: baseline /foo (Dir with two children),
+    // current /foo (File). The prior subtree's descendants must surface
+    // as Deleted so consumers see they're gone.
+    let prior_dir = make_dir(
+        ResourceId::default(),
+        meta(1, 8, 0),
+        0,
+        BTreeMap::from_iter([
+            (
+                name("x"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 10, 0)),
+            ),
+            (
+                name("y"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 11, 0)),
+            ),
+        ]),
+    );
+    let a = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(1, 1, 0),
+        0,
+        BTreeMap::from_iter([(name("foo"), dir(8, 0, Some(prior_dir)))]),
+    ));
+    let b = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(2, 1, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("foo"),
+            ChildEntry::Leaf(leaf(EntryKind::File, 10, 2, 7, 0)),
+        )]),
+    ));
+    let d = diff_tree(&a, &b);
+
+    let deleted_segs: Vec<_> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(
+        deleted_segs,
+        vec!["foo", "foo/x", "foo/y"],
+        "kind change → Leaf must surface prior descendants in lex order",
+    );
+    let created_segs: Vec<_> = d.created.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(created_segs, vec!["foo"]);
+    assert!(d.renamed.is_empty());
+}
+
+#[test]
+fn diff_tree_same_name_kind_change_with_inode_collision() {
+    // Both prior and new at "foo" share inode 100, but kind differs
+    // (Dir → File via kernel inode reuse). The rename pairing layer must
+    // NOT collapse them into a (nonsensical) same-name "Rename".
+    let a = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(1, 1, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("foo"),
+            dir(
+                100,
+                0,
+                Some(make_dir(
+                    ResourceId::default(),
+                    meta(1, 100, 0),
+                    0,
+                    BTreeMap::new(),
+                )),
+            ),
+        )]),
+    ));
+    let b = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(2, 1, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("foo"),
+            ChildEntry::Leaf(leaf(EntryKind::File, 0, 0, 100, 0)),
+        )]),
+    ));
+    let d = diff_tree(&a, &b);
+    assert!(
+        d.renamed.is_empty(),
+        "same-path kind change with inode reuse is not a rename, got {:?}",
+        d.renamed,
+    );
+    assert_eq!(d.deleted.len(), 1);
+    assert_eq!(d.deleted[0].kind, EntryKind::Dir);
+    assert_eq!(d.deleted[0].inode, 100);
+    assert_eq!(d.created.len(), 1);
+    assert_eq!(d.created[0].kind, EntryKind::File);
+    assert_eq!(d.created[0].inode, 100);
+}
+
+#[test]
+fn diff_tree_cross_kind_inode_collision_no_phantom_rename() {
+    // Different paths, different kinds, same inode (kernel reuse across
+    // unrelated rm + mkdir). Must NOT be paired as a "Rename file → dir".
+    let a = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(1, 1, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("alpha"),
+            ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 100, 0)),
+        )]),
+    ));
+    let b = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(2, 1, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("beta"),
+            dir(
+                100,
+                0,
+                Some(make_dir(
+                    ResourceId::default(),
+                    meta(2, 100, 0),
+                    0,
+                    BTreeMap::new(),
+                )),
+            ),
+        )]),
+    ));
+    let d = diff_tree(&a, &b);
+    assert!(
+        d.renamed.is_empty(),
+        "cross-kind inode collision is not a rename, got {:?}",
+        d.renamed,
+    );
+    let deleted_segs: Vec<_> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
+    let created_segs: Vec<_> = d.created.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(deleted_segs, vec!["alpha"]);
+    assert_eq!(created_segs, vec!["beta"]);
+    assert_eq!(d.deleted[0].kind, EntryKind::File);
+    assert_eq!(d.created[0].kind, EntryKind::Dir);
+}
+
+#[test]
+fn diff_tree_dir_replace_at_different_inode_emits_descendants() {
+    // Same-name dir replaced with a fresh dir at a different inode (the
+    // user `rm -rf foo && mkdir foo`). Both the parent slot and every
+    // descendant on each side must surface — the parent identity is
+    // structurally different, and the prior children are gone while the
+    // new children are new.
+    let prior_inner = make_dir(
+        ResourceId::default(),
+        meta(1, 200, 0),
+        0,
+        BTreeMap::from_iter([
+            (
+                name("x"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 10, 0)),
+            ),
+            (
+                name("y"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 11, 0)),
+            ),
+        ]),
+    );
+    let new_inner = make_dir(
+        ResourceId::default(),
+        meta(2, 300, 0),
+        0,
+        BTreeMap::from_iter([
+            (
+                name("p"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 2, 20, 0)),
+            ),
+            (
+                name("q"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 2, 21, 0)),
+            ),
+        ]),
+    );
+    let a = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(1, 1, 0),
+        0,
+        BTreeMap::from_iter([(name("foo"), dir(200, 0, Some(prior_inner)))]),
+    ));
+    let b = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(2, 1, 0),
+        0,
+        BTreeMap::from_iter([(name("foo"), dir(300, 0, Some(new_inner)))]),
+    ));
+    let d = diff_tree(&a, &b);
+
+    let deleted_segs: Vec<_> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(
+        deleted_segs,
+        vec!["foo", "foo/x", "foo/y"],
+        "dir-replace must surface prior descendants in lex order",
+    );
+    let created_segs: Vec<_> = d.created.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(
+        created_segs,
+        vec!["foo", "foo/p", "foo/q"],
+        "dir-replace must surface new descendants in lex order",
+    );
+    assert!(d.renamed.is_empty());
+}
+
+#[test]
+fn diff_tree_rename_into_kind_change_slot() {
+    // Combined scenario: /old changes kind File→Dir AND a file at
+    // /something/dir moves into the new Dir as /old/x (same inode 500).
+    // The kind change must surface as Deleted+Created at /old, and the
+    // genuine cross-level move must surface as a Rename — neither should
+    // be lost or collapsed by the staging architecture.
+    let new_inner = make_dir(
+        ResourceId::default(),
+        meta(2, 200, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("x"),
+            ChildEntry::Leaf(leaf(EntryKind::File, 10, 2, 500, 0)),
+        )]),
+    );
+    let prior_something = make_dir(
+        ResourceId::default(),
+        meta(1, 999, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("dir"),
+            ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 500, 0)),
+        )]),
+    );
+    let new_something = make_dir(ResourceId::default(), meta(2, 999, 0), 0, BTreeMap::new());
+    let a = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(1, 1, 0),
+        0,
+        BTreeMap::from_iter([
+            (
+                name("old"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 100, 0)),
+            ),
+            (name("something"), dir(999, 0, Some(prior_something))),
+        ]),
+    ));
+    let b = TreeSnapshot::Dir(make_dir(
+        ResourceId::default(),
+        meta(2, 1, 0),
+        0,
+        BTreeMap::from_iter([
+            (name("old"), dir(200, 0, Some(new_inner))),
+            (name("something"), dir(999, 0, Some(new_something))),
+        ]),
+    ));
+    let d = diff_tree(&a, &b);
+
+    let renames: Vec<(&str, &str)> = d
+        .renamed
+        .iter()
+        .map(|r| (r.from.segment.as_str(), r.to.segment.as_str()))
+        .collect();
+    assert_eq!(
+        renames,
+        vec![("something/dir", "old/x")],
+        "cross-level rename into kind-changed slot must be detected",
+    );
+    let deleted_segs: Vec<_> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
+    let created_segs: Vec<_> = d.created.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(
+        deleted_segs,
+        vec!["old"],
+        "kind change at /old must surface as Deleted (File)",
+    );
+    assert_eq!(
+        created_segs,
+        vec!["old"],
+        "kind change at /old must surface as Created (Dir); /old/x was paired as Rename",
+    );
+    assert_eq!(d.deleted[0].kind, EntryKind::File);
+    assert_eq!(d.deleted[0].inode, 100);
+    assert_eq!(d.created[0].kind, EntryKind::Dir);
+    assert_eq!(d.created[0].inode, 200);
+}
+
+#[test]
+fn diff_tree_file_pair_device_change_is_delete_create() {
+    // File-anchored Profile, anchor's device flips. `diff_file_pair` must
+    // emit Deleted+Created (not Modified): the snapshot identity changed.
+    let a = TreeSnapshot::File(leaf(EntryKind::File, 10, 1, 7, 0));
+    let b = TreeSnapshot::File(leaf(EntryKind::File, 10, 1, 7, 1));
+    let d = diff_tree(&a, &b);
+    assert_eq!(d.deleted.len(), 1);
+    assert_eq!(d.created.len(), 1);
+    assert_eq!(d.deleted[0].inode, 7);
+    assert_eq!(d.created[0].inode, 7);
+    assert!(d.modified.is_empty());
+    assert!(d.renamed.is_empty());
 }
 
 #[test]
@@ -1722,17 +2072,5 @@ proptest! {
         let s = splice(Some(TreeSnapshot::Dir(Arc::clone(&root))), a, replacement, &tree);
         let SpliceResult::Spliced(TreeSnapshot::Dir(new_root)) = s else { unreachable!() };
         prop_assert!(Arc::ptr_eq(&new_root, &root));
-    }
-}
-
-// Use EntryRef to silence the "unused import" warning when tests narrow
-// to specific use cases. The cross-level rename test exercises EntryRef
-// equality semantics indirectly.
-#[allow(dead_code)]
-fn _assert_entry_ref_constructible() -> EntryRef {
-    EntryRef {
-        segment: CompactString::new("x"),
-        kind: EntryKind::File,
-        inode: 0,
     }
 }

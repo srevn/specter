@@ -472,6 +472,16 @@ fn compute_dir_hash(d: &DirSnapshot) -> u128 {
                 l.leaf_hash().hash(&mut h);
             }
             ChildEntry::Dir(c) => {
+                // `(inode, device)` are folded twice on the `Some(subtree)`
+                // path: once via the DirChild and once transitively through
+                // the subtree's `root_meta` inside `dir_hash`. The values
+                // agree by walker construction (both lstats target the same
+                // dirent), so the duplication is harmless. The asymmetry is
+                // necessary: when `subtree = None` (uncovered), only the
+                // DirChild fold contributes inode/device, since
+                // `UNCOVERED_SUBTREE_HASH` is a constant. Folding the
+                // DirChild's inode/device unconditionally keeps the
+                // covered/uncovered cases distinguishable.
                 DIR_TAG.hash(&mut h);
                 c.inode.hash(&mut h);
                 c.device.hash(&mut h);
@@ -749,10 +759,18 @@ pub fn diff_tree(baseline: &TreeSnapshot, current: &TreeSnapshot) -> Diff {
             );
             pair_renames(staged_created, staged_deleted, &mut out);
         }
-        // Kind mismatch (File vs Dir): can't happen in v1 — Profile
-        // kind is fixed at attach time and a kind change at the anchor
-        // is reported as Vanished. Empty diff is the safe answer.
-        _ => {}
+        // Kind mismatch (File vs Dir) at the anchor: structurally
+        // unreachable in v1 — Profile kind is fixed at attach time and
+        // a kind change at the anchor surfaces as Vanished, not as a
+        // diff. The empty Diff is the safe release behaviour; the
+        // debug_assert flags any future contract drift in tests.
+        _ => {
+            debug_assert!(
+                false,
+                "diff_tree: File↔Dir mismatch at the anchor is unreachable in v1; \
+                 anchor kind changes are reported via Vanished, not diff",
+            );
+        }
     }
     out
 }
@@ -763,6 +781,15 @@ struct StagedEntry {
     kind: EntryKind,
     inode: u64,
     device: u64,
+    /// When `false`, `pair_renames` skips this entry's `(device, inode)`
+    /// from rename matching and routes it directly to `out.created` /
+    /// `out.deleted`. Used for parent slots whose identity has flipped
+    /// (kind change at the same name, Dir replaced at a different inode):
+    /// such slots represent observably-different entities and are not
+    /// rename candidates, even when their inodes coincide. Descendants of
+    /// these slots remain eligible — genuine moves into / out of the slot
+    /// surface as Renames.
+    pair_eligible: bool,
 }
 
 fn collect_dir_pair(
@@ -831,20 +858,22 @@ fn diff_same_name(
         (ChildEntry::Leaf(p), ChildEntry::Leaf(n)) => {
             if p.inode != n.inode || p.device != n.device {
                 // Same name, different inode ⇒ delete-then-create. Stage
-                // both; rename pairing in the post-pass may join them
-                // (it skips when both segments match, so this stays as
-                // a Deleted+Created pair).
+                // as pair_eligible: each side may legitimately pair with
+                // a cross-level entry sharing its inode (the user moved
+                // the prior file out and a different one in).
                 staged_deleted.push(StagedEntry {
                     rel: rel.clone(),
                     kind: p.kind,
                     inode: p.inode,
                     device: p.device,
+                    pair_eligible: true,
                 });
                 staged_created.push(StagedEntry {
                     rel,
                     kind: n.kind,
                     inode: n.inode,
                     device: n.device,
+                    pair_eligible: true,
                 });
             } else if p.leaf_hash() != n.leaf_hash() {
                 modified.push(EntryRef {
@@ -856,43 +885,101 @@ fn diff_same_name(
         }
         (ChildEntry::Dir(p), ChildEntry::Dir(n)) => {
             if p.inode != n.inode || p.device != n.device {
+                // Same-name dir-replace at a different inode: parent slot
+                // represents a different entity. Stage parent ineligible
+                // (it must surface as Deleted + Created, never collapse
+                // to a same-rel "Rename"), and recurse both subtrees so
+                // descendants surface as Deleted/Created or pair as
+                // cross-level Renames against the rest of the walk.
                 staged_deleted.push(StagedEntry {
                     rel: rel.clone(),
                     kind: EntryKind::Dir,
                     inode: p.inode,
                     device: p.device,
+                    pair_eligible: false,
                 });
                 staged_created.push(StagedEntry {
-                    rel,
+                    rel: rel.clone(),
                     kind: EntryKind::Dir,
                     inode: n.inode,
                     device: n.device,
+                    pair_eligible: false,
                 });
-            } else if let (Some(ps), Some(ns)) = (p.subtree.as_deref(), n.subtree.as_deref())
-                && ps.dir_hash() != ns.dir_hash()
-            {
-                collect_dir_pair(ps, ns, &rel, modified, staged_created, staged_deleted);
+                stage_descendants_deleted(&rel, pc, staged_deleted);
+                stage_descendants_created(&rel, nc, staged_created);
+            } else {
+                match (p.subtree.as_deref(), n.subtree.as_deref()) {
+                    (Some(ps), Some(ns)) if ps.dir_hash() != ns.dir_hash() => {
+                        collect_dir_pair(ps, ns, &rel, modified, staged_created, staged_deleted);
+                    }
+                    (Some(_), Some(_)) | (None, None) => {
+                        // Hashes match (covered both sides) or both sides
+                        // uncovered: no delta to emit at this Dir slot.
+                    }
+                    (Some(_), None) | (None, Some(_)) => {
+                        // Coverage flip on the same Dir slot. Structurally
+                        // unreachable in v1: a Profile's coverage rule is
+                        // pinned by `config_hash`, so a scope change forks
+                        // a new Profile rather than flipping subtree
+                        // presence at the same slot. Mirrors the assert in
+                        // the engine's `walk_pair`.
+                        debug_assert!(
+                            false,
+                            "diff_same_name: coverage flip on same Dir slot is unreachable in v1",
+                        );
+                    }
+                }
             }
-            // (Some, None) or (None, Some): coverage flip on the same
-            // dir. Diff doesn't emit a delta for coverage changes — the
-            // engine's reconciler handles depth/exclude transitions on
-            // the next probe.
         }
-        // Kind change at same name ⇒ delete + create with the recorded
-        // kinds.
+        // Kind change at same name (Leaf↔Dir): the slot represents
+        // logically-different entities across the two snapshots. Stage
+        // the parent as ineligible (so pair_renames doesn't try to
+        // collapse it into a nonsensical same-name "Rename" when the
+        // kernel reuses the inode across the kind flip) and recurse the
+        // Dir side(s) so descendants surface — either as Deleted/Created
+        // or as cross-level Renames.
         _ => {
             staged_deleted.push(StagedEntry {
                 rel: rel.clone(),
                 kind: pc.kind(),
                 inode: pc.inode(),
                 device: pc.device(),
+                pair_eligible: false,
             });
             staged_created.push(StagedEntry {
-                rel,
+                rel: rel.clone(),
                 kind: nc.kind(),
                 inode: nc.inode(),
                 device: nc.device(),
+                pair_eligible: false,
             });
+            stage_descendants_deleted(&rel, pc, staged_deleted);
+            stage_descendants_created(&rel, nc, staged_created);
+        }
+    }
+}
+
+/// Stage every descendant of `parent` (if `parent` is a covered Dir) as
+/// Deleted, with `parent_rel` as the rel-prefix. Called from
+/// `diff_same_name`'s ineligible-parent paths (kind change, Dir-replace
+/// at different inode). Leaves and uncovered Dirs are no-ops.
+fn stage_descendants_deleted(parent_rel: &str, parent: &ChildEntry, staged: &mut Vec<StagedEntry>) {
+    if let ChildEntry::Dir(d) = parent
+        && let Some(sub) = d.subtree.as_deref()
+    {
+        for (cname, cchild) in &sub.entries {
+            stage_deleted(cname, cchild, parent_rel, staged);
+        }
+    }
+}
+
+/// Symmetric counterpart of [`stage_descendants_deleted`].
+fn stage_descendants_created(parent_rel: &str, parent: &ChildEntry, staged: &mut Vec<StagedEntry>) {
+    if let ChildEntry::Dir(d) = parent
+        && let Some(sub) = d.subtree.as_deref()
+    {
+        for (cname, cchild) in &sub.entries {
+            stage_created(cname, cchild, parent_rel, staged);
         }
     }
 }
@@ -909,6 +996,7 @@ fn stage_deleted(
         kind: pc.kind(),
         inode: pc.inode(),
         device: pc.device(),
+        pair_eligible: true,
     });
     // For Dir deletions, recurse to emit each descendant as Deleted.
     // Output is a flat Diff for the Effect API; it doesn't care about
@@ -934,6 +1022,7 @@ fn stage_created(
         kind: nc.kind(),
         inode: nc.inode(),
         device: nc.device(),
+        pair_eligible: true,
     });
     if let ChildEntry::Dir(d) = nc
         && let Some(sub) = d.subtree.as_deref()
@@ -946,14 +1035,25 @@ fn stage_created(
 
 /// Pair Created/Deleted entries by `(device, inode)` to recover Renames.
 ///
-/// The index is `BTreeMap::insert`,
-/// so when a `(device, inode)` collides (the pathological hardlink case
-/// of multiple Created at the same inode) the *last* index wins. The
-/// `paired` set guarantees one Created can match at most one Deleted.
+/// The index uses `BTreeMap::insert` semantics, so when a `(device, inode)`
+/// collides (the pathological hardlink case of multiple Created at the
+/// same inode) the *last* index wins. The `paired` set guarantees one
+/// Created can match at most one Deleted.
+///
+/// **Pairing rules.** A `(deleted, created)` pair becomes a `Rename` iff
+/// (1) both sides are `pair_eligible`, (2) the `(device, inode)` matches,
+/// (3) the `kind` matches, and (4) the `rel` differs. Same-`rel` candidates
+/// are structurally impossible for eligible entries (parent kind changes
+/// and Dir-replace-at-different-inode stage their parents ineligible;
+/// other staging paths cannot produce same-rel collisions in the global
+/// buffer) — pinned by the `debug_assert` below. Cross-kind candidates
+/// arise from kernel inode reuse across unrelated operations and are
+/// not renames; they fall through to Created+Deleted.
 ///
 /// Output order: unpaired Created/Deleted are emitted in collection order
-/// (depth-first lex); Renamed entries are emitted in `staged_deleted`'s
-/// iteration order (also depth-first lex on the baseline side).
+/// (depth-first lex on each side); Renamed entries are emitted in
+/// `staged_deleted`'s iteration order (also depth-first lex on the
+/// baseline side).
 fn pair_renames(
     staged_created: Vec<StagedEntry>,
     staged_deleted: Vec<StagedEntry>,
@@ -961,20 +1061,35 @@ fn pair_renames(
 ) {
     let mut by_key: BTreeMap<(u64, u64), usize> = BTreeMap::new();
     for (i, c) in staged_created.iter().enumerate() {
-        by_key.insert((c.device, c.inode), i);
+        if c.pair_eligible {
+            by_key.insert((c.device, c.inode), i);
+        }
     }
     let mut paired: BTreeSet<usize> = BTreeSet::new();
     let mut leftover_deleted: Vec<StagedEntry> = Vec::with_capacity(staged_deleted.len());
 
     for d in staged_deleted {
+        if !d.pair_eligible {
+            // Ineligible parent (kind change or Dir-replace): never a
+            // rename. Route to out.deleted in lex order via the shared
+            // leftover queue.
+            leftover_deleted.push(d);
+            continue;
+        }
         match by_key.get(&(d.device, d.inode)) {
             Some(&ci) if !paired.contains(&ci) => {
                 let c = &staged_created[ci];
-                if c.rel == d.rel {
-                    // Same name + same inode: the entry didn't actually
-                    // change identity. Mark the Created as paired so it
-                    // isn't emitted; drop the Deleted (no delta).
-                    paired.insert(ci);
+                debug_assert!(
+                    c.rel != d.rel,
+                    "staging invariant: eligible same-rel pairs should be \
+                     reduced upstream (modified, dir-recursion, or marked \
+                     ineligible) and never reach pair_renames",
+                );
+                if c.kind != d.kind {
+                    // Cross-kind inode collision (kernel reuse across
+                    // unrelated operations). Not a rename — let both
+                    // sides surface as Created/Deleted.
+                    leftover_deleted.push(d);
                     continue;
                 }
                 out.renamed.push(Rename {
