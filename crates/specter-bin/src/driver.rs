@@ -16,6 +16,18 @@
 //!   block on `Select::ready_timeout` until any source readies (or a
 //!   timer deadline elapses, or shutdown).
 //!
+//! **Drain order rationale.** Sensor inputs (FsEvents) drain *before*
+//! effect completions because the fire-cycle's post-fire tail
+//! (`BurstPhase::Awaiting` / `Rebasing`) absorbs FsEvents and folds
+//! their disk state into the rebase, while `EffectComplete` arrivals
+//! transition `Awaiting → Rebasing`. If the order were inverted, an
+//! `EffectComplete` could move the burst into Rebasing before the
+//! engine had seen FsEvents queued in the same tick — those events
+//! would then route to the wrong burst (or kick off a fresh burst
+//! against an in-flight rebase). Sensor-first preserves the
+//! "fire-tail absorbs concurrent edits" contract documented on
+//! `BurstPhase::Awaiting`.
+//!
 //! `Select::ready_timeout` is a *peek* primitive — the message stays in
 //! its channel and the next iteration's `try_recv` drain re-imposes
 //! the drain ordering. The deadline math feeds `next_deadline` from the
@@ -756,8 +768,12 @@ mod tests {
     }
 
     #[test]
-    fn fs_event_drained_before_effect_complete_per_8_3_ordering() {
-        // Sensor inputs are drained BEFORE effect completions. Push an
+    fn fs_event_drained_before_effect_complete_so_fire_tail_absorbs() {
+        // Sensor inputs drain BEFORE effect completions: an EffectComplete
+        // could move an Awaiting burst into Rebasing, and any FsEvent
+        // queued in the same tick should reach the engine first so the
+        // fire-tail (`BurstPhase::Awaiting` / `Rebasing`) can absorb it
+        // and fold the disk change into the post-fire rebase. Push an
         // EffectComplete first, then an FsEvent; tick sees the FsEvent first
         // because of the drain order — even though EffectComplete was queued earlier.
         let tmp = tempfile::TempDir::new().unwrap();

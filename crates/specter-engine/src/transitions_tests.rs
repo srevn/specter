@@ -23,7 +23,7 @@ use specter_core::{
     CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
     EffectScope, EntryKind, FsEvent, Input, LeafEntry, Placeholder, ProbeKind, ProbeOp,
     ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, TimerKind, TreeSnapshot, WatchOp,
+    StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -2187,8 +2187,8 @@ fn b1_clears_last_emitted_dir_hash_on_effect_complete_failed() {
 #[test]
 fn b3_recovery_seed_no_prior_emit_does_not_fire() {
     // Fresh attach → Seed-Ok → no prior `last_emitted_dir_hash` ⇒
-    // b3_seed_drift_observed returns false ⇒ no Effect (preserves
-    // "fresh Seed never fires Effect").
+    // b3_seed_drift_observed returns an empty key set ⇒ no Effect
+    // (preserves "fresh Seed never fires Effect").
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     let snap = dir_tree_snap(root, vec![]);
@@ -2201,6 +2201,242 @@ fn b3_recovery_seed_no_prior_emit_does_not_fire() {
         Instant::now(),
     );
     assert!(out.effects.is_empty(), "fresh-Profile Seed fires no Effect");
+}
+
+/// Multi-Sub Profile with two `SubtreeRoot` Subs sharing one
+/// `(resource, config_hash)`. Manually populate
+/// `last_emitted_dir_hash` so one Sub's recorded hash matches the
+/// post-graft `current` and the other's diverges. Trigger a Seed-Ok;
+/// the per-key B3 helper must return only the drifted key, and
+/// `emit_effects` must fire one Effect — the matched-key Sub stays
+/// silent because re-running its command would be a no-op against an
+/// unchanged tree.
+#[test]
+fn b3_recovery_seed_per_key_only_drifted_subs_fire() {
+    use specter_core::DedupKey;
+
+    let (mut e, pid, sid_a, root, _now) = engine_with_attached_sub();
+    // Seed → Idle so we have a stable baseline for setup.
+    complete_seed_burst(&mut e, pid, root);
+
+    // Attach a second SubtreeRoot Sub onto the same Profile (same
+    // `(resource, max_settle, config, events)` ⇒ shared config_hash ⇒
+    // shared Profile via the existing-Profile path).
+    let req_b = SubAttachRequest {
+        name: String::from("sub-b"),
+        resource: root,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
+    };
+    let (sid_b, _) = e.attach_sub(req_b, Instant::now());
+    assert_eq!(
+        e.subs.get(sid_b).unwrap().profile,
+        pid,
+        "Sub B joins the existing Profile via shared config_hash",
+    );
+
+    // The post-Seed `current` snapshot's anchor `dir_hash` is what the
+    // helper compares against. Seed left `current = baseline = empty
+    // dir`, so capture that hash and synthesise per-Sub history:
+    //  - Sub A's recorded hash equals `current_hash`         → no drift.
+    //  - Sub B's recorded hash differs                       → drifted.
+    let curr_hash: u128 = match e.profiles.get(pid).unwrap().current.as_ref().unwrap() {
+        TreeSnapshot::Dir(arc) => arc.dir_hash(),
+        TreeSnapshot::File(_) => unreachable!("dir-anchored Profile"),
+    };
+    let stale_hash: u128 = curr_hash.wrapping_add(1);
+    let key_a = DedupKey::Subtree {
+        sub: sid_a,
+        profile: pid,
+    };
+    let key_b = DedupKey::Subtree {
+        sub: sid_b,
+        profile: pid,
+    };
+    {
+        let p = e.profiles.get_mut(pid).unwrap();
+        p.last_emitted_dir_hash.insert(key_a.clone(), curr_hash);
+        p.last_emitted_dir_hash.insert(key_b.clone(), stale_hash);
+    }
+
+    // Trigger a recovery-style Seed: clear `current` so the next probe
+    // response drives `dispatch_seed_ok`, then synthesise an Active(Seed)
+    // burst pointing at the anchor (matches the shape `start_seed_burst`
+    // produces). The helper would normally be reached via a real
+    // recovery; the manual setup is the cheapest path that exercises the
+    // dispatch arm.
+    let snap = dir_tree_snap(root, vec![]);
+    {
+        let p = e.profiles.get_mut(pid).unwrap();
+        // Force a Seed dispatch by emptying current; the helper compares
+        // against the post-graft hash, which `dispatch_seed_ok` writes
+        // from the response.
+        p.current = None;
+        p.baseline = None;
+    }
+
+    // Drive the Seed via `start_seed_burst` + an injected Ok response.
+    let mut out = StepOutput::default();
+    e.start_seed_burst(pid, Instant::now(), &mut out);
+    let seed_corr = e.pending_probe(pid).expect("Seed probe in flight");
+    let seed_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: seed_corr,
+            result: ProbeResult::Ok(snap),
+        }),
+        Instant::now(),
+    );
+
+    // Exactly one Effect — Sub B (whose key drifted). Sub A's key
+    // matches the post-graft hash, so the per-key filter excludes it.
+    assert_eq!(
+        seed_out.effects.len(),
+        1,
+        "only the drifted Sub fires; got {} effects",
+        seed_out.effects.len(),
+    );
+    assert_eq!(
+        seed_out.effects[0].key, key_b,
+        "the drifted SubtreeRoot key fires; the matched key stays silent",
+    );
+}
+
+/// Per-key drift check is bool-equivalent at the boundaries: empty
+/// `last_emitted_dir_hash` ⇒ empty result; all entries match ⇒ empty
+/// result; at least one differs ⇒ non-empty result.
+#[test]
+fn b3_per_key_helper_returns_only_subtree_drifted_keys() {
+    use specter_core::DedupKey;
+
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+
+    // Compute the current dir_hash and inject one matching + one
+    // diverging entry, plus one PerFile entry that should be ignored.
+    let curr_hash: u128 = match e.profiles.get(pid).unwrap().current.as_ref().unwrap() {
+        TreeSnapshot::Dir(arc) => arc.dir_hash(),
+        TreeSnapshot::File(_) => unreachable!("dir-anchored Profile"),
+    };
+    let key_subtree_match = DedupKey::Subtree {
+        sub: sid,
+        profile: pid,
+    };
+    // A second subtree key with the same (sub, profile) collides with
+    // `key_subtree_match`; use a synthetic SubId that's distinct. Any
+    // distinct (sub, profile) is fine — the helper doesn't validate
+    // against the live SubRegistry.
+    use slotmap::KeyData;
+    let synthetic_sub = SubId::from(KeyData::from_ffi(0xdead_beef));
+    let key_subtree_drift = DedupKey::Subtree {
+        sub: synthetic_sub,
+        profile: pid,
+    };
+    let key_perfile = DedupKey::PerFile {
+        sub: sid,
+        profile: pid,
+        resource: root,
+    };
+    {
+        let p = e.profiles.get_mut(pid).unwrap();
+        p.last_emitted_dir_hash
+            .insert(key_subtree_match.clone(), curr_hash);
+        p.last_emitted_dir_hash
+            .insert(key_subtree_drift.clone(), curr_hash.wrapping_add(7));
+        p.last_emitted_dir_hash
+            .insert(key_perfile, curr_hash.wrapping_add(13));
+    }
+
+    let drifted = e.b3_seed_drift_observed(pid);
+    assert_eq!(drifted.len(), 1, "only the diverged Subtree key returns");
+    assert_eq!(
+        drifted[0], key_subtree_drift,
+        "PerFile keys are filtered; matched Subtree keys are filtered",
+    );
+}
+
+/// Standard burst with a per-stable-file Sub: drift filter is `None`,
+/// PerFile keys still emit per matching diff entry. This pins that the
+/// Commit-4 narrowing of the Seed-drift path didn't accidentally skip
+/// PerFile emission on the unrelated Standard burst path.
+#[test]
+fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
+    let mut e = Engine::new();
+    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    let now = Instant::now();
+    let req = SubAttachRequest {
+        name: String::from("fmt"),
+        resource: r,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::PerStableFile,
+        events: ClassSet::CONTENT,
+    };
+    let (_sid, _) = e.attach_sub(req, now);
+    let pid = e.profiles.iter().next().unwrap().0;
+    // Seed → Idle.
+    let seed_corr = e.pending_probe(pid).expect("Seed probe in flight");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: seed_corr,
+            result: ProbeResult::Ok(dir_tree_snap(r, vec![])),
+        }),
+        now,
+    );
+
+    // Standard burst with a created file → PerFile Effect emits.
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Modified,
+        },
+        now,
+    );
+    let mut t = now;
+    let mut effect_out = None;
+    let snap_with_file = dir_tree_snap(r, vec![("new.rs", EntryKind::File, 5)]);
+    for _ in 0..6 {
+        t += SETTLE * 4;
+        while let Some(entry) = e.pop_expired(t) {
+            e.step(
+                Input::TimerExpired {
+                    profile: entry.profile,
+                    kind: entry.kind,
+                    id: entry.id,
+                },
+                t,
+            );
+        }
+        let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                profile: pid,
+                correlation,
+                result: ProbeResult::Ok(snap_with_file.clone()),
+            }),
+            t,
+        );
+        if !out.effects.is_empty() {
+            effect_out = Some(out);
+            break;
+        }
+    }
+    let out = effect_out.expect("Standard burst stabilised and emitted");
+    assert_eq!(
+        out.effects.len(),
+        1,
+        "Standard burst with PerFile Sub fires one Effect for the new file",
+    );
 }
 
 #[test]

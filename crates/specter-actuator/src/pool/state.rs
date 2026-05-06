@@ -26,6 +26,21 @@ enum ReapPolicy {
     Drop,
 }
 
+/// Per-`DedupKey` actuator slot: at most one in-flight child plus a
+/// single Latest-coalesce pending Effect.
+///
+/// **Engine-side twin.** Every `Effect` the actuator runs corresponds
+/// to a `+1` on the engine's `BurstPhase::Awaiting { outstanding }`
+/// counter for the owning Profile. The slot retires the running job
+/// (or drops the pending Effect on shutdown) and emits
+/// `Input::EffectComplete`; the engine then decrements `outstanding`
+/// and either stays in `Awaiting` or transitions to `Rebasing` when
+/// the count hits zero. The two bookkeepings are intentionally
+/// disjoint: this slot is per-(Sub, DedupKey) and lives on the
+/// actuator thread; the Awaiting counter is per-Profile and lives on
+/// the engine thread. Neither side sees the other's bookkeeping
+/// directly — the `EffectComplete` message is the sole synchronisation
+/// point.
 #[derive(Debug, Default)]
 pub(crate) struct Slot {
     pub running: Option<RunningJob>,
