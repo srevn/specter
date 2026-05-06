@@ -238,11 +238,7 @@ impl InotifyWatcher {
     ) -> io::Result<()> {
         // ── Re-watch path ───────────────────────────────────────────
         if let Some(prior) = self.by_resource.get(r).copied() {
-            let cached_kind = self
-                .kinds
-                .get(r)
-                .copied()
-                .unwrap_or(ResourceKind::Unknown);
+            let cached_kind = self.kinds.get(r).copied().unwrap_or(ResourceKind::Unknown);
             let new_mask = compute_install_mask(events, cached_kind);
             if new_mask == prior.mask {
                 tracing::trace!(
@@ -318,7 +314,8 @@ impl InotifyWatcher {
                 return Err(io::Error::from_raw_os_error(libc::EEXIST));
             }
 
-            self.by_resource.insert(r, InotifyEntry { wd, mask: new_mask });
+            self.by_resource
+                .insert(r, InotifyEntry { wd, mask: new_mask });
             self.by_wd.insert(wd, r);
             tracing::debug!(
                 ?r,
@@ -425,11 +422,9 @@ impl InotifyWatcher {
     ) {
         match self.by_resource.get(existing).copied() {
             Some(existing_entry) => {
-                if let Err(e) = ffi::inotify_add_watch(
-                    &self.inotify_fd,
-                    proc_path_ref,
-                    existing_entry.mask,
-                ) {
+                if let Err(e) =
+                    ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, existing_entry.mask)
+                {
                     tracing::warn!(
                         ?r,
                         ?existing,

@@ -161,7 +161,7 @@ fn signal_pid(pid: u32, sig: nix::sys::signal::Signal) -> io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     #![allow(unsafe_code)] // mirrors the production site (`os.rs::OsSpawner::spawn`); the test exercises it.
 
@@ -183,7 +183,6 @@ mod tests {
     /// succeeds. macOS-only: Linux/glibc `posix_spawn` is implemented as
     /// fork+exec under the hood and has no equivalent cap, so the test
     /// would be a no-op there (and would simply burn ~10k fds).
-    #[cfg(target_os = "macos")]
     #[test]
     fn spawn_succeeds_above_macos_posix_spawn_open_max() {
         // The kernel's `OPEN_MAX` is 10240 on every supported macOS version.
