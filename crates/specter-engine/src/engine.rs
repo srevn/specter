@@ -131,6 +131,9 @@ impl Engine {
             Input::ConfigDiff(diff) => {
                 self.on_config_diff(diff, now, &mut out);
             }
+            Input::SensorOverflow { scope } => {
+                self.on_sensor_overflow(scope, now, &mut out);
+            }
             // `Input` is `non_exhaustive` in `core`; downstream pattern
             // matches require a wildcard. New variants land alongside
             // their handlers.

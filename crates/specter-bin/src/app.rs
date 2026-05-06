@@ -285,15 +285,14 @@ pub(crate) fn watcher_loop<W: FsWatcher>(
                             let _ = sides.sensor_in_tx.send(Input::FsEvent { resource, event });
                         }
                         WatcherEvent::Overflow { scope } => {
-                            // kqueue never emits this under v1; the
-                            // routing path lands with Phase B11's
-                            // `Input::SensorOverflow`. Until then,
-                            // surfacing here would be a sensor bug —
-                            // log loudly but don't crash the daemon.
-                            tracing::warn!(
-                                ?scope,
-                                "WatcherEvent::Overflow on a backend that should not emit it",
-                            );
+                            // inotify's `IN_Q_OVERFLOW` lifts here on
+                            // Linux; kqueue never emits Overflow under
+                            // v1 (`EV_CLEAR` coalesces but never
+                            // silently drops). The engine's
+                            // `on_sensor_overflow` handler reseeds every
+                            // in-scope Profile and emits
+                            // `Diagnostic::SensorOverflow`.
+                            let _ = sides.sensor_in_tx.send(Input::SensorOverflow { scope });
                         }
                     }
                 }

@@ -5,7 +5,7 @@
 //! (a few small fields) and carries enough context to log meaningfully.
 
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
-use crate::input::FsEvent;
+use crate::input::{FsEvent, OverflowScope};
 use crate::op::{ProbeCorrelation, WatchFailure};
 use crate::profile::BurstIntent;
 
@@ -220,6 +220,19 @@ pub enum Diagnostic {
         profile: ProfileId,
         outstanding: u32,
     },
+    /// `Input::SensorOverflow` arrived from the Sensor — the kernel's
+    /// event queue dropped record(s) over `scope` and the watcher
+    /// surfaced the loss-of-trust signal. The engine reseeded every
+    /// in-scope Profile via `start_seed_burst`; the diagnostic surfaces
+    /// the event in operator logs so the underlying load condition
+    /// (`max_queued_events` saturation, slow downstream actuator
+    /// blocking the watcher's drain) can be tuned.
+    ///
+    /// One emission per overflow record. The emitted variant is the
+    /// engine's only signal that "we missed events" — the bursts the
+    /// reseed schedules carry no per-Profile annotation that they were
+    /// triggered by overflow rather than a normal `FsEvent`.
+    SensorOverflow { scope: OverflowScope },
 }
 
 impl Default for Diagnostic {

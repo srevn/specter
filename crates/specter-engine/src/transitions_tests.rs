@@ -21,9 +21,9 @@ use compact_str::CompactString;
 use specter_core::{
     ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet,
     CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
-    EffectScope, EntryKind, FsEvent, Input, LeafEntry, Placeholder, ProbeKind, ProbeOp,
-    ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
+    EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, Placeholder, ProbeKind,
+    ProbeOp, ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1523,6 +1523,228 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     assert_eq!(
         purged_count, 2,
         "one ProfileClaimPurged{{DescentPrefix}} per descent",
+    );
+}
+
+// ---- B11: SensorOverflow reseeds in-scope Profiles ----
+
+#[test]
+fn sensor_overflow_global_idle_reseeds_to_active_seed() {
+    // Idle Profile (post-`complete_seed_burst`): an overflow drives a
+    // direct `start_seed_burst` call; the Profile transitions to
+    // `Active(Seed)` and a fresh probe is in flight.
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+    assert!(matches!(
+        e.profiles.get(pid).unwrap().state,
+        ProfileState::Idle
+    ));
+
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        Instant::now(),
+    );
+
+    let burst = match &e.profiles.get(pid).unwrap().state {
+        ProfileState::Active(b) => b,
+        s => panic!("expected Active(Seed) after overflow; got {s:?}"),
+    };
+    assert_eq!(burst.intent, BurstIntent::Seed);
+    assert!(matches!(burst.phase, BurstPhase::Verifying));
+    assert!(
+        e.pending_probe(pid).is_some(),
+        "seed burst armed a fresh verify probe",
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(
+                d,
+                Diagnostic::SensorOverflow {
+                    scope: OverflowScope::Global
+                }
+            )),
+        "Diagnostic::SensorOverflow{{Global}} emitted exactly once per overflow input",
+    );
+}
+
+#[test]
+fn sensor_overflow_active_standard_transitions_to_active_seed() {
+    // Active(Standard) Profile: an overflow `finish_burst_to_idle` +
+    // `start_seed_burst` round-trip transitions the burst to
+    // `Active(Seed)`. The Standard burst's `dirty_resources` /
+    // `force_walk_resources` are discarded — the seed re-baselines.
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+    let now = Instant::now();
+    e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Modified,
+        },
+        now,
+    );
+    // Now in Active(Standard) Batching.
+    let burst = match &e.profiles.get(pid).unwrap().state {
+        ProfileState::Active(b) => b,
+        s => panic!("expected Active(Standard) after FsEvent; got {s:?}"),
+    };
+    assert_eq!(burst.intent, BurstIntent::Standard);
+    assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
+
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        now,
+    );
+
+    let burst = match &e.profiles.get(pid).unwrap().state {
+        ProfileState::Active(b) => b,
+        s => panic!("expected Active(Seed) after overflow; got {s:?}"),
+    };
+    assert_eq!(
+        burst.intent,
+        BurstIntent::Seed,
+        "overflow abandoned the Standard burst and re-seeded",
+    );
+    assert!(
+        burst.dirty_resources.is_empty() && burst.force_walk_resources.is_empty(),
+        "seed burst starts with empty dirty / force_walk sets — Standard's accumulators discarded",
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(
+                d,
+                Diagnostic::SensorOverflow {
+                    scope: OverflowScope::Global
+                }
+            )),
+    );
+}
+
+#[test]
+fn sensor_overflow_pending_profile_is_skipped() {
+    // Pending(_) Profile: descent in flight; no baseline to drift-test.
+    // Overflow is a no-op for the Profile state but still emits the
+    // diagnostic.
+    let mut e = Engine::new();
+    let req = SubAttachRequest::for_path(
+        "guard".into(),
+        std::path::PathBuf::from("missing/anchor"),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
+    let (_sid, _) = e.attach_sub(req, Instant::now());
+    let pid = {
+        let mut iter = e.profiles.iter();
+        iter.next().expect("profile exists").0
+    };
+    assert!(
+        e.descent_state(pid).is_some(),
+        "fixture: profile is in Pending(_)",
+    );
+
+    let pre_state = format!("{:?}", e.profiles.get(pid).unwrap().state);
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        Instant::now(),
+    );
+    let post_state = format!("{:?}", e.profiles.get(pid).unwrap().state);
+
+    assert_eq!(
+        pre_state, post_state,
+        "Pending Profile state preserved across overflow",
+    );
+    assert!(
+        e.descent_state(pid).is_some(),
+        "descent still in flight after overflow",
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::SensorOverflow { .. })),
+        "diagnostic still emitted regardless of per-Profile dispatch",
+    );
+}
+
+#[test]
+fn sensor_overflow_resource_scope_filters_profiles() {
+    // OverflowScope::Resource(r) reseeds only Profiles whose anchor
+    // lies in the subtree rooted at r — the FSEvents per-stream signal.
+    // Set up two siblings under one root; overflow at the first
+    // sibling's resource reseeds only the first.
+    let mut e = Engine::new();
+    let parent = e.tree.ensure(None, "parent", ResourceRole::User);
+    e.tree.get_mut(parent).unwrap().kind = ResourceKind::Dir;
+    let a = e.tree.ensure(Some(parent), "a", ResourceRole::User);
+    e.tree.get_mut(a).unwrap().kind = ResourceKind::Dir;
+    let b = e.tree.ensure(Some(parent), "b", ResourceRole::User);
+    e.tree.get_mut(b).unwrap().kind = ResourceKind::Dir;
+    let now = Instant::now();
+    let req_a = SubAttachRequest {
+        name: "sub-a".into(),
+        resource: a,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
+        log_output: false,
+    };
+    let req_b = SubAttachRequest {
+        name: "sub-b".into(),
+        resource: b,
+        ..req_a.clone()
+    };
+    let (sid_a, _) = e.attach_sub(req_a, now);
+    let (sid_b, _) = e.attach_sub(req_b, now);
+    let pid_a = e.subs.get(sid_a).unwrap().profile;
+    let pid_b = e.subs.get(sid_b).unwrap().profile;
+    complete_seed_burst(&mut e, pid_a, a);
+    complete_seed_burst(&mut e, pid_b, b);
+    assert!(matches!(
+        e.profiles.get(pid_a).unwrap().state,
+        ProfileState::Idle
+    ));
+    assert!(matches!(
+        e.profiles.get(pid_b).unwrap().state,
+        ProfileState::Idle
+    ));
+
+    // Overflow scoped to `a` — only Profile A reseeds.
+    let _ = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Resource(a),
+        },
+        Instant::now(),
+    );
+
+    assert!(
+        matches!(
+            &e.profiles.get(pid_a).unwrap().state,
+            ProfileState::Active(b) if b.intent == BurstIntent::Seed
+        ),
+        "Profile A (anchor at a) reseeded",
+    );
+    assert!(
+        matches!(
+            &e.profiles.get(pid_b).unwrap().state,
+            ProfileState::Idle
+        ),
+        "Profile B (anchor at b, sibling of a) untouched",
     );
 }
 

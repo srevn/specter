@@ -16,9 +16,9 @@ use crate::refcounts::clamp_watch_demand_to_zero;
 use smallvec::SmallVec;
 use specter_core::{
     BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect,
-    EffectOutcome, EffectScope, FsEvent, ProbeResponse, ProbeResult, ProfileId, ProfileState,
-    ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot,
-    WatchFailure, WatchOp,
+    EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeResponse, ProbeResult, ProfileId,
+    ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind,
+    TreeSnapshot, WatchFailure, WatchOp,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -619,6 +619,131 @@ impl Engine {
                 failure,
             });
         }
+    }
+
+    /// Sensor reports it dropped events at the kernel level (inotify's
+    /// `IN_Q_OVERFLOW`). Reseed every Profile in scope so the engine's
+    /// post-probe `dispatch_seed_ok` re-establishes baseline against
+    /// disk reality and runs B3 drift detection (a recorded
+    /// `last_emitted_dir_hash[Subtree]` disagreement fires Effects once,
+    /// then rebases).
+    ///
+    /// # Per-Profile dispatch
+    ///
+    /// Each in-scope Profile is reseeded according to its current state:
+    ///
+    /// - **`Idle`** — direct [`Engine::start_seed_burst`]. The Profile's
+    ///   `current` is preserved as the seed probe's `baseline_subtree`
+    ///   for mtime-skip; the response `dispatch_seed_ok` rebases or
+    ///   fires-on-drift.
+    /// - **`Active(_)`** — abandon the in-flight burst via
+    ///   [`Engine::finish_burst_to_idle`] (which cancels any pending
+    ///   probe, decrements the anchor's `suppress_count`, and runs
+    ///   `propagate(-1)` for Standard bursts including its
+    ///   Draining→Verifying ancestor cascade), then start a fresh seed
+    ///   burst. The Standard burst's accumulated `dirty_resources` are
+    ///   discarded — the seed re-baselines against the post-overflow
+    ///   tree, which strictly dominates whatever the Standard burst was
+    ///   tracking. `reap_pending` Profiles reaped inside
+    ///   `finish_burst_to_idle` skip the seed (no Profile to seed).
+    /// - **`Pending(_)`** — descent in flight; the anchor doesn't yet
+    ///   exist and the Profile holds no baseline to drift-test. Skip.
+    ///   The descent's prefix watch continues to deliver future
+    ///   `IN_CREATE` events; if the missed event was an `IN_CREATE` for
+    ///   the next path component, the descent stalls until a future
+    ///   probe / rename / fresh kernel event re-syncs. v1 limitation
+    ///   accepted in exchange for handler simplicity.
+    ///
+    /// # Scope
+    ///
+    /// [`OverflowScope::Global`] (the v1 inotify backend's only emit)
+    /// reseeds every Profile in the registry. [`OverflowScope::Resource`]
+    /// reseeds Profiles whose anchor is `r` or a descendant of `r` —
+    /// the FSEvents per-stream signal; `profiles_in_subtree(r)` walks
+    /// the tree's ancestor chain to compute membership.
+    ///
+    /// One [`Diagnostic::SensorOverflow`] per call surfaces the event in
+    /// operator logs — the bursts the reseed schedules carry no
+    /// per-Profile annotation that they were triggered by overflow.
+    pub(crate) fn on_sensor_overflow(
+        &mut self,
+        scope: OverflowScope,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        // Snapshot the in-scope ProfileId set BEFORE any mutation. The
+        // loop below transitions Profiles through Idle and re-into
+        // Active(Seed); a fresh `iter()` mid-loop would observe the
+        // partial transitions and could double-handle a Profile.
+        let profiles_to_reseed: smallvec::SmallVec<[ProfileId; 8]> = match scope {
+            OverflowScope::Global => self.profiles.iter().map(|(pid, _)| pid).collect(),
+            OverflowScope::Resource(r) => self.profiles_in_subtree(r),
+        };
+
+        for pid in profiles_to_reseed {
+            // The Profile may have been reaped between snapshot and
+            // this iteration via a prior iteration's
+            // `finish_burst_to_idle` (a `reap_pending` Profile reaps
+            // when its burst transitions to Idle). Stale id ⇒ skip.
+            let Some(p) = self.profiles.get(pid) else {
+                continue;
+            };
+            match &p.state {
+                ProfileState::Idle => {
+                    self.start_seed_burst(pid, now, out);
+                }
+                ProfileState::Active(_) => {
+                    // Abandon the in-flight burst, then reseed. The two
+                    // helpers compose: `finish_burst_to_idle` returns
+                    // the Profile to Idle (decrementing suppress_count
+                    // by one), and `start_seed_burst` adds it back —
+                    // the anchor remains suppressed across the
+                    // transition. The intervening Idle state is invisible
+                    // to external observers (no `StepOutput` ordering
+                    // dependency on it). If `finish_burst_to_idle`
+                    // reaped the Profile (`reap_pending`), the
+                    // `Engine::profiles.get(pid)` inside
+                    // `start_seed_burst` returns None and the call
+                    // no-ops — correct degenerate behaviour.
+                    self.finish_burst_to_idle(pid, out);
+                    self.start_seed_burst(pid, now, out);
+                }
+                ProfileState::Pending(_) => {
+                    // Descent in flight; no baseline to drift-test.
+                    // The descent's prefix watch keeps delivering
+                    // future structural events; if the missed event
+                    // was the IN_CREATE we were waiting for, descent
+                    // stalls until a re-probe occurs through other
+                    // means. Documented v1 limitation.
+                }
+                // ProfileState is non_exhaustive in core; absorb any
+                // future variant defensively rather than panic.
+                _ => {}
+            }
+        }
+
+        out.diagnostics.push(Diagnostic::SensorOverflow { scope });
+    }
+
+    /// Enumerate Profiles whose anchor lies in the subtree rooted at
+    /// `r` (the anchor itself is `r`, or `r` is on the anchor's
+    /// ancestor chain). Used by [`Self::on_sensor_overflow`] to scope a
+    /// per-resource overflow signal — the FSEvents-style "this stream's
+    /// queue overflowed" case. v1 inotify always emits
+    /// [`OverflowScope::Global`] so this is dead-stream-equipment in
+    /// the inotify path; kept for the engine API's symmetric handling
+    /// across backends.
+    ///
+    /// Worst-case `O(profiles × tree-depth)`. Acceptable for typical
+    /// per-resource overflow rates (rare under healthy invariants).
+    fn profiles_in_subtree(&self, r: ResourceId) -> smallvec::SmallVec<[ProfileId; 8]> {
+        self.profiles
+            .iter()
+            .filter(|(_, p)| {
+                p.resource == r || self.tree.ancestors(p.resource).any(|a| a == r)
+            })
+            .map(|(pid, _)| pid)
+            .collect()
     }
 
     /// Start a new burst (Seed if no baseline yet, Standard if baseline

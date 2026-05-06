@@ -90,4 +90,18 @@ pub enum Input {
         failure: WatchFailure,
     },
     ConfigDiff(SubRegistryDiff),
+    /// Sensor reports it dropped events at the kernel level — the watch
+    /// state is intact but the event stream is no longer trustworthy
+    /// over `scope`. The engine response is to reseed every Profile in
+    /// scope (`Engine::on_sensor_overflow`): cancel any in-flight burst
+    /// and start a fresh Seed burst whose post-probe `dispatch_seed_ok`
+    /// re-establishes baseline against disk reality and runs the B3
+    /// drift detection (a recorded `last_emitted_dir_hash[Subtree]`
+    /// disagreement fires Effects once, then rebases).
+    ///
+    /// Always [`OverflowScope::Global`] on the v1 inotify backend
+    /// (`IN_Q_OVERFLOW` is queue-wide). The [`OverflowScope::Resource`]
+    /// variant exists for FSEvents (per-stream overflow) and to keep
+    /// the engine's handler shape stable across backends.
+    SensorOverflow { scope: OverflowScope },
 }

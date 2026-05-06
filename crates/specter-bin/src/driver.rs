@@ -548,6 +548,10 @@ pub fn log_diagnostic(d: &Diagnostic) {
             outstanding,
             "await-gate deadline elapsed; force-transitioning to Rebasing (actuator likely hung)",
         ),
+        Diagnostic::SensorOverflow { scope } => tracing::warn!(
+            ?scope,
+            "sensor reported overflow (kernel queue dropped events); reseeding in-scope Profiles",
+        ),
     }
 }
 
