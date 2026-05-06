@@ -89,6 +89,12 @@ impl Engine {
         );
         // The borrow on `p` ends here (NLL); `&mut self.next_correlation`
         // and the re-borrow of `self.profiles` below are disjoint.
+        debug_assert!(
+            self.next_correlation < u64::MAX,
+            "Engine.next_correlation saturated at u64::MAX; subsequent probe \
+             correlations would collide with effect correlations and break \
+             stale-response detection",
+        );
         self.next_correlation = self.next_correlation.saturating_add(1);
         let correlation = ProbeCorrelation(self.next_correlation);
         if let Some(p) = self.profiles.get_mut(pid) {

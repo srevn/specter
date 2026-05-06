@@ -62,7 +62,6 @@ pub enum OverflowScope {
     Global,
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum Input {
     FsEvent {

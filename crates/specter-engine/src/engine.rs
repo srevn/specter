@@ -64,7 +64,7 @@ impl Engine {
     pub(crate) fn descent_state(&self, pid: ProfileId) -> Option<&DescentState> {
         match &self.profiles.get(pid)?.state {
             ProfileState::Pending(d) => Some(d),
-            _ => None,
+            ProfileState::Idle | ProfileState::Active(_) => None,
         }
     }
 
@@ -72,7 +72,7 @@ impl Engine {
     pub(crate) fn descent_state_mut(&mut self, pid: ProfileId) -> Option<&mut DescentState> {
         match &mut self.profiles.get_mut(pid)?.state {
             ProfileState::Pending(d) => Some(d),
-            _ => None,
+            ProfileState::Idle | ProfileState::Active(_) => None,
         }
     }
 
@@ -100,12 +100,8 @@ impl Engine {
 
     /// Pure, deterministic, total. Consumes one [`Input`], emits a sorted
     /// [`StepOutput`]. Each variant routes to the corresponding
-    /// `on_*` handler (`transitions.rs`).
-    ///
-    /// `match_same_arms` is permitted: explicit arms document the routing
-    /// even when bodies are uniform; the trailing wildcard absorbs
-    /// `non_exhaustive` v2+ variants.
-    #[allow(clippy::match_same_arms)]
+    /// `on_*` handler (`transitions.rs`). Exhaustive — adding a variant
+    /// to [`Input`] is a compile error here until a handler lands.
     pub fn step(&mut self, input: Input, now: Instant) -> StepOutput {
         let mut out = StepOutput::default();
         match input {
@@ -134,10 +130,6 @@ impl Engine {
             Input::SensorOverflow { scope } => {
                 self.on_sensor_overflow(scope, now, &mut out);
             }
-            // `Input` is `non_exhaustive` in `core`; downstream pattern
-            // matches require a wildcard. New variants land alongside
-            // their handlers.
-            _ => {}
         }
         self.sort_step_output(&mut out);
         out
@@ -379,14 +371,33 @@ impl Engine {
     }
 
     /// After adding a fresh Profile, recompute parent edges of every
-    /// other Profile that the new one might interpose. O(profiles²)
-    /// worst-case; acceptable for v1's small configs.
+    /// other Profile that the new one might interpose. Narrowed to
+    /// strict descendants of the new anchor: a Profile P' can only
+    /// re-parent to the new Profile if its anchor is a strict
+    /// descendant of `new_profile.resource` (the new Profile is a
+    /// covering ancestor of P' and may interpose between P' and its
+    /// previous parent). Profiles at the same anchor (different
+    /// `config_hash`), at sibling subtrees, or at ancestor positions
+    /// cannot be affected by the new attach.
+    ///
+    /// O(N × depth) — N profiles each tested by ancestor-walk against
+    /// the new anchor. The pre-narrowing form was O(N²) at the
+    /// `compute_parent` level; this filter is the critical-path
+    /// reduction.
     fn recompute_dependent_parent_edges(&mut self, new_profile: ProfileId) {
+        let Some(new_anchor) = self.profiles.get(new_profile).map(|p| p.resource) else {
+            return;
+        };
         let candidates: Vec<ProfileId> = self
             .profiles
             .iter()
             .filter(|(pid, _)| *pid != new_profile)
-            .map(|(pid, _)| pid)
+            .filter_map(|(pid, p)| {
+                self.tree
+                    .ancestors(p.resource)
+                    .any(|a| a == new_anchor)
+                    .then_some(pid)
+            })
             .collect();
         self.stability
             .recompute_parent_edges_for_subset(&self.tree, &self.profiles, candidates);
@@ -470,9 +481,6 @@ impl Engine {
         let lifecycle = self.profiles.get(profile_id).map(|p| match &p.state {
             ProfileState::Idle | ProfileState::Pending(_) => DetachLifecycle::ReapNow,
             ProfileState::Active(_) => DetachLifecycle::DeferToBurstEnd,
-            // `non_exhaustive` ProfileState: any future variant is
-            // treated as ReapNow (no burst to drive the deferred path).
-            _ => DetachLifecycle::ReapNow,
         });
         match lifecycle {
             Some(DetachLifecycle::ReapNow) => {

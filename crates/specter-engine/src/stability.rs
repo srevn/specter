@@ -175,17 +175,12 @@ impl StabilityIndex {
 /// True iff `state` is `Active` with `BurstPhase::Draining`. Only `Draining`
 /// Profiles are interested in the `dirty_descendants → 0` edge — the
 /// reconfirm-probe transition is the consumer of `propagate`'s return list.
+/// `Idle` and `Pending` are structurally not-Draining — the descent
+/// lifecycle never drives the reconfirm cascade.
 const fn in_draining(state: &ProfileState) -> bool {
     match state {
-        ProfileState::Idle => false,
-        // Descent has no Draining phase — the arm is structurally
-        // redundant with the wildcard but documents that Pending
-        // intentionally never drives the reconfirm cascade.
-        ProfileState::Pending(_) => false,
+        ProfileState::Idle | ProfileState::Pending(_) => false,
         ProfileState::Active(burst) => matches!(burst.phase, BurstPhase::Draining),
-        // `ProfileState` is `non_exhaustive`; any future variant is treated
-        // as not-Draining (won't drive a reconfirm probe).
-        _ => false,
     }
 }
 

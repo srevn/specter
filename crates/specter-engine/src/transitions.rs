@@ -716,9 +716,6 @@ impl Engine {
                     // stalls until a re-probe occurs through other
                     // means. Documented v1 limitation.
                 }
-                // ProfileState is non_exhaustive in core; absorb any
-                // future variant defensively rather than panic.
-                _ => {}
             }
         }
 
@@ -796,11 +793,9 @@ impl Engine {
                     self.event_drives_batching(profile_id, event_resource, now, out);
                 }
             },
-            // `ProfileState` non_exhaustive: Pending Profiles never reach
-            // here — `covering_profiles` filters them at the source — but
-            // the wildcard arm absorbs both Pending (defensively) and any
-            // future variant.
-            _ => {}
+            // Pending Profiles never reach here — `covering_profiles`
+            // filters them at the source. Defensive no-op.
+            ProfileState::Pending(_) => {}
         }
     }
 
@@ -1392,13 +1387,16 @@ impl Engine {
     /// `is_timer_referenced` gate already filters most non-Awaiting
     /// fires; this guard handles the residual same-step ordering window.
     fn handle_gate_deadline(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        let outstanding = match self.profiles.get(profile_id).map(|p| &p.state) {
-            Some(ProfileState::Active(b)) => match &b.phase {
-                BurstPhase::Awaiting { outstanding, .. } => *outstanding,
-                _ => return,
-            },
-            _ => return,
+        let Some(p) = self.profiles.get(profile_id) else {
+            return;
         };
+        let ProfileState::Active(burst) = &p.state else {
+            return;
+        };
+        let BurstPhase::Awaiting { outstanding, .. } = &burst.phase else {
+            return;
+        };
+        let outstanding = *outstanding;
         out.diagnostics.push(Diagnostic::AwaitGateDeadlineElapsed {
             profile: profile_id,
             outstanding,
@@ -1762,7 +1760,13 @@ impl Engine {
     /// the same `Engine.next_correlation` counter as
     /// [`Engine::mint_probe_correlation`] — the typed wrappers
     /// ([`CorrelationId`] vs `ProbeCorrelation`) keep the spaces disjoint.
-    const fn next_effect_correlation(&mut self) -> CorrelationId {
+    fn next_effect_correlation(&mut self) -> CorrelationId {
+        debug_assert!(
+            self.next_correlation < u64::MAX,
+            "Engine.next_correlation saturated at u64::MAX; subsequent effect \
+             correlations would collide with probe correlations and break \
+             actuator-side coalescing",
+        );
         self.next_correlation = self.next_correlation.saturating_add(1);
         CorrelationId(self.next_correlation)
     }

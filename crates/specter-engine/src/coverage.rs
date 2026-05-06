@@ -356,4 +356,60 @@ mod tests {
         assert!(!covers(&profile, a, &tree));
         assert!(!covers(&profile, b, &tree));
     }
+
+    #[test]
+    fn star_pattern_descends_through_directories() {
+        // globset's `*` does NOT respect `/` — `*.rs` is "any path ending in
+        // `.rs`," not basename-only. Pin the semantic so a future glob-engine
+        // swap surfaces the deviation as a test failure rather than a
+        // silent change in user-visible coverage.
+        let mut tree = Tree::new();
+        let (root, profile) = anchor(
+            &mut tree,
+            "root",
+            recursive_unbounded().pattern(glob("*.rs")),
+        );
+        // Top-level .rs file matches.
+        let lib = tree.ensure(Some(root), "lib.rs", ResourceRole::User);
+        mark(&mut tree, lib, ResourceKind::File);
+        // Deep .rs file also matches — `*` is path-blind.
+        let src = tree.ensure(Some(root), "src", ResourceRole::User);
+        mark(&mut tree, src, ResourceKind::Dir);
+        let deep = tree.ensure(Some(src), "deep.rs", ResourceRole::User);
+        mark(&mut tree, deep, ResourceKind::File);
+        let deeper_dir = tree.ensure(Some(src), "foo", ResourceRole::User);
+        mark(&mut tree, deeper_dir, ResourceKind::Dir);
+        let deepest = tree.ensure(Some(deeper_dir), "deeper.rs", ResourceRole::User);
+        mark(&mut tree, deepest, ResourceKind::File);
+        assert!(covers(&profile, lib, &tree));
+        assert!(covers(&profile, deep, &tree));
+        assert!(covers(&profile, deepest, &tree));
+    }
+
+    #[test]
+    fn double_star_exclude_does_not_match_directory_itself() {
+        // `target/**` matches `target/foo` but not `target` literally. The
+        // directory itself remains covered; only its contents are excluded.
+        // Surprises users coming from gitignore (where `target/` excludes the
+        // directory and contents); pinned here so the contrast is explicit.
+        let mut tree = Tree::new();
+        let (root, profile) = anchor(
+            &mut tree,
+            "root",
+            recursive_unbounded().exclude(glob("target/**")),
+        );
+        let target = tree.ensure(Some(root), "target", ResourceRole::User);
+        mark(&mut tree, target, ResourceKind::Dir);
+        let inside = tree.ensure(Some(target), "foo", ResourceRole::User);
+        mark(&mut tree, inside, ResourceKind::Dir);
+        assert!(
+            covers(&profile, target, &tree),
+            "`target/**` does not match `target` literally — the directory \
+             itself stays covered",
+        );
+        assert!(
+            !covers(&profile, inside, &tree),
+            "`target/foo` matches `target/**` — contents excluded",
+        );
+    }
 }

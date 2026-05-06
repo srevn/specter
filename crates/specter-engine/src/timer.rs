@@ -8,19 +8,35 @@ use std::time::Instant;
 
 /// One pending timer.
 ///
-/// `Ord` is derived in field-declaration order: `(deadline, profile, id,
-/// kind)`. The first three are the documented tie-break; `id` is unique
-/// within the heap's lifetime, so `kind`'s ordering position never
-/// participates in real comparisons. It rides along on the entry as a
-/// dispatch hint: pop validates it against the owning Profile's burst
-/// slot, and the engine routes Settle vs BurstDeadline directly without
-/// re-deriving from state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+/// Ordering is `(deadline, profile, id)` — the documented tie-break.
+/// `id` is unique within the heap's lifetime, so the third tier
+/// guarantees a total order. `kind` rides on the entry as a dispatch
+/// hint (pop validates it against the owning Profile's burst slot;
+/// the engine routes Settle vs BurstDeadline directly without
+/// re-deriving from state) but is **not** part of the ordering
+/// identity — a manual `Ord` impl makes that explicit and prevents a
+/// future field reorder from silently changing tie-break semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerEntry {
     pub deadline: Instant,
     pub profile: ProfileId,
     pub id: TimerId,
     pub kind: TimerKind,
+}
+
+impl Ord for TimerEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.deadline
+            .cmp(&other.deadline)
+            .then_with(|| self.profile.cmp(&other.profile))
+            .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for TimerEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Min-heap of pending timers.
@@ -63,6 +79,11 @@ impl TimerHeap {
     /// monotonic-counter minting via [`TimerId::from_counter`] sidesteps
     /// `slotmap`'s generation re-use semantics.
     pub fn schedule(&mut self, deadline: Instant, profile: ProfileId, kind: TimerKind) -> TimerId {
+        debug_assert!(
+            self.counter < u64::MAX,
+            "TimerHeap counter saturated at u64::MAX; subsequent ids would collide \
+             and break lazy invalidation",
+        );
         self.counter = self.counter.saturating_add(1);
         let id = TimerId::from_counter(self.counter);
         self.inner.push(Reverse(TimerEntry {

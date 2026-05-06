@@ -153,10 +153,6 @@ pub enum BurstPhase {
 /// drives it. Pending and Active remain mutually exclusive at the type
 /// level, so the dispatch site routes a live response on state identity
 /// alone (see [`crate::Engine::on_probe_response`]).
-///
-/// `non_exhaustive` keeps wildcard arms compiling at downstream call sites
-/// when a future variant lands.
-#[non_exhaustive]
 #[derive(Debug, Default)]
 pub enum ProfileState {
     #[default]
