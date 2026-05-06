@@ -283,12 +283,14 @@ mod tests {
     }
 
     fn make_effect_perfile(sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64) -> Effect {
+        let resource = unique_resource_id(res_seed);
         Effect {
             key: DedupKey::PerFile {
                 sub: unique_sub_id(sub_seed),
                 profile: unique_profile_id(profile_seed),
-                resource: unique_resource_id(res_seed),
+                resource,
             },
+            target: resource,
             command: CommandResolved {
                 argv: vec!["/bin/true".into()],
             },
@@ -307,6 +309,7 @@ mod tests {
                 sub: unique_sub_id(sub_seed),
                 profile: unique_profile_id(profile_seed),
             },
+            target: unique_resource_id(profile_seed),
             command: CommandResolved {
                 argv: vec!["/bin/true".into()],
             },

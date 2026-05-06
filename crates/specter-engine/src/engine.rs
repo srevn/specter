@@ -131,7 +131,7 @@ impl Engine {
                 self.on_sensor_overflow(scope, now, &mut out);
             }
         }
-        self.sort_step_output(&mut out);
+        Self::sort_step_output(&mut out);
         out
     }
 
@@ -149,7 +149,7 @@ impl Engine {
     pub fn attach_sub(&mut self, req: SubAttachRequest, now: Instant) -> (SubId, StepOutput) {
         let mut out = StepOutput::default();
         let sub_id = self.attach_sub_inner(req, now, &mut out);
-        self.sort_step_output(&mut out);
+        Self::sort_step_output(&mut out);
         (sub_id, out)
     }
 
@@ -425,7 +425,7 @@ impl Engine {
     pub fn detach_sub(&mut self, sub: SubId, now: Instant) -> StepOutput {
         let mut out = StepOutput::default();
         self.detach_sub_inner(sub, now, &mut out);
-        self.sort_step_output(&mut out);
+        Self::sort_step_output(&mut out);
         out
     }
 
@@ -716,27 +716,26 @@ impl Engine {
     }
 
     /// Sort: `watch_ops` by `ResourceId`; `probe_ops` by `ProfileId`;
-    /// `effects` by `(SubId, ResourceId)`. `Subtree`-keyed effects look up
-    /// the Profile's anchor at sort time, so the method takes `&self`.
-    /// `diagnostics` follow insertion order — they aren't part of the
-    /// user-visible sort guarantee.
-    pub(crate) fn sort_step_output(&self, out: &mut StepOutput) {
+    /// `effects` by `(SubId, ResourceId)` per the determinism contract.
+    /// All three extractors are pure `const fn` — the sort never peeks
+    /// at Engine state because every key is captured on the op/effect
+    /// at construction time, so `sort_step_output` itself is associated
+    /// rather than a method. `diagnostics` follow insertion order —
+    /// they aren't part of the user-visible sort guarantee.
+    pub(crate) fn sort_step_output(out: &mut StepOutput) {
         out.watch_ops.sort_by_key(Self::watch_op_key);
         out.probe_ops.sort_by_key(Self::probe_op_key);
-        out.effects.sort_by_key(|e| self.effect_sort_key(e));
+        out.effects.sort_by_key(Self::effect_sort_key);
     }
 
-    fn effect_sort_key(&self, e: &Effect) -> (SubId, ResourceId) {
-        match &e.key {
-            DedupKey::PerFile { sub, resource, .. } => (*sub, *resource),
-            DedupKey::Subtree { sub, profile } => {
-                let resource = self
-                    .profiles
-                    .get(*profile)
-                    .map_or_else(ResourceId::default, |p| p.resource);
-                (*sub, resource)
-            }
-        }
+    /// Sort key for [`StepOutput::effects`]: `(sub_of_key, target)`.
+    /// Pure free function — `Effect.target` was frozen at emission time,
+    /// so sort needs no Engine state and no fallback.
+    pub(crate) const fn effect_sort_key(e: &Effect) -> (SubId, ResourceId) {
+        let sub = match e.key {
+            DedupKey::PerFile { sub, .. } | DedupKey::Subtree { sub, .. } => sub,
+        };
+        (sub, e.target)
     }
 
     pub(crate) const fn watch_op_key(op: &WatchOp) -> ResourceId {
@@ -845,6 +844,10 @@ mod tests {
 
     fn pidn(n: u64) -> ProfileId {
         ProfileId::from(KeyData::from_ffi(n))
+    }
+
+    fn sidn(n: u64) -> SubId {
+        SubId::from(KeyData::from_ffi(n))
     }
 
     #[test]
@@ -1108,8 +1111,7 @@ mod tests {
         });
         out.watch_ops.push(WatchOp::Unwatch { resource: r2 });
 
-        let e = Engine::new();
-        e.sort_step_output(&mut out);
+        Engine::sort_step_output(&mut out);
 
         let resources: Vec<ResourceId> = out.watch_ops.iter().map(Engine::watch_op_key).collect();
         assert_eq!(resources, vec![r1, r2, r3]);
@@ -1136,11 +1138,96 @@ mod tests {
             },
         });
 
-        let e = Engine::new();
-        e.sort_step_output(&mut out);
+        Engine::sort_step_output(&mut out);
 
         let profiles: Vec<ProfileId> = out.probe_ops.iter().map(Engine::probe_op_key).collect();
         assert_eq!(profiles, vec![p1, p2]);
+    }
+
+    /// `effect_sort_key` extracts `(sub, target)` from a `PerFile`-keyed
+    /// Effect with no `&Engine` access. The captured `target` survives
+    /// any post-emission state churn — sort is independent of
+    /// `ProfileMap`.
+    #[test]
+    fn effect_sort_key_perfile_uses_captured_target() {
+        let sub = sidn(11);
+        let profile = pidn(7);
+        let resource = rid(13);
+        let e = Effect {
+            key: DedupKey::PerFile {
+                sub,
+                profile,
+                resource,
+            },
+            target: resource,
+            ..Effect::default()
+        };
+        assert_eq!(Engine::effect_sort_key(&e), (sub, resource));
+    }
+
+    /// `effect_sort_key` extracts `(sub, target)` from a `Subtree`-keyed
+    /// Effect. The anchor lives on `Effect.target`, not in the key, and
+    /// the extractor reads it directly with no Engine state — the
+    /// formerly-`&self` lookup-with-fallback is gone.
+    #[test]
+    fn effect_sort_key_subtree_uses_captured_target() {
+        let sub = sidn(11);
+        let profile = pidn(7);
+        let anchor = rid(13);
+        let e = Effect {
+            key: DedupKey::Subtree { sub, profile },
+            target: anchor,
+            ..Effect::default()
+        };
+        assert_eq!(Engine::effect_sort_key(&e), (sub, anchor));
+    }
+
+    /// `sort_step_output` orders mixed-arm effects by `(sub, target)`.
+    /// Mixing `PerFile` and `Subtree` in one step is the production case
+    /// (a multi-Sub Profile firing both kinds simultaneously); the
+    /// ordering interleaves them by sub and target rather than
+    /// segregating by variant.
+    #[test]
+    fn sort_step_output_orders_effects_by_sub_then_target() {
+        let sub_a = sidn(2);
+        let sub_b = sidn(5);
+        let prof = pidn(7);
+        let r_lo = rid(1);
+        let r_hi = rid(9);
+        // Push out of order: (sub_b, hi), (sub_a, hi), (sub_a, lo).
+        let mut out = StepOutput::default();
+        out.effects.push(Effect {
+            key: DedupKey::Subtree {
+                sub: sub_b,
+                profile: prof,
+            },
+            target: r_hi,
+            ..Effect::default()
+        });
+        out.effects.push(Effect {
+            key: DedupKey::PerFile {
+                sub: sub_a,
+                profile: prof,
+                resource: r_hi,
+            },
+            target: r_hi,
+            ..Effect::default()
+        });
+        out.effects.push(Effect {
+            key: DedupKey::PerFile {
+                sub: sub_a,
+                profile: prof,
+                resource: r_lo,
+            },
+            target: r_lo,
+            ..Effect::default()
+        });
+
+        Engine::sort_step_output(&mut out);
+
+        let keys: Vec<(SubId, ResourceId)> =
+            out.effects.iter().map(Engine::effect_sort_key).collect();
+        assert_eq!(keys, vec![(sub_a, r_lo), (sub_a, r_hi), (sub_b, r_hi)]);
     }
 
     #[test]

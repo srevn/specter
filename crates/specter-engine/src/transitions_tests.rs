@@ -2376,6 +2376,149 @@ fn records_last_emitted_dir_hash_after_subtree_effect() {
     ));
 }
 
+/// `Effect.target` for a `Subtree`-keyed Effect is the Profile anchor
+/// — captured from `Profile.resource` at emit time. The sort-key
+/// extractor pulls `target` directly without a `&Engine` lookup; this
+/// pins the emission-side capture so a future refactor that drops the
+/// `target` assignment surfaces here.
+#[test]
+fn subtree_effect_target_is_anchor_at_emission() {
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let now = Instant::now();
+    let out = drive_to_first_effect(&mut e, pid, root, now);
+
+    assert_eq!(out.effects.len(), 1, "Subtree-Ok fires one Effect");
+    assert!(
+        matches!(&out.effects[0].key, DedupKey::Subtree { profile, .. } if *profile == pid),
+        "Effect is keyed Subtree at the burst's Profile",
+    );
+    assert_eq!(
+        out.effects[0].target, root,
+        "Subtree.target is the Profile anchor at emission time",
+    );
+    assert_eq!(
+        e.profiles.get(pid).unwrap().resource,
+        root,
+        "anchor is unchanged post-emit (sanity)",
+    );
+}
+
+/// `Effect.target` for a `PerFile`-keyed Effect is the file resource
+/// — same value as `DedupKey::PerFile.resource` by construction. Pins
+/// the redundancy: if `target` and `key.resource` ever diverge for
+/// PerFile, sort and coalescing-identity would tell different stories.
+#[test]
+fn per_file_effect_target_matches_dedup_key_resource() {
+    // Reuse the standard PerStableFile fixture: empty baseline, two
+    // created Files, stable response → two PerFile Effects.
+    let mut e = Engine::new();
+    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+    e.tree.set_kind(r, ResourceKind::Dir);
+    let now = Instant::now();
+    let req = SubAttachRequest {
+        name: "fmt".into(),
+        resource: r,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: diff_command(),
+        scope: EffectScope::PerStableFile,
+        events: NO_EVENTS,
+        log_output: false,
+    };
+    let (sid, _) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+
+    // Complete Seed with empty baseline.
+    let seed_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: seed_corr,
+            result: ProbeResult::Ok(dir_tree_snap(r, vec![])),
+        }),
+        now,
+    );
+
+    // FsEvent → Standard burst.
+    let t1 = now + Duration::from_millis(10);
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+
+    // Drain settle.
+    let t2 = t1 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
+    }
+
+    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let snap = dir_tree_snap(
+        r,
+        vec![("a.rs", EntryKind::File, 1), ("b.rs", EntryKind::File, 2)],
+    );
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: std_corr,
+            result: ProbeResult::Ok(snap.clone()),
+        }),
+        t2,
+    );
+
+    // Drain rescheduled settle, send same snapshot for stability.
+    let t3 = t2 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(t3) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t3,
+        );
+    }
+    let std_corr2 = e.pending_probe(pid).expect("Verifying probe in flight");
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: std_corr2,
+            result: ProbeResult::Ok(snap),
+        }),
+        t3,
+    );
+
+    let per_file: Vec<&specter_core::Effect> = out
+        .effects
+        .iter()
+        .filter(|e| matches!(&e.key, DedupKey::PerFile { sub, .. } if *sub == sid))
+        .collect();
+    assert_eq!(per_file.len(), 2, "two created files ⇒ two PerFile Effects");
+    for eff in &per_file {
+        match &eff.key {
+            DedupKey::PerFile { resource, .. } => {
+                assert_eq!(
+                    eff.target, *resource,
+                    "PerFile.target == DedupKey::PerFile.resource by construction",
+                );
+            }
+            DedupKey::Subtree { .. } => unreachable!("filtered above"),
+        }
+    }
+}
+
 #[test]
 fn clears_last_emitted_dir_hash_on_effect_complete_failed() {
     let (mut e, pid, sid, root, _now) = engine_with_attached_sub();

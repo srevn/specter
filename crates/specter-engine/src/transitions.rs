@@ -1541,6 +1541,11 @@ impl Engine {
                     );
                     out.effects.push(Effect {
                         key: dk.clone(),
+                        // Subtree's target is the anchor — `resource` was
+                        // captured at line 1445 from `Profile.resource`.
+                        // Frozen-at-emit so sort survives any post-emit
+                        // state churn without a ProfileMap lookup.
+                        target: resource,
                         command,
                         env,
                         cwd: anchor_cwd.clone(),
@@ -1708,6 +1713,11 @@ impl Engine {
             );
             out.effects.push(Effect {
                 key: dk.clone(),
+                // PerFile's target is the file resource — same value as
+                // `dk.resource` by construction. Carried separately so
+                // sort doesn't have to peek inside the variant; the pair
+                // `(sub_of_key, target)` is uniform across both arms.
+                target: resource,
                 command,
                 env,
                 cwd: anchor_cwd.to_path_buf(),

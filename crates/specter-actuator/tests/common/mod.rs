@@ -140,12 +140,14 @@ pub fn perfile_effect(
     argv: Vec<String>,
     cwd: PathBuf,
 ) -> Effect {
+    let resource = unique_resource_id(res_seed);
     Effect {
         key: DedupKey::PerFile {
             sub: unique_sub_id(sub_seed),
             profile: unique_profile_id(profile_seed),
-            resource: unique_resource_id(res_seed),
+            resource,
         },
+        target: resource,
         command: CommandResolved { argv },
         env: Vec::new(),
         cwd,
@@ -157,6 +159,11 @@ pub fn perfile_effect(
 }
 
 /// Build a Subtree Effect with a literal `argv`.
+///
+/// The actuator does not consult `target`; the field is set to a
+/// stable per-Profile sentinel (`unique_resource_id(profile_seed)`) so
+/// fixtures remain comparable across calls without leaking
+/// engine-internal anchor identity into the actuator's tests.
 pub fn subtree_effect(
     sub_seed: u64,
     profile_seed: u64,
@@ -169,6 +176,7 @@ pub fn subtree_effect(
             sub: unique_sub_id(sub_seed),
             profile: unique_profile_id(profile_seed),
         },
+        target: unique_resource_id(profile_seed),
         command: CommandResolved { argv },
         env: Vec::new(),
         cwd,

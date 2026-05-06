@@ -32,6 +32,15 @@ pub struct CommandResolved {
 /// verdict was stable). `diff` is `Some` iff `sub.needs_diff` AND the
 /// diff source (a `baseline` snapshot) was present.
 ///
+/// `target` is the Resource this Effect addresses — the anchor directory
+/// for `DedupKey::Subtree`, or the file resource for `DedupKey::PerFile`
+/// (where it duplicates `key.resource` by construction). Captured at
+/// emission time; the pair `(sub_of_key(self.key), self.target)` is the
+/// total-ordered sort key for [`crate::output::StepOutput::effects`].
+/// Carried on the Effect rather than derived from a Profile lookup at
+/// sort time: a frozen value survives any state churn between
+/// `emit_effects` and `sort_step_output`.
+///
 /// `capture_output` mirrors the Sub's `log_output` at emission time. The
 /// actuator reads it to choose between `Stdio::null()` (the default —
 /// child output is discarded) and `Stdio::inherit()` (child output is
@@ -41,6 +50,7 @@ pub struct CommandResolved {
 #[derive(Clone, Debug)]
 pub struct Effect {
     pub key: DedupKey,
+    pub target: ResourceId,
     pub command: CommandResolved,
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
@@ -57,6 +67,7 @@ impl Default for Effect {
     fn default() -> Self {
         Self {
             key: DedupKey::default(),
+            target: ResourceId::default(),
             command: CommandResolved::default(),
             env: Vec::new(),
             cwd: PathBuf::new(),
@@ -80,7 +91,12 @@ pub struct CorrelationId(pub u64);
 /// symmetrically across both arms — the engine credits the per-Profile
 /// `BurstPhase::Awaiting` counter on every `EffectComplete`, so this
 /// lookup is hot.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+///
+/// `Ord` drives the actuator's `BTreeMap<DedupKey, Slot>` and the
+/// engine's `BTreeMap<DedupKey, u128>` (`Profile::last_emitted_dir_hash`).
+/// `Hash` is intentionally not derived — no `HashMap`/`HashSet` keys on
+/// this type and `core` bans `hashbrown` outright.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum DedupKey {
     PerFile {
         sub: SubId,
