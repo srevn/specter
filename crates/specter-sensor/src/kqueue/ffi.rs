@@ -90,26 +90,41 @@ pub(crate) fn trigger_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<
     kevent_change(kq, &ev.0)
 }
 
-/// Register a vnode watch with the caller-supplied fflags mask,
-/// edge-triggered. `udata` carries the engine's `ResourceId.as_ffi()` so
-/// events round-trip the id without the watcher needing a separate fd↔id
-/// map.
+/// Register (or re-register) a vnode watch with the caller-supplied
+/// fflags mask, edge-triggered, in the requested enabled/disabled state.
+/// `udata` carries the engine's `ResourceId.as_ffi()` so events
+/// round-trip the id without the watcher needing a separate fd↔id map.
+///
+/// `enabled = false` composes `EV_DISABLE` onto the change record so the
+/// install-and-disable happens in **one syscall**. Per `kqueue(2)`:
+/// > Adding an event automatically enables it, unless overridden by the
+/// > EV_DISABLE flag.
+///
+/// (FreeBSD `kqueue(2)` § EV_ADD; macOS `kqueue(2)` § EV_ADD.)
+///
+/// Single-record install-with-state matters on the re-watch path of a
+/// previously suppressed FD: a two-syscall sequence (`EV_ADD` then
+/// `EV_DISABLE`) leaves a window where the kernel-side filter is enabled,
+/// during which any pending event on the filter (queued before the prior
+/// `suppress`) becomes deliverable. Composing the bits in one change
+/// record collapses that window to zero.
 ///
 /// `fflags` is the caller's responsibility — the kqueue translator
-/// (`super::translate::class_set_to_fflags`) is the single producer of the
-/// mask in the watcher's `watch()` path. The same call doubles as a
-/// re-registration: `EV_ADD` on an existing `(fd, EVFILT_VNODE)` entry
-/// overwrites the prior fflags without affecting other kevent state
-/// (notably the `EV_DISABLE` bit, which is preserved per the kqueue man
-/// page). The watcher exploits this to update the registered mask
-/// without closing or reopening the fd.
+/// (`super::translate::class_set_to_fflags`) is the single producer of
+/// the mask in the watcher's `watch()` path. `EV_ADD` on an existing
+/// `(fd, EVFILT_VNODE)` entry overwrites the prior fflags atomically.
 pub(crate) fn register_vnode(
     kq: &OwnedFd,
     target: &OwnedFd,
     r: ResourceId,
     fflags: u32,
+    enabled: bool,
 ) -> io::Result<()> {
-    vnode_change(kq, target, r, libc::EV_ADD | libc::EV_CLEAR, fflags)
+    let mut change_flags = libc::EV_ADD | libc::EV_CLEAR;
+    if !enabled {
+        change_flags |= libc::EV_DISABLE;
+    }
+    vnode_change(kq, target, r, change_flags, fflags)
 }
 
 /// `EV_DISABLE` — silences delivery without removing the registration.
@@ -154,9 +169,14 @@ fn vnode_change(
     fflags: u32,
 ) -> io::Result<()> {
     let mut ev = Kevent::zeroed();
-    // `OwnedFd` guarantees a non-negative raw fd, so the cast widens
-    // (`i32` → `usize`) without sign-loss.
-    ev.0.ident = usize::try_from(target.as_raw_fd()).unwrap_or(0);
+    // `OwnedFd::as_raw_fd` returns a non-negative `RawFd` by API contract
+    // (the type wraps an owned, opened descriptor). The conversion to
+    // `usize` is therefore lossless. Panic on the unreachable path
+    // rather than silently registering against fd 0 (stdin) — a
+    // misregistration there would corrupt the watcher's view of every
+    // resource keyed at fd 0's slot.
+    ev.0.ident = usize::try_from(target.as_raw_fd())
+        .expect("OwnedFd::as_raw_fd is non-negative by API contract");
     ev.0.filter = libc::EVFILT_VNODE;
     ev.0.flags = flags;
     ev.0.fflags = fflags;

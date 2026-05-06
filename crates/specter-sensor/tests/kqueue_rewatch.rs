@@ -216,10 +216,10 @@ fn rewatch_with_same_mask_preserves_registration() {
 }
 
 /// Per design §10.5 — suppression and mask changes interact. A re-watch
-/// after `suppress()` must re-apply `EV_DISABLE` so the freshly-installed
-/// mask doesn't accidentally enable delivery on a resource the engine
-/// has silenced. This is the test for the watcher's defensive
-/// EV_DISABLE-after-EV_ADD branch.
+/// after `suppress()` must keep the resource silenced even when the new
+/// mask widens. The watcher composes `EV_ADD | EV_CLEAR | EV_DISABLE` on
+/// a single change record so the kernel-side filter never observes an
+/// enabled state mid-update.
 #[test]
 fn rewatch_preserves_suppress_state() {
     let tmp = TempDir::new().unwrap();
@@ -265,6 +265,91 @@ fn rewatch_preserves_suppress_state() {
             .iter()
             .any(|(rid, e)| *rid == r && *e == FsEvent::MetadataChanged),
         "after unsuppress, the widened mask should deliver MetadataChanged; got {restored:?}"
+    );
+
+    drop(w);
+}
+
+/// F-HIGH-1 race property: events queued in the kernel filter BEFORE the
+/// initial `suppress()` must remain silenced across a subsequent
+/// `watch()` (re-register) call on the suppressed FD. The re-register's
+/// single-syscall `EV_ADD | EV_CLEAR | EV_DISABLE` change record collapses
+/// the prior two-syscall window — under the old shape an `EV_ADD`-then-
+/// `EV_DISABLE` sequence transiently enabled the kernel-side filter, so
+/// any pending event on it would become deliverable on a concurrent
+/// `kevent` drain.
+///
+/// The watcher's `poll_until` is the only consumer of the kqueue fd, so
+/// the race is single-thread quiescent — but the property the kernel
+/// guarantees is "no transient enable", and the test pins that contract
+/// regardless of when delivery fires. The harness writes BEFORE
+/// `suppress`, then issues a re-watch with a widened mask, then drains.
+/// Pre-fix, the drain after re-watch would surface the queued
+/// `Modified`; post-fix it stays buffered behind the disable bit until
+/// `unsuppress`.
+#[test]
+fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("file.txt");
+    std::fs::write(&path, "x").unwrap();
+
+    let mut w = KqueueWatcher::new().unwrap();
+    let mut sm = SlotMap::<ResourceId, ()>::with_key();
+    let r = sm.insert(());
+
+    // Watch before any modification so the kernel filter is live.
+    w.watch(r, &path, opts(ClassSet::CONTENT)).unwrap();
+
+    // Write — queues a NOTE_WRITE in the kernel filter. Drain it once so
+    // we know the event landed; this also clears any registration-time
+    // ack bits.
+    std::fs::write(&path, "y").unwrap();
+    let initial = drain_until(
+        &mut w,
+        |(rid, e)| *rid == r && *e == FsEvent::Modified,
+        Duration::from_secs(2),
+    );
+    assert!(
+        initial
+            .iter()
+            .any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
+        "initial write must deliver before suppress; got {initial:?}",
+    );
+
+    // Suppress, then queue another write while suppressed. Under
+    // EV_DISABLE the filter still buffers events — they accumulate
+    // behind the disable bit and stay invisible to drains.
+    w.suppress(r);
+    std::fs::write(&path, "z").unwrap();
+    let suppressed_drain = drain_for(&mut w, Duration::from_millis(200));
+    assert!(
+        !suppressed_drain.iter().any(|(rid, _)| *rid == r),
+        "writes during suppress must not deliver; got {suppressed_drain:?}",
+    );
+
+    // Re-watch with a widened mask. The single-syscall change record
+    // re-registers AND keeps the disable bit set; the buffered NOTE_WRITE
+    // does not slip out.
+    w.watch(r, &path, opts(ClassSet::CONTENT | ClassSet::METADATA))
+        .unwrap();
+    let post_rewatch = drain_for(&mut w, Duration::from_millis(300));
+    assert!(
+        !post_rewatch.iter().any(|(rid, _)| *rid == r),
+        "re-watch on a suppressed FD must keep buffered events silenced; \
+         got {post_rewatch:?} — F-HIGH-1 regression",
+    );
+
+    // Sanity check: unsuppress reveals the buffered event(s), confirming
+    // they were merely silenced (not lost) and the new mask took effect.
+    w.unsuppress(r);
+    let restored = drain_until(
+        &mut w,
+        |(rid, _)| *rid == r,
+        Duration::from_secs(2),
+    );
+    assert!(
+        restored.iter().any(|(rid, _)| *rid == r),
+        "unsuppress must flush buffered events; got {restored:?}",
     );
 
     drop(w);

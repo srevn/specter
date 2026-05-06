@@ -109,9 +109,13 @@ impl FsWatcher for KqueueWatcher {
         // ── Re-watch path ───────────────────────────────────────────
         // FD already held: compute the new fflags from the cached kind
         // + incoming events; diff against the installed mask; re-register
-        // iff different. EV_ADD on an existing (fd, EVFILT_VNODE) entry
-        // overwrites the prior fflags atomically without affecting the
-        // EV_DISABLE bit (per kqueue man page).
+        // iff different. The re-register composes EV_ADD | EV_CLEAR with
+        // an optional EV_DISABLE on the **same change record**, so the
+        // kernel-side filter never observes an enabled state mid-update
+        // when re-registering on a previously suppressed FD. This closes
+        // the two-syscall race that an EV_ADD-then-EV_DISABLE sequence
+        // exposed (per kqueue(2) § EV_ADD: "Adding an event automatically
+        // enables it, unless overridden by the EV_DISABLE flag").
         if self.by_resource.contains_key(r) {
             let kind = self.kinds.get(r).copied().unwrap_or(ResourceKind::Unknown);
             let new_fflags = translate::class_set_to_fflags(opts.events, kind);
@@ -125,40 +129,19 @@ impl FsWatcher for KqueueWatcher {
                 );
                 return Ok(());
             }
-            // Re-register on the same FD. The borrow on `by_resource`
-            // is scoped to the single syscall; NLL drops it before the
-            // subsequent `registered_fflags` mutation.
+            let suppressed = self.suppressed.contains_key(r);
             {
                 let fd = self
                     .by_resource
                     .get(r)
                     .expect("by_resource.contains_key(r) was true");
-                ffi::register_vnode(&self.kq, fd, r, new_fflags)?;
+                ffi::register_vnode(&self.kq, fd, r, new_fflags, !suppressed)?;
             }
             self.registered_fflags.insert(r, new_fflags);
-            // Defensive: per design §10.5, re-applying EV_DISABLE after
-            // EV_ADD preserves the suppression bit on platforms whose
-            // EV_ADD semantics differ subtly from FreeBSD's. The kqueue
-            // man page on macOS / FreeBSD documents preservation, so the
-            // call is redundant in practice — kept as forward-compat
-            // defense. Errors here are non-fatal: the prior disable bit
-            // either survived (defense was unneeded) or didn't (race
-            // window we'd report as a Diagnostic next probe). Pass
-            // `new_fflags` (the just-installed mask) so EV_DISABLE on
-            // macOS doesn't clobber the registration.
-            if self.suppressed.contains_key(r)
-                && let Some(fd) = self.by_resource.get(r)
-                && let Err(e) = ffi::disable_vnode(&self.kq, fd, r, new_fflags)
-            {
-                tracing::warn!(
-                    ?r,
-                    error = ?e,
-                    "kqueue defensive EV_DISABLE post re-register failed; suppression may be lost",
-                );
-            }
             tracing::debug!(
                 ?r,
                 ?opts,
+                suppressed,
                 old_fflags = format_args!("{cached_fflags:#x}"),
                 new_fflags = format_args!("{new_fflags:#x}"),
                 "kqueue re-register (mask changed)"
@@ -169,16 +152,18 @@ impl FsWatcher for KqueueWatcher {
         // ── Fresh-watch path ────────────────────────────────────────
         // 1) Open. 2) Stat. 3) Translate. 4) Register. 5) Insert. Each
         // step's failure drops anything earlier (the OwnedFd auto-closes)
-        // so a partially-failed `watch` leaves zero state.
+        // so a partially-failed `watch` leaves zero state. Fresh watches
+        // start enabled — `suppressed` is populated by `suppress(r)`
+        // after the WatchOp ordering puts a `Watch` before any same-step
+        // `Suppress`, so any later silencing rides the dedicated
+        // `disable_vnode` syscall path.
         let fd = fd::open_for_watch(path)?;
         let kind = fd::stat_kind(&fd)?;
         let fflags = translate::class_set_to_fflags(opts.events, kind);
-        ffi::register_vnode(&self.kq, &fd, r, fflags)?;
+        ffi::register_vnode(&self.kq, &fd, r, fflags, true)?;
         self.by_resource.insert(r, fd);
         self.kinds.insert(r, kind);
         self.registered_fflags.insert(r, fflags);
-        // Fresh watch starts unsuppressed by construction; nothing to
-        // do on `suppressed`.
         tracing::debug!(
             ?r,
             ?path,
