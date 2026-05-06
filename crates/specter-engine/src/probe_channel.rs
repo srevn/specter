@@ -26,8 +26,8 @@
 
 use crate::Engine;
 use specter_core::{
-    DirSnapshot, ProbeCorrelation, ProbeKind, ProbeOp, ProbeRequest, ProfileId, ResourceId,
-    ResourceKind, ScanConfig, StepOutput,
+    DirSnapshot, ProbeCorrelation, ProbeKind, ProbeOp, ProbeRequest, ProfileId, Resource,
+    ResourceId, ResourceKind, ScanConfig, StepOutput,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -153,9 +153,16 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let kind = match self.tree.get(target_resource).map(|r| r.kind) {
-            Some(ResourceKind::File) => ProbeKind::File,
-            _ => ProbeKind::Directory,
+        // Probe kind: definitively-File slots probe as File; everything
+        // else (Dir, unprobed, stale) probes as Directory — the more
+        // permissive choice. The Sensor returns `Vanished` on kind
+        // mismatch, which the Engine handles as Removed.
+        let kind = if self.tree.get(target_resource).and_then(Resource::kind)
+            == Some(ResourceKind::File)
+        {
+            ProbeKind::File
+        } else {
+            ProbeKind::Directory
         };
         let target_path = self.tree.path_of(target_resource).unwrap_or_default();
 

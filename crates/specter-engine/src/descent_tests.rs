@@ -76,7 +76,7 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
     // /foo exists as a Dir with no role-anchor — represents a real
     // directory the engine has discovered.
     let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
-    e.tree_mut().get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "guard".into(),
@@ -130,7 +130,7 @@ fn descent_one_level_advances_on_created_entry() {
 fn descent_two_levels_advances_progressively() {
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
-    e.tree_mut().get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "guard".into(),
@@ -311,7 +311,7 @@ fn descent_anchor_kind_set_from_entry() {
     );
 
     let res = e.tree().get(bar).unwrap();
-    assert_eq!(res.kind, ResourceKind::Dir);
+    assert_eq!(res.kind(), Some(ResourceKind::Dir));
     assert!(matches!(res.role, ResourceRole::User));
 }
 
@@ -456,7 +456,7 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
 fn descent_probe_uses_minimal_scan_config() {
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
-    e.tree_mut().get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let user_cfg = specter_core::ScanConfig::builder()
         .recursive(true)
@@ -578,7 +578,7 @@ fn profile_state_default_is_idle() {
 fn descent_state_helper_returns_none_for_idle() {
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
-    e.tree_mut().get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_resource(
         "g".into(),
         foo,
@@ -614,7 +614,7 @@ fn descent_state_helper_returns_none_for_idle() {
 fn descent_state_helper_returns_none_for_active() {
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
-    e.tree_mut().get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_resource(
         "g".into(),
         foo,
@@ -710,7 +710,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     // assertion holds.
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
-    e.tree_mut().get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_resource(
         "g".into(),
         foo,

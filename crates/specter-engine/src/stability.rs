@@ -216,7 +216,7 @@ mod tests {
     }
 
     fn mark_dir(tree: &mut Tree, id: specter_core::ResourceId) {
-        tree.get_mut(id).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(id, ResourceKind::Dir);
     }
 
     #[test]

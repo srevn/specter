@@ -86,7 +86,7 @@ fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
 
 fn anchor(e: &mut Engine, name: &str) -> ResourceId {
     let r = e.tree_mut().ensure(None, name, ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
     r
 }
 
@@ -337,7 +337,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
-    e.tree_mut().get_mut(child).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap_with_child = dir_snap(r, vec![("child", EntryKind::Dir, 7)]);
     let (_sid, pid) = attach_and_complete_seed_with(
@@ -404,7 +404,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
-    e.tree_mut().get_mut(child).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap = dir_snap(r, vec![("child", EntryKind::Dir, 7)]);
     let (sid, pid) = attach_and_complete_seed_with(
@@ -953,7 +953,7 @@ fn fire_cycle_event_at_unsuppressed_descendant_during_awaiting_absorbs() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
-    e.tree_mut().get_mut(child).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap_with_child = dir_snap(r, vec![("child", EntryKind::Dir, 7)]);
     let (_sid, pid) = attach_and_complete_seed_with(
@@ -1067,7 +1067,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
-    e.tree_mut().get_mut(child).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap_initial = dir_snap(r, vec![("child", EntryKind::Dir, 7)]);
     let (sid, pid) = attach_and_complete_seed_with(

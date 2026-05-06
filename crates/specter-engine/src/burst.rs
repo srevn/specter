@@ -639,17 +639,21 @@ pub(crate) fn lca_target(
 
 /// Promote a non-Dir candidate to its parent Dir; probes target Dirs.
 /// Falls back to `profile.resource` if the chain crosses a reaped slot.
+/// Unprobed slots (`kind() == None`) walk up like File-shape — we don't
+/// know what they are, the parent is the safer probe target.
 fn promote_to_dir(start: ResourceId, profile: &Profile, tree: &Tree) -> ResourceId {
     let mut current = start;
     loop {
-        match tree.get(current).map(|r| r.kind) {
-            Some(ResourceKind::Dir) => return current,
-            Some(_) => match tree.parent(current) {
-                Some(p) => current = p,
-                None => return profile.resource,
-            },
-            None => return profile.resource,
+        let Some(r) = tree.get(current) else {
+            return profile.resource;
+        };
+        if matches!(r.kind(), Some(ResourceKind::Dir)) {
+            return current;
         }
+        let Some(p) = tree.parent(current) else {
+            return profile.resource;
+        };
+        current = p;
     }
 }
 
@@ -714,7 +718,7 @@ mod tests {
     fn engine_with_profile() -> (Engine, specter_core::ProfileId) {
         let mut e = Engine::new();
         let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-        e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+        e.tree.set_kind(r, ResourceKind::Dir);
         let pid = e.profiles.attach(
             &mut e.tree,
             Profile::new(
@@ -1036,11 +1040,11 @@ mod tests {
     ) {
         let mut e = Engine::new();
         let root = e.tree.ensure(None, "root", ResourceRole::User);
-        e.tree.get_mut(root).unwrap().kind = ResourceKind::Dir;
+        e.tree.set_kind(root, ResourceKind::Dir);
         let a = e.tree.ensure(Some(root), "a", ResourceRole::User);
-        e.tree.get_mut(a).unwrap().kind = ResourceKind::Dir;
+        e.tree.set_kind(a, ResourceKind::Dir);
         let b = e.tree.ensure(Some(root), "b", ResourceRole::User);
-        e.tree.get_mut(b).unwrap().kind = ResourceKind::Dir;
+        e.tree.set_kind(b, ResourceKind::Dir);
         let pid = e.profiles.attach(
             &mut e.tree,
             Profile::new(

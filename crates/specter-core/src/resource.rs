@@ -3,9 +3,18 @@
 //! `Resource` lives inside `Tree`'s `SlotMap`. The structurally load-bearing
 //! fields (`parent`, `segment`, `children`, `profiles`) are `pub(crate)` —
 //! mutating them outside the routes that maintain the corresponding indices
-//! corrupts the Tree. Read access is via the accessor methods. The pure-data
-//! fields (`kind`, `watch_demand`, `suppress_count`, `role`) are `pub`; the
-//! engine writes them directly.
+//! corrupts the Tree. Read access is via the accessor methods.
+//!
+//! `kind` is `pub(crate)` — three external read sites historically
+//! disagreed on what `Unknown` means (pattern bypass vs File-shape vs
+//! not-Dir). Forcing reads through [`Resource::kind`] (returns
+//! `Option<ResourceKind>`) and [`Resource::kind_or_file`] (collapses
+//! Unknown to File-shape, the backend-mask convention) makes that
+//! choice explicit at every call site. Writes go through
+//! [`crate::Tree::set_kind`], same pattern as `Tree::set_role`.
+//!
+//! The remaining pure-data fields (`watch_demand`, `suppress_count`,
+//! `events_union`, `role`) are `pub`; the engine writes them directly.
 
 use crate::ids::{ProfileId, ResourceId};
 use crate::sub::ClassSet;
@@ -19,7 +28,16 @@ pub struct Resource {
     pub(crate) segment: SymbolU32,
     pub(crate) children: BTreeMap<SymbolU32, ResourceId>,
     pub(crate) profiles: TinyVec<[(u64, ProfileId); 1]>,
-    pub kind: ResourceKind,
+    /// Probed kind of this slot. `ResourceKind::Unknown` is the
+    /// pre-classification placeholder — fresh slots created by
+    /// `Tree::ensure`, `Tree::vacate`-reset slots, and descent
+    /// scaffolds all start here. The engine writes the classified
+    /// kind via [`crate::Tree::set_kind`] once a probe response or
+    /// reconcile pass observes the inode. Read via [`Resource::kind`]
+    /// (returns `Option<ResourceKind>`, with `Unknown` as `None`) or
+    /// [`Resource::kind_or_file`] (Unknown → File, the backend-mask
+    /// convention).
+    pub(crate) kind: ResourceKind,
     pub watch_demand: u32,
     pub suppress_count: u32,
     /// Per-Resource OR of every covering Profile's contribution.
@@ -150,6 +168,51 @@ impl Resource {
     #[must_use]
     pub fn profiles(&self) -> &[(u64, ProfileId)] {
         &self.profiles
+    }
+
+    /// Probed kind of this slot. `None` means the slot has not yet been
+    /// classified — descent prefix placeholder, freshly-`ensure`'d slot
+    /// before the first probe response, or post-`vacate` slot whose
+    /// kind was reset. Consumers must explicitly handle the unprobed
+    /// case.
+    ///
+    /// Use [`Resource::kind_or_file`] when the call site wants the
+    /// backend-mask "Unknown collapses to File" convention.
+    #[must_use]
+    pub const fn kind(&self) -> Option<ResourceKind> {
+        match self.kind {
+            ResourceKind::File => Some(ResourceKind::File),
+            ResourceKind::Dir => Some(ResourceKind::Dir),
+            ResourceKind::Unknown => None,
+        }
+    }
+
+    /// Probed kind, with the unprobed case collapsed to
+    /// [`ResourceKind::File`]. This is the backend-mask convention: the
+    /// kqueue / inotify translators register file-shape bits for
+    /// unclassified slots, terminal events on Unknown classify as
+    /// CONTENT, etc. See [`ResourceKind::effective`] for the same
+    /// semantic on a bare `ResourceKind` value.
+    #[must_use]
+    pub const fn kind_or_file(&self) -> ResourceKind {
+        self.kind.effective()
+    }
+
+    /// Raw kind including [`ResourceKind::Unknown`]. Use only when the
+    /// consumer needs to **preserve** the unprobed signal — the
+    /// kqueue / inotify watcher's [`ResourceKind::matches_or_unknown`]
+    /// verification expects `Unknown` as the engine's intentional
+    /// wildcard, so [`crate::WatchOp::Watch`] construction sites pass
+    /// it through unchanged.
+    ///
+    /// All other engine-side sites should prefer [`Resource::kind`]
+    /// (Option, `None` for unprobed) or [`Resource::kind_or_file`]
+    /// (collapses unprobed to File-shape). The accessor exists to make
+    /// "I want the raw value as a wildcard" an explicit choice
+    /// distinguishable from a stale-bypass bug.
+    #[must_use]
+    pub const fn kind_raw(&self) -> ResourceKind {
+        self.kind
     }
 }
 

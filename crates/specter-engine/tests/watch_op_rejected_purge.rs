@@ -125,7 +125,7 @@ fn attach_subtree_root(
 fn anchor_claim_purged_then_detach_no_panic() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (sid, pid, attach_out) = attach_subtree_root(&mut e, "build", root, MAX_SETTLE);
     complete_seed_burst(&mut e, pid, &attach_out, dir_snap(root, vec![]));
@@ -179,7 +179,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
 fn anchor_claim_purged_for_two_profiles_each_no_panic() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (sid_p, pid_p, out_p) = attach_subtree_root(&mut e, "P", root, MAX_SETTLE);
     let (_sid_q, pid_q, out_q) =
@@ -257,9 +257,9 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
     let mut e = Engine::new();
     // Build a parent / anchor pair.
     let parent = e.tree_mut().ensure(None, "var", ResourceRole::User);
-    e.tree_mut().get_mut(parent).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(parent, ResourceKind::Dir);
     let anchor = e.tree_mut().ensure(Some(parent), "log", ResourceRole::User);
-    e.tree_mut().get_mut(anchor).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let (sid, pid, attach_out) = attach_subtree_root(&mut e, "watch", anchor, MAX_SETTLE);
     complete_seed_burst(&mut e, pid, &attach_out, dir_snap(anchor, vec![]));
@@ -323,7 +323,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     // via parent's StructureChanged because the parent watch failed).
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
-    e.tree_mut().get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),

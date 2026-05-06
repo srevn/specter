@@ -8,7 +8,7 @@
 //! to `P`'s `watch_demand`.
 
 use smallvec::SmallVec;
-use specter_core::{Profile, ResourceId, ResourceKind, Tree};
+use specter_core::{Profile, Resource, ResourceId, ResourceKind, Tree};
 use std::path::PathBuf;
 
 /// True iff `profile` would scan `target` given its `ScanConfig`.
@@ -86,7 +86,14 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
     }
 
     if let Some(pat) = &profile.config.pattern {
-        let target_kind = tree.get(target).map_or(ResourceKind::Unknown, |r| r.kind);
+        // Unprobed slots collapse to File-shape (the backend-mask
+        // convention shared by `fs_event_to_class`, the kqueue / inotify
+        // translators, and `recompute_events_union`). The prior raw-`kind`
+        // form let Unknown bypass the pattern entirely — a file freshly
+        // touched in the window between create_child's slot
+        // materialization and a follow-up event would slip the user's
+        // pattern filter.
+        let target_kind = tree.get(target).map_or(ResourceKind::File, Resource::kind_or_file);
         if matches!(target_kind, ResourceKind::File) {
             let mut rel = PathBuf::new();
             for seg in &rev {
@@ -117,7 +124,7 @@ mod tests {
 
     /// Mark `id`'s `ResourceKind` so the pattern check has a stable answer.
     fn mark(tree: &mut Tree, id: ResourceId, kind: ResourceKind) {
-        tree.get_mut(id).unwrap().kind = kind;
+        tree.set_kind(id, kind);
     }
 
     /// Anchor a Profile with the supplied `ScanConfig`. Caller still owns the
@@ -384,6 +391,29 @@ mod tests {
         assert!(covers(&profile, lib, &tree));
         assert!(covers(&profile, deep, &tree));
         assert!(covers(&profile, deepest, &tree));
+    }
+
+    #[test]
+    fn pattern_applies_to_unprobed_kind_targets() {
+        // An FsEvent on a descendant whose kind hasn't been classified
+        // yet (Resource::kind() == None) must still be filtered by the
+        // user's pattern. The prior raw-`kind` form in `covers` let
+        // Unknown-kind slots bypass the pattern entirely. The new
+        // `kind_or_file()` accessor collapses unprobed to File-shape,
+        // matching the convention shared by `fs_event_to_class`.
+        let mut tree = Tree::new();
+        let (root, profile) = anchor(
+            &mut tree,
+            "root",
+            recursive_unbounded().pattern(glob("*.rs")),
+        );
+        let unprobed = tree.ensure(Some(root), "lib.c", ResourceRole::User);
+        // Deliberately do NOT call `mark` — kind stays at the default
+        // `ResourceKind::Unknown` placeholder.
+        assert!(tree.get(unprobed).unwrap().kind().is_none());
+        // Pattern is `*.rs`; lib.c does not match. Unprobed must still
+        // be filtered out.
+        assert!(!covers(&profile, unprobed, &tree));
     }
 
     #[test]

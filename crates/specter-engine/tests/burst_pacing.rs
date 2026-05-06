@@ -86,7 +86,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     // settle window of the last event.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let now = Instant::now();
     let req = SubAttachRequest {
@@ -192,7 +192,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
     // `last_response + settle`, regardless of how many cycles preceded.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let now = Instant::now();
     let req = SubAttachRequest {

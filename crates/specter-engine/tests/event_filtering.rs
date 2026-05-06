@@ -148,7 +148,7 @@ fn attach_sub_with_events(
 fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (_sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -203,7 +203,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
     // scope-driven.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (_sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -256,7 +256,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
 fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "build", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (_sid_a, pid_a, _) = attach_sub_with_events(
         &mut e,
@@ -315,7 +315,7 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
     // `it_ef_6_metadata_dropped_on_descendant_for_content_only_sub`.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "build", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
     let cfg = ScanConfig::builder().recursive(true).build();
     let (_sid_a, pid_a, attach_a) = attach_sub_with_events(
         &mut e,
@@ -383,7 +383,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
     let mut e = Engine::new();
     // Pre-existing /tmp; the Sub's anchor /tmp/build/leaf doesn't exist.
     let tmp = e.tree_mut().ensure(None, "tmp", ResourceRole::User);
-    e.tree_mut().get_mut(tmp).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(tmp, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
@@ -441,11 +441,11 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
 fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure(None, "p", ResourceRole::User);
-    e.tree_mut().get_mut(parent).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(parent, ResourceKind::Dir);
     let anchor = e
         .tree_mut()
         .ensure(Some(parent), "watched-dir", ResourceRole::User);
-    e.tree_mut().get_mut(anchor).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     // CONTENT-only mask on a Dir anchor — note: CONTENT registers no
     // bits on a Dir, but the class routing still uses Profile.events_union
@@ -518,7 +518,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
 fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (_sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -535,7 +535,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
     let child = e
         .tree_mut()
         .ensure(Some(root), "file.txt", ResourceRole::User);
-    e.tree_mut().get_mut(child).unwrap().kind = ResourceKind::File;
+    e.tree_mut().set_kind(child, ResourceKind::File);
     e.tree_mut().get_mut(child).unwrap().watch_demand = 1;
 
     // chmod on the descendant file → MetadataChanged.
@@ -576,7 +576,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
     // DOES drive the burst (CONTENT class matches mask).
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (_sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -591,7 +591,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
     let child = e
         .tree_mut()
         .ensure(Some(root), "file.txt", ResourceRole::User);
-    e.tree_mut().get_mut(child).unwrap().kind = ResourceKind::File;
+    e.tree_mut().set_kind(child, ResourceKind::File);
     e.tree_mut().get_mut(child).unwrap().watch_demand = 1;
 
     let _ = e.step(
@@ -629,7 +629,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
 fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "root", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
     let cfg = ScanConfig::builder().recursive(true).build();
 
     // Profile A: events = CONTENT only.
@@ -712,7 +712,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
 fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "build", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
     let cfg = ScanConfig::builder().recursive(true).build();
     let (sid_a, pid_a, _) = attach_sub_with_events(
         &mut e,
@@ -760,9 +760,9 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
 fn seed_vanished_releases_anchor_contribution_for_recovery() {
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure(None, "p", ResourceRole::User);
-    e.tree_mut().get_mut(parent).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(parent, ResourceKind::Dir);
     let anchor = e.tree_mut().ensure(Some(parent), "a", ResourceRole::User);
-    e.tree_mut().get_mut(anchor).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let (_sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -829,9 +829,9 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
     // a clean state and step 4 reaps cleanly.
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure(None, "p", ResourceRole::User);
-    e.tree_mut().get_mut(parent).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(parent, ResourceKind::Dir);
     let anchor = e.tree_mut().ensure(Some(parent), "a", ResourceRole::User);
-    e.tree_mut().get_mut(anchor).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let (sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -895,9 +895,9 @@ fn seed_failed_releases_anchor_contribution() {
     // Symmetric regression for dispatch_seed_failed.
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure(None, "p", ResourceRole::User);
-    e.tree_mut().get_mut(parent).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(parent, ResourceKind::Dir);
     let anchor = e.tree_mut().ensure(Some(parent), "a", ResourceRole::User);
-    e.tree_mut().get_mut(anchor).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let (_sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -956,7 +956,7 @@ fn setup_with_surviving_child(
     StepOutput,
 ) {
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (sid, pid, attach_out) = attach_sub_with_events(
         e,
@@ -1189,7 +1189,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
     // 2 → 1 → 0 cleanly.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     // Two Subs at the same anchor with different config_hash —
     // different max_settle yields a fresh Profile.
@@ -1372,7 +1372,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
     // contribution as well as the Dir's.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -1626,7 +1626,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
     // subdir 2 → 1; Q's contribution survives at 1.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     // Two Profiles at the same anchor with different config_hash
     // (different max_settle ⇒ different Profile).
@@ -1754,7 +1754,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     // must yield Q's mask only, not the union.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(root).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let attach_p = SubAttachRequest::for_resource(
         "P".into(),

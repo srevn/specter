@@ -70,7 +70,7 @@ fn config_diff_add_sub_to_existing_profile() {
     // new Watch/Probe/Suppress.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
     let (sid_a, _attach) = e.attach_sub(
@@ -127,7 +127,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     // anchor unwatched.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_resource(
         "A".into(),
@@ -185,7 +185,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
     // reap_pending=true; on burst-end, no Effect; Profile reaped.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let (sid_a, attach_out) = e.attach_sub(
         SubAttachRequest::for_resource(
@@ -276,7 +276,7 @@ fn effect_complete_after_detach_drops_silently() {
     // a Diagnostic — no panic, no reseed.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let (sid, attach_out) = e.attach_sub(
         SubAttachRequest::for_resource(
@@ -350,7 +350,7 @@ fn config_diff_modified_remove_then_add() {
     // path (path-based add re-materializes if needed).
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let (sid_a, attach_out) = e.attach_sub(
         SubAttachRequest::for_resource(

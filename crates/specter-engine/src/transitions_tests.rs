@@ -61,7 +61,7 @@ fn engine_with_attached_sub() -> (
 ) {
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("test-sub"),
@@ -406,9 +406,9 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     // directory).
     let mut e = Engine::new();
     let parent = e.tree.ensure(None, "parentdir", ResourceRole::User);
-    e.tree.get_mut(parent).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(parent, ResourceKind::Dir);
     let file_anchor = e.tree.ensure(Some(parent), "main.rs", ResourceRole::User);
-    e.tree.get_mut(file_anchor).unwrap().kind = ResourceKind::File;
+    e.tree.set_kind(file_anchor, ResourceKind::File);
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "build".into(),
@@ -712,7 +712,7 @@ fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
     // ScanConfig has `recursive(true)` so `covers(profile, child, tree)`
     // is satisfied.
     let child = e.tree.ensure(Some(root), "child.txt", ResourceRole::User);
-    e.tree.get_mut(child).unwrap().kind = ResourceKind::File;
+    e.tree.set_kind(child, ResourceKind::File);
     e.tree.get_mut(child).unwrap().watch_demand = 1;
 
     let out = e.step(
@@ -753,7 +753,7 @@ fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
 fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("test-sub"),
@@ -772,7 +772,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     complete_seed_burst(&mut e, pid, r);
 
     let child = e.tree.ensure(Some(r), "f.txt", ResourceRole::User);
-    e.tree.get_mut(child).unwrap().kind = ResourceKind::File;
+    e.tree.set_kind(child, ResourceKind::File);
     e.tree.get_mut(child).unwrap().watch_demand = 1;
 
     let out = e.step(
@@ -875,7 +875,7 @@ fn fs_event_at_watched_resource_with_no_consumer_emits_event_no_consumer_not_unw
     // someone else holds open). watch_demand > 0 ensures the event isn't
     // routed through the `EventOnUnwatchedResource` path.
     let r = e.tree.ensure(None, "lonely", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     e.tree.get_mut(r).unwrap().watch_demand = 1;
 
     let out = e.step(
@@ -1124,7 +1124,7 @@ fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
 fn effect_emission_carries_diff_when_needs_diff() {
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("fmt"),
@@ -1233,7 +1233,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
 fn probe_op_for_file_anchor_is_file_kind() {
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "log.txt", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::File;
+    e.tree.set_kind(r, ResourceKind::File);
     let req = SubAttachRequest {
         name: String::from("file-sub"),
         resource: r,
@@ -1263,7 +1263,7 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
     // Diagnostic.
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "x", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let mut out = StepOutput::default();
     crate::refcounts::add_watch_demand(&mut e.tree, r, NO_EVENTS, &mut out);
     crate::refcounts::add_watch_demand(&mut e.tree, r, NO_EVENTS, &mut out);
@@ -1327,7 +1327,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     // Set up: pre-existing /foo, attach `foo/bar` (descent at /foo).
     let mut e = Engine::new();
     let foo = e.tree.ensure(None, "foo", ResourceRole::User);
-    e.tree.get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_path(
         "guard".into(),
         std::path::PathBuf::from("foo/bar"),
@@ -1459,7 +1459,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     // siblings under the same scaffold). WatchOpRejected purges both.
     let mut e = Engine::new();
     let foo = e.tree.ensure(None, "foo", ResourceRole::User);
-    e.tree.get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(foo, ResourceKind::Dir);
     let req_a = SubAttachRequest::for_path(
         "a".into(),
         std::path::PathBuf::from("foo/sib_a"),
@@ -1680,11 +1680,11 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     // sibling's resource reseeds only the first.
     let mut e = Engine::new();
     let parent = e.tree.ensure(None, "parent", ResourceRole::User);
-    e.tree.get_mut(parent).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(parent, ResourceKind::Dir);
     let a = e.tree.ensure(Some(parent), "a", ResourceRole::User);
-    e.tree.get_mut(a).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(a, ResourceKind::Dir);
     let b = e.tree.ensure(Some(parent), "b", ResourceRole::User);
-    e.tree.get_mut(b).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(b, ResourceKind::Dir);
     let now = Instant::now();
     let req_a = SubAttachRequest {
         name: "sub-a".into(),
@@ -1899,7 +1899,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
     // remaining Sub's settle wins.
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let cfg = ScanConfig::builder().recursive(true).build();
     let (sid_fast, _) = e.attach_sub(
@@ -1953,7 +1953,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
 fn config_diff_added_only_attaches_subs() {
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
 
     let req = SubAttachRequest {
         name: "added".into(),
@@ -2024,7 +2024,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     // file entries.
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "fmt".into(),
@@ -2158,7 +2158,7 @@ fn per_stable_file_skips_dir_entries() {
     // PerStableFile must fire ONE Effect (the File), not three.
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "fmt".into(),
@@ -2602,7 +2602,7 @@ fn b3_per_key_helper_returns_only_subtree_drifted_keys() {
 fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("fmt"),
@@ -2687,7 +2687,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     // not change it.
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let req = SubAttachRequest {
         name: String::from("formatter"),
         resource: r,
@@ -2738,7 +2738,7 @@ fn structure_only_profile_has_per_file_fds_false() {
     // covered files.
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-    e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree.set_kind(r, ResourceKind::Dir);
     let req = SubAttachRequest {
         name: String::from("ls-only"),
         resource: r,
@@ -2914,7 +2914,7 @@ mod props {
     ) {
         let mut e = Engine::new();
         let r = e.tree.ensure(None, "anchor", ResourceRole::User);
-        e.tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+        e.tree.set_kind(r, ResourceKind::Dir);
         let now = Instant::now();
         let req = SubAttachRequest {
             name: String::from("test"),

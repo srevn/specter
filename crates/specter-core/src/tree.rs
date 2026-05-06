@@ -75,6 +75,19 @@ impl Tree {
         }
     }
 
+    /// Set the probed kind on the slot. No-op for stale `id`. The engine
+    /// calls this from `reconcile::create_child`, `descent::dispatch`,
+    /// and the entry-validate path inside reconcile — every site that
+    /// has just observed the inode and classified it. Symmetric with
+    /// [`Tree::set_role`]; mirrors the
+    /// `Resource.kind` field's `pub(crate)` visibility (see the
+    /// rustdoc on [`crate::Resource`]).
+    pub fn set_kind(&mut self, id: ResourceId, kind: ResourceKind) {
+        if let Some(r) = self.nodes.get_mut(id) {
+            r.kind = kind;
+        }
+    }
+
     /// Get-or-create a Resource at `(parent, segment)`. Idempotent: returns
     /// the existing slot if one is present at this `(parent, segment)`,
     /// regardless of `role`. The `role` argument applies *only* on creation.
@@ -362,7 +375,7 @@ mod tests {
         let mut tree = Tree::new();
         let parent = tree.ensure(None, "p", ResourceRole::User);
         let _child = tree.ensure(Some(parent), "c", ResourceRole::User);
-        tree.get_mut(parent).unwrap().kind = crate::resource::ResourceKind::Dir;
+        tree.set_kind(parent, crate::resource::ResourceKind::Dir);
         tree.get_mut(parent).unwrap().watch_demand = 3;
         tree.get_mut(parent).unwrap().suppress_count = 2;
 

@@ -33,8 +33,8 @@
 
 use crate::coverage::covers;
 use specter_core::{
-    ClassSet, Profile, ProfileId, ProfileMap, ProfileState, ResourceId, ResourceKind, StepOutput,
-    Tree, WatchOp,
+    ClassSet, Profile, ProfileId, ProfileMap, ProfileState, Resource, ResourceId, ResourceKind,
+    StepOutput, Tree, WatchOp,
 };
 
 /// `+watch_demand` on `r`, contributing `contribution` to `r.events_union`.
@@ -72,7 +72,10 @@ pub fn add_watch_demand(
 
     if prev_refcount == 0 || new_union != prev_union {
         let path = tree.path_of(r).unwrap_or_default();
-        let kind = tree.get(r).map_or(ResourceKind::Unknown, |res| res.kind);
+        // Preserve raw `Unknown` here — the sensor's
+        // `matches_or_unknown` verification treats it as the engine's
+        // intentional wildcard at fresh-watch time.
+        let kind = tree.get(r).map_or(ResourceKind::Unknown, Resource::kind_raw);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
@@ -158,7 +161,10 @@ pub fn sub_watch_demand(
             res.events_union = new_union;
         }
         let path = tree.path_of(r).unwrap_or_default();
-        let kind = tree.get(r).map_or(ResourceKind::Unknown, |res| res.kind);
+        // Preserve raw `Unknown` (sensor wildcard); see the rustdoc on
+        // `Resource::kind_raw` and the parallel construction in
+        // `add_watch_demand`.
+        let kind = tree.get(r).map_or(ResourceKind::Unknown, Resource::kind_raw);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
@@ -260,8 +266,14 @@ fn profile_contribution_for(
         && profile.resource != resource
         && covers(profile, resource, tree)
     {
-        let kind = tree.get(resource).map_or(ResourceKind::Unknown, |r| r.kind);
-        let is_dir = matches!(kind, ResourceKind::Dir);
+        // Per-Resource Dir contribution gates on a *definitely-Dir*
+        // classification — unprobed slots fold under the
+        // `has_per_file_fds` branch instead, matching the engine's
+        // 1-to-N "Dir always; Leaf under has_per_file_fds" contract.
+        let is_dir = matches!(
+            tree.get(resource).and_then(Resource::kind),
+            Some(ResourceKind::Dir),
+        );
         if is_dir || profile.has_per_file_fds {
             union |= profile.events_union;
         }
@@ -331,13 +343,13 @@ pub fn clamp_watch_demand_to_zero(tree: &mut Tree, r: ResourceId, out: &mut Step
     let Some(res) = tree.get_mut(r) else {
         return;
     };
-    let prev = res.watch_demand;
-    if prev == 0 {
+    if res.watch_demand == 0 {
         return;
     }
     res.watch_demand = 0;
-    res.kind = ResourceKind::Unknown;
     res.events_union = ClassSet::EMPTY;
+    // The mutable borrow on `res` ends here; `set_kind` reborrows.
+    tree.set_kind(r, ResourceKind::Unknown);
     out.watch_ops.push(WatchOp::Unwatch { resource: r });
 }
 
@@ -677,7 +689,7 @@ mod tests {
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand, 0);
         assert_eq!(res.suppress_count, 0);
-        assert_eq!(res.kind, ResourceKind::Unknown);
+        assert!(res.kind().is_none(), "clamp resets kind to Unknown");
         assert_eq!(res.events_union, ClassSet::EMPTY);
         assert_eq!(out.watch_ops.len(), 1);
         assert!(matches!(
@@ -944,9 +956,9 @@ mod tests {
         // when its kind is Dir.
         let mut tree = Tree::new();
         let root = tree.ensure(None, "root", ResourceRole::User);
-        tree.get_mut(root).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(root, ResourceKind::Dir);
         let sub = tree.ensure(Some(root), "sub", ResourceRole::User);
-        tree.get_mut(sub).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(sub, ResourceKind::Dir);
         let mut profiles = ProfileMap::new();
         let pid = profiles.attach(
             &mut tree,
@@ -969,9 +981,9 @@ mod tests {
         // bookkeeping for descendant claims).
         let mut tree = Tree::new();
         let root = tree.ensure(None, "root", ResourceRole::User);
-        tree.get_mut(root).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(root, ResourceKind::Dir);
         let sub = tree.ensure(Some(root), "sub", ResourceRole::User);
-        tree.get_mut(sub).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(sub, ResourceKind::Dir);
         let mut profiles = ProfileMap::new();
         let pid = profiles.attach(
             &mut tree,
@@ -993,9 +1005,9 @@ mod tests {
         // still set while the Profile is releasing its claim.
         let mut tree = Tree::new();
         let root = tree.ensure(None, "root", ResourceRole::User);
-        tree.get_mut(root).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(root, ResourceKind::Dir);
         let sub = tree.ensure(Some(root), "sub", ResourceRole::User);
-        tree.get_mut(sub).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(sub, ResourceKind::Dir);
         let mut profiles = ProfileMap::new();
         let pid = profiles.attach(
             &mut tree,
@@ -1021,9 +1033,9 @@ mod tests {
         // leaves do NOT contribute (matches walk_pair gating).
         let mut tree = Tree::new();
         let root = tree.ensure(None, "root", ResourceRole::User);
-        tree.get_mut(root).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(root, ResourceKind::Dir);
         let leaf = tree.ensure(Some(root), "f.rs", ResourceRole::User);
-        tree.get_mut(leaf).unwrap().kind = ResourceKind::File;
+        tree.set_kind(leaf, ResourceKind::File);
         let mut profiles = ProfileMap::new();
         let pid = profiles.attach(
             &mut tree,
@@ -1044,9 +1056,9 @@ mod tests {
         // contribute the Profile's events_union.
         let mut tree = Tree::new();
         let root = tree.ensure(None, "root", ResourceRole::User);
-        tree.get_mut(root).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(root, ResourceKind::Dir);
         let leaf = tree.ensure(Some(root), "f.rs", ResourceRole::User);
-        tree.get_mut(leaf).unwrap().kind = ResourceKind::File;
+        tree.set_kind(leaf, ResourceKind::File);
         let mut profiles = ProfileMap::new();
         let pid = profiles.attach(
             &mut tree,

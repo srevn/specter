@@ -43,7 +43,7 @@ fn cfg_recursive() -> ScanConfig {
 }
 
 fn mark_dir(tree: &mut Tree, id: ResourceId) {
-    tree.get_mut(id).unwrap().kind = ResourceKind::Dir;
+    tree.set_kind(id, ResourceKind::Dir);
 }
 
 #[test]
@@ -166,8 +166,8 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
     let lib_c = tree.ensure(Some(src), "lib.c", ResourceRole::User);
     mark_dir(&mut tree, root);
     mark_dir(&mut tree, src);
-    tree.get_mut(lib_rs).unwrap().kind = ResourceKind::File;
-    tree.get_mut(lib_c).unwrap().kind = ResourceKind::File;
+    tree.set_kind(lib_rs, ResourceKind::File);
+    tree.set_kind(lib_c, ResourceKind::File);
 
     let p = profiles.attach(
         &mut tree,
@@ -412,7 +412,7 @@ fn golden_path_full_lifecycle() {
 fn vanished_during_seed_clears_baseline_and_diagnoses() {
     let mut e = Engine::new();
     let r = e_anchor(&mut e, "log.txt");
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::File;
+    e.tree_mut().set_kind(r, ResourceKind::File);
     let req = SubAttachRequest {
         name: "fmt".into(),
         resource: r,
@@ -662,7 +662,7 @@ fn step_output_is_sorted() {
 
 fn e_anchor(e: &mut Engine, name: &str) -> ResourceId {
     let r = e.tree_mut().ensure(None, name, ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
     r
 }
 

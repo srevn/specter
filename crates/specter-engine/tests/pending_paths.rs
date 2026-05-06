@@ -82,7 +82,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
     // starts.
     let mut e = Engine::new();
     let var = e.tree_mut().ensure(None, "var", ResourceRole::User);
-    e.tree_mut().get_mut(var).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
@@ -143,7 +143,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         e.tree().get(myapp).unwrap().role,
         ResourceRole::User,
     ));
-    assert_eq!(e.tree().get(myapp).unwrap().kind, ResourceKind::Dir);
+    assert_eq!(e.tree().get(myapp).unwrap().kind(), Some(ResourceKind::Dir));
 
     // Profile is now in Active(Seed Probing) — the Seed burst was
     // started at materialization.
@@ -174,7 +174,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
 fn pending_path_failed_probe_retains_state() {
     let mut e = Engine::new();
     let var = e.tree_mut().ensure(None, "var", ResourceRole::User);
-    e.tree_mut().get_mut(var).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
@@ -220,7 +220,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     // prefix) to trigger a fresh probe (no settle).
     let mut e = Engine::new();
     let var = e.tree_mut().ensure(None, "var", ResourceRole::User);
-    e.tree_mut().get_mut(var).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
@@ -272,11 +272,11 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     let mut e = Engine::new();
     // Both / and /src exist; /src is the anchor.
     let root_dir = e.tree_mut().ensure(None, "root", ResourceRole::User);
-    e.tree_mut().get_mut(root_dir).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(root_dir, ResourceKind::Dir);
     let src = e
         .tree_mut()
         .ensure(Some(root_dir), "src", ResourceRole::User);
-    e.tree_mut().get_mut(src).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_resource(
         "watch".into(),
@@ -358,7 +358,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
 fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let mut e = Engine::new();
     let var = e.tree_mut().ensure(None, "var", ResourceRole::User);
-    e.tree_mut().get_mut(var).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),

@@ -86,18 +86,17 @@ pub(crate) fn ensure_descendant(
     while let Some(comp) = comps.next() {
         cur = tree.ensure(Some(cur), comp, ResourceRole::User);
         let is_leaf = comps.peek().is_none();
-        if let Some(res) = tree.get_mut(cur) {
-            if is_leaf {
-                // Refresh leaf kind to the snapshot's value — covers create
-                // and the rare "kind tracked stale" case (kind change at the
-                // same slot is a Vanished → fresh-slot path, not this one).
-                res.kind = leaf_kind;
-            } else if matches!(res.kind, ResourceKind::Unknown) {
-                // Intermediate path component: default to Dir when first
-                // created. Don't override an existing kind — P5's pending-
-                // path scaffolding stamps `Dir` already.
-                res.kind = ResourceKind::Dir;
-            }
+        if is_leaf {
+            // Refresh leaf kind to the snapshot's value — covers create
+            // and the rare "kind tracked stale" case (kind change at the
+            // same slot is a Vanished → fresh-slot path, not this one).
+            tree.set_kind(cur, leaf_kind);
+        } else if tree.get(cur).is_some_and(|r| r.kind().is_none()) {
+            // Intermediate path component: default to Dir when first
+            // created (kind is Unknown / unprobed). Don't override an
+            // existing kind — pending-path scaffolding stamps `Dir`
+            // already.
+            tree.set_kind(cur, ResourceKind::Dir);
         }
     }
     Some(cur)
@@ -519,9 +518,7 @@ fn create_child(
         _ => ResourceKind::File,
     };
     let resource = tree.ensure(Some(parent), name, ResourceRole::User);
-    if let Some(res) = tree.get_mut(resource) {
-        res.kind = res_kind;
-    }
+    tree.set_kind(resource, res_kind);
 
     if covers(profile, resource, tree) {
         let need_watch = matches!(new_child, ChildEntry::Dir(_)) || profile.has_per_file_fds;
@@ -603,7 +600,7 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure(None, "root", ResourceRole::User);
-        tree.get_mut(r).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(r, ResourceKind::Dir);
         // `events` chooses the per-leaf gating: CONTENT (or METADATA) ⇒
         // `has_per_file_fds = true` ⇒ Leaves get watch_demand contributions.
         // STRUCTURE-only ⇒ Dir-only contributions.
@@ -747,7 +744,7 @@ mod tests {
         // walk_pair will drop on delete (the Profile's events_union, here
         // STRUCTURE).
         let sub_id = tree.ensure(Some(root), "sub", ResourceRole::User);
-        tree.get_mut(sub_id).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(sub_id, ResourceKind::Dir);
         crate::refcounts::add_watch_demand(
             &mut tree,
             sub_id,
@@ -778,7 +775,7 @@ mod tests {
         // (symmetric to create).
         let (mut tree, profiles, root, pid) = anchor(true);
         let leaf_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
-        tree.get_mut(leaf_id).unwrap().kind = ResourceKind::File;
+        tree.set_kind(leaf_id, ResourceKind::File);
         crate::refcounts::add_watch_demand(
             &mut tree,
             leaf_id,
@@ -814,7 +811,7 @@ mod tests {
         let (mut tree, profiles, root, pid) = anchor(false);
         // Pre-materialise the prior Dir slot with the matching mask.
         let foo_id = tree.ensure(Some(root), "foo", ResourceRole::User);
-        tree.get_mut(foo_id).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(foo_id, ResourceKind::Dir);
         crate::refcounts::add_watch_demand(
             &mut tree,
             foo_id,
@@ -910,7 +907,7 @@ mod tests {
         // PerFile entry.
         let (mut tree, mut profiles, root, pid) = anchor(true);
         let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
-        tree.get_mut(a_rs_id).unwrap().kind = ResourceKind::File;
+        tree.set_kind(a_rs_id, ResourceKind::File);
 
         // Prior current = root with a.rs as covered leaf; baseline matches
         // so the diff has no ops other than the delete.
@@ -975,7 +972,7 @@ mod tests {
         // slot persists — the entry must NOT be purged.
         let (mut tree, mut profiles, root, pid) = anchor(true);
         let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
-        tree.get_mut(a_rs_id).unwrap().kind = ResourceKind::File;
+        tree.set_kind(a_rs_id, ResourceKind::File);
 
         let prior_current = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         profiles.get_mut(pid).unwrap().current =
@@ -1026,7 +1023,7 @@ mod tests {
 
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
-        tree.get_mut(a_rs_id).unwrap().kind = ResourceKind::File;
+        tree.set_kind(a_rs_id, ResourceKind::File);
 
         let prior_current = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         profiles.get_mut(pid).unwrap().current =
@@ -1086,7 +1083,7 @@ mod tests {
             ),
         );
         let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
-        tree.get_mut(a_rs_id).unwrap().kind = ResourceKind::File;
+        tree.set_kind(a_rs_id, ResourceKind::File);
 
         // Both Profiles record a PerFile entry against a.rs. Each entry's
         // `profile` field is the owning Profile's own id — mirrors what
@@ -1175,9 +1172,9 @@ mod tests {
         // is preserved.
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let a_id = tree.ensure(Some(root), "a", ResourceRole::User);
-        tree.get_mut(a_id).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(a_id, ResourceKind::Dir);
         let b_id = tree.ensure(Some(a_id), "b", ResourceRole::User);
-        tree.get_mut(b_id).unwrap().kind = ResourceKind::Dir;
+        tree.set_kind(b_id, ResourceKind::Dir);
 
         let prior_current = dir_snap(root, 100, vec![("a", dir_child(2, None))]);
         profiles.get_mut(pid).unwrap().current =

@@ -82,7 +82,7 @@ fn two_profiles_one_resource_share_watch_demand() {
     // emitted (the 0→1 edge).
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let cfg_a = ScanConfig::builder().recursive(true).build();
     let cfg_b = ScanConfig::builder().recursive(false).build();
@@ -136,9 +136,9 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
     // ancestors.
     let mut e = Engine::new();
     let src = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(src).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(src, ResourceKind::Dir);
     let foo = e.tree_mut().ensure(Some(src), "foo", ResourceRole::User);
-    e.tree_mut().get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
@@ -232,9 +232,9 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     // the engine emits a reconfirm probe in the same step.
     let mut e = Engine::new();
     let src = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(src).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(src, ResourceKind::Dir);
     let foo = e.tree_mut().ensure(Some(src), "foo", ResourceRole::User);
-    e.tree_mut().get_mut(foo).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
@@ -451,7 +451,7 @@ fn co_located_profiles_share_suppress_count() {
     // last-finishing burst's burst-end.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
-    e.tree_mut().get_mut(r).unwrap().kind = ResourceKind::Dir;
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let cfg_a = ScanConfig::builder().recursive(true).build();
     let cfg_b = ScanConfig::builder().recursive(false).build();

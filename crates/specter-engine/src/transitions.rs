@@ -17,8 +17,8 @@ use smallvec::SmallVec;
 use specter_core::{
     BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect,
     EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeResponse, ProbeResult, ProfileId,
-    ProfileState, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind,
-    TreeSnapshot, WatchFailure, WatchOp,
+    ProfileState, Resource, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId,
+    TimerKind, TreeSnapshot, WatchFailure, WatchOp,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -116,10 +116,14 @@ impl Engine {
         // resource's kind; per-Profile dispatch consults the Profile's
         // `events_union` (every Sub on a Profile shares the same mask, so
         // the union is each Sub's mask).
+        //
+        // Unprobed slots collapse to File-shape per the backend-mask
+        // convention — `fs_event_to_class` and the kqueue / inotify
+        // translators agree on this default.
         let resource_kind = self
             .tree
             .get(resource)
-            .map_or(ResourceKind::Unknown, |r| r.kind);
+            .map_or(ResourceKind::File, Resource::kind_or_file);
         let event_class = fs_event_to_class(event, resource_kind);
         let is_terminal = matches!(
             event,
@@ -1444,10 +1448,16 @@ impl Engine {
         let pattern = p.config.pattern.clone();
 
         let anchor_path = self.tree.path_of(resource).unwrap_or_default();
+        // Unprobed anchors fall back to `Dir` here — `compute_cwd`
+        // routes File-shape anchors to the parent directory and Dir-
+        // shape (or unprobed pending-path) anchors to the path itself.
+        // The actuator surfaces unprobed-but-missing paths as
+        // `EffectOutcome::Failed`.
         let anchor_kind = self
             .tree
             .get(resource)
-            .map_or(ResourceKind::Unknown, |r| r.kind);
+            .and_then(Resource::kind)
+            .unwrap_or(ResourceKind::Dir);
         let anchor_cwd = compute_cwd(&anchor_path, anchor_kind);
 
         // Lazy-build the Diff Arc only if any Sub needs it AND both a
