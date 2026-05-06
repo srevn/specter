@@ -547,14 +547,52 @@ impl FsWatcher for InotifyWatcher {
         tracing::debug!(?r, wd, "inotify unwatch");
     }
 
-    /// Stub. Phase B8 lands the real body — user-space filter via the
-    /// `suppressed` map. inotify has no kernel-level disable analogue,
-    /// so the contract names "silenced delivery" rather than
-    /// "registration disabled".
-    fn suppress(&mut self, _r: ResourceId) {}
+    /// Silence event delivery on `r` via a user-space filter — inotify
+    /// has no kernel-level disable analogue to kqueue's `EV_DISABLE`,
+    /// so the [`Self::suppressed`] map is the authoritative source and
+    /// `poll_until` (Phase B9) consults it before lifting an event
+    /// onto the engine's input channel.
+    ///
+    /// Idempotent on stale ids (the engine emits Suppress only on the
+    /// 0→1 `suppress_count` edge under D11, but the operation is
+    /// safe under any race). The trait doc tightening (Phase A6)
+    /// pins the kernel-disable vs user-space-filter wording so the
+    /// engine's caller doesn't depend on a kernel-side flush
+    /// semantic kqueue happens to provide and inotify cannot.
+    ///
+    /// Mirrors the kqueue branch's "warn on unwatched" discipline so
+    /// the two backends produce comparable diagnostic output on a
+    /// `WatchOp::Suppress` that races a concurrent `WatchOp::Unwatch`.
+    fn suppress(&mut self, r: ResourceId) {
+        if !self.by_resource.contains_key(r) {
+            tracing::warn!(?r, "inotify suppress on unwatched resource (race; dropped)");
+            return;
+        }
+        self.suppressed.insert(r, ());
+        tracing::debug!(?r, "inotify suppress (user-space)");
+    }
 
-    /// Stub. Phase B8 lands the real body. Mirror of `suppress`.
-    fn unsuppress(&mut self, _r: ResourceId) {}
+    /// Restore event delivery on `r`. Idempotent; mirror of
+    /// [`Self::suppress`] including the "warn on unwatched" race
+    /// discipline. A watched-but-not-suppressed `r` is silently fine
+    /// — the [`Self::suppressed`] removal is a no-op and event
+    /// delivery resumes (or, more accurately, was already happening).
+    /// Symmetry with kqueue's
+    /// [`crate::kqueue::watcher::KqueueWatcher::unsuppress`] keeps the
+    /// engine's caller backend-agnostic; the kqueue branch's
+    /// `EV_ENABLE` syscall is the structural counterpart of this
+    /// `suppressed.remove(r)` call.
+    fn unsuppress(&mut self, r: ResourceId) {
+        if !self.by_resource.contains_key(r) {
+            tracing::warn!(
+                ?r,
+                "inotify unsuppress on unwatched resource (race; dropped)"
+            );
+            return;
+        }
+        self.suppressed.remove(r);
+        tracing::debug!(?r, "inotify unsuppress (user-space)");
+    }
 
     /// Stub. Phase B9 lands the real body — `epoll_wait` over
     /// `(inotify_fd, wake_fd)` with `IN_IGNORED` consumption,
