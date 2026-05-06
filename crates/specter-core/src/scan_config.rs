@@ -156,7 +156,7 @@ pub enum ConfigError {
     InvalidGlob { source: String, message: String },
 }
 
-/// Canonical hash of `(ScanConfig, max_settle, events)` (I7 + D3).
+/// Canonical hash of `(ScanConfig, max_settle, events)`.
 /// The single hashing entry point in `core`/`engine` — all other paths
 /// route through this for `config_hash` derivation.
 ///
@@ -166,7 +166,7 @@ pub enum ConfigError {
 ///   `max_settle.as_nanos()`, `events.bits()`.
 ///
 /// `events` is folded last so two Subs differing only on event-class mask
-/// fork separate Profiles (design D3, "Profile-union infection" defence).
+/// fork separate Profiles ("Profile-union infection" defence).
 #[must_use]
 pub fn compute_config_hash(scan: &ScanConfig, max_settle: Duration, events: ClassSet) -> u64 {
     let mut h = hasher();
@@ -353,9 +353,9 @@ mod tests {
         );
     }
 
-    /// D3 — `events` is part of `config_hash`. Two Subs differing only on
+    /// `events` is part of `config_hash`. Two Subs differing only on
     /// the class mask must fork separate Profiles ("Profile-union
-    /// infection" defence — see design §4.1).
+    /// infection" defence).
     #[test]
     fn hash_distinguishes_events_mask() {
         let cfg = ScanConfig::builder().build();
@@ -389,10 +389,6 @@ mod tests {
     /// Golden test — pins `SipHash` key + canonical encoding. Drift here is a
     /// *breaking* change for any persisted Profile hash; rotate intentionally
     /// and update only this constant.
-    ///
-    /// The constant rotates exactly once when D3 lands (events folded last):
-    /// `events.bits()` == 0 for `ClassSet::EMPTY`, so the new hash differs
-    /// from the old by exactly the appended `0u8.hash()` step.
     #[test]
     fn hash_known_good() {
         let cfg = ScanConfig::builder().build();

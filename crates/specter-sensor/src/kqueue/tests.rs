@@ -84,11 +84,11 @@ fn normalize_attrib_with_write_emits_write() {
     );
 }
 
-// ── D10: NOTE_LINK is kind-aware ──────────────────────────────────
+// ── NOTE_LINK is kind-aware ──────────────────────────────────────
 
 #[test]
 fn normalize_link_on_dir_is_structure_changed() {
-    // D10: NOTE_LINK on a Dir == subdirectory was added/removed (the
+    // NOTE_LINK on a Dir == subdirectory was added/removed (the
     // `..` backref count changed). Structural signal.
     assert_eq!(
         kevent_to_fs_event(0, libc::NOTE_LINK, ResourceKind::Dir),
@@ -98,7 +98,7 @@ fn normalize_link_on_dir_is_structure_changed() {
 
 #[test]
 fn normalize_link_on_file_is_metadata_changed() {
-    // D10: NOTE_LINK on a File == hardlink count changed (via `ln`,
+    // NOTE_LINK on a File == hardlink count changed (via `ln`,
     // `unlink` on a hardlinked inode). Metadata signal.
     assert_eq!(
         kevent_to_fs_event(0, libc::NOTE_LINK, ResourceKind::File),
@@ -118,7 +118,7 @@ fn normalize_link_on_unknown_defaults_to_metadata_changed() {
 
 #[test]
 fn normalize_link_takes_priority_over_write_on_file() {
-    // D10 ordering: LINK before WRITE. On a File, a coalesced
+    // Ordering: LINK before WRITE. On a File, a coalesced
     // (LINK | WRITE) kevent maps to MetadataChanged — the link-count
     // shift is the dominant signal even when content also changed in
     // the same kernel batch.

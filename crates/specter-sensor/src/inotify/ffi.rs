@@ -76,8 +76,8 @@ pub(super) fn inotify_init() -> io::Result<OwnedFd> {
 ///   existing path the kernel returns the same `wd`, on a path resolving
 ///   to a different inode it returns a fresh `wd`.
 ///
-/// The watcher's [`super::watcher::InotifyWatcher::watch`] (Phase B6)
-/// uses the wd-equality check to detect inode swaps under an atomic
+/// The watcher's [`super::watcher::InotifyWatcher::watch`] uses the
+/// wd-equality check to detect inode swaps under an atomic
 /// rename of the watched path — the load-bearing race the
 /// `/proc/self/fd/N` install is designed to close.
 pub(super) fn inotify_add_watch(fd: &OwnedFd, path: &Path, mask: u32) -> io::Result<c_int> {
@@ -97,7 +97,7 @@ pub(super) fn inotify_add_watch(fd: &OwnedFd, path: &Path, mask: u32) -> io::Res
 /// Per `inotify(7)`, the kernel queues `IN_IGNORED` for the wd before
 /// freeing the descriptor on the per-instance `idr`. Callers must drop
 /// any pre-existing events queued on `wd` until `IN_IGNORED` is observed
-/// — see the wd-reuse race mitigation (Phase B7).
+/// — see the wd-reuse race mitigation in the watcher.
 ///
 /// `EINVAL` from a stale wd (the inode was already deleted, kernel
 /// already reaped) is not an error: caller treats as "already gone."
@@ -143,7 +143,7 @@ pub(super) fn read_inotify(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
 
 /// Open `path` with `O_PATH | O_NOFOLLOW | O_CLOEXEC`. The fd binds to
 /// a specific inode regardless of subsequent path-level renames; used
-/// by the watcher's race-free install in Phase B6.
+/// by the watcher's race-free install.
 ///
 /// `O_PATH` permits `fstat` even without read permission and does not
 /// pin the inode against `unlink` — exactly the discipline kqueue's
@@ -152,8 +152,7 @@ pub(super) fn read_inotify(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
 /// fork+exec can race against any of those steps, and a leaked
 /// `O_PATH` fd in the child would prolong the inode's reference count
 /// for the child's lifetime. Plugging the leak at open() time is
-/// uniform with the watcher's three persistent fds (§ 1.4 of the
-/// inotify port plan).
+/// uniform with the watcher's three persistent fds.
 pub(super) fn open_o_path(path: &Path) -> io::Result<OwnedFd> {
     let cstr = path_to_cstring(path)?;
     // SAFETY: `cstr` is a valid NUL-terminated C string; `flags` is a

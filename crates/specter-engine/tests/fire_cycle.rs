@@ -12,8 +12,9 @@
 //!   when the actuator hangs; late completions diagnose.
 //! - `reap_pending` mid-Awaiting reaps without re-probing.
 //! - Anchor loss during Awaiting / Rebasing finishes the burst cleanly.
-//! - The Seed-side B3 drift path that produces zero effects skips
-//!   Awaiting; the Standard-side B1 suppression skips Awaiting too.
+//! - The Seed-side drift path that produces zero effects skips
+//!   Awaiting; the Standard-side hash-dedup suppression skips Awaiting
+//!   too.
 
 #![allow(
     clippy::items_after_statements,
@@ -109,7 +110,7 @@ fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
 }
 
 /// Same as `subtree_request` but with `CONTENT` in the events mask so
-/// descendant `Modified` events pass the L5 class filter.
+/// descendant `Modified` events pass the class filter.
 fn subtree_request_with_content(name: &str, r: ResourceId) -> SubAttachRequest {
     SubAttachRequest::for_resource(
         name.into(),
@@ -179,8 +180,8 @@ fn attach_and_complete_seed(
 
 /// Drain timers and inject probe responses until the Standard burst
 /// reaches a stable verdict and emits Effects (transitioning to
-/// Awaiting) — or exits the cycle (B1-suppressed, no Subs match) and
-/// finishes to Idle. Returns the StepOutput from the verdict step.
+/// Awaiting) — or exits the cycle (hash-dedup-suppressed, no Subs match)
+/// and finishes to Idle. Returns the StepOutput from the verdict step.
 ///
 /// A Standard burst's first probe diffs against the seed baseline; if
 /// the response carries a different snapshot, the verdict is unstable
@@ -250,7 +251,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     // EffectComplete::Ok → Rebasing (probe at anchor). ProbeResponse Ok
     // with the SAME snapshot (idempotent command) → Idle, baseline ==
     // current. A fresh FsEvent identical to the first must NOT re-fire
-    // — B1 hash dedup catches it because last_emitted_dir_hash matches
+    // — hash dedup catches it because last_emitted_dir_hash matches
     // the current view.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
@@ -310,11 +311,11 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     assert!(e.profiles().get(pid).unwrap().baseline.is_some());
 
     // Fresh FsEvent identical to the first → Standard burst starts but
-    // B1 hash dedup suppresses the Effect (current == last_emitted_dir_hash).
+    // hash dedup suppresses the Effect (current == last_emitted_dir_hash).
     let later_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(40));
     assert!(
         later_out.effects.is_empty(),
-        "B1 dedup suppresses idempotent re-fire — fire-cycle terminated cleanly",
+        "hash dedup suppresses idempotent re-fire — fire-cycle terminated cleanly",
     );
     // Burst returned to Idle directly (no Awaiting because count==0).
     assert!(matches!(
@@ -330,7 +331,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
     // outstanding unchanged.
     //
     // The Sub uses a `CONTENT` events mask so the descendant Modified
-    // event passes the L5 class filter (which sits BEFORE drive_burst's
+    // event passes the class filter (which sits BEFORE drive_burst's
     // absorb path). With the EMPTY default mask the event would drop
     // as `EventClassDropped` and never reach the fire-tail.
     let mut e = Engine::new();
@@ -698,9 +699,9 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
 }
 
 #[test]
-fn fire_cycle_b3_fresh_seed_skips_awaiting() {
+fn fire_cycle_fresh_seed_skips_awaiting() {
     // Fresh attach → Seed-Ok → no prior `last_emitted_dir_hash` ⇒
-    // b3_seed_drift_observed returns false ⇒ no emit ⇒ finish_to_idle
+    // seed_drift_observed returns false ⇒ no emit ⇒ finish_to_idle
     // directly. Verify no Awaiting state is entered.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
@@ -783,12 +784,12 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
         "first fire cycle records the SubtreeRoot DedupKey hash",
     );
 
-    // Second burst: identical event/probe; B1 hash matches → no Effect.
+    // Second burst: identical event/probe; hash matches → no Effect.
     let later = now + Duration::from_millis(40);
     let second_out = drive_to_awaiting(&mut e, pid, r, snap, later);
     assert!(
         second_out.effects.is_empty(),
-        "B1 hash dedup suppresses the second fire — count == 0",
+        "hash dedup suppresses the second fire — count == 0",
     );
     // Profile finished directly to Idle; no Awaiting.
     assert!(matches!(

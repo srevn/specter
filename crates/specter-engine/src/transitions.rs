@@ -32,19 +32,19 @@ impl Engine {
     ///    + drop (race between `Unwatch` and the Sensor's drain).
     /// 2. Pending descents whose `current_prefix == resource` get a fresh
     ///    descent probe (`on_descent_event`). Descent prefix watches register
-    ///    STRUCTURE-only (D9), so any event reaching here is structurally
-    ///    relevant by L4 — descent dispatch is unfiltered.
+    ///    STRUCTURE-only, so any event reaching here is structurally
+    ///    relevant — descent dispatch is unfiltered.
     /// 3. Idle Profiles whose `watch_root_parent == resource` and whose
     ///    anchor is currently absent (`current.is_none()`) re-enter pending
-    ///    descent — auto-recapture on anchor reappearance. Same D9 STRUCTURE
+    ///    descent — auto-recapture on anchor reappearance. Same STRUCTURE
     ///    floor applies.
-    /// 4. Per-covering-Profile dispatch with class-aware filter (L5):
-    ///    - Anchor events bypass the filter unconditionally per design D8 —
-    ///      lifecycle signal continuity trumps user opt-out.
+    /// 4. Per-covering-Profile dispatch with class-aware filter:
+    ///    - Anchor events bypass the filter unconditionally — lifecycle
+    ///      signal continuity trumps user opt-out.
     ///    - Descendant events whose class (per [`fs_event_to_class`]) is
     ///      not in the Profile's `events_union` drop with
-    ///      `EventClassDropped` BEFORE driving the burst (per design §6.1
-    ///      — class filter sits before dirty-set bumps).
+    ///      `EventClassDropped` BEFORE driving the burst — the class filter
+    ///      sits before dirty-set bumps.
     ///    - Terminal-on-anchor → `on_anchor_terminal_event`. Anything else
     ///      that passes the filter → `drive_burst`.
     pub(crate) fn on_fs_event(
@@ -66,8 +66,8 @@ impl Engine {
         // Route events at descent prefixes to `on_descent_event`. Multiple
         // Profiles may share one prefix (two Subs awaiting siblings under
         // the same scaffold); fan out to each. Descent prefix watches
-        // register STRUCTURE-only (D9), so any event reaching here is
-        // structurally relevant by L4 — no class filter applies.
+        // register STRUCTURE-only, so any event reaching here is
+        // structurally relevant — no class filter applies.
         let descent_owners = self.descents_at_prefix(resource);
         for pid in &descent_owners {
             self.on_descent_event(*pid, now, out);
@@ -79,7 +79,7 @@ impl Engine {
         // automatically. Pending and Idle are mutually exclusive
         // ProfileState variants — the `matches!(p.state, ProfileState::Idle)`
         // filter already excludes Pending Profiles. The watch-root-parent
-        // watch registers STRUCTURE-only (D9) — recovery dispatch is
+        // watch registers STRUCTURE-only — recovery dispatch is
         // unfiltered, same rationale as descent above.
         let recovery_targets: Vec<ProfileId> = self
             .profiles
@@ -112,10 +112,10 @@ impl Engine {
             return;
         }
 
-        // L5 class-aware routing. Compute the event's class once from the
+        // Class-aware routing. Compute the event's class once from the
         // resource's kind; per-Profile dispatch consults the Profile's
-        // `events_union` (D3 — every Sub on a Profile shares the same
-        // mask, so the union is each Sub's mask).
+        // `events_union` (every Sub on a Profile shares the same mask, so
+        // the union is each Sub's mask).
         let resource_kind = self
             .tree
             .get(resource)
@@ -135,11 +135,11 @@ impl Engine {
                 continue;
             };
 
-            // D8 — anchor events bypass the class filter unconditionally
+            // Anchor events bypass the class filter unconditionally
             // (lifecycle: anchor disappearance recovery, anchor reappearance
-            // detection, etc.). §6.1 — descendant events whose class is
-            // not in the Profile's `events_union` drop here, before
-            // `drive_burst` extends `dirty_resources` / `force_walk_resources`.
+            // detection, etc.). Descendant events whose class is not in
+            // the Profile's `events_union` drop here, before `drive_burst`
+            // extends `dirty_resources` / `force_walk_resources`.
             if !is_anchor && !profile_events.intersects(event_class) {
                 out.diagnostics.push(Diagnostic::EventClassDropped {
                     resource,
@@ -624,7 +624,7 @@ impl Engine {
     /// Sensor reports it dropped events at the kernel level (inotify's
     /// `IN_Q_OVERFLOW`). Reseed every Profile in scope so the engine's
     /// post-probe `dispatch_seed_ok` re-establishes baseline against
-    /// disk reality and runs B3 drift detection (a recorded
+    /// disk reality and runs drift detection (a recorded
     /// `last_emitted_dir_hash[Subtree]` disagreement fires Effects once,
     /// then rebases).
     ///
@@ -878,7 +878,7 @@ impl Engine {
     /// (Seed, Ok).
     ///
     /// Graft the response into `Profile.current` at the burst's
-    /// `probe_target` (= anchor for Seeds). Bundle B3 (hash-only): if the
+    /// `probe_target` (= anchor for Seeds). Hash-only drift check: if the
     /// post-graft `current` diverges from a recorded
     /// `last_emitted_dir_hash[Subtree]` for this Profile, fire
     /// `emit_effects` once and route through the same fire-tail as a
@@ -887,7 +887,7 @@ impl Engine {
     /// Otherwise rebase directly: `baseline := current` and finish.
     ///
     /// Fresh-attach Seed cannot enter the drift branch — `last_emitted_dir_hash`
-    /// is empty by construction at fresh attach, so `b3_seed_drift_observed`
+    /// is empty by construction at fresh attach, so `seed_drift_observed`
     /// returns false. The drift branch fires only on recovery / post-Effect
     /// rebase paths where the Profile has already emitted at least one
     /// Subtree key.
@@ -929,15 +929,16 @@ impl Engine {
             }
         }
 
-        // Bundle B3 — fire Effects only for the Subtree keys that drifted
-        // since the last successful emission. emit_effects' B1 path runs
-        // against the freshly grafted current and updates
-        // `last_emitted_dir_hash` to the new post-fire hash. The rebase
-        // (`baseline := current`) happens in both branches below; on the
-        // drift-fires branch it must run before `transition_to_awaiting`
-        // so the Profile's view is consistent for any FsEvent absorbed
-        // during the post-fire tail (Awaiting/Rebasing).
-        let drifted_keys = self.b3_seed_drift_observed(profile_id);
+        // Fire Effects only for the Subtree keys that drifted since the
+        // last successful emission. The dedup-hash path inside
+        // `emit_effects` runs against the freshly grafted current and
+        // updates `last_emitted_dir_hash` to the new post-fire hash. The
+        // rebase (`baseline := current`) happens in both branches below;
+        // on the drift-fires branch it must run before
+        // `transition_to_awaiting` so the Profile's view is consistent for
+        // any FsEvent absorbed during the post-fire tail
+        // (Awaiting/Rebasing).
+        let drifted_keys = self.seed_drift_observed(profile_id);
         if !drifted_keys.is_empty() {
             let outcome = self.emit_effects(profile_id, false, Some(&drifted_keys), out);
             if outcome.count > 0 {
@@ -953,15 +954,16 @@ impl Engine {
             // reaches here defensively). Fall through to the finish path.
         }
 
-        // Non-drift Seed (fresh attach, no-drift recovery, or B1-suppressed
-        // drift): rebase and finish. No Effect fires, no Awaiting tail.
+        // Non-drift Seed (fresh attach, no-drift recovery, or
+        // dedup-hash-suppressed drift): rebase and finish. No Effect
+        // fires, no Awaiting tail.
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = p.current.clone();
         }
         self.finish_burst_to_idle(profile_id, out);
     }
 
-    /// Bundle B3 — per-key hash-only drift check at Seed-Ok. Returns the
+    /// Per-key hash-only drift check at Seed-Ok. Returns the
     /// `DedupKey::Subtree` keys whose recorded `last_emitted_dir_hash`
     /// differs from the post-graft `current`'s anchor-rooted hash. Empty
     /// vec means "no drift" — fresh-Profile Seed (no prior emission) ⇒
@@ -980,8 +982,8 @@ impl Engine {
     /// per-file diff. The dispatcher passes the returned filter to
     /// `emit_effects`, which then skips PerStableFile Subs entirely on
     /// the drift path — PerFile keys fire only via Standard bursts, never
-    /// from B3.
-    fn b3_seed_drift_observed(&self, profile_id: ProfileId) -> SmallVec<[DedupKey; 2]> {
+    /// from this drift path.
+    fn seed_drift_observed(&self, profile_id: ProfileId) -> SmallVec<[DedupKey; 2]> {
         let Some(p) = self.profiles.get(profile_id) else {
             return SmallVec::new();
         };
@@ -1130,8 +1132,9 @@ impl Engine {
 
         if is_stable && dirty_zero {
             // Row 3: stable + dirty=0 → fire Effect. Awaiting on count > 0;
-            // finish-to-Idle on count == 0 (B1 suppressed everything, no
-            // Subs matched, or `reap_pending` skipped the emit). baseline
+            // finish-to-Idle on count == 0 (dedup-hash suppressed
+            // everything, no Subs matched, or `reap_pending` skipped the
+            // emit). baseline
             // is NOT pinned here on the firing branch — it will rebase
             // when the Rebasing probe response lands (`dispatch_rebase_ok`).
             // No drift filter — Standard bursts emit for every matching Sub.
@@ -1150,8 +1153,8 @@ impl Engine {
         } else if forced {
             // Row 5: not-stable + forced → fire Effect with forced=true.
             // Same Awaiting / finish-to-Idle branching as row 3 — `forced`
-            // overrides B1 inside `emit_effects`, but a Profile with no
-            // matching Subs still returns count == 0.
+            // overrides dedup-hash suppression inside `emit_effects`, but
+            // a Profile with no matching Subs still returns count == 0.
             let outcome = self.emit_effects(profile_id, true, None, out);
             if outcome.count > 0 {
                 self.transition_to_awaiting(profile_id, outcome.count, now);
@@ -1227,13 +1230,13 @@ impl Engine {
     /// anchor (set by `transition_to_rebasing`); no stability verdict
     /// applies (we just fired, drift is expected).
     ///
-    /// **No B3.** Recovery / post-Effect drift detection is gated on
-    /// Seed-Ok in v1; Rebasing is a phase of the Standard burst (or
-    /// the Seed burst's drift tail), not a fresh Seed, so the B3 hash
+    /// **No drift check.** Recovery / post-Effect drift detection is
+    /// gated on Seed-Ok in v1; Rebasing is a phase of the Standard burst
+    /// (or the Seed burst's drift tail), not a fresh Seed, so the hash
     /// check would either fire-loop (every fire writes a new hash;
     /// the next rebase would see drift; loop) or be silently a no-op
     /// (the post-fire hash matches itself by construction). The
-    /// helper deliberately avoids `b3_seed_drift_observed` here.
+    /// helper deliberately avoids `seed_drift_observed` here.
     fn dispatch_rebase_ok(
         &mut self,
         profile_id: ProfileId,
@@ -1274,7 +1277,7 @@ impl Engine {
     /// Symmetric path with `dispatch_standard_vanished`: clear baseline /
     /// current, release the anchor watch contribution, finish the burst.
     /// Diagnostic carries the burst's actual intent so logs can
-    /// distinguish Seed-driven (B3 drift) vs Standard-driven Rebasing;
+    /// distinguish Seed-driven (drift) vs Standard-driven Rebasing;
     /// the lookup falls back to `Standard` only on a stale-Profile or
     /// non-Active defensive path (the routing in `on_probe_response`
     /// guarantees `Active(Rebasing)` at entry).
@@ -1325,7 +1328,7 @@ impl Engine {
     /// `dispatch_rebase_*` only on `BurstPhase::Rebasing`, and that
     /// phase is reachable only from Active. Standard is the right
     /// default because Rebasing is overwhelmingly a Standard-burst tail
-    /// (Seed-driven Rebasing requires a recovery + B3 drift, the rare
+    /// (Seed-driven Rebasing requires a recovery + drift, the rare
     /// path).
     fn rebase_burst_intent(&self, profile_id: ProfileId) -> BurstIntent {
         self.profiles
@@ -1410,8 +1413,8 @@ impl Engine {
     ///
     /// `drift_filter` narrows emission on the Seed-drift path: when `Some`,
     /// only `SubtreeRoot` Subs whose `DedupKey::Subtree` is in the filter
-    /// fire, and PerStableFile Subs are skipped entirely (B3 is a Subtree-
-    /// only drift signal — see `b3_seed_drift_observed`). On the Standard
+    /// fire, and PerStableFile Subs are skipped entirely (the drift signal
+    /// is Subtree-only — see `seed_drift_observed`). On the Standard
     /// burst path the filter is `None` and every matching Sub emits.
     ///
     /// `Profile.reap_pending` suppresses all emission — the Profile is on its
@@ -1422,8 +1425,8 @@ impl Engine {
     /// Returns an [`EmitOutcome`] whose `count` is the number of Effects
     /// pushed onto `out.effects`. Callers consume this to decide whether
     /// to enter the `Awaiting` phase (`count > 0`) or short-circuit to
-    /// `finish_burst_to_idle` (B1 suppressed everything, no Subs matched,
-    /// or `reap_pending`).
+    /// `finish_burst_to_idle` (dedup-hash suppressed everything, no Subs
+    /// matched, or `reap_pending`).
     fn emit_effects(
         &mut self,
         profile_id: ProfileId,
@@ -1463,9 +1466,9 @@ impl Engine {
             diff_slot.clone()
         };
 
-        // Snapshot the post-graft `current` hash once for B1 SubtreeRoot
-        // suppression. PerStableFile uses per-leaf hashes (computed inside
-        // `emit_effects_per_stable_file`).
+        // Snapshot the post-graft `current` hash once for SubtreeRoot
+        // dedup-hash suppression. PerStableFile uses per-leaf hashes
+        // (computed inside `emit_effects_per_stable_file`).
         let current_dir_hash: u128 = current_snap.as_ref().map_or(0, |s| match s {
             TreeSnapshot::Dir(arc) => arc.dir_hash(),
             TreeSnapshot::File(leaf) => leaf.leaf_hash(),
@@ -1489,17 +1492,17 @@ impl Engine {
                     // Drift filter (Seed-drift path): emit only when this
                     // Sub's `Subtree` key is in the requested set. The
                     // Standard burst path passes `None` and emits
-                    // unconditionally (modulo B1 below).
+                    // unconditionally (modulo dedup-hash suppression below).
                     if let Some(allowed) = drift_filter
                         && !allowed.contains(&dk)
                     {
                         continue;
                     }
-                    // Bundle B1: suppress when the post-burst hash equals
-                    // the hash we last fired against for this DedupKey AND
-                    // the burst is not forced. `forced=true` is the
-                    // "max-settle elapsed; give up and run" path —
-                    // suppressing it would lie about progress.
+                    // Suppress when the post-burst hash equals the hash we
+                    // last fired against for this DedupKey AND the burst
+                    // is not forced. `forced=true` is the "max-settle
+                    // elapsed; give up and run" path — suppressing it
+                    // would lie about progress.
                     let suppress = !forced
                         && self
                             .profiles
@@ -1547,11 +1550,11 @@ impl Engine {
                     }
                 }
                 EffectScope::PerStableFile => {
-                    // B3 is Subtree-only — PerFile keys are not drift
-                    // sources (per the helper's documented limitation).
-                    // On the Seed-drift path the filter is `Some` and
-                    // PerStableFile Subs do not fire; PerFile keys reach
-                    // the actuator only via Standard bursts.
+                    // The drift path is Subtree-only — PerFile keys are
+                    // not drift sources (per the helper's documented
+                    // limitation). On the Seed-drift path the filter is
+                    // `Some` and PerStableFile Subs do not fire; PerFile
+                    // keys reach the actuator only via Standard bursts.
                     if drift_filter.is_some() {
                         continue;
                     }
@@ -1662,7 +1665,7 @@ impl Engine {
                 profile: profile_id,
                 resource,
             };
-            // Bundle B1 per-leaf suppression. `lookup_leaf_hash_in_current`
+            // Per-leaf dedup-hash suppression. `lookup_leaf_hash_in_current`
             // returns `None` when current's per-leaf hash isn't reachable
             // (rare; defense-in-depth) — fire conservatively in that case
             // (correctness over efficiency).
@@ -1707,9 +1710,9 @@ impl Engine {
             });
             count = count.saturating_add(1);
 
-            // Bundle B1: record the post-fire leaf hash so the next stable
-            // verdict at the same DedupKey can suppress an idempotent
-            // re-fire. Only insert when we have a real leaf hash; the
+            // Record the post-fire leaf hash so the next stable verdict
+            // at the same DedupKey can suppress an idempotent re-fire.
+            // Only insert when we have a real leaf hash; the
             // None-fallback above is intentionally not memoised (we want
             // the next probe to fire too).
             if let Some(h) = leaf_hash
@@ -1766,14 +1769,16 @@ impl Engine {
 }
 
 /// Outcome of an [`Engine::emit_effects`] call. `count` is the number of
-/// `out.effects.push(...)` invocations that survived B1 suppression and
-/// Sub-scope routing — i.e., Effects that the Actuator will actually run.
+/// `out.effects.push(...)` invocations that survived dedup-hash
+/// suppression and Sub-scope routing — i.e., Effects that the Actuator
+/// will actually run.
 ///
 /// `dispatch_*_ok` consumes this to decide whether the Profile should
 /// enter the `Awaiting` phase (count > 0, at least one Effect is in
-/// flight) or short-circuit to `finish_burst_to_idle` (count == 0: B1
-/// suppressed every emission, no Subs matched, or `reap_pending` was
-/// set). The `#[must_use]` attribute prevents a future caller from
+/// flight) or short-circuit to `finish_burst_to_idle` (count == 0:
+/// dedup-hash suppressed every emission, no Subs matched, or
+/// `reap_pending` was set). The `#[must_use]` attribute prevents a future
+/// caller from
 /// silently dropping the count and re-introducing the post-emit
 /// "Idle-but-Effects-in-flight" leakage.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
@@ -1844,7 +1849,7 @@ fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> PathBuf {
     }
 }
 
-/// L5 event-class assignment. Maps an [`FsEvent`] + the resource's
+/// Event-class assignment. Maps an [`FsEvent`] + the resource's
 /// [`ResourceKind`] to the [`ClassSet`] bit it represents.
 ///
 /// Non-terminal events have a fixed class regardless of kind:
@@ -1853,15 +1858,15 @@ fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> PathBuf {
 /// - [`FsEvent::StructureChanged`] → [`ClassSet::STRUCTURE`]
 ///
 /// Identity events ([`FsEvent::Removed`] / [`FsEvent::Renamed`] /
-/// [`FsEvent::Revoked`]) fold by kind per design §2.1 + D7:
+/// [`FsEvent::Revoked`]) fold by kind:
 /// - `Dir` → [`ClassSet::STRUCTURE`] (the directory's place in its parent
 ///   changed).
 /// - `File` (and `Unknown` via [`ResourceKind::effective`]) →
 ///   [`ClassSet::CONTENT`] (the file's identity changed — kqexec
-///   mapping; the Unknown collapse matches the L4 translator's
+///   mapping; the Unknown collapse matches the translator's
 ///   File-shape default).
 ///
-/// Pure / `const fn`; consulted at the L5 entry filter in [`Engine::on_fs_event`].
+/// Pure / `const fn`; consulted at the entry filter in [`Engine::on_fs_event`].
 const fn fs_event_to_class(event: FsEvent, kind: ResourceKind) -> ClassSet {
     match event {
         FsEvent::Modified => ClassSet::CONTENT,
@@ -1911,7 +1916,7 @@ const _: fn() = || {
 ///   non-final segment.
 /// - Any segment fails to resolve.
 ///
-/// Bundle B1 `PerStableFile` suppression treats `None` as "fire
+/// `PerStableFile` dedup-hash suppression treats `None` as "fire
 /// conservatively" — correctness over efficiency on the rare path where
 /// reconcile materialised the slot but the leaf isn't reachable from
 /// `current` at emission time (e.g., diff-entry's parent uncovered).

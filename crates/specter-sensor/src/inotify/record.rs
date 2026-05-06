@@ -22,18 +22,18 @@
 //! v1 collapses every name-bearing structure event into
 //! [`specter_core::FsEvent::StructureChanged`] and re-discovers the
 //! delta via a parent probe — `cookie` and `name` are never consumed.
-//! The parser preserves them anyway so the v3+ optimization (per the
-//! analysis §9.1: minting a typed `Input::ChildEvent { parent, name,
-//! kind }` directly from inotify) does not have to reshape the record
-//! API. Cost is one byte-slice borrow per record on the hot path.
+//! The parser preserves them anyway so a future optimization that mints
+//! a typed `Input::ChildEvent { parent, name, kind }` directly from
+//! inotify does not have to reshape the record API. Cost is one
+//! byte-slice borrow per record on the hot path.
 //!
 //! ## Truncation discipline
 //!
 //! The kernel returns `EINVAL` if the user buffer is below the per-event
 //! minimum (`sizeof(struct inotify_event) + NAME_MAX + 1` ≈ 273 bytes,
 //! per `inotify(7)`). The watcher sizes its drain buffer well above
-//! that — see [`super::watcher`] (Phase B5 land) — so `read` never
-//! returns a truncated record. The defensive guards below silently end
+//! that — see [`super::watcher`] — so `read` never returns a truncated
+//! record. The defensive guards below silently end
 //! iteration on a malformed buffer rather than panic, but those branches
 //! are observationally dead under healthy invariants.
 
@@ -52,7 +52,7 @@ const HEADER_SIZE: usize = 16;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Record<'a> {
     /// Watch descriptor identifying which install fired this event.
-    /// Maps to `ResourceId` via the watcher's `wd → r` index (Phase B5).
+    /// Maps to `ResourceId` via the watcher's `wd → r` index.
     pub wd: c_int,
     /// Bit set of `IN_*` flags; consumed by [`super::normalize`].
     pub mask: u32,

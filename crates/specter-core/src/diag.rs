@@ -67,10 +67,10 @@ pub enum Diagnostic {
         errno: i32,
     },
     /// `FsEvent` arrived for a covered descendant whose class (per the
-    /// L5 `fs_event_to_class` mapping) is not in the covering Profile's
+    /// `fs_event_to_class` mapping) is not in the covering Profile's
     /// `events_union`. The user opted out of this class via `Sub.events`,
-    /// so the engine drops the event before it can drive a burst (per
-    /// design §6.1 — class filter sits before dirty-set bumps).
+    /// so the engine drops the event before it can drive a burst (the
+    /// class filter sits before dirty-set bumps).
     ///
     /// Distinct from [`Self::EventNoConsumer`] (no covering Profile at
     /// all): there *is* a covering Profile, but the class filter rejects.
@@ -78,8 +78,8 @@ pub enum Diagnostic {
     /// hard-coded "always drop METADATA"; this one carries the dropped
     /// event + Profile so logs can disambiguate user opt-out from race.
     ///
-    /// Anchor-on-Profile events bypass this filter unconditionally per
-    /// design D8 — lifecycle continuity (anchor terminal events drive
+    /// Anchor-on-Profile events bypass this filter unconditionally —
+    /// lifecycle continuity (anchor terminal events drive
     /// `on_anchor_terminal_event`; non-terminal anchor events drive the
     /// burst) trumps the user's class opt-out.
     EventClassDropped {

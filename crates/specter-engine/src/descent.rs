@@ -200,7 +200,7 @@ impl crate::Engine {
 
     /// Enter `ProfileState::Pending` against `prefix` with `remaining`
     /// path components (single-component segments, anchor last). Bumps the
-    /// prefix's `STRUCTURE` `watch_demand` contribution (D9), opens the
+    /// prefix's `STRUCTURE` `watch_demand` contribution, opens the
     /// probe channel, writes the descent state, and emits the descent
     /// probe — the four-step Idle → Pending entry sequence as a single
     /// helper.
@@ -383,8 +383,8 @@ impl crate::Engine {
             self.tree.set_role(new_resource, ResourceRole::User);
 
             // Capture the Profile's user mask now; used as the anchor's
-            // contribution (D-anchor). The Profile's events_union is
-            // invariant (D3 / R1), so this is a one-time read.
+            // contribution. The Profile's events_union is invariant, so
+            // this is a one-time read.
             let events_union = self
                 .profiles
                 .get(profile_id)

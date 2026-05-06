@@ -64,8 +64,8 @@ fn drain_for(w: &mut InotifyWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)
 /// Re-watch with a widened mask should make new event classes deliverable.
 /// Specifically: a CONTENT-only registration filters out
 /// `MetadataChanged`; widening to `CONTENT | METADATA` (a fresh `Watch`
-/// op the engine emits when `Resource.events_union` changes per D11)
-/// must re-register the wd with `IN_ATTRIB`, and a subsequent chmod then
+/// op the engine emits when `Resource.events_union` changes) must
+/// re-register the wd with `IN_ATTRIB`, and a subsequent chmod then
 /// fires `MetadataChanged`.
 #[test]
 fn rewatch_with_widened_mask_delivers_new_classes() {

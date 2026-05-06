@@ -3,7 +3,7 @@
 //! `poll_until`. macOS / FreeBSD only — kqueue is BSD-only.
 //!
 //! Each test passes the minimum [`ClassSet`] needed to fire the event it
-//! asserts on (per design D7's identity floor + class-aware mapping):
+//! asserts on (identity floor + class-aware mapping):
 //! - Terminal events (`Removed`, `Renamed`, `Revoked`) work with `EMPTY`
 //!   because `IDENTITY_FLOOR = NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE`
 //!   is OR-ed onto every registration.

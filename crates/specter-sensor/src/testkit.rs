@@ -105,8 +105,8 @@ impl MockFsWatcher {
     /// the queue ran dry).
     ///
     /// Useful for engine / bin tests that need to assert the `Overflow`
-    /// routing path (Phase B11) without spinning up a real inotify
-    /// instance and stressing it past `max_queued_events`.
+    /// routing path without spinning up a real inotify instance and
+    /// stressing it past `max_queued_events`.
     pub fn inject_overflow(&mut self, scope: OverflowScope) {
         self.queued_overflow.push(scope);
     }
@@ -127,7 +127,7 @@ impl MockFsWatcher {
     ///   no lifecycle ops in the call log.
     ///
     /// `Suppress` / `Unsuppress` ops do not affect the mask and are
-    /// skipped during the walk. Under R2 / D11 the engine emits a fresh
+    /// skipped during the walk. The engine emits a fresh
     /// `WatchOp::Watch` whenever `Resource.events_union` widens or
     /// narrows, so the latest `Watch` reflects the engine's current
     /// per-Resource union.
@@ -530,7 +530,7 @@ mod tests {
     // ---------------------------------------------------------------- registered_events
 
     /// `registered_events` reads the events on the latest `Watch` call.
-    /// Under R2 / D11 the engine emits a fresh `Watch` whenever
+    /// The engine emits a fresh `Watch` whenever
     /// `Resource.events_union` changes, so the latest call reflects the
     /// current per-Resource union.
     #[test]

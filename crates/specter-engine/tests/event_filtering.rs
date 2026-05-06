@@ -1,10 +1,9 @@
-//! Engine-level integration tests for the event-filtering primitive
-//! (`docs/EVENT_FILTERING_DESIGN.md`). Each test exercises the user-facing
-//! invariants without spinning up a real kqueue: the L5 entry filter, the
-//! D3 mask-fork (mask ∈ `config_hash`), the D8 anchor-bypass, the D9
-//! descent-prefix STRUCTURE-only contribution, and the E2E #3 closure path
-//! (`subtree-root × default events ⇒ has_per_file_fds = true ⇒ per-file
-//! FDs on covered Leaves).
+//! Engine-level integration tests for the event-filtering primitive.
+//! Each test exercises the user-facing invariants without spinning up a
+//! real kqueue: the entry filter, the mask-fork (mask ∈ `config_hash`),
+//! the anchor-bypass, the descent-prefix STRUCTURE-only contribution,
+//! and the E2E #3 closure path (`subtree-root × default events ⇒
+//! has_per_file_fds = true ⇒ per-file FDs on covered Leaves).
 //!
 //! Where the equivalent shape lives in `transitions_tests.rs`, this file
 //! is the **integration** counterpart — exercising whole-Engine flows
@@ -132,11 +131,11 @@ fn attach_sub_with_events(
 // ───────────────────────────────────────────────────────────────────────
 // IT-EF-1 — DEFAULT_SUBTREE_ROOT enables per-file FDs (closes E2E #3)
 //
-// Per design §15: "echo 'test' > file.txt inside a subtree-root watched
-// dir then receives an event on the per-file FD (CONTENT class registered
-// under D4 → translator emits NOTE_WRITE | NOTE_EXTEND on every covered
-// Leaf), the burst fires, the probe runs, the diff classifies the file as
-// Modified, and the user's command runs."
+// `echo 'test' > file.txt` inside a subtree-root watched dir receives an
+// event on the per-file FD (CONTENT class drives the translator to emit
+// `NOTE_WRITE | NOTE_EXTEND` on every covered Leaf), the burst fires,
+// the probe runs, the diff classifies the file as Modified, and the
+// user's command runs.
 //
 // At engine level this manifests as: a `subtree-root` Sub with default
 // events (`STRUCTURE | CONTENT`) drives `has_per_file_fds = true`, so
@@ -243,14 +242,14 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// IT-EF-2 — Two Subs with different masks fork separate Profiles (R1 / D3)
+// IT-EF-2 — Two Subs with different masks fork separate Profiles
 //
-// Per design §4.1: events folds into `compute_config_hash`, so two Subs
-// at the same resource that differ only on `events` partition into two
-// distinct Profiles. This guards against the "Profile-union infection"
-// problem: a chmod on a Sub asking only for CONTENT must not fire that
-// Sub's command via the same Profile that handles a sibling Sub asking
-// for METADATA.
+// `events` folds into `compute_config_hash`, so two Subs at the same
+// resource that differ only on `events` partition into two distinct
+// Profiles. This guards against the "Profile-union infection" problem:
+// a chmod on a Sub asking only for CONTENT must not fire that Sub's
+// command via the same Profile that handles a sibling Sub asking for
+// METADATA.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -278,7 +277,7 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
 
     assert_ne!(
         pid_a, pid_b,
-        "Subs with distinct events forks fork into distinct Profiles (D3)",
+        "Subs with distinct events forks fork into distinct Profiles",
     );
 
     // Both Profiles record their own mask; the per-resource union
@@ -294,7 +293,7 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
     assert_eq!(
         e.tree().get(root).unwrap().events_union,
         ClassSet::CONTENT | ClassSet::METADATA,
-        "anchor's per-Resource union ORs both Profiles' contributions (R2)",
+        "anchor's per-Resource union ORs both Profiles' contributions",
     );
 }
 
@@ -302,15 +301,15 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
 fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
     // Concrete chmod scenario: Sub A wants CONTENT, Sub B wants METADATA.
     // After a `MetadataChanged` at the anchor, Profile B drives a burst;
-    // Profile A's L5 filter would drop it… EXCEPT D8: anchor events
-    // bypass the filter unconditionally. So both Profiles drive bursts
-    // — the differentiation happens at probe time / dedup, not at
-    // routing.
+    // Profile A's class filter would drop it… EXCEPT anchor events bypass
+    // the filter unconditionally. So both Profiles drive bursts — the
+    // differentiation happens at probe time / dedup, not at routing.
     //
     // This test pins the routing semantics (both Profiles get the event
     // because of the anchor-bypass) and the registration semantics
     // (METADATA-only kernel mask wouldn't even fire MetadataChanged for
-    // the CONTENT Sub if the L5 filter applied — but it doesn't, by D8).
+    // the CONTENT Sub if the class filter applied — but it doesn't, due to
+    // the anchor-bypass).
     //
     // The descendant case (where the filter DOES apply) is covered in
     // `it_ef_6_metadata_dropped_on_descendant_for_content_only_sub`.
@@ -339,8 +338,8 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
     complete_seed_burst(&mut e, pid_a, &attach_a, snap.clone());
     complete_seed_burst(&mut e, pid_b, &attach_b, snap);
 
-    // MetadataChanged at the anchor: D8 — anchor events bypass class
-    // filter for both Profiles. Both should drive bursts.
+    // MetadataChanged at the anchor — anchor events bypass class filter
+    // for both Profiles. Both should drive bursts.
     let out = e.step(
         Input::FsEvent {
             resource: root,
@@ -352,7 +351,7 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
         !out.diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
-        "anchor events bypass class filter for ALL covering Profiles (D8)",
+        "anchor events bypass class filter for ALL covering Profiles",
     );
 
     // Both Profiles transition Idle → Active(Standard, Settling).
@@ -368,11 +367,11 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// IT-EF-3 — Descent prefix carries STRUCTURE-only mask (D9)
+// IT-EF-3 — Descent prefix carries STRUCTURE-only mask
 //
-// Design D9: "Descent prefix watches register `events = {STRUCTURE}`
-// regardless of the Sub's mask. The prefix is not the user's anchor; it's
-// a transient artifact of the engine's descent state machine."
+// Descent prefix watches register `events = {STRUCTURE}` regardless of
+// the Sub's mask. The prefix is not the user's anchor; it's a transient
+// artifact of the engine's descent state machine.
 //
 // We attach a Sub at a path whose anchor doesn't yet exist. The deepest
 // existing prefix is bumped — its `events_union` should be STRUCTURE
@@ -409,7 +408,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
 
     // /tmp's events_union is STRUCTURE — NOT the Sub's CONTENT mask. The
     // Sub's mask only contributes to its own anchor's union; the prefix
-    // is engine infrastructure (D9).
+    // is engine infrastructure.
     assert_eq!(
         e.tree().get(tmp).unwrap().events_union,
         ClassSet::STRUCTURE,
@@ -424,17 +423,18 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// IT-EF-4 — Anchor terminal events bypass the L5 class filter (D8)
+// IT-EF-4 — Anchor terminal events bypass the class filter
 //
 // A `events = ["content"]` Sub on a Dir anchor: `Removed` at the anchor
 // folds to STRUCTURE per `fs_event_to_class`'s identity-on-Dir rule.
-// STRUCTURE is NOT in the Profile's mask. Without D8, L5 would drop the
-// event and the anchor's contribution would leak — `watch_root_parent →
-// re-descent` recovery would never trigger.
+// STRUCTURE is NOT in the Profile's mask. Without the anchor-bypass, the
+// class filter would drop the event and the anchor's contribution would leak —
+// `watch_root_parent → re-descent` recovery would never trigger.
 //
-// With D8, the event routes to `on_anchor_terminal_event` regardless of
-// mask: `anchor_contribution` clears, baseline/current drop, the Profile
-// transitions Idle, ready for recovery via watch_root_parent.
+// With the anchor-bypass, the event routes to
+// `on_anchor_terminal_event` regardless of mask: `anchor_contribution`
+// clears, baseline/current drop, the Profile transitions Idle, ready
+// for recovery via watch_root_parent.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -448,7 +448,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     e.tree_mut().get_mut(anchor).unwrap().kind = ResourceKind::Dir;
 
     // CONTENT-only mask on a Dir anchor — note: CONTENT registers no
-    // bits on a Dir, but the L5 routing still uses Profile.events_union
+    // bits on a Dir, but the class routing still uses Profile.events_union
     // for filtering.
     let (_sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -467,8 +467,9 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand, 1);
 
     // `Removed` on the anchor (a Dir) folds to STRUCTURE — not in mask.
-    // Without D8, this event would drop with EventClassDropped. With D8,
-    // it routes through on_anchor_terminal_event.
+    // Without the anchor-bypass, this event would drop with
+    // EventClassDropped. With the anchor-bypass, it routes through
+    // on_anchor_terminal_event.
     let out = e.step(
         Input::FsEvent {
             resource: anchor,
@@ -480,7 +481,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
         !out.diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
-        "D8: anchor terminal events bypass the L5 class filter",
+        "anchor terminal events bypass the class filter",
     );
 
     let p = e.profiles().get(pid).unwrap();
@@ -506,11 +507,11 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
 // ───────────────────────────────────────────────────────────────────────
 // IT-EF-6 — `MetadataChanged` on a CONTENT-only Sub does not fire
 //
-// Per design §6.3 + §15: descendant `MetadataChanged` events on a Sub
-// whose mask excludes METADATA drop at L5 with `EventClassDropped` and
-// do NOT extend `dirty_resources` / `force_walk_resources` (per §6.1 —
-// L5 sits before dirty-set bumps). The Profile remains in its prior
-// state; no Effect emerges.
+// Descendant `MetadataChanged` events on a Sub whose mask excludes
+// METADATA drop with `EventClassDropped` and do NOT extend
+// `dirty_resources` / `force_walk_resources` (the class filter sits
+// before dirty-set bumps). The Profile remains in its prior state; no
+// Effect emerges.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -546,7 +547,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
         Instant::now(),
     );
 
-    // L5 drops with EventClassDropped.
+    // The class filter drops with EventClassDropped.
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
@@ -611,13 +612,13 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
 
 // ───────────────────────────────────────────────────────────────────────
 // IT-EF-5 — second Profile attaches at the same resource ⇒ engine emits
-// fresh `WatchOp::Watch` with the widened union mask (R2 / D11)
+// fresh `WatchOp::Watch` with the widened union mask
 //
-// Per design §4.2: "the union mask can change without the refcount
-// changing — when a second Profile starts covering a Resource, its mask
-// contribution may expand the union. The 0→1-edge model is structurally
-// insufficient for this." `add_watch_demand` emits Watch on the 0→1 edge
-// OR on any union widening at non-zero refcount.
+// The union mask can change without the refcount changing — when a
+// second Profile starts covering a Resource, its mask contribution may
+// expand the union. The 0→1-edge model is structurally insufficient for
+// this. `add_watch_demand` emits Watch on the 0→1 edge OR on any union
+// widening at non-zero refcount.
 //
 // Watcher-side mechanics (cache diff, EV_ADD overwrite) are covered in
 // `crates/specter-sensor/tests/kqueue_rewatch.rs`. This engine-level test
@@ -663,7 +664,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
     );
 
     // Profile B: events = METADATA on the same anchor (different mask
-    // ⇒ different config_hash ⇒ separate Profile per D3).
+    // ⇒ different config_hash ⇒ separate Profile).
     let (_sid_b, _pid_b, attach_b) = attach_sub_with_events(
         &mut e,
         "B",
@@ -672,9 +673,9 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
         ClassSet::METADATA,
         cfg,
     );
-    // Per D11: the engine emits a fresh `WatchOp::Watch` for the root,
-    // carrying the union (CONTENT | METADATA), even though the
-    // anchor's `watch_demand` went 1→2 (not a 0→1 edge).
+    // The engine emits a fresh `WatchOp::Watch` for the root, carrying
+    // the union (CONTENT | METADATA), even though the anchor's
+    // `watch_demand` went 1→2 (not a 0→1 edge).
     let watch_after_b = attach_b
         .watch_ops
         .iter()
@@ -684,7 +685,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
             } if *resource == root => Some(*events),
             _ => None,
         })
-        .expect("Profile B's attach emits a fresh Watch on root (D11 mask widening)");
+        .expect("Profile B's attach emits a fresh Watch on root (mask widening)");
     assert_eq!(
         watch_after_b,
         ClassSet::CONTENT | ClassSet::METADATA,
@@ -698,14 +699,13 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
     assert_eq!(
         e.tree().get(root).unwrap().watch_demand,
         2,
-        "watch_demand bumped 1→2 on second attach (R2: union changes drive Watch even off the 0↔1 edge)",
+        "watch_demand bumped 1→2 on second attach (union changes drive Watch even off the 0↔1 edge)",
     );
 }
 
 // ───────────────────────────────────────────────────────────────────────
 // IT-EF-2 dedup — Subtree-keyed effect uses Profile id, so two Profiles
-// with different masks don't collide on `last_emitted_dir_hash`. Pins
-// design §6.5 + §6.2.
+// with different masks don't collide on `last_emitted_dir_hash`.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1368,7 +1368,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_dir() {
 #[test]
 fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
     // PerStableFile / has_per_file_fds=true Profile: covered Leaves
-    // also carry per-file FDs (B2). Detach must release the leaf's
+    // also carry per-file FDs. Detach must release the leaf's
     // contribution as well as the Dir's.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);

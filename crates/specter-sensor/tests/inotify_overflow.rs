@@ -3,7 +3,7 @@
 //! `mask = IN_Q_OVERFLOW`. The watcher lifts it to
 //! [`WatcherEvent::Overflow`] (`scope: Global`); the bin then posts
 //! [`Input::SensorOverflow`] to the engine, which reseeds every
-//! in-scope Profile (Phase B11).
+//! in-scope Profile.
 //!
 //! The per-instance queue size is `/proc/sys/fs/inotify/max_queued_events`
 //! (default `16384`). To exercise overflow without root, we'd need to

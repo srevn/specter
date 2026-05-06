@@ -1,15 +1,15 @@
-//! L4 translator: `(ClassSet, ResourceKind) → kqueue NOTE_* fflags`.
+//! Translator: `(ClassSet, ResourceKind) → kqueue NOTE_* fflags`.
 //!
 //! Single platform-specific translation point. Backend-agnostic
 //! [`ClassSet`] enters; kqueue-specific `u32` fflags leave. The identity
-//! floor (D7) is OR-ed unconditionally onto every registration so the
+//! floor is OR-ed unconditionally onto every registration so the
 //! engine's reconciler always sees terminal events (delete / rename /
 //! revoke), independent of the user's class mask.
 //!
 //! Inotify's analogue would live in a sibling module
 //! `sensor::inotify::translate`; the engine surface is unchanged.
 //!
-//! ## Mapping table (D8 / §8 of the design doc)
+//! ## Mapping table
 //!
 //! | Class      | Dir bits                                  | File bits                          |
 //! |------------|-------------------------------------------|------------------------------------|
@@ -17,7 +17,7 @@
 //! | `CONTENT`  | ∅ (dir-irrelevant)                        | `NOTE_WRITE \| NOTE_EXTEND`        |
 //! | `METADATA` | `NOTE_ATTRIB`                             | `NOTE_ATTRIB \| NOTE_LINK`         |
 //!
-//! `NOTE_LINK` placement is kind-aware (D10): on a Dir it's a structural
+//! `NOTE_LINK` placement is kind-aware: on a Dir it's a structural
 //! signal (subdirectory `..` backref count change); on a File it's a
 //! metadata signal (hardlink count change).
 //!
@@ -36,10 +36,10 @@ use libc::{
 use specter_core::{ClassSet, ResourceKind};
 
 /// Identity floor — OR-ed onto every kqueue vnode registration regardless
-/// of the user's `events` mask. Per design D7, these three NOTE bits drive
-/// **Tree integrity** (slot vacate on delete) and **watch lifecycle**
+/// of the user's `events` mask. These three NOTE bits drive **Tree
+/// integrity** (slot vacate on delete) and **watch lifecycle**
 /// (re-register on rename) and must always reach the engine even when the
-/// user opted out of CONTENT / STRUCTURE / METADATA. The engine's L5 entry
+/// user opted out of CONTENT / STRUCTURE / METADATA. The engine's entry
 /// filter then folds terminal events into the appropriate class for
 /// per-Profile filtering (CONTENT for files, STRUCTURE for dirs); see
 /// `engine::transitions::fs_event_to_class`.
@@ -60,7 +60,7 @@ pub(super) const fn class_set_to_fflags(events: ClassSet, kind: ResourceKind) ->
     // re-encoded per arm.
     let effective = kind.effective();
 
-    // STRUCTURE — Dir-only. NOTE_LINK lands here on Dirs (D10).
+    // STRUCTURE — Dir-only. NOTE_LINK lands here on Dirs.
     if events.intersects(ClassSet::STRUCTURE) && matches!(effective, ResourceKind::Dir) {
         fflags |= NOTE_WRITE | NOTE_EXTEND | NOTE_LINK;
     }
@@ -70,10 +70,10 @@ pub(super) const fn class_set_to_fflags(events: ClassSet, kind: ResourceKind) ->
         fflags |= NOTE_WRITE | NOTE_EXTEND;
     }
 
-    // METADATA — both kinds. NOTE_LINK lands here on Files (D10);
+    // METADATA — both kinds. NOTE_LINK lands here on Files;
     // Dir's NOTE_LINK is in the STRUCTURE branch above and we don't
     // re-add it here even when STRUCTURE isn't set, because LINK on a
-    // Dir is *not* a metadata signal under D10.
+    // Dir is not a metadata signal.
     if events.intersects(ClassSet::METADATA) {
         fflags |= NOTE_ATTRIB;
         if matches!(effective, ResourceKind::File) {
@@ -92,8 +92,8 @@ mod tests {
     };
     use specter_core::{ClassSet, ResourceKind};
 
-    /// `IDENTITY_FLOOR` membership is a load-bearing invariant for D7;
-    /// pin it explicitly so a refactor that drops a bit is a test failure.
+    /// `IDENTITY_FLOOR` membership is a load-bearing invariant; pin it
+    /// explicitly so a refactor that drops a bit is a test failure.
     #[test]
     fn identity_floor_includes_delete_rename_revoke() {
         assert_ne!(IDENTITY_FLOOR & NOTE_DELETE, 0, "DELETE missing from floor");
@@ -108,8 +108,7 @@ mod tests {
     }
 
     /// EMPTY × any-kind always degrades to identity-floor only. This is
-    /// the v1 fallback for fixture-defaulted `ClassSet::EMPTY` watches
-    /// and the shape the integration tests of P0/P1 still depend on.
+    /// the v1 fallback for fixture-defaulted `ClassSet::EMPTY` watches.
     #[test]
     fn empty_class_set_yields_identity_floor_only() {
         for kind in [ResourceKind::Dir, ResourceKind::File, ResourceKind::Unknown] {
@@ -181,7 +180,7 @@ mod tests {
 
     #[test]
     fn metadata_on_dir_adds_attrib_only() {
-        // D10: NOTE_LINK on a Dir is STRUCTURE, not METADATA. So a
+        // NOTE_LINK on a Dir is STRUCTURE, not METADATA. So a
         // METADATA-only Dir does NOT register LINK.
         let f = class_set_to_fflags(ClassSet::METADATA, ResourceKind::Dir);
         assert_eq!(f, IDENTITY_FLOOR | NOTE_ATTRIB);
@@ -190,7 +189,7 @@ mod tests {
 
     #[test]
     fn metadata_on_file_adds_attrib_and_link() {
-        // D10: NOTE_LINK on a File is METADATA (hardlink count change).
+        // NOTE_LINK on a File is METADATA (hardlink count change).
         let f = class_set_to_fflags(ClassSet::METADATA, ResourceKind::File);
         assert_eq!(f, IDENTITY_FLOOR | NOTE_ATTRIB | NOTE_LINK);
     }

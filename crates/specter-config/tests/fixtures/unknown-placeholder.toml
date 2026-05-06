@@ -2,6 +2,6 @@
 name    = "build"
 path    = "/"
 # Lowercase non-catalog name: typo of `$path`. Uppercase names like
-# `$Path` / `$SPECTER_PATH` pass through as literal for shell expansion
-# (`E2E_ISSUES.md` Issue #1); only lowercase catalog misses are typos.
+# `$Path` / `$SPECTER_PATH` pass through as literal for shell expansion;
+# only lowercase catalog misses are typos.
 command = ["fmt", "$paht"]

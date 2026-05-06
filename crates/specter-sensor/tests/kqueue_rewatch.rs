@@ -1,5 +1,5 @@
 //! Re-registration on mask change — the per-FD `registered_fflags`
-//! cache + `EV_ADD`-overwrites-fflags semantics from D11 / R2.
+//! cache + `EV_ADD`-overwrites-fflags semantics.
 //!
 //! These tests exercise [`KqueueWatcher::watch`]'s re-watch path: a
 //! second `watch()` call on a resource that already holds an `OwnedFd`.
@@ -60,9 +60,9 @@ fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)>
 /// Re-watch with a widened mask should make new event classes deliverable.
 /// Specifically: a CONTENT-only registration filters out
 /// `MetadataChanged`; widening to `CONTENT | METADATA` (a fresh `Watch`
-/// op the engine emits when `Resource.events_union` changes per D11)
-/// must re-register the FD with `NOTE_ATTRIB`, and a subsequent chmod
-/// then fires `MetadataChanged`.
+/// op the engine emits when `Resource.events_union` changes) must
+/// re-register the FD with `NOTE_ATTRIB`, and a subsequent chmod then
+/// fires `MetadataChanged`.
 #[test]
 fn rewatch_with_widened_mask_delivers_new_classes() {
     let tmp = TempDir::new().unwrap();
@@ -232,11 +232,11 @@ fn rewatch_with_same_mask_preserves_registration() {
     drop(w);
 }
 
-/// Per design §10.5 — suppression and mask changes interact. A re-watch
-/// after `suppress()` must keep the resource silenced even when the new
-/// mask widens. The watcher composes `EV_ADD | EV_CLEAR | EV_DISABLE` on
-/// a single change record so the kernel-side filter never observes an
-/// enabled state mid-update.
+/// Suppression and mask changes interact. A re-watch after `suppress()`
+/// must keep the resource silenced even when the new mask widens. The
+/// watcher composes `EV_ADD | EV_CLEAR | EV_DISABLE` on a single change
+/// record so the kernel-side filter never observes an enabled state
+/// mid-update.
 #[test]
 fn rewatch_preserves_suppress_state() {
     let tmp = TempDir::new().unwrap();
@@ -252,7 +252,7 @@ fn rewatch_preserves_suppress_state() {
     w.suppress(r);
     let _ = drain_for(&mut w, Duration::from_millis(100));
 
-    // Re-watch with widened mask. Per §10.5, suppression is preserved.
+    // Re-watch with widened mask. Suppression is preserved.
     w.watch(
         r,
         &path,
@@ -293,9 +293,9 @@ fn rewatch_preserves_suppress_state() {
     drop(w);
 }
 
-/// F-HIGH-1 race property: events queued in the kernel filter BEFORE the
-/// initial `suppress()` must remain silenced across a subsequent
-/// `watch()` (re-register) call on the suppressed FD. The re-register's
+/// Race property: events queued in the kernel filter BEFORE the initial
+/// `suppress()` must remain silenced across a subsequent `watch()`
+/// (re-register) call on the suppressed FD. The re-register's
 /// single-syscall `EV_ADD | EV_CLEAR | EV_DISABLE` change record collapses
 /// the prior two-syscall window — under the old shape an `EV_ADD`-then-
 /// `EV_DISABLE` sequence transiently enabled the kernel-side filter, so
@@ -365,7 +365,7 @@ fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
     assert!(
         !post_rewatch.iter().any(|(rid, _)| *rid == r),
         "re-watch on a suppressed FD must keep buffered events silenced; \
-         got {post_rewatch:?} — F-HIGH-1 regression",
+         got {post_rewatch:?}",
     );
 
     // Sanity check: unsuppress reveals the buffered event(s), confirming

@@ -1085,7 +1085,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         "descent probe emitted at the parent prefix; got {:?}",
         out.probe_ops,
     );
-    // ClassSet::STRUCTURE is correct for the descent contribution by D9.
+    // ClassSet::STRUCTURE is correct for the descent contribution.
     let _ = ClassSet::STRUCTURE;
 }
 

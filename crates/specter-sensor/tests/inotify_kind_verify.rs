@@ -1,17 +1,15 @@
-//! Race-stable kind verification (Phase B6 / § 1.2 of the inotify port
-//! plan). The watcher's fresh-watch path opens the user-supplied path
-//! with `O_PATH | O_NOFOLLOW`, `fstat`s the resulting fd to discover the
-//! inode's actual kind, and verifies it against the engine's
-//! `WatchOp::Watch.kind`. A disagreement maps to
+//! Race-stable kind verification. The watcher's fresh-watch path opens
+//! the user-supplied path with `O_PATH | O_NOFOLLOW`, `fstat`s the
+//! resulting fd to discover the inode's actual kind, and verifies it
+//! against the engine's `WatchOp::Watch.kind`. A disagreement maps to
 //! [`WatchFailure::Resource`] (`ENOTDIR`) so the engine routes through
 //! the path-fatal recovery channel rather than installing a
 //! kind-incoherent watch. Engine-emitted `Unknown` is a wildcard that
 //! defers to the observed kind — verification cannot fail when `kind ==
 //! ResourceKind::Unknown`.
 //!
-//! Companion of `inotify_dir_file_swap.rs`: that test exercises the
-//! atomic-rename-during-watch race; this test pins the static
-//! disagreement case (engine expected one shape, the path is the other).
+//! Pins the static disagreement case (engine expected one shape, the
+//! path is the other).
 
 #![cfg(target_os = "linux")]
 

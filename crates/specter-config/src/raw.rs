@@ -5,8 +5,8 @@ use serde::Deserialize;
 pub(crate) struct RawConfig {
     /// Block of operator-facing engine telemetry settings — level,
     /// destination, file path. v1 splits the schema cleanly: the top-level
-    /// `log_level` of older configs no longer parses (alpha break, per
-    /// `CLAUDE.md` "no migration code"). Use `[log]\nlevel = "debug"`.
+    /// `log_level` of older configs no longer parses (alpha break, no
+    /// migration). Use `[log]\nlevel = "debug"`.
     #[serde(default)]
     pub log: Option<RawLogConfig>,
     #[serde(default, rename = "watch")]

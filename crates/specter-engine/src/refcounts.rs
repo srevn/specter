@@ -7,7 +7,7 @@
 //!
 //! In addition to the binary refcount, every Resource carries a
 //! `events_union: ClassSet` — the OR of every covering Profile's
-//! contribution (R2 / D4). The union is the L3 carrier for the per-FD
+//! contribution. The union is the carrier for the per-FD
 //! kqueue mask: `add_watch_demand` ORs the incoming contribution onto the
 //! cached union; `sub_watch_demand` recomputes from scratch by walking
 //! covering Profiles in the registry. `WatchOp::Watch` is emitted whenever
@@ -175,11 +175,11 @@ pub fn sub_watch_demand(
 /// 1. **Anchor.** `Profile.anchor_contribution == true` AND
 ///    `Profile.resource == resource` ⇒ contributes `Profile.events_union`.
 /// 2. **Watch-root parent.** `Profile.watch_root_parent == Some(resource)`
-///    ⇒ contributes `STRUCTURE` (D9; the parent watch exists so the
+///    ⇒ contributes `STRUCTURE` (the parent watch exists so the
 ///    Profile can detect anchor reappearance via the parent's
 ///    `StructureChanged` event).
 /// 3. **Pending-descent prefix.** `Profile.state == Pending(d)` AND
-///    `d.current_prefix == resource` ⇒ contributes `STRUCTURE` (D9; the
+///    `d.current_prefix == resource` ⇒ contributes `STRUCTURE` (the
 ///    descent prefix watch exists so the engine sees the next path
 ///    segment materialize).
 /// 4. **Covered descendant.** `resource != Profile.resource` AND
@@ -201,9 +201,9 @@ pub fn sub_watch_demand(
 ///   `Profile.current` is still `Some`; the gate excludes this Profile's
 ///   own descendant contribution from the post-decrement recompute).
 ///
-/// Together the two gates close F-MED-4: the recompute reports the
-/// post-release union without depending on `current.is_some()` having
-/// flipped (graft hasn't taken `current` yet at `delete_child` time).
+/// Together the two gates ensure the recompute reports the post-release
+/// union without depending on `current.is_some()` having flipped (graft
+/// hasn't taken `current` yet at `delete_child` time).
 fn recompute_resource_events(
     tree: &Tree,
     profiles: &ProfileMap,
@@ -236,12 +236,12 @@ fn profile_contribution_for(
         union |= profile.events_union;
     }
 
-    // 2. Watch-root parent — D9 STRUCTURE contribution.
+    // 2. Watch-root parent — STRUCTURE contribution.
     if profile.watch_root_parent == Some(resource) {
         union |= ClassSet::STRUCTURE;
     }
 
-    // 3. Pending-descent prefix — D9 STRUCTURE contribution.
+    // 3. Pending-descent prefix — STRUCTURE contribution.
     if let ProfileState::Pending(d) = &profile.state
         && d.current_prefix == resource
     {
@@ -827,7 +827,7 @@ mod tests {
     #[test]
     fn recompute_includes_watch_root_parent_as_structure() {
         // A Profile whose `watch_root_parent == resource` contributes
-        // STRUCTURE per D9, regardless of its own events_union mask.
+        // STRUCTURE regardless of its own events_union mask.
         let mut tree = Tree::new();
         let parent = tree.ensure(None, "p", ResourceRole::WatchRootParent);
         let anchor = tree.ensure(Some(parent), "a", ResourceRole::User);

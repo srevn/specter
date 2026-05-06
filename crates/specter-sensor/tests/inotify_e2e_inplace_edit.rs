@@ -4,7 +4,7 @@
 //! directory's inode when its child file's content changes via an
 //! in-place rewrite *if* the directory is registered for `IN_MODIFY`.
 //! But the engine does NOT register `IN_MODIFY` on a Dir under the
-//! L4 translator (CONTENT × Dir is a no-op; STRUCTURE on Dir adds
+//! translator (CONTENT × Dir is a no-op; STRUCTURE on Dir adds
 //! `IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO`, not
 //! `IN_MODIFY`). So a STRUCTURE-only Dir watch on Linux behaves
 //! similarly to kqueue: an in-place edit at a child file fires no

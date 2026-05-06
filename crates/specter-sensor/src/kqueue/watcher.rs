@@ -21,8 +21,8 @@
 //!
 //! # Per-FD mask cache
 //!
-//! Under R2 / D11, the engine emits `WatchOp::Watch` whenever
-//! `Resource.events_union` changes, *not* only on the 0→1 refcount edge.
+//! The engine emits `WatchOp::Watch` whenever `Resource.events_union`
+//! changes, not only on the 0→1 refcount edge.
 //! The watcher caches the post-translation kqueue fflags per resource
 //! (`registered_fflags`) so a re-`watch()` with an unchanged mask skips
 //! the syscall entirely, and a re-`watch()` with a widened/narrowed mask
@@ -67,7 +67,7 @@ pub struct KqueueWatcher {
     /// path-resolution at watch-install time.
     kinds: SecondaryMap<ResourceId, ResourceKind>,
     /// Per-resource kqueue fflags cache: populated alongside `by_resource`
-    /// from the L4 translator's output (`class_set_to_fflags(events,
+    /// from the translator's output (`class_set_to_fflags(events,
     /// kind)`). Used by `watch()` to diff the incoming mask against the
     /// installed one so unchanged re-registrations skip the syscall, and
     /// changed ones re-register via `EV_ADD` without reopening the fd.
@@ -102,8 +102,8 @@ impl KqueueWatcher {
     ///
     /// Two paths share this entry point: a fresh-watch (no FD held for
     /// `r`) and a re-watch (engine emitted a fresh `WatchOp::Watch`
-    /// because `Resource.events_union` changed at non-zero refcount, per
-    /// D11). The two diverge on whether `by_resource` already holds an
+    /// because `Resource.events_union` changed at non-zero refcount).
+    /// The two diverge on whether `by_resource` already holds an
     /// `OwnedFd` for `r`; the re-watch path skips open/stat and reuses
     /// the existing FD, diffing the cached fflags against the
     /// translator's output.

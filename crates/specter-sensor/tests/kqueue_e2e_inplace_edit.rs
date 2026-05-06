@@ -1,5 +1,3 @@
-//! Real-fs E2E #3 closure (see `docs/EVENT_FILTERING_DESIGN.md` §1.1 / §15).
-//!
 //! In-place file edit (`echo 'test' > file.txt`) inside a subtree-root
 //! watched directory does **not** bump the parent directory's mtime on
 //! APFS / HFS+, so a `STRUCTURE`-only watch on the parent emits no event.
@@ -54,7 +52,7 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     out
 }
 
-/// E2E #3 closure: in-place file edit (`>` redirect, no rename) fires
+/// In-place file edit (`>` redirect, no rename) fires
 /// `FsEvent::Modified` on the per-file FD installed by the engine's
 /// `has_per_file_fds = true` walk_pair gating.
 ///
@@ -102,7 +100,7 @@ fn in_place_edit_fires_modified_on_per_file_fd() {
     assert!(
         out.iter()
             .any(|(r, e)| *r == r_file && *e == FsEvent::Modified),
-        "per-file FD must fire Modified on in-place edit (E2E #3 closure); got {out:?}",
+        "per-file FD must fire Modified on in-place edit; got {out:?}",
     );
 
     drop(w);
@@ -115,7 +113,7 @@ fn in_place_edit_fires_modified_on_per_file_fd() {
 /// The test asserts the absence of an event for ~300 ms — long enough
 /// to be confident that the kernel isn't going to deliver one. If APFS
 /// or HFS+ ever changes its mtime semantics this test will fail and the
-/// E2E #3 design rationale needs revisiting.
+/// design rationale needs revisiting.
 #[test]
 fn in_place_edit_does_not_fire_on_dir_watch_alone() {
     let tmp = TempDir::new().unwrap();
@@ -143,8 +141,8 @@ fn in_place_edit_does_not_fire_on_dir_watch_alone() {
 
     // The dir's STRUCTURE watch must NOT fire on an in-place edit. If
     // it does, the documented design assumption (APFS/HFS+ doesn't bump
-    // parent mtime on in-place writes) is violated and the E2E #3
-    // rationale needs revisiting.
+    // parent mtime on in-place writes) is violated and the rationale
+    // needs revisiting.
     let dir_fired = out.iter().any(|ev| {
         matches!(
             ev,

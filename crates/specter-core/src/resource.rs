@@ -22,7 +22,7 @@ pub struct Resource {
     pub kind: ResourceKind,
     pub watch_demand: u32,
     pub suppress_count: u32,
-    /// Per-Resource OR of every covering Profile's contribution (R2 / D4).
+    /// Per-Resource OR of every covering Profile's contribution.
     /// The kqueue translator (sensor side) reads this off
     /// `WatchOp::Watch.events` to compute fflags. Maintained by the
     /// engine's refcount helpers in lockstep with `watch_demand` — added
@@ -244,7 +244,7 @@ mod tests {
 
     /// Fresh `Resource` initialises `events_union` to `EMPTY`. Refcount
     /// helpers OR contributions onto this field as covering Profiles
-    /// attach (R2 / D4).
+    /// attach.
     #[test]
     fn fresh_resource_events_union_is_empty() {
         let r = Resource::new(None, dummy_segment(), ResourceRole::User);

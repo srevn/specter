@@ -312,18 +312,18 @@ pub struct Profile {
     /// Cleared on `EffectComplete::Failed` — the failed Effect leaves no
     /// observation to deduplicate against.
     pub last_emitted_dir_hash: BTreeMap<DedupKey, u128>,
-    /// User-declared event-class mask for this Profile (R1 / D3). Under
-    /// D3 every Sub on a Profile shares the same `events` by construction
-    /// (mask folds into `config_hash`), so this field is the Sub's mask
-    /// — the "union" naming is structural: L1 contributions OR onto L2,
-    /// even though under D3 the OR is a no-op. The R2 chain (per-Resource
-    /// `events_union` aggregated across covering Profiles) reads this as
-    /// the per-Profile contribution.
+    /// User-declared event-class mask for this Profile. Every Sub on a
+    /// Profile shares the same `events` by construction (mask folds into
+    /// `config_hash`), so this field is the Sub's mask — the "union"
+    /// naming is structural: per-Sub contributions OR onto the
+    /// Profile's mask, even though the OR is a no-op here. The
+    /// per-Resource `events_union` aggregated across covering Profiles
+    /// reads this as the per-Profile contribution.
     pub events_union: ClassSet,
     /// True iff covered Leaves need their own FDs. Derived at construction
     /// from `events.intersects(CONTENT | METADATA)` and invariant for the
-    /// Profile's lifetime under D3 (events are part of `config_hash`, so a
-    /// mask change forks a new Profile rather than flipping this flag).
+    /// Profile's lifetime (events are part of `config_hash`, so a mask
+    /// change forks a new Profile rather than flipping this flag).
     ///
     /// The walker-side reconciler reads this to decide whether covered
     /// Leaf children get `add_watch_demand` (per-file FDs for in-place
@@ -341,7 +341,7 @@ impl Profile {
     ///
     /// `events` becomes the Profile's `events_union` and drives
     /// `has_per_file_fds` (true iff CONTENT or METADATA is in the mask).
-    /// Under D3 every Sub on a Profile shares the same `events`, so
+    /// Every Sub on a Profile shares the same `events`, so
     /// `events_union` is invariant for the Profile's lifetime.
     #[must_use]
     pub fn new(
@@ -521,8 +521,8 @@ mod tests {
     }
 
     /// `has_per_file_fds` defaults to false when `events` excludes both
-    /// CONTENT and METADATA. Under D3 the flag is invariant for the
-    /// Profile's lifetime — set once at construction from the events mask.
+    /// CONTENT and METADATA. The flag is invariant for the Profile's
+    /// lifetime — set once at construction from the events mask.
     #[test]
     fn new_profile_initialises_has_per_file_fds_false_for_empty_events() {
         let mut tree = Tree::new();
@@ -573,8 +573,8 @@ mod tests {
         assert_eq!(p.config_hash, expected);
     }
 
-    /// Different `events` mask produces different `config_hash` (D3
-    /// partition-by-mask).
+    /// Different `events` mask produces different `config_hash`
+    /// (partition-by-mask).
     #[test]
     fn config_hash_partitions_by_events() {
         let mut tree = Tree::new();

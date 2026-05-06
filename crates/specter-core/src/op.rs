@@ -129,8 +129,8 @@ pub enum WatchOp {
     /// the sensor accepts whatever inode resolves while caching the
     /// observed kind for normalization / mask translation.
     ///
-    /// `events` is the L3 carrier for the per-Resource event-class union
-    /// (R2 / D4): the engine ships `Resource.events_union` on every
+    /// `events` is the carrier for the per-Resource event-class union:
+    /// the engine ships `Resource.events_union` on every
     /// `Watch` op, the sensor diffs the cached per-FD mask, and
     /// re-registers iff different. `ClassSet::EMPTY` degrades to
     /// identity-floor-only delivery (kqueue: `NOTE_DELETE | NOTE_RENAME

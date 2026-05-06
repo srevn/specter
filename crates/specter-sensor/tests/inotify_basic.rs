@@ -4,7 +4,7 @@
 //! `kqueue_basic.rs`.
 //!
 //! Each test passes the minimum [`ClassSet`] needed to fire the event it
-//! asserts on (per design D7's identity floor + class-aware mapping):
+//! asserts on (identity floor + class-aware mapping):
 //! - Terminal events ([`FsEvent::Removed`], [`FsEvent::Renamed`]) work
 //!   with [`ClassSet::EMPTY`] because `IDENTITY_FLOOR =
 //!   IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT` is OR-ed onto every

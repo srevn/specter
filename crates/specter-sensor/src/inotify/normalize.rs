@@ -20,12 +20,12 @@
 //! ## `IN_IGNORED`
 //!
 //! `IN_IGNORED` is sensor-internal — the watcher's
-//! [`super::watcher::InotifyWatcher::poll_until`] (Phase B7) consumes it
-//! before invoking this translator. The defensive guard returning `None`
+//! [`super::watcher::InotifyWatcher::poll_until`] consumes it before
+//! invoking this translator. The defensive guard returning `None`
 //! is kept so a slipped record (impossible under healthy invariants) is
 //! silently dropped rather than mis-routed.
 //!
-//! ## D10 parity
+//! ## kqueue parity
 //!
 //! kqueue's `NOTE_LINK` is kind-aware (Dir → StructureChanged, File →
 //! MetadataChanged). inotify has no `NOTE_LINK` analogue; hardlink
@@ -73,15 +73,13 @@ pub(super) const fn mask_to_fs_event(mask: u32, kind: ResourceKind) -> Option<Fs
 
     // Name-bearing structure events: parent's child set changed.
     // v1 collapses the cookie + name; the engine probes the parent on
-    // every StructureChanged to discover what changed by name. (Per the
-    // analysis §9.1, a v3+ optimization could mint a typed
-    // `Input::ChildEvent { parent, name, kind }`; out of v1 scope.)
+    // every StructureChanged to discover what changed by name.
     if mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO) != 0 {
         return Some(FsEvent::StructureChanged);
     }
 
     // Resolve `Unknown` once via the canonical collapse — single source
-    // of truth shared with the translator and the engine's L5 filter.
+    // of truth shared with the translator and the engine's class filter.
     let effective = kind.effective();
 
     // Non-terminal CONTENT bits collapse on kind. The translator

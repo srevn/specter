@@ -40,8 +40,8 @@ pub struct InotifyWakeHandle {
 
 impl InotifyWakeHandle {
     /// Construct a handle backed by `wake_fd`. The watcher creates the
-    /// eventfd in its constructor (Phase B5), wraps it in `Arc`, and
-    /// hands clones to every caller of [`crate::FsWatcher::wake_handle`].
+    /// eventfd in its constructor, wraps it in `Arc`, and hands clones
+    /// to every caller of [`crate::FsWatcher::wake_handle`].
     pub(super) const fn new(wake_fd: Arc<OwnedFd>) -> Self {
         Self { wake_fd }
     }

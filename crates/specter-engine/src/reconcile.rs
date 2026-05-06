@@ -131,16 +131,15 @@ pub(crate) fn lookup_descendant(
 /// ensures (or releases) the Tree slot, sets its kind, and updates
 /// `watch_demand` via `add_watch_demand` / `sub_watch_demand` on the 0↔1
 /// edge for **covered Dirs** (always) and **covered Leaves under
-/// `Profile.has_per_file_fds == true`** (B2).
+/// `Profile.has_per_file_fds == true`**.
 ///
 /// `add_watch_demand` and `sub_watch_demand` thread the Profile's
-/// `events_union` as the per-Resource mask contribution (R2 / D4); the
+/// `events_union` as the per-Resource mask contribution; the
 /// per-Resource union is the OR of every covering Profile's contribution.
 /// `sub_watch_demand` requires `&ProfileMap` for the on-decrement
 /// recompute, and an explicit `releasing_descendant: Some(profile_id)`
 /// signal so the recompute skips this Profile's descendant contribution
-/// even though `Profile.current` is still `Some` mid-graft (closes
-/// F-MED-4).
+/// even though `Profile.current` is still `Some` mid-graft.
 ///
 /// Two-phase order:
 /// 1. Deletions in reverse-lex (leaves before parents) so `try_reap`'s
@@ -413,18 +412,18 @@ pub(crate) fn current_target_hash(
 /// Reap the Tree slot at `(parent, name)` — and, recursively, every
 /// descendant of `prior_child` if it's a Dir. Watch contributions are
 /// released on the 1→0 edge for covered Dirs (always) and covered Leaves
-/// under `profile.has_per_file_fds` (B2). Idempotent on missing slots.
+/// under `profile.has_per_file_fds`. Idempotent on missing slots.
 ///
 /// Reverse-lex within each Dir's children (leaves before parents) so the
 /// `try_reap`-after-`vacate` gate sees a fully-drained slot at every
 /// level.
 ///
 /// `sub_watch_demand` threads `profile.events_union` as the contribution
-/// (R2) and `Some(profile_id)` as the explicit `releasing_descendant`
+/// and `Some(profile_id)` as the explicit `releasing_descendant`
 /// signal: during graft `Profile.current` is still `Some` while this
 /// helper runs, so the recompute would otherwise count this Profile's
-/// own descendant claim toward the post-decrement union (F-MED-4). The
-/// param skips that contribution precisely.
+/// own descendant claim toward the post-decrement union. The param
+/// skips that contribution precisely.
 ///
 /// `pub(crate)` so [`Engine::release_descendant_claim`] can reuse the
 /// walk for whole-snapshot teardown — single source of truth for "walk
@@ -496,10 +495,10 @@ pub(crate) fn delete_child(
 /// every descendant of `new_child` when it's a Dir whose subtree was
 /// observed. Emits `add_watch_demand` on the 0→1 edge (or on a mask
 /// widening) for covered Dirs (always) and covered Leaves under
-/// `profile.has_per_file_fds` (B2).
+/// `profile.has_per_file_fds`.
 ///
 /// `add_watch_demand` threads `profile.events_union` as the per-Resource
-/// mask contribution (R2). The recursive `walk_pair` call into the new
+/// mask contribution. The recursive `walk_pair` call into the new
 /// Dir's subtree threads `profiles` through so its own `delete_child` /
 /// `create_child` recursion is well-formed; on a pure-create walk
 /// (`prior == None`) `delete_child` doesn't fire and the borrow is just
@@ -680,7 +679,7 @@ mod tests {
 
     #[test]
     fn walk_pair_per_file_profile_emits_watch_for_leaf_create() {
-        // has_per_file_fds=true ⇒ Leaf creates *also* get Watch (B2).
+        // has_per_file_fds=true ⇒ Leaf creates *also* get Watch.
         let (mut tree, profiles, root, pid) = anchor(true);
         let new = dir_snap(
             root,
@@ -775,8 +774,8 @@ mod tests {
     #[test]
     fn walk_pair_per_file_leaf_deletion_releases_watch() {
         // PerStableFile Profile (has_per_file_fds=true): covered Leaf
-        // carries a Watch contribution; delete should release it (B2
-        // symmetric to create).
+        // carries a Watch contribution; delete should release it
+        // (symmetric to create).
         let (mut tree, profiles, root, pid) = anchor(true);
         let leaf_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
         tree.get_mut(leaf_id).unwrap().kind = ResourceKind::File;

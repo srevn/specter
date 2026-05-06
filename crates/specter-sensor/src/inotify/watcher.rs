@@ -30,10 +30,10 @@
 //!
 //! Each entry caches `(wd, mask)`: the watch descriptor returned by
 //! `inotify_add_watch` and the kernel-side mask we last installed. A
-//! re-`watch()` (Phase B6) with an unchanged mask short-circuits
-//! without a syscall — the kernel's "replace mask" semantics on an
-//! existing path produce the same bits, so the call is a noop. Mirrors
-//! kqueue's `registered_fflags` discipline.
+//! re-`watch()` with an unchanged mask short-circuits without a
+//! syscall — the kernel's "replace mask" semantics on an existing path
+//! produce the same bits, so the call is a noop. Mirrors kqueue's
+//! `registered_fflags` discipline.
 
 use crate::inotify::wake::InotifyWakeHandle;
 use crate::inotify::{ffi, normalize, record, translate};
@@ -47,9 +47,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Token tagging the inotify fd in epoll. Phase B9's `poll_until`
-/// consumer reads `epoll_event.u64` to discriminate inotify-data-ready
-/// from wake-fired; distinct from [`WAKE_TOKEN`].
+/// Token tagging the inotify fd in epoll. The `poll_until` consumer
+/// reads `epoll_event.u64` to discriminate inotify-data-ready from
+/// wake-fired; distinct from [`WAKE_TOKEN`].
 const INOTIFY_TOKEN: u64 = 0xDEAD_BEEF_DEAD_BEEF;
 
 /// Token tagging the wake (eventfd) in epoll. Distinct from
@@ -79,14 +79,13 @@ pub struct InotifyWatcher {
     wake_fd: Arc<OwnedFd>,
 
     /// Epoll fd watching `(inotify_fd, wake_fd)`. Owned, not Arc'd —
-    /// only `poll_until` (Phase B9) reads from it; wake handles never
-    /// touch it.
+    /// only `poll_until` reads from it; wake handles never touch it.
     epoll_fd: OwnedFd,
 
-    /// `ResourceId → (wd, mask)`. Populated by `watch()` (Phase B6) on
-    /// successful install, cleared by `unwatch()` (Phase B7). The mask
-    /// cache lets a re-`watch()` skip the syscall when the install
-    /// mask is unchanged (mirror of kqueue's `registered_fflags`).
+    /// `ResourceId → (wd, mask)`. Populated by `watch()` on successful
+    /// install, cleared by `unwatch()`. The mask cache lets a
+    /// re-`watch()` skip the syscall when the install mask is unchanged
+    /// (mirror of kqueue's `registered_fflags`).
     by_resource: SecondaryMap<ResourceId, InotifyEntry>,
 
     /// `wd → ResourceId`. inotify events don't carry userdata
@@ -98,34 +97,33 @@ pub struct InotifyWatcher {
     by_wd: BTreeMap<libc::c_int, ResourceId>,
 
     /// Per-resource kind cache. Populated at fresh-watch time from the
-    /// `fstat` of the freshly opened fd (Phase B6) — closing the
-    /// TOCTOU window between the engine's `WatchOp::Watch.kind` and the
+    /// `fstat` of the freshly opened fd — closing the TOCTOU window
+    /// between the engine's `WatchOp::Watch.kind` and the
     /// kernel's path-resolution at install time. Used by
     /// [`crate::inotify::normalize::mask_to_fs_event`] to disambiguate
     /// `IN_MODIFY` on Dir vs File defensive paths.
     kinds: SecondaryMap<ResourceId, ResourceKind>,
 
     /// Suppressed set. inotify has no kernel-level disable analogue to
-    /// kqueue's `EV_DISABLE`, so `poll_until` (Phase B9) filters
-    /// delivery user-side using this map. Mutated by
-    /// `suppress`/`unsuppress` (Phase B8); the trait's idempotency
-    /// contract is satisfied by `BTreeMap`'s insert/remove semantics.
+    /// kqueue's `EV_DISABLE`, so `poll_until` filters delivery
+    /// user-side using this map. Mutated by `suppress`/`unsuppress`;
+    /// the trait's idempotency contract is satisfied by `BTreeMap`'s
+    /// insert/remove semantics.
     suppressed: SecondaryMap<ResourceId, ()>,
 
     /// `wd`s in the "draining" state: `inotify_rm_watch` has been
     /// called but the kernel's `IN_IGNORED` for that wd has not yet
     /// arrived in our read buffer. Events on draining wds are dropped
-    /// during `poll_until` (Phase B9); the `IN_IGNORED` consumption
-    /// reaps the flag. See § 1.3 of the inotify port plan for the
-    /// wd-reuse race this closes — a subsequent `inotify_add_watch`
-    /// may return the same wd before userspace observes the
-    /// `IN_IGNORED`, and pre-rm events on the old inode would
-    /// otherwise mis-attribute to the freshly attached resource.
+    /// during `poll_until`; the `IN_IGNORED` consumption reaps the
+    /// flag. This closes a wd-reuse race — a subsequent
+    /// `inotify_add_watch` may return the same wd before userspace
+    /// observes the `IN_IGNORED`, and pre-rm events on the old inode
+    /// would otherwise mis-attribute to the freshly attached resource.
     draining_wds: BTreeSet<libc::c_int>,
 
     /// Drain buffer for inotify event records. Sized at construction
-    /// and reused across drains — `poll_until` (Phase B9) performs no
-    /// allocation on the hot path.
+    /// and reused across drains — `poll_until` performs no allocation
+    /// on the hot path.
     read_buf: Vec<u8>,
 }
 
@@ -133,10 +131,10 @@ pub struct InotifyWatcher {
 ///
 /// `mask` is the exact bits passed to `inotify_add_watch` (including
 /// install-time directional flags like `IN_ONLYDIR` for Dir watches).
-/// A re-`watch()` (Phase B6) recomputes the mask from the user's
-/// `events` set and the cached kind; an unchanged mask short-circuits
-/// without a syscall — the kernel's "replace mask" semantics on an
-/// existing path would produce identical bits.
+/// A re-`watch()` recomputes the mask from the user's `events` set and
+/// the cached kind; an unchanged mask short-circuits without a syscall
+/// — the kernel's "replace mask" semantics on an existing path would
+/// produce identical bits.
 #[derive(Debug, Clone, Copy)]
 struct InotifyEntry {
     wd: libc::c_int,
@@ -190,16 +188,16 @@ impl InotifyWatcher {
     ///
     /// - **Re-watch** — `r` already holds an entry. Triggered by the
     ///   engine when `Resource.events_union` changes at non-zero
-    ///   refcount (R2 / D11). The cached mask short-circuits when
-    ///   unchanged; an inode-swap is detected via the `wd != prior.wd`
+    ///   refcount. The cached mask short-circuits when unchanged; an
+    ///   inode-swap is detected via the `wd != prior.wd`
     ///   check (atomic rename swapped the path between the prior
     ///   install and this re-add) and the prior wd is drained.
     ///
     /// - **Fresh-watch** — `r` has no entry. Triggered on the 0→1
     ///   `watch_demand` edge. Race-free install via
-    ///   [`ffi::open_o_path`] + `/proc/self/fd/N` (§ 1.2 of the
-    ///   inotify port plan): the fd binds to a specific inode, and
-    ///   `inotify_add_watch` on the magic-symlink path resolves to
+    ///   [`ffi::open_o_path`] + `/proc/self/fd/N`: the fd binds to a
+    ///   specific inode, and `inotify_add_watch` on the magic-symlink
+    ///   path resolves to
     ///   that inode regardless of intervening renames at `path`. The
     ///   fstat verification then matches the engine's expected
     ///   `kind`; a kind disagreement maps to `ENOTDIR`, which the
@@ -217,8 +215,8 @@ impl InotifyWatcher {
     /// same `/proc/self/fd/N`: the kernel's "replace mask" semantics
     /// have just clobbered the existing watch with our new mask, and
     /// a naive `inotify_rm_watch` would tear down the existing
-    /// resource's kernel-side registration entirely (§ 1.7 of the
-    /// plan). The restoration is best-effort; on failure the existing
+    /// resource's kernel-side registration entirely. The restoration
+    /// is best-effort; on failure the existing
     /// resource's mask remains the rejected resource's mask until its
     /// next reconcile triggers a re-add — a documented v1 limitation,
     /// not a correctness regression.
@@ -471,9 +469,9 @@ impl FsWatcher for InotifyWatcher {
     /// Tear down `r`'s kernel-side registration with the wd-reuse race
     /// mitigation: the wd is marked **draining** BEFORE the
     /// `inotify_rm_watch` so any pre-existing events on it are dropped
-    /// from the next `poll_until` (Phase B9) iteration; the kernel's
-    /// synchronous `IN_IGNORED` arrives later in the drain stream and
-    /// reaps the flag. See § 1.3 of the inotify port plan.
+    /// from the next `poll_until` iteration; the kernel's synchronous
+    /// `IN_IGNORED` arrives later in the drain stream and reaps the
+    /// flag.
     ///
     /// Idempotent on stale ids — clearing the side maps (`suppressed`,
     /// `kinds`) before the `by_resource` removal is safe regardless of
@@ -538,15 +536,14 @@ impl FsWatcher for InotifyWatcher {
     /// Silence event delivery on `r` via a user-space filter — inotify
     /// has no kernel-level disable analogue to kqueue's `EV_DISABLE`,
     /// so the [`Self::suppressed`] map is the authoritative source and
-    /// `poll_until` (Phase B9) consults it before lifting an event
-    /// onto the engine's input channel.
+    /// `poll_until` consults it before lifting an event onto the
+    /// engine's input channel.
     ///
     /// Idempotent on stale ids (the engine emits Suppress only on the
-    /// 0→1 `suppress_count` edge under D11, but the operation is
-    /// safe under any race). The trait doc tightening (Phase A6)
-    /// pins the kernel-disable vs user-space-filter wording so the
-    /// engine's caller doesn't depend on a kernel-side flush
-    /// semantic kqueue happens to provide and inotify cannot.
+    /// 0→1 `suppress_count` edge, but the operation is safe under any
+    /// race). The trait doc pins the kernel-disable vs user-space-filter
+    /// wording so the engine's caller doesn't depend on a kernel-side
+    /// flush semantic kqueue happens to provide and inotify cannot.
     ///
     /// Mirrors the kqueue branch's "warn on unwatched" discipline so
     /// the two backends produce comparable diagnostic output on a
@@ -595,7 +592,7 @@ impl FsWatcher for InotifyWatcher {
     /// 1. **`IN_Q_OVERFLOW`** — kernel signal that the per-instance
     ///    event queue overflowed and dropped record(s). Lift to
     ///    [`WatcherEvent::Overflow`] with [`OverflowScope::Global`];
-    ///    the engine reseeds every in-scope Profile (Phase B11).
+    ///    the engine reseeds every in-scope Profile.
     ///    Per `inotify(7)` the record's `wd` is `-1` and no other
     ///    actionable bit is set; the by_wd / draining checks below
     ///    are bypassed via the early `continue`.
@@ -615,8 +612,7 @@ impl FsWatcher for InotifyWatcher {
     ///    referred to is no longer the ResourceId's intent, and a
     ///    subsequent kernel-side wd reuse (a fresh `inotify_add_watch`
     ///    receiving the same wd) would otherwise mis-attribute pre-rm
-    ///    events to the freshly attached resource. See § 1.3 of the
-    ///    inotify port plan.
+    ///    events to the freshly attached resource.
     /// 4. **Normal event** — resolve `wd → ResourceId` via `by_wd`,
     ///    drop if [`Self::suppressed`] holds the resource (user-space
     ///    filter; inotify has no kernel-level disable), normalize via
@@ -813,11 +809,11 @@ impl FsWatcher for InotifyWatcher {
         Ok(emitted)
     }
 
-    /// Capture a wake handle. Real from B5: clones the watcher's
-    /// `Arc<OwnedFd>` of the eventfd so the handle survives the
-    /// watcher's drop without UB (see [`InotifyWakeHandle`] for the
-    /// `Arc` discipline). Cheap (one `Arc` increment + one `Box`
-    /// allocation); idempotent — multiple handles coexist freely.
+    /// Capture a wake handle. Clones the watcher's `Arc<OwnedFd>` of
+    /// the eventfd so the handle survives the watcher's drop without
+    /// UB (see [`InotifyWakeHandle`] for the `Arc` discipline). Cheap
+    /// (one `Arc` increment + one `Box` allocation); idempotent —
+    /// multiple handles coexist freely.
     fn wake_handle(&self) -> Box<dyn WakeHandle> {
         Box::new(InotifyWakeHandle::new(Arc::clone(&self.wake_fd)))
     }

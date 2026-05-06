@@ -53,9 +53,9 @@ pub struct SubAttachRequest {
     pub scope: EffectScope,
     /// Event-class mask the user opted into. The engine folds this into
     /// `config_hash` so two Subs differing only on classes fork separate
-    /// Profiles (design D3). The config layer is responsible for
-    /// materializing the scope-conditional default before constructing the
-    /// request — this struct does no defaulting.
+    /// Profiles. The config layer is responsible for materializing the
+    /// scope-conditional default before constructing the request — this
+    /// struct does no defaulting.
     pub events: ClassSet,
     /// Forward subprocess stdout/stderr to Specter's own stdout/stderr
     /// (`Stdio::inherit()`); when `false`, child output goes to
@@ -149,8 +149,8 @@ pub enum EffectScope {
     PerStableFile,
 }
 
-/// User-facing event-class set on a [`Sub`] — the L1 surface of the event
-/// filtering primitive (see `docs/EVENT_FILTERING_DESIGN.md`).
+/// User-facing event-class set on a [`Sub`] — the surface of the event
+/// filtering primitive.
 ///
 /// A class set names *what kinds of change* a watch cares about, in
 /// backend-agnostic vocabulary. The kqueue translator (sensor side) is the
@@ -166,8 +166,7 @@ pub enum EffectScope {
 ///
 /// The set is backed by a `u8` bitmask — `bits()` is the canonical
 /// representation folded into [`compute_config_hash`](crate::compute_config_hash)
-/// (per design D3, two Subs differing only on classes fork separate
-/// Profiles).
+/// (two Subs differing only on classes fork separate Profiles).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ClassSet(u8);
 
@@ -328,8 +327,8 @@ pub struct Sub {
     pub max_settle: Duration,
     pub needs_diff: bool,
     /// User-declared event-class mask. Folded into the Profile's
-    /// `config_hash` (D3); under R1, every Sub on a Profile shares the
-    /// same `events` by construction.
+    /// `config_hash`; every Sub on a Profile shares the same `events`
+    /// by construction.
     pub events: ClassSet,
     /// Forward subprocess stdout/stderr to Specter's own stdio. Threaded
     /// onto each emitted [`Effect`] as `capture_output`; the actuator

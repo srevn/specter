@@ -48,7 +48,7 @@ pub enum FsEvent {
 /// Carried on the sensor → engine path in two places: in the
 /// per-`poll_until` drain (`specter-sensor::WatcherEvent::Overflow`)
 /// and in the engine input variant the bin lifts it into
-/// (Phase B11's `Input::SensorOverflow`).
+/// ([`Input::SensorOverflow`]).
 ///
 /// [`Global`]: Self::Global
 /// [`Resource`]: Self::Resource
@@ -95,7 +95,7 @@ pub enum Input {
     /// over `scope`. The engine response is to reseed every Profile in
     /// scope (`Engine::on_sensor_overflow`): cancel any in-flight burst
     /// and start a fresh Seed burst whose post-probe `dispatch_seed_ok`
-    /// re-establishes baseline against disk reality and runs the B3
+    /// re-establishes baseline against disk reality and runs the
     /// drift detection (a recorded `last_emitted_dir_hash[Subtree]`
     /// disagreement fires Effects once, then rebases).
     ///

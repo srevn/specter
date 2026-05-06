@@ -333,7 +333,7 @@ impl EngineDriver {
     ///
     /// - **Unchanged** — only fire `reopen_file` (logrotate cadence is
     ///   independent of operator-driven config edits; reopen
-    ///   unconditionally per the design doc §4.4 step 4).
+    ///   unconditionally).
     /// - **LevelOnly** — call `set_level`; reopen the file too.
     /// - **DestinationChanged** — log an `error!` instructing the
     ///   operator to restart; reopen the (still-old) file so logrotate

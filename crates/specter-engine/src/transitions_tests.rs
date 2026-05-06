@@ -34,9 +34,9 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 /// Default events mask for transition tests. Empty mask gives a Profile
 /// with `has_per_file_fds = false`, matching the prior tests' assumption
 /// that per-file FDs are out of scope unless the test specifically opts
-/// into PerStableFile + a CONTENT/METADATA mask. Per design D3, events
-/// fold into `config_hash` so two test fixtures differing only on `events`
-/// fork separate Profiles (intentional partition).
+/// into PerStableFile + a CONTENT/METADATA mask. Events fold into
+/// `config_hash` so two test fixtures differing only on `events` fork
+/// separate Profiles (intentional partition).
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn empty_command() -> CommandTemplate {
@@ -669,7 +669,7 @@ fn stale_probe_response_emits_exactly_one_diagnostic() {
     );
 }
 
-/// D8 — anchor events bypass the L5 class filter unconditionally.
+/// Anchor events bypass the class filter unconditionally.
 /// Profile has events = EMPTY (nothing in the mask); a `MetadataChanged`
 /// at the anchor still drives the lifecycle path (burst start), and no
 /// `EventClassDropped` is emitted. This guards the lifecycle-continuity
@@ -689,7 +689,7 @@ fn fs_event_metadatachanged_at_anchor_bypasses_class_filter() {
         !out.diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
-        "anchor events bypass the L5 class filter (D8)",
+        "anchor events bypass the class filter",
     );
     assert!(
         matches!(e.profiles.get(pid).unwrap().state, ProfileState::Active(_),),
@@ -697,7 +697,7 @@ fn fs_event_metadatachanged_at_anchor_bypasses_class_filter() {
     );
 }
 
-/// §6.1 — descendant events whose class is not in the covering Profile's
+/// Descendant events whose class is not in the covering Profile's
 /// `events_union` drop with `EventClassDropped` BEFORE driving the burst.
 /// Profile has events = EMPTY ⇒ `intersects(any_class) == false`, so a
 /// `MetadataChanged` on a covered descendant drops cleanly without state
@@ -744,7 +744,7 @@ fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
     ));
 }
 
-/// L5 + D7 — identity events on a *descendant File* fold into the CONTENT
+/// Identity events on a *descendant File* fold into the CONTENT
 /// class. A Profile excluding CONTENT (here: STRUCTURE-only on a Dir
 /// anchor) drops the descendant File `Removed` with `EventClassDropped`.
 /// The dropped event is not routed through `on_anchor_terminal_event`
@@ -805,7 +805,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     let _ = sid;
 }
 
-/// D8 — terminal events on the anchor route through
+/// Terminal events on the anchor route through
 /// `on_anchor_terminal_event` regardless of the Profile's `events_union`.
 /// Anchor is a Dir, events = EMPTY: the kqexec class for `Removed` on a
 /// Dir is STRUCTURE — not in the EMPTY mask — but anchor events bypass
@@ -831,7 +831,7 @@ fn fs_event_anchor_terminal_bypasses_class_filter() {
         !out.diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
-        "anchor terminal events bypass the L5 class filter (D8)",
+        "anchor terminal events bypass the class filter",
     );
 
     let p = e.profiles.get(pid).unwrap();
@@ -1526,7 +1526,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     );
 }
 
-// ---- B11: SensorOverflow reseeds in-scope Profiles ----
+// ---- SensorOverflow reseeds in-scope Profiles ----
 
 #[test]
 fn sensor_overflow_global_idle_reseeds_to_active_seed() {
@@ -2272,11 +2272,11 @@ fn per_stable_file_skips_dir_entries() {
     assert_eq!(rel, "main.rs");
 }
 
-// ---------- Bundles B1, B2, B3 ----------
+// ---------- Dedup-hash + drift suppression ----------
 
 /// Drive a complete attach + Seed-Ok + FsEvent + two Standard-Ok responses
 /// (the second confirming stability) and return the StepOutput that contains
-/// the Effect emission. Common harness for B1 SubtreeRoot tests.
+/// the Effect emission. Common harness for SubtreeRoot dedup-hash tests.
 ///
 /// Stability requires `current.subtree_at(target).dir_hash() ==
 /// response.dir_hash()`. The first Standard probe diffs against the Seed
@@ -2356,7 +2356,7 @@ fn drive_to_first_effect(
 }
 
 #[test]
-fn b1_records_last_emitted_dir_hash_after_subtree_effect() {
+fn records_last_emitted_dir_hash_after_subtree_effect() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     let now = Instant::now();
     let out = drive_to_first_effect(&mut e, pid, root, now);
@@ -2377,12 +2377,12 @@ fn b1_records_last_emitted_dir_hash_after_subtree_effect() {
 }
 
 #[test]
-fn b1_clears_last_emitted_dir_hash_on_effect_complete_failed() {
+fn clears_last_emitted_dir_hash_on_effect_complete_failed() {
     let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
     let now = Instant::now();
     let _ = drive_to_first_effect(&mut e, pid, root, now);
 
-    // Confirm B1 wrote an entry.
+    // Confirm the dedup-hash entry was written.
     assert!(
         !e.profiles
             .get(pid)
@@ -2391,7 +2391,7 @@ fn b1_clears_last_emitted_dir_hash_on_effect_complete_failed() {
             .is_empty()
     );
 
-    // EffectComplete::Failed → B1 clears the entry for this DedupKey.
+    // EffectComplete::Failed clears the dedup-hash entry for this DedupKey.
     let dk = DedupKey::Subtree {
         sub: sid,
         profile: pid,
@@ -2418,9 +2418,9 @@ fn b1_clears_last_emitted_dir_hash_on_effect_complete_failed() {
 }
 
 #[test]
-fn b3_recovery_seed_no_prior_emit_does_not_fire() {
+fn recovery_seed_no_prior_emit_does_not_fire() {
     // Fresh attach → Seed-Ok → no prior `last_emitted_dir_hash` ⇒
-    // b3_seed_drift_observed returns an empty key set ⇒ no Effect
+    // seed_drift_observed returns an empty key set ⇒ no Effect
     // (preserves "fresh Seed never fires Effect").
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
@@ -2440,12 +2440,12 @@ fn b3_recovery_seed_no_prior_emit_does_not_fire() {
 /// `(resource, config_hash)`. Manually populate
 /// `last_emitted_dir_hash` so one Sub's recorded hash matches the
 /// post-graft `current` and the other's diverges. Trigger a Seed-Ok;
-/// the per-key B3 helper must return only the drifted key, and
+/// the per-key drift helper must return only the drifted key, and
 /// `emit_effects` must fire one Effect — the matched-key Sub stays
 /// silent because re-running its command would be a no-op against an
 /// unchanged tree.
 #[test]
-fn b3_recovery_seed_per_key_only_drifted_subs_fire() {
+fn recovery_seed_per_key_only_drifted_subs_fire() {
     use specter_core::DedupKey;
 
     let (mut e, pid, sid_a, root, _now) = engine_with_attached_sub();
@@ -2586,7 +2586,7 @@ fn b3_per_key_helper_returns_only_subtree_drifted_keys() {
             .insert(key_perfile, curr_hash.wrapping_add(13));
     }
 
-    let drifted = e.b3_seed_drift_observed(pid);
+    let drifted = e.seed_drift_observed(pid);
     assert_eq!(drifted.len(), 1, "only the diverged Subtree key returns");
     assert_eq!(
         drifted[0], key_subtree_drift,
@@ -2676,12 +2676,10 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
 
 #[test]
 fn has_per_file_fds_is_invariant_for_profile_lifetime() {
-    // Under D3 the events mask folds into `config_hash`, so every Sub on
-    // a Profile shares the same events by construction. `has_per_file_fds`
-    // is derived once at `Profile::new` from the events mask and never
-    // flips during the Profile's lifetime — the prior B2 recompute
-    // machinery (recompute_has_per_file_sub / update_per_leaf_watch_demand)
-    // is removed because it's structurally unreachable.
+    // The events mask folds into `config_hash`, so every Sub on a Profile
+    // shares the same events by construction. `has_per_file_fds` is
+    // derived once at `Profile::new` from the events mask and never flips
+    // during the Profile's lifetime.
     //
     // This test pins the new invariant: a Profile constructed with a
     // mask containing CONTENT (or METADATA) starts with the flag set,
@@ -2710,7 +2708,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     );
 
     // A Sub with the same `(resource, max_settle, scan, events)` shares
-    // the existing Profile (D3); the flag stays true.
+    // the existing Profile; the flag stays true.
     let req2 = SubAttachRequest {
         name: String::from("formatter-2"),
         resource: r,

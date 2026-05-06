@@ -246,12 +246,11 @@ impl Engine {
             // joins an existing burst lifecycle (or shares the Idle
             // baseline). No fresh Watch / Probe / parent-edge work.
             //
-            // Under D3 the events mask folds into `config_hash`, so a
-            // Sub joining an existing Profile shares its mask by
-            // construction — `events_union` and `has_per_file_fds` are
-            // invariant for the Profile's lifetime. No retroactive
-            // per-leaf `watch_demand` bump is needed (the prior B2
-            // recompute machinery is removed).
+            // The events mask folds into `config_hash`, so a Sub joining
+            // an existing Profile shares its mask by construction —
+            // `events_union` and `has_per_file_fds` are invariant for the
+            // Profile's lifetime. No retroactive per-leaf `watch_demand`
+            // bump is needed.
             if let Some(p) = self.profiles.get_mut(profile_id)
                 && req.settle < p.settle
             {
@@ -264,7 +263,7 @@ impl Engine {
 
         // Capture the Profile's mask before any &mut borrows. Used as the
         // anchor's contribution (immediate-Seed path); the descent prefix
-        // path uses `STRUCTURE` per D9 instead.
+        // path uses `STRUCTURE` instead.
         let events_union = self
             .profiles
             .get(profile_id)
@@ -290,8 +289,8 @@ impl Engine {
         } else {
             // Immediate-Seed path. Anchor exists; bump its watch_demand
             // with the Profile's events_union (the user-declared mask),
-            // set up the watch-root parent (STRUCTURE per D9), compute
-            // parent edges, start the Seed burst.
+            // set up the watch-root parent (STRUCTURE), compute parent
+            // edges, start the Seed burst.
             add_watch_demand(&mut self.tree, anchor, events_union, out);
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.anchor_contribution = true;
@@ -356,8 +355,8 @@ impl Engine {
                 .set_role(parent_id, specter_core::ResourceRole::WatchRootParent);
         }
 
-        // D9 — the watch-root parent is engine infrastructure (used to
-        // detect anchor reappearance after a `rm -rf` of the anchor).
+        // The watch-root parent is engine infrastructure (used to detect
+        // anchor reappearance after a `rm -rf` of the anchor).
         // Contribution is `STRUCTURE` regardless of the Sub's user mask.
         // The corresponding bookkeeping flag is `Profile.watch_root_parent
         // == Some(parent_id)`, written below; the recompute path reads
@@ -437,8 +436,8 @@ impl Engine {
         p.sub_refcount = p.sub_refcount.saturating_sub(1);
         let new_refcount = p.sub_refcount;
 
-        // Bundle B1: purge `last_emitted_dir_hash` entries keyed by the
-        // detached Sub. Their suppress-targets are stale; leaving them
+        // Purge `last_emitted_dir_hash` entries keyed by the detached
+        // Sub. Their suppress-targets are stale; leaving them
         // would let a *different* Sub on the same Profile (sharing a
         // DedupKey by accident — only PerFile keys collide on
         // `(sub, resource)`, so this is mostly a hygienic guard) inherit
@@ -455,14 +454,10 @@ impl Engine {
             }
             // Recompute Profile.settle = min(remaining_subs.settles).
             //
-            // Under D3 every Sub on a Profile shares the same `events`
-            // mask (events folds into `config_hash`); detaching one Sub
+            // Every Sub on a Profile shares the same `events` mask
+            // (events folds into `config_hash`); detaching one Sub
             // cannot flip `Profile.has_per_file_fds` or
-            // `Profile.events_union`. The prior B2 retroactive-bump
-            // machinery is therefore unreachable and has been removed —
-            // a future v2 predicate-layer change would re-introduce it
-            // shaped around per-Sub contributions, not the broken
-            // recompute-per-attach pattern.
+            // `Profile.events_union`.
             self.recompute_profile_settle(profile_id);
             return;
         }

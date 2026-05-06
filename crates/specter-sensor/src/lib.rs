@@ -55,14 +55,13 @@ impl WatchFailureExt for WatchFailure {
 /// - [`Overflow`](Self::Overflow) — a kernel-level "events were dropped"
 ///   signal that has no `ResourceId` attached. inotify emits this on
 ///   `IN_Q_OVERFLOW` (the `IDR` overflow → queue-wide → `Global` scope);
-///   FSEvents would emit per-stream (`Resource(r)`); kqueue never emits
-///   it under v1 because `EV_CLEAR` coalesces but never silently drops
-///   at the kernel level.
+///   kqueue never emits it under v1 because `EV_CLEAR` coalesces but
+///   never silently drops at the kernel level.
 ///
 /// The bin lifts each variant into the engine's input vocabulary:
-/// `Fs` → `Input::FsEvent`; `Overflow` → `Input::SensorOverflow`
-/// (Phase B11). The engine's response to `Overflow` is to reseed every
-/// in-scope Profile.
+/// `Fs` → `Input::FsEvent`; `Overflow` → `Input::SensorOverflow`.
+/// The engine's response to `Overflow` is to reseed every in-scope
+/// Profile.
 #[derive(Debug, Clone)]
 pub enum WatcherEvent {
     Fs {
@@ -119,7 +118,7 @@ pub enum WatcherEvent {
 ///                 engine_inbound.send(Input::FsEvent { resource, event });
 ///             }
 ///             WatcherEvent::Overflow { scope } => {
-///                 // Phase B11 surfaces this as `Input::SensorOverflow`.
+///                 // Surfaced as `Input::SensorOverflow`.
 ///                 engine_inbound.send(/* … scope … */);
 ///             }
 ///         }
@@ -151,10 +150,9 @@ pub trait FsWatcher: Send {
     /// caches the observed kind for downstream normalization. Re-watch
     /// paths reuse the cached kind and ignore this argument.
     ///
-    /// `events` is the per-Resource event-class union (R2 / D4). The
-    /// watcher diffs it against the cached per-FD mask and re-registers
-    /// iff different; `ClassSet::EMPTY` degrades to identity-floor-only
-    /// delivery.
+    /// `events` is the per-Resource event-class union. The watcher diffs
+    /// it against the cached per-FD mask and re-registers iff different;
+    /// `ClassSet::EMPTY` degrades to identity-floor-only delivery.
     fn watch(
         &mut self,
         r: ResourceId,
@@ -251,7 +249,7 @@ impl Clone for Box<dyn WakeHandle> {
 
 /// Multi-threaded probe worker pool.
 ///
-/// `submit` is fire-and-forget (I8); the response lands on the bin's
+/// `submit` is fire-and-forget; the response lands on the bin's
 /// `engine_inbound` channel as `Input::ProbeResponse(...)`. `cancel` is
 /// best-effort: queued probes whose `(profile, correlation)` pair
 /// no longer matches the prober's per-Profile expectation are skipped

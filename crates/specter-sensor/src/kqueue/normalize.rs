@@ -16,7 +16,7 @@
 //! coalescing is acceptable because the engine's `Settling` state debounces
 //! either as "something changed; reschedule."
 //!
-//! `NOTE_LINK` is kind-aware (D10): on a Dir it's a structural signal
+//! `NOTE_LINK` is kind-aware: on a Dir it's a structural signal
 //! (subdirectory created/removed via `..` backref count change); on a
 //! File it's a metadata signal (hardlink count change via `ln`/`unlink`).
 //! Placed before WRITE/EXTEND in the priority order so a coalesced
@@ -61,11 +61,11 @@ pub(super) const fn kevent_to_fs_event(
     // consistent).
     let effective = kind.effective();
 
-    // D10 — NOTE_LINK is kind-aware. On a Dir, link-count changes via
+    // NOTE_LINK is kind-aware. On a Dir, link-count changes via
     // child-dir creation / removal (the parent's `..` backref count
     // shifts); the engine treats that as `StructureChanged`. On a File,
     // NOTE_LINK fires on hardlink ops (`ln`, `unlink` on a hardlinked
-    // inode) — a metadata signal under the design's class taxonomy.
+    // inode) — a metadata signal under the class taxonomy.
     //
     // Placed before the WRITE/EXTEND arm so a coalesced `(LINK | WRITE)`
     // kevent on a File yields MetadataChanged (LINK semantics dominate

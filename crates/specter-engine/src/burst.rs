@@ -350,7 +350,7 @@ impl Engine {
 
     /// Phase: `Verifying` → `Awaiting`. The single source of the post-fire
     /// transition: `dispatch_standard_ok` row 3 / row 5 and
-    /// `dispatch_seed_ok` B3-drift path call this immediately after
+    /// `dispatch_seed_ok` drift path call this immediately after
     /// `emit_effects` returns a non-zero `EmitOutcome.count`. The match
     /// is structural (count > 0) — callers know they pushed Effects.
     ///
