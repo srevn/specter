@@ -75,10 +75,7 @@ pub fn add_watch_demand(
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
-            opts: WatchOpts {
-                events: new_union,
-                ..WatchOpts::default()
-            },
+            opts: WatchOpts { events: new_union },
         });
     }
 }
@@ -162,10 +159,7 @@ pub fn sub_watch_demand(
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
-            opts: WatchOpts {
-                events: new_union,
-                ..WatchOpts::default()
-            },
+            opts: WatchOpts { events: new_union },
         });
     }
 }

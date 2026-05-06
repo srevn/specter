@@ -38,7 +38,6 @@ fn atomic_save_emits_terminal_on_old_inode_and_structure_on_dir() {
         tmp.path(),
         WatchOpts {
             events: ClassSet::STRUCTURE,
-            ..Default::default()
         },
     )
     .expect("watch dir");

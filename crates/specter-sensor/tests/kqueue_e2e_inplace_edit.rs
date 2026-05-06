@@ -27,11 +27,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const fn opts(events: ClassSet) -> WatchOpts {
-    WatchOpts {
-        follow_symlinks: false,
-        recursive: false,
-        events,
-    }
+    WatchOpts { events }
 }
 
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(

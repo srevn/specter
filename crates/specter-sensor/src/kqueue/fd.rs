@@ -4,9 +4,7 @@
 //! event monitoring only" — won't pin the file against `unlink`); the
 //! FreeBSD branch uses `O_RDONLY`. Both unconditionally apply
 //! `O_NOFOLLOW` — symlinks at the anchor path fail with `ELOOP` rather
-//! than silently traversing. The v1 user surface
-//! (`WatchOpts.follow_symlinks`) is hard-coded `false`, so the watcher
-//! ignores the field entirely.
+//! than silently traversing. v1 has no follow-symlinks opt-in.
 
 use specter_core::ResourceKind;
 use std::ffi::CString;

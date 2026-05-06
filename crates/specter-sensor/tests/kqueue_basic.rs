@@ -22,16 +22,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// Build a [`WatchOpts`] with the given event-class mask and sensible
-/// defaults for the rest of the fields. The kqueue watcher only consults
-/// `events`; the other fields are preserved so v2 backends can opt in
-/// without disturbing v1 fixtures.
+/// Build a [`WatchOpts`] with the given event-class mask.
 const fn opts(events: ClassSet) -> WatchOpts {
-    WatchOpts {
-        follow_symlinks: false,
-        recursive: false,
-        events,
-    }
+    WatchOpts { events }
 }
 
 /// Drain events from `w` until at least one matches `pred` or the

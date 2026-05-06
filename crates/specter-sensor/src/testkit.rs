@@ -385,11 +385,9 @@ mod tests {
 
         let opts1 = WatchOpts {
             events: ClassSet::CONTENT,
-            ..WatchOpts::default()
         };
         let opts2 = WatchOpts {
             events: ClassSet::CONTENT | ClassSet::METADATA,
-            ..WatchOpts::default()
         };
 
         w.watch(ids[0], &PathBuf::from("/tmp/a"), opts1).unwrap();
@@ -413,7 +411,6 @@ mod tests {
             &PathBuf::from("/tmp/a"),
             WatchOpts {
                 events: ClassSet::STRUCTURE,
-                ..WatchOpts::default()
             },
         )
         .unwrap();
@@ -444,7 +441,6 @@ mod tests {
             &PathBuf::from("/tmp/a"),
             WatchOpts {
                 events: ClassSet::CONTENT,
-                ..WatchOpts::default()
             },
         )
         .unwrap();
@@ -468,7 +464,6 @@ mod tests {
             &PathBuf::from("/tmp/a"),
             WatchOpts {
                 events: ClassSet::CONTENT,
-                ..WatchOpts::default()
             },
         )
         .unwrap();
@@ -478,7 +473,6 @@ mod tests {
             &PathBuf::from("/tmp/a"),
             WatchOpts {
                 events: ClassSet::CONTENT | ClassSet::METADATA,
-                ..WatchOpts::default()
             },
         );
         // Helper reads the call log — sees the failed Watch attempt

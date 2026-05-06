@@ -16,14 +16,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// Build a [`WatchOpts`] with the given event-class mask and v1 defaults
-/// for the rest of the fields.
+/// Build a [`WatchOpts`] with the given event-class mask.
 const fn opts(events: ClassSet) -> WatchOpts {
-    WatchOpts {
-        follow_symlinks: false,
-        recursive: false,
-        events,
-    }
+    WatchOpts { events }
 }
 
 /// Drain at least one event matching `pred` or hit `overall` deadline.

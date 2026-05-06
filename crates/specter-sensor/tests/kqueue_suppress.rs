@@ -15,13 +15,10 @@ fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)>
     out
 }
 
-/// Build a [`WatchOpts`] with only `events` overridden — these tests
-/// watch a directory and expect `StructureChanged` on child writes, so
-/// they all pass [`ClassSet::STRUCTURE`].
+/// Build a [`WatchOpts`] for tests that watch a directory and expect
+/// `StructureChanged` on child writes — they all pass [`ClassSet::STRUCTURE`].
 const fn dir_opts() -> WatchOpts {
     WatchOpts {
-        follow_symlinks: false,
-        recursive: false,
         events: ClassSet::STRUCTURE,
     }
 }
