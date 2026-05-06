@@ -327,7 +327,45 @@ impl FsWatcher for KqueueWatcher {
 
 /// Convert an `Instant` deadline to a kqueue-friendly `timespec`.
 /// `d <= now` clamps to `ZERO` (non-blocking poll).
-pub(super) fn deadline_instant_to_timespec(d: Instant) -> libc::timespec {
+fn deadline_instant_to_timespec(d: Instant) -> libc::timespec {
     let dur = d.saturating_duration_since(Instant::now());
     ffi::duration_to_timespec(dur)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deadline_instant_to_timespec;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn deadline_in_past_clamps_to_zero() {
+        let past = Instant::now()
+            .checked_sub(Duration::from_mins(1))
+            .expect("60s before Instant::now() is representable");
+        let ts = deadline_instant_to_timespec(past);
+        assert_eq!(ts.tv_sec, 0);
+        assert_eq!(ts.tv_nsec, 0);
+    }
+
+    #[test]
+    fn deadline_future_round_trip_within_a_second() {
+        let dur = Duration::from_millis(500);
+        let ts = deadline_instant_to_timespec(Instant::now() + dur);
+        // The deadline is `now + 500ms` and `deadline_instant_to_timespec`
+        // reads `Instant::now()` again internally, so the timespec is at
+        // most 500ms and should be within ~50ms of that target.
+        //
+        // `tv_sec`/`tv_nsec` are signed (`i64`/`c_long`) on macOS/FreeBSD;
+        // the conversion back to `u64`/`u32` is bounded by the sub-second
+        // duration we just produced.
+        let secs = u64::try_from(ts.tv_sec).expect("non-negative tv_sec");
+        let nanos = u32::try_from(ts.tv_nsec).expect("non-negative, < 1s tv_nsec");
+        let dur_ts = Duration::new(secs, nanos);
+        assert!(dur_ts <= dur, "{dur_ts:?} <= {dur:?}");
+        assert!(
+            dur_ts > dur.saturating_sub(Duration::from_millis(50)),
+            "{dur_ts:?} > {:?}",
+            dur.saturating_sub(Duration::from_millis(50))
+        );
+    }
 }

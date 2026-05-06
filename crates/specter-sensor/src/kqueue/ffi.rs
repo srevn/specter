@@ -20,33 +20,33 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 /// changes. Copy because `libc::kevent` is plain POD on macOS / FreeBSD.
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
-pub(crate) struct Kevent(libc::kevent);
+pub(super) struct Kevent(libc::kevent);
 
 impl Kevent {
-    pub(crate) const fn zeroed() -> Self {
+    pub(super) const fn zeroed() -> Self {
         // SAFETY: `libc::kevent` is plain old data — every field is an
         // integer or a pointer. Zero is a valid bit pattern for all.
         Self(unsafe { MaybeUninit::zeroed().assume_init() })
     }
 
-    pub(crate) const fn flags(&self) -> u16 {
+    pub(super) const fn flags(&self) -> u16 {
         self.0.flags
     }
 
-    pub(crate) const fn fflags(&self) -> u32 {
+    pub(super) const fn fflags(&self) -> u32 {
         self.0.fflags
     }
 
     /// `true` iff this kevent corresponds to the `EVFILT_USER` wake
     /// ident reserved at watcher init. Wake events are filtered out
     /// before normalization — they have no `ResourceId` payload.
-    pub(crate) const fn is_user_event(&self, wake_ident: usize) -> bool {
+    pub(super) const fn is_user_event(&self, wake_ident: usize) -> bool {
         self.0.filter == libc::EVFILT_USER && self.0.ident == wake_ident
     }
 
     /// Decode `udata` back to a `ResourceId`. Returns `None` if the udata
     /// is the zero sentinel (every wake event carries `udata = 0`).
-    pub(crate) fn resource_id(&self) -> Option<ResourceId> {
+    pub(super) fn resource_id(&self) -> Option<ResourceId> {
         let raw = self.0.udata as u64;
         if raw == 0 {
             return None;
@@ -57,7 +57,7 @@ impl Kevent {
 
 /// `kqueue(2)`. Fresh queue fd; held inside `Arc<OwnedFd>` by the
 /// watcher and shared with every wake handle.
-pub(crate) fn kqueue_new() -> io::Result<OwnedFd> {
+pub(super) fn kqueue_new() -> io::Result<OwnedFd> {
     // SAFETY: kqueue() takes no arguments and returns a fresh fd or -1.
     let raw = unsafe { kqueue() };
     if raw < 0 {
@@ -69,7 +69,7 @@ pub(crate) fn kqueue_new() -> io::Result<OwnedFd> {
 
 /// Register `EVFILT_USER` for the wake ident. The watcher does this once
 /// at construction; only the watcher's `poll_until` consumes the wakes.
-pub(crate) fn register_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<()> {
+pub(super) fn register_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<()> {
     let mut ev = Kevent::zeroed();
     ev.0.ident = wake_ident;
     ev.0.filter = libc::EVFILT_USER;
@@ -81,7 +81,7 @@ pub(crate) fn register_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result
 /// Trigger the wake ident — issues `NOTE_TRIGGER` so any in-flight
 /// `kevent_drain` returns promptly. Idempotent on the kernel side
 /// (concurrent triggers coalesce).
-pub(crate) fn trigger_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<()> {
+pub(super) fn trigger_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<()> {
     let mut ev = Kevent::zeroed();
     ev.0.ident = wake_ident;
     ev.0.filter = libc::EVFILT_USER;
@@ -113,7 +113,7 @@ pub(crate) fn trigger_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<
 /// (`super::translate::class_set_to_fflags`) is the single producer of
 /// the mask in the watcher's `watch()` path. `EV_ADD` on an existing
 /// `(fd, EVFILT_VNODE)` entry overwrites the prior fflags atomically.
-pub(crate) fn register_vnode(
+pub(super) fn register_vnode(
     kq: &OwnedFd,
     target: &OwnedFd,
     r: ResourceId,
@@ -139,7 +139,7 @@ pub(crate) fn register_vnode(
 /// there. Treating both backends identically (always pass the cached
 /// mask) is correct on both. Only the disable bit is intentionally
 /// changed.
-pub(crate) fn disable_vnode(
+pub(super) fn disable_vnode(
     kq: &OwnedFd,
     target: &OwnedFd,
     r: ResourceId,
@@ -151,7 +151,7 @@ pub(crate) fn disable_vnode(
 /// `EV_ENABLE` — restores delivery on a previously disabled
 /// registration. See [`disable_vnode`] for the fflags-passthrough
 /// rationale.
-pub(crate) fn enable_vnode(
+pub(super) fn enable_vnode(
     kq: &OwnedFd,
     target: &OwnedFd,
     r: ResourceId,
@@ -187,7 +187,7 @@ fn vnode_change(
 /// Drain pending events into `out`. Retries on `EINTR`. `timeout = None`
 /// blocks indefinitely; `Some(ts)` arms the kernel-side wait. Returns
 /// the number of slots in `out` populated by the kernel.
-pub(crate) fn kevent_drain(
+pub(super) fn kevent_drain(
     kq: &OwnedFd,
     out: &mut [Kevent],
     timeout: Option<timespec>,
@@ -260,9 +260,48 @@ fn kevent_change(kq: &OwnedFd, ev: &libc::kevent) -> io::Result<()> {
 ///   to `u64::MAX` seconds.
 /// - `subsec_nanos()` returns `u32` capped at `999_999_999`.
 #[allow(clippy::cast_possible_wrap)]
-pub(crate) fn duration_to_timespec(dur: std::time::Duration) -> timespec {
+pub(super) fn duration_to_timespec(dur: std::time::Duration) -> timespec {
     timespec {
         tv_sec: dur.as_secs() as libc::time_t,
         tv_nsec: libc::c_long::from(dur.subsec_nanos() as i32),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Kevent, duration_to_timespec};
+    use std::time::Duration;
+
+    #[test]
+    fn duration_to_timespec_zero_yields_zero_components() {
+        let ts = duration_to_timespec(Duration::ZERO);
+        assert_eq!(ts.tv_sec, 0);
+        assert_eq!(ts.tv_nsec, 0);
+    }
+
+    #[test]
+    fn duration_to_timespec_one_sec_one_nano() {
+        let ts = duration_to_timespec(Duration::new(1, 1));
+        assert_eq!(ts.tv_sec, 1);
+        assert_eq!(ts.tv_nsec, 1);
+    }
+
+    #[test]
+    fn kevent_zeroed_is_default_state() {
+        let ev = Kevent::zeroed();
+        // `EVFILT_*` constants are negative on macOS / FreeBSD; zero is
+        // a valid (and unused) bit pattern that we never treat as a
+        // real filter, confirming the zero-init is "untriggered".
+        // `udata` of zero round-trips to `None` (the wake-event
+        // sentinel).
+        assert_eq!(ev.flags(), 0);
+        assert_eq!(ev.fflags(), 0);
+        assert!(ev.resource_id().is_none(), "zero udata decodes to None");
+        // Zero `filter` is not `EVFILT_USER` (a negative value on both
+        // BSDs), so an arbitrary user-ident probe rejects.
+        assert!(
+            !ev.is_user_event(0xDEAD_BEEF),
+            "zero-init does not look like a user event"
+        );
     }
 }

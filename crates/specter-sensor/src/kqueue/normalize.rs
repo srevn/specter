@@ -99,3 +99,177 @@ pub(super) const fn kevent_to_fs_event(
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::kevent_to_fs_event;
+    use libc::{
+        NOTE_ATTRIB, NOTE_DELETE, NOTE_EXTEND, NOTE_LINK, NOTE_RENAME, NOTE_REVOKE, NOTE_WRITE,
+    };
+    use specter_core::{FsEvent, ResourceKind};
+
+    // ── Terminal priority ─────────────────────────────────────────────
+
+    #[test]
+    fn revoke_takes_priority() {
+        let fflags = NOTE_REVOKE | NOTE_DELETE | NOTE_WRITE;
+        assert_eq!(
+            kevent_to_fs_event(0, fflags, ResourceKind::File),
+            Some(FsEvent::Revoked)
+        );
+    }
+
+    #[test]
+    fn remove_takes_priority_over_rename() {
+        let fflags = NOTE_DELETE | NOTE_RENAME;
+        assert_eq!(
+            kevent_to_fs_event(0, fflags, ResourceKind::File),
+            Some(FsEvent::Removed)
+        );
+    }
+
+    #[test]
+    fn rename_takes_priority_over_write() {
+        let fflags = NOTE_RENAME | NOTE_WRITE;
+        assert_eq!(
+            kevent_to_fs_event(0, fflags, ResourceKind::File),
+            Some(FsEvent::Renamed)
+        );
+    }
+
+    #[test]
+    fn terminal_takes_priority_over_link() {
+        // Terminal flags (REVOKE / DELETE / RENAME) outrank LINK — once
+        // the vnode has been reaped, the link-count signal is moot.
+        let fflags = NOTE_DELETE | NOTE_LINK;
+        assert_eq!(
+            kevent_to_fs_event(0, fflags, ResourceKind::File),
+            Some(FsEvent::Removed)
+        );
+    }
+
+    // ── WRITE / EXTEND ────────────────────────────────────────────────
+
+    #[test]
+    fn write_on_dir_is_structure_changed() {
+        assert_eq!(
+            kevent_to_fs_event(0, NOTE_WRITE, ResourceKind::Dir),
+            Some(FsEvent::StructureChanged)
+        );
+    }
+
+    #[test]
+    fn write_on_file_is_modified() {
+        assert_eq!(
+            kevent_to_fs_event(0, NOTE_WRITE, ResourceKind::File),
+            Some(FsEvent::Modified)
+        );
+    }
+
+    #[test]
+    fn extend_alone_collapses_with_write() {
+        assert_eq!(
+            kevent_to_fs_event(0, NOTE_EXTEND, ResourceKind::File),
+            Some(FsEvent::Modified)
+        );
+        assert_eq!(
+            kevent_to_fs_event(0, NOTE_EXTEND, ResourceKind::Dir),
+            Some(FsEvent::StructureChanged)
+        );
+    }
+
+    #[test]
+    fn unknown_kind_defaults_to_modified() {
+        assert_eq!(
+            kevent_to_fs_event(0, NOTE_WRITE, ResourceKind::Unknown),
+            Some(FsEvent::Modified)
+        );
+    }
+
+    // ── ATTRIB ────────────────────────────────────────────────────────
+
+    #[test]
+    fn attrib_alone_is_metadata() {
+        assert_eq!(
+            kevent_to_fs_event(0, NOTE_ATTRIB, ResourceKind::File),
+            Some(FsEvent::MetadataChanged)
+        );
+    }
+
+    #[test]
+    fn attrib_with_write_emits_write() {
+        // WRITE > ATTRIB; the engine's debouncing handles the metadata
+        // change as part of the same Settling burst.
+        let fflags = NOTE_ATTRIB | NOTE_WRITE;
+        assert_eq!(
+            kevent_to_fs_event(0, fflags, ResourceKind::File),
+            Some(FsEvent::Modified)
+        );
+    }
+
+    // ── NOTE_LINK is kind-aware ───────────────────────────────────────
+
+    #[test]
+    fn link_on_dir_is_structure_changed() {
+        // NOTE_LINK on a Dir == subdirectory was added/removed (the
+        // `..` backref count changed). Structural signal.
+        assert_eq!(
+            kevent_to_fs_event(0, NOTE_LINK, ResourceKind::Dir),
+            Some(FsEvent::StructureChanged)
+        );
+    }
+
+    #[test]
+    fn link_on_file_is_metadata_changed() {
+        // NOTE_LINK on a File == hardlink count changed (via `ln`,
+        // `unlink` on a hardlinked inode). Metadata signal.
+        assert_eq!(
+            kevent_to_fs_event(0, NOTE_LINK, ResourceKind::File),
+            Some(FsEvent::MetadataChanged)
+        );
+    }
+
+    #[test]
+    fn link_on_unknown_defaults_to_metadata_changed() {
+        // Unknown defaults to File-shape per the watcher's defensive
+        // fallback. NOTE_LINK ⇒ MetadataChanged.
+        assert_eq!(
+            kevent_to_fs_event(0, NOTE_LINK, ResourceKind::Unknown),
+            Some(FsEvent::MetadataChanged)
+        );
+    }
+
+    #[test]
+    fn link_takes_priority_over_write_on_file() {
+        // Ordering: LINK before WRITE. On a File, a coalesced
+        // (LINK | WRITE) kevent maps to MetadataChanged — the
+        // link-count shift is the dominant signal even when content
+        // also changed in the same kernel batch.
+        let fflags = NOTE_LINK | NOTE_WRITE;
+        assert_eq!(
+            kevent_to_fs_event(0, fflags, ResourceKind::File),
+            Some(FsEvent::MetadataChanged)
+        );
+    }
+
+    #[test]
+    fn link_with_write_on_dir_remains_structure_changed() {
+        // On a Dir, both LINK and WRITE map to StructureChanged. The
+        // LINK arm runs first per the priority order, but the result
+        // is observationally identical regardless of which arm fires.
+        let fflags = NOTE_LINK | NOTE_WRITE;
+        assert_eq!(
+            kevent_to_fs_event(0, fflags, ResourceKind::Dir),
+            Some(FsEvent::StructureChanged)
+        );
+    }
+
+    // ── No-actionable-signal fallthrough ──────────────────────────────
+
+    #[test]
+    fn no_actionable_signal_returns_none() {
+        assert_eq!(kevent_to_fs_event(0, 0, ResourceKind::File), None);
+        assert_eq!(kevent_to_fs_event(0, 0, ResourceKind::Dir), None);
+        assert_eq!(kevent_to_fs_event(0, 0, ResourceKind::Unknown), None);
+    }
+}

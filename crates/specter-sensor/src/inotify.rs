@@ -27,8 +27,5 @@ mod translate;
 mod wake;
 mod watcher;
 
-#[cfg(test)]
-mod tests;
-
 pub use wake::InotifyWakeHandle;
 pub use watcher::InotifyWatcher;

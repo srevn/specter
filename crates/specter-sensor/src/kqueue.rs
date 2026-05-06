@@ -23,8 +23,5 @@ mod translate;
 mod wake;
 mod watcher;
 
-#[cfg(test)]
-mod tests;
-
 pub use wake::KqueueWakeHandle;
 pub use watcher::KqueueWatcher;
