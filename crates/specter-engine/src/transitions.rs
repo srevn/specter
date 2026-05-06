@@ -696,7 +696,11 @@ impl Engine {
         // grafted current and updates `last_emitted_dir_hash` to the new
         // post-fire hash, so the rebase below is consistent.
         if self.b3_seed_drift_observed(profile_id) {
-            self.emit_effects(profile_id, false, out);
+            // The `EmitOutcome.count` is intentionally discarded here; the
+            // post-Effect rebase semantics still rely on `finish_burst_to_idle`
+            // running unconditionally. Phase 09's fire-cycle commit consumes
+            // the count to gate `Awaiting` entry.
+            let _ = self.emit_effects(profile_id, false, out);
         }
 
         // Rebase: baseline := current (the grafted snapshot).
@@ -855,8 +859,11 @@ impl Engine {
 
         if is_stable && dirty_zero {
             // Row 3: stable + dirty=0 → fire Effect, → Idle. baseline pinned
-            // (advances on next EffectComplete::Ok Seed).
-            self.emit_effects(profile_id, forced, out);
+            // (advances on next EffectComplete::Ok Seed). The
+            // `EmitOutcome.count` is discarded here for now; Phase 09's
+            // fire-cycle commit consumes it to choose between Awaiting
+            // (count > 0) and finish_burst_to_idle (count == 0).
+            let _ = self.emit_effects(profile_id, forced, out);
             self.finish_burst_to_idle(profile_id, out);
         } else if is_stable {
             // Row 4: stable + dirty>0 → Draining. The stable snapshot lives
@@ -866,8 +873,9 @@ impl Engine {
             self.transition_to_draining(profile_id);
         } else if forced {
             // Row 5: not-stable + forced → fire Effect with forced=true,
-            // → Idle.
-            self.emit_effects(profile_id, true, out);
+            // → Idle. `EmitOutcome.count` discarded — same rationale as
+            // above.
+            let _ = self.emit_effects(profile_id, true, out);
             self.finish_burst_to_idle(profile_id, out);
         } else {
             // Row 5 else: not-stable + !forced → re-arm debounce in
@@ -970,13 +978,24 @@ impl Engine {
     /// way out and any remaining Subs (none, by construction of
     /// `reap_pending = sub_refcount == 0`) would fire against a Sub registry
     /// that no longer holds them.
+    ///
+    /// Returns an [`EmitOutcome`] whose `count` is the number of Effects
+    /// pushed onto `out.effects`. Callers in Phase 09 use this to decide
+    /// whether to enter the `Awaiting` phase (`count > 0`) or short-circuit
+    /// to `finish_burst_to_idle` (B1 suppressed everything, no Subs matched,
+    /// or `reap_pending`).
     #[allow(clippy::too_many_lines)] // diff/B1/scope-routing fan-out is irreducible without churn
-    fn emit_effects(&mut self, profile_id: ProfileId, forced: bool, out: &mut StepOutput) {
+    fn emit_effects(
+        &mut self,
+        profile_id: ProfileId,
+        forced: bool,
+        out: &mut StepOutput,
+    ) -> EmitOutcome {
         let Some(p) = self.profiles.get(profile_id) else {
-            return;
+            return EmitOutcome::default();
         };
         if p.reap_pending {
-            return;
+            return EmitOutcome::default();
         }
         let resource = p.resource;
         let baseline_snap = p.baseline.clone();
@@ -1015,6 +1034,7 @@ impl Engine {
         // Snapshot the Sub IDs to avoid holding `&self.subs` across the
         // loop body's `out.effects.push`.
         let sub_ids: Vec<SubId> = self.subs.at(profile_id).to_vec();
+        let mut count: u32 = 0;
         for sub_id in sub_ids {
             let (scope, needs_diff) = match self.subs.get(sub_id) {
                 Some(s) => (s.scope, s.needs_diff),
@@ -1068,6 +1088,7 @@ impl Engine {
                         correlation,
                         diff: diff_for_effect,
                     });
+                    count = count.saturating_add(1);
 
                     // Record the post-fire hash so the next stable verdict
                     // can suppress an idempotent re-fire.
@@ -1081,7 +1102,7 @@ impl Engine {
                     let Some(diff) = ensure_diff(&mut diff_arc) else {
                         continue;
                     };
-                    self.emit_effects_per_stable_file(
+                    let pushed = self.emit_effects_per_stable_file(
                         sub_id,
                         resource,
                         forced,
@@ -1092,9 +1113,11 @@ impl Engine {
                         out,
                         current_snap.as_ref(),
                     );
+                    count = count.saturating_add(pushed);
                 }
             }
         }
+        EmitOutcome { count }
     }
 
     /// Per-Diff-entry Effect emission for a `PerStableFile` Sub. Walks
@@ -1108,6 +1131,10 @@ impl Engine {
     /// in the Tree (defensive — reconcile runs before this and materializes
     /// covered entries), a fresh Resource is created with no `watch_demand`
     /// contribution.
+    ///
+    /// Returns the number of Effects pushed to `out.effects`. The caller
+    /// (`emit_effects`) sums this into the [`EmitOutcome.count`] it returns.
+    #[must_use]
     fn emit_effects_per_stable_file(
         &mut self,
         sub_id: SubId,
@@ -1119,11 +1146,12 @@ impl Engine {
         anchor_cwd: &Path,
         out: &mut StepOutput,
         current: Option<&TreeSnapshot>,
-    ) {
+    ) -> u32 {
         let profile_id = match self.subs.get(sub_id) {
             Some(s) => s.profile,
-            None => return,
+            None => return 0,
         };
+        let mut count: u32 = 0;
 
         // Collect matching segments + kinds in a single pass, in the order
         // expected — created, then modified, then renamed.to.
@@ -1216,6 +1244,7 @@ impl Engine {
                 correlation,
                 diff: Some(diff.clone()),
             });
+            count = count.saturating_add(1);
 
             // Bundle B1: record the post-fire leaf hash so the next stable
             // verdict at the same DedupKey can suppress an idempotent
@@ -1228,6 +1257,7 @@ impl Engine {
                 p.last_emitted_dir_hash.insert(dk, h);
             }
         }
+        count
     }
 
     /// Walk `resource` and its strict ancestors looking for Profiles whose
@@ -1272,6 +1302,23 @@ impl Engine {
         self.next_correlation = self.next_correlation.saturating_add(1);
         CorrelationId(self.next_correlation)
     }
+}
+
+/// Outcome of an [`Engine::emit_effects`] call. `count` is the number of
+/// `out.effects.push(...)` invocations that survived B1 suppression and
+/// Sub-scope routing — i.e., Effects that the Actuator will actually run.
+///
+/// Phase 09's fire-cycle work consumes this to decide whether the Profile
+/// should enter the `Awaiting` phase (count > 0, at least one Effect is
+/// in flight) or short-circuit to `finish_burst_to_idle` (count == 0:
+/// B1 suppressed every emission, no Subs matched, or `reap_pending` was
+/// set). The `#[must_use]` attribute prevents a future caller from
+/// silently dropping the count and re-introducing the post-emit
+/// "Idle-but-Effects-in-flight" leakage that Phase 09 fixes.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[must_use]
+pub(crate) struct EmitOutcome {
+    pub count: u32,
 }
 
 /// Snapshot of `on_probe_response`'s routing decision. Computed under a
