@@ -257,8 +257,9 @@ impl ActuatorState {
         let argv = effect.command.argv.clone();
         let cwd = effect.cwd.clone();
         let correlation = effect.correlation;
+        let capture_output = effect.capture_output;
 
-        let handles = match spawner.spawn(&argv, &env, &cwd) {
+        let handles = match spawner.spawn(&argv, &env, &cwd, capture_output) {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!(?key, ?cwd, ?e, "spawn failed");

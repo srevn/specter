@@ -1,6 +1,6 @@
 use crate::error::{ConfigError, IssueKind, ValidationIssue};
 use crate::path::canonicalize_lenient;
-use crate::raw::{RawConfig, RawWatch};
+use crate::raw::{RawConfig, RawLogConfig, RawWatch};
 use crate::template;
 use compact_str::CompactString;
 use specter_core::{
@@ -18,8 +18,91 @@ const MAX_SETTLE_CEIL_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
-    pub log_level: LogLevel,
+    pub log: LogConfig,
     pub watches: Vec<SubSpec>,
+}
+
+/// Engine-telemetry configuration — the operator-facing diagnostic
+/// stream's level, sink, and (for [`LogDestination::File`]) target path.
+///
+/// This block is *only* about engine logs. Subprocess output is a
+/// separate concern controlled per-watch by [`SubSpec::log_output`].
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct LogConfig {
+    pub level: LogLevel,
+    pub destination: LogDestination,
+    /// Required iff `destination == LogDestination::File`. Validated at
+    /// load time: must be absolute. For `LogDestination::Stderr`,
+    /// callers should ignore this field.
+    pub path: Option<PathBuf>,
+}
+
+impl LogConfig {
+    /// Merge CLI overrides onto a config-loaded [`LogConfig`].
+    ///
+    /// Precedence is symmetric for every field: `CLI > config > default`.
+    /// When destination resolves to [`LogDestination::File`] but no path
+    /// was supplied (neither CLI nor config), returns
+    /// [`ConfigError::Validate`] with [`IssueKind::Empty`] on `log.path`.
+    /// CLI-supplied paths must be absolute (matching the config-time
+    /// rule), or the same error surfaces with [`IssueKind::NonAbsolute`].
+    pub fn merge_cli(
+        mut self,
+        level: Option<LogLevel>,
+        destination: Option<LogDestination>,
+        path: Option<PathBuf>,
+    ) -> Result<Self, ConfigError> {
+        if let Some(l) = level {
+            self.level = l;
+        }
+        if let Some(d) = destination {
+            self.destination = d;
+        }
+        if let Some(p) = path {
+            self.path = Some(p);
+        }
+        let mut errors: Vec<ValidationIssue> = Vec::new();
+        match (self.destination, self.path.as_deref()) {
+            (LogDestination::Stderr, _) => {
+                self.path = None;
+            }
+            (LogDestination::File, None) => errors.push(ValidationIssue::new(
+                None,
+                "log.path",
+                IssueKind::Empty,
+                "log.path is required when destination = \"file\" \
+                 (provide --log-path or `[log] path` in the config)"
+                    .to_owned(),
+            )),
+            (LogDestination::File, Some(p)) => {
+                if !p.is_absolute() {
+                    errors.push(ValidationIssue::new(
+                        None,
+                        "log.path",
+                        IssueKind::NonAbsolute,
+                        format!("log.path `{}` must be absolute", p.display()),
+                    ));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(self)
+        } else {
+            Err(ConfigError::Validate { path: None, errors })
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, clap::ValueEnum)]
+pub enum LogDestination {
+    /// Engine telemetry to stderr. Supervisor (systemd / launchd /
+    /// FreeBSD `daemon -o`) captures it.
+    #[default]
+    Stderr,
+    /// Engine telemetry to a regular file via `tracing-appender`'s
+    /// non-blocking writer. Reopened on SIGHUP for logrotate
+    /// `copytruncate`-style rotation.
+    File,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -39,6 +122,13 @@ pub struct SubSpec {
     /// engine — `PartialEq`-derived diffs ensure a hot-reload flip on
     /// this field reaps the old Profile and attaches a fresh one.
     pub events: ClassSet,
+    /// Forward subprocess stdout/stderr to Specter's own stdio. False by
+    /// default — children run with `Stdio::null()`. When true, the
+    /// actuator uses `Stdio::inherit()` and the supervisor's log facility
+    /// (systemd journal, launchd `StandardOutPath`, FreeBSD `daemon -o`)
+    /// captures the bytes. Engine threads this through `SubAttachRequest`
+    /// → `Sub.log_output` → `Effect.capture_output`.
+    pub log_output: bool,
 }
 
 impl SubSpec {
@@ -53,6 +143,7 @@ impl SubSpec {
             self.command.clone(),
             self.scope,
             self.events,
+            self.log_output,
         )
     }
 }
@@ -135,21 +226,7 @@ impl std::str::FromStr for Config {
 fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
 
-    let log_level = match raw.log_level.as_deref() {
-        None => LogLevel::Info,
-        Some(s) => match LogLevel::parse(s) {
-            Some(lvl) => lvl,
-            None => {
-                errors.push(ValidationIssue::new(
-                    None,
-                    "log_level",
-                    IssueKind::InvalidEnum,
-                    format!("unknown log level `{s}`"),
-                ));
-                LogLevel::Info
-            }
-        },
-    };
+    let log = validate_log(raw.log.as_ref(), &mut errors);
 
     let mut watches: Vec<SubSpec> = Vec::with_capacity(raw.watches.len());
     let mut seen_names: BTreeMap<&str, usize> = BTreeMap::new();
@@ -171,12 +248,85 @@ fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError>
     }
 
     if errors.is_empty() {
-        Ok(Config { log_level, watches })
+        Ok(Config { log, watches })
     } else {
         Err(ConfigError::Validate {
             path: path.map(Path::to_owned),
             errors,
         })
+    }
+}
+
+/// Resolve the `[log]` block. Field-level errors push into `errors`; the
+/// returned [`LogConfig`] uses defaults for any field that failed
+/// validation so the rest of the config can keep parsing.
+fn validate_log(raw: Option<&RawLogConfig>, errors: &mut Vec<ValidationIssue>) -> LogConfig {
+    let Some(raw) = raw else {
+        return LogConfig::default();
+    };
+
+    let level = match raw.level.as_deref() {
+        None => LogLevel::Info,
+        Some(s) => match LogLevel::parse(s) {
+            Some(lvl) => lvl,
+            None => {
+                errors.push(ValidationIssue::new(
+                    None,
+                    "log.level",
+                    IssueKind::InvalidEnum,
+                    format!("unknown log level `{s}`"),
+                ));
+                LogLevel::Info
+            }
+        },
+    };
+
+    let destination = match raw.destination.as_deref() {
+        None => LogDestination::Stderr,
+        Some("stderr") => LogDestination::Stderr,
+        Some("file") => LogDestination::File,
+        Some(other) => {
+            errors.push(ValidationIssue::new(
+                None,
+                "log.destination",
+                IssueKind::InvalidEnum,
+                format!("unknown log destination `{other}` (expected `stderr` or `file`)"),
+            ));
+            LogDestination::Stderr
+        }
+    };
+
+    let path = match (destination, raw.path.as_deref()) {
+        (LogDestination::Stderr, _) => None,
+        (LogDestination::File, None) => {
+            errors.push(ValidationIssue::new(
+                None,
+                "log.path",
+                IssueKind::Empty,
+                "log.path is required when destination = \"file\"".to_owned(),
+            ));
+            None
+        }
+        (LogDestination::File, Some(p)) => {
+            let pb = PathBuf::from(p);
+            if pb.is_absolute() {
+                Some(pb)
+            } else {
+                errors.push(ValidationIssue::new(
+                    None,
+                    "log.path",
+                    IssueKind::NonAbsolute,
+                    format!("log.path `{p}` must be absolute"),
+                ));
+                None
+            }
+        }
+    };
+
+    LogConfig {
+        level,
+        destination,
+        path,
     }
 }
 
@@ -365,6 +515,7 @@ fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationI
         max_settle: Duration::from_millis(max_settle_ms),
         scan: sb.build(),
         events,
+        log_output: raw.log_output.unwrap_or(false),
     })
 }
 
@@ -439,7 +590,7 @@ fn parse_events_field(
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, LogLevel, SubSpec};
+    use super::{Config, LogDestination, LogLevel, SubSpec};
     use crate::error::{ConfigError, IssueKind};
     use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
     use std::time::Duration;
@@ -469,14 +620,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_input_yields_default_log_level_and_no_watches() {
+    fn empty_input_yields_default_log_config_and_no_watches() {
         let cfg = Config::from_str("").unwrap();
-        assert_eq!(cfg.log_level, LogLevel::Info);
+        assert_eq!(cfg.log.level, LogLevel::Info);
+        assert_eq!(cfg.log.destination, LogDestination::Stderr);
+        assert!(cfg.log.path.is_none());
         assert!(cfg.watches.is_empty());
     }
 
     #[test]
-    fn log_level_only_parses_each_variant() {
+    fn log_level_block_parses_each_variant() {
         for (s, expected) in [
             ("trace", LogLevel::Trace),
             ("debug", LogLevel::Debug),
@@ -485,19 +638,83 @@ mod tests {
             ("warning", LogLevel::Warn),
             ("error", LogLevel::Error),
         ] {
-            let cfg = Config::from_str(&format!("log_level = \"{s}\"")).unwrap();
-            assert_eq!(cfg.log_level, expected, "input `{s}`");
+            let cfg = Config::from_str(&format!("[log]\nlevel = \"{s}\"")).unwrap();
+            assert_eq!(cfg.log.level, expected, "input `{s}`");
         }
     }
 
     #[test]
     fn unknown_log_level_rejected() {
-        let err = Config::from_str("log_level = \"verbose\"").unwrap_err();
+        let err = Config::from_str("[log]\nlevel = \"verbose\"").unwrap_err();
         let errors = validation_errors(err);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, IssueKind::InvalidEnum);
-        assert_eq!(errors[0].field, "log_level");
+        assert_eq!(errors[0].field, "log.level");
         assert!(errors[0].watch_index.is_none());
+    }
+
+    #[test]
+    fn legacy_top_level_log_level_is_rejected_as_unknown_field() {
+        // Clean alpha break — the old top-level `log_level` field is gone.
+        // RawConfig has `deny_unknown_fields`, so the parse fails fast
+        // rather than silently dropping the value.
+        let err = Config::from_str("log_level = \"debug\"").unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn log_destination_file_requires_path() {
+        let err = Config::from_str("[log]\ndestination = \"file\"").unwrap_err();
+        let errors = validation_errors(err);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, IssueKind::Empty);
+        assert_eq!(errors[0].field, "log.path");
+    }
+
+    #[test]
+    fn log_destination_file_with_relative_path_rejected() {
+        let err =
+            Config::from_str("[log]\ndestination = \"file\"\npath = \"specter.log\"").unwrap_err();
+        let errors = validation_errors(err);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, IssueKind::NonAbsolute);
+        assert_eq!(errors[0].field, "log.path");
+    }
+
+    #[test]
+    fn log_destination_file_with_absolute_path_round_trips() {
+        let cfg =
+            Config::from_str("[log]\ndestination = \"file\"\npath = \"/var/log/specter.log\"")
+                .unwrap();
+        assert_eq!(cfg.log.destination, LogDestination::File);
+        assert_eq!(
+            cfg.log.path.as_deref(),
+            Some(std::path::Path::new("/var/log/specter.log"))
+        );
+    }
+
+    #[test]
+    fn log_destination_unknown_value_rejected() {
+        let err = Config::from_str("[log]\ndestination = \"syslog\"").unwrap_err();
+        let errors = validation_errors(err);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, IssueKind::InvalidEnum);
+        assert_eq!(errors[0].field, "log.destination");
+    }
+
+    #[test]
+    fn log_path_ignored_for_stderr_destination() {
+        // Stderr path is dropped (set to None) — the operator may have
+        // legacy config with `path = ...`; we don't fail validation,
+        // because the field carries no meaning when destination = stderr.
+        let cfg =
+            Config::from_str("[log]\ndestination = \"stderr\"\npath = \"/var/log/ignored.log\"")
+                .unwrap();
+        assert_eq!(cfg.log.destination, LogDestination::Stderr);
+        assert!(
+            cfg.log.path.is_none(),
+            "path is dropped for stderr destination"
+        );
     }
 
     #[test]
@@ -515,6 +732,29 @@ mod tests {
         assert!(w.scan.pattern.is_none());
         assert_eq!(w.scan.max_depth, None);
         assert_eq!(w.command.argv.len(), 1);
+        assert!(!w.log_output, "log_output defaults to false");
+    }
+
+    #[test]
+    fn log_output_explicit_true_round_trips() {
+        let cfg = Config::from_str(&minimal_toml("log_output = true\n")).unwrap();
+        assert!(cfg.watches[0].log_output);
+    }
+
+    #[test]
+    fn log_output_explicit_false_round_trips() {
+        let cfg = Config::from_str(&minimal_toml("log_output = false\n")).unwrap();
+        assert!(!cfg.watches[0].log_output);
+    }
+
+    #[test]
+    fn log_output_threads_into_attach_request() {
+        let cfg = Config::from_str(&minimal_toml("log_output = true\n")).unwrap();
+        let req = cfg.watches[0].to_attach_request();
+        assert!(
+            req.log_output,
+            "SubSpec.log_output reaches SubAttachRequest.log_output via to_attach_request",
+        );
     }
 
     #[test]

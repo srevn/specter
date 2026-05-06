@@ -73,6 +73,7 @@ fn engine_with_attached_sub() -> (
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
+        log_output: false,
     };
     let (sid, _out) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -163,6 +164,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
+        log_output: false,
     };
     let (sid2, out) = e.attach_sub(req, now);
     assert_eq!(e.profiles.get(pid).unwrap().sub_refcount, pre_refcount + 1);
@@ -418,6 +420,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
+        log_output: false,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -762,6 +765,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::STRUCTURE,
+        log_output: false,
     };
     let (sid, _out) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -1132,6 +1136,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
         command: diff_command(), // references $created
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
+        log_output: false,
     };
     let (sid, _out) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -1239,6 +1244,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
+        log_output: false,
     };
     let (_sid, out) = e.attach_sub(req, Instant::now());
     let probe_kind = out.probe_ops.iter().find_map(|op| match op {
@@ -1329,6 +1335,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (_sid, _) = e.attach_sub(req, Instant::now());
     let pid = {
@@ -1458,6 +1465,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let req_b = SubAttachRequest::for_path(
         "b".into(),
@@ -1468,6 +1476,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid_a, _) = e.attach_sub(req_a, Instant::now());
     let (sid_b, _) = e.attach_sub(req_b, Instant::now());
@@ -1686,6 +1695,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             command: empty_command(),
             scope: EffectScope::SubtreeRoot,
             events: NO_EVENTS,
+            log_output: false,
         },
         now,
     );
@@ -1701,6 +1711,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             command: empty_command(),
             scope: EffectScope::SubtreeRoot,
             events: NO_EVENTS,
+            log_output: false,
         },
         now,
     );
@@ -1736,6 +1747,7 @@ fn config_diff_added_only_attaches_subs() {
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
+        log_output: false,
     };
     let mut diff = specter_core::SubRegistryDiff::default();
     diff.added.push(req);
@@ -1772,6 +1784,7 @@ fn config_diff_removed_then_added_atomic() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let mut diff = specter_core::SubRegistryDiff::default();
     diff.removed.push(sid_a);
@@ -1805,6 +1818,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         command: diff_command(),
         scope: EffectScope::PerStableFile,
         events: NO_EVENTS,
+        log_output: false,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -1938,6 +1952,7 @@ fn per_stable_file_skips_dir_entries() {
         command: diff_command(),
         scope: EffectScope::PerStableFile,
         events: NO_EVENTS,
+        log_output: false,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -2232,6 +2247,7 @@ fn b3_recovery_seed_per_key_only_drifted_subs_fire() {
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
+        log_output: false,
     };
     let (sid_b, _) = e.attach_sub(req_b, Instant::now());
     assert_eq!(
@@ -2380,6 +2396,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
         command: empty_command(),
         scope: EffectScope::PerStableFile,
         events: ClassSet::CONTENT,
+        log_output: false,
     };
     let (_sid, _) = e.attach_sub(req, now);
     let pid = e.profiles.iter().next().unwrap().0;
@@ -2465,6 +2482,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         command: empty_command(),
         scope: EffectScope::PerStableFile,
         events: ClassSet::CONTENT,
+        log_output: false,
     };
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs.get(sid).unwrap().profile;
@@ -2485,6 +2503,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         command: empty_command(),
         scope: EffectScope::PerStableFile,
         events: ClassSet::CONTENT,
+        log_output: false,
     };
     let (_sid2, _) = e.attach_sub(req2, Instant::now());
     assert!(e.profiles.get(pid).unwrap().has_per_file_fds);
@@ -2514,6 +2533,7 @@ fn structure_only_profile_has_per_file_fds_false() {
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::STRUCTURE,
+        log_output: false,
     };
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs.get(sid).unwrap().profile;
@@ -2690,6 +2710,7 @@ mod props {
             command: empty_command(),
             scope: EffectScope::SubtreeRoot,
             events: NO_EVENTS,
+            log_output: false,
         };
         let (sid, out) = e.attach_sub(req, now);
         let last_correlation = out.probe_ops.iter().find_map(|op| match op {

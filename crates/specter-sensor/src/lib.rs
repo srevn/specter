@@ -171,3 +171,24 @@ pub use prober::{DEFAULT_CONCURRENCY, WorkerProber};
 
 #[cfg(feature = "testkit")]
 pub mod testkit;
+
+/// Concrete platform watcher type — chosen at compile time so the
+/// bin holds a typed value (no `Box<dyn>` in the watcher hot loop).
+///
+/// macOS / FreeBSD use [`KqueueWatcher`]. A future Linux backend
+/// (`InotifyWatcher`) slots into this alias under
+/// `cfg(target_os = "linux")` without touching the bin's wiring.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub type DefaultWatcher = KqueueWatcher;
+
+/// Construct the platform's default watcher.
+///
+/// Returns the same concrete type as [`DefaultWatcher`] — no
+/// trait-object overhead. See module docs on [`FsWatcher`] for the
+/// invariants the returned watcher must uphold (`Send`, single-threaded
+/// `poll_until` consumer, cross-thread mutation only via the bin's
+/// channel + [`WakeHandle`] discipline).
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub fn default_watcher() -> io::Result<DefaultWatcher> {
+    KqueueWatcher::new()
+}

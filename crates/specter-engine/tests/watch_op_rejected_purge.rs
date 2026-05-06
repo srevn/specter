@@ -110,6 +110,7 @@ fn attach_subtree_root(
         empty_command(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
+        false,
     );
     let (sid, out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -330,6 +331,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         empty_command(),
         EffectScope::SubtreeRoot,
         ClassSet::EMPTY,
+        false,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;

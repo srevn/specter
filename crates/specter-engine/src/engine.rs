@@ -229,6 +229,7 @@ impl Engine {
                 req.settle,
                 req.max_settle,
                 req.events,
+                req.log_output,
             )
         });
 

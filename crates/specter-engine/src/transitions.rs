@@ -1337,8 +1337,8 @@ impl Engine {
         let sub_ids: Vec<SubId> = self.subs.at(profile_id).to_vec();
         let mut count: u32 = 0;
         for sub_id in sub_ids {
-            let (scope, needs_diff) = match self.subs.get(sub_id) {
-                Some(s) => (s.scope, s.needs_diff),
+            let (scope, needs_diff, log_output) = match self.subs.get(sub_id) {
+                Some(s) => (s.scope, s.needs_diff, s.log_output),
                 None => continue,
             };
             match scope {
@@ -1397,6 +1397,7 @@ impl Engine {
                         forced,
                         correlation,
                         diff: diff_for_effect,
+                        capture_output: log_output,
                     });
                     count = count.saturating_add(1);
 
@@ -1545,6 +1546,7 @@ impl Engine {
             let Some(sub) = self.subs.get(sub_id) else {
                 continue;
             };
+            let log_output = sub.log_output;
             let (command, env) = specter_core::resolve_effect(
                 sub,
                 anchor_path,
@@ -1562,6 +1564,7 @@ impl Engine {
                 forced,
                 correlation,
                 diff: Some(diff.clone()),
+                capture_output: log_output,
             });
             count = count.saturating_add(1);
 

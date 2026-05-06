@@ -21,14 +21,23 @@ use std::path::Path;
 /// hold one `Arc<dyn Spawner>` and share across the controller thread
 /// + any test orchestration.
 pub trait Spawner: Send + Sync {
-    /// Spawn a child for the given argv + env + cwd. Returns paired
-    /// handles: the `waiter` (consumed by the wait thread) and the
-    /// `signaler` (held by the controller, used for SIGTERM/SIGKILL).
+    /// Spawn a child for the given argv + env + cwd + stdio policy.
+    /// Returns paired handles: the `waiter` (consumed by the wait thread)
+    /// and the `signaler` (held by the controller, used for SIGTERM/SIGKILL).
+    ///
+    /// `capture_output` is the per-Effect stdio policy mirrored from the
+    /// owning Sub's `log_output`. `false` (the default) routes
+    /// stdout/stderr to `/dev/null`; `true` inherits Specter's own
+    /// stdio so the parent's supervisor (systemd journal, launchd
+    /// `StandardOutPath`, FreeBSD `daemon -o`) captures the bytes.
+    /// Stdin is unconditionally `/dev/null` regardless — a watch-action
+    /// command never reads from the parent's tty.
     fn spawn(
         &self,
         argv: &[String],
         env: &[(String, String)],
         cwd: &Path,
+        capture_output: bool,
     ) -> io::Result<SpawnHandles>;
 }
 

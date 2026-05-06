@@ -99,6 +99,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::CONTENT,
+        log_output: false,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
     let pid = e.subs().get(sid).expect("sub").profile;
@@ -204,6 +205,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
         command: empty_command(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::CONTENT,
+        log_output: false,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
     let pid = e.subs().get(sid).expect("sub").profile;

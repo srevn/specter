@@ -64,7 +64,7 @@ fn reorder_only_yields_no_diff() {
     let mut b_watches = a.watches.clone();
     b_watches.reverse();
     let b = Config {
-        log_level: a.log_level,
+        log: a.log.clone(),
         watches: b_watches,
     };
     let d = diff(&a, &b, &ids_for(&a, 1));

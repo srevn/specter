@@ -93,6 +93,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let now = Instant::now();
     let (sid, attach_out) = e.attach_sub(req, now);
@@ -184,6 +185,7 @@ fn pending_path_failed_probe_retains_state() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -229,6 +231,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -284,6 +287,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let now = Instant::now();
     let (sid, attach_out) = e.attach_sub(req, now);
@@ -365,6 +369,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let now = Instant::now();
     let (sid, attach_out) = e.attach_sub(req, now);
@@ -439,6 +444,7 @@ fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let now = Instant::now();
     let (sid, _attach_out) = e.attach_sub(req, now);

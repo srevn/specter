@@ -96,6 +96,7 @@ fn two_profiles_one_resource_share_watch_demand() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (_sid_a, out_a) = e.attach_sub(req_a, Instant::now());
     let watch_count_a = out_a
@@ -114,6 +115,7 @@ fn two_profiles_one_resource_share_watch_demand() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (_sid_b, out_b) = e.attach_sub(req_b, Instant::now());
     let watch_count_b = out_b
@@ -150,6 +152,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -176,6 +179,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -244,6 +248,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -268,6 +273,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -461,6 +467,7 @@ fn co_located_profiles_share_suppress_count() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -476,6 +483,7 @@ fn co_located_profiles_share_suppress_count() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );

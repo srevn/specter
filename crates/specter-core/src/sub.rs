@@ -57,6 +57,13 @@ pub struct SubAttachRequest {
     /// materializing the scope-conditional default before constructing the
     /// request — this struct does no defaulting.
     pub events: ClassSet,
+    /// Forward subprocess stdout/stderr to Specter's own stdout/stderr
+    /// (`Stdio::inherit()`); when `false`, child output goes to
+    /// `/dev/null`. Threaded through to `Effect.capture_output` at
+    /// emission time. Not folded into `config_hash` — flipping it
+    /// changes how the actuator spawns, not which Profile a Sub
+    /// belongs to.
+    pub log_output: bool,
 }
 
 impl SubAttachRequest {
@@ -73,6 +80,7 @@ impl SubAttachRequest {
         command: CommandTemplate,
         scope: EffectScope,
         events: ClassSet,
+        log_output: bool,
     ) -> Self {
         Self {
             name,
@@ -84,6 +92,7 @@ impl SubAttachRequest {
             command,
             scope,
             events,
+            log_output,
         }
     }
 
@@ -102,6 +111,7 @@ impl SubAttachRequest {
         command: CommandTemplate,
         scope: EffectScope,
         events: ClassSet,
+        log_output: bool,
     ) -> Self {
         Self {
             name,
@@ -113,6 +123,7 @@ impl SubAttachRequest {
             command,
             scope,
             events,
+            log_output,
         }
     }
 }
@@ -320,6 +331,11 @@ pub struct Sub {
     /// `config_hash` (D3); under R1, every Sub on a Profile shares the
     /// same `events` by construction.
     pub events: ClassSet,
+    /// Forward subprocess stdout/stderr to Specter's own stdio. Threaded
+    /// onto each emitted [`Effect`] as `capture_output`; the actuator
+    /// switches between `Stdio::null()` (false, the default) and
+    /// `Stdio::inherit()` (true). Not folded into `config_hash`.
+    pub log_output: bool,
 }
 
 impl Sub {
@@ -336,6 +352,7 @@ impl Sub {
         settle: Duration,
         max_settle: Duration,
         events: ClassSet,
+        log_output: bool,
     ) -> Self {
         let needs_diff = scope == EffectScope::PerStableFile || command.references_diff();
         Self {
@@ -348,6 +365,7 @@ impl Sub {
             max_settle,
             needs_diff,
             events,
+            log_output,
         }
     }
 }
@@ -485,6 +503,7 @@ mod tests {
             SETTLE,
             MAX_SETTLE,
             NO_EVENTS,
+            false,
         );
         assert!(sub.needs_diff);
     }
@@ -500,6 +519,7 @@ mod tests {
             SETTLE,
             MAX_SETTLE,
             NO_EVENTS,
+            false,
         );
         assert!(sub.needs_diff);
     }
@@ -515,6 +535,7 @@ mod tests {
             SETTLE,
             MAX_SETTLE,
             NO_EVENTS,
+            false,
         );
         assert!(!sub.needs_diff);
     }
@@ -533,6 +554,7 @@ mod tests {
                 SETTLE,
                 MAX_SETTLE,
                 NO_EVENTS,
+                false,
             )
         });
 
@@ -556,6 +578,7 @@ mod tests {
                 SETTLE,
                 MAX_SETTLE,
                 NO_EVENTS,
+                false,
             )
         });
         let s2 = reg.insert(|id| {
@@ -568,6 +591,7 @@ mod tests {
                 SETTLE,
                 MAX_SETTLE,
                 NO_EVENTS,
+                false,
             )
         });
 
@@ -598,6 +622,7 @@ mod tests {
                 SETTLE,
                 MAX_SETTLE,
                 NO_EVENTS,
+                false,
             )
         });
         assert_eq!(reg.find_by_name("build"), Some(id));
@@ -623,6 +648,7 @@ mod tests {
                 SETTLE,
                 MAX_SETTLE,
                 NO_EVENTS,
+                false,
             )
         });
         reg.remove(id);
@@ -643,6 +669,7 @@ mod tests {
                 SETTLE,
                 MAX_SETTLE,
                 NO_EVENTS,
+                false,
             )
         });
         let b = reg.insert(|id| {
@@ -655,6 +682,7 @@ mod tests {
                 SETTLE,
                 MAX_SETTLE,
                 NO_EVENTS,
+                false,
             )
         });
         let found = reg.find_by_name("shared").expect("at least one match");
@@ -675,6 +703,7 @@ mod tests {
                 SETTLE,
                 MAX_SETTLE,
                 NO_EVENTS,
+                false,
             )
         });
 
@@ -697,6 +726,7 @@ mod tests {
             SETTLE,
             MAX_SETTLE,
             ClassSet::CONTENT | ClassSet::METADATA,
+            false,
         );
         assert_eq!(sub.events, ClassSet::CONTENT | ClassSet::METADATA);
     }

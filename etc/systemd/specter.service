@@ -1,0 +1,42 @@
+# Template — adapt User=, Group=, paths to your install.
+# Copy to /etc/systemd/system/specter.service and run:
+#   systemctl daemon-reload && systemctl enable --now specter
+
+[Unit]
+Description=Specter — prove the absence of filesystem change
+After=network.target
+Documentation=https://github.com/srevn/specter
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/specter --config /usr/local/etc/specter.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Note: create the specter user before enabling:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin specter
+User=specter
+Group=specter
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+ReadOnlyPaths=/srv
+ReadWritePaths=/var/log/specter.log
+
+[Install]
+WantedBy=multi-user.target

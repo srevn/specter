@@ -44,8 +44,10 @@
 //! diff, apply via `Input::ConfigDiff`, sync `loader.ids` post-apply,
 //! rotate `current_config`. All on the engine thread — no Mutex.
 
+use crate::app::CliLogOverrides;
 use crate::channels::EngineSide;
 use crate::loader::Loader;
+use crate::observability::{LogReloadKind, ObservabilityHandle};
 use crossbeam::channel::Select;
 use specter_config::Config;
 use specter_core::{Diagnostic, Input, ProbeOp, StepOutput, SubId};
@@ -89,6 +91,14 @@ pub struct EngineDriver {
     engine: Engine,
     loader: Loader,
     config_path: PathBuf,
+    /// CLI overrides applied to `[log]` at startup. Re-applied on every
+    /// SIGHUP-driven reload so CLI precedence stays consistent across
+    /// the process lifetime (`CLI > config > default`).
+    cli_log_overrides: CliLogOverrides,
+    /// Subscriber handle for runtime updates (`set_level`,
+    /// `reopen_file`). Held here so `handle_reload` can fire both on
+    /// SIGHUP without going through the loader.
+    obs_handle: ObservabilityHandle,
     sides: EngineSide,
     prober: Arc<dyn Prober>,
     wake_handle: Box<dyn WakeHandle>,
@@ -99,6 +109,8 @@ impl std::fmt::Debug for EngineDriver {
         f.debug_struct("EngineDriver")
             .field("loader", &self.loader)
             .field("config_path", &self.config_path)
+            .field("cli_log_overrides", &self.cli_log_overrides)
+            .field("obs_handle", &self.obs_handle)
             .finish_non_exhaustive()
     }
 }
@@ -109,6 +121,8 @@ impl EngineDriver {
         engine: Engine,
         loader: Loader,
         config_path: PathBuf,
+        cli_log_overrides: CliLogOverrides,
+        obs_handle: ObservabilityHandle,
         sides: EngineSide,
         prober: Arc<dyn Prober>,
         wake_handle: Box<dyn WakeHandle>,
@@ -117,6 +131,8 @@ impl EngineDriver {
             engine,
             loader,
             config_path,
+            cli_log_overrides,
+            obs_handle,
             sides,
             prober,
             wake_handle,
@@ -217,6 +233,14 @@ impl EngineDriver {
     /// snapshot, apply via `Input::ConfigDiff`, sync `loader.ids`,
     /// rotate `loader.current_config`. On failure, log + retain
     /// running config.
+    ///
+    /// Log-side reload is integrated here:
+    ///   - The `[log]` block is re-resolved (CLI overrides re-applied);
+    ///     a level-only change calls `obs_handle.set_level`;
+    ///     a destination/path change logs an `error!` instructing the
+    ///     operator to restart (v1 doesn't hot-reload destinations).
+    ///   - `obs_handle.reopen_file()` fires unconditionally so logrotate
+    ///     `copytruncate`-style rotation works without a config diff.
     fn handle_reload(&mut self, now: Instant) {
         let new_config = match Config::from_path(&self.config_path) {
             Ok(c) => c,
@@ -230,10 +254,33 @@ impl EngineDriver {
             }
         };
 
+        // Resolve the new [log] block with CLI overrides (CLI wins,
+        // matching startup precedence). Validation may fail (e.g., a
+        // freshly-edited config now says destination = "file" without a
+        // path); on failure we log and keep the old log state.
+        let new_log_resolved = match new_config.log.clone().merge_cli(
+            self.cli_log_overrides.level,
+            self.cli_log_overrides.destination,
+            self.cli_log_overrides.path.clone(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "log reload failed; keeping running log config",
+                );
+                // Don't abandon the watch reload below — the [log]
+                // failure is independent.
+                self.loader.current_log.clone()
+            }
+        };
+        self.apply_log_reload(&new_log_resolved);
+
         let diff = specter_config::diff(&self.loader.current_config, &new_config, &self.loader.ids);
         if diff.added.is_empty() && diff.removed.is_empty() && diff.modified.is_empty() {
-            tracing::info!("config reload: no changes");
+            tracing::info!("config reload: no watch changes");
             self.loader.current_config = new_config;
+            self.loader.current_log = new_log_resolved;
             return;
         }
 
@@ -271,6 +318,7 @@ impl EngineDriver {
         }
 
         self.loader.current_config = new_config;
+        self.loader.current_log = new_log_resolved;
         tracing::info!(
             added = added_n,
             removed = removed_n,
@@ -278,6 +326,52 @@ impl EngineDriver {
             "config reload applied",
         );
         self.forward(out);
+    }
+
+    /// Apply a freshly-resolved [`specter_config::LogConfig`] to the
+    /// observability handle. Three branches:
+    ///
+    /// - **Unchanged** — only fire `reopen_file` (logrotate cadence is
+    ///   independent of operator-driven config edits; reopen
+    ///   unconditionally per the design doc §4.4 step 4).
+    /// - **LevelOnly** — call `set_level`; reopen the file too.
+    /// - **DestinationChanged** — log an `error!` instructing the
+    ///   operator to restart; reopen the (still-old) file so logrotate
+    ///   keeps working until the restart.
+    ///
+    /// Any reopen `Err` is logged at `warn!` — the rotator may have
+    /// raced us to the path, in which case the existing fd is still
+    /// usable.
+    fn apply_log_reload(&self, new_log: &specter_config::LogConfig) {
+        let kind = LogReloadKind::diff(&self.loader.current_log, new_log);
+        match kind {
+            LogReloadKind::Unchanged => {}
+            LogReloadKind::LevelOnly => match self.obs_handle.set_level(new_log.level) {
+                Ok(()) => tracing::info!(
+                    new_level = ?new_log.level,
+                    "log level updated via SIGHUP",
+                ),
+                Err(e) => tracing::error!(
+                    error = ?e,
+                    "log level reload failed; keeping prior level",
+                ),
+            },
+            LogReloadKind::DestinationChanged => {
+                tracing::error!(
+                    new_destination = ?new_log.destination,
+                    new_path = ?new_log.path.as_ref().map(|p| p.display().to_string()),
+                    "log destination / path change is not hot-reloadable in v1; \
+                     restart specter to apply",
+                );
+            }
+        }
+        if let Err(e) = self.obs_handle.reopen_file() {
+            tracing::warn!(
+                error = ?e,
+                path = ?self.obs_handle.file_path().map(|p| p.display().to_string()),
+                "log file reopen failed; keeping existing fd",
+            );
+        }
     }
 
     /// Push a [`StepOutput`] to its downstream consumers.
@@ -494,10 +588,20 @@ mod tests {
         let wake_handle = watcher.wake_handle();
         let prober: Arc<MockProber> = Arc::new(MockProber::new());
 
+        let log_cfg = config.log.clone();
+        // Tests don't drive the SIGHUP API meaningfully and would race
+        // each other on the global subscriber slot if every rig called
+        // `observability::init`. `noop()` returns a structurally-correct
+        // handle whose `set_level` / `reopen_file` are silent no-ops —
+        // tests assert the *driver*'s reload-pipeline behaviour, not the
+        // subscriber's filter state.
+        let obs_handle = crate::observability::ObservabilityHandle::noop();
         let driver = EngineDriver::new(
             Engine::new(),
-            Loader::new(config),
+            Loader::new(config, log_cfg),
             config_path,
+            CliLogOverrides::default(),
+            obs_handle,
             engine_side,
             prober.clone(),
             wake_handle,
@@ -518,8 +622,9 @@ mod tests {
     fn config_with_one_watch(path: &std::path::Path) -> Config {
         let toml = format!(
             r#"
-    log_level = "warn"
-    
+    [log]
+    level = "warn"
+
     [[watch]]
     name      = "build"
     path      = "{}"

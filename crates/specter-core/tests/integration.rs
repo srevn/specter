@@ -55,6 +55,7 @@ fn shared_profile_via_config_hash() {
             SETTLE,
             MAX_SETTLE,
             NO_EVENTS,
+            false,
         )
     });
 

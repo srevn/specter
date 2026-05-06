@@ -122,6 +122,7 @@ fn attach_sub_with_events(
         empty_command(),
         scope,
         events,
+        false,
     );
     let (sid, out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -394,6 +395,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
         empty_command(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT, // user wants CONTENT only
+        false,
     );
     let (sid, _attach_out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -1196,6 +1198,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         empty_command(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
+        false,
     );
     let attach_q = SubAttachRequest::for_resource(
         "Q".into(),
@@ -1206,6 +1209,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         empty_command(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
+        false,
     );
     let (sid_p, attach_out_p) = e.attach_sub(attach_p, Instant::now());
     let (_sid_q, attach_out_q) = e.attach_sub(attach_q, Instant::now());

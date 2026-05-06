@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Template — adapt paths to your install. Copy to:
+  /Library/LaunchDaemons/io.specter.plist
+Then load:
+  sudo launchctl load -w /Library/LaunchDaemons/io.specter.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.specter</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/specter</string>
+    <string>--config</string>
+    <string>/usr/local/etc/specter.toml</string>
+  </array>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>WorkingDirectory</key>
+  <string>/</string>
+
+  <!--
+    Engine stderr lands here when [log] destination = "stderr"
+    (the default). If destination = "file", these are still useful
+    for capturing pre-tracing-init failures (e.g., config load errors).
+  -->
+  <key>StandardOutPath</key>
+  <string>/var/log/specter.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/specter.err</string>
+</dict>
+</plist>

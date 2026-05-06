@@ -83,6 +83,7 @@ fn config_diff_add_sub_to_existing_profile() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -100,6 +101,7 @@ fn config_diff_add_sub_to_existing_profile() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     ));
     let out = e.step(Input::ConfigDiff(diff), now);
 
@@ -136,6 +138,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let now = Instant::now();
     let (sid_a, attach_out) = e.attach_sub(req, now);
@@ -194,6 +197,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -284,6 +288,7 @@ fn effect_complete_after_detach_drops_silently() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -357,6 +362,7 @@ fn config_diff_modified_remove_then_add() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -392,6 +398,7 @@ fn config_diff_modified_remove_then_add() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
     ));
     let _out = e.step(Input::ConfigDiff(diff), now);

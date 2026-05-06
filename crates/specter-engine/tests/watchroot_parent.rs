@@ -68,6 +68,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -101,6 +102,7 @@ fn root_anchor_has_no_watch_root_parent() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -125,6 +127,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, attach_out) = e.attach_sub(req, now);
     let pid = e.subs().get(sid).unwrap().profile;
@@ -184,6 +187,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -197,6 +201,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -230,6 +235,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );
@@ -249,6 +255,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             empty_command(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
+            false,
         ),
         now,
     );

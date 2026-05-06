@@ -297,6 +297,7 @@ mod tests {
             forced: false,
             correlation: CorrelationId(corr),
             diff: None,
+            capture_output: false,
         }
     }
 
@@ -314,6 +315,7 @@ mod tests {
             forced: false,
             correlation: CorrelationId(corr),
             diff: None,
+            capture_output: false,
         }
     }
 
@@ -439,6 +441,28 @@ mod tests {
             .complete(s[0].pid, EffectOutcome::Ok)
             .expect("complete");
         h.wait_for_effect_completes(1, Duration::from_secs(1));
+        h.shutdown();
+    }
+
+    #[test]
+    fn capture_output_threads_from_effect_to_spawner() {
+        // The actuator must surface `Effect.capture_output` to the
+        // `Spawner::spawn` call so the production OsSpawner can switch
+        // between Stdio::null() (false) and Stdio::inherit() (true).
+        let mut h = Harness::new(4);
+        let mut e_off = make_effect_subtree(1, 1, 1);
+        e_off.capture_output = false;
+        let mut e_on = make_effect_subtree(2, 2, 2);
+        e_on.capture_output = true;
+        h.submit(e_off);
+        h.submit(e_on);
+        let s = h.wait_for_spawns(2, Duration::from_secs(1));
+        // Spawn order matches submit order under the global gate.
+        assert!(!s[0].capture_output);
+        assert!(s[1].capture_output);
+        h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
+        h.spawner.complete(s[1].pid, EffectOutcome::Ok).unwrap();
+        h.wait_for_effect_completes(2, Duration::from_secs(1));
         h.shutdown();
     }
 

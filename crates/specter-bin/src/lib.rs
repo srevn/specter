@@ -10,7 +10,7 @@ mod app;
 mod channels;
 mod driver;
 mod loader;
+mod observability;
 mod signals;
-mod tracing_init;
 
 pub use app::run;

@@ -1,4 +1,4 @@
-use crate::config::LogLevel;
+use crate::config::{LogDestination, LogLevel};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -14,9 +14,20 @@ pub struct Cli {
     #[arg(long, short = 'c')]
     pub config: PathBuf,
 
-    /// Override log level from config (cli wins).
+    /// Override `[log] level` from config (cli wins).
     #[arg(long, value_enum)]
     pub log_level: Option<LogLevel>,
+
+    /// Override `[log] destination` from config (cli wins). When `file`,
+    /// the resolved path must come from either `--log-path` or
+    /// `[log] path` in the config.
+    #[arg(long, value_enum)]
+    pub log_destination: Option<LogDestination>,
+
+    /// Override `[log] path` (must be absolute). Only meaningful when the
+    /// resolved destination is `file`.
+    #[arg(long)]
+    pub log_path: Option<PathBuf>,
 
     /// Global cap on concurrent Effect spawns. Omit for default (`2 × num_cpus`).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]

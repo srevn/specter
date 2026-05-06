@@ -32,7 +32,8 @@ fn minimal_fixture_round_trips() {
 #[test]
 fn full_fixture_round_trips_every_field() {
     let cfg = Config::from_path(&fixture("full.toml")).unwrap();
-    assert_eq!(cfg.log_level, specter_config::LogLevel::Debug);
+    assert_eq!(cfg.log.level, specter_config::LogLevel::Debug);
+    assert_eq!(cfg.log.destination, specter_config::LogDestination::Stderr);
     assert_eq!(cfg.watches.len(), 1);
     let w = &cfg.watches[0];
     assert_eq!(w.name, "build");

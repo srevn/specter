@@ -114,7 +114,7 @@ fn issue_kind_duplicate_name() {
 
 #[test]
 fn issue_kind_invalid_enum_log_level() {
-    let toml = "log_level = \"verbose\"";
+    let toml = "[log]\nlevel = \"verbose\"";
     assert_kinds(toml, &[IssueKind::InvalidEnum]);
 }
 

@@ -31,6 +31,13 @@ pub struct CommandResolved {
 /// the deadline-crossed flag, regardless of whether the eventual probe
 /// verdict was stable). `diff` is `Some` iff `sub.needs_diff` AND the
 /// diff source (a `baseline` snapshot) was present.
+///
+/// `capture_output` mirrors the Sub's `log_output` at emission time. The
+/// actuator reads it to choose between `Stdio::null()` (the default —
+/// child output is discarded) and `Stdio::inherit()` (child output is
+/// forwarded to Specter's own stdout/stderr, where the supervisor's
+/// log facility — systemd journal, launchd `StandardOutPath`, FreeBSD
+/// `daemon -o` — captures it).
 #[derive(Clone, Debug)]
 pub struct Effect {
     pub key: DedupKey,
@@ -40,6 +47,7 @@ pub struct Effect {
     pub forced: bool,
     pub correlation: CorrelationId,
     pub diff: Option<Arc<Diff>>,
+    pub capture_output: bool,
 }
 
 impl Default for Effect {
@@ -55,6 +63,7 @@ impl Default for Effect {
             forced: false,
             correlation: CorrelationId::default(),
             diff: None,
+            capture_output: false,
         }
     }
 }

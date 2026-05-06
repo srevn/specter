@@ -104,6 +104,7 @@ fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     )
 }
 
@@ -119,6 +120,7 @@ fn subtree_request_with_content(name: &str, r: ResourceId) -> SubAttachRequest {
         empty_command(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
+        false,
     )
 }
 
@@ -817,6 +819,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         empty_command(),
         EffectScope::PerStableFile,
         ClassSet::CONTENT,
+        false,
     );
     let (sid, attach_out) = e.attach_sub(req, now);
     let pid = pid_of(&e, sid);

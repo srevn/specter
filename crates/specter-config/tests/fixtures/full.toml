@@ -1,4 +1,5 @@
-log_level = "debug"
+[log]
+level = "debug"
 
 [[watch]]
 name          = "build"

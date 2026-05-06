@@ -87,6 +87,7 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -140,6 +141,7 @@ fn descent_two_levels_advances_progressively() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -331,6 +333,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -390,6 +393,7 @@ fn second_absolute_attach_reuses_fs_root() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let req2 = SubAttachRequest::for_path(
         "b".into(),
@@ -400,6 +404,7 @@ fn second_absolute_attach_reuses_fs_root() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (_, _) = e.attach_sub(req1, Instant::now());
     let (_, _) = e.attach_sub(req2, Instant::now());
@@ -427,6 +432,7 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -465,6 +471,7 @@ fn descent_probe_uses_minimal_scan_config() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (_sid, out) = e.attach_sub(req, Instant::now());
 
@@ -581,6 +588,7 @@ fn descent_state_helper_returns_none_for_idle() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -616,6 +624,7 @@ fn descent_state_helper_returns_none_for_active() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
@@ -711,6 +720,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
         empty_command(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
+        false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;

@@ -1,9 +1,12 @@
 //! Production [`Spawner`] impl using `std::process::Command` +
 //! `nix::sys::signal`.
 //!
-//! Stdin/stdout/stderr are routed to `/dev/null` (v1's `log_output =
-//! false`). cwd is validated by `Command::spawn` at spawn time;
-//! failure surfaces as an `io::Result::Err`.
+//! Stdin is always routed to `/dev/null`. Stdout/stderr default to
+//! `/dev/null` (the Sub's `log_output = false` case); when
+//! `capture_output` is `true` they `inherit()` Specter's own
+//! fds, letting the supervisor's log facility capture child bytes.
+//! cwd is validated by `Command::spawn` at spawn time; failure
+//! surfaces as an `io::Result::Err`.
 //!
 //! `Command::spawn` is forced down the fork+exec path via a no-op
 //! [`CommandExt::pre_exec`] hook (see `OsSpawner::spawn`'s safety note).
@@ -27,9 +30,13 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Production `Spawner`. Spawns via `std::process::Command`. Stdin/
-/// stdout/stderr → `/dev/null` (v1 `log_output = false`). cwd
-/// is passed to `Command::current_dir` and validated at spawn time.
+/// Production `Spawner`.
+///
+/// Spawns via `std::process::Command`. Stdin is always `/dev/null`.
+/// Stdout/stderr go to `/dev/null` by default; when `capture_output`
+/// is `true` they inherit Specter's own fds so the parent supervisor's
+/// log facility captures child bytes. cwd is passed to
+/// `Command::current_dir` and validated at spawn time.
 #[derive(Debug, Default)]
 pub struct OsSpawner;
 
@@ -46,17 +53,23 @@ impl Spawner for OsSpawner {
         argv: &[String],
         env: &[(String, String)],
         cwd: &Path,
+        capture_output: bool,
     ) -> io::Result<SpawnHandles> {
         if argv.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
         }
+        let (stdout, stderr) = if capture_output {
+            (Stdio::inherit(), Stdio::inherit())
+        } else {
+            (Stdio::null(), Stdio::null())
+        };
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..])
             .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .current_dir(cwd)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(stdout)
+            .stderr(stderr);
         // SAFETY: the pre_exec hook is an empty `Ok(())` — it performs no
         // I/O, no allocation, no signal-unsafe work. Its sole purpose is
         // to disqualify Rust std's `posix_spawn` fast path (which
@@ -234,7 +247,7 @@ mod tests {
         let argv: Vec<String> = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
         let env: Vec<(String, String)> = Vec::new();
         let handles = spawner
-            .spawn(&argv, &env, cwd)
+            .spawn(&argv, &env, cwd, false)
             .expect("spawn must succeed under high fd pressure (fork+exec route)");
         let outcome = handles
             .waiter

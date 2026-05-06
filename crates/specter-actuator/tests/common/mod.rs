@@ -152,6 +152,7 @@ pub fn perfile_effect(
         forced: false,
         correlation: CorrelationId(corr),
         diff: None,
+        capture_output: false,
     }
 }
 
@@ -174,5 +175,6 @@ pub fn subtree_effect(
         forced: false,
         correlation: CorrelationId(corr),
         diff: None,
+        capture_output: false,
     }
 }

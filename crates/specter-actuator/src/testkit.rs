@@ -25,6 +25,7 @@ pub struct SpawnRecord {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
+    pub capture_output: bool,
 }
 
 /// Recorded signal call.
@@ -120,6 +121,7 @@ impl Spawner for MockSpawner {
         argv: &[String],
         env: &[(String, String)],
         cwd: &Path,
+        capture_output: bool,
     ) -> io::Result<SpawnHandles> {
         // Copy out of the lock before checking — Mutex guard's
         // significant Drop should not span the if-let body.
@@ -135,6 +137,7 @@ impl Spawner for MockSpawner {
             argv: argv.to_vec(),
             env: env.to_vec(),
             cwd: cwd.to_owned(),
+            capture_output,
         });
         let dead = Arc::new(AtomicBool::new(false));
         Ok(SpawnHandles {

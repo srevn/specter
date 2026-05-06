@@ -51,3 +51,15 @@ pub use permits::{Permit, Permits};
 pub use pool::{DEFAULT_CONCURRENCY, Reaped, SubprocessActuator};
 #[cfg(unix)]
 pub use spawner::{ChildSignaler, ChildWaiter, SpawnHandles, Spawner};
+
+/// Construct the platform's default spawner as a `Box<dyn Spawner>`.
+///
+/// `Box<dyn>` matches the existing `&dyn Spawner` calling convention in
+/// the actuator's state machine — one vtable hop per spawn, on a rare
+/// (op/sec scale) hot path. A future non-Unix backend slots in by
+/// gating `OsSpawner` on the relevant `cfg`.
+#[cfg(unix)]
+#[must_use]
+pub fn default_spawner() -> Box<dyn Spawner> {
+    Box::new(OsSpawner::new())
+}

@@ -20,13 +20,13 @@
 use crate::channels::Channels;
 use crate::driver::EngineDriver;
 use crate::loader::Loader;
+use crate::observability;
 use crate::signals::spawn_signal_thread;
-use crate::tracing_init::init_tracing;
-use specter_actuator::{OsSpawner, SubprocessActuator};
+use specter_actuator::{SubprocessActuator, default_spawner};
 use specter_config::{Cli, Config};
 use specter_core::{Input, WatchOp};
 use specter_engine::Engine;
-use specter_sensor::{FsWatcher, KqueueWatcher, WakeHandle, WorkerProber};
+use specter_sensor::{FsWatcher, WakeHandle, WorkerProber, default_watcher};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,21 +54,46 @@ pub fn run(cli: Cli) -> ExitCode {
         }
     };
 
-    // Tracing — CLI override > config > default.
-    let log_level = cli.log_level.unwrap_or(initial_config.log_level);
-    init_tracing(log_level);
+    // Tracing — CLI overrides applied on top of `[log]` (cli wins).
+    let log_cfg = match initial_config.log.clone().merge_cli(
+        cli.log_level,
+        cli.log_destination,
+        cli.log_path.clone(),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("specter: log config invalid:\n{e}");
+            return ExitCode::from(1);
+        }
+    };
+    // `_obs_guard` holds the file appender's worker thread alive for the
+    // entire process lifetime. Drop ordering is load-bearing: if the
+    // engine driver owned the guard, every `tracing::*` event between
+    // `drop(driver)` and end-of-`run` ("specter exited cleanly", thread
+    // join errors) would land on a dropped appender and be silently
+    // discarded. Keeping it on `App::run`'s stack frame defers the
+    // appender shutdown until after every join completes.
+    let (obs_handle, _obs_guard) = match observability::init(&log_cfg) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("specter: observability init failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
     tracing::info!(
-        ?log_level,
+        level = ?log_cfg.level,
+        destination = ?log_cfg.destination,
+        path = ?log_cfg.path.as_ref().map(|p| p.display().to_string()),
         watches = initial_config.watches.len(),
         config = %cli.config.display(),
         "specter starting"
     );
 
-    // Kqueue + wake handle.
-    let watcher = match KqueueWatcher::new() {
+    // Kqueue (or Linux inotify, when that backend lands) + wake handle.
+    let watcher = match default_watcher() {
         Ok(w) => w,
         Err(e) => {
-            tracing::error!(?e, "kqueue init failed");
+            tracing::error!(?e, "watcher init failed");
             return ExitCode::from(1);
         }
     };
@@ -114,10 +139,17 @@ pub fn run(cli: Cli) -> ExitCode {
 
     // Engine driver — main thread.
     let config_path = cli.config;
+    let cli_log_overrides = CliLogOverrides {
+        level: cli.log_level,
+        destination: cli.log_destination,
+        path: cli.log_path,
+    };
     let mut driver = EngineDriver::new(
         Engine::new(),
-        Loader::new(initial_config),
+        Loader::new(initial_config, log_cfg),
         config_path,
+        cli_log_overrides,
+        obs_handle,
         chans.take_engine_side(),
         prober.clone(),
         wake_handle.clone(),
@@ -179,10 +211,20 @@ pub fn run(cli: Cli) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Spawn the watcher thread. Owns the [`KqueueWatcher`] for its
-/// lifetime; drop closes the kqueue fd on exit.
+/// CLI overrides for `[log]`. Captured at startup so SIGHUP-driven
+/// reloads can re-apply them on top of the freshly-parsed config (CLI
+/// wins, matching the startup precedence).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CliLogOverrides {
+    pub level: Option<specter_config::LogLevel>,
+    pub destination: Option<specter_config::LogDestination>,
+    pub path: Option<std::path::PathBuf>,
+}
+
+/// Spawn the watcher thread. Owns the [`DefaultWatcher`] for its
+/// lifetime; drop closes the underlying fd(s) on exit.
 fn spawn_watcher_thread(
-    mut watcher: KqueueWatcher,
+    mut watcher: specter_sensor::DefaultWatcher,
     sides: crate::channels::WatcherSide,
     shutdown_flag: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
@@ -292,7 +334,7 @@ fn spawn_actuator_thread(
     thread::Builder::new()
         .name("specter-actuator".into())
         .spawn(move || {
-            let spawner = OsSpawner::new();
+            let spawner = default_spawner();
             let mut act = SubprocessActuator::new(concurrency);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 act.run(
@@ -300,7 +342,7 @@ fn spawn_actuator_thread(
                     sides.shutdown_actuator_rx,
                     sides.hard_shutdown_actuator_rx,
                     sides.effect_in_tx,
-                    &spawner,
+                    spawner.as_ref(),
                 );
             }));
             if let Err(payload) = result {
