@@ -563,13 +563,26 @@ fn parse_events_field(
             "content" => ClassSet::CONTENT,
             "metadata" => ClassSet::METADATA,
             other => {
+                // Surface the whitespace-is-significant case explicitly:
+                // serde-toml preserves quoted whitespace, so a raw entry
+                // like `events = [" structure "]` reaches us with the
+                // padding intact and silently fails the literal match.
+                // The hint catches the typo at first glance instead of
+                // forcing the operator to inspect quoting rules.
+                let trimmed = other.trim();
+                let hint = if trimmed != other && !trimmed.is_empty() {
+                    format!(
+                        "leading/trailing whitespace is significant — \
+                         did you mean `{trimmed}`?"
+                    )
+                } else {
+                    "expected `structure`, `content`, or `metadata`".to_owned()
+                };
                 errors.push(ValidationIssue::new(
                     Some(idx),
                     "events",
                     IssueKind::InvalidEnum,
-                    format!(
-                        "unknown event class `{other}` (expected `structure`, `content`, or `metadata`)"
-                    ),
+                    format!("unknown event class `{other}` ({hint})"),
                 ));
                 continue;
             }
@@ -1099,6 +1112,48 @@ mod tests {
             let toml = minimal_toml(&format!("events = [\"{bad}\"]\n"));
             assert_only_kind(&toml, IssueKind::InvalidEnum);
         }
+    }
+
+    #[test]
+    fn events_field_whitespace_emits_did_you_mean_hint() {
+        // serde-toml preserves whitespace inside quoted strings, so
+        // `events = [" structure "]` reaches the parser with padding
+        // intact. The emitted message must surface the trim hint so
+        // operators don't re-read the TOML spec to find the bug.
+        for padded in [" structure", "structure ", " structure ", "\tcontent"] {
+            let toml = minimal_toml(&format!("events = [\"{padded}\"]\n"));
+            let err = Config::from_str(&toml).unwrap_err();
+            let errors = validation_errors(err);
+            assert_eq!(errors.len(), 1, "got {errors:?}");
+            assert_eq!(errors[0].kind, IssueKind::InvalidEnum);
+            assert!(
+                errors[0].detail.contains("whitespace"),
+                "padded `{padded}` should mention whitespace; got `{}`",
+                errors[0].detail,
+            );
+            assert!(
+                errors[0].detail.contains(padded.trim()),
+                "padded `{padded}` should suggest the trimmed value; got `{}`",
+                errors[0].detail,
+            );
+        }
+    }
+
+    #[test]
+    fn events_field_non_whitespace_typo_omits_whitespace_hint() {
+        // Non-whitespace typos (`strucutre`) get the standard error,
+        // not the whitespace-specific hint — keeps the message tight
+        // for the common typo case.
+        let toml = minimal_toml("events = [\"strucutre\"]\n");
+        let err = Config::from_str(&toml).unwrap_err();
+        let errors = validation_errors(err);
+        assert_eq!(errors.len(), 1, "got {errors:?}");
+        assert_eq!(errors[0].kind, IssueKind::InvalidEnum);
+        assert!(
+            !errors[0].detail.contains("whitespace"),
+            "non-whitespace typo should NOT mention whitespace; got `{}`",
+            errors[0].detail,
+        );
     }
 
     #[test]
