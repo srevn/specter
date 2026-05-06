@@ -282,6 +282,12 @@ mod kqueue;
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub use kqueue::{KqueueWakeHandle, KqueueWatcher};
 
+#[cfg(target_os = "linux")]
+mod inotify;
+
+#[cfg(target_os = "linux")]
+pub use inotify::{InotifyWakeHandle, InotifyWatcher};
+
 #[cfg(unix)]
 mod prober;
 
