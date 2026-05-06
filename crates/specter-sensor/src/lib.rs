@@ -175,11 +175,14 @@ pub mod testkit;
 /// Concrete platform watcher type — chosen at compile time so the
 /// bin holds a typed value (no `Box<dyn>` in the watcher hot loop).
 ///
-/// macOS / FreeBSD use [`KqueueWatcher`]. A future Linux backend
-/// (`InotifyWatcher`) slots into this alias under
-/// `cfg(target_os = "linux")` without touching the bin's wiring.
+/// One alias per backend, each `cfg`-gated to its target. Adding a
+/// backend is one block (alias + module + `FsWatcher` impl); the
+/// factory below already routes through this alias.
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub type DefaultWatcher = KqueueWatcher;
+
+#[cfg(target_os = "linux")]
+pub type DefaultWatcher = InotifyWatcher;
 
 /// Construct the platform's default watcher.
 ///
@@ -188,7 +191,6 @@ pub type DefaultWatcher = KqueueWatcher;
 /// invariants the returned watcher must uphold (`Send`, single-threaded
 /// `poll_until` consumer, cross-thread mutation only via the bin's
 /// channel + [`WakeHandle`] discipline).
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub fn default_watcher() -> io::Result<DefaultWatcher> {
-    KqueueWatcher::new()
+    DefaultWatcher::new()
 }
