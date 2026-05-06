@@ -93,7 +93,9 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
         // touched in the window between create_child's slot
         // materialization and a follow-up event would slip the user's
         // pattern filter.
-        let target_kind = tree.get(target).map_or(ResourceKind::File, Resource::kind_or_file);
+        let target_kind = tree
+            .get(target)
+            .map_or(ResourceKind::File, Resource::kind_or_file);
         if matches!(target_kind, ResourceKind::File) {
             let mut rel = PathBuf::new();
             for seg in &rev {
@@ -120,12 +122,13 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
 /// from the spec: a Resource ancestor with no Profile is skipped; the
 /// walk continues to the next Resource ancestor.
 ///
-/// Lives in `coverage.rs` rather than on `StabilityIndex` because the
-/// derivation is purely a `(tree, profiles, child)` function of the
-/// `covers` predicate — no stability state participates. The two
-/// `recompute_parent_edges_for_*` methods on `StabilityIndex` remain
-/// there because they mutate the parent index; they call this free
-/// function for the per-Profile resolution.
+/// Coverage-domain by nature: the derivation is purely a `(tree,
+/// profiles, child)` function of the `covers` predicate, with no
+/// caching or peer state. The cached parent edge lives on
+/// `Profile.parent_profile`; engine-side write paths
+/// (`compute_and_set_parent_edge`,
+/// `stability::recompute_parent_edges_for_*`) call this function and
+/// route the result through `stability::write_parent_edge`.
 #[must_use]
 pub fn nearest_covering_ancestor(
     tree: &Tree,
@@ -154,7 +157,8 @@ pub fn nearest_covering_ancestor(
 mod tests {
     use super::*;
     use specter_core::{
-        ClassSet, GlobPattern, Profile, ResourceKind, ResourceRole, ScanConfig, ScanConfigBuilder,
+        ClassSet, GlobPattern, Profile, ProfileMap, ResourceKind, ResourceRole, ScanConfig,
+        ScanConfigBuilder,
     };
     use std::time::Duration;
 
@@ -482,6 +486,172 @@ mod tests {
         assert!(
             !covers(&profile, inside, &tree),
             "`target/foo` matches `target/**` — contents excluded",
+        );
+    }
+
+    // ===== nearest_covering_ancestor =====
+    //
+    // Resolution tests for the `covers` derivation. Walks Resource
+    // ancestors of a child Profile's anchor; at each ancestor, picks
+    // the smallest covering [`ProfileId`].
+
+    fn cfg_recursive() -> ScanConfig {
+        ScanConfig::builder().recursive(true).build()
+    }
+
+    fn mark_dir(tree: &mut Tree, id: ResourceId) {
+        tree.set_kind(id, ResourceKind::Dir);
+    }
+
+    #[test]
+    fn nearest_covering_ancestor_returns_none_for_orphan_profile() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r = tree.ensure(None, "root", ResourceRole::User);
+        mark_dir(&mut tree, r);
+        let pid = profiles.attach(
+            &mut tree,
+            Profile::new(r, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
+        assert!(nearest_covering_ancestor(&tree, &profiles, pid).is_none());
+    }
+
+    #[test]
+    fn nearest_covering_ancestor_walks_up_to_first_covering_ancestor() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let root = tree.ensure(None, "root", ResourceRole::User);
+        let a = tree.ensure(Some(root), "a", ResourceRole::User);
+        let b = tree.ensure(Some(a), "b", ResourceRole::User);
+        for r in [root, a, b] {
+            mark_dir(&mut tree, r);
+        }
+        let p_root = profiles.attach(
+            &mut tree,
+            Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
+        let p_a = profiles.attach(
+            &mut tree,
+            Profile::new(a, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
+        let p_b = profiles.attach(
+            &mut tree,
+            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
+
+        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b), Some(p_a));
+        assert_eq!(
+            nearest_covering_ancestor(&tree, &profiles, p_a),
+            Some(p_root)
+        );
+        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_root), None);
+    }
+
+    #[test]
+    fn nearest_covering_ancestor_skips_non_covering_ancestor() {
+        // root has Profile p_root with recursive=false → does not cover deep
+        // descendants. The deeper Profile's resolution must walk past p_root
+        // and return None (no further covering ancestor).
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let root = tree.ensure(None, "root", ResourceRole::User);
+        let a = tree.ensure(Some(root), "a", ResourceRole::User);
+        let b = tree.ensure(Some(a), "b", ResourceRole::User);
+        for r in [root, a, b] {
+            mark_dir(&mut tree, r);
+        }
+        let _p_root = profiles.attach(
+            &mut tree,
+            Profile::new(
+                root,
+                ScanConfig::builder().recursive(false).build(),
+                MAX_SETTLE,
+                SETTLE,
+                NO_EVENTS,
+            ),
+        );
+        let p_b = profiles.attach(
+            &mut tree,
+            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
+        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b), None);
+    }
+
+    #[test]
+    fn nearest_covering_ancestor_excludes_self() {
+        // Two co-located Profiles at the anchor; resolution for one must
+        // not return itself.
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r = tree.ensure(None, "root", ResourceRole::User);
+        mark_dir(&mut tree, r);
+        let p_a = profiles.attach(
+            &mut tree,
+            Profile::new(
+                r,
+                cfg_recursive(),
+                Duration::from_secs(6),
+                SETTLE,
+                NO_EVENTS,
+            ),
+        );
+        let p_b = profiles.attach(
+            &mut tree,
+            Profile::new(
+                r,
+                cfg_recursive(),
+                Duration::from_secs(12),
+                SETTLE,
+                NO_EVENTS,
+            ),
+        );
+        // Both at root; root has no Profile ancestor; resolution walks
+        // ancestors of root.resource (none — root is a Tree root).
+        assert!(nearest_covering_ancestor(&tree, &profiles, p_a).is_none());
+        assert!(nearest_covering_ancestor(&tree, &profiles, p_b).is_none());
+    }
+
+    #[test]
+    fn nearest_covering_ancestor_ties_by_smallest_profile_id() {
+        // Two co-located covering Profiles at the same ancestor Resource.
+        // Resolution for a deeper Profile picks the smaller ProfileId.
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let root = tree.ensure(None, "root", ResourceRole::User);
+        let leaf = tree.ensure(Some(root), "leaf", ResourceRole::User);
+        mark_dir(&mut tree, root);
+        mark_dir(&mut tree, leaf);
+        // Two distinct Profiles at root, distinct config_hashes via differing
+        // max_settle (makes them separate Profiles).
+        let p_root_a = profiles.attach(
+            &mut tree,
+            Profile::new(
+                root,
+                cfg_recursive(),
+                Duration::from_secs(6),
+                SETTLE,
+                NO_EVENTS,
+            ),
+        );
+        let p_root_b = profiles.attach(
+            &mut tree,
+            Profile::new(
+                root,
+                cfg_recursive(),
+                Duration::from_secs(12),
+                SETTLE,
+                NO_EVENTS,
+            ),
+        );
+        let p_leaf = profiles.attach(
+            &mut tree,
+            Profile::new(leaf, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
+
+        let smaller = std::cmp::min(p_root_a, p_root_b);
+        assert_eq!(
+            nearest_covering_ancestor(&tree, &profiles, p_leaf),
+            Some(smaller),
         );
     }
 }

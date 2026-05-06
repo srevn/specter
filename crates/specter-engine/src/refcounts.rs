@@ -75,7 +75,9 @@ pub fn add_watch_demand(
         // Preserve raw `Unknown` here — the sensor's
         // `matches_or_unknown` verification treats it as the engine's
         // intentional wildcard at fresh-watch time.
-        let kind = tree.get(r).map_or(ResourceKind::Unknown, Resource::kind_raw);
+        let kind = tree
+            .get(r)
+            .map_or(ResourceKind::Unknown, Resource::kind_raw);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
@@ -164,7 +166,9 @@ pub fn sub_watch_demand(
         // Preserve raw `Unknown` (sensor wildcard); see the rustdoc on
         // `Resource::kind_raw` and the parallel construction in
         // `add_watch_demand`.
-        let kind = tree.get(r).map_or(ResourceKind::Unknown, Resource::kind_raw);
+        let kind = tree
+            .get(r)
+            .map_or(ResourceKind::Unknown, Resource::kind_raw);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,

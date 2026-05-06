@@ -360,7 +360,8 @@ impl crate::Engine {
                 .tree
                 .ensure(Some(prefix), &next_segment, ResourceRole::DescentScaffold),
         };
-        self.tree.set_kind(new_resource, kind_from_entry(entry_kind));
+        self.tree
+            .set_kind(new_resource, kind_from_entry(entry_kind));
 
         if is_anchor {
             // Materialize: flip role to User; swap watch_demand from

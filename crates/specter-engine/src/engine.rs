@@ -14,7 +14,6 @@
 //! Sub-attachment API.
 
 use crate::refcounts::add_watch_demand;
-use crate::stability::StabilityIndex;
 use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
     BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Effect, Input, ProbeOp, Profile,
@@ -46,7 +45,6 @@ pub struct Engine {
     pub(crate) profiles: ProfileMap,
     pub(crate) subs: SubRegistry,
     pub(crate) timers: TimerHeap,
-    pub(crate) stability: StabilityIndex,
     pub(crate) next_correlation: u64,
 }
 
@@ -363,13 +361,13 @@ impl Engine {
     /// Compute and store the parent edge for a fresh Profile via the
     /// `coverage::nearest_covering_ancestor` derivation: walk Resource
     /// ancestors of the Profile's anchor; the smallest covering
-    /// [`ProfileId`] wins by deterministic tie-break.
+    /// [`ProfileId`] wins by deterministic tie-break. Routes through
+    /// `stability::write_parent_edge` so the self-parent
+    /// `debug_assert_ne!` lives at a single source.
     fn compute_and_set_parent_edge(&mut self, profile_id: ProfileId) {
-        if let Some(parent) =
-            crate::coverage::nearest_covering_ancestor(&self.tree, &self.profiles, profile_id)
-        {
-            self.stability.set_parent(profile_id, parent);
-        }
+        let parent =
+            crate::coverage::nearest_covering_ancestor(&self.tree, &self.profiles, profile_id);
+        crate::stability::write_parent_edge(&mut self.profiles, profile_id, parent);
     }
 
     /// After adding a fresh Profile, recompute parent edges of every
@@ -401,8 +399,11 @@ impl Engine {
                     .then_some(pid)
             })
             .collect();
-        self.stability
-            .recompute_parent_edges_for_subset(&self.tree, &self.profiles, candidates);
+        crate::stability::recompute_parent_edges_for_subset(
+            &self.tree,
+            &mut self.profiles,
+            candidates,
+        );
     }
 
     /// Detach a Sub by id.
@@ -568,14 +569,16 @@ impl Engine {
         self.release_anchor_claim(profile_id, out);
         self.release_watch_root_parent_claim(profile_id, out);
 
-        // Detach the Profile from the registry.
+        // Detach the Profile from the registry. The Profile's
+        // `parent_profile` field dies with the struct — no separate
+        // clear step is needed. Dependents whose `parent_profile`
+        // still points at the now-removed slot are rewritten by
+        // `recompute_parent_edges_for_dependents` below.
         let _ = self.profiles.detach(&mut self.tree, profile_id);
 
-        // Clear and recompute parent edges.
-        self.stability.clear_parent(profile_id);
-        self.stability.recompute_parent_edges_for_dependents(
+        crate::stability::recompute_parent_edges_for_dependents(
             &self.tree,
-            &self.profiles,
+            &mut self.profiles,
             profile_id,
         );
 
@@ -1241,7 +1244,6 @@ mod tests {
         assert!(e.timers.is_empty());
         assert!(e.next_deadline().is_none());
         assert_eq!(e.next_correlation, 0);
-        assert!(e.stability.parent_of(ProfileId::default()).is_none());
     }
 
     // ===== decompose_attach_path =====

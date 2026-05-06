@@ -1,8 +1,8 @@
 //! Multi-Profile composition end-to-end. Two Profiles co-located on one
 //! Resource share `watch_demand`/`suppress_count` via refcount aggregation;
 //! parent–child Profiles propagate `dirty_descendants` through the
-//! StabilityIndex; the `Active(Draining)` exit row drives the reconfirm
-//! probe.
+//! cached `Profile.parent_profile` chain; the `Active(Draining)` exit
+//! row drives the reconfirm probe.
 
 #![allow(
     clippy::items_after_statements,

@@ -154,7 +154,7 @@ impl Engine {
         }
 
         add_suppress(&mut self.tree, resource, out);
-        let _ = self.stability.propagate(&mut self.profiles, profile_id, 1);
+        let _ = crate::stability::propagate(&mut self.profiles, profile_id, 1);
     }
 
     /// Caller: `drive_burst` Active branch — an `FsEvent` arrived during a
@@ -516,7 +516,7 @@ impl Engine {
         sub_suppress(&mut self.tree, resource, out);
 
         if was_standard {
-            let hit_zero = self.stability.propagate(&mut self.profiles, profile_id, -1);
+            let hit_zero = crate::stability::propagate(&mut self.profiles, profile_id, -1);
 
             // Draining → Verifying reconfirm for ancestors whose count
             // just hit zero. `transition_to_verifying` mints a fresh

@@ -1,8 +1,10 @@
 //! Cross-module integration tests for `specter-engine`.
 //!
 //! Two suites:
-//! - **P3-era primitives**: `covers + nearest_covering_ancestor +
-//!   StabilityIndex::propagate` against a real `Tree` + `ProfileMap`.
+//! - **P3-era primitives**: `covers + nearest_covering_ancestor`
+//!   against a real `Tree` + `ProfileMap`. Propagation behavior lives
+//!   in `stability::tests` (free-function unit tests) and end-to-end
+//!   through the burst lifecycle in `tests/multi_profile.rs`.
 //! - **P4 lifecycle**: full `Idle ↔ Active(Burst)` flows driven through
 //!   `Engine::attach_sub` and `Engine::step` against a `MockSensor`-style
 //!   harness (assertions read from `StepOutput`).
@@ -29,7 +31,7 @@ use specter_core::{
     ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, TreeSnapshot,
     WatchOp,
 };
-use specter_engine::{Engine, StabilityIndex, SubAttachRequest, covers, nearest_covering_ancestor};
+use specter_engine::{Engine, SubAttachRequest, covers, nearest_covering_ancestor};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -112,48 +114,6 @@ fn covers_drives_nearest_covering_ancestor() {
             Some(p_root),
         );
     }
-}
-
-#[test]
-fn nearest_covering_ancestor_then_propagate_round_trip() {
-    let mut tree = Tree::new();
-    let mut profiles = ProfileMap::new();
-    let root = tree.ensure(None, "root", ResourceRole::User);
-    let mid = tree.ensure(Some(root), "mid", ResourceRole::User);
-    let leaf = tree.ensure(Some(mid), "leaf", ResourceRole::User);
-    for r in [root, mid, leaf] {
-        mark_dir(&mut tree, r);
-    }
-    let p_root = profiles.attach(
-        &mut tree,
-        Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
-    );
-    let p_mid = profiles.attach(
-        &mut tree,
-        Profile::new(mid, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
-    );
-    let p_leaf = profiles.attach(
-        &mut tree,
-        Profile::new(leaf, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
-    );
-
-    let mut idx = StabilityIndex::new();
-    if let Some(parent) = nearest_covering_ancestor(&tree, &profiles, p_leaf) {
-        idx.set_parent(p_leaf, parent);
-    }
-    if let Some(parent) = nearest_covering_ancestor(&tree, &profiles, p_mid) {
-        idx.set_parent(p_mid, parent);
-    }
-    assert_eq!(idx.parent_of(p_leaf), Some(p_mid));
-    assert_eq!(idx.parent_of(p_mid), Some(p_root));
-
-    let _hit = idx.propagate(&mut profiles, p_leaf, 1);
-    assert_eq!(profiles.get(p_mid).unwrap().dirty_descendants, 1);
-    assert_eq!(profiles.get(p_root).unwrap().dirty_descendants, 1);
-
-    let _hit = idx.propagate(&mut profiles, p_leaf, -1);
-    assert_eq!(profiles.get(p_mid).unwrap().dirty_descendants, 0);
-    assert_eq!(profiles.get(p_root).unwrap().dirty_descendants, 0);
 }
 
 #[test]

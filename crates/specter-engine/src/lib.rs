@@ -17,7 +17,6 @@ mod transitions;
 
 pub use coverage::{covers, nearest_covering_ancestor};
 pub use engine::Engine;
-pub use stability::StabilityIndex;
 pub use timer::{TimerEntry, TimerHeap};
 
 // Re-export `SubAttachRequest` from `core` for back-compat with sites

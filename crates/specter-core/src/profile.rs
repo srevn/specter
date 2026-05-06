@@ -258,6 +258,21 @@ pub struct Profile {
     pub pending_probe: Option<ProbeCorrelation>,
     pub baseline: Option<TreeSnapshot>,
     pub current: Option<TreeSnapshot>,
+    /// Cached nearest covering ancestor Profile — the parent edge
+    /// `propagate` walks at burst-start (`+1`) and burst-end (`-1`).
+    /// `None` for root Profiles whose ancestor chain holds no
+    /// covering Profile. Re-resolved engine-side at fresh-Profile
+    /// attach, interpose-attach, and parent reap; the cache keeps
+    /// `propagate`'s hot path at O(depth) chain reads (recomputing
+    /// from `covers(P, R)` per step would be O(depth² ×
+    /// profiles_per_resource) with a PathBuf allocation per call).
+    ///
+    /// **Discipline.** Engine writes converge on the
+    /// `stability::write_parent_edge` helper, the single source of
+    /// the self-parent `debug_assert_ne!`. Direct field assignment
+    /// is reserved for testkit / unit-test setup — same convention
+    /// as `pending_probe`.
+    pub parent_profile: Option<ProfileId>,
     pub dirty_descendants: u32,
     pub sub_refcount: u32,
     pub max_settle: Duration,
@@ -357,6 +372,7 @@ impl Profile {
             pending_probe: None,
             baseline: None,
             current: None,
+            parent_profile: None,
             dirty_descendants: 0,
             sub_refcount: 0,
             max_settle,
@@ -500,6 +516,7 @@ mod tests {
         assert!(matches!(p.state, ProfileState::Idle));
         assert!(p.baseline.is_none());
         assert!(p.current.is_none());
+        assert!(p.parent_profile.is_none());
         assert_eq!(p.dirty_descendants, 0);
         assert_eq!(p.sub_refcount, 0);
         assert_eq!(p.max_settle, MAX_SETTLE);
