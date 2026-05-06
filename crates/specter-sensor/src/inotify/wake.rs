@@ -22,12 +22,6 @@
 //! Arc keeps the fd live until the last handle clone drops. No
 //! use-after-free is possible.
 
-// Consumer of `InotifyWakeHandle::new` lands in Phase B5
-// (`super::watcher::InotifyWatcher::new` constructs the eventfd, wraps
-// it in `Arc`, and hands clones to every `wake_handle` caller). Remove
-// this allow once B5's constructor wires the helper.
-#![allow(dead_code)]
-
 use crate::WakeHandle;
 use crate::inotify::ffi;
 use std::os::fd::OwnedFd;
