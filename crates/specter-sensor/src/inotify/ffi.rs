@@ -23,12 +23,6 @@
 //! propagating an error — empty drain on a wake is a normal outcome.
 
 #![allow(unsafe_code)]
-// Helper consumers land per-phase: `eventfd_write` is wired by Phase B4
-// (`super::wake`); the inotify/epoll/`O_PATH`/`fstat`/read helpers are
-// wired by Phase B5–B9 (`super::watcher`). `dead_code` would otherwise
-// spam every helper between B1 and B9. Remove this allow once Phase B9
-// lands `poll_until` and every helper has a consumer.
-#![allow(dead_code)]
 
 use libc::{
     self, EFD_CLOEXEC, EFD_NONBLOCK, EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLLIN, IN_CLOEXEC,

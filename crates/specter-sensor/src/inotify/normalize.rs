@@ -37,11 +37,6 @@
 //! a kernel anomaly that delivered them would still land on a sensible
 //! `StructureChanged`.
 
-// Consumer lands in Phase B9 (`super::watcher::InotifyWatcher::poll_until`).
-// Tests below already exercise every branch; remove this allow when
-// B9's `poll_until` body wires the helper into the drain path.
-#![allow(dead_code)]
-
 use libc::{
     IN_ATTRIB, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_IGNORED, IN_MODIFY,
     IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO, IN_UNMOUNT,

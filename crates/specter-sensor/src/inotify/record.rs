@@ -37,11 +37,6 @@
 //! iteration on a malformed buffer rather than panic, but those branches
 //! are observationally dead under healthy invariants.
 
-// Consumer lands in Phase B9 (`super::watcher::InotifyWatcher::poll_until`).
-// Tests below already exercise the parser end-to-end; remove this allow
-// when B9's drain path consumes the iterator.
-#![allow(dead_code)]
-
 use libc::c_int;
 
 /// Size of the fixed-width header preceding the variable-length name.
@@ -64,10 +59,12 @@ pub(super) struct Record<'a> {
     /// Pairing token for `IN_MOVED_FROM` ↔ `IN_MOVED_TO`. v1 does not
     /// match move pairs (the engine probes the parent on
     /// `StructureChanged`); preserved for v3+ named-event handling.
+    #[allow(dead_code)]
     pub cookie: u32,
     /// Basename portion (NUL padding stripped). Empty for non-name
     /// events. Borrows from the watcher's drain buffer; lifetime
     /// matches the parser's input slice.
+    #[allow(dead_code)]
     pub name: &'a [u8],
 }
 
