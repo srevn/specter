@@ -360,11 +360,13 @@ impl Engine {
         }
     }
 
-    /// Compute and store the parent edge for a fresh Profile. `compute_parent`
-    /// walks Resource ancestors; the smallest covering [`ProfileId`] wins
-    /// by deterministic tie-break.
+    /// Compute and store the parent edge for a fresh Profile via the
+    /// `coverage::nearest_covering_ancestor` derivation: walk Resource
+    /// ancestors of the Profile's anchor; the smallest covering
+    /// [`ProfileId`] wins by deterministic tie-break.
     fn compute_and_set_parent_edge(&mut self, profile_id: ProfileId) {
-        if let Some(parent) = StabilityIndex::compute_parent(&self.tree, &self.profiles, profile_id)
+        if let Some(parent) =
+            crate::coverage::nearest_covering_ancestor(&self.tree, &self.profiles, profile_id)
         {
             self.stability.set_parent(profile_id, parent);
         }

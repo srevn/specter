@@ -8,7 +8,7 @@
 //! to `P`'s `watch_demand`.
 
 use smallvec::SmallVec;
-use specter_core::{Profile, Resource, ResourceId, ResourceKind, Tree};
+use specter_core::{Profile, ProfileId, ProfileMap, Resource, ResourceId, ResourceKind, Tree};
 use std::path::PathBuf;
 
 /// True iff `profile` would scan `target` given its `ScanConfig`.
@@ -106,6 +106,48 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
     }
 
     true
+}
+
+/// Resolve the nearest covering ancestor Profile of `child` — the
+/// derivation companion to [`covers`].
+///
+/// Walks Resource ancestors of `child.resource`; at each ancestor
+/// Resource, picks the smallest covering [`ProfileId`] for a
+/// deterministic tie-break. Returns `None` for root Profiles whose
+/// ancestor chain holds no covering Profile.
+///
+/// "Nearest ancestor *Profile*, not Resource" is the easy mistake
+/// from the spec: a Resource ancestor with no Profile is skipped; the
+/// walk continues to the next Resource ancestor.
+///
+/// Lives in `coverage.rs` rather than on `StabilityIndex` because the
+/// derivation is purely a `(tree, profiles, child)` function of the
+/// `covers` predicate — no stability state participates. The two
+/// `recompute_parent_edges_for_*` methods on `StabilityIndex` remain
+/// there because they mutate the parent index; they call this free
+/// function for the per-Profile resolution.
+#[must_use]
+pub fn nearest_covering_ancestor(
+    tree: &Tree,
+    profiles: &ProfileMap,
+    child: ProfileId,
+) -> Option<ProfileId> {
+    let child_resource = profiles.get(child)?.resource;
+    for ancestor in tree.ancestors(child_resource) {
+        let nearest = profiles
+            .at(ancestor)
+            .filter(|&pid| pid != child)
+            .filter(|&pid| {
+                profiles
+                    .get(pid)
+                    .is_some_and(|p| covers(p, child_resource, tree))
+            })
+            .min();
+        if nearest.is_some() {
+            return nearest;
+        }
+    }
+    None
 }
 
 #[cfg(test)]

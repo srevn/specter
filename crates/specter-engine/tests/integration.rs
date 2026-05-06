@@ -1,7 +1,7 @@
 //! Cross-module integration tests for `specter-engine`.
 //!
 //! Two suites:
-//! - **P3-era primitives**: `covers + StabilityIndex::compute_parent +
+//! - **P3-era primitives**: `covers + nearest_covering_ancestor +
 //!   StabilityIndex::propagate` against a real `Tree` + `ProfileMap`.
 //! - **P4 lifecycle**: full `Idle ↔ Active(Burst)` flows driven through
 //!   `Engine::attach_sub` and `Engine::step` against a `MockSensor`-style
@@ -29,7 +29,7 @@ use specter_core::{
     ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, TreeSnapshot,
     WatchOp,
 };
-use specter_engine::{Engine, StabilityIndex, SubAttachRequest, covers};
+use specter_engine::{Engine, StabilityIndex, SubAttachRequest, covers, nearest_covering_ancestor};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -53,7 +53,7 @@ fn engine_default_constructible() {
 }
 
 #[test]
-fn covers_drives_compute_parent() {
+fn covers_drives_nearest_covering_ancestor() {
     // Three Resources in a chain: root → a → b. A Profile at root with
     // `recursive = false` does NOT cover b (depth > 1, recursive false);
     // a Profile at root with `recursive = true` DOES.
@@ -84,7 +84,7 @@ fn covers_drives_compute_parent() {
         );
 
         assert!(!covers(profiles.get(p_root).unwrap(), b, &tree));
-        assert!(StabilityIndex::compute_parent(&tree, &profiles, p_b).is_none());
+        assert!(nearest_covering_ancestor(&tree, &profiles, p_b).is_none());
     }
 
     // Flavor 2: root's Profile is recursive; b parents to root.
@@ -108,14 +108,14 @@ fn covers_drives_compute_parent() {
 
         assert!(covers(profiles.get(p_root).unwrap(), b, &tree));
         assert_eq!(
-            StabilityIndex::compute_parent(&tree, &profiles, p_b),
+            nearest_covering_ancestor(&tree, &profiles, p_b),
             Some(p_root),
         );
     }
 }
 
 #[test]
-fn compute_parent_then_propagate_round_trip() {
+fn nearest_covering_ancestor_then_propagate_round_trip() {
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
     let root = tree.ensure(None, "root", ResourceRole::User);
@@ -138,10 +138,10 @@ fn compute_parent_then_propagate_round_trip() {
     );
 
     let mut idx = StabilityIndex::new();
-    if let Some(parent) = StabilityIndex::compute_parent(&tree, &profiles, p_leaf) {
+    if let Some(parent) = nearest_covering_ancestor(&tree, &profiles, p_leaf) {
         idx.set_parent(p_leaf, parent);
     }
-    if let Some(parent) = StabilityIndex::compute_parent(&tree, &profiles, p_mid) {
+    if let Some(parent) = nearest_covering_ancestor(&tree, &profiles, p_mid) {
         idx.set_parent(p_mid, parent);
     }
     assert_eq!(idx.parent_of(p_leaf), Some(p_mid));

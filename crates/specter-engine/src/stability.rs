@@ -1,7 +1,7 @@
 //! Stability composition. Holds parent edges between Profiles
 //! (nearest covering ancestor) and propagates dirty-descendant deltas.
 
-use crate::coverage::covers;
+use crate::coverage::nearest_covering_ancestor;
 use slotmap::SecondaryMap;
 use specter_core::{BurstPhase, ProfileId, ProfileMap, ProfileState, Tree};
 use tinyvec::TinyVec;
@@ -39,40 +39,6 @@ impl StabilityIndex {
         self.parents.remove(child);
     }
 
-    /// Compute the parent edge for `child`: the **nearest ancestor
-    /// Profile** P' such that `covers(P', child.resource) && P' != child`.
-    /// Walks Resource ancestors of `child.resource`; at each ancestor
-    /// Resource, picks the smallest covering [`ProfileId`] for a
-    /// deterministic tie-break. Returns `None` for root Profiles with no
-    /// covering ancestor.
-    ///
-    /// "Nearest ancestor *Profile*, not Resource" is the easy mistake from
-    /// the spec: a Resource ancestor with no Profile is skipped; the walk
-    /// continues to the next Resource ancestor.
-    #[must_use]
-    pub fn compute_parent(
-        tree: &Tree,
-        profiles: &ProfileMap,
-        child: ProfileId,
-    ) -> Option<ProfileId> {
-        let child_resource = profiles.get(child)?.resource;
-        for ancestor in tree.ancestors(child_resource) {
-            let nearest = profiles
-                .at(ancestor)
-                .filter(|&pid| pid != child)
-                .filter(|&pid| {
-                    profiles
-                        .get(pid)
-                        .is_some_and(|p| covers(p, child_resource, tree))
-                })
-                .min();
-            if nearest.is_some() {
-                return nearest;
-            }
-        }
-        None
-    }
-
     /// Recompute parent edges for every Profile that currently names
     /// `removed_profile` as its parent. Called from `Engine::detach_sub`
     /// after the Profile is detached, so dependent Profiles re-resolve
@@ -94,7 +60,7 @@ impl StabilityIndex {
             .map(|(pid, _)| pid)
             .collect();
         for pid in dependents {
-            match Self::compute_parent(tree, profiles, pid) {
+            match nearest_covering_ancestor(tree, profiles, pid) {
                 Some(new_parent) => {
                     self.parents.insert(pid, new_parent);
                 }
@@ -122,7 +88,7 @@ impl StabilityIndex {
         I: IntoIterator<Item = ProfileId>,
     {
         for pid in profiles_to_check {
-            match Self::compute_parent(tree, profiles, pid) {
+            match nearest_covering_ancestor(tree, profiles, pid) {
                 Some(new_parent) => {
                     self.parents.insert(pid, new_parent);
                 }
@@ -241,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_parent_returns_none_for_orphan_profile() {
+    fn nearest_covering_ancestor_returns_none_for_orphan_profile() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure(None, "root", ResourceRole::User);
@@ -250,11 +216,11 @@ mod tests {
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
         );
-        assert!(StabilityIndex::compute_parent(&tree, &profiles, pid).is_none());
+        assert!(nearest_covering_ancestor(&tree, &profiles, pid).is_none());
     }
 
     #[test]
-    fn compute_parent_walks_up_to_first_covering_ancestor() {
+    fn nearest_covering_ancestor_walks_up_to_first_covering_ancestor() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let root = tree.ensure(None, "root", ResourceRole::User);
@@ -277,24 +243,24 @@ mod tests {
         );
 
         assert_eq!(
-            StabilityIndex::compute_parent(&tree, &profiles, p_b),
+            nearest_covering_ancestor(&tree, &profiles, p_b),
             Some(p_a),
         );
         assert_eq!(
-            StabilityIndex::compute_parent(&tree, &profiles, p_a),
+            nearest_covering_ancestor(&tree, &profiles, p_a),
             Some(p_root),
         );
         assert_eq!(
-            StabilityIndex::compute_parent(&tree, &profiles, p_root),
-            None
+            nearest_covering_ancestor(&tree, &profiles, p_root),
+            None,
         );
     }
 
     #[test]
-    fn compute_parent_skips_non_covering_ancestor() {
+    fn nearest_covering_ancestor_skips_non_covering_ancestor() {
         // root has Profile p_root with recursive=false → does not cover deep
-        // descendants. The deeper Profile's compute_parent should walk past
-        // p_root and return None (no further covering ancestor).
+        // descendants. The deeper Profile's resolution must walk past p_root
+        // and return None (no further covering ancestor).
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let root = tree.ensure(None, "root", ResourceRole::User);
@@ -319,12 +285,12 @@ mod tests {
         );
         // p_root's covers(b) is false (depth > 1, recursive=false), so it's
         // not a candidate. No covering ancestor.
-        assert_eq!(StabilityIndex::compute_parent(&tree, &profiles, p_b), None);
+        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b), None);
     }
 
     #[test]
-    fn compute_parent_excludes_self() {
-        // Two co-located Profiles at the anchor; compute_parent for one must
+    fn nearest_covering_ancestor_excludes_self() {
+        // Two co-located Profiles at the anchor; resolution for one must
         // not return itself.
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
@@ -338,16 +304,16 @@ mod tests {
             &mut tree,
             Profile::new(r, cfg(), Duration::from_secs(12), SETTLE, NO_EVENTS),
         );
-        // Both at root; root has no Profile *ancestor*; compute_parent walks
+        // Both at root; root has no Profile *ancestor*; resolution walks
         // ancestors of root.resource (none — root is a Tree root).
-        assert!(StabilityIndex::compute_parent(&tree, &profiles, p_a).is_none());
-        assert!(StabilityIndex::compute_parent(&tree, &profiles, p_b).is_none());
+        assert!(nearest_covering_ancestor(&tree, &profiles, p_a).is_none());
+        assert!(nearest_covering_ancestor(&tree, &profiles, p_b).is_none());
     }
 
     #[test]
-    fn compute_parent_ties_by_smallest_profile_id() {
+    fn nearest_covering_ancestor_ties_by_smallest_profile_id() {
         // Two co-located covering Profiles at the same ancestor Resource.
-        // compute_parent for a deeper Profile picks the smaller ProfileId.
+        // Resolution for a deeper Profile picks the smaller ProfileId.
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let root = tree.ensure(None, "root", ResourceRole::User);
@@ -371,7 +337,7 @@ mod tests {
 
         let smaller = std::cmp::min(p_root_a, p_root_b);
         assert_eq!(
-            StabilityIndex::compute_parent(&tree, &profiles, p_leaf),
+            nearest_covering_ancestor(&tree, &profiles, p_leaf),
             Some(smaller),
         );
     }
@@ -599,7 +565,7 @@ mod tests {
         idx.set_parent(p_leaf, p_mid);
         idx.set_parent(p_mid, p_root);
 
-        // Detach p_root via the registry so compute_parent walks see no A.
+        // Detach p_root via the registry so the resolver walks see no A.
         let _ = profiles.detach(&mut tree, p_root);
 
         idx.recompute_parent_edges_for_dependents(&tree, &profiles, p_root);
@@ -633,7 +599,7 @@ mod tests {
         );
 
         let mut idx = StabilityIndex::new();
-        if let Some(parent) = StabilityIndex::compute_parent(&tree, &profiles, p_leaf) {
+        if let Some(parent) = nearest_covering_ancestor(&tree, &profiles, p_leaf) {
             idx.set_parent(p_leaf, parent);
         }
         // p_leaf's edge currently points at p_root.

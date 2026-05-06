@@ -15,7 +15,7 @@ mod stability;
 mod timer;
 mod transitions;
 
-pub use coverage::covers;
+pub use coverage::{covers, nearest_covering_ancestor};
 pub use engine::Engine;
 pub use stability::StabilityIndex;
 pub use timer::{TimerEntry, TimerHeap};
