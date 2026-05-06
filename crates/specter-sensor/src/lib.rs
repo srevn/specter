@@ -13,7 +13,13 @@ use std::io;
 use std::path::Path;
 use std::time::Instant;
 
-pub use specter_core::WatchFailure;
+// Re-exported alongside the trait so the bin can name `WatcherEvent` and
+// its variant payloads (`OverflowScope`, `WatchFailure`) via one crate
+// path. `OverflowScope` lives in `core` because the engine consumes it
+// as `Input::SensorOverflow.scope`, but the sensor → bin call site never
+// touches `core` directly. The `pub use` doubles as the in-module import
+// the trait + `WatcherEvent` definitions below need.
+pub use specter_core::{OverflowScope, WatchFailure};
 
 /// Sensor-side extension on [`WatchFailure`] that classifies an
 /// `io::Error` from a watch-install syscall.
@@ -40,6 +46,34 @@ impl WatchFailureExt for WatchFailure {
     }
 }
 
+/// One observation produced by [`FsWatcher::poll_until`].
+///
+/// Two variants:
+///
+/// - [`Fs`](Self::Fs) — a per-resource filesystem event. The dominant
+///   variant; every `WatchOp::Watch` install can produce these.
+/// - [`Overflow`](Self::Overflow) — a kernel-level "events were dropped"
+///   signal that has no `ResourceId` attached. inotify emits this on
+///   `IN_Q_OVERFLOW` (the `IDR` overflow → queue-wide → `Global` scope);
+///   FSEvents would emit per-stream (`Resource(r)`); kqueue never emits
+///   it under v1 because `EV_CLEAR` coalesces but never silently drops
+///   at the kernel level.
+///
+/// The bin lifts each variant into the engine's input vocabulary:
+/// `Fs` → `Input::FsEvent`; `Overflow` → `Input::SensorOverflow`
+/// (Phase B11). The engine's response to `Overflow` is to reseed every
+/// in-scope Profile.
+#[derive(Debug, Clone)]
+pub enum WatcherEvent {
+    Fs {
+        resource: ResourceId,
+        event: FsEvent,
+    },
+    Overflow {
+        scope: OverflowScope,
+    },
+}
+
 /// Single-threaded filesystem watcher.
 ///
 /// One thread blocks in [`poll_until`](FsWatcher::poll_until); the
@@ -59,7 +93,7 @@ impl WatchFailureExt for WatchFailure {
 /// # Bin loop pattern
 ///
 /// ```ignore
-/// let mut events = Vec::with_capacity(64);
+/// let mut events: Vec<WatcherEvent> = Vec::with_capacity(64);
 /// loop {
 ///     // 1. Apply pending WatchOps from the channel.
 ///     while let Ok(op) = ops_rx.try_recv() {
@@ -79,8 +113,16 @@ impl WatchFailureExt for WatchFailure {
 ///     // 2. Block until the deadline, an event, or a wake.
 ///     events.clear();
 ///     watcher.poll_until(engine_deadline, &mut events)?;
-///     for (resource, event) in events.drain(..) {
-///         engine_inbound.send(Input::FsEvent { resource, event });
+///     for ev in events.drain(..) {
+///         match ev {
+///             WatcherEvent::Fs { resource, event } => {
+///                 engine_inbound.send(Input::FsEvent { resource, event });
+///             }
+///             WatcherEvent::Overflow { scope } => {
+///                 // Phase B11 surfaces this as `Input::SensorOverflow`.
+///                 engine_inbound.send(/* … scope … */);
+///             }
+///         }
 ///     }
 /// }
 /// ```
@@ -148,19 +190,33 @@ pub trait FsWatcher: Send {
     fn unsuppress(&mut self, r: ResourceId);
 
     /// Block until the next event(s), the deadline, or a wake. Pushes
-    /// normalized `(ResourceId, FsEvent)` pairs into `out` and returns
-    /// the count pushed.
+    /// normalized [`WatcherEvent`]s into `out` and returns the count
+    /// pushed *this call*.
+    ///
+    /// Two variants ride the same channel:
+    ///
+    /// - [`Fs`](WatcherEvent::Fs) — per-resource filesystem event;
+    ///   the dominant variant.
+    /// - [`Overflow`](WatcherEvent::Overflow) — kernel-level "events
+    ///   were dropped" signal carrying an [`OverflowScope`]. inotify
+    ///   emits `Global` on `IN_Q_OVERFLOW`; FSEvents would emit
+    ///   per-stream; kqueue never emits this under v1.
     ///
     /// `deadline = None` means "no deadline; block until event or wake."
     /// A returned count of zero is normal: either the deadline arrived
     /// or only a wake fired.
     ///
-    /// `EINTR` is retried internally; other syscall errors propagate.
+    /// `EINTR` is retried internally. Syscall errors map to a typed
+    /// [`WatchFailure`] (kqueue: `EMFILE` from a full kernel queue →
+    /// [`Pressure`](WatchFailure::Pressure); everything else →
+    /// [`Invariant`](WatchFailure::Invariant)) — symmetric with
+    /// [`watch`](Self::watch). The bin treats a `poll_until` failure
+    /// as terminal for the watcher thread (no recovery path).
     fn poll_until(
         &mut self,
         deadline: Option<Instant>,
-        out: &mut Vec<(ResourceId, FsEvent)>,
-    ) -> io::Result<usize>;
+        out: &mut Vec<WatcherEvent>,
+    ) -> Result<usize, WatchFailure>;
 
     /// Capture a wake handle for cross-thread interruption of
     /// `poll_until`. Cloneable via [`WakeHandle::clone_box`]; concurrent

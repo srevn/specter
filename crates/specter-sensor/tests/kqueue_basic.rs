@@ -11,30 +11,51 @@
 //! - `Modified` on a File needs [`ClassSet::CONTENT`].
 //! - `MetadataChanged` needs [`ClassSet::METADATA`].
 
+// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a
+// `Vec` while preserving its allocation. Required here because the helper
+// reuses the same buffer across the drain-loop's iterations.
+#![allow(clippy::iter_with_drain)]
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, KqueueWatcher};
+use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// Drain events from `w` until at least one matches `pred` or the
-/// deadline elapses. Returns the accumulated events. Loops with short
-/// inner deadlines because kqueue may need a couple of round-trips on
-/// some systems before delivering the post-fs-op event.
+/// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator
+/// until at least one matches `pred` or the deadline elapses. Returns
+/// the accumulated events.
+///
+/// Loops with short inner deadlines because kqueue may need a couple of
+/// round-trips on some systems before delivering the post-fs-op event.
+///
+/// kqueue must not emit [`WatcherEvent::Overflow`] under v1 (`EV_CLEAR`
+/// coalesces but never silently drops at the kernel level); the helper
+/// `panic!`s if it sees one so a future regression here surfaces as a
+/// loud test failure rather than silent event loss.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut KqueueWatcher,
     pred: F,
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
-    let mut out = Vec::new();
+    let mut buf: Vec<WatcherEvent> = Vec::new();
+    let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut out);
+        buf.clear();
+        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        for ev in buf.drain(..) {
+            match ev {
+                WatcherEvent::Fs { resource, event } => out.push((resource, event)),
+                WatcherEvent::Overflow { scope } => {
+                    panic!("kqueue must not emit WatcherEvent::Overflow; got scope={scope:?}");
+                }
+            }
+        }
         if out.iter().any(&pred) {
             return out;
         }
@@ -247,7 +268,7 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     // Late event drain — kernel may still deliver an event for the
     // unwatched fd. Watcher emits anyway; the test's contract is
     // "no panic / no error."
-    let mut out = Vec::new();
+    let mut out: Vec<WatcherEvent> = Vec::new();
     let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(200)), &mut out);
     drop(w);
 }

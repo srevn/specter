@@ -1290,15 +1290,13 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
             .iter()
             .any(|op| matches!(op, WatchOp::Unwatch { .. }))
     );
-    assert!(
-        result.diagnostics.iter().any(|d| matches!(
-            d,
-            Diagnostic::WatchOpRejected {
-                failure: specter_core::WatchFailure::Pressure { errno: 24 },
-                ..
-            }
-        )),
-    );
+    assert!(result.diagnostics.iter().any(|d| matches!(
+        d,
+        Diagnostic::WatchOpRejected {
+            failure: specter_core::WatchFailure::Pressure { errno: 24 },
+            ..
+        }
+    )),);
 }
 
 #[test]

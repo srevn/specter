@@ -26,7 +26,7 @@ use specter_actuator::{SubprocessActuator, default_spawner};
 use specter_config::{Cli, Config};
 use specter_core::{Input, WatchOp};
 use specter_engine::Engine;
-use specter_sensor::{FsWatcher, WakeHandle, WorkerProber, default_watcher};
+use specter_sensor::{FsWatcher, WakeHandle, WatcherEvent, WorkerProber, default_watcher};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -249,12 +249,19 @@ fn spawn_watcher_thread(
 
 /// Watcher event loop body. Generic over the watcher type so sibling
 /// tests can drive it with `MockFsWatcher` without spinning up kqueue.
+///
+/// `clippy::iter_with_drain` allow: `events.drain(..)` is the canonical
+/// way to consume a `Vec` while preserving its allocation. `into_iter()`
+/// would drop the buffer between poll iterations and force a fresh
+/// allocation per drain — defeating the `Vec::with_capacity(64)` we
+/// initialise with.
+#[allow(clippy::iter_with_drain)]
 pub(crate) fn watcher_loop<W: FsWatcher>(
     watcher: &mut W,
     sides: &crate::channels::WatcherSide,
     shutdown_flag: &AtomicBool,
 ) {
-    let mut events = Vec::with_capacity(64);
+    let mut events: Vec<WatcherEvent> = Vec::with_capacity(64);
     loop {
         // Apply pending watch ops first.
         loop {
@@ -270,15 +277,29 @@ pub(crate) fn watcher_loop<W: FsWatcher>(
         events.clear();
         match watcher.poll_until(None, &mut events) {
             Ok(_) => {
-                // `ResourceId` and `FsEvent` are `Copy`; iterate by
-                // reference and copy out so the next iteration's
-                // `events.clear()` reuses the buffer's allocation.
-                for &(resource, event) in &events {
-                    let _ = sides.sensor_in_tx.send(Input::FsEvent { resource, event });
+                // Drain the buffer in place so the next iteration's
+                // `events.clear()` reuses the same allocation.
+                for ev in events.drain(..) {
+                    match ev {
+                        WatcherEvent::Fs { resource, event } => {
+                            let _ = sides.sensor_in_tx.send(Input::FsEvent { resource, event });
+                        }
+                        WatcherEvent::Overflow { scope } => {
+                            // kqueue never emits this under v1; the
+                            // routing path lands with Phase B11's
+                            // `Input::SensorOverflow`. Until then,
+                            // surfacing here would be a sensor bug —
+                            // log loudly but don't crash the daemon.
+                            tracing::warn!(
+                                ?scope,
+                                "WatcherEvent::Overflow on a backend that should not emit it",
+                            );
+                        }
+                    }
                 }
             }
-            Err(e) => {
-                tracing::error!(?e, "watcher poll error; thread exiting");
+            Err(failure) => {
+                tracing::error!(?failure, "watcher poll error; thread exiting");
                 return;
             }
         }

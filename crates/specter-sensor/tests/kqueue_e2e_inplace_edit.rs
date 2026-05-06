@@ -17,12 +17,14 @@
 //! covered by `crates/specter-engine/tests/event_filtering.rs`'s
 //! `it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves`.
 
-#![allow(clippy::missing_const_for_fn)]
+// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a
+// `Vec` while preserving its allocation across drain-loop iterations.
+#![allow(clippy::iter_with_drain, clippy::missing_const_for_fn)]
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, KqueueWatcher};
+use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -32,9 +34,19 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
-    let mut out = Vec::new();
+    let mut buf: Vec<WatcherEvent> = Vec::new();
+    let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut out);
+        buf.clear();
+        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        for ev in buf.drain(..) {
+            match ev {
+                WatcherEvent::Fs { resource, event } => out.push((resource, event)),
+                WatcherEvent::Overflow { scope } => {
+                    panic!("kqueue must not emit WatcherEvent::Overflow; got scope={scope:?}");
+                }
+            }
+        }
         if out.iter().any(&pred) {
             return out;
         }
@@ -117,7 +129,7 @@ fn in_place_edit_does_not_fire_on_dir_watch_alone() {
         .expect("watch dir");
 
     // Drain any registration ack noise so the post-edit drain is clean.
-    let mut warmup = Vec::new();
+    let mut warmup: Vec<WatcherEvent> = Vec::new();
     let _ = w.poll_until(
         Some(Instant::now() + Duration::from_millis(100)),
         &mut warmup,
@@ -126,16 +138,20 @@ fn in_place_edit_does_not_fire_on_dir_watch_alone() {
     // In-place edit (the symptom case).
     std::fs::write(&file_path, "v2 with more bytes").unwrap();
 
-    let mut out = Vec::new();
+    let mut out: Vec<WatcherEvent> = Vec::new();
     let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(300)), &mut out);
 
     // The dir's STRUCTURE watch must NOT fire on an in-place edit. If
     // it does, the documented design assumption (APFS/HFS+ doesn't bump
     // parent mtime on in-place writes) is violated and the E2E #3
     // rationale needs revisiting.
-    let dir_fired = out
-        .iter()
-        .any(|(r, e)| *r == r_dir && *e == FsEvent::StructureChanged);
+    let dir_fired = out.iter().any(|ev| {
+        matches!(
+            ev,
+            WatcherEvent::Fs { resource, event }
+                if *resource == r_dir && *event == FsEvent::StructureChanged
+        )
+    });
     assert!(
         !dir_fired,
         "design assumption: in-place edit does not bump parent dir mtime → \

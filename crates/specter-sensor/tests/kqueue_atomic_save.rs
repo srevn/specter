@@ -8,11 +8,14 @@
 //! `StructureChanged` triggers a reprobe that discovers the new file
 //! at the same path with a fresh `ResourceId`.
 
+// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a
+// `Vec` while preserving its allocation across drain-loop iterations.
+#![allow(clippy::iter_with_drain)]
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, KqueueWatcher};
+use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -43,9 +46,19 @@ fn atomic_save_emits_terminal_on_old_inode_and_structure_on_dir() {
     std::fs::rename(&staging, &target).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    let mut out = Vec::new();
+    let mut buf: Vec<WatcherEvent> = Vec::new();
+    let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut out);
+        buf.clear();
+        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        for ev in buf.drain(..) {
+            match ev {
+                WatcherEvent::Fs { resource, event } => out.push((resource, event)),
+                WatcherEvent::Overflow { scope } => {
+                    panic!("kqueue must not emit WatcherEvent::Overflow; got scope={scope:?}");
+                }
+            }
+        }
         let file_terminal = out
             .iter()
             .any(|(r, e)| *r == r_file && matches!(e, FsEvent::Removed | FsEvent::Renamed));

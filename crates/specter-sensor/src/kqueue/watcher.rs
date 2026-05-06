@@ -32,9 +32,9 @@
 
 use crate::kqueue::wake::KqueueWakeHandle;
 use crate::kqueue::{fd, ffi, normalize, translate};
-use crate::{FsWatcher, WakeHandle, WatchFailure, WatchFailureExt};
+use crate::{FsWatcher, WakeHandle, WatchFailure, WatchFailureExt, WatcherEvent};
 use slotmap::SecondaryMap;
-use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
+use specter_core::{ClassSet, ResourceId, ResourceKind};
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::Path;
@@ -270,11 +270,16 @@ impl FsWatcher for KqueueWatcher {
     fn poll_until(
         &mut self,
         deadline: Option<Instant>,
-        out: &mut Vec<(ResourceId, FsEvent)>,
-    ) -> io::Result<usize> {
+        out: &mut Vec<WatcherEvent>,
+    ) -> Result<usize, WatchFailure> {
         let timeout = deadline.map(deadline_instant_to_timespec);
         let mut events = [ffi::Kevent::zeroed(); EVENT_BATCH];
-        let n = ffi::kevent_drain(&self.kq, &mut events, timeout)?;
+        // `kevent` may itself signal pressure (`EMFILE` from a full
+        // kernel queue) in addition to the per-syscall errno set; route
+        // every error through the typed boundary so the bin can demux on
+        // the variant rather than re-classifying `io::Error` upstream.
+        let n = ffi::kevent_drain(&self.kq, &mut events, timeout)
+            .map_err(|e| WatchFailure::from_io(&e))?;
         tracing::trace!(n, "kqueue drained");
 
         let mut emitted = 0usize;
@@ -300,7 +305,16 @@ impl FsWatcher for KqueueWatcher {
             // from `by_resource` between kernel queue-up and our drain.
             // Emit anyway — engine's `EventOnUnwatchedResource` Diagnostic
             // handles the race.
-            out.push((r, fs_event));
+            //
+            // kqueue never emits `WatcherEvent::Overflow` under v1: the
+            // EV_CLEAR coalesce semantic merges duplicate writes into one
+            // delivered event, but it never silently drops. Overflow is
+            // an inotify-only concept (`IN_Q_OVERFLOW`); the bin's loop
+            // is shaped to accept either variant from any backend.
+            out.push(WatcherEvent::Fs {
+                resource: r,
+                event: fs_event,
+            });
             emitted += 1;
         }
         Ok(emitted)

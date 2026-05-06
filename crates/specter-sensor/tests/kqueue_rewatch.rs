@@ -11,10 +11,23 @@
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, KqueueWatcher};
+use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// Push every [`WatcherEvent::Fs`] in `buf` into `out`; `panic!` on
+/// [`WatcherEvent::Overflow`] (kqueue must not emit it under v1).
+fn collect_fs(buf: &mut Vec<WatcherEvent>, out: &mut Vec<(ResourceId, FsEvent)>) {
+    for ev in buf.drain(..) {
+        match ev {
+            WatcherEvent::Fs { resource, event } => out.push((resource, event)),
+            WatcherEvent::Overflow { scope } => {
+                panic!("kqueue must not emit WatcherEvent::Overflow; got scope={scope:?}");
+            }
+        }
+    }
+}
 
 /// Drain at least one event matching `pred` or hit `overall` deadline.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
@@ -23,9 +36,12 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
-    let mut out = Vec::new();
+    let mut buf: Vec<WatcherEvent> = Vec::new();
+    let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut out);
+        buf.clear();
+        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        collect_fs(&mut buf, &mut out);
         if out.iter().any(&pred) {
             return out;
         }
@@ -34,8 +50,10 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
 }
 
 fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)> {
-    let mut out = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + dur), &mut out);
+    let mut buf: Vec<WatcherEvent> = Vec::new();
+    let _ = w.poll_until(Some(Instant::now() + dur), &mut buf);
+    let mut out = Vec::with_capacity(buf.len());
+    collect_fs(&mut buf, &mut out);
     out
 }
 

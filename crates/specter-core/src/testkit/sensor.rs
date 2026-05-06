@@ -350,11 +350,8 @@ mod tests {
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         };
-        let input = MockSensor::watch_op_rejected(
-            r,
-            op,
-            crate::WatchFailure::Pressure { errno: EMFILE },
-        );
+        let input =
+            MockSensor::watch_op_rejected(r, op, crate::WatchFailure::Pressure { errno: EMFILE });
         match input {
             Input::WatchOpRejected {
                 resource,

@@ -5,13 +5,22 @@
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, KqueueWatcher};
+use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)> {
-    let mut out = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + dur), &mut out);
+    let mut buf: Vec<WatcherEvent> = Vec::new();
+    let _ = w.poll_until(Some(Instant::now() + dur), &mut buf);
+    let mut out = Vec::with_capacity(buf.len());
+    for ev in buf {
+        match ev {
+            WatcherEvent::Fs { resource, event } => out.push((resource, event)),
+            WatcherEvent::Overflow { scope } => {
+                panic!("kqueue must not emit WatcherEvent::Overflow; got scope={scope:?}");
+            }
+        }
+    }
     out
 }
 

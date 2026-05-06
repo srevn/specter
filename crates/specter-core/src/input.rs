@@ -38,6 +38,30 @@ pub enum FsEvent {
     Revoked,
 }
 
+/// Scope of a sensor overflow signal.
+///
+/// inotify's `IN_Q_OVERFLOW` is queue-wide ([`Global`]); FSEvents emits
+/// per-stream overflow ([`Resource`]). The v1 inotify backend always
+/// emits `Global`; kqueue never emits overflow under v1 (`EV_CLEAR`
+/// coalesces but never silently drops at the kernel level).
+///
+/// Carried on the sensor → engine path in two places: in the
+/// per-`poll_until` drain (`specter-sensor::WatcherEvent::Overflow`)
+/// and in the engine input variant the bin lifts it into
+/// (Phase B11's `Input::SensorOverflow`).
+///
+/// [`Global`]: Self::Global
+/// [`Resource`]: Self::Resource
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum OverflowScope {
+    /// Per-watched-resource scope. FSEvents reports overflow per active
+    /// stream; the v1 inotify backend never emits this variant.
+    Resource(ResourceId),
+    /// Watcher-wide queue overflow; affects every active watch on the
+    /// sensor. inotify's `IN_Q_OVERFLOW` is the only emitter under v1.
+    Global,
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum Input {

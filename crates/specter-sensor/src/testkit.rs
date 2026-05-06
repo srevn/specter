@@ -10,10 +10,9 @@
 //! the `testkit` Cargo feature; consumers attach it under
 //! `[dev-dependencies]`.
 
-use crate::{FsWatcher, Prober, WakeHandle, WatchFailure};
+use crate::{FsWatcher, OverflowScope, Prober, WakeHandle, WatchFailure, WatcherEvent};
 use slotmap::SecondaryMap;
 use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, ResourceKind};
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -59,8 +58,16 @@ pub struct MockFsWatcher {
     pub installed: SecondaryMap<ResourceId, MockEntry>,
     /// Current suppress state: present ⇔ last edge was `suppress`.
     pub suppressed: SecondaryMap<ResourceId, ()>,
-    /// Events queued for delivery on the next `poll_until` call.
+    /// Per-resource events queued for delivery on the next `poll_until`
+    /// call. Drained into [`WatcherEvent::Fs`] before any queued
+    /// overflow scopes (preserves the natural "events first, kernel
+    /// signals last" ordering the bin's loop expects).
     pub queued_events: Vec<(ResourceId, FsEvent)>,
+    /// Overflow scopes queued for delivery on the next `poll_until`
+    /// call. Drained into [`WatcherEvent::Overflow`] **after** the
+    /// per-resource events. Tests use this to exercise the bin's
+    /// overflow-routing path without wiring a real inotify backend.
+    pub queued_overflow: Vec<OverflowScope>,
     /// Set by `fail_next_watch` to simulate FD pressure / kind
     /// mismatch / programmer error — the **next** `watch()` call returns
     /// `Err(failure)` without modifying state. One-shot; consumed on read.
@@ -83,11 +90,25 @@ impl MockFsWatcher {
         Self::default()
     }
 
-    /// Queue an event for delivery on the next `poll_until` call. The
-    /// queue drains entirely on poll — caller is responsible for
-    /// re-injecting between successive polls.
+    /// Queue a per-resource event for delivery on the next `poll_until`
+    /// call. The queue drains entirely on poll — caller is responsible
+    /// for re-injecting between successive polls.
     pub fn inject(&mut self, r: ResourceId, ev: FsEvent) {
         self.queued_events.push((r, ev));
+    }
+
+    /// Queue an overflow signal for delivery on the next `poll_until`
+    /// call. Drained into [`WatcherEvent::Overflow`] **after** any
+    /// queued per-resource events on the same poll, mirroring the
+    /// inotify backend's natural ordering (`Fs` events for the records
+    /// preceding the overflow marker; `Overflow` once the kernel signals
+    /// the queue ran dry).
+    ///
+    /// Useful for engine / bin tests that need to assert the `Overflow`
+    /// routing path (Phase B11) without spinning up a real inotify
+    /// instance and stressing it past `max_queued_events`.
+    pub fn inject_overflow(&mut self, scope: OverflowScope) {
+        self.queued_overflow.push(scope);
     }
 
     /// Cause the next `watch` call to fail with `failure`. Consumed on
@@ -176,12 +197,21 @@ impl FsWatcher for MockFsWatcher {
     fn poll_until(
         &mut self,
         _deadline: Option<Instant>,
-        out: &mut Vec<(ResourceId, FsEvent)>,
-    ) -> io::Result<usize> {
-        let drained = std::mem::take(&mut self.queued_events);
-        let n = drained.len();
-        out.extend(drained);
-        Ok(n)
+        out: &mut Vec<WatcherEvent>,
+    ) -> Result<usize, WatchFailure> {
+        let fs = std::mem::take(&mut self.queued_events);
+        let overflow = std::mem::take(&mut self.queued_overflow);
+        let emitted = fs.len() + overflow.len();
+        out.extend(
+            fs.into_iter()
+                .map(|(resource, event)| WatcherEvent::Fs { resource, event }),
+        );
+        out.extend(
+            overflow
+                .into_iter()
+                .map(|scope| WatcherEvent::Overflow { scope }),
+        );
+        Ok(emitted)
     }
 
     fn wake_handle(&self) -> Box<dyn WakeHandle> {
@@ -262,7 +292,7 @@ impl Prober for MockProber {
 #[cfg(test)]
 mod tests {
     use super::{MockFsWatcher, MockProber, WatcherCall};
-    use crate::{FsWatcher, Prober, WakeHandle, WatchFailure};
+    use crate::{FsWatcher, OverflowScope, Prober, WakeHandle, WatchFailure, WatcherEvent};
     use slotmap::SlotMap;
     use specter_core::{
         ClassSet, FsEvent, ProbeCorrelation, ProbeKind, ProbeRequest, ProfileId, ResourceId,
@@ -356,24 +386,87 @@ mod tests {
     }
 
     #[test]
-    fn poll_until_drains_queued_events() {
+    fn poll_until_drains_queued_events_as_fs_variant() {
         let ids = fresh_resource_ids(2);
         let mut w = MockFsWatcher::new();
 
         w.inject(ids[0], FsEvent::Modified);
         w.inject(ids[1], FsEvent::Renamed);
 
-        let mut out = Vec::new();
+        let mut out: Vec<WatcherEvent> = Vec::new();
         let n = w.poll_until(None, &mut out).unwrap();
         assert_eq!(n, 2);
         assert_eq!(out.len(), 2);
         assert!(w.queued_events.is_empty());
+        assert!(matches!(
+            &out[0],
+            WatcherEvent::Fs { resource, event } if *resource == ids[0] && *event == FsEvent::Modified
+        ));
+        assert!(matches!(
+            &out[1],
+            WatcherEvent::Fs { resource, event } if *resource == ids[1] && *event == FsEvent::Renamed
+        ));
 
         // Second poll: nothing queued.
         out.clear();
         let n = w.poll_until(None, &mut out).unwrap();
         assert_eq!(n, 0);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn poll_until_drains_queued_overflow_after_fs_events() {
+        // Ordering invariant: any per-resource events queued before the
+        // poll surface as `Fs` records first, then the queued overflow
+        // scopes as `Overflow` records. This mirrors the inotify
+        // backend's natural drain order — events for records preceding
+        // the overflow marker come first, then `IN_Q_OVERFLOW`.
+        let ids = fresh_resource_ids(1);
+        let mut w = MockFsWatcher::new();
+
+        w.inject(ids[0], FsEvent::Modified);
+        w.inject_overflow(OverflowScope::Global);
+        w.inject_overflow(OverflowScope::Resource(ids[0]));
+
+        let mut out: Vec<WatcherEvent> = Vec::new();
+        let n = w.poll_until(None, &mut out).unwrap();
+        assert_eq!(n, 3);
+        assert!(matches!(
+            &out[0],
+            WatcherEvent::Fs { resource, event } if *resource == ids[0] && *event == FsEvent::Modified
+        ));
+        assert!(matches!(
+            &out[1],
+            WatcherEvent::Overflow {
+                scope: OverflowScope::Global,
+            }
+        ));
+        assert!(matches!(
+            &out[2],
+            WatcherEvent::Overflow {
+                scope: OverflowScope::Resource(r),
+            } if *r == ids[0]
+        ));
+        assert!(w.queued_events.is_empty());
+        assert!(w.queued_overflow.is_empty());
+    }
+
+    #[test]
+    fn poll_until_with_only_overflow_drains_overflow() {
+        // No `Fs` events queued — `poll_until` still drains the
+        // overflow queue and reports a non-zero count.
+        let mut w = MockFsWatcher::new();
+        w.inject_overflow(OverflowScope::Global);
+
+        let mut out: Vec<WatcherEvent> = Vec::new();
+        let n = w.poll_until(None, &mut out).unwrap();
+        assert_eq!(n, 1);
+        assert!(matches!(
+            &out[0],
+            WatcherEvent::Overflow {
+                scope: OverflowScope::Global,
+            }
+        ));
     }
 
     #[test]

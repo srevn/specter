@@ -5,8 +5,7 @@
 
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
-use specter_core::FsEvent;
-use specter_sensor::{FsWatcher, KqueueWatcher};
+use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -21,7 +20,7 @@ fn wake_interrupts_long_poll_until() {
         wake.wake();
     });
 
-    let mut events = Vec::<(specter_core::ResourceId, FsEvent)>::new();
+    let mut events: Vec<WatcherEvent> = Vec::new();
     let start = Instant::now();
     let n = w
         .poll_until(Some(Instant::now() + Duration::from_secs(10)), &mut events)
@@ -53,7 +52,7 @@ fn multiple_concurrent_wakes_coalesce() {
         }));
     }
 
-    let mut events = Vec::new();
+    let mut events: Vec<WatcherEvent> = Vec::new();
     let n = w
         .poll_until(Some(Instant::now() + Duration::from_secs(2)), &mut events)
         .unwrap();
@@ -99,7 +98,7 @@ fn wake_handle_clone_box_is_independent() {
 #[test]
 fn poll_until_returns_promptly_with_zero_deadline() {
     let mut w = KqueueWatcher::new().unwrap();
-    let mut events = Vec::new();
+    let mut events: Vec<WatcherEvent> = Vec::new();
 
     let start = Instant::now();
     // Past deadline → non-blocking poll.
