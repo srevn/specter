@@ -1558,14 +1558,12 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
         "seed burst armed a fresh verify probe",
     );
     assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(
-                d,
-                Diagnostic::SensorOverflow {
-                    scope: OverflowScope::Global
-                }
-            )),
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::SensorOverflow {
+                scope: OverflowScope::Global
+            }
+        )),
         "Diagnostic::SensorOverflow{{Global}} emitted exactly once per overflow input",
     );
 }
@@ -1614,16 +1612,12 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
         burst.dirty_resources.is_empty() && burst.force_walk_resources.is_empty(),
         "seed burst starts with empty dirty / force_walk sets — Standard's accumulators discarded",
     );
-    assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(
-                d,
-                Diagnostic::SensorOverflow {
-                    scope: OverflowScope::Global
-                }
-            )),
-    );
+    assert!(out.diagnostics.iter().any(|d| matches!(
+        d,
+        Diagnostic::SensorOverflow {
+            scope: OverflowScope::Global
+        }
+    )),);
 }
 
 #[test]
@@ -1740,10 +1734,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
         "Profile A (anchor at a) reseeded",
     );
     assert!(
-        matches!(
-            &e.profiles.get(pid_b).unwrap().state,
-            ProfileState::Idle
-        ),
+        matches!(&e.profiles.get(pid_b).unwrap().state, ProfileState::Idle),
         "Profile B (anchor at b, sibling of a) untouched",
     );
 }

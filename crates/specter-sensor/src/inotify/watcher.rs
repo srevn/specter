@@ -736,9 +736,7 @@ impl FsWatcher for InotifyWatcher {
             // 2. IN_IGNORED: cleanup signal for this wd.
             if rec.mask & libc::IN_IGNORED != 0 {
                 let was_draining = self.draining_wds.remove(&rec.wd);
-                if !was_draining
-                    && let Some(r) = self.by_wd.remove(&rec.wd)
-                {
+                if !was_draining && let Some(r) = self.by_wd.remove(&rec.wd) {
                     // Spontaneous reap: the kernel destroyed the watch
                     // because the watched inode was deleted/unmounted
                     // (the preceding IN_DELETE_SELF / IN_UNMOUNT
@@ -791,11 +789,7 @@ impl FsWatcher for InotifyWatcher {
             // resource whose `kinds` slot was cleared between the
             // kernel's queue-add and our drain (e.g., race against a
             // spontaneous IN_IGNORED in the same batch).
-            let kind = self
-                .kinds
-                .get(r)
-                .copied()
-                .unwrap_or(ResourceKind::Unknown);
+            let kind = self.kinds.get(r).copied().unwrap_or(ResourceKind::Unknown);
             let Some(fs_event) = normalize::mask_to_fs_event(rec.mask, kind) else {
                 // No actionable bit — registration ack with only
                 // orientation flags (IN_ISDIR), or a defensive

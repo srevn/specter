@@ -103,5 +103,7 @@ pub enum Input {
     /// (`IN_Q_OVERFLOW` is queue-wide). The [`OverflowScope::Resource`]
     /// variant exists for FSEvents (per-stream overflow) and to keep
     /// the engine's handler shape stable across backends.
-    SensorOverflow { scope: OverflowScope },
+    SensorOverflow {
+        scope: OverflowScope,
+    },
 }

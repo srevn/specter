@@ -141,18 +141,29 @@ pub(super) fn read_inotify(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
     }
 }
 
-/// Open `path` with `O_PATH | O_NOFOLLOW`. The fd binds to a specific
-/// inode regardless of subsequent path-level renames; used by the
-/// watcher's race-free install in Phase B6.
+/// Open `path` with `O_PATH | O_NOFOLLOW | O_CLOEXEC`. The fd binds to
+/// a specific inode regardless of subsequent path-level renames; used
+/// by the watcher's race-free install in Phase B6.
 ///
 /// `O_PATH` permits `fstat` even without read permission and does not
 /// pin the inode against `unlink` — exactly the discipline kqueue's
-/// `O_EVTONLY` provides on Darwin.
+/// `O_EVTONLY` provides on Darwin. `O_CLOEXEC` covers the
+/// `open → fstat → add_watch → drop(fd)` window: the actuator's
+/// fork+exec can race against any of those steps, and a leaked
+/// `O_PATH` fd in the child would prolong the inode's reference count
+/// for the child's lifetime. Plugging the leak at open() time is
+/// uniform with the watcher's three persistent fds (§ 1.4 of the
+/// inotify port plan).
 pub(super) fn open_o_path(path: &Path) -> io::Result<OwnedFd> {
     let cstr = path_to_cstring(path)?;
     // SAFETY: `cstr` is a valid NUL-terminated C string; `flags` is a
     // valid `O_*` bit set. `open` returns a non-negative fd or -1.
-    let raw = unsafe { libc::open(cstr.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW) };
+    let raw = unsafe {
+        libc::open(
+            cstr.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
     if raw < 0 {
         return Err(Error::last_os_error());
     }

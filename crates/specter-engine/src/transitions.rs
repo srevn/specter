@@ -739,9 +739,7 @@ impl Engine {
     fn profiles_in_subtree(&self, r: ResourceId) -> smallvec::SmallVec<[ProfileId; 8]> {
         self.profiles
             .iter()
-            .filter(|(_, p)| {
-                p.resource == r || self.tree.ancestors(p.resource).any(|a| a == r)
-            })
+            .filter(|(_, p)| p.resource == r || self.tree.ancestors(p.resource).any(|a| a == r))
             .map(|(pid, _)| pid)
             .collect()
     }

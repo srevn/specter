@@ -15,11 +15,29 @@
 //! | `METADATA`  | `IN_ATTRIB`                                               | `IN_ATTRIB`                        |
 //!
 //! Identity floor (always OR-ed): `IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT`.
-//! Defensive flags (always OR-ed): `IN_DONT_FOLLOW | IN_EXCL_UNLINK`.
+//! Defensive flags (always OR-ed): `IN_EXCL_UNLINK`.
 //!
 //! Dir-anchored watches additionally OR `IN_ONLYDIR` at install time;
 //! that lives in the watcher (Phase B6), not in the translator — it's an
 //! `inotify_add_watch` directional flag, not part of the event mask.
+//!
+//! ## Why no `IN_DONT_FOLLOW`
+//!
+//! kqueue's `O_NOFOLLOW` symlink defense lives at the file-open seam, and
+//! the inotify port preserves that discipline by passing `O_NOFOLLOW` to
+//! the [`crate::inotify::ffi::open_o_path`] step that fronts every
+//! `add_watch`. The follow-up `inotify_add_watch` is then issued on a
+//! `/proc/self/fd/N` magic-symlink path (per § 1.2 of the inotify port
+//! plan), which the kernel resolves to the exact inode the fd refers to.
+//!
+//! Including `IN_DONT_FOLLOW` would tell the kernel to *not* follow the
+//! `/proc/self/fd/N` magic symlink — i.e., to install on the symlink
+//! itself rather than the inode it points at. The kernel rejects such
+//! installs (`EACCES` on a regular-file underlying inode; `ENOTDIR` when
+//! `IN_ONLYDIR` is also set) because magic symlinks aren't watchable
+//! inodes. The user-path symlink defense is satisfied entirely by
+//! `O_NOFOLLOW`; adding `IN_DONT_FOLLOW` would actively break the
+//! race-free install.
 //!
 //! ## D10 parity
 //!
@@ -44,8 +62,8 @@
 //! case.
 
 use libc::{
-    IN_ATTRIB, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_DONT_FOLLOW,
-    IN_EXCL_UNLINK, IN_MODIFY, IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO, IN_UNMOUNT,
+    IN_ATTRIB, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_EXCL_UNLINK, IN_MODIFY,
+    IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO, IN_UNMOUNT,
 };
 use specter_core::{ClassSet, ResourceKind};
 
@@ -66,16 +84,19 @@ pub(super) const IDENTITY_FLOOR: u32 = IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUN
 
 /// Defensive flags applied on every `inotify_add_watch`:
 ///
-/// - `IN_DONT_FOLLOW` — never follow symlinks at the watched path.
-///   Parity with kqueue's `O_NOFOLLOW` discipline; v1 has no
-///   follow-symlinks opt-in.
 /// - `IN_EXCL_UNLINK` — stop firing events on an unlinked-but-still-open
 ///   inode. kqueue auto-removes the registration when the fd closes;
 ///   inotify's path-based registration would otherwise keep delivering
 ///   `IN_MODIFY` on a deleted inode held open by a writer. Setting
 ///   `IN_EXCL_UNLINK` aligns inotify's semantics with kqueue's
 ///   "registration ends when the inode is unreachable."
-pub(super) const ADD_WATCH_DEFENCE: u32 = IN_DONT_FOLLOW | IN_EXCL_UNLINK;
+///
+/// Symlink defense lives at the file-open seam (`O_NOFOLLOW` on
+/// [`crate::inotify::ffi::open_o_path`]), not in the install mask — see
+/// the module docs above. `IN_DONT_FOLLOW` is incompatible with the
+/// `/proc/self/fd/N` race-free install path and is therefore not
+/// included here.
+pub(super) const ADD_WATCH_DEFENCE: u32 = IN_EXCL_UNLINK;
 
 /// Compute the inotify mask for an `inotify_add_watch` call given the
 /// user's [`ClassSet`] and the resource's kind. The result always
@@ -115,7 +136,8 @@ mod tests {
     use super::{ADD_WATCH_DEFENCE, IDENTITY_FLOOR, class_set_to_mask};
     use libc::{
         IN_ATTRIB, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_DONT_FOLLOW,
-        IN_EXCL_UNLINK, IN_MODIFY, IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO, IN_UNMOUNT,
+        IN_EXCL_UNLINK, IN_MODIFY, IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO, IN_ONLYDIR,
+        IN_UNMOUNT,
     };
     use specter_core::{ClassSet, ResourceKind};
 
@@ -133,12 +155,40 @@ mod tests {
     }
 
     /// `ADD_WATCH_DEFENCE` membership is the kqueue-parity invariant
-    /// (`IN_DONT_FOLLOW` mirrors `O_NOFOLLOW`, `IN_EXCL_UNLINK` mirrors
-    /// kqueue's auto-detach on unlink-then-fd-close).
+    /// (`IN_EXCL_UNLINK` mirrors kqueue's auto-detach on unlink-then-fd-
+    /// close). Symlink defense lives at the file-open seam
+    /// (`open_o_path`'s `O_NOFOLLOW`), not in the install mask — see
+    /// module docs.
     #[test]
-    fn add_watch_defence_pins_dont_follow_and_excl_unlink() {
-        assert_ne!(ADD_WATCH_DEFENCE & IN_DONT_FOLLOW, 0, "DONT_FOLLOW missing");
+    fn add_watch_defence_pins_excl_unlink() {
         assert_ne!(ADD_WATCH_DEFENCE & IN_EXCL_UNLINK, 0, "EXCL_UNLINK missing");
+    }
+
+    /// `ADD_WATCH_DEFENCE` must not include `IN_DONT_FOLLOW` — it would
+    /// break the `/proc/self/fd/N` race-free install path.
+    #[test]
+    fn add_watch_defence_excludes_dont_follow() {
+        assert_eq!(
+            ADD_WATCH_DEFENCE & IN_DONT_FOLLOW,
+            0,
+            "ADD_WATCH_DEFENCE must not OR IN_DONT_FOLLOW: combined with /proc/self/fd/N \
+             the kernel rejects the install (EACCES on a regular-file inode; ENOTDIR \
+             with IN_ONLYDIR). O_NOFOLLOW at open() is the symlink defense."
+        );
+    }
+
+    /// `ADD_WATCH_DEFENCE` must not include `IN_ONLYDIR` either — that
+    /// directional flag is applied per-install in
+    /// `super::compute_install_mask` only when the resource is a Dir.
+    /// Including it unconditionally would reject every File watch.
+    #[test]
+    fn add_watch_defence_excludes_onlydir() {
+        assert_eq!(
+            ADD_WATCH_DEFENCE & IN_ONLYDIR,
+            0,
+            "ADD_WATCH_DEFENCE must not OR IN_ONLYDIR: it's a per-install directional \
+             flag the watcher OR-s only on Dir watches via compute_install_mask."
+        );
     }
 
     /// EMPTY × any-kind always degrades to identity-floor + defence
