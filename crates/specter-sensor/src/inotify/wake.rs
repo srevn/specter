@@ -1,37 +1,71 @@
-//! `InotifyWakeHandle` — cross-thread wake for
+//! `InotifyWakeHandle` — cross-thread wake-up signal for an in-flight
 //! [`super::watcher::InotifyWatcher::poll_until`].
 //!
-//! Stub — the real eventfd-backed implementation lands in Phase B4.
-//! The placeholder type satisfies [`crate::WakeHandle`] so the lib's
-//! `DefaultWatcher` re-export and the `wake_handle` trait method type-
-//! check on Linux during Phases B1–B3.
+//! Backed by an eventfd (`EFD_NONBLOCK | EFD_CLOEXEC`). The watcher's
+//! epoll instance listens on `(inotify_fd, wake_fd)`; concurrent
+//! [`wake`](Self::wake) calls accumulate kernel-side, and a single
+//! `eventfd_read` from `poll_until` drains the entire counter
+//! atomically. Mirror of [`crate::kqueue::wake::KqueueWakeHandle`] with
+//! the eventfd in place of `EVFILT_USER`.
+//!
+//! ## Lifecycle and the `Arc<OwnedFd>` discipline
+//!
+//! The handle holds an `Arc<OwnedFd>` clone of the watcher's eventfd.
+//! As long as *any* clone exists (the watcher itself plus every wake
+//! handle in flight), the kernel-side fd stays open and `wake()` is
+//! valid. Drop of the last clone closes the fd, kernel-reaping the
+//! eventfd's pending counter — a queued non-zero value is silently
+//! discarded by the kernel at close time, with no UB.
+//!
+//! `wake()` after the watcher has been dropped is a no-op-equivalent:
+//! the eventfd_write lands on a counter no consumer will drain, and the
+//! Arc keeps the fd live until the last handle clone drops. No
+//! use-after-free is possible.
+
+// Consumer of `InotifyWakeHandle::new` lands in Phase B5
+// (`super::watcher::InotifyWatcher::new` constructs the eventfd, wraps
+// it in `Arc`, and hands clones to every `wake_handle` caller). Remove
+// this allow once B5's constructor wires the helper.
+#![allow(dead_code)]
 
 use crate::WakeHandle;
+use crate::inotify::ffi;
+use std::os::fd::OwnedFd;
+use std::sync::Arc;
 
-/// Stub wake handle.
+/// Cross-thread wake-up handle for [`super::watcher::InotifyWatcher::poll_until`].
 ///
-/// Replaced in Phase B4 with the eventfd-backed `Arc<OwnedFd>` form. The
-/// placeholder is intentionally unconstructible outside this module —
-/// only [`super::watcher::InotifyWatcher`]'s stub `wake_handle` reaches
-/// it, and that path is unreachable until Phase B5 makes
-/// `InotifyWatcher::new` succeed.
+/// Cheap to clone (one `Arc` increment). Multiple handles may coexist;
+/// concurrent `wake()` calls accumulate in the eventfd counter, which a
+/// single `eventfd_read` consumes atomically. Idempotent on consecutive
+/// wakes within one `poll_until` window.
 #[derive(Debug, Clone)]
 pub struct InotifyWakeHandle {
-    _phantom: (),
+    wake_fd: Arc<OwnedFd>,
 }
 
 impl InotifyWakeHandle {
-    pub(super) const fn placeholder() -> Self {
-        Self { _phantom: () }
+    /// Construct a handle backed by `wake_fd`. The watcher creates the
+    /// eventfd in its constructor (Phase B5), wraps it in `Arc`, and
+    /// hands clones to every caller of [`crate::FsWatcher::wake_handle`].
+    pub(super) const fn new(wake_fd: Arc<OwnedFd>) -> Self {
+        Self { wake_fd }
     }
 }
 
 impl WakeHandle for InotifyWakeHandle {
     fn wake(&self) {
-        // Unreachable while the watcher's `new` is stubbed (Phase B5).
-        // Logging here would be misleading — the call path doesn't exist
-        // on a healthy bin during the helper-cluster phases. Real
-        // implementation lands in Phase B4.
+        if let Err(e) = ffi::eventfd_write(&self.wake_fd, 1) {
+            // Reachable when the eventfd has been closed underneath us
+            // (last Arc dropped while a clone is still triggering). The
+            // handle itself stays sound; subsequent wakes silently hit
+            // the same dead fd. Logging at warn keeps the consumer-stale
+            // case visible in operational dashboards.
+            tracing::warn!(
+                error = ?e,
+                "inotify wake() failed; consumer may be stale"
+            );
+        }
     }
 
     fn clone_box(&self) -> Box<dyn WakeHandle> {

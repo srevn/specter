@@ -7,7 +7,6 @@
 //! that flows past `default_watcher` reaches a defined "not yet
 //! implemented" state rather than panicking.
 
-use crate::inotify::wake::InotifyWakeHandle;
 use crate::{FsWatcher, WakeHandle, WatchFailure, WatcherEvent};
 use specter_core::{ClassSet, ResourceId, ResourceKind};
 use std::io;
@@ -66,6 +65,11 @@ impl FsWatcher for InotifyWatcher {
     }
 
     fn wake_handle(&self) -> Box<dyn WakeHandle> {
-        Box::new(InotifyWakeHandle::placeholder())
+        // Structurally unreachable in the helper-cluster phases:
+        // `Self::new` returns `ENOSYS`, so no caller holds an
+        // `InotifyWatcher` value during B1–B4. Phase B5 lands the real
+        // constructor and returns `Box::new(InotifyWakeHandle::new(
+        // Arc::clone(&self.wake_fd)))` from this method.
+        unreachable!("InotifyWatcher stub: wake_handle reached without a successful new()")
     }
 }
