@@ -134,13 +134,7 @@ pub(super) fn read_inotify(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
         // valid open inotify_fd. The kernel writes whole records into
         // the prefix; the trailing tail is undefined but the caller
         // consumes only the returned `n` bytes.
-        let n = unsafe {
-            libc::read(
-                fd.as_raw_fd(),
-                buf.as_mut_ptr().cast::<c_void>(),
-                buf.len(),
-            )
-        };
+        let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast::<c_void>(), buf.len()) };
         if n >= 0 {
             return Ok(usize::try_from(n).unwrap_or(0));
         }
@@ -316,9 +310,8 @@ pub(super) fn epoll_wait(
         // slots and treats the rest as undefined. The slice's start
         // pointer is correctly aligned (epoll_event is `repr(packed)` on
         // x86_64 but Vec/slice storage honours the type's layout).
-        let n = unsafe {
-            libc::epoll_wait(epoll.as_raw_fd(), out.as_mut_ptr(), maxevents, timeout_ms)
-        };
+        let n =
+            unsafe { libc::epoll_wait(epoll.as_raw_fd(), out.as_mut_ptr(), maxevents, timeout_ms) };
         if n >= 0 {
             return Ok(usize::try_from(n).unwrap_or(0));
         }
