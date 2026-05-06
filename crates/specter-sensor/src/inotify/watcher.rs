@@ -480,10 +480,72 @@ impl FsWatcher for InotifyWatcher {
             .map_err(|e| WatchFailure::from_io(&e))
     }
 
-    /// Stub. Phase B7 lands the real body — `inotify_rm_watch` plus
-    /// the `draining_wds` mark-and-drop that closes the wd-reuse race
-    /// window between `rm_watch` and the kernel's `IN_IGNORED`.
-    fn unwatch(&mut self, _r: ResourceId) {}
+    /// Tear down `r`'s kernel-side registration with the wd-reuse race
+    /// mitigation: the wd is marked **draining** BEFORE the
+    /// `inotify_rm_watch` so any pre-existing events on it are dropped
+    /// from the next `poll_until` (Phase B9) iteration; the kernel's
+    /// synchronous `IN_IGNORED` arrives later in the drain stream and
+    /// reaps the flag. See § 1.3 of the inotify port plan.
+    ///
+    /// Idempotent on stale ids — clearing the side maps (`suppressed`,
+    /// `kinds`) before the `by_resource` removal is safe regardless of
+    /// whether `r` was actually held; the kernel-side `rm_watch` only
+    /// runs when `by_resource` had an entry to remove.
+    ///
+    /// `EINVAL` from `rm_watch` is benign: the kernel had already
+    /// reaped the wd (the inode was deleted out from under us) and
+    /// queued `IN_IGNORED` synchronously at that time. The
+    /// `draining_wds` flag still covers the window — any pre-deletion
+    /// events queued before the kernel's reap are dropped, and the
+    /// `IN_IGNORED` consumption clears the flag.
+    fn unwatch(&mut self, r: ResourceId) {
+        self.suppressed.remove(r);
+        self.kinds.remove(r);
+        let Some(entry) = self.by_resource.remove(r) else {
+            // Stale id — every map keyed by `r` is now empty (or was
+            // already empty); no kernel-side work to do.
+            return;
+        };
+
+        let wd = entry.wd;
+
+        // Mark the wd as draining BEFORE `rm_watch`. The kernel queues
+        // `IN_IGNORED` synchronously at rm_watch time; pre-existing
+        // events on `wd` that haven't reached our drain buffer yet are
+        // stale (the inode is no longer the ResourceId's intent), and
+        // a subsequent `inotify_add_watch` from a fresh `watch()` call
+        // may return the same `wd` for an unrelated inode before our
+        // drain consumes the `IN_IGNORED`. The flag drops every event
+        // on `wd` until the `IN_IGNORED` arrives and reaps it.
+        self.draining_wds.insert(wd);
+
+        // Drop the `by_wd` entry NOW. A subsequent `watch()` on the
+        // same kernel-reused wd installs a fresh `by_wd[wd]` mapping
+        // with the new ResourceId; the draining flag still holds, so
+        // stale events on the old inode drop until `IN_IGNORED`
+        // clears it.
+        self.by_wd.remove(&wd);
+
+        if let Err(e) = ffi::inotify_rm_watch(&self.inotify_fd, wd) {
+            // EINVAL ⇒ kernel had already reaped the wd (the inode
+            // was deleted before our explicit `rm_watch`). The
+            // `IN_IGNORED` was queued at deletion time and will
+            // arrive on the drain stream; `draining_wds` covers the
+            // gap. Anything else is unexpected and worth a warn —
+            // EBADF on inotify_fd, for instance, would be a
+            // structural break.
+            if e.raw_os_error() != Some(libc::EINVAL) {
+                tracing::warn!(
+                    ?r,
+                    wd,
+                    error = ?e,
+                    "inotify_rm_watch failed (non-EINVAL); kernel-side state may leak"
+                );
+            }
+        }
+
+        tracing::debug!(?r, wd, "inotify unwatch");
+    }
 
     /// Stub. Phase B8 lands the real body — user-space filter via the
     /// `suppressed` map. inotify has no kernel-level disable analogue,
