@@ -11,11 +11,14 @@
 //! to a transient buffer, restoring FIFO at end-of-pump.
 
 use crossbeam::channel::{Receiver, Sender, bounded};
+use std::num::NonZeroUsize;
 
 /// Counting semaphore.
 ///
-/// Construct with `n.max(1)` tokens — a configured `0` would prevent
-/// any spawns and is treated as a misconfiguration, not a feature.
+/// The `n: NonZeroUsize` constructor argument encodes the "at least one
+/// permit" invariant in the type system; the public boundary
+/// ([`crate::SubprocessActuator::new`]) resolves the `0`-as-default
+/// sentinel into a [`NonZeroUsize`] before reaching this layer.
 #[derive(Debug)]
 pub struct Permits {
     /// Receiver side: acquiring a token consumes one.
@@ -26,10 +29,10 @@ pub struct Permits {
 }
 
 impl Permits {
-    /// Construct with `n` tokens (clamped to `>= 1`).
+    /// Construct with `n` tokens.
     #[must_use]
-    pub fn new(n: usize) -> Self {
-        let n = n.max(1);
+    pub fn new(n: NonZeroUsize) -> Self {
+        let n = n.get();
         let (tx, rx) = bounded::<()>(n);
         for _ in 0..n {
             tx.send(())
@@ -59,11 +62,14 @@ pub struct Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        // If the [`Permits`] has been dropped (channel disconnected),
-        // the send fails silently — the token vanishes with the
-        // already-gone semaphore. Acceptable: actuator is being torn
-        // down.
-        let _ = self.tx.send(());
+        // `try_send` is non-blocking: under our invariant the channel
+        // can never be at capacity here (we hold one of N tokens, so at
+        // most N-1 sit in the channel). On `Full(_)` the invariant has
+        // been broken (e.g. a double-drop in a buggy wrapper) and we
+        // discard the token rather than deadlock. On `Disconnected(_)`
+        // the [`Permits`] has been dropped — the token vanishes with
+        // the already-gone semaphore (actuator teardown).
+        let _ = self.tx.try_send(());
     }
 }
 
@@ -77,9 +83,13 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    fn nz(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).expect("test setup: n must be non-zero")
+    }
+
     #[test]
     fn permits_with_n_tokens_allows_n_acquisitions() {
-        let p = Permits::new(3);
+        let p = Permits::new(nz(3));
         let _a = p.try_acquire().expect("first acquire");
         let _b = p.try_acquire().expect("second acquire");
         let _c = p.try_acquire().expect("third acquire");
@@ -88,7 +98,7 @@ mod tests {
 
     #[test]
     fn permit_drop_releases_for_subsequent_acquire() {
-        let p = Permits::new(1);
+        let p = Permits::new(nz(1));
         {
             let _g = p.try_acquire().expect("acquire");
             assert!(p.try_acquire().is_none(), "second acquire fails while held");
@@ -97,15 +107,8 @@ mod tests {
     }
 
     #[test]
-    fn permits_with_zero_clamps_to_one() {
-        let p = Permits::new(0);
-        let _g = p.try_acquire().expect("clamped to one token");
-        assert!(p.try_acquire().is_none(), "only one token");
-    }
-
-    #[test]
     fn permits_concurrent_acquire_release_safe() {
-        let p = Arc::new(Permits::new(4));
+        let p = Arc::new(Permits::new(nz(4)));
         let counter = Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::new();
         for _ in 0..8 {
@@ -133,7 +136,7 @@ mod tests {
 
     #[test]
     fn permits_drop_with_held_permits_does_not_panic() {
-        let p = Permits::new(2);
+        let p = Permits::new(nz(2));
         let g = p.try_acquire().expect("acquire");
         drop(p);
         drop(g); // permit's send to a dropped Permits silently fails — no panic
@@ -141,7 +144,7 @@ mod tests {
 
     #[test]
     fn permits_debug_does_not_drain_tokens() {
-        let p = Permits::new(2);
+        let p = Permits::new(nz(2));
         let _ = format!("{p:?}");
         let _a = p.try_acquire().expect("acquire post-Debug");
         let _b = p.try_acquire().expect("acquire post-Debug");

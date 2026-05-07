@@ -11,10 +11,12 @@
 //! whose pending was just replaced) doesn't get pushed twice.
 
 use crate::permits::{Permit, Permits};
-use crate::spawner::{ChildSignaler, Spawner};
+use crate::spawner::{ChildSignaler, ChildWaiter, Spawner};
 use crossbeam::channel::Sender;
-use specter_core::{CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId};
+use specter_core::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId};
 use std::collections::{BTreeMap, VecDeque};
+use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 
 /// Policy for [`ActuatorState::handle_reap_inner`]: during normal
@@ -48,16 +50,14 @@ pub(crate) struct Slot {
     pub in_ready_queue: bool,
 }
 
-#[allow(dead_code)] // `pid` and `tmp_path` are diagnostic-only fields.
 pub(crate) struct RunningJob {
     pub pid: u32,
+    // `sub` and `correlation` are debug-only — read by the manual
+    // [`Debug`] impl below to surface job context in tracing dumps;
+    // not consulted by reap or shutdown paths.
     pub sub: SubId,
     pub correlation: CorrelationId,
     pub signaler: Box<dyn ChildSignaler>,
-    /// `Some` iff a tmp diff file was created and `SPECTER_DIFF_PATH` set.
-    /// The wait thread owns the canonical path (for cleanup); this copy
-    /// is retained for shutdown-time visibility.
-    pub tmp_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for RunningJob {
@@ -66,7 +66,6 @@ impl std::fmt::Debug for RunningJob {
             .field("pid", &self.pid)
             .field("sub", &self.sub)
             .field("correlation", &self.correlation)
-            .field("tmp_path", &self.tmp_path)
             .finish_non_exhaustive()
     }
 }
@@ -80,7 +79,7 @@ pub(crate) struct ActuatorState {
 }
 
 impl ActuatorState {
-    pub fn new(concurrency: usize) -> Self {
+    pub fn new(concurrency: NonZeroUsize) -> Self {
         Self {
             slots: BTreeMap::new(),
             ready_queue: VecDeque::new(),
@@ -216,7 +215,6 @@ impl ActuatorState {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)] // effect's fields are cloned individually; ownership transfer documents the responsibility
     fn spawn_effect(
         &mut self,
         key: DedupKey,
@@ -226,12 +224,22 @@ impl ActuatorState {
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
     ) {
+        let Effect {
+            command: CommandResolved { argv },
+            mut env,
+            cwd,
+            correlation,
+            capture_output,
+            diff,
+            ..
+        } = effect;
+
         // Materialize the diff tmp file (best-effort: on write failure we
         // proceed without SPECTER_DIFF_PATH; the user's command sees no
         // diff file and reports a missing-var error on its own if it
         // requires one).
-        let tmp_path = effect.diff.as_ref().and_then(|diff| {
-            let path = crate::tmp::tmp_path(effect.correlation);
+        let tmp_path = diff.as_ref().and_then(|diff| {
+            let path = crate::tmp::tmp_path(correlation);
             match crate::tmp::write_diff_file(&path, diff) {
                 Ok(()) => Some(path),
                 Err(e) => {
@@ -245,19 +253,12 @@ impl ActuatorState {
             }
         });
 
-        // Build the final env (clone effect.env + maybe SPECTER_DIFF_PATH).
-        let mut env = effect.env.clone();
         if let Some(p) = tmp_path.as_ref() {
             env.push((
                 "SPECTER_DIFF_PATH".to_owned(),
                 p.to_string_lossy().into_owned(),
             ));
         }
-
-        let argv = effect.command.argv.clone();
-        let cwd = effect.cwd.clone();
-        let correlation = effect.correlation;
-        let capture_output = effect.capture_output;
 
         let handles = match spawner.spawn(&argv, &env, &cwd, capture_output) {
             Ok(h) => h,
@@ -298,7 +299,6 @@ impl ActuatorState {
                 sub,
                 correlation,
                 signaler,
-                tmp_path: tmp_path.clone(),
             });
         }
 
@@ -306,19 +306,22 @@ impl ActuatorState {
 
         // Spawn the wait thread. The wait_loop owns the waiter, the
         // permit (released on drop), and the tmp_path (for cleanup
-        // post-wait).
+        // post-wait). `wait_key` is the closure-bound clone; `key`
+        // stays available so the spawn-failure log retains it.
         let reap_tx = reap_tx.clone();
-        let tmp_path_for_wait = tmp_path;
         let wait_key = key.clone();
         if let Err(e) = std::thread::Builder::new()
-            .name(format!("specter-actuator-wait-{pid}"))
+            // Linux pthread_setname_np truncates to 15 chars + null;
+            // `act-wait-` is 9 chars, leaving room for a 6-digit pid
+            // unscathed. macOS allows 64 bytes.
+            .name(format!("act-wait-{pid}"))
             .spawn(move || {
-                super::wait_loop(
+                wait_loop(
                     waiter,
                     wait_key,
                     sub,
                     correlation,
-                    tmp_path_for_wait,
+                    tmp_path,
                     permit,
                     reap_tx,
                 );
@@ -334,6 +337,64 @@ impl ActuatorState {
             // will kill the orphan if reachable.
         }
     }
+}
+
+/// Wait-thread body. Block on `waiter.wait()`; on return, clean up the
+/// tmp file, release the permit, send a [`super::Reaped`] to the
+/// controller.
+///
+/// Two orderings are load-bearing:
+///
+/// 1. The waiter sets `dead = true` (production impl) before returning,
+///    so a controller signal racing this thread observes `dead = true`
+///    and short-circuits — preventing a stale signal against a reaped
+///    (and possibly pid-reused) child.
+///
+/// 2. Permit release precedes reap notification. Spawns for *other*
+///    Subs can dispatch immediately on the freed permit even if the
+///    reap channel is briefly saturated. Spawns for the *same* Sub
+///    still wait for the controller to drain `running_per_sub[sub]`
+///    when it processes the [`super::Reaped`] — by design (per-Sub
+///    serialization). The brief stale-counter window between
+///    `drop(permit)` and `handle_reap` is benign: same-Sub items
+///    defer one extra pump cycle, no over-spawning.
+#[allow(clippy::needless_pass_by_value)] // closure-spawned: arguments owned for the thread
+fn wait_loop(
+    waiter: Box<dyn ChildWaiter>,
+    key: DedupKey,
+    sub: SubId,
+    correlation: CorrelationId,
+    tmp_path: Option<PathBuf>,
+    permit: Permit,
+    reap_tx: Sender<super::Reaped>,
+) {
+    let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| waiter.wait())) {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            tracing::warn!(?key, ?e, "wait failed");
+            EffectOutcome::Failed {
+                exit_code: None,
+                signal: None,
+            }
+        }
+        Err(_) => {
+            tracing::error!(?key, "wait panicked");
+            EffectOutcome::Failed {
+                exit_code: None,
+                signal: None,
+            }
+        }
+    };
+    if let Some(p) = tmp_path.as_ref() {
+        crate::tmp::cleanup(p);
+    }
+    drop(permit);
+    let _ = reap_tx.send(super::Reaped {
+        key,
+        sub,
+        correlation,
+        outcome,
+    });
 }
 
 #[inline]

@@ -79,6 +79,15 @@ pub trait ChildWaiter: Send {
 /// when their paired waiter has already returned (the production impl
 /// uses an `Arc<AtomicBool>`); ESRCH from the actual `kill(2)` is
 /// collapsed to `Ok(())` as a defense-in-depth layer.
+///
+/// Neither layer fully closes the PID-reuse race: between `child.wait()`
+/// returning (kernel reaps the zombie; pid eligible for reuse) and the
+/// waiter setting the shared flag, a brief window exists where a signal
+/// could land on an unrelated process at the same pid. ESRCH-collapse
+/// does not help here — a reused pid points at a real process and the
+/// syscall returns success. The window is small but live on systems
+/// with high pid pressure; v2 may switch to process descriptors
+/// (pidfd / pdfork).
 pub trait ChildSignaler: Send + Sync {
     /// Send SIGTERM. ESRCH (child already gone) is collapsed to `Ok(())`.
     /// Short-circuits to `Ok(())` if the paired waiter has already

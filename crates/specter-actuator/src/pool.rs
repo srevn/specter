@@ -14,13 +14,11 @@
 //! SIGKILL stragglers, drain remaining reaps.
 
 mod state;
-use crate::permits::Permit;
-use crate::spawner::{ChildWaiter, Spawner};
+use crate::spawner::Spawner;
 use crossbeam::channel::{Receiver, Sender};
 use specter_core::{CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId};
 use state::ActuatorState;
-use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 /// Sentinel for "default concurrency" passed to [`SubprocessActuator::new`].
@@ -51,14 +49,18 @@ pub struct SubprocessActuator {
 impl SubprocessActuator {
     /// Construct with `concurrency` global permits. Pass
     /// [`DEFAULT_CONCURRENCY`] (`0`) to resolve to `2 * num_cpus`; non-zero
-    /// values pass through.
+    /// values pass through. The `0`-sentinel is the only place this
+    /// crate resolves "default concurrency"; everything below
+    /// [`ActuatorState::new`] receives a [`NonZeroUsize`] and trusts it.
     #[must_use]
     pub fn new(concurrency: usize) -> Self {
-        let resolved = if concurrency == 0 {
-            std::thread::available_parallelism().map_or(4, |n| n.get().saturating_mul(2))
-        } else {
-            concurrency
-        };
+        let fallback = NonZeroUsize::new(4).expect("4 is non-zero");
+        let resolved = NonZeroUsize::new(concurrency).unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .ok()
+                .and_then(|n| NonZeroUsize::new(n.get().saturating_mul(2)))
+                .unwrap_or(fallback)
+        });
         let (reap_tx, reap_rx) = crossbeam::channel::bounded::<Reaped>(64);
         Self {
             state: ActuatorState::new(resolved),
@@ -113,22 +115,22 @@ impl SubprocessActuator {
                 },
                 recv(self.reap_rx) -> msg => match msg {
                     Ok(r)  => self.state.handle_reap(r, &engine_in, spawner, &self.reap_tx),
-                    Err(_) => unreachable!("controller owns reap_tx; rx cannot disconnect"),
+                    Err(_) => {
+                        // Controller holds reap_tx, so the rx cannot disconnect under
+                        // current invariants. Logged break preserves orderly shutdown
+                        // if a future refactor reshuffles ownership.
+                        tracing::error!("reap channel disconnected; controller invariant broken");
+                        break;
+                    }
                 },
                 recv(shutdown_rx) -> _ => break,
                 recv(hard_shutdown_rx) -> _ => { hard = true; break; }
             }
         }
-        self.shutdown(&engine_in, spawner, hard, &hard_shutdown_rx);
+        self.shutdown(&engine_in, hard, &hard_shutdown_rx);
     }
 
-    fn shutdown(
-        &mut self,
-        engine_in: &Sender<Input>,
-        _spawner: &dyn Spawner,
-        hard: bool,
-        hard_shutdown_rx: &Receiver<()>,
-    ) {
+    fn shutdown(&mut self, engine_in: &Sender<Input>, hard: bool, hard_shutdown_rx: &Receiver<()>) {
         // Phase 1: SIGTERM all running.
         tracing::info!("shutdown phase 1: SIGTERM running children");
         for slot in self.state.slots.values() {
@@ -196,53 +198,6 @@ impl SubprocessActuator {
     fn has_running(&self) -> bool {
         self.state.slots.values().any(|s| s.running.is_some())
     }
-}
-
-/// Wait-thread body. Block on `waiter.wait()`; on return, clean up the
-/// tmp file, release the permit, send a [`Reaped`] to the controller.
-///
-/// Order is load-bearing: the waiter sets `dead=true` (production impl)
-/// before returning, so a controller signal racing this thread sees
-/// `dead=true` and short-circuits. Permit release precedes reap
-/// notification so the controller can dispatch the next spawn even if
-/// the reap channel is briefly saturated.
-#[allow(clippy::needless_pass_by_value)] // closure-spawned: arguments owned for the thread
-pub(crate) fn wait_loop(
-    waiter: Box<dyn ChildWaiter>,
-    key: DedupKey,
-    sub: SubId,
-    correlation: CorrelationId,
-    tmp_path: Option<PathBuf>,
-    permit: Permit,
-    reap_tx: Sender<Reaped>,
-) {
-    let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| waiter.wait())) {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            tracing::warn!(?key, ?e, "wait failed");
-            EffectOutcome::Failed {
-                exit_code: None,
-                signal: None,
-            }
-        }
-        Err(_) => {
-            tracing::error!(?key, "wait panicked");
-            EffectOutcome::Failed {
-                exit_code: None,
-                signal: None,
-            }
-        }
-    };
-    if let Some(p) = tmp_path.as_ref() {
-        crate::tmp::cleanup(p);
-    }
-    drop(permit);
-    let _ = reap_tx.send(Reaped {
-        key,
-        sub,
-        correlation,
-        outcome,
-    });
 }
 
 #[cfg(all(test, feature = "testkit"))]

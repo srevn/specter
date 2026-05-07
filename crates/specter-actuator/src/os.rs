@@ -17,9 +17,18 @@
 //! with more than ~10k directories trip it. fork+exec has no such
 //! cap and is the load-bearing fix for deep-tree workloads.
 //!
-//! The PID-reuse race during shutdown signaling is closed in two layers:
-//! a shared `Arc<AtomicBool>` flag set by [`OsChildWaiter::wait`] before
-//! returning, plus ESRCH-collapse at the syscall layer.
+//! The PID-reuse race during shutdown signaling is *narrowed* — not
+//! eliminated — by two layers. [`OsChildWaiter::wait`] sets a shared
+//! `Arc<AtomicBool>` immediately after `child.wait()` returns; a
+//! controller signal observing `dead == true` short-circuits and never
+//! issues a `kill(2)`. The kernel reaps the zombie inside `child.wait()`,
+//! so the pid is eligible for reuse the moment `wait()` returns; a small
+//! window remains before the flag store is visible to the controller. In
+//! that window ESRCH-collapse does *not* save us: the (reused) pid points
+//! at a real, unrelated process and `kill(2)` returns success against it.
+//! On busy systems with high pid pressure (CI runners, build servers) the
+//! race is small but live; v2 may switch to process descriptors (Linux
+//! pidfd, FreeBSD pdfork) to eliminate it entirely.
 
 use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles, Spawner};
 use specter_core::EffectOutcome;
