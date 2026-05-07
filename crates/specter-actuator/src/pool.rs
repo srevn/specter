@@ -110,7 +110,7 @@ impl SubprocessActuator {
         loop {
             crossbeam::select! {
                 recv(effects_rx) -> msg => match msg {
-                    Ok(effect) => self.state.handle_submit(effect, spawner, &self.reap_tx),
+                    Ok(effect) => self.state.handle_submit(effect, spawner, &self.reap_tx, &engine_in),
                     Err(_)     => break, // bin closed channel
                 },
                 recv(self.reap_rx) -> msg => match msg {
@@ -779,6 +779,34 @@ mod tests {
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         // Engine receives one more EffectComplete (the prior call drained
         // the first); waiting for one more here is the right count.
+        h.wait_for_effect_completes(1, Duration::from_secs(1));
+        h.shutdown();
+    }
+
+    #[test]
+    fn spawn_failure_does_not_block_same_sub_on_different_key() {
+        // Regression fence for a (now-closed) race in the synth-Reap
+        // teardown: when spawn failures synthesised a `Reaped` via a
+        // channel hop, an interleaved same-key submit could replace
+        // `slot.running` before the synth drained, then the synth
+        // would clobber the new job's state and leave the per-Sub
+        // counter desynced. The fix routes synth-Reaps directly
+        // through `handle_reap_inner` on the controller call stack.
+        //
+        // This test exercises the simpler post-failure observable:
+        // after a spawn-failure on (Sub=7, Profile=1, Resource=1), a
+        // follow-up Effect for the *same* Sub on (Profile=2,
+        // Resource=2) must spawn promptly. If `running_per_sub[7]`
+        // were stuck above zero, the per-Sub gate would defer the
+        // second submit indefinitely.
+        let mut h = Harness::new(4);
+        h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
+        h.submit(make_effect_perfile(7, 1, 1, 1));
+        h.wait_for_effect_completes(1, Duration::from_secs(1));
+        h.spawner.clear_spawn_error();
+        h.submit(make_effect_perfile(7, 2, 2, 2));
+        let s = h.wait_for_spawns(1, Duration::from_secs(1));
+        h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(1));
         h.shutdown();
     }

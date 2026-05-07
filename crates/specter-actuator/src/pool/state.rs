@@ -94,6 +94,7 @@ impl ActuatorState {
         effect: Effect,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
+        engine_in: &Sender<Input>,
     ) {
         let key = effect.key.clone();
         tracing::trace!(?key, "submit");
@@ -108,7 +109,7 @@ impl ActuatorState {
                 self.ready_queue.push_back(key);
             }
         }
-        self.pump(spawner, reap_tx);
+        self.pump(spawner, reap_tx, engine_in);
     }
 
     /// Reap handler — emit [`Input::EffectComplete`], clear running,
@@ -121,7 +122,7 @@ impl ActuatorState {
         reap_tx: &Sender<super::Reaped>,
     ) {
         self.handle_reap_inner(reaped, engine_in, ReapPolicy::Pump);
-        self.pump(spawner, reap_tx);
+        self.pump(spawner, reap_tx, engine_in);
     }
 
     /// Shutdown-phase reap handler — emit [`Input::EffectComplete`] and
@@ -174,7 +175,12 @@ impl ActuatorState {
     /// Spawn ready slots while permits + per-Sub gates allow. Items
     /// blocked by either gate are deferred to a transient buffer and
     /// restored at end so FIFO is preserved across pump invocations.
-    pub fn pump(&mut self, spawner: &dyn Spawner, reap_tx: &Sender<super::Reaped>) {
+    pub fn pump(
+        &mut self,
+        spawner: &dyn Spawner,
+        reap_tx: &Sender<super::Reaped>,
+        engine_in: &Sender<Input>,
+    ) {
         let mut blocked: VecDeque<DedupKey> = VecDeque::new();
         while let Some(key) = self.ready_queue.pop_front() {
             // Per-Sub gate.
@@ -203,7 +209,7 @@ impl ActuatorState {
                 drop(permit);
                 continue;
             };
-            self.spawn_effect(key, sub, effect, permit, spawner, reap_tx);
+            self.spawn_effect(key, sub, effect, permit, spawner, reap_tx, engine_in);
         }
         for k in blocked {
             // The flag is already true (we set it when we pushed and only
@@ -223,6 +229,7 @@ impl ActuatorState {
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
+        engine_in: &Sender<Input>,
     ) {
         let Effect {
             command: CommandResolved { argv },
@@ -268,21 +275,31 @@ impl ActuatorState {
                     crate::tmp::cleanup(p);
                 }
                 drop(permit);
-                // Synthesize a Reaped::Failed and route through the
-                // normal reap path — handle_reap is reentrant via pump
-                // but we're already inside pump, so we send-and-let-the-
-                // controller-pick-up rather than calling handle_reap
-                // directly. Sending to reap_tx is non-blocking in the
-                // typical case (bounded(64)).
-                let _ = reap_tx.send(super::Reaped {
-                    key,
-                    sub,
-                    correlation,
-                    outcome: EffectOutcome::Failed {
-                        exit_code: None,
-                        signal: None,
+                // Inline teardown rather than `reap_tx.send`. A channel
+                // round-trip would let a same-key submit drain off
+                // `effects_rx` before this synth Reap drains off
+                // `reap_rx`, repopulating `slot.running` with a fresh
+                // job; the picked-up Reap would then clobber that
+                // job's signaler and `slots.remove` it, leaking the
+                // SIGTERM target on shutdown and double-allowing
+                // same-Sub spawns past the per-Sub gate. Direct call
+                // collapses the window. `running_per_sub` was not
+                // bumped on this branch (saturating_sub no-ops on the
+                // absent entry); pending was taken in pump, so Pump
+                // policy removes the slot.
+                self.handle_reap_inner(
+                    super::Reaped {
+                        key,
+                        sub,
+                        correlation,
+                        outcome: EffectOutcome::Failed {
+                            exit_code: None,
+                            signal: None,
+                        },
                     },
-                });
+                    engine_in,
+                    ReapPolicy::Pump,
+                );
                 return;
             }
         };
@@ -304,11 +321,12 @@ impl ActuatorState {
 
         tracing::debug!(?key, pid, "spawned");
 
-        // Spawn the wait thread. The wait_loop owns the waiter, the
-        // permit (released on drop), and the tmp_path (for cleanup
-        // post-wait). `wait_key` is the closure-bound clone; `key`
-        // stays available so the spawn-failure log retains it.
-        let reap_tx = reap_tx.clone();
+        // Pre-clone what the wait_loop closure consumes; `Builder::spawn`
+        // drops the closure (and its captures) on failure, but the
+        // failure branch below still needs `tmp_path` for cleanup and
+        // `key` for the synth Reap.
+        let tmp_path_for_thread = tmp_path.clone();
+        let reap_tx_for_thread = reap_tx.clone();
         let wait_key = key.clone();
         if let Err(e) = std::thread::Builder::new()
             // Linux pthread_setname_np truncates to 15 chars + null;
@@ -321,20 +339,46 @@ impl ActuatorState {
                     wait_key,
                     sub,
                     correlation,
-                    tmp_path,
+                    tmp_path_for_thread,
                     permit,
-                    reap_tx,
+                    reap_tx_for_thread,
                 );
             })
         {
-            // Couldn't spawn the wait thread (EAGAIN — RLIMIT_NPROC).
-            // The child is running; we have no one to wait for it. The
-            // best we can do is log and synthesize Failed; the OS will
-            // eventually reap the zombie when the actuator process
-            // exits.
-            tracing::error!(?key, pid, ?e, "wait thread spawn failed");
-            // The signaler is in the slot; controller's shutdown path
-            // will kill the orphan if reachable.
+            tracing::error!(
+                ?key,
+                pid,
+                ?e,
+                "wait thread spawn failed; SIGKILL orphan + synth Failed",
+            );
+            // The child is alive but has no waiter. Without SIGKILL its
+            // user command runs unmonitored to completion (writing to
+            // the watched tree), then sits as an unreaped zombie until
+            // the actuator exits. The signaler lives in `slot.running`
+            // until `handle_reap_inner` clears the slot, so SIGKILL
+            // must precede teardown.
+            if let Some(slot) = self.slots.get(&key)
+                && let Some(job) = slot.running.as_ref()
+                && let Err(kill_err) = job.signaler.signal_kill()
+            {
+                tracing::warn!(?key, pid, ?kill_err, "orphan SIGKILL failed");
+            }
+            if let Some(p) = tmp_path.as_ref() {
+                crate::tmp::cleanup(p);
+            }
+            self.handle_reap_inner(
+                super::Reaped {
+                    key,
+                    sub,
+                    correlation,
+                    outcome: EffectOutcome::Failed {
+                        exit_code: None,
+                        signal: None,
+                    },
+                },
+                engine_in,
+                ReapPolicy::Pump,
+            );
         }
     }
 }
@@ -401,5 +445,292 @@ fn wait_loop(
 pub(crate) const fn sub_of_key(key: &DedupKey) -> SubId {
     match *key {
         DedupKey::PerFile { sub, .. } | DedupKey::Subtree { sub, .. } => sub,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Direct tests for [`ActuatorState::handle_reap_inner`] — the
+    //! teardown that both the success and failure spawn paths route
+    //! through. The two synth-Reap callers (spawn-failure inline and
+    //! wait-thread-spawn-failure inline) are exercised here against
+    //! pre-loaded state, since neither has a fault-injection seam in
+    //! the controller harness.
+    use super::super::Reaped;
+    use super::{ActuatorState, ReapPolicy, RunningJob, Slot};
+    use crate::spawner::ChildSignaler;
+    use crossbeam::channel::unbounded;
+    use specter_core::{
+        CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, ProfileId,
+        ResourceId, SubId,
+    };
+    use std::io;
+    use std::num::NonZeroUsize;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn nz(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).expect("test setup: n must be non-zero")
+    }
+
+    fn unique_sub_id(seed: u64) -> SubId {
+        use slotmap::KeyData;
+        SubId::from(KeyData::from_ffi(seed))
+    }
+
+    fn unique_resource_id(seed: u64) -> ResourceId {
+        use slotmap::KeyData;
+        ResourceId::from(KeyData::from_ffi(seed))
+    }
+
+    fn unique_profile_id(seed: u64) -> ProfileId {
+        use slotmap::KeyData;
+        ProfileId::from(KeyData::from_ffi(seed))
+    }
+
+    fn perfile_key(sub_seed: u64, profile_seed: u64, res_seed: u64) -> DedupKey {
+        DedupKey::PerFile {
+            sub: unique_sub_id(sub_seed),
+            profile: unique_profile_id(profile_seed),
+            resource: unique_resource_id(res_seed),
+        }
+    }
+
+    fn dummy_effect(key: DedupKey, target: ResourceId, corr: u64) -> Effect {
+        Effect {
+            key,
+            target,
+            command: CommandResolved {
+                argv: vec!["/bin/true".into()],
+            },
+            env: Vec::new(),
+            cwd: PathBuf::from("/tmp"),
+            forced: false,
+            correlation: CorrelationId(corr),
+            diff: None,
+            capture_output: false,
+        }
+    }
+
+    /// Counts SIGTERM / SIGKILL invocations; never errors. Shared
+    /// across `RunningJob` constructions in tests so we can assert
+    /// neither was sent during pure-state teardown.
+    #[derive(Default)]
+    struct CountingSignaler {
+        term: AtomicUsize,
+        kill: AtomicUsize,
+    }
+    impl ChildSignaler for CountingSignaler {
+        fn signal_term(&self) -> io::Result<()> {
+            self.term.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn signal_kill(&self) -> io::Result<()> {
+            self.kill.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn stub_running_job(sub: SubId, corr: u64, signaler: Arc<CountingSignaler>) -> RunningJob {
+        struct Adapter(Arc<CountingSignaler>);
+        impl ChildSignaler for Adapter {
+            fn signal_term(&self) -> io::Result<()> {
+                self.0.signal_term()
+            }
+            fn signal_kill(&self) -> io::Result<()> {
+                self.0.signal_kill()
+            }
+        }
+        RunningJob {
+            pid: 99_999,
+            sub,
+            correlation: CorrelationId(corr),
+            signaler: Box::new(Adapter(signaler)),
+        }
+    }
+
+    /// Spawn-failure shape: the slot exists (created in `handle_submit`)
+    /// but `running` was never set and `running_per_sub` was never
+    /// bumped (the spawn failed before the increment). The synth Reap
+    /// must remove the slot, leave the counter map empty (no
+    /// underflow), and emit `EffectComplete::Failed` to the engine.
+    #[test]
+    fn handle_reap_inner_synth_for_unspawned_slot_clears_state() {
+        let mut state = ActuatorState::new(nz(2));
+        let key = perfile_key(1, 1, 1);
+        let sub = unique_sub_id(1);
+        state.slots.insert(key.clone(), Slot::default());
+        let (tx, rx) = unbounded::<Input>();
+
+        state.handle_reap_inner(
+            Reaped {
+                key: key.clone(),
+                sub,
+                correlation: CorrelationId(1),
+                outcome: EffectOutcome::Failed {
+                    exit_code: None,
+                    signal: None,
+                },
+            },
+            &tx,
+            ReapPolicy::Pump,
+        );
+
+        assert!(state.slots.is_empty(), "slot removed");
+        assert!(
+            state.running_per_sub.is_empty(),
+            "counter not underflowed by saturating_sub against absent entry",
+        );
+        assert!(state.ready_queue.is_empty());
+        match rx.try_recv() {
+            Ok(Input::EffectComplete {
+                sub: s,
+                key: k,
+                result,
+            }) => {
+                assert_eq!(s, sub);
+                assert_eq!(k, key);
+                assert!(matches!(
+                    result,
+                    EffectOutcome::Failed {
+                        exit_code: None,
+                        signal: None,
+                    }
+                ));
+            }
+            other => panic!("expected EffectComplete::Failed; got {other:?}"),
+        }
+    }
+
+    /// Wait-thread-spawn-failure shape: spawn succeeded so `running`
+    /// is set and `running_per_sub[sub] == 1`, but the wait thread
+    /// failed to start. The synth Reap must drop the signaler from
+    /// `running`, decrement the counter to zero (removing the entry),
+    /// and remove the slot.
+    #[test]
+    fn handle_reap_inner_synth_for_running_slot_decrements_and_removes() {
+        let mut state = ActuatorState::new(nz(2));
+        let key = perfile_key(2, 2, 2);
+        let sub = unique_sub_id(2);
+        let signaler = Arc::new(CountingSignaler::default());
+        let slot = Slot {
+            running: Some(stub_running_job(sub, 5, Arc::clone(&signaler))),
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.running_per_sub.insert(sub, 1);
+        let (tx, rx) = unbounded::<Input>();
+
+        state.handle_reap_inner(
+            Reaped {
+                key,
+                sub,
+                correlation: CorrelationId(5),
+                outcome: EffectOutcome::Failed {
+                    exit_code: None,
+                    signal: None,
+                },
+            },
+            &tx,
+            ReapPolicy::Pump,
+        );
+
+        assert!(state.slots.is_empty(), "slot removed");
+        assert!(state.running_per_sub.is_empty(), "counter cleared");
+        assert_eq!(
+            signaler.term.load(Ordering::SeqCst),
+            0,
+            "no SIGTERM during teardown",
+        );
+        assert_eq!(
+            signaler.kill.load(Ordering::SeqCst),
+            0,
+            "no SIGKILL during teardown",
+        );
+        let _ = rx.try_recv().expect("EffectComplete emitted");
+    }
+
+    /// Pump policy with non-empty pending re-queues the slot for the
+    /// next pump cycle; running is cleared but the slot stays alive
+    /// so handle_submit's Latest coalesce continues to work.
+    #[test]
+    fn handle_reap_inner_pump_with_pending_requeues_for_respawn() {
+        let mut state = ActuatorState::new(nz(2));
+        let key = perfile_key(3, 3, 3);
+        let sub = unique_sub_id(3);
+        let res = unique_resource_id(3);
+        let signaler = Arc::new(CountingSignaler::default());
+        let slot = Slot {
+            running: Some(stub_running_job(sub, 7, signaler)),
+            pending: Some(dummy_effect(key.clone(), res, 8)),
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.running_per_sub.insert(sub, 1);
+        let (tx, _rx) = unbounded::<Input>();
+
+        state.handle_reap_inner(
+            Reaped {
+                key: key.clone(),
+                sub,
+                correlation: CorrelationId(7),
+                outcome: EffectOutcome::Ok,
+            },
+            &tx,
+            ReapPolicy::Pump,
+        );
+
+        let slot_after = state.slots.get(&key).expect("slot preserved with pending");
+        assert!(slot_after.running.is_none(), "running cleared");
+        assert!(
+            slot_after.pending.is_some(),
+            "pending preserved for re-spawn"
+        );
+        assert!(slot_after.in_ready_queue);
+        assert_eq!(
+            state.ready_queue.iter().collect::<Vec<_>>(),
+            vec![&key],
+            "key re-queued for next pump",
+        );
+        assert!(state.running_per_sub.is_empty());
+    }
+
+    /// Drop policy (shutdown phase) removes the slot regardless of
+    /// pending; pending is silently dropped, mirroring the
+    /// `handle_reap_no_pump` shutdown contract.
+    #[test]
+    fn handle_reap_inner_drop_policy_removes_slot_even_with_pending() {
+        let mut state = ActuatorState::new(nz(2));
+        let key = perfile_key(4, 4, 4);
+        let sub = unique_sub_id(4);
+        let res = unique_resource_id(4);
+        let signaler = Arc::new(CountingSignaler::default());
+        let slot = Slot {
+            running: Some(stub_running_job(sub, 11, signaler)),
+            pending: Some(dummy_effect(key.clone(), res, 12)),
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.running_per_sub.insert(sub, 1);
+        let (tx, _rx) = unbounded::<Input>();
+
+        state.handle_reap_inner(
+            Reaped {
+                key,
+                sub,
+                correlation: CorrelationId(11),
+                outcome: EffectOutcome::Failed {
+                    exit_code: None,
+                    signal: None,
+                },
+            },
+            &tx,
+            ReapPolicy::Drop,
+        );
+
+        assert!(state.slots.is_empty(), "slot removed under Drop policy");
+        assert!(state.running_per_sub.is_empty());
+        assert!(state.ready_queue.is_empty(), "no re-queue under Drop");
     }
 }
