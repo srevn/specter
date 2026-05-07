@@ -49,8 +49,8 @@
 
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use specter_core::{
-    ClassSet, DescentState, Diagnostic, EntryKind, ProfileId, ProfileState, ResourceId,
-    ResourceKind, ResourceRole, StepOutput, TreeSnapshot,
+    AnchorClaim, ClassSet, DescentState, Diagnostic, EntryKind, ProfileId, ProfileState,
+    ResourceId, ResourceKind, ResourceRole, StepOutput, TreeSnapshot,
 };
 use std::time::Instant;
 
@@ -389,13 +389,13 @@ impl crate::Engine {
                 .get(profile_id)
                 .map_or(ClassSet::EMPTY, |p| p.events_union);
 
-            // Transition Pending → Idle and set anchor_contribution = true
-            // BEFORE the refcount ops so the recompute sees the post-
-            // transition contribution attribution: the prefix's STRUCTURE
-            // contribution is gone (state no longer Pending), the anchor's
-            // mask contribution is owed (anchor_contribution = true).
+            // Transition Pending → Idle and set anchor_claim = Held BEFORE
+            // the refcount ops so the recompute sees the post-transition
+            // contribution attribution: the prefix's STRUCTURE contribution
+            // is gone (state no longer Pending), the anchor's mask
+            // contribution is owed (`anchor_claim == AnchorClaim::Held`).
             if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.anchor_contribution = true;
+                p.anchor_claim = AnchorClaim::Held;
                 p.state = ProfileState::Idle;
             }
 

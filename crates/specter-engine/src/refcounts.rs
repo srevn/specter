@@ -33,8 +33,8 @@
 
 use crate::coverage::covers;
 use specter_core::{
-    ClassSet, Profile, ProfileId, ProfileMap, ProfileState, Resource, ResourceId, ResourceKind,
-    StepOutput, Tree, WatchOp,
+    AnchorClaim, ClassSet, Profile, ProfileId, ProfileMap, ProfileState, Resource, ResourceId,
+    ResourceKind, StepOutput, Tree, WatchOp,
 };
 
 /// `+watch_demand` on `r`, contributing `contribution` to `r.events_union`.
@@ -100,9 +100,9 @@ pub fn add_watch_demand(
 /// for the removal.
 ///
 /// `profiles` is the registry the recompute walks. Callers pass
-/// `&self.profiles` after the releasing Profile's state-tracking flag
-/// (`anchor_contribution`, `state == Pending(d)`, or `watch_root_parent`)
-/// has been cleared, so the recompute models the post-release state.
+/// `&self.profiles` after the releasing Profile's state-tracking field
+/// (`anchor_claim`, `state == Pending(d)`, or `watch_root_parent`) has
+/// been cleared, so the recompute models the post-release state.
 ///
 /// `releasing_descendant` — when `Some(pid)`, the recompute (multi-
 /// contributor case) skips `pid`'s **descendant** contribution to `r`.
@@ -182,7 +182,7 @@ pub fn sub_watch_demand(
 /// `resource` into a running union. Four contribution sources, each
 /// matched to its dedicated bookkeeping on `Profile`:
 ///
-/// 1. **Anchor.** `Profile.anchor_contribution == true` AND
+/// 1. **Anchor.** `Profile.anchor_claim == AnchorClaim::Held` AND
 ///    `Profile.resource == resource` ⇒ contributes `Profile.events_union`.
 /// 2. **Watch-root parent.** `Profile.watch_root_parent == Some(resource)`
 ///    ⇒ contributes `STRUCTURE` (the parent watch exists so the
@@ -239,10 +239,10 @@ fn profile_contribution_for(
 ) -> ClassSet {
     let mut union = ClassSet::EMPTY;
 
-    // 1. Anchor — requires the per-Profile `anchor_contribution` flag so
-    // anchor terminal events (which clear the flag) immediately stop
+    // 1. Anchor — requires the per-Profile `anchor_claim == Held` so
+    // anchor terminal events (which clear the claim) immediately stop
     // contributing.
-    if profile.anchor_contribution && profile.resource == resource {
+    if matches!(profile.anchor_claim, AnchorClaim::Held) && profile.resource == resource {
         union |= profile.events_union;
     }
 
@@ -364,8 +364,8 @@ mod tests {
         sub_suppress, sub_watch_demand,
     };
     use specter_core::{
-        ClassSet, DescentState, Profile, ProfileMap, ProfileState, ResourceKind, ResourceRole,
-        ScanConfig, StepOutput, Tree, WatchOp,
+        AnchorClaim, ClassSet, DescentState, Profile, ProfileMap, ProfileState, ResourceKind,
+        ResourceRole, ScanConfig, StepOutput, Tree, WatchOp,
     };
     use std::time::Duration;
 
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn sub_watch_demand_above_one_recomputes_union_from_profiles() {
         // Two Profiles cover the anchor; both contribute via
-        // `anchor_contribution = true`. Sub one → recompute walks the
+        // `anchor_claim = AnchorClaim::Held`. Sub one → recompute walks the
         // remaining Profile and yields its mask.
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
@@ -501,10 +501,10 @@ mod tests {
                 ClassSet::METADATA,
             ),
         );
-        // Mark anchor_contribution = true on both (simulates the post-attach
-        // state where each Profile has bumped the anchor's watch_demand).
-        profiles.get_mut(p_a).unwrap().anchor_contribution = true;
-        profiles.get_mut(p_b).unwrap().anchor_contribution = true;
+        // Mark anchor_claim = Held on both (simulates the post-attach state
+        // where each Profile has bumped the anchor's watch_demand).
+        profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::Held;
+        profiles.get_mut(p_b).unwrap().anchor_claim = AnchorClaim::Held;
 
         let mut out = StepOutput::default();
         add_watch_demand(&mut tree, r, ClassSet::CONTENT, &mut out);
@@ -515,10 +515,10 @@ mod tests {
             ClassSet::CONTENT | ClassSet::METADATA,
         );
 
-        // Simulate Profile A releasing: clear its anchor_contribution flag
-        // BEFORE sub_watch_demand so the recompute reflects the post-release
+        // Simulate Profile A releasing: clear its anchor_claim BEFORE
+        // sub_watch_demand so the recompute reflects the post-release
         // state. The recompute should then yield METADATA only.
-        profiles.get_mut(p_a).unwrap().anchor_contribution = false;
+        profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::None;
         out.watch_ops.clear();
         sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
 
@@ -559,15 +559,15 @@ mod tests {
                 ClassSet::CONTENT,
             ),
         );
-        profiles.get_mut(p_a).unwrap().anchor_contribution = true;
-        profiles.get_mut(p_b).unwrap().anchor_contribution = true;
+        profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::Held;
+        profiles.get_mut(p_b).unwrap().anchor_claim = AnchorClaim::Held;
 
         let mut out = StepOutput::default();
         add_watch_demand(&mut tree, r, ClassSet::CONTENT, &mut out);
         add_watch_demand(&mut tree, r, ClassSet::CONTENT, &mut out);
         out.watch_ops.clear();
 
-        profiles.get_mut(p_a).unwrap().anchor_contribution = false;
+        profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::None;
         sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
 
         assert_eq!(tree.get(r).unwrap().watch_demand, 1);
@@ -784,7 +784,7 @@ mod tests {
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
         );
-        profiles.get_mut(pid).unwrap().anchor_contribution = true;
+        profiles.get_mut(pid).unwrap().anchor_claim = AnchorClaim::Held;
 
         assert_eq!(
             recompute_resource_events(&tree, &profiles, r, None),
@@ -793,8 +793,8 @@ mod tests {
     }
 
     #[test]
-    fn recompute_excludes_anchor_when_anchor_contribution_false() {
-        // The flag is the source of truth; without it, the Profile's
+    fn recompute_excludes_anchor_when_anchor_claim_none() {
+        // The claim is the source of truth; without `Held`, the Profile's
         // anchor mask doesn't contribute.
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
@@ -803,8 +803,8 @@ mod tests {
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
         );
-        // anchor_contribution defaults to false.
-        assert!(!profiles.get(pid).unwrap().anchor_contribution);
+        // anchor_claim defaults to None.
+        assert_eq!(profiles.get(pid).unwrap().anchor_claim, AnchorClaim::None,);
 
         assert_eq!(
             recompute_resource_events(&tree, &profiles, r, None),
@@ -831,8 +831,8 @@ mod tests {
                 ClassSet::CONTENT | ClassSet::METADATA,
             ),
         );
-        profiles.get_mut(p_a).unwrap().anchor_contribution = true;
-        profiles.get_mut(p_b).unwrap().anchor_contribution = true;
+        profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::Held;
+        profiles.get_mut(p_b).unwrap().anchor_claim = AnchorClaim::Held;
 
         assert_eq!(
             recompute_resource_events(&tree, &profiles, r, None),
@@ -896,7 +896,7 @@ mod tests {
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
         );
-        profiles.get_mut(p_a).unwrap().anchor_contribution = true;
+        profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::Held;
 
         // Profile B: anchored elsewhere, watch_root_parent == r.
         let other_b = tree.ensure(Some(r), "child_b", ResourceRole::User);

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 /// Which Profile-side claim was the subject of a [`Diagnostic::ProfileClaimPurged`]
 /// emission. Each claim type has a dedicated bookkeeping field on
 /// [`crate::profile::Profile`]:
-/// - [`Self::Anchor`] ⇔ `Profile.anchor_contribution = true`
+/// - [`Self::Anchor`] ⇔ `Profile.anchor_claim == AnchorClaim::Held`
 /// - [`Self::WatchRootParent`] ⇔ `Profile.watch_root_parent == Some(_)`
 /// - [`Self::DescentPrefix`] ⇔ `Profile.state == Pending(_)`
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

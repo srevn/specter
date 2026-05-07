@@ -23,10 +23,11 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic, DirChild,
-    DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation,
-    ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ProfileState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, TreeSnapshot, WatchOp,
+    AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic,
+    DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
+    ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ProfileState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, TreeSnapshot,
+    WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -432,8 +433,8 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
 // `watch_root_parent → re-descent` recovery would never trigger.
 //
 // With the anchor-bypass, the event routes to
-// `on_anchor_terminal_event` regardless of mask: `anchor_contribution`
-// clears, baseline/current drop, the Profile transitions Idle, ready
+// `on_anchor_terminal_event` regardless of mask: `anchor_claim` clears
+// to None, baseline/current drop, the Profile transitions Idle, ready
 // for recovery via watch_root_parent.
 // ───────────────────────────────────────────────────────────────────────
 
@@ -460,9 +461,10 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     );
     complete_seed_burst(&mut e, pid, &attach_out, dir_snap(anchor, vec![]));
 
-    assert!(
-        e.profiles().get(pid).unwrap().anchor_contribution,
-        "post-Seed: anchor_contribution=true",
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim,
+        AnchorClaim::Held,
+        "post-Seed: anchor_claim = Held",
     );
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand, 1);
 
@@ -485,9 +487,10 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     );
 
     let p = e.profiles().get(pid).unwrap();
-    assert!(
-        !p.anchor_contribution,
-        "anchor_contribution cleared by on_anchor_terminal_event",
+    assert_eq!(
+        p.anchor_claim,
+        AnchorClaim::None,
+        "anchor_claim cleared by on_anchor_terminal_event",
     );
     assert!(p.baseline.is_none());
     assert!(p.current.is_none());
@@ -745,11 +748,10 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
 // Regression: Seed-Vanished + watch-root-parent recovery flow
 //
 // Bug: Before this fix, `dispatch_seed_vanished` left
-// `anchor_contribution = true`. A subsequent `StructureChanged` at
-// `watch_root_parent` triggered `start_pending_recovery`, which
-// transitioned the Profile to `Pending` while the flag was still true —
-// violating `reap_profile`'s `!(Pending && anchor_contribution)`
-// trichotomy invariant.
+// `anchor_claim == AnchorClaim::Held`. A subsequent `StructureChanged`
+// at `watch_root_parent` triggered `start_pending_recovery`, which
+// transitioned the Profile to `Pending` while the claim was still Held —
+// violating `reap_profile`'s `!(Pending && Held)` trichotomy invariant.
 //
 // Fix: `dispatch_seed_vanished` (and `dispatch_seed_failed`) now release
 // the anchor's contribution, mirroring `dispatch_standard_*`. The watch
@@ -757,7 +759,7 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
-fn seed_vanished_releases_anchor_contribution_for_recovery() {
+fn seed_vanished_releases_anchor_claim_for_recovery() {
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure(None, "p", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
@@ -772,7 +774,10 @@ fn seed_vanished_releases_anchor_contribution_for_recovery() {
         ClassSet::CONTENT,
         ScanConfig::builder().recursive(true).build(),
     );
-    assert!(e.profiles().get(pid).unwrap().anchor_contribution);
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim,
+        AnchorClaim::Held,
+    );
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand, 1);
 
     // Seed Vanished: anchor was found at attach but disappeared before
@@ -789,9 +794,10 @@ fn seed_vanished_releases_anchor_contribution_for_recovery() {
 
     // Anchor's contribution is released; Profile back to Idle ready for
     // recovery via watch_root_parent.
-    assert!(
-        !e.profiles().get(pid).unwrap().anchor_contribution,
-        "Seed Vanished now releases anchor_contribution (post-fix)",
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim,
+        AnchorClaim::None,
+        "Seed Vanished now releases anchor_claim (post-fix)",
     );
     assert_eq!(
         e.tree().get(anchor).unwrap().watch_demand,
@@ -815,7 +821,7 @@ fn seed_vanished_releases_anchor_contribution_for_recovery() {
 
 #[test]
 fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
-    // Step 1: attach_sub: anchor_contribution=true
+    // Step 1: attach_sub: anchor_claim = Held
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure(None, "p", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
@@ -851,16 +857,17 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
         Instant::now(),
     );
 
-    // Profile is Pending now. anchor_contribution must be false (the
-    // trichotomy invariant).
+    // Profile is Pending now. anchor_claim must be None (the trichotomy
+    // invariant).
     let p = e.profiles().get(pid).expect("Profile alive");
     assert!(
         matches!(p.state, ProfileState::Pending(_)),
         "recovery transitions Profile → Pending",
     );
-    assert!(
-        !p.anchor_contribution,
-        "post-fix: anchor_contribution=false during Pending — trichotomy holds",
+    assert_eq!(
+        p.anchor_claim,
+        AnchorClaim::None,
+        "post-fix: anchor_claim = None during Pending — trichotomy holds",
     );
 
     // Step 4: detach. reap_profile must NOT debug_assert and must NOT
@@ -880,7 +887,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
 }
 
 #[test]
-fn seed_failed_releases_anchor_contribution() {
+fn seed_failed_releases_anchor_claim() {
     // Symmetric regression for dispatch_seed_failed.
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure(None, "p", ResourceRole::User);
@@ -907,9 +914,10 @@ fn seed_failed_releases_anchor_contribution() {
         Instant::now(),
     );
 
-    assert!(
-        !e.profiles().get(pid).unwrap().anchor_contribution,
-        "Seed Failed releases anchor_contribution (post-fix, symmetric with Seed Vanished)",
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim,
+        AnchorClaim::None,
+        "Seed Failed releases anchor_claim (post-fix, symmetric with Seed Vanished)",
     );
     assert_eq!(
         e.tree().get(anchor).unwrap().watch_demand,
@@ -1242,18 +1250,19 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         t2,
     );
 
-    // P reaped; Q remains Idle with anchor_contribution cleared.
+    // P reaped; Q remains Idle with anchor_claim cleared.
     assert!(e.profiles().get(pid_p).is_none(), "P reaped");
     let q = e.profiles().get(pid_q).expect("Q survives");
-    assert!(
-        !q.anchor_contribution,
-        "Q's anchor_contribution cleared by terminal event",
+    assert_eq!(
+        q.anchor_claim,
+        AnchorClaim::None,
+        "Q's anchor_claim cleared by terminal event",
     );
     assert!(matches!(q.state, ProfileState::Idle));
 
     // Counter walked 2 → 1 → 0 cleanly. Anchor slot is reaped because
     // the surviving-child only kept it alive while P+Q were attached;
-    // Q.anchor_contribution=false leaves only the child anchor, which
+    // Q's anchor_claim = None leaves only the child anchor, which
     // does keep root alive — confirm via watch_demand counter.
     let final_counter = e.tree().get(root).map_or(0, |r| r.watch_demand);
     assert_eq!(
@@ -1453,11 +1462,11 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
     );
 
     // After Removed at the anchor: Profile is Idle (post-finalize),
-    // anchor_contribution cleared, current taken by
+    // anchor_claim cleared to None, current taken by
     // release_descendant_claim, child reaped.
     let p = e.profiles().get(pid).expect("Profile survives anchor loss");
     assert!(matches!(p.state, ProfileState::Idle));
-    assert!(!p.anchor_contribution);
+    assert_eq!(p.anchor_claim, AnchorClaim::None);
     assert!(
         p.current.is_none(),
         "current taken by release_descendant_claim"

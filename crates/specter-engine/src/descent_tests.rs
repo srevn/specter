@@ -16,9 +16,9 @@
 use crate::Engine;
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind,
-    Input, LeafEntry, ProbeOp, ProbeResponse, ProbeResult, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, SubAttachRequest, TreeSnapshot,
+    AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
+    EntryKind, Input, LeafEntry, ProbeOp, ProbeResponse, ProbeResult, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, SubAttachRequest, TreeSnapshot,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -496,10 +496,10 @@ fn descent_probe_uses_minimal_scan_config() {
 }
 
 /// Materialization at descent's anchor branch sets
-/// `Profile.anchor_contribution = true` so a later reap correctly
+/// `Profile.anchor_claim = AnchorClaim::Held` so a later reap correctly
 /// releases the anchor's `watch_demand`.
 #[test]
-fn descent_materialization_sets_anchor_contribution_flag() {
+fn descent_materialization_sets_anchor_claim_held() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     let corr = e.pending_probe(pid).unwrap();
     let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
@@ -511,9 +511,10 @@ fn descent_materialization_sets_anchor_contribution_flag() {
         }),
         Instant::now(),
     );
-    assert!(
-        e.profiles().get(pid).unwrap().anchor_contribution,
-        "anchor_contribution set on descent materialization",
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim,
+        AnchorClaim::Held,
+        "anchor_claim set to Held on descent materialization",
     );
 }
 
@@ -531,7 +532,10 @@ fn reap_pending_profile_releases_only_descent_prefix() {
     // unbumped.
     assert_eq!(e.tree().get(foo).unwrap().watch_demand, 1);
     assert_eq!(e.tree().get(bar).unwrap().watch_demand, 0);
-    assert!(!e.profiles().get(pid).unwrap().anchor_contribution);
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim,
+        AnchorClaim::None,
+    );
 
     // Detach the only Sub. Profile is Pending; Pending Profiles reap
     // immediately (they hold no burst that would resolve a deferred reap).
@@ -697,7 +701,7 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
 fn reap_profile_trichotomy_debug_assert_holds_for_pending() {
     let (mut e, sid, pid) = setup_pending_one_level();
     // Pending Profile reap path: descent_prefix.is_some() &&
-    // !had_anchor_contribution. Predicate `(some && false)` is false →
+    // anchor_claim == None. Predicate `(some && Held)` matches false →
     // assertion holds.
     let _ = e.detach_sub(sid, Instant::now());
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
@@ -706,7 +710,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_pending() {
 #[test]
 fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     // Materialized Profile reap path: descent_prefix.is_none() &&
-    // had_anchor_contribution. Predicate `(none && true)` is false →
+    // anchor_claim == Held. Predicate `(none && Held)` matches false →
     // assertion holds.
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
@@ -724,7 +728,10 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
-    assert!(e.profiles().get(pid).unwrap().anchor_contribution);
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim,
+        AnchorClaim::Held,
+    );
     // Drain Seed via Vanished so the Profile lands Idle with the
     // anchor's contribution still held. Then detach.
     let Some(corr) = e.pending_probe(pid) else {

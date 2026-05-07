@@ -3,8 +3,8 @@
 //! A Profile holds at most three Resource-side claims, each with a
 //! per-Profile bookkeeping field and a per-Resource refcount contribution:
 //!
-//! 1. **Anchor.** `Profile.anchor_contribution = true` ⇒ Profile contributes
-//!    `Profile.events_union` to `Profile.resource.watch_demand`.
+//! 1. **Anchor.** `Profile.anchor_claim == AnchorClaim::Held` ⇒ Profile
+//!    contributes `Profile.events_union` to `Profile.resource.watch_demand`.
 //! 2. **Watch-root parent.** `Profile.watch_root_parent = Some(parent)` ⇒
 //!    Profile contributes `STRUCTURE` to `parent.watch_demand`.
 //! 3. **Descent prefix.** `Profile.state = Pending(d)` ⇒ Profile contributes
@@ -31,7 +31,7 @@
 use crate::Engine;
 use crate::reconcile::{delete_child, purge_per_file_dedup_for_reaped_slots};
 use crate::refcounts::sub_watch_demand;
-use specter_core::{ClassSet, ProfileId, ProfileState, StepOutput, TreeSnapshot};
+use specter_core::{AnchorClaim, ClassSet, ProfileId, ProfileState, StepOutput, TreeSnapshot};
 
 impl Engine {
     /// Release the Profile's anchor `watch_demand` contribution if held.
@@ -45,14 +45,14 @@ impl Engine {
         let Some(p) = self.profiles.get(pid) else {
             return;
         };
-        if !p.anchor_contribution {
+        let AnchorClaim::Held = p.anchor_claim else {
             return;
-        }
+        };
         let resource = p.resource;
         let mask = p.events_union;
 
         if let Some(p) = self.profiles.get_mut(pid) {
-            p.anchor_contribution = false;
+            p.anchor_claim = AnchorClaim::None;
         }
 
         if self.tree.get(resource).is_some_and(|r| r.watch_demand > 0) {

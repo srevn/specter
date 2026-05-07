@@ -16,9 +16,9 @@
 use crate::refcounts::add_watch_demand;
 use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
-    BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Input, Profile, ProfileId,
-    ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest, SubId, SubRegistry,
-    TimerId, TimerKind, Tree, compute_config_hash,
+    AnchorClaim, BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Input, Profile,
+    ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest, SubId,
+    SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -262,7 +262,7 @@ impl Engine {
             // edges, start the Seed burst.
             add_watch_demand(&mut self.tree, anchor, events_union, out);
             if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.anchor_contribution = true;
+                p.anchor_claim = AnchorClaim::Held;
             }
             self.set_watch_root_parent(profile_id, anchor, out);
             self.compute_and_set_parent_edge(profile_id);
@@ -487,7 +487,8 @@ impl Engine {
     /// to per-Resource `watch_demand`:
     ///
     ///   - **Anchor** (1-to-1): `Profile.resource.watch_demand` carries
-    ///     `+1` from this Profile while `Profile.anchor_contribution`.
+    ///     `+1` from this Profile while
+    ///     `Profile.anchor_claim == AnchorClaim::Held`.
     ///   - **Watch-root parent** (1-to-1): `Profile.watch_root_parent`'s
     ///     resource carries `+1` `STRUCTURE` for anchor-reappearance
     ///     detection.
@@ -517,12 +518,15 @@ impl Engine {
         };
         let anchor = p.resource;
 
-        // Trichotomy invariant: Pending and anchor_contribution are
-        // mutually exclusive. Descent flips Pending → Idle and bumps the
-        // anchor atomically in `dispatch_descent_ok`'s anchor branch.
+        // Trichotomy invariant: Pending and AnchorClaim::Held are mutually
+        // exclusive. Descent flips Pending → Idle and bumps the anchor
+        // atomically in `dispatch_descent_ok`'s anchor branch.
         debug_assert!(
-            !(matches!(p.state, ProfileState::Pending(_)) && p.anchor_contribution),
-            "reap_profile: Pending + anchor_contribution must be mutually exclusive",
+            !matches!(
+                (&p.state, p.anchor_claim),
+                (ProfileState::Pending(_), AnchorClaim::Held),
+            ),
+            "reap_profile: Pending + AnchorClaim::Held must be mutually exclusive",
         );
 
         // Close the probe channel BEFORE the descent-prefix helper

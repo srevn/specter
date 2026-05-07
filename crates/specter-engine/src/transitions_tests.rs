@@ -19,7 +19,7 @@
 use crate::{Engine, SubAttachRequest};
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet,
+    AnchorClaim, ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet,
     CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
     EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, Placeholder, ProbeKind,
     ProbeOp, ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole,
@@ -1110,7 +1110,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
         ProfileState::Idle,
     ));
     // Sanity: anchor's contribution is intact (we did NOT terminate).
-    assert!(e.profiles.get(pid).unwrap().anchor_contribution);
+    assert_eq!(e.profiles.get(pid).unwrap().anchor_claim, AnchorClaim::Held,);
     let _ = sid;
 }
 
@@ -1118,15 +1118,16 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
 /// `on_anchor_terminal_event` regardless of the Profile's `events_union`.
 /// Anchor is a Dir, events = EMPTY: the kqexec class for `Removed` on a
 /// Dir is STRUCTURE — not in the EMPTY mask — but anchor events bypass
-/// the filter. After the call, `anchor_contribution` is cleared and
+/// the filter. After the call, `anchor_claim` is cleared to `None` and
 /// `baseline` / `current` are dropped.
 #[test]
 fn fs_event_anchor_terminal_bypasses_class_filter() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid, root);
-    assert!(
-        e.profiles.get(pid).unwrap().anchor_contribution,
-        "anchor_contribution set after attach_sub_inner",
+    assert_eq!(
+        e.profiles.get(pid).unwrap().anchor_claim,
+        AnchorClaim::Held,
+        "anchor_claim set to Held after attach_sub_inner",
     );
 
     let out = e.step(
@@ -1144,9 +1145,10 @@ fn fs_event_anchor_terminal_bypasses_class_filter() {
     );
 
     let p = e.profiles.get(pid).unwrap();
-    assert!(
-        !p.anchor_contribution,
-        "anchor_contribution cleared by on_anchor_terminal_event",
+    assert_eq!(
+        p.anchor_claim,
+        AnchorClaim::None,
+        "anchor_claim cleared by on_anchor_terminal_event",
     );
     assert!(p.baseline.is_none());
     assert!(p.current.is_none());
@@ -1755,10 +1757,11 @@ fn watch_op_rejected_for_anchored_profile_emits_anchor_claim_purged() {
             .iter()
             .any(|d| matches!(d, Diagnostic::WatchOpRejected { .. })),
     );
-    // Anchor flag cleared.
-    assert!(
-        !e.profiles.get(pid).unwrap().anchor_contribution,
-        "anchor_contribution cleared by purge",
+    // Anchor claim cleared.
+    assert_eq!(
+        e.profiles.get(pid).unwrap().anchor_claim,
+        AnchorClaim::None,
+        "anchor_claim cleared by purge",
     );
 }
 
@@ -2048,14 +2051,14 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     );
 }
 
-// ---- P11.0: anchor_contribution flag drives reap correctness ----
+// ---- P11.0: anchor_claim drives reap correctness ----
 
 #[test]
-fn seed_vanished_then_reap_releases_anchor_via_contribution_flag() {
+fn seed_vanished_then_reap_releases_anchor_via_claim() {
     let (mut e, pid, sid, r, _now) = engine_with_attached_sub();
-    // Anchor watch_demand is 1, anchor_contribution is true.
+    // Anchor watch_demand is 1, anchor_claim is Held.
     assert_eq!(e.tree.get(r).unwrap().watch_demand, 1);
-    assert!(e.profiles.get(pid).unwrap().anchor_contribution);
+    assert_eq!(e.profiles.get(pid).unwrap().anchor_claim, AnchorClaim::Held,);
 
     // Detach the Sub mid-burst → reap_pending = true.
     let _ = e.detach_sub(sid, Instant::now());
@@ -2080,20 +2083,20 @@ fn seed_vanished_then_reap_releases_anchor_via_contribution_flag() {
         .any(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == r));
     assert!(
         saw_unwatch,
-        "Unwatch for the anchor emitted on reap (anchor_contribution flag)",
+        "Unwatch for the anchor emitted on reap (anchor_claim drove the release)",
     );
 }
 
 #[test]
-fn anchor_terminal_event_clears_anchor_contribution_flag() {
+fn anchor_terminal_event_clears_anchor_claim() {
     // After on_anchor_terminal_event releases the anchor, a subsequent
-    // reap must NOT double-release it (the flag is cleared).
+    // reap must NOT double-release it (the claim is cleared to None).
     let (mut e, pid, _sid, r, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid, r);
-    assert!(e.profiles.get(pid).unwrap().anchor_contribution);
+    assert_eq!(e.profiles.get(pid).unwrap().anchor_claim, AnchorClaim::Held,);
 
     // Inject a Removed event at the anchor: the terminal event releases
-    // the anchor's contribution and clears the flag.
+    // the anchor's contribution and clears the claim.
     let _ = e.step(
         Input::FsEvent {
             resource: r,
@@ -2101,9 +2104,10 @@ fn anchor_terminal_event_clears_anchor_contribution_flag() {
         },
         Instant::now(),
     );
-    assert!(
-        !e.profiles.get(pid).unwrap().anchor_contribution,
-        "anchor_contribution cleared by terminal event",
+    assert_eq!(
+        e.profiles.get(pid).unwrap().anchor_claim,
+        AnchorClaim::None,
+        "anchor_claim cleared by terminal event",
     );
     assert_eq!(
         e.tree.get(r).unwrap().watch_demand,

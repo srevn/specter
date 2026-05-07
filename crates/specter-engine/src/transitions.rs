@@ -15,10 +15,10 @@ use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use crate::refcounts::clamp_watch_demand_to_zero;
 use smallvec::SmallVec;
 use specter_core::{
-    BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic, Effect,
-    EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeResponse, ProbeResult, ProfileId,
-    ProfileState, Resource, ResourceId, ResourceKind, StepOutput, SubId, SubRegistryDiff, TimerId,
-    TimerKind, TreeSnapshot, WatchFailure, WatchOp,
+    AnchorClaim, BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic,
+    Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeResponse, ProbeResult,
+    ProfileId, ProfileState, Resource, ResourceId, ResourceKind, StepOutput, SubId,
+    SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -567,7 +567,7 @@ impl Engine {
         let mut parent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         let mut descent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         for (pid, p) in self.profiles.iter() {
-            if p.anchor_contribution && p.resource == resource {
+            if matches!(p.anchor_claim, AnchorClaim::Held) && p.resource == resource {
                 anchor_claimers.push(pid);
             }
             if p.watch_root_parent == Some(resource) {
@@ -835,8 +835,8 @@ impl Engine {
     /// is by design.
     ///
     /// **Ordering.** The anchor release runs BEFORE `finish_burst_to_idle`,
-    /// so any deferred `reap_profile` (`reap_pending`) sees a cleared
-    /// `anchor_contribution` flag and skips its redundant release inside
+    /// so any deferred `reap_profile` (`reap_pending`) sees an
+    /// `AnchorClaim::None` and skips its redundant release inside
     /// `reap_profile::release_anchor_claim`. This mirrors the
     /// `dispatch_*_vanished/failed` discipline.
     /// Reverse-ordering would have `finish_burst_to_idle` invoke
@@ -1035,7 +1035,7 @@ impl Engine {
     /// Symmetric with `dispatch_standard_vanished` (treats Vanished as an
     /// anchor-disappearance signal): releases the anchor's `watch_demand`
     /// contribution so the trichotomy invariant in `reap_profile` —
-    /// `!(Pending && anchor_contribution)` — survives the eventual
+    /// `!(Pending && AnchorClaim::Held)` — survives the eventual
     /// `start_pending_recovery` transition.
     ///
     /// Recovery does not depend on the anchor's FD: the kqueue
@@ -1064,8 +1064,8 @@ impl Engine {
             // current already None — release_descendant_claim took it.
         }
         // Release BEFORE finish_burst_to_idle so any deferred
-        // `reap_profile` (reap_pending) sees a cleared flag — preserves
-        // the trichotomy invariant `!(Pending && anchor_contribution)`
+        // `reap_profile` (reap_pending) sees `AnchorClaim::None` —
+        // preserves the trichotomy invariant `!(Pending && Held)`
         // across the eventual `start_pending_recovery` transition.
         self.release_anchor_claim(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
@@ -1202,10 +1202,10 @@ impl Engine {
     /// against future routing changes.
     ///
     /// Release runs BEFORE `finish_burst_to_idle` so any deferred
-    /// `reap_profile` (`reap_pending`) sees `anchor_contribution=false`
-    /// and skips a redundant release. Without this ordering the post-
-    /// `finish` release would underflow the now-zero `watch_demand`
-    /// counter (debug-assert panic; release-build silent leak).
+    /// `reap_profile` (`reap_pending`) sees `AnchorClaim::None` and skips
+    /// a redundant release. Without this ordering the post-`finish`
+    /// release would underflow the now-zero `watch_demand` counter
+    /// (debug-assert panic; release-build silent leak).
     fn dispatch_standard_vanished(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if self.profiles.get(profile_id).is_none() {
             return;

@@ -235,6 +235,34 @@ pub enum TimerKind {
     AwaitGateDeadline,
 }
 
+/// Lifecycle of a Profile's anchor `watch_demand` contribution.
+///
+/// Two-state machine:
+/// - [`Self::None`] — Profile holds no anchor contribution. Reachable
+///   when the Profile is `Pending` (descent prefix carries the
+///   STRUCTURE watch instead), `Purged` (`Input::WatchOpRejected`
+///   clamped the slot), or freshly constructed pre-attach.
+/// - [`Self::Held`] — Profile contributes `+1 events_union` to its
+///   anchor's `watch_demand`. Set on the path that bumped the counter
+///   (immediate-Seed in `attach_sub_inner` or descent's anchor
+///   materialization); cleared on the matching decrement (anchor
+///   terminal event, reap, clamp purge).
+///
+/// Encoded as a sum type so the dispatch sites — `release_anchor_claim`,
+/// the recompute, every `dispatch_*_vanished` — read the lifecycle
+/// directly rather than combining a flag with [`ProfileState`]. The
+/// trichotomy "materialized / pending / purged" emerges from
+/// `(state, anchor_claim)` rather than from a third variant: every
+/// release helper treats Purged identically to None (no contribution
+/// to drop), so distinguishing them at the type level adds no
+/// dispatch information.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub enum AnchorClaim {
+    #[default]
+    None,
+    Held,
+}
+
 #[derive(Debug)]
 pub struct Profile {
     pub resource: ResourceId,
@@ -292,26 +320,27 @@ pub struct Profile {
     /// unavailable.
     pub watch_root_parent: Option<ResourceId>,
     /// Tracks whether this Profile currently holds a `+1` contribution on
-    /// `resource.watch_demand` — set on the path that called
-    /// `add_watch_demand(anchor)` (immediate-Seed in `attach_sub_inner`
-    /// or descent's anchor materialization), cleared on the matching
-    /// `sub_watch_demand(anchor)` (anchor terminal event, reap).
+    /// `resource.watch_demand` — [`AnchorClaim::Held`] on the path that
+    /// called `add_watch_demand(anchor)` (immediate-Seed in
+    /// `attach_sub_inner` or descent's anchor materialization), cleared
+    /// to [`AnchorClaim::None`] on the matching `sub_watch_demand(anchor)`
+    /// (anchor terminal event, reap, clamp purge).
     ///
-    /// The flag distinguishes three reap-time lifecycle states that
+    /// The claim distinguishes three reap-time lifecycle states that
     /// otherwise look identical in the Profile/descent registry:
-    /// **materialized** (`true` ⇒ release anchor), **pending**
+    /// **materialized** (`Held` ⇒ release anchor), **pending**
     /// (descent in flight ⇒ release descent prefix instead), and
-    /// **purged** (`false`, descent already removed by
+    /// **purged** (`None`, descent already removed by
     /// `Input::WatchOpRejected` ⇒ no contribution to release; the clamp
     /// already did it).
     ///
-    /// Without this flag a heuristic like `baseline.is_some() ||
+    /// Without this field a heuristic like `baseline.is_some() ||
     /// current.is_some()` undercounts `dispatch_seed_vanished` paths
     /// (which clear the snapshots while leaving the anchor's contribution
     /// intact) and a heuristic like `tree.get(anchor).watch_demand > 0`
     /// overcounts in multi-Profile sharing (would steal another
     /// Profile's contribution).
-    pub anchor_contribution: bool,
+    pub anchor_claim: AnchorClaim,
     /// Per-`DedupKey` `dir_hash` (or `leaf_hash`) of the hierarchical
     /// snapshot the engine fired against on the most recent successful
     /// Effect emission for that key.
@@ -379,7 +408,7 @@ impl Profile {
             settle,
             reap_pending: false,
             watch_root_parent: None,
-            anchor_contribution: false,
+            anchor_claim: AnchorClaim::None,
             last_emitted_dir_hash: BTreeMap::new(),
             events_union: events,
             has_per_file_fds,

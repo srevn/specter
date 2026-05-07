@@ -8,11 +8,11 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, ChildEntry, ClaimKind, ClassSet, CommandTemplate, Diagnostic, DirChild,
-    DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation,
-    ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ProfileState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, TreeSnapshot,
-    WatchFailure, WatchOp,
+    AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClaimKind, ClassSet, CommandTemplate,
+    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
+    ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ProfileState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
+    TreeSnapshot, WatchFailure, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -116,7 +116,10 @@ fn anchor_claim_purged_then_detach_no_panic() {
 
     let (sid, pid, attach_out) = attach_subtree_root(&mut e, "build", root, MAX_SETTLE);
     complete_seed_burst(&mut e, pid, &attach_out, dir_snap(root, vec![]));
-    assert!(e.profiles().get(pid).unwrap().anchor_contribution);
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim,
+        AnchorClaim::Held,
+    );
     assert_eq!(e.tree().get(root).unwrap().watch_demand, 1);
 
     // Reject the kernel watch on the anchor.
@@ -134,8 +137,11 @@ fn anchor_claim_purged_then_detach_no_panic() {
         Instant::now(),
     );
 
-    // Anchor flag cleared; counter zeroed.
-    assert!(!e.profiles().get(pid).unwrap().anchor_contribution);
+    // Anchor claim cleared; counter zeroed.
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim,
+        AnchorClaim::None,
+    );
     assert_eq!(e.tree().get(root).unwrap().watch_demand, 0);
     // ProfileClaimPurged{Anchor} surfaces.
     assert!(
@@ -186,9 +192,15 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
         Instant::now(),
     );
 
-    // Both flags cleared.
-    assert!(!e.profiles().get(pid_p).unwrap().anchor_contribution);
-    assert!(!e.profiles().get(pid_q).unwrap().anchor_contribution);
+    // Both claims cleared.
+    assert_eq!(
+        e.profiles().get(pid_p).unwrap().anchor_claim,
+        AnchorClaim::None,
+    );
+    assert_eq!(
+        e.profiles().get(pid_q).unwrap().anchor_claim,
+        AnchorClaim::None,
+    );
     assert_eq!(e.tree().get(root).unwrap().watch_demand, 0);
 
     // Two anchor purge diagnostics surface.
@@ -210,13 +222,13 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
         },
         Instant::now(),
     );
-    // No panic. Profile P (Idle, anchor_contribution=false) is left
-    // alone by covering_profiles' filter (P.state is Idle, not Pending,
-    // so it would normally route through finalize_anchor_lost). But
-    // wait — covering_profiles still includes Idle Profiles. The route
-    // is finalize_anchor_lost(P) which is a no-op because
-    // anchor_contribution is already false (post-purge) and was_active
-    // is false (state is Idle, not Active). So it's a clean no-op.
+    // No panic. Profile P (Idle, anchor_claim=None) is left alone by
+    // covering_profiles' filter (P.state is Idle, not Pending, so it
+    // would normally route through finalize_anchor_lost). But wait —
+    // covering_profiles still includes Idle Profiles. The route is
+    // finalize_anchor_lost(P) which is a no-op because anchor_claim is
+    // already None (post-purge) and was_active is false (state is Idle,
+    // not Active). So it's a clean no-op.
     let _ = p_seed_vanished;
 
     // Detach P; assert clean reap.
