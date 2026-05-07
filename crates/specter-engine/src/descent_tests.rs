@@ -14,6 +14,7 @@
 )]
 
 use crate::Engine;
+use crate::engine::FS_ROOT_SEG;
 use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
@@ -77,12 +78,14 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
     let mut e = Engine::new();
     // /foo exists as a Dir with no role-anchor — represents a real
     // directory the engine has discovered.
-    let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
+    let foo = e
+        .tree_mut()
+        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "guard".into(),
-        PathBuf::from("foo/bar"),
+        PathBuf::from("/foo/bar"),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -94,6 +97,17 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
     (e, sid, pid)
+}
+
+/// Resolve `/foo` after the helper's `ensure_path` placed it under the
+/// synthetic FS-root. Centralises the two-step lookup so individual tests
+/// stay readable.
+fn lookup_foo(e: &Engine) -> ResourceId {
+    let root = e
+        .tree()
+        .lookup(None, FS_ROOT_SEG)
+        .expect("FS-root bootstrapped by ensure_path");
+    e.tree().lookup(Some(root), "foo").expect("/foo exists")
 }
 
 #[test]
@@ -134,12 +148,14 @@ fn descent_one_level_advances_on_created_entry() {
 #[test]
 fn descent_two_levels_advances_progressively() {
     let mut e = Engine::new();
-    let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
+    let foo = e
+        .tree_mut()
+        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "guard".into(),
-        PathBuf::from("foo/bar/baz"),
+        PathBuf::from("/foo/bar/baz"),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -236,7 +252,7 @@ fn descent_event_at_prefix_emits_fresh_probe() {
     assert!(e.pending_probe(pid).is_none());
 
     // Inject a StructureChanged at /foo (the prefix).
-    let foo = e.tree().lookup(None, "foo").unwrap();
+    let foo = lookup_foo(&e);
     let out = e.step(
         Input::FsEvent {
             resource: foo,
@@ -260,7 +276,7 @@ fn descent_event_during_in_flight_probe_drops() {
     // probe is in flight from setup
     assert!(e.pending_probe(pid).is_some());
 
-    let foo = e.tree().lookup(None, "foo").unwrap();
+    let foo = lookup_foo(&e);
     let out = e.step(
         Input::FsEvent {
             resource: foo,
@@ -310,7 +326,7 @@ fn descent_failed_retains_state() {
 fn descent_anchor_kind_set_from_entry() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     let corr = e.pending_probe(pid).unwrap();
-    let foo = e.tree().lookup(None, "foo").unwrap();
+    let foo = lookup_foo(&e);
     let bar = e.tree().lookup(Some(foo), "bar").expect("scaffold exists");
 
     // Inject as a Dir.
@@ -521,7 +537,9 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
 #[test]
 fn descent_probe_uses_descent_variant() {
     let mut e = Engine::new();
-    let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
+    let foo = e
+        .tree_mut()
+        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let user_cfg = specter_core::ScanConfig::builder()
@@ -530,7 +548,7 @@ fn descent_probe_uses_descent_variant() {
         .build();
     let req = SubAttachRequest::for_path(
         "g".into(),
-        PathBuf::from("foo/bar"),
+        PathBuf::from("/foo/bar"),
         user_cfg,
         MAX_SETTLE,
         SETTLE,
@@ -587,7 +605,7 @@ fn descent_materialization_sets_anchor_claim_held() {
 #[test]
 fn reap_pending_profile_releases_only_descent_prefix() {
     let (mut e, sid, pid) = setup_pending_one_level();
-    let foo = e.tree().lookup(None, "foo").unwrap();
+    let foo = lookup_foo(&e);
     let bar = e.tree().lookup(Some(foo), "bar").expect("anchor scaffold");
 
     // Pre-conditions: descent contributes to `foo`, anchor `bar` is
@@ -825,7 +843,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
 #[test]
 fn detach_sub_pending_profile_reaps_immediately() {
     let (mut e, sid, pid) = setup_pending_one_level();
-    let foo = e.tree().lookup(None, "foo").unwrap();
+    let foo = lookup_foo(&e);
     // Pre-condition: Pending; descent contributes +1 to /foo.
     assert!(e.descent_state(pid).is_some());
     assert_eq!(e.tree().get(foo).unwrap().watch_demand, 1);
@@ -879,7 +897,7 @@ fn on_probe_response_routes_descent_via_state_match() {
 fn on_watch_op_rejected_clears_pending_state() {
     use specter_core::{ClassSet, ProfileState, ResourceKind, WatchOp};
     let (mut e, _sid, pid) = setup_pending_one_level();
-    let foo = e.tree().lookup(None, "foo").unwrap();
+    let foo = lookup_foo(&e);
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
         ProfileState::Pending(_)
@@ -920,7 +938,7 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
     // for future-proofing, and we want the test to lock in its
     // benign-failure contract.)
     let (mut e, _sid, pid) = setup_pending_one_level();
-    let foo = e.tree().lookup(None, "foo").unwrap();
+    let foo = lookup_foo(&e);
     let corr = e.pending_probe(pid).unwrap();
 
     // Snapshot pre-state.
@@ -993,7 +1011,7 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
 fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
     use specter_core::{ClassSet, ProfileState, ResourceKind, WatchOp};
     let (mut e, _sid, pid) = setup_pending_one_level();
-    let foo = e.tree().lookup(None, "foo").unwrap();
+    let foo = lookup_foo(&e);
     assert!(
         e.pending_probe(pid).is_some(),
         "descent probe in flight after attach",
@@ -1056,7 +1074,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     //      contribution gone, watch_root_parent contribution persists.
     //   4. Call enter_pending_descent at foo with [bar] as remaining.
     let (mut e, _sid, pid) = setup_pending_one_level();
-    let foo = e.tree().lookup(None, "foo").unwrap();
+    let foo = lookup_foo(&e);
 
     // Step 1+2: Drive descent to materialization. The probe response with
     // `bar` as a Dir entry materializes the anchor.

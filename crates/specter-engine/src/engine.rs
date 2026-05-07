@@ -112,17 +112,47 @@ impl Engine {
         out
     }
 
-    /// Attach a Sub to an existing Resource (`req.resource`). Reuses an
-    /// existing Profile when `(resource, config_hash)` matches; otherwise
-    /// creates a fresh Profile, emits `WatchOp::Watch` on its anchor, and
-    /// starts a `Burst { intent: Seed, phase: Verifying }` to establish
-    /// the initial baseline.
+    /// Attach a Sub to an existing Resource (`req.resource`) or to a
+    /// path that the engine materialises (`req.path`). Reuses an
+    /// existing Profile when `(resource, config_hash)` matches;
+    /// otherwise creates a fresh Profile, emits `WatchOp::Watch` on its
+    /// anchor, and starts a `Burst { intent: Seed, phase: Verifying }`
+    /// to establish the initial baseline.
     ///
-    /// Returns the minted [`SubId`] and a sorted [`StepOutput`].
+    /// Returns the minted [`SubId`] and a sorted [`StepOutput`]. On a
+    /// path-rejection short-circuit (see invariants below), returns
+    /// `SubId::default()` plus a sorted [`StepOutput`] carrying a
+    /// [`Diagnostic::AttachPathInvalid`] and no other ops.
+    ///
+    /// # Production invariants (path-based attach)
+    ///
+    /// 1. **Absolute paths only.** `req.path` must be absolute and
+    ///    UTF-8. The internal `decompose_attach_path` is the canonical
+    ///    gate; it rejects non-absolute paths, non-UTF-8 segments,
+    ///    `.` / `..` components, Windows path prefixes, and empty
+    ///    segments. The bin layer's `canonicalize_lenient` already
+    ///    enforces absolute paths for TOML-loaded configs, but
+    ///    hot-reload `ConfigDiff::added` constructs `SubAttachRequest`
+    ///    from a different path; the gate keeps the engine's contract
+    ///    independent of every caller.
+    /// 2. **Single FS-root.** Every absolute attach decomposes to
+    ///    `[FS_ROOT_SEG, ...]`; `materialize_path_or_pending` lazily
+    ///    bootstraps a synthetic `/` slot (role
+    ///    `ResourceRole::DescentScaffold`) before the pre-existence
+    ///    walk so every Profile's rewind chain terminates at this
+    ///    shared slot. The FS-root invariant is documented here rather
+    ///    than enforced at the Tree type level — unit tests for
+    ///    lower-level Tree functions (`coverage`, `refcounts`) still
+    ///    construct multi-root trees outside of `attach_sub`.
+    /// 3. **`Tree::path_of` reconstructs absolute paths.**
+    ///    `PathBuf::push("/")` resets the buffer to absolute, so the
+    ///    Sensor's `WatchOp::Watch { path }` always carries an absolute
+    ///    path for any Profile registered via `attach_sub`.
     ///
     /// # Panics
-    /// Panics if `req.resource` is stale (no live Tree slot). The Engine
-    /// must construct the Resource before attaching a Sub to it.
+    /// Panics if `req.resource` is stale (no live Tree slot) on the
+    /// resource-based attach path. The Engine must construct the
+    /// Resource before attaching a Sub to it.
     pub fn attach_sub(&mut self, req: SubAttachRequest, now: Instant) -> (SubId, StepOutput) {
         let mut out = StepOutput::default();
         let sub_id = self.attach_sub_inner(req, now, &mut out);
@@ -756,32 +786,69 @@ enum DetachLifecycle {
     DeferToBurstEnd,
 }
 
-/// Decompose an attach path into Tree segments. `RootDir` becomes the
-/// synthetic [`FS_ROOT_SEG`] so absolute attaches share one root in the
-/// Tree (`Tree::path_of` reconstructs an absolute path because
-/// `PathBuf::push("/")` resets to absolute).
+/// Decompose an absolute, UTF-8 attach path into Tree segments, with
+/// `RootDir` mapped to the synthetic [`FS_ROOT_SEG`] so the engine has a
+/// single shared root for every attach. `Tree::path_of` reconstructs an
+/// absolute path from this segment because `PathBuf::push("/")` resets
+/// to absolute.
 ///
-/// Returns `None` and emits [`Diagnostic::AttachPathInvalid`] on:
-/// - empty paths (no real components);
-/// - relative components `.` / `..` (config validation should canonicalize
-///   before attach — defense-in-depth);
-/// - `Component::Prefix` (Windows-only; unreachable on Unix v1).
+/// Returns `None` and emits [`Diagnostic::AttachPathInvalid`] for:
+/// - non-absolute paths (engine requires fully-qualified paths; the bin
+///   layer's `canonicalize_lenient` enforces this for TOML-loaded
+///   configs, but hot-reload `ConfigDiff::added` and test-only attaches
+///   can bypass the bin's discipline — the gate keeps the engine's
+///   contract independent of every caller);
+/// - paths with non-UTF-8 bytes (the Tree's segment store is
+///   `&str`-keyed; the engine cannot represent non-UTF-8 segments);
+/// - relative components `.` / `..` (caller must canonicalize before
+///   attach);
+/// - Windows path prefixes (Unix v1 only);
+/// - empty path segments (defense-in-depth against hand-constructed
+///   `PathBuf`s — `PathBuf` itself normalises double-slashes).
 ///
-/// Non-UTF-8 segments are skipped silently — Tree keys are `&str`-interned
-/// and the engine can't represent them. This matches the prior filter
-/// behavior.
+/// **Post-condition.** On `Some(comps)`, `comps[0] == FS_ROOT_SEG` and
+/// every `comps[i]` is a non-empty UTF-8 string. `materialize_path_or_pending`
+/// relies on this to skip the FS-root pre-existence check and bootstrap
+/// the slot unconditionally.
 fn decompose_attach_path<'a>(
     path: &'a std::path::Path,
     out: &mut StepOutput,
 ) -> Option<Vec<&'a str>> {
+    if !path.is_absolute() {
+        out.diagnostics.push(Diagnostic::AttachPathInvalid {
+            path: path.to_path_buf(),
+            hint: "path must be absolute (engine requires fully-qualified paths)",
+        });
+        return None;
+    }
+
+    // Single upfront UTF-8 check on the whole path. On Unix, `Path::to_str`
+    // returns `Some` iff every byte is valid UTF-8; a `Some` result means
+    // every `Component::Normal`'s byte-slice is also UTF-8. The loop body's
+    // `s.to_str().expect(...)` is sound under this precondition.
+    if path.to_str().is_none() {
+        out.diagnostics.push(Diagnostic::AttachPathInvalid {
+            path: path.to_path_buf(),
+            hint: "non-UTF-8 path segment (engine requires UTF-8)",
+        });
+        return None;
+    }
+
     let mut comps: Vec<&str> = Vec::with_capacity(path.components().count());
     for c in path.components() {
         match c {
             Component::RootDir => comps.push(FS_ROOT_SEG),
-            Component::Normal(s) => match s.to_str() {
-                Some(name) if !name.is_empty() => comps.push(name),
-                _ => {}
-            },
+            Component::Normal(s) => {
+                let name = s.to_str().expect("path UTF-8 verified above");
+                if name.is_empty() {
+                    out.diagnostics.push(Diagnostic::AttachPathInvalid {
+                        path: path.to_path_buf(),
+                        hint: "empty path segment",
+                    });
+                    return None;
+                }
+                comps.push(name);
+            }
             Component::CurDir | Component::ParentDir => {
                 out.diagnostics.push(Diagnostic::AttachPathInvalid {
                     path: path.to_path_buf(),
@@ -798,13 +865,16 @@ fn decompose_attach_path<'a>(
             }
         }
     }
-    if comps.is_empty() {
-        out.diagnostics.push(Diagnostic::AttachPathInvalid {
-            path: path.to_path_buf(),
-            hint: "empty attach path",
-        });
-        return None;
-    }
+
+    // The `is_absolute()` guard above guarantees `Component::RootDir` was
+    // emitted, which puts `FS_ROOT_SEG` at `comps[0]`. Defense-in-depth
+    // assertion against future regressions or hand-constructed paths
+    // that confuse the components iterator.
+    debug_assert!(
+        !comps.is_empty() && comps[0] == FS_ROOT_SEG,
+        "decompose_attach_path post-condition: absolute path → comps[0] == FS_ROOT_SEG",
+    );
+
     Some(comps)
 }
 
@@ -1107,40 +1177,28 @@ mod tests {
     }
 
     #[test]
-    fn decompose_relative_path_skips_root_marker() {
-        let mut out = StepOutput::default();
-        let comps = decompose_attach_path(std::path::Path::new("foo/bar"), &mut out)
-            .expect("relative path decomposes");
-        assert_eq!(comps, vec!["foo", "bar"]);
-        assert!(out.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn decompose_empty_path_emits_diagnostic() {
+    fn decompose_empty_path_rejected_as_non_absolute() {
+        // An empty `Path` is non-absolute on Unix; the gate's `is_absolute`
+        // check fires before any component-level work, so the diagnostic's
+        // hint is "absolute" rather than "empty". The empty-segment hint
+        // is reserved for the `Component::Normal` branch's defense-in-depth
+        // check (hand-constructed paths with empty components).
         let mut out = StepOutput::default();
         let result = decompose_attach_path(std::path::Path::new(""), &mut out);
         assert!(result.is_none());
         assert!(out.diagnostics.iter().any(|d| matches!(
             d,
             specter_core::Diagnostic::AttachPathInvalid { path, hint }
-                if path == std::path::Path::new("") && hint.contains("empty"),
+                if path == std::path::Path::new("") && hint.contains("absolute"),
         )));
     }
 
-    #[test]
-    fn decompose_path_with_curdir_is_rejected() {
-        // Rust's `Path::components()` normalizes embedded `/./` away, but
-        // preserves a leading `./`. Use `./foo` to actually exercise the
-        // `Component::CurDir` arm.
-        let mut out = StepOutput::default();
-        let result = decompose_attach_path(std::path::Path::new("./foo"), &mut out);
-        assert!(result.is_none());
-        assert!(out.diagnostics.iter().any(|d| matches!(
-            d,
-            specter_core::Diagnostic::AttachPathInvalid { path, hint }
-                if path == std::path::Path::new("./foo") && hint.contains("non-canonical"),
-        )));
-    }
+    // Note: `Component::CurDir` is structurally unreachable for absolute
+    // paths — `Path::components()` normalises `./` away when it appears
+    // after `RootDir`, and the `is_absolute()` gate rejects leading-`./`
+    // paths before the loop runs. The `CurDir | ParentDir` match arm
+    // remains as defense-in-depth, exercised in production only via
+    // `ParentDir` (covered by the next test).
 
     #[test]
     fn decompose_path_with_parentdir_is_rejected() {
@@ -1160,6 +1218,69 @@ mod tests {
         let comps = decompose_attach_path(std::path::Path::new("/"), &mut out)
             .expect("root-only path decomposes");
         assert_eq!(comps, vec![FS_ROOT_SEG]);
+    }
+
+    // ===== Boundary rejection tests =====
+    //
+    // Phase 5 Group D's gate-tightening pins three rejection categories
+    // at the decomposition seam: non-absolute paths, non-UTF-8 segments,
+    // and non-canonical components. The tests below cover the categories
+    // not already exercised above (`parentdir_is_rejected` covers the
+    // `..` case).
+
+    #[test]
+    fn decompose_relative_multi_segment_path_emits_diagnostic() {
+        let mut out = StepOutput::default();
+        let result = decompose_attach_path(std::path::Path::new("foo/bar"), &mut out);
+        assert!(result.is_none());
+        assert!(out.diagnostics.iter().any(|d| matches!(
+            d,
+            specter_core::Diagnostic::AttachPathInvalid { path, hint }
+                if path == std::path::Path::new("foo/bar") && hint.contains("absolute"),
+        )));
+    }
+
+    #[test]
+    fn decompose_relative_single_segment_path_emits_diagnostic() {
+        // The single-segment case is the one the dropped `None` branch
+        // of `materialize_path_or_pending` used to handle as a degenerate
+        // `prefix == anchor` fixture. Post-Group-D the gate rejects it
+        // outright.
+        let mut out = StepOutput::default();
+        let result = decompose_attach_path(std::path::Path::new("foo"), &mut out);
+        assert!(result.is_none());
+        assert!(out.diagnostics.iter().any(|d| matches!(
+            d,
+            specter_core::Diagnostic::AttachPathInvalid { path, hint }
+                if path == std::path::Path::new("foo") && hint.contains("absolute"),
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decompose_path_with_non_utf8_segment_emits_diagnostic() {
+        // Non-UTF-8 segments sneak in via `canonicalize` resolving through
+        // a symlink whose target component holds non-UTF-8 bytes. The
+        // pre-fix decomposer silently dropped these, attaching the engine
+        // to the wrong directory; the gate now rejects with an explicit
+        // diagnostic.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::PathBuf;
+
+        let bad_seg = OsStr::from_bytes(&[0xFF, 0xFE]);
+        let mut path = PathBuf::from("/foo");
+        path.push(bad_seg);
+        path.push("bar");
+
+        let mut out = StepOutput::default();
+        let result = decompose_attach_path(&path, &mut out);
+        assert!(result.is_none());
+        assert!(out.diagnostics.iter().any(|d| matches!(
+            d,
+            specter_core::Diagnostic::AttachPathInvalid { hint, .. }
+                if hint.contains("non-UTF-8"),
+        )));
     }
 
     #[test]
@@ -1186,6 +1307,91 @@ mod tests {
             )
         });
         assert!(saw, "AttachPathInvalid must carry the offending path");
+    }
+
+    /// End-to-end gate enforcement: a relative-path attach request rolls
+    /// up no `SubId`, no Tree slots, and no Profile — only the diagnostic
+    /// surfaces. Pins the contract that `attach_sub_inner`'s
+    /// `decompose_attach_path` short-circuit is total: rejection
+    /// produces `SubId::default()` and zero side-effects on engine state.
+    #[test]
+    fn attach_with_relative_path_emits_diagnostic_and_no_state() {
+        let mut e = Engine::new();
+        let pre_tree_len = e.tree.len();
+        let pre_profile_count = e.profiles.len();
+
+        let bad = std::path::PathBuf::from("relative/path");
+        let req = SubAttachRequest::for_path(
+            "rel".to_string(),
+            bad.clone(),
+            ScanConfig::builder().recursive(false).build(),
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+            specter_core::CommandTemplate::new(std::iter::empty()),
+            specter_core::EffectScope::SubtreeRoot,
+            specter_core::ClassSet::default(),
+            false,
+        );
+        let (sid, out) = e.attach_sub(req, Instant::now());
+
+        assert_eq!(sid, SubId::default(), "rejected attach mints no SubId");
+        assert_eq!(e.tree.len(), pre_tree_len, "no Tree slots created");
+        assert_eq!(e.profiles.len(), pre_profile_count, "no Profile attached");
+        assert!(e.subs.is_empty(), "no Sub recorded in registry");
+        assert!(out.watch_ops.is_empty(), "no watch ops emitted");
+        assert!(out.probe_ops.is_empty(), "no probe ops emitted");
+        assert!(out.effects.is_empty(), "no effects emitted");
+        assert!(out.diagnostics.iter().any(|d| matches!(
+            d,
+            specter_core::Diagnostic::AttachPathInvalid { path, hint }
+                if path == &bad && hint.contains("absolute"),
+        )));
+    }
+
+    /// End-to-end counterpart for non-UTF-8 paths. The test fabricates a
+    /// path with a non-UTF-8 segment via `OsStr::from_bytes` (Unix-only)
+    /// and confirms the same total-rejection contract: no SubId, no Tree
+    /// slots, no Profile.
+    #[cfg(unix)]
+    #[test]
+    fn attach_with_non_utf8_path_emits_diagnostic_and_no_state() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::PathBuf;
+
+        let bad_seg = OsStr::from_bytes(&[0xFF, 0xFE]);
+        let mut path = PathBuf::from("/foo");
+        path.push(bad_seg);
+
+        let mut e = Engine::new();
+        let pre_tree_len = e.tree.len();
+        let pre_profile_count = e.profiles.len();
+
+        let req = SubAttachRequest::for_path(
+            "bad".to_string(),
+            path.clone(),
+            ScanConfig::builder().recursive(false).build(),
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+            specter_core::CommandTemplate::new(std::iter::empty()),
+            specter_core::EffectScope::SubtreeRoot,
+            specter_core::ClassSet::default(),
+            false,
+        );
+        let (sid, out) = e.attach_sub(req, Instant::now());
+
+        assert_eq!(sid, SubId::default(), "rejected attach mints no SubId");
+        assert_eq!(e.tree.len(), pre_tree_len, "no Tree slots created");
+        assert_eq!(e.profiles.len(), pre_profile_count, "no Profile attached");
+        assert!(e.subs.is_empty(), "no Sub recorded in registry");
+        assert!(out.watch_ops.is_empty(), "no watch ops emitted");
+        assert!(out.probe_ops.is_empty(), "no probe ops emitted");
+        assert!(out.effects.is_empty(), "no effects emitted");
+        assert!(out.diagnostics.iter().any(|d| matches!(
+            d,
+            specter_core::Diagnostic::AttachPathInvalid { path: p, hint }
+                if p == &path && hint.contains("non-UTF-8"),
+        )));
     }
 
     #[test]

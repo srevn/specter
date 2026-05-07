@@ -373,12 +373,12 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     // operator restart is required to recover (no automatic recovery
     // via parent's StructureChanged because the parent watch failed).
     let mut e = Engine::new();
-    let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
+    let foo = e.tree_mut().ensure_path(&["/", "foo"], ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
-        PathBuf::from("foo/bar"),
+        PathBuf::from("/foo/bar"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,

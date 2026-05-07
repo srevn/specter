@@ -16,6 +16,7 @@
     clippy::unnecessary_wraps
 )]
 
+use crate::engine::FS_ROOT_SEG;
 use crate::{Engine, SubAttachRequest};
 use compact_str::CompactString;
 use specter_core::{
@@ -377,11 +378,13 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
 #[should_panic(expected = "walker contract violated")]
 fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     let mut e = Engine::new();
-    let foo = e.tree.ensure(None, "foo", ResourceRole::User);
+    let foo = e
+        .tree
+        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
     e.tree.set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_path(
         "guard".into(),
-        std::path::PathBuf::from("foo/bar"),
+        std::path::PathBuf::from("/foo/bar"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -398,7 +401,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
             e.profiles.get(pid).map(|p| &p.state),
             Some(ProfileState::Pending(_)),
         ),
-        "path-relative attach against an absent leaf goes Pending",
+        "path-based attach against an absent leaf goes Pending",
     );
     let correlation = e
         .pending_probe(pid)
@@ -1942,13 +1945,15 @@ fn watch_op_rejected_already_unwatched_emits_diagnostic_only() {
 
 #[test]
 fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
-    // Set up: pre-existing /foo, attach `foo/bar` (descent at /foo).
+    // Set up: pre-existing /foo, attach `/foo/bar` (descent at /foo).
     let mut e = Engine::new();
-    let foo = e.tree.ensure(None, "foo", ResourceRole::User);
+    let foo = e
+        .tree
+        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
     e.tree.set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_path(
         "guard".into(),
-        std::path::PathBuf::from("foo/bar"),
+        std::path::PathBuf::from("/foo/bar"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -2077,11 +2082,13 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     // Two Profiles share a descent prefix (e.g., two Subs anchored at
     // siblings under the same scaffold). WatchOpRejected purges both.
     let mut e = Engine::new();
-    let foo = e.tree.ensure(None, "foo", ResourceRole::User);
+    let foo = e
+        .tree
+        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
     e.tree.set_kind(foo, ResourceKind::Dir);
     let req_a = SubAttachRequest::for_path(
         "a".into(),
-        std::path::PathBuf::from("foo/sib_a"),
+        std::path::PathBuf::from("/foo/sib_a"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -2092,7 +2099,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     );
     let req_b = SubAttachRequest::for_path(
         "b".into(),
-        std::path::PathBuf::from("foo/sib_b"),
+        std::path::PathBuf::from("/foo/sib_b"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -2247,7 +2254,7 @@ fn sensor_overflow_pending_profile_is_skipped() {
     let mut e = Engine::new();
     let req = SubAttachRequest::for_path(
         "guard".into(),
-        std::path::PathBuf::from("missing/anchor"),
+        std::path::PathBuf::from("/missing/anchor"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -2610,7 +2617,7 @@ fn config_diff_removed_then_added_atomic() {
     // Path-based add — the engine re-materializes if needed.
     let req_b = SubAttachRequest::for_path(
         "B".into(),
-        std::path::PathBuf::from("anchor"),
+        std::path::PathBuf::from("/anchor"),
         ScanConfig::builder().build(), // different config_hash (non-recursive)
         MAX_SETTLE,
         SETTLE,

@@ -91,30 +91,48 @@ impl crate::Engine {
     /// `WatchRootParent` ancestor is fine — the watch state is owned by
     /// some other Profile in the case of `User`, or by the engine's
     /// infrastructure in the case of `WatchRootParent`.)
+    ///
+    /// **Pre-condition.** `components` is non-empty and `components[0] ==
+    /// FS_ROOT_SEG`. [`crate::engine::decompose_attach_path`] is the
+    /// canonical producer and enforces both invariants by gate; the
+    /// `debug_assert!` below pins the contract for any future
+    /// hand-constructed caller (test fixtures, fuzzers).
     pub(crate) fn materialize_path_or_pending(&mut self, components: &[&str]) -> MaterializeResult {
+        debug_assert!(
+            !components.is_empty() && components[0] == crate::engine::FS_ROOT_SEG,
+            "materialize_path_or_pending pre-condition: components must be non-empty and \
+             components[0] == FS_ROOT_SEG (decompose_attach_path is the canonical producer)",
+        );
+        // Release-mode degradation for the empty case: the Engine's
+        // caller (`attach_sub_inner`) maps `Materialized(default)` to a
+        // no-op return path. Keep this short-circuit so a future caller
+        // misuse can't index out-of-bounds on `components[0]` below.
         if components.is_empty() {
             return MaterializeResult::Materialized(ResourceId::default());
         }
 
-        // FS-root bootstrap. Absolute attaches start with the synthetic
-        // [`crate::engine::FS_ROOT_SEG`] (`"/"`) — the filesystem root
-        // always exists on Unix, so we lazy-ensure a Tree slot for it
-        // before pre-existence sampling. The pre-existence walk's first
-        // step then sees the root as live, anchoring `prefix_idx` at
-        // `Some(0)` for any absolute path. Non-absolute (test-only)
-        // attaches skip this and may legitimately produce `prefix_idx =
-        // None` if the Tree is empty (handled below).
-        if components[0] == crate::engine::FS_ROOT_SEG {
-            self.tree.ensure(
-                None,
-                crate::engine::FS_ROOT_SEG,
-                ResourceRole::DescentScaffold,
-            );
-        }
+        // FS-root bootstrap. Unconditional: the pre-condition guarantees
+        // `components[0] == FS_ROOT_SEG`, and `Tree::ensure` is idempotent
+        // (returns the existing slot if `(parent=None, segment="/")`
+        // already maps to one). The role is `DescentScaffold` on first
+        // creation; if a prior `User` attach at `/` already promoted the
+        // slot, `ensure`'s preserve-existing-role contract leaves it
+        // alone. Bootstrapping unconditionally guarantees every Profile's
+        // rewind chain terminates at this `/` slot — the kernel always
+        // `lstat`s `/` successfully on Unix, so a `Vanished` response
+        // from a `/` probe is impossible, making cascading parent
+        // destruction (`rm -rf /a/b/c/d`) recoverable: the descent stays
+        // Pending at `/` waiting for the cascade's bottom segment to
+        // reappear.
+        self.tree.ensure(
+            None,
+            crate::engine::FS_ROOT_SEG,
+            ResourceRole::DescentScaffold,
+        );
 
         // Snapshot which segments existed BEFORE the walk so we can tell
-        // freshly-scaffolded segments from already-existing ones. After
-        // the bootstrap above, an absolute attach's first segment always
+        // freshly-scaffolded segments from already-existing ones. The
+        // bootstrap above guarantees `components[0]` (FS-root) always
         // pre-exists.
         let mut pre_existed: Vec<bool> = Vec::with_capacity(components.len());
         let mut cur_lookup: Option<ResourceId> = None;
@@ -123,59 +141,49 @@ impl crate::Engine {
             pre_existed.push(id.is_some());
             cur_lookup = id;
         }
+        debug_assert!(
+            pre_existed[0],
+            "materialize_path_or_pending: FS-root bootstrap must make components[0] pre-exist",
+        );
 
         // Now do the walk. `ensure_path` creates non-leaf as
         // `DescentScaffold`, leaf as `User`.
         let anchor = self.tree.ensure_path(components, ResourceRole::User);
 
-        // Walk forward to find the deepest pre-existing prefix. If every
-        // segment pre-existed, descent isn't needed.
-        let mut prefix_idx: Option<usize> = None;
+        // Walk forward to find the deepest pre-existing prefix. The
+        // bootstrap guarantees `pre_existed[0] == true`, so `prefix_idx`
+        // is always at least `0` — no `Option<usize>` trichotomy is
+        // needed.
+        let mut prefix_idx: usize = 0;
         for (i, &existed) in pre_existed.iter().enumerate() {
             if existed {
-                prefix_idx = Some(i);
+                prefix_idx = i;
             } else {
                 break;
             }
         }
 
-        match prefix_idx {
-            Some(i) if i + 1 == components.len() => {
-                // Whole path pre-existed. P4 path.
-                MaterializeResult::Materialized(anchor)
-            }
-            Some(i) => {
-                // Segments [0..=i] pre-existed; [i+1..] are scaffolds.
-                let prefix = self.resolve_components(&components[..=i]);
-                let remaining: Vec<CompactString> = components[i + 1..]
-                    .iter()
-                    .map(|&s| CompactString::from(s))
-                    .collect();
-                MaterializeResult::Pending {
-                    anchor,
-                    prefix: prefix.unwrap_or(anchor),
-                    remaining,
-                }
-            }
-            None => {
-                // Reachable only for **relative**-path attaches against
-                // an empty Tree (test fixtures use this path). Absolute
-                // attaches always have at least the bootstrapped FS-root
-                // pre-existing, so `prefix_idx >= Some(0)`.
-                //
-                // Degenerate semantics: the root segment is treated as
-                // both the "anchor scaffold" and the descent prefix. The
-                // first probe at the root will return `Vanished` and the
-                // rewind is a no-op (root has no parent, see
-                // `dispatch_descent_vanished`'s `None` branch).
-                let remaining: Vec<CompactString> =
-                    components.iter().map(|&s| CompactString::from(s)).collect();
-                let root = self.resolve_components(&components[..1]).unwrap_or(anchor);
-                MaterializeResult::Pending {
-                    anchor,
-                    prefix: root,
-                    remaining,
-                }
+        if prefix_idx + 1 == components.len() {
+            // Whole path pre-existed. P4 immediate-Seed path.
+            MaterializeResult::Materialized(anchor)
+        } else {
+            // Segments [0..=prefix_idx] pre-existed; [prefix_idx+1..] are
+            // scaffolds. `ensure_path` above created every segment, so
+            // `resolve_components` on any prefix is guaranteed to
+            // succeed — convert from the prior `unwrap_or(anchor)` (which
+            // masked an invariant violation) to `expect` with an explicit
+            // contract message.
+            let prefix = self
+                .resolve_components(&components[..=prefix_idx])
+                .expect("ensure_path created every component; prefix slice must resolve");
+            let remaining: Vec<CompactString> = components[prefix_idx + 1..]
+                .iter()
+                .map(|&s| CompactString::from(s))
+                .collect();
+            MaterializeResult::Pending {
+                anchor,
+                prefix,
+                remaining,
             }
         }
     }
@@ -435,15 +443,21 @@ impl crate::Engine {
     /// probe returns `Ok` and routes to `dispatch_descent_ok`'s
     /// "next segment not yet present; await next event" branch.
     ///
-    /// For absolute-path attaches the FS-root bootstrap in
-    /// `materialize_path_or_pending` guarantees the chain terminates at
-    /// `/`'s `Ok` response (the kernel always `lstat`s `/` successfully
-    /// on Unix). The `None` branch below is reachable only for
-    /// relative-path attaches against an empty Tree (test fixtures);
-    /// the production cascade `rm -rf /a/b/c/d` with anchor at `/d`
-    /// rewinds through `/c`, `/b`, `/a`, `/` and terminates on `/`'s
-    /// `Ok` rather than reaching this branch. The branch is preserved
-    /// for test coverage and defensive-future-bootstrap reasons.
+    /// **Branch reachability post-bootstrap.** With the unconditional
+    /// FS-root bootstrap in [`Self::materialize_path_or_pending`], every
+    /// descent's rewind chain terminates at the FS-root slot `/`. The
+    /// kernel always `lstat`s `/` successfully on Unix, so a `Vanished`
+    /// response from a `/` probe is impossible — meaning the `None` arm
+    /// below is structurally unreachable in production. A cascade like
+    /// `rm -rf /a/b/c/d` with anchor at `/d` rewinds through `/c`, `/b`,
+    /// `/a`, `/` and terminates on `/`'s `Ok` rather than reaching the
+    /// arm; the descent stays Pending at `/` waiting for the cascade's
+    /// bottom segment to reappear, which makes cascading parent
+    /// destruction auto-recoverable. The arm is retained as
+    /// defense-in-depth against kernel anomalies (e.g., a chrooted
+    /// environment where `/` is somehow inaccessible) and to keep the
+    /// recursion well-typed; tests must construct the state directly to
+    /// exercise it.
     ///
     /// For an `N`-level cascade with a Profile anchored at the leaf,
     /// the engine emits up to `N` rewind cycles per Pending Profile

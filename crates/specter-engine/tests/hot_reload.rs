@@ -352,7 +352,7 @@ fn config_diff_modified_remove_then_add() {
     // gets a fresh Profile (different config_hash) anchored at the same
     // path (path-based add re-materializes if needed).
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_path(&["/", "src"], ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let (sid_a, attach_out) = e.attach_sub(
@@ -394,7 +394,7 @@ fn config_diff_modified_remove_then_add() {
         sid_a,
         SubAttachRequest::for_path(
             "A-renamed".into(),
-            PathBuf::from("src"),
+            PathBuf::from("/src"),
             ScanConfig::builder().recursive(false).build(),
             MAX_SETTLE,
             SETTLE,

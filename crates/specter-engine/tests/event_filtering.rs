@@ -383,12 +383,12 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
 fn it_ef_3_descent_prefix_contributes_structure_only() {
     let mut e = Engine::new();
     // Pre-existing /tmp; the Sub's anchor /tmp/build/leaf doesn't exist.
-    let tmp = e.tree_mut().ensure(None, "tmp", ResourceRole::User);
+    let tmp = e.tree_mut().ensure_path(&["/", "tmp"], ResourceRole::User);
     e.tree_mut().set_kind(tmp, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
-        PathBuf::from("tmp/build/leaf"),
+        PathBuf::from("/tmp/build/leaf"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,

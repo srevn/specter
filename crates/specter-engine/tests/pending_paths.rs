@@ -78,12 +78,12 @@ fn attach_sub_path_pending_then_anchor_appears() {
     // log appears, then myapp appears. Anchor materializes; Seed burst
     // starts.
     let mut e = Engine::new();
-    let var = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    let var = e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User);
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
-        PathBuf::from("var/log/myapp"),
+        PathBuf::from("/var/log/myapp"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -170,12 +170,12 @@ fn attach_sub_path_pending_then_anchor_appears() {
 #[test]
 fn pending_path_failed_probe_retains_state() {
     let mut e = Engine::new();
-    let var = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    let var = e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User);
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
-        PathBuf::from("var/missing"),
+        PathBuf::from("/var/missing"),
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
@@ -216,12 +216,12 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     // with a no-progress response, then inject FsEvent at /var (the
     // prefix) to trigger a fresh probe (no settle).
     let mut e = Engine::new();
-    let var = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    let var = e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User);
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
-        PathBuf::from("var/missing"),
+        PathBuf::from("/var/missing"),
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
@@ -341,12 +341,12 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
 #[test]
 fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let mut e = Engine::new();
-    let var = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    let var = e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User);
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
         "watch".into(),
-        PathBuf::from("var/log/myapp"),
+        PathBuf::from("/var/log/myapp"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -392,23 +392,23 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     );
 }
 
-// Anchor terminal event on a Pending Profile
-//
-// `was_active = !matches!(state, Idle)` historically included Pending,
-// so a terminal event at a Pending Profile's anchor (degenerate path:
-// `prefix == anchor` from `materialize_path_or_pending`'s None branch,
-// reachable only via test-fixture relative-path attaches against an
-// empty Tree) routed through `finish_burst_to_idle` and underflowed
-// `sub_suppress` (Pending never bumped suppress_count).
+// Anchor terminal event on a Pending Profile pins the no-consumer
+// routing. An absolute attach against an empty Tree puts the FS-root
+// bootstrap between prefix and anchor: prefix is the synthetic `/`,
+// anchor is the scaffolded `/foo`. The two are distinct slots, and the
+// anchor's `watch_demand` is zero (descent hasn't materialized it yet),
+// so a `Removed` at the anchor lands in `EventOnUnwatchedResource`
+// rather than coercing the Pending Profile through
+// `finalize_anchor_lost` / `finish_burst_to_idle`.
 #[test]
-fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
+fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     let mut e = Engine::new();
-    // Relative-path attach against an empty Tree triggers
-    // `materialize_path_or_pending`'s None branch — anchor and prefix
-    // are the same Resource (degenerate fixture).
+    // Absolute path against an empty Tree: bootstrap creates `/`, anchor
+    // `/foo` is scaffolded under `/`. Profile lands Pending with
+    // current_prefix = `/`, anchor = /foo (different slots).
     let req = SubAttachRequest::for_path(
         "watch".into(),
-        PathBuf::from("foo"),
+        PathBuf::from("/foo"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -421,28 +421,35 @@ fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
     let (sid, _attach_out) = e.attach_sub(req, now);
     let pid = e.subs().get(sid).unwrap().profile;
 
-    // Confirm the degenerate setup: prefix == anchor.
     let p = e.profiles().get(pid).expect("Profile attached");
     let anchor = p.resource;
     let prefix = match &p.state {
         ProfileState::Pending(d) => d.current_prefix,
         s => panic!("expected Pending, got {s:?}"),
     };
-    assert_eq!(prefix, anchor, "fixture: prefix == anchor");
-    assert!(
-        e.tree().get(anchor).unwrap().watch_demand >= 1,
-        "prefix bumped its STRUCTURE contribution",
+    assert_ne!(
+        prefix, anchor,
+        "FS-root bootstrap separates prefix from anchor"
+    );
+    assert_eq!(
+        e.tree().get(prefix).unwrap().watch_demand,
+        1,
+        "descent prefix `/` carries the +1 STRUCTURE contribution",
+    );
+    assert_eq!(
+        e.tree().get(anchor).unwrap().watch_demand,
+        0,
+        "anchor scaffold is not yet bumped (descent hasn't materialized it)",
     );
 
-    // Dispatch FsEvent::Removed at the anchor (== prefix). Routing:
-    //   - classify_event_carriers(anchor) finds P in `descents`;
-    //     on_descent_event short-circuits (probe still in flight from
-    //     attach — I5).
-    //   - covering_profiles filters Pending → no per-Profile dispatch.
-    //   - finalize_anchor_lost is NOT called for P.
-    // Pre-fix this routed through finish_burst_to_idle → sub_suppress
-    // (underflow because Pending never bumped suppress_count). Post-fix:
-    // no panic. The Profile remains Pending; no Unsuppress is emitted.
+    // Dispatch FsEvent::Removed at the anchor (/foo). The anchor's
+    // `watch_demand == 0` short-circuits at the `EventOnUnwatchedResource`
+    // head guard in `on_fs_event` before any classifier work runs.
+    // Earlier this same Profile shape (a degenerate `prefix == anchor`
+    // fixture from a relative-path attach against an empty Tree) routed
+    // through `finish_burst_to_idle` → `sub_suppress` and underflowed
+    // `suppress_count`. The FS-root bootstrap rules out that degenerate
+    // shape entirely.
     let out = e.step(
         Input::FsEvent {
             resource: anchor,
@@ -451,7 +458,7 @@ fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
         now,
     );
 
-    // Profile still Pending — covering-Profile fan-out skipped P.
+    // Profile remains Pending (no covering-profile fan-out touched it).
     let still_pending = matches!(
         e.profiles().get(pid).unwrap().state,
         ProfileState::Pending(_),
@@ -468,11 +475,19 @@ fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
         .filter(|op| matches!(op, specter_core::WatchOp::Unsuppress { .. }))
         .count();
     assert_eq!(unsuppress_count, 0);
-    // suppress_count remains untouched — Pending never bumped it.
     assert_eq!(
         e.tree().get(anchor).unwrap().suppress_count,
         0,
         "suppress_count untouched (Pending never bumped it)",
+    );
+    // The event landed in the no-consumer head guard.
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            specter_core::Diagnostic::EventOnUnwatchedResource { resource, .. } if *resource == anchor,
+        )),
+        "anchor terminal event on Pending Profile lands in EventOnUnwatchedResource diagnostic; got {:?}",
+        out.diagnostics,
     );
 }
 
@@ -484,13 +499,15 @@ fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
 fn classifier_routes_descent_and_recovery_in_single_pass() {
     // /root and /root/bar exist; /root/foo does not. /elsewhere exists.
     let mut e = Engine::new();
-    let root_dir = e.tree_mut().ensure(None, "root", ResourceRole::User);
+    let root_dir = e.tree_mut().ensure_path(&["/", "root"], ResourceRole::User);
     e.tree_mut().set_kind(root_dir, ResourceKind::Dir);
     let bar = e
         .tree_mut()
         .ensure(Some(root_dir), "bar", ResourceRole::User);
     e.tree_mut().set_kind(bar, ResourceKind::Dir);
-    let elsewhere = e.tree_mut().ensure(None, "elsewhere", ResourceRole::User);
+    let elsewhere = e
+        .tree_mut()
+        .ensure_path(&["/", "elsewhere"], ResourceRole::User);
     e.tree_mut().set_kind(elsewhere, ResourceKind::Dir);
 
     // Profile A: Pending at /root, descending toward `foo` (does not
@@ -499,7 +516,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     // event — `on_descent_event` short-circuits on a busy slot.
     let req_a = SubAttachRequest::for_path(
         "watch-a".into(),
-        PathBuf::from("root/foo"),
+        PathBuf::from("/root/foo"),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
