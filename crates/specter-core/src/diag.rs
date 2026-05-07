@@ -249,14 +249,3 @@ pub enum Diagnostic {
     /// triggered by overflow rather than a normal `FsEvent`.
     SensorOverflow { scope: OverflowScope },
 }
-
-impl Default for Diagnostic {
-    /// Sentinel for `tinyvec::Array`'s `T: Default` bound on
-    /// `StepOutput.diagnostics`. Inline slots are overwritten before they
-    /// are ever read.
-    fn default() -> Self {
-        Self::StaleTimer {
-            id: TimerId::default(),
-        }
-    }
-}

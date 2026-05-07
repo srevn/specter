@@ -3708,7 +3708,7 @@ mod props {
                 let watch_keys: Vec<_> = out
                     .watch_ops
                     .iter()
-                    .map(Engine::watch_op_key)
+                    .map(WatchOp::resource)
                     .collect();
                 let mut sorted = watch_keys.clone();
                 sorted.sort();
@@ -3718,7 +3718,7 @@ mod props {
                 let probe_keys: Vec<_> = out
                     .probe_ops
                     .iter()
-                    .map(Engine::probe_op_key)
+                    .map(ProbeOp::profile)
                     .collect();
                 let mut sorted_p = probe_keys.clone();
                 sorted_p.sort();

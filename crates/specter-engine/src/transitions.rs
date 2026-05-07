@@ -1786,8 +1786,8 @@ impl Engine {
     /// Profile's anchor (`Profile.resource`) is `DescentScaffold`-roled
     /// and carries no `watch_demand` from this Profile — the descent
     /// prefix carries it instead. Events at the prefix route via
-    /// `descents_at_prefix` / `on_descent_event`; events at the anchor
-    /// or its descendants are structurally unreachable in production
+    /// `classify_event_carriers` / `on_descent_event`; events at the
+    /// anchor or its descendants are structurally unreachable in production
     /// (the anchor's `watch_demand` is 0 ⇒ head guard short-circuits).
     /// Filtering here makes the routing contract explicit:
     /// covering-Profile dispatch (Standard burst, anchor terminal event)

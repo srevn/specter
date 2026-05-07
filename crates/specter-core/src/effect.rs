@@ -35,11 +35,12 @@ pub struct CommandResolved {
 /// `target` is the Resource this Effect addresses — the anchor directory
 /// for `DedupKey::Subtree`, or the file resource for `DedupKey::PerFile`
 /// (where it duplicates `key.resource` by construction). Captured at
-/// emission time; the pair `(sub_of_key(self.key), self.target)` is the
-/// total-ordered sort key for [`crate::output::StepOutput::effects`].
-/// Carried on the Effect rather than derived from a Profile lookup at
-/// sort time: a frozen value survives any state churn between
-/// `emit_effects` and `sort_step_output`.
+/// emission time; the pair `(self.key.sub(), self.target)` is the
+/// total-ordered sort key for [`crate::output::StepOutput::effects`]
+/// applied by [`crate::StepOutput::sort_for_emission`]. Carried on the
+/// Effect rather than derived from a Profile lookup at sort time: a
+/// frozen value survives any state churn between `emit_effects` and
+/// `sort_for_emission`.
 ///
 /// `capture_output` mirrors the Sub's `log_output` at emission time. The
 /// actuator reads it to choose between `Stdio::null()` (the default —
@@ -58,25 +59,6 @@ pub struct Effect {
     pub correlation: CorrelationId,
     pub diff: Option<Arc<Diff>>,
     pub capture_output: bool,
-}
-
-impl Default for Effect {
-    /// Sentinel for `tinyvec::Array`'s `T: Default` bound on
-    /// `StepOutput.effects`. Inline slots are overwritten before they're
-    /// ever read.
-    fn default() -> Self {
-        Self {
-            key: DedupKey::default(),
-            target: ResourceId::default(),
-            command: CommandResolved::default(),
-            env: Vec::new(),
-            cwd: PathBuf::new(),
-            forced: false,
-            correlation: CorrelationId::default(),
-            diff: None,
-            capture_output: false,
-        }
-    }
 }
 
 /// Per-Effect correlation token. Engine-monotonic in v1.
@@ -118,9 +100,25 @@ impl DedupKey {
             Self::PerFile { profile, .. } | Self::Subtree { profile, .. } => profile,
         }
     }
+
+    /// The Sub that emitted this key. Both variants carry the field;
+    /// callers needing the `(sub, target)` sort key for
+    /// [`crate::StepOutput::sort_for_emission`] reach through here
+    /// rather than re-implementing the match.
+    #[must_use]
+    pub const fn sub(&self) -> SubId {
+        match *self {
+            Self::PerFile { sub, .. } | Self::Subtree { sub, .. } => sub,
+        }
+    }
 }
 
 impl Default for DedupKey {
+    /// Null `DedupKey` for test fodder — used by tests that synthesize
+    /// `Input::EffectComplete` with a Sub that is not in the registry
+    /// (engine emits `EffectCompleteForUnknownSub` and drops). Not a
+    /// `SmallVec` sentinel: `DedupKey` is stored inside `Effect`, not
+    /// directly in `StepOutput.effects`.
     fn default() -> Self {
         Self::Subtree {
             sub: SubId::default(),

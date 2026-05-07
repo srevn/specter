@@ -244,8 +244,20 @@ mod tests {
 
     #[test]
     fn new_creates_bounded_effects_at_1024() {
+        use specter_core::{CommandResolved, CorrelationId, DedupKey};
+        use std::path::PathBuf;
         let chans = Channels::new();
-        let dummy = || Effect::default();
+        let dummy = || Effect {
+            key: DedupKey::default(),
+            target: ResourceId::default(),
+            command: CommandResolved::default(),
+            env: Vec::new(),
+            cwd: PathBuf::new(),
+            forced: false,
+            correlation: CorrelationId::default(),
+            diff: None,
+            capture_output: false,
+        };
         for _ in 0..1024 {
             chans.effects_tx.try_send(dummy()).expect("first 1024 fit");
         }

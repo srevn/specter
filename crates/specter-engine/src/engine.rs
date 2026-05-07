@@ -16,9 +16,9 @@
 use crate::refcounts::add_watch_demand;
 use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
-    BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Effect, Input, ProbeOp, Profile,
-    ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest, SubId,
-    SubRegistry, TimerId, TimerKind, Tree, WatchOp, compute_config_hash,
+    BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Input, Profile, ProfileId,
+    ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest, SubId, SubRegistry,
+    TimerId, TimerKind, Tree, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -108,7 +108,7 @@ impl Engine {
                 self.on_sensor_overflow(scope, now, &mut out);
             }
         }
-        Self::sort_step_output(&mut out);
+        out.sort_for_emission();
         out
     }
 
@@ -126,7 +126,7 @@ impl Engine {
     pub fn attach_sub(&mut self, req: SubAttachRequest, now: Instant) -> (SubId, StepOutput) {
         let mut out = StepOutput::default();
         let sub_id = self.attach_sub_inner(req, now, &mut out);
-        Self::sort_step_output(&mut out);
+        out.sort_for_emission();
         (sub_id, out)
     }
 
@@ -408,7 +408,7 @@ impl Engine {
     pub fn detach_sub(&mut self, sub: SubId, now: Instant) -> StepOutput {
         let mut out = StepOutput::default();
         self.detach_sub_inner(sub, now, &mut out);
-        Self::sort_step_output(&mut out);
+        out.sort_for_emission();
         out
     }
 
@@ -699,45 +699,6 @@ impl Engine {
             ),
         }
     }
-
-    /// Sort: `watch_ops` by `ResourceId`; `probe_ops` by `ProfileId`;
-    /// `effects` by `(SubId, ResourceId)` per the determinism contract.
-    /// All three extractors are pure `const fn` — the sort never peeks
-    /// at Engine state because every key is captured on the op/effect
-    /// at construction time, so `sort_step_output` itself is associated
-    /// rather than a method. `diagnostics` follow insertion order —
-    /// they aren't part of the user-visible sort guarantee.
-    pub(crate) fn sort_step_output(out: &mut StepOutput) {
-        out.watch_ops.sort_by_key(Self::watch_op_key);
-        out.probe_ops.sort_by_key(Self::probe_op_key);
-        out.effects.sort_by_key(Self::effect_sort_key);
-    }
-
-    /// Sort key for [`StepOutput::effects`]: `(sub_of_key, target)`.
-    /// Pure free function — `Effect.target` was frozen at emission time,
-    /// so sort needs no Engine state and no fallback.
-    pub(crate) const fn effect_sort_key(e: &Effect) -> (SubId, ResourceId) {
-        let sub = match e.key {
-            DedupKey::PerFile { sub, .. } | DedupKey::Subtree { sub, .. } => sub,
-        };
-        (sub, e.target)
-    }
-
-    pub(crate) const fn watch_op_key(op: &WatchOp) -> ResourceId {
-        match op {
-            WatchOp::Watch { resource, .. }
-            | WatchOp::Unwatch { resource }
-            | WatchOp::Suppress { resource }
-            | WatchOp::Unsuppress { resource } => *resource,
-        }
-    }
-
-    pub(crate) const fn probe_op_key(op: &ProbeOp) -> ProfileId {
-        match op {
-            ProbeOp::Probe { request } => request.profile,
-            ProbeOp::Cancel { profile } => *profile,
-        }
-    }
 }
 
 /// Local lifecycle classifier for `detach_sub_inner`. Three
@@ -810,13 +771,11 @@ fn decompose_attach_path<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use slotmap::KeyData;
     use specter_core::{
-        ClassSet, DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeKind, ProbeOp,
-        ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ResourceId, ResourceKind, ScanConfig,
-        StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind, WatchOp,
+        DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeResponse, ProbeResult,
+        ProfileId, ResourceId, ScanConfig, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind,
+        WatchOp,
     };
-    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     // Compile-time `Send + Sync` check on `Engine`. The bin loop parks
@@ -825,18 +784,6 @@ mod tests {
         const fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Engine>();
     };
-
-    fn rid(n: u64) -> ResourceId {
-        ResourceId::from(KeyData::from_ffi(n))
-    }
-
-    fn pidn(n: u64) -> ProfileId {
-        ProfileId::from(KeyData::from_ffi(n))
-    }
-
-    fn sidn(n: u64) -> SubId {
-        SubId::from(KeyData::from_ffi(n))
-    }
 
     #[test]
     fn step_fs_event_for_unwatched_resource_diagnoses() {
@@ -1082,140 +1029,6 @@ mod tests {
         assert_eq!(e.pending_probe(pid1), Some(a));
         assert_eq!(e.pending_probe(pid2), Some(b));
         assert_eq!(e.pending_probe(pid3), Some(c));
-    }
-
-    #[test]
-    fn sort_step_output_orders_watch_ops_by_resource_id() {
-        let r1 = rid(1);
-        let r2 = rid(2);
-        let r3 = rid(3);
-        let mut out = StepOutput::default();
-        out.watch_ops.push(WatchOp::Suppress { resource: r3 });
-        out.watch_ops.push(WatchOp::Watch {
-            resource: r1,
-            path: PathBuf::from("/x"),
-            kind: ResourceKind::Unknown,
-            events: ClassSet::EMPTY,
-        });
-        out.watch_ops.push(WatchOp::Unwatch { resource: r2 });
-
-        Engine::sort_step_output(&mut out);
-
-        let resources: Vec<ResourceId> = out.watch_ops.iter().map(Engine::watch_op_key).collect();
-        assert_eq!(resources, vec![r1, r2, r3]);
-    }
-
-    #[test]
-    fn sort_step_output_orders_probe_ops_by_profile_id() {
-        let p1 = pidn(1);
-        let p2 = pidn(2);
-        let mut out = StepOutput::default();
-        out.probe_ops.push(ProbeOp::Cancel { profile: p2 });
-        out.probe_ops.push(ProbeOp::Probe {
-            request: ProbeRequest {
-                profile: p1,
-                correlation: ProbeCorrelation(7),
-                kind: ProbeKind::File,
-                target_resource: ResourceId::default(),
-                target_path: PathBuf::from("/y"),
-                scan_config: ScanConfig::builder().build(),
-                captured_with: 0,
-                baseline_subtree: None,
-                force_walk: std::collections::BTreeSet::new(),
-                forced: false,
-            },
-        });
-
-        Engine::sort_step_output(&mut out);
-
-        let profiles: Vec<ProfileId> = out.probe_ops.iter().map(Engine::probe_op_key).collect();
-        assert_eq!(profiles, vec![p1, p2]);
-    }
-
-    /// `effect_sort_key` extracts `(sub, target)` from a `PerFile`-keyed
-    /// Effect with no `&Engine` access. The captured `target` survives
-    /// any post-emission state churn — sort is independent of
-    /// `ProfileMap`.
-    #[test]
-    fn effect_sort_key_perfile_uses_captured_target() {
-        let sub = sidn(11);
-        let profile = pidn(7);
-        let resource = rid(13);
-        let e = Effect {
-            key: DedupKey::PerFile {
-                sub,
-                profile,
-                resource,
-            },
-            target: resource,
-            ..Effect::default()
-        };
-        assert_eq!(Engine::effect_sort_key(&e), (sub, resource));
-    }
-
-    /// `effect_sort_key` extracts `(sub, target)` from a `Subtree`-keyed
-    /// Effect. The anchor lives on `Effect.target`, not in the key, and
-    /// the extractor reads it directly with no Engine state — the
-    /// formerly-`&self` lookup-with-fallback is gone.
-    #[test]
-    fn effect_sort_key_subtree_uses_captured_target() {
-        let sub = sidn(11);
-        let profile = pidn(7);
-        let anchor = rid(13);
-        let e = Effect {
-            key: DedupKey::Subtree { sub, profile },
-            target: anchor,
-            ..Effect::default()
-        };
-        assert_eq!(Engine::effect_sort_key(&e), (sub, anchor));
-    }
-
-    /// `sort_step_output` orders mixed-arm effects by `(sub, target)`.
-    /// Mixing `PerFile` and `Subtree` in one step is the production case
-    /// (a multi-Sub Profile firing both kinds simultaneously); the
-    /// ordering interleaves them by sub and target rather than
-    /// segregating by variant.
-    #[test]
-    fn sort_step_output_orders_effects_by_sub_then_target() {
-        let sub_a = sidn(2);
-        let sub_b = sidn(5);
-        let prof = pidn(7);
-        let r_lo = rid(1);
-        let r_hi = rid(9);
-        // Push out of order: (sub_b, hi), (sub_a, hi), (sub_a, lo).
-        let mut out = StepOutput::default();
-        out.effects.push(Effect {
-            key: DedupKey::Subtree {
-                sub: sub_b,
-                profile: prof,
-            },
-            target: r_hi,
-            ..Effect::default()
-        });
-        out.effects.push(Effect {
-            key: DedupKey::PerFile {
-                sub: sub_a,
-                profile: prof,
-                resource: r_hi,
-            },
-            target: r_hi,
-            ..Effect::default()
-        });
-        out.effects.push(Effect {
-            key: DedupKey::PerFile {
-                sub: sub_a,
-                profile: prof,
-                resource: r_lo,
-            },
-            target: r_lo,
-            ..Effect::default()
-        });
-
-        Engine::sort_step_output(&mut out);
-
-        let keys: Vec<(SubId, ResourceId)> =
-            out.effects.iter().map(Engine::effect_sort_key).collect();
-        assert_eq!(keys, vec![(sub_a, r_lo), (sub_a, r_hi), (sub_b, r_hi)]);
     }
 
     #[test]

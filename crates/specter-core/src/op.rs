@@ -152,13 +152,17 @@ pub enum WatchOp {
     },
 }
 
-impl Default for WatchOp {
-    /// Sentinel placeholder so `WatchOp` satisfies `tinyvec::Array`'s
-    /// `T: Default` bound. Inline `TinyVec` slots are overwritten before
-    /// they are ever read.
-    fn default() -> Self {
-        Self::Unsuppress {
-            resource: ResourceId::default(),
+impl WatchOp {
+    /// The Resource this op targets. Every variant carries one — the
+    /// match is exhaustive and `const`. This is the determinism-sort
+    /// key for [`crate::StepOutput::watch_ops`].
+    #[must_use]
+    pub const fn resource(&self) -> ResourceId {
+        match self {
+            Self::Watch { resource, .. }
+            | Self::Unwatch { resource }
+            | Self::Suppress { resource }
+            | Self::Unsuppress { resource } => *resource,
         }
     }
 }
@@ -218,7 +222,7 @@ impl WatchFailure {
 // `Probe` is the dominant variant — every burst emits one — and boxing
 // it would add an allocation per probe with no observable benefit since
 // `Cancel` is sparse (per Profile reap, not per burst). The size delta
-// rides on `tinyvec` inline slots, which is why we accept it explicitly.
+// rides on `SmallVec` inline slots, which is why we accept it explicitly.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProbeOp {
@@ -226,12 +230,15 @@ pub enum ProbeOp {
     Cancel { profile: ProfileId },
 }
 
-impl Default for ProbeOp {
-    /// Sentinel for `tinyvec::Array`. The `Cancel` variant carries no
-    /// `ProbeRequest`, sidestepping a `Default` requirement on that type.
-    fn default() -> Self {
-        Self::Cancel {
-            profile: ProfileId::default(),
+impl ProbeOp {
+    /// The Profile this op addresses. Both variants carry one (the
+    /// `Probe` variant via its nested [`ProbeRequest`]). This is the
+    /// determinism-sort key for [`crate::StepOutput::probe_ops`].
+    #[must_use]
+    pub const fn profile(&self) -> ProfileId {
+        match self {
+            Self::Probe { request } => request.profile,
+            Self::Cancel { profile } => *profile,
         }
     }
 }
