@@ -464,8 +464,9 @@ fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
     );
 
     // Dispatch FsEvent::Removed at the anchor (== prefix). Routing:
-    //   - descents_at_prefix(anchor) finds [P]; on_descent_event
-    //     short-circuits (probe still in flight from attach — I5).
+    //   - classify_event_carriers(anchor) finds P in `descents`;
+    //     on_descent_event short-circuits (probe still in flight from
+    //     attach — I5).
     //   - covering_profiles filters Pending → no per-Profile dispatch.
     //   - finalize_anchor_lost is NOT called for P.
     // Pre-fix this routed through finish_burst_to_idle → sub_suppress
@@ -502,4 +503,198 @@ fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
         0,
         "suppress_count untouched (Pending never bumped it)",
     );
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Behavioral parity: a single FsEvent at one Resource fans out to a
+// Pending Profile (descent dispatch) AND an Idle Profile with absent
+// anchor (recovery dispatch), without disturbing an unrelated Profile.
+//
+// Pre-fix: `on_fs_event` walks `self.profiles` twice — once to collect
+// `descents_at_prefix(resource)`, then again to filter recovery
+// candidates (`watch_root_parent == Some(resource) && Idle &&
+// current.is_none()`). Both passes produce disjoint Profile sets.
+//
+// Post-fix: `classify_event_carriers` collects both classes in a single
+// pass over `self.profiles`, returning an `EventCarriers { descents,
+// recoveries }`. Mutual exclusivity holds structurally — `Pending`
+// excludes `Idle` at the `ProfileState` level.
+//
+// This test asserts the routing observable: A receives a fresh descent
+// probe; B transitions Idle → Pending and emits a recovery descent
+// probe; C is untouched. It passes both pre- and post-refactor — the
+// refactor's purpose is performance, not behavior.
+// ───────────────────────────────────────────────────────────────────────
+#[test]
+#[allow(clippy::similar_names)]
+fn classifier_routes_descent_and_recovery_in_single_pass() {
+    // /root and /root/bar exist; /root/foo does not. /elsewhere exists.
+    let mut e = Engine::new();
+    let root_dir = e.tree_mut().ensure(None, "root", ResourceRole::User);
+    e.tree_mut().set_kind(root_dir, ResourceKind::Dir);
+    let bar = e
+        .tree_mut()
+        .ensure(Some(root_dir), "bar", ResourceRole::User);
+    e.tree_mut().set_kind(bar, ResourceKind::Dir);
+    let elsewhere = e.tree_mut().ensure(None, "elsewhere", ResourceRole::User);
+    e.tree_mut().set_kind(elsewhere, ResourceKind::Dir);
+
+    // Profile A: Pending at /root, descending toward `foo` (does not
+    // exist). Drain its initial descent probe with a no-progress
+    // response so its `pending_probe` slot is empty before the test
+    // event — `on_descent_event` short-circuits on a busy slot.
+    let req_a = SubAttachRequest::for_path(
+        "watch-a".into(),
+        PathBuf::from("root/foo"),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
+    let now = Instant::now();
+    let (sid_a, attach_a_out) = e.attach_sub(req_a, now);
+    let pid_a = e.subs().get(sid_a).unwrap().profile;
+    let a_corr = first_probe_corr(&attach_a_out).expect("descent probe at attach");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid_a,
+            correlation: a_corr,
+            result: ProbeResult::Ok(dir_snap_with(vec![("bar", EntryKind::Dir, 1)])),
+        }),
+        now,
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid_a).unwrap().state,
+            ProfileState::Pending(_),
+        ),
+        "A still Pending after no-progress response",
+    );
+
+    // Profile B: anchor at /root/bar; drive Seed → Idle, then Removed
+    // at /root/bar → Idle with current=None and watch_root_parent=/root.
+    let req_b = SubAttachRequest::for_resource(
+        "watch-b".into(),
+        bar,
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
+    let (sid_b, attach_b_out) = e.attach_sub(req_b, now);
+    let pid_b = e.subs().get(sid_b).unwrap().profile;
+    let b_corr = first_probe_corr(&attach_b_out).expect("Seed probe at attach");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid_b,
+            correlation: b_corr,
+            result: ProbeResult::Ok(dir_snap_with(vec![])),
+        }),
+        now,
+    );
+    assert_eq!(
+        e.profiles().get(pid_b).unwrap().watch_root_parent,
+        Some(root_dir),
+        "B watches its parent /root for anchor recovery",
+    );
+    e.step(
+        Input::FsEvent {
+            resource: bar,
+            event: FsEvent::Removed,
+        },
+        now,
+    );
+    let p_b = e.profiles().get(pid_b).unwrap();
+    assert!(matches!(p_b.state, ProfileState::Idle));
+    assert!(p_b.current.is_none(), "B's anchor is gone");
+    assert_eq!(p_b.watch_root_parent, Some(root_dir));
+
+    // Profile C: anchor at /elsewhere; Seed → Idle. Unrelated to /root.
+    let req_c = SubAttachRequest::for_resource(
+        "watch-c".into(),
+        elsewhere,
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
+    let (sid_c, attach_c_out) = e.attach_sub(req_c, now);
+    let pid_c = e.subs().get(sid_c).unwrap().profile;
+    let c_corr = first_probe_corr(&attach_c_out).expect("Seed probe at attach");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid_c,
+            correlation: c_corr,
+            result: ProbeResult::Ok(dir_snap_with(vec![])),
+        }),
+        now,
+    );
+    assert!(matches!(
+        e.profiles().get(pid_c).unwrap().state,
+        ProfileState::Idle,
+    ));
+
+    // The trigger: a single StructureChanged event at /root.
+    // - A's `current_prefix == /root` ⇒ descent dispatch.
+    // - B's `watch_root_parent == /root && current.is_none()` ⇒ recovery
+    //   dispatch (Idle → Pending).
+    // - C is anchored at /elsewhere ⇒ untouched.
+    let out = e.step(
+        Input::FsEvent {
+            resource: root_dir,
+            event: FsEvent::StructureChanged,
+        },
+        now,
+    );
+
+    // A: a fresh descent probe minted (slot was empty after drain).
+    let a_probes = out
+        .probe_ops
+        .iter()
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid_a))
+        .count();
+    assert_eq!(a_probes, 1, "A's descent advance emits one probe");
+    assert!(
+        matches!(
+            e.profiles().get(pid_a).unwrap().state,
+            ProfileState::Pending(_),
+        ),
+        "A remains Pending",
+    );
+
+    // B: re-entered Pending (recovery descent) and emitted a probe.
+    let b_probes = out
+        .probe_ops
+        .iter()
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid_b))
+        .count();
+    assert_eq!(b_probes, 1, "B's recovery emits one descent probe");
+    assert!(
+        matches!(
+            e.profiles().get(pid_b).unwrap().state,
+            ProfileState::Pending(_),
+        ),
+        "B transitioned Idle → Pending",
+    );
+
+    // C: untouched. No probe; state still Idle.
+    let c_probes = out
+        .probe_ops
+        .iter()
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid_c))
+        .count();
+    assert_eq!(c_probes, 0, "C is unrelated to /root; no probe");
+    assert!(matches!(
+        e.profiles().get(pid_c).unwrap().state,
+        ProfileState::Idle,
+    ));
 }

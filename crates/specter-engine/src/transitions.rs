@@ -63,36 +63,20 @@ impl Engine {
             return;
         }
 
-        // Route events at descent prefixes to `on_descent_event`. Multiple
-        // Profiles may share one prefix (two Subs awaiting siblings under
-        // the same scaffold); fan out to each. Descent prefix watches
-        // register STRUCTURE-only, so any event reaching here is
-        // structurally relevant — no class filter applies.
-        let descent_owners = self.descents_at_prefix(resource);
-        for pid in &descent_owners {
-            self.on_descent_event(*pid, now, out);
+        // Single-pass classification of the event's carriers: Profiles
+        // that "carry" a dispatch responsibility for this resource.
+        // Descent prefix and watch-root-parent watches both register
+        // STRUCTURE-only, so any event reaching here is structurally
+        // relevant for both arms — no class filter applies before
+        // dispatch. Mutual exclusion is structural (`Pending` excludes
+        // `Idle` at the `ProfileState` sum-type level).
+        let carriers = self.classify_event_carriers(resource);
+        let descent_count = carriers.descents.len();
+        let recovery_count = carriers.recoveries.len();
+        for pid in carriers.descents.iter().copied() {
+            self.on_descent_event(pid, now, out);
         }
-
-        // If an Idle Profile's anchor is absent (current.is_none()) and the
-        // event resource is its `watch_root_parent`, re-enter pending descent
-        // for this Profile so an anchor reappearance is detected
-        // automatically. Pending and Idle are mutually exclusive
-        // ProfileState variants — the `matches!(p.state, ProfileState::Idle)`
-        // filter already excludes Pending Profiles. The watch-root-parent
-        // watch registers STRUCTURE-only — recovery dispatch is
-        // unfiltered, same rationale as descent above.
-        let recovery_targets: Vec<ProfileId> = self
-            .profiles
-            .iter()
-            .filter(|(_, p)| {
-                p.watch_root_parent == Some(resource)
-                    && matches!(p.state, ProfileState::Idle)
-                    && p.current.is_none()
-            })
-            .map(|(pid, _)| pid)
-            .collect();
-        let recovery_count = recovery_targets.len();
-        for pid in recovery_targets {
+        for pid in carriers.recoveries.iter().copied() {
             self.start_pending_recovery(pid, resource, out);
         }
 
@@ -100,7 +84,7 @@ impl Engine {
         // P4 single-Profile this resolves to 0 or 1; P5 multi-Profile
         // dispatches to each in encounter order.
         let covering = self.covering_profiles(resource);
-        if covering.is_empty() && descent_owners.is_empty() && recovery_count == 0 {
+        if covering.is_empty() && descent_count == 0 && recovery_count == 0 {
             // No consumer: covered by no Profile, no in-flight descent,
             // and no recovery kicked off. Emit `EventNoConsumer` (a
             // benign "watched but no listener" signal — typically a
@@ -1842,6 +1826,53 @@ impl Engine {
         self.next_correlation = self.next_correlation.saturating_add(1);
         CorrelationId(self.next_correlation)
     }
+
+    /// Single-pass classification of Profiles that carry a dispatch
+    /// responsibility for an [`crate::Input::FsEvent`] at `resource`.
+    /// Sole consumer is [`Engine::on_fs_event`].
+    ///
+    /// Two carrier classes, mutually exclusive at the
+    /// [`ProfileState`] sum-type level:
+    ///
+    /// - **Descent**: `Pending(d)` Profiles whose `d.current_prefix ==
+    ///   resource`. `on_descent_event` advances descent.
+    /// - **Recovery**: `Idle` Profiles whose `watch_root_parent ==
+    ///   Some(resource)` and whose anchor is currently absent
+    ///   (`current.is_none()`). `start_pending_recovery` re-enters
+    ///   pending descent — auto-recapture on anchor reappearance.
+    ///
+    /// O(profiles). A per-resource index keyed by `current_prefix` and
+    /// `watch_root_parent` would convert this to O(matched); not in
+    /// scope for v1.
+    fn classify_event_carriers(&self, resource: ResourceId) -> EventCarriers {
+        let mut out = EventCarriers {
+            descents: SmallVec::new(),
+            recoveries: SmallVec::new(),
+        };
+        for (pid, p) in self.profiles.iter() {
+            match &p.state {
+                ProfileState::Pending(d) if d.current_prefix == resource => {
+                    out.descents.push(pid);
+                }
+                ProfileState::Idle
+                    if p.watch_root_parent == Some(resource) && p.current.is_none() =>
+                {
+                    out.recoveries.push(pid);
+                }
+                ProfileState::Pending(_) | ProfileState::Idle | ProfileState::Active(_) => {}
+            }
+        }
+        out
+    }
+}
+
+/// Per-resource dispatch fan-out collected by
+/// [`Engine::classify_event_carriers`]. The two SmallVec inline caps of
+/// 2 cover the typical "shared scaffold" case (two Subs anchored at
+/// sibling children of one parent) without a heap allocation.
+struct EventCarriers {
+    descents: SmallVec<[ProfileId; 2]>,
+    recoveries: SmallVec<[ProfileId; 2]>,
 }
 
 /// Outcome of an [`Engine::emit_effects`] call. `count` is the number of

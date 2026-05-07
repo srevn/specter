@@ -38,7 +38,8 @@ pub(crate) const FS_ROOT_SEG: &str = "/";
 /// Per-Profile pending-path descent state lives inline on
 /// `ProfileState::Pending(DescentState)`. Read through
 /// `Engine::descent_state` / `Engine::descent_state_mut` (both
-/// `pub(crate)`); fan-out queries use `Engine::descents_at_prefix`.
+/// `pub(crate)`); per-event fan-out lives next to its sole consumer
+/// (`Engine::classify_event_carriers` in `transitions.rs`).
 #[derive(Debug, Default)]
 pub struct Engine {
     pub(crate) tree: Tree,
@@ -72,28 +73,6 @@ impl Engine {
             ProfileState::Pending(d) => Some(d),
             ProfileState::Idle | ProfileState::Active(_) => None,
         }
-    }
-
-    /// Profiles whose Pending descent has `current_prefix == resource`.
-    /// Sole consumer is `on_fs_event`'s descent fan-out (multiple
-    /// Profiles may share one prefix — e.g., two Subs anchored at sibling
-    /// children await the shared parent's materialization).
-    ///
-    /// O(profiles). `SmallVec<[ProfileId; 2]>` matches the typical case
-    /// (0-1 descents per prefix; 2 covers the "shared scaffold" case).
-    pub(crate) fn descents_at_prefix(
-        &self,
-        resource: ResourceId,
-    ) -> smallvec::SmallVec<[ProfileId; 2]> {
-        let mut out: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
-        for (pid, p) in self.profiles.iter() {
-            if let ProfileState::Pending(d) = &p.state
-                && d.current_prefix == resource
-            {
-                out.push(pid);
-            }
-        }
-        out
     }
 
     /// Pure, deterministic, total. Consumes one [`Input`], emits a sorted
