@@ -135,6 +135,18 @@ fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId, root: Resou
     ));
 }
 
+/// Engine with a single Profile in `Active(Standard) { phase: Batching }`
+/// and `pending_probe = None`. Drives the Profile through Seed → Idle,
+/// then starts a Standard burst at the anchor. Used by the I5-breach
+/// tests to inject a forged `pending_probe` while phase is non-mint.
+fn engine_in_standard_batching() -> (Engine, specter_core::ProfileId, Instant) {
+    let (mut e, pid, _sid, r, now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, r);
+    let mut out = StepOutput::default();
+    e.start_standard_burst(pid, r, now, &mut out);
+    (e, pid, now)
+}
+
 // ---- attach_sub ----
 
 #[test]
@@ -326,6 +338,154 @@ fn probe_response_for_idle_profile_drops_with_diagnostic() {
         .iter()
         .any(|d| matches!(d, Diagnostic::StaleProbeResponse { .. }));
     assert!(stale);
+}
+
+// ---- I5 invariant breach (post-live-check shape mismatch) ----
+//
+// The two test pairs below exercise the dispatch arms that route a
+// *live* probe response (correlation matches the slot) into a state /
+// phase combination that should be unreachable by construction. Only
+// Verifying / Rebasing (Active) and Pending mint into the channel; any
+// other shape with the slot occupied means the slot survived a phase
+// change without a matching `cancel_pending_probe`. The dispatch
+// `debug_assert!`s in dev/CI and falls through to a
+// `StaleProbeResponse` diagnostic in release. Each pair has one
+// debug-only panic test and one release-only diagnostic test.
+
+/// I5: a live response routed against `Batching` is a state-machine bug;
+/// the dispatch panics in dev/CI rather than misroute to
+/// `dispatch_standard_ok` (which would corrupt `Awaiting.outstanding`
+/// via a spurious `transition_to_awaiting`).
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "debug_assert! is compiled out in release"
+)]
+#[should_panic(expected = "I5 violated")]
+fn probe_response_in_batching_phase_panics_on_invariant_breach() {
+    use specter_core::ProbeCorrelation;
+    let (mut e, pid, now) = engine_in_standard_batching();
+
+    // Forge a correlation while phase = Batching. Production cannot
+    // reach this state — `pending_probe = Some(_)` and phase = Batching
+    // coexist only if a future regression skips a `cancel_pending_probe`
+    // call before the phase change. ProbeCorrelation(0) is the Default;
+    // the engine never mints it (mint counter starts at 1), so it is
+    // safe as a forged-but-non-colliding token.
+    let bogus = ProbeCorrelation::default();
+    e.profiles
+        .get_mut(pid)
+        .expect("Profile alive")
+        .pending_probe = Some(bogus);
+
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: bogus,
+            result: ProbeResult::Ok(file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1)),
+        }),
+        now,
+    );
+}
+
+/// Release-mode pair: the `debug_assert!` is compiled out, so the
+/// dispatch routes through `ProbeDispatch::Stale` and emits
+/// `StaleProbeResponse`. Pinning the release-build fallthrough keeps
+/// the safety net intact when the assertion is silent.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "covered by paired _panics_ test")]
+fn probe_response_in_batching_phase_drops_in_release() {
+    use specter_core::ProbeCorrelation;
+    let (mut e, pid, now) = engine_in_standard_batching();
+    let bogus = ProbeCorrelation::default();
+    e.profiles
+        .get_mut(pid)
+        .expect("Profile alive")
+        .pending_probe = Some(bogus);
+
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: bogus,
+            result: ProbeResult::Ok(file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1)),
+        }),
+        now,
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::StaleProbeResponse { profile, correlation }
+            if *profile == pid && *correlation == bogus
+        )),
+        "expected StaleProbeResponse for the I5 breach (got {:?})",
+        out.diagnostics,
+    );
+}
+
+/// Symmetric I5 breach: an Idle Profile with a non-empty `pending_probe`
+/// slot. By construction Idle ⇒ pending_probe = None; a live response
+/// here means the slot survived the transition to Idle without a
+/// cancel. Same dispatch policy as the non-mint phase tests: panic in
+/// debug, diagnostic in release.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "debug_assert! is compiled out in release"
+)]
+#[should_panic(expected = "I5 violated")]
+fn probe_response_on_idle_state_panics_on_invariant_breach() {
+    use specter_core::ProbeCorrelation;
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+
+    let bogus = ProbeCorrelation::default();
+    e.profiles
+        .get_mut(pid)
+        .expect("Profile alive")
+        .pending_probe = Some(bogus);
+
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: bogus,
+            result: ProbeResult::Ok(dir_tree_snap(root, vec![])),
+        }),
+        Instant::now(),
+    );
+}
+
+/// Release-mode pair: the I5 breach on Idle still produces a
+/// `StaleProbeResponse` diagnostic.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "covered by paired _panics_ test")]
+fn probe_response_on_idle_state_drops_in_release() {
+    use specter_core::ProbeCorrelation;
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+
+    let bogus = ProbeCorrelation::default();
+    e.profiles
+        .get_mut(pid)
+        .expect("Profile alive")
+        .pending_probe = Some(bogus);
+
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: bogus,
+            result: ProbeResult::Ok(dir_tree_snap(root, vec![])),
+        }),
+        Instant::now(),
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::StaleProbeResponse { profile, correlation }
+            if *profile == pid && *correlation == bogus
+        )),
+        "expected StaleProbeResponse for the I5 breach (got {:?})",
+        out.diagnostics,
+    );
 }
 
 // ---- Standard burst dispatch ----
@@ -582,7 +742,9 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     // After dispatch, Profile.current must remain File-shaped — pre-fix
     // it would have been wholesale-replaced with a Dir snapshot rooted
     // at the parent dir, breaking the navigation invariant.
-    let std_corr = e.pending_probe(pid).expect("Standard verify probe in flight");
+    let std_corr = e
+        .pending_probe(pid)
+        .expect("Standard verify probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,

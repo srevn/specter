@@ -202,8 +202,19 @@ impl Engine {
     /// before any dispatch arm runs — descent advance, post-Effect Seed,
     /// and Draining → Verifying reconfirm all re-mint via
     /// [`Engine::mint_probe_correlation`], which I5-asserts an empty slot.
-    /// State-machine identity (`Pending` vs `Active`) then routes the live
-    /// response to the descent or burst dispatch family.
+    ///
+    /// `(state, phase)` then routes the live response to one of three
+    /// dispatch families: `Pending(_)` ⇒ descent; `Active(_)` with phase
+    /// `Verifying` ⇒ burst; `Active(_)` with phase `Rebasing` ⇒ rebase.
+    /// Every other shape (Idle with the slot occupied, or Active with
+    /// phase `Batching` / `Draining` / `Awaiting`) is an I5 invariant
+    /// breach — the slot held a correlation but no in-flight mint
+    /// corresponds to it. The dispatch `debug_assert!`s those cases
+    /// (panic in dev/CI) and falls through to a
+    /// [`Diagnostic::StaleProbeResponse`] in release rather than
+    /// misroute. The remaining benign route is `None` (stale `ProfileId`
+    /// from a Profile detached / reaped between FsEvent ingestion and
+    /// step), which emits the same diagnostic without a debug assertion.
     pub(crate) fn on_probe_response(
         &mut self,
         response: ProbeResponse,
@@ -238,38 +249,45 @@ impl Engine {
             p.pending_probe = None;
         }
 
-        // Route on state-machine identity. The live `pending_probe` belongs
-        // to either a descent (`Pending`) or a burst (`Active`); within
-        // `Active` the `Rebasing` phase carves out its own dispatch
-        // family (post-fire rebase, no stability verdict — graft +
-        // baseline := current + finish). The wildcard absorbs `Idle`
-        // (defensive — should not occur with `pending_probe = Some(_)`)
-        // and any future `non_exhaustive` variant.
+        // Route on (state, phase). Only Verifying / Rebasing (Active) and
+        // Pending mint into the probe channel; observing pending_probe =
+        // Some(received) in any other shape is an I5 invariant breach —
+        // the slot was minted, then the phase changed without a matching
+        // cancel_pending_probe. The debug_assert! arms surface those as
+        // panics in dev/CI; release builds fall through to
+        // ProbeDispatch::Stale so the engine never dispatches a
+        // misclassified response (which would, e.g., drive
+        // dispatch_standard_ok against an Awaiting Profile and overwrite
+        // outstanding via a spurious transition_to_awaiting).
         let dispatch = match self.profiles.get(profile_id).map(|p| &p.state) {
             Some(ProfileState::Pending(_)) => ProbeDispatch::Descent,
             Some(ProfileState::Active(burst)) => match &burst.phase {
-                BurstPhase::Rebasing => ProbeDispatch::Rebase,
-                // Verifying — pre-fire stability check. Awaiting /
-                // Batching / Draining never carry an in-flight probe,
-                // so a response targeting them slipped past the live
-                // check above — but the I5 field discipline guarantees
-                // that the slot held a Verifying-minted correlation,
-                // so route as Burst with the burst's recorded intent.
-                BurstPhase::Verifying
-                | BurstPhase::Batching { .. }
-                | BurstPhase::Draining
-                | BurstPhase::Awaiting { .. } => ProbeDispatch::Burst {
+                BurstPhase::Verifying => ProbeDispatch::Burst {
                     intent: burst.intent,
                     forced: burst.forced,
                 },
+                BurstPhase::Rebasing => ProbeDispatch::Rebase,
+                BurstPhase::Batching { .. }
+                | BurstPhase::Draining
+                | BurstPhase::Awaiting { .. } => {
+                    debug_assert!(
+                        false,
+                        "I5 violated: live probe response in non-mint phase \
+                         (profile = {profile_id:?}, phase = {:?})",
+                        burst.phase,
+                    );
+                    ProbeDispatch::Stale
+                }
             },
-            _ => {
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    profile: profile_id,
-                    correlation: received,
-                });
-                return;
+            Some(ProfileState::Idle) => {
+                debug_assert!(
+                    false,
+                    "I5 violated: live probe response on Idle Profile \
+                     (profile = {profile_id:?}); Idle must hold pending_probe = None",
+                );
+                ProbeDispatch::Stale
             }
+            None => ProbeDispatch::Stale,
         };
 
         match dispatch {
@@ -314,6 +332,12 @@ impl Engine {
                     self.dispatch_standard_failed(profile_id, errno, out);
                 }
             },
+            ProbeDispatch::Stale => {
+                out.diagnostics.push(Diagnostic::StaleProbeResponse {
+                    profile: profile_id,
+                    correlation: received,
+                });
+            }
         }
     }
 
@@ -1837,22 +1861,31 @@ enum AwaitAction {
 
 /// Snapshot of `on_probe_response`'s routing decision. Computed under a
 /// short `&self.profiles` borrow, then dispatched under `&mut self`.
-/// Three variants:
+///
+/// Variants:
 /// - `Descent`: the live response targets `ProfileState::Pending(_)`. Routes
 ///   to `dispatch_descent_probe`.
 /// - `Rebase`: the live response targets `ProfileState::Active(_)` with
 ///   phase `BurstPhase::Rebasing`. Routes to `dispatch_rebase_*` (post-fire
 ///   rebase — no stability verdict; graft + `baseline := current` + finish).
-/// - `Burst { intent, forced }`: the live response targets a pre-fire
-///   `Active` phase (`Verifying`). The intent + forced flags are captured
-///   here so the dispatch arm can act on them.
+/// - `Burst { intent, forced }`: the live response targets `Verifying`.
+///   The intent + forced flags are captured here so the dispatch arm can
+///   act on them.
+/// - `Stale`: the live response cannot be routed coherently. Two reasons:
+///   stale `ProfileId` (`None`, benign post-detach race) or I5 invariant
+///   breach (Idle / non-mint Active phase with a non-empty `pending_probe`
+///   slot — a state-machine bug surfaced by `debug_assert!` in dev/CI;
+///   release builds fall through to a `StaleProbeResponse` diagnostic).
 ///
-/// Stale responses are filtered before this enum is constructed (top-level
-/// `pending_probe == Some(received)` check in `on_probe_response`).
+/// The top-level `pending_probe == Some(received)` check in
+/// `on_probe_response` filters correlation-mismatch staleness before this
+/// enum is constructed; `Stale` here covers shape mismatches that survive
+/// that filter.
 enum ProbeDispatch {
     Descent,
     Rebase,
     Burst { intent: BurstIntent, forced: bool },
+    Stale,
 }
 
 /// Resolve an Effect's `cwd` from the Profile's anchor path + kind.
