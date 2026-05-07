@@ -9,6 +9,7 @@
 use crate::effect::DedupKey;
 use crate::ids::{ProfileId, ResourceId, TimerId};
 use crate::op::ProbeCorrelation;
+use crate::resource::ResourceKind;
 use crate::scan_config::{ScanConfig, compute_config_hash};
 use crate::snapshot::tree::TreeSnapshot;
 use crate::sub::ClassSet;
@@ -271,6 +272,40 @@ pub struct Profile {
     pub resource: ResourceId,
     pub config: ScanConfig,
     pub config_hash: u64,
+    /// Cached classification of the anchor — the on-disk shape Specter
+    /// observed at the resource. Set on the path that first learned the
+    /// kind (resource-based attach with a classified slot, descent
+    /// materialization, or first Seed-Ok response) and invariant for the
+    /// rest of the Profile's lifetime: anchor kind changes on disk surface
+    /// as `Vanished` at probe time, never as a mid-life mutation here.
+    ///
+    /// **Lifecycle.**
+    /// - `None` while the Profile's `state` is `Pending` (descent has not
+    ///   yet materialised the anchor) **or** while a fresh resource-based
+    ///   attach hasn't yet seen its first probe response (the Resource
+    ///   slot was `Unknown` at attach-time and no probe has classified it).
+    /// - `Some(kind)` from the materialisation moment (descent → Idle) or
+    ///   the first Seed-Ok dispatch onward.
+    ///
+    /// **Why a Profile field, not a Tree lookup.** Three engine-side
+    /// dispatch sites need the anchor's kind on the hot path:
+    /// `transition_to_verifying` (probe-target dispatch), `emit_effects`
+    /// (`compute_cwd` dispatch), and `emit_probe_op` (probe-shape dispatch).
+    /// Each previously did `tree.get(profile.resource).and_then(Resource::kind)`
+    /// with a hand-rolled fallback for the unprobed case (File at the
+    /// burst site, Dir at the cwd site). Caching once on the Profile
+    /// removes the per-dispatch lookup, lets the call sites read the
+    /// invariant directly, and centralises the fallback rationale on this
+    /// field's documentation rather than repeating it at each reader.
+    ///
+    /// **Reader convention.** Sites use `profile.kind.unwrap_or(<default>)`
+    /// where the default matches the prior backend-mask convention at
+    /// that site (File for probe-target dispatch — the safer assumption
+    /// for an unprobed anchor, since a File probe at a Dir target collapses
+    /// to `Vanished` and recovery; Dir for `compute_cwd` — a Dir cwd at
+    /// the path itself is recoverable via `EffectOutcome::Failed` if the
+    /// path is actually a File).
+    pub kind: Option<ResourceKind>,
     pub state: ProfileState,
     /// Engine-side slot for the **probe channel** — the per-Profile
     /// communication primitive between the engine and the Prober pool.
@@ -400,6 +435,7 @@ impl Profile {
             resource,
             config,
             config_hash,
+            kind: None,
             state: ProfileState::Idle,
             pending_probe: None,
             baseline: None,

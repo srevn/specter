@@ -31,8 +31,8 @@ use crate::Engine;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
-    Burst, BurstIntent, BurstPhase, Profile, ProfileId, ProfileState, Resource, ResourceId,
-    ResourceKind, StepOutput, TimerKind, Tree, TreeSnapshot,
+    Burst, BurstIntent, BurstPhase, Profile, ProfileId, ProfileState, ResourceId, ResourceKind,
+    StepOutput, TimerKind, Tree, TreeSnapshot,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -303,7 +303,14 @@ impl Engine {
         let dirty_for_lca = burst.dirty_resources.clone();
         let force_set = burst.force_walk_resources.clone();
         let forced = burst.forced;
-        let anchor_kind = anchor_kind(p, &self.tree);
+        // Read the cached anchor classification. `None` means a
+        // resource-based attach landed on an `Unknown` slot whose Seed
+        // probe hasn't yet returned — collapse to `File`, the safer
+        // dispatch (probing AT an anchor that turns out to be a Dir
+        // returns `Vanished` and the engine recovers; probing at the
+        // parent of an anchor that turns out to be a File reproduces the
+        // Session-1 splice corruption bug class).
+        let anchor_kind = p.kind.unwrap_or(ResourceKind::File);
 
         // Decide target. The kind dispatch sits at the call site rather than
         // inside `lca_target` so the LCA helper has a single contract:
@@ -719,15 +726,6 @@ fn promote_to_dir(start: ResourceId, profile: &Profile, tree: &Tree) -> Resource
         };
         current = p;
     }
-}
-
-/// Read the Profile's anchor kind, collapsing the unprobed case to
-/// [`ResourceKind::File`] per the backend-mask convention. Used at probe-
-/// emission decision sites to route File anchors to the anchor itself
-/// while Dir anchors take the LCA path.
-fn anchor_kind(profile: &Profile, tree: &Tree) -> ResourceKind {
-    tree.get(profile.resource)
-        .map_or(ResourceKind::File, Resource::kind_or_file)
 }
 
 /// Build the `force_walk` set the walker consumes. Engine-side closure of

@@ -327,6 +327,44 @@ fn descent_anchor_kind_set_from_entry() {
     assert!(matches!(res.role, ResourceRole::User));
 }
 
+/// Companion to `descent_anchor_kind_set_from_entry`: descent
+/// materialisation must also cache the kind on the Profile itself, not
+/// just the Tree slot. The cached `Profile.kind` is the read path for
+/// `transition_to_verifying`'s probe-target dispatch — without it, a
+/// File-anchored Profile materialised from descent would fall through to
+/// the `unwrap_or(File)` default by accident rather than by knowledge.
+#[test]
+fn descent_materialization_caches_profile_kind() {
+    let (mut e, _sid, pid) = setup_pending_one_level();
+    assert_eq!(
+        e.profiles().get(pid).and_then(|p| p.kind),
+        None,
+        "Pending Profile starts with kind = None (anchor not yet observed)",
+    );
+
+    let corr = e.pending_probe(pid).unwrap();
+    // Inject as a regular File. The bug class Session 1 closed had
+    // `Profile.kind` left implicit; this test pins the cache so a
+    // File-anchored materialisation can never re-introduce the
+    // descendant-observation dispatch path by an unprobed-anchor
+    // accident.
+    let snap = dir_snap_with(vec![("bar", EntryKind::File, 1)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: corr,
+            result: ProbeResult::Ok(snap),
+        }),
+        Instant::now(),
+    );
+
+    assert_eq!(
+        e.profiles().get(pid).and_then(|p| p.kind),
+        Some(ResourceKind::File),
+        "Profile.kind cached at descent materialisation matches the entry kind",
+    );
+}
+
 // ===== absolute-path bootstrap & minimal descent probe =====
 
 /// Absolute-path attaches bootstrap a synthetic FS-root `"/"` segment so

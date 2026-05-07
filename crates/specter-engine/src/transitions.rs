@@ -926,6 +926,25 @@ impl Engine {
             None => return,
         };
 
+        // First-Seed-Ok fallback for `Profile.kind`. Resource-based attach
+        // against an `Unknown` slot leaves `kind` unset until the first
+        // probe response classifies the anchor; descent-materialised
+        // Profiles already have it set. Either way, the response shape
+        // is the canonical witness — Dir snapshot ⇒ Dir anchor, File
+        // snapshot ⇒ File anchor (the walker returns `Vanished` on kind
+        // mismatch, so the response shape always reflects on-disk
+        // reality). Set only when None to keep the "first observation
+        // wins" invariant on the field.
+        let response_kind = match &snapshot {
+            TreeSnapshot::Dir(_) => ResourceKind::Dir,
+            TreeSnapshot::File(_) => ResourceKind::File,
+        };
+        if let Some(p) = self.profiles.get_mut(profile_id)
+            && p.kind.is_none()
+        {
+            p.kind = Some(response_kind);
+        }
+
         match snapshot {
             TreeSnapshot::Dir(arc) => {
                 graft(
@@ -1478,18 +1497,16 @@ impl Engine {
         let baseline_snap = p.baseline.clone();
         let current_snap = p.current.clone();
         let pattern = p.config.pattern.clone();
+        // Read the cached anchor classification. `None` falls back to
+        // `Dir` (the path itself becomes cwd; if the actuator's later
+        // `chdir` discovers the path doesn't behave as a directory, the
+        // Effect surfaces `EffectOutcome::Failed`). Reaching `None`
+        // here implies a fresh resource-based attach whose Seed probe
+        // hasn't returned — `dispatch_seed_ok`'s fallback writes the
+        // field on the next Seed-Ok.
+        let anchor_kind = p.kind.unwrap_or(ResourceKind::Dir);
 
         let anchor_path = self.tree.path_of(resource).unwrap_or_default();
-        // Unprobed anchors fall back to `Dir` here — `compute_cwd`
-        // routes File-shape anchors to the parent directory and Dir-
-        // shape (or unprobed pending-path) anchors to the path itself.
-        // The actuator surfaces unprobed-but-missing paths as
-        // `EffectOutcome::Failed`.
-        let anchor_kind = self
-            .tree
-            .get(resource)
-            .and_then(Resource::kind)
-            .unwrap_or(ResourceKind::Dir);
         let anchor_cwd = compute_cwd(&anchor_path, anchor_kind);
 
         // Lazy-build the Diff Arc only if any Sub needs it AND both a

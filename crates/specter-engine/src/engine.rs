@@ -182,7 +182,20 @@ impl Engine {
                 req.settle,
                 req.events,
             );
-            self.profiles.attach(&mut self.tree, p)
+            let pid = self.profiles.attach(&mut self.tree, p);
+            // Cache the anchor's classified kind on the Profile. `None` for
+            // a `DescentScaffold` anchor (Pending path; descent's
+            // materialisation branch writes the field) or a freshly
+            // `ensure`'d-but-unprobed slot (the first Seed-Ok fallback in
+            // `dispatch_seed_ok` writes the field). Existing Profiles —
+            // `find` branch above — already carry the field from their
+            // own first-classify moment; refreshing here would either
+            // no-op or trample the canonical first observation.
+            let anchor_kind = self.tree.get(anchor).and_then(specter_core::Resource::kind);
+            if let Some(p) = self.profiles.get_mut(pid) {
+                p.kind = anchor_kind;
+            }
+            pid
         };
 
         let is_fresh_profile = self

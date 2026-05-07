@@ -179,6 +179,75 @@ fn attach_sub_fresh_profile_emits_watch_suppress_probe() {
     assert_eq!(e.tree.get(r).unwrap().suppress_count, 1);
 }
 
+/// `Profile.kind` is the cached witness of the anchor's classification:
+/// `transition_to_verifying`'s probe-target dispatch and
+/// `emit_effects`'s `compute_cwd` dispatch read this rather than
+/// re-deriving the kind from the Tree on every call. A resource-based
+/// attach against a kind-classified slot must populate the field at the
+/// `attach_sub_inner` post-`Profile::new` write.
+#[test]
+fn attach_sub_caches_anchor_kind_for_classified_resource() {
+    let (e, pid, _sid, _r, _now) = engine_with_attached_sub();
+    assert_eq!(
+        e.profiles.get(pid).and_then(|p| p.kind),
+        Some(ResourceKind::Dir),
+        "resource-based attach reads the classified anchor's kind into Profile.kind",
+    );
+}
+
+/// Resource-based attach against an `Unknown` slot leaves `Profile.kind
+/// = None` until the first probe response classifies the anchor. The
+/// `dispatch_seed_ok` fallback writes the field from the response shape
+/// — the rare unprobed-attach path's only signal of the anchor's
+/// classification.
+#[test]
+fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
+    let mut e = Engine::new();
+    // Resource exists but kind is left Unknown — the rare path where a
+    // caller passes a resource-based attach against a freshly-`ensure`'d
+    // slot whose kind hasn't been classified by any prior probe.
+    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+    let now = Instant::now();
+    let req = SubAttachRequest {
+        name: String::from("test-sub"),
+        resource: r,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
+        log_output: false,
+    };
+    let (sid, _) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+
+    assert_eq!(
+        e.profiles.get(pid).and_then(|p| p.kind),
+        None,
+        "unprobed anchor → Profile.kind starts as None",
+    );
+
+    // Drive the Seed-Ok with a Dir-shaped response. The fallback in
+    // `dispatch_seed_ok` should pick the kind off the response shape.
+    let correlation = e.pending_probe(pid).expect("Seed verify probe in flight");
+    let snap = dir_tree_snap(r, vec![]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            result: ProbeResult::Ok(snap),
+        }),
+        now,
+    );
+    assert_eq!(
+        e.profiles.get(pid).and_then(|p| p.kind),
+        Some(ResourceKind::Dir),
+        "Seed-Ok fallback caches the anchor kind from the response shape",
+    );
+}
+
 #[test]
 fn attach_sub_existing_profile_bumps_refcount() {
     let (mut e, pid, _sid, r, now) = engine_with_attached_sub();

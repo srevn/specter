@@ -395,9 +395,18 @@ impl crate::Engine {
             // contribution attribution: the prefix's STRUCTURE contribution
             // is gone (state no longer Pending), the anchor's mask
             // contribution is owed (`anchor_claim == AnchorClaim::Held`).
+            //
+            // The anchor's kind is now known — the parent's directory
+            // listing (`entry_kind` derived above) classifies it. Cache it
+            // on the Profile so subsequent dispatch sites
+            // (`transition_to_verifying`, `compute_cwd`) read the
+            // invariant directly rather than re-deriving it from the
+            // Tree slot every time.
+            let anchor_kind = kind_from_entry(entry_kind);
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.anchor_claim = AnchorClaim::Held;
                 p.state = ProfileState::Idle;
+                p.kind = Some(anchor_kind);
             }
 
             // Profile.resource was assigned to the anchor's slot at
