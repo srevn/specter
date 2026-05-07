@@ -499,10 +499,17 @@ impl Engine {
     /// For a non-idempotent command, mtime differs and the walker
     /// re-walks, capturing the post-command tree as the new baseline.
     ///
-    /// **`force_walk` empty.** Descendant FsEvents absorbed during the
-    /// fire-tail are not accumulated into `force_walk_resources`. v1
-    /// loss-of-fidelity carve-out: metadata-only descendant edits whose
-    /// mtime doesn't change can be missed by the rebase walker.
+    /// **`force_walk` from absorbed-fire-tail events.** FsEvents that
+    /// arrived at descendants during `Awaiting` accumulated into
+    /// `Burst.force_walk_resources` via `drive_burst`'s absorb arm.
+    /// This helper renders them to walker-facing paths and ships them
+    /// as `force_walk`, so the rebase walker re-enumerates the parents
+    /// of paths the command touched even when the parent dir's mtime
+    /// didn't bump (POSIX content-edit semantics). For idempotent
+    /// commands the absorbed set is empty and the walker mtime-skips
+    /// at every level — the cheap path is preserved. The field is
+    /// cleared alongside the phase swap, mirroring
+    /// `transition_to_verifying`'s post-emit hygiene.
     pub(crate) fn transition_to_rebasing(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
@@ -515,6 +522,15 @@ impl Engine {
             .current
             .as_ref()
             .and_then(|s| s.subtree_at(resource, &self.tree));
+        // Snapshot absorbed events for the rebase walker's force_walk
+        // before the mutation block clears the field. force_walk_resources
+        // tracks "events since last probe" — Verifying and Rebasing are
+        // sister consumers of the same accumulator.
+        let force_set = match &p.state {
+            ProfileState::Active(burst) => burst.force_walk_resources.clone(),
+            _ => BTreeSet::new(),
+        };
+        let force_walk_paths = build_force_walk(&force_set, resource, &self.tree);
 
         let Some(correlation) = self.mint_probe_correlation(profile_id) else {
             return;
@@ -525,6 +541,7 @@ impl Engine {
         {
             burst.phase = BurstPhase::Rebasing;
             burst.probe_target = Some(resource);
+            burst.force_walk_resources.clear();
         }
 
         let target_path = self.tree.path_of(resource).unwrap_or_default();
@@ -541,7 +558,7 @@ impl Engine {
                     scan_config,
                     captured_with,
                     baseline_subtree,
-                    BTreeSet::new(),
+                    force_walk_paths,
                     false,
                     out,
                 );

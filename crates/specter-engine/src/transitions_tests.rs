@@ -4071,6 +4071,177 @@ fn finalize_anchor_lost_was_active_pre_helper_ordering() {
     );
 }
 
+// ---------- Awaiting-absorbed events fold into rebase force_walk ----------
+
+/// `transition_to_rebasing` consumes Awaiting-absorbed events as the
+/// rebase walker's `force_walk`, defeating the POSIX content-edit
+/// mtime-skip carve-out: a command that edits a descendant in place
+/// (no parent-dir mtime bump) would otherwise leave the rebased
+/// baseline with stale leaves. Field is cleared post-emit, mirroring
+/// `transition_to_verifying`'s hygiene.
+///
+/// Sub uses `ClassSet::CONTENT` so the descendant `Modified` event
+/// passes both gates: (1) a per-file FD is wired up by the standard
+/// burst's reconcile (`has_per_file_fds = true`), bumping the leaf's
+/// `watch_demand` past `on_fs_event`'s zero-gate, and (2) the
+/// per-Profile class filter (which sits BEFORE `drive_burst`'s absorb
+/// arm) admits the CONTENT-classed event.
+#[test]
+fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
+    let mut e = Engine::new();
+    let root = e.tree.ensure(None, "anchor", ResourceRole::User);
+    e.tree.set_kind(root, ResourceKind::Dir);
+    let now = Instant::now();
+    let req = SubAttachRequest {
+        name: String::from("test-sub"),
+        resource: root,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: ClassSet::CONTENT,
+        log_output: false,
+    };
+    let (sid, _) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+
+    let stable_out = drive_to_first_effect(&mut e, pid, root, now);
+    assert_eq!(stable_out.effects.len(), 1, "stable verdict fires Effect");
+    let key = stable_out.effects[0].key.clone();
+
+    // Look up the descendant the standard burst's reconcile created.
+    // `drive_to_first_effect` ships `[("a.rs", File, 1)]` as the
+    // probe response; the engine's graft creates an `a.rs` Resource
+    // under root and bumps its watch_demand (per-file FD) because the
+    // Profile carries CONTENT in its events_union.
+    let descendant = e
+        .tree
+        .lookup(Some(root), "a.rs")
+        .expect("standard burst's reconcile created a.rs");
+    assert!(
+        e.tree.get(descendant).is_some_and(|r| r.watch_demand > 0),
+        "per-file FD must be wired up for the descendant — otherwise \
+         the Modified event drops at on_fs_event's watch_demand gate \
+         before reaching the absorb arm",
+    );
+
+    // Inject an FsEvent during Awaiting → absorb arm. `Modified` is
+    // the in-place content-edit class — the same FsEvent kqueue emits
+    // for a `write(2)` against a per-file FD, which is the carve-out
+    // scenario this test pins (the parent dir's mtime is unchanged).
+    let absorb_out = e.step(
+        Input::FsEvent {
+            resource: descendant,
+            event: FsEvent::Modified,
+        },
+        now + SETTLE * 2,
+    );
+    assert!(
+        absorb_out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::EventAbsorbedByFireTail { resource, .. } if *resource == descendant,
+        )),
+        "Awaiting absorb must emit EventAbsorbedByFireTail",
+    );
+    let burst = match &e.profiles.get(pid).unwrap().state {
+        ProfileState::Active(b) => b,
+        _ => panic!("expected Active(Awaiting)"),
+    };
+    assert!(
+        burst.force_walk_resources.contains(&descendant),
+        "Awaiting absorb must accumulate event_resource into \
+         force_walk_resources for the next Rebasing probe; got {:?}",
+        burst.force_walk_resources,
+    );
+
+    // EffectComplete::Ok → transition_to_rebasing.
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key,
+            result: EffectOutcome::Ok,
+        },
+        now + SETTLE * 3,
+    );
+
+    let descendant_path = e.tree.path_of(descendant).expect("path resolves");
+    let req = rebase_out
+        .probe_ops
+        .iter()
+        .find_map(|op| match op {
+            ProbeOp::Probe { request } => Some(request),
+            ProbeOp::Cancel { .. } => None,
+        })
+        .expect("Rebase probe minted on EffectComplete::Ok");
+    match req {
+        ProbeRequest::Subtree { force_walk, .. } => {
+            assert!(
+                force_walk.contains(&descendant_path),
+                "Rebasing probe must ship absorbed resource's path in \
+                 force_walk; got {force_walk:?}",
+            );
+        }
+        other => panic!("Rebasing on Dir-anchored Profile must emit Subtree probe; got {other:?}"),
+    }
+
+    let burst = match &e.profiles.get(pid).unwrap().state {
+        ProfileState::Active(b) => b,
+        _ => panic!("expected Active(Rebasing)"),
+    };
+    assert!(matches!(burst.phase, BurstPhase::Rebasing));
+    assert!(
+        burst.force_walk_resources.is_empty(),
+        "transition_to_rebasing clears force_walk_resources after \
+         consuming them",
+    );
+}
+
+/// Idempotent fire-tail: no FsEvent absorbs during Awaiting →
+/// Rebasing probe ships empty `force_walk` so the walker mtime-skips
+/// at every level. Pins the optimization against a future regression
+/// where someone unconditionally extends `force_walk_resources`.
+#[test]
+fn rebasing_without_absorbed_events_ships_empty_force_walk() {
+    let (mut e, pid, sid, root, _now0) = engine_with_attached_sub();
+    let now = Instant::now();
+    let stable_out = drive_to_first_effect(&mut e, pid, root, now);
+    let key = stable_out.effects[0].key.clone();
+
+    // No FsEvent during Awaiting — drive directly to EffectComplete.
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key,
+            result: EffectOutcome::Ok,
+        },
+        now + SETTLE * 3,
+    );
+
+    let req = rebase_out
+        .probe_ops
+        .iter()
+        .find_map(|op| match op {
+            ProbeOp::Probe { request } => Some(request),
+            ProbeOp::Cancel { .. } => None,
+        })
+        .expect("Rebase probe minted on EffectComplete::Ok");
+    match req {
+        ProbeRequest::Subtree {
+            force_walk, forced, ..
+        } => {
+            assert!(
+                force_walk.is_empty(),
+                "Rebasing without absorbs ships empty force_walk \
+                 (preserves walker mtime-skip); got {force_walk:?}",
+            );
+            assert!(!forced, "Rebasing is never forced");
+        }
+        other => panic!("expected Subtree probe; got {other:?}"),
+    }
+}
+
 // ---------- Property tests ----------
 
 mod props {

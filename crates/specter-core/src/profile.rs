@@ -56,18 +56,27 @@ pub struct Burst {
     pub intent: BurstIntent,
     pub forced: bool,
     /// Resources whose `FsEvent` drove (or is driving) this burst.
-    /// Populated cumulatively across the whole burst lifecycle:
-    /// • `start_standard_burst` initialises with `{ event_resource }`.
-    /// • Every `on_fs_event` during `Active` adds `event_resource`.
-    /// Cleared when the `Burst` is dropped (`finish_burst_to_idle`).
-    /// Used to compute the LCA target at every `transition_to_verifying`
-    /// and as the closure source for `force_walk_resources`.
+    /// Populated by `start_standard_burst` (`{ event_resource }` seed)
+    /// and `event_drives_batching` (each FsEvent during `Active`'s
+    /// pre-fire phases — `Batching | Verifying | Draining`). Cleared
+    /// when the `Burst` is dropped (`finish_burst_to_idle`). Used to
+    /// compute the LCA target at every `transition_to_verifying`. Not
+    /// extended on the post-fire absorb path: the rebase probe targets
+    /// the anchor unconditionally, with no LCA to compute.
     pub dirty_resources: BTreeSet<ResourceId>,
-    /// Since-last-probe cut of `dirty_resources`. The walker uses this to
-    /// refuse mtime-skip on event-dirty paths, closing the coarse-mtime
-    /// hole. Same accumulation rule as `dirty_resources`, but cleared at
-    /// every `transition_to_verifying` (the engine ships its current
-    /// contents as `force_walk` to the walker, then resets).
+    /// Set of resources whose snapshots the next probe must visit
+    /// fresh, defeating the walker's coarse-mtime skip. Two
+    /// accumulation sources, each consumed at the next probe issuance:
+    /// • Pre-fire: `start_standard_burst` and `event_drives_batching`
+    ///   (FsEvents during `Batching | Verifying | Draining`) seed the
+    ///   set; `transition_to_verifying` consumes and clears.
+    /// • Post-fire: `drive_burst`'s absorb arm (FsEvents during
+    ///   `Awaiting | Rebasing`) seeds the set; `transition_to_rebasing`
+    ///   consumes and clears.
+    /// Events absorbed during `Rebasing` after the rebase probe is in
+    /// flight have no consumer — they accumulate into the cleared
+    /// field and drop at `finish_burst_to_idle`. The bounded residual
+    /// window (≈ probe round-trip latency) is the v1 carve-out.
     pub force_walk_resources: BTreeSet<ResourceId>,
     /// `target_resource` of the most recently emitted probe in this burst.
     /// Mirrors the latest `ProbeRequest.target_resource`. Read by the

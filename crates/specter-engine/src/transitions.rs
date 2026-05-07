@@ -840,17 +840,23 @@ impl Engine {
     /// `event_drives_batching` (which accumulates `dirty_resources` +
     /// `force_walk_resources`, emits a Cancel iff a probe was in flight,
     /// and arms a fresh settle timer); post-fire `Active`
-    /// (`Awaiting` / `Rebasing`) → absorb the event with a diagnostic.
+    /// (`Awaiting` / `Rebasing`) → defer the event to the next post-fire
+    /// probe by appending `event_resource` to `force_walk_resources` and
+    /// pushing an `EventAbsorbedByFireTail` diagnostic.
     ///
-    /// `event_resource` is the `FsEvent`'s source. It seeds (Idle path)
-    /// or accumulates (pre-fire Active path) the event-tracking sets
-    /// the next probe uses to compute LCA + `force_walk`. The post-fire
-    /// absorb path does not extend either set: the Rebasing probe at
-    /// the anchor captures whatever's on disk regardless, and a fresh
-    /// burst against an in-flight one would corrupt the fire-tail.
+    /// `event_resource` is the `FsEvent`'s source. The pre-fire path
+    /// extends both `dirty_resources` (LCA basis) and
+    /// `force_walk_resources` (mtime-skip defeat); the post-fire absorb
+    /// path extends only `force_walk_resources` because the rebase
+    /// probe targets the anchor unconditionally and has no use for an
+    /// LCA. The absorb's force_walk hint closes the carve-out where a
+    /// content-only descendant edit during the fire-tail would have
+    /// left the post-rebase baseline with stale leaves: POSIX content
+    /// edits don't bump parent dir mtime, so the rebase walker would
+    /// mtime-skip without the hint.
     ///
     /// `event` is threaded through purely for the absorb diagnostic so
-    /// the operator can correlate logs to the dropped FsEvent.
+    /// the operator can correlate logs to the deferred FsEvent.
     ///
     /// The "no baseline → Seed" branch handles the degenerate
     /// post-`Vanished` Idle state where `current.is_none()` — a Standard
@@ -877,6 +883,16 @@ impl Engine {
             }
             ProfileState::Active(burst) => match &burst.phase {
                 BurstPhase::Awaiting { .. } | BurstPhase::Rebasing => {
+                    // Defer the event to the next post-fire probe's
+                    // force_walk: POSIX content edits don't bump parent
+                    // dir mtime, so without this hint the rebase walker
+                    // mtime-skips at the parent and the new baseline
+                    // carries stale leaves.
+                    if let Some(p) = self.profiles.get_mut(profile_id)
+                        && let ProfileState::Active(b) = &mut p.state
+                    {
+                        b.force_walk_resources.insert(event_resource);
+                    }
                     out.diagnostics.push(Diagnostic::EventAbsorbedByFireTail {
                         profile: profile_id,
                         resource: event_resource,
