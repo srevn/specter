@@ -558,27 +558,27 @@ fn ancestor_chain(
 
 /// Outcome of [`splice`].
 ///
-/// The carried [`TreeSnapshot`] is always the view the caller should adopt
-/// as the new current — the variants only differentiate whether the splice
-/// path encountered a contract violation the caller should surface as a
+/// The carried view is always what the caller should adopt as the new
+/// current — the variants only differentiate whether the splice path
+/// encountered a contract violation the caller should surface as a
 /// diagnostic.
 #[derive(Debug)]
 pub enum SpliceResult {
-    /// Splice succeeded. The new view integrates `replacement` at `target`
-    /// (or is the trivial wholesale-replace when prior was `None` /
-    /// `File(_)` / target-equals-anchor).
+    /// Splice succeeded. The new view integrates `replacement` at
+    /// `target` (or is the trivial wholesale-replace when prior was
+    /// `None` / target-equals-anchor).
     Spliced(TreeSnapshot),
     /// Splice could not navigate from the prior anchor down to `target`
     /// (target outside anchor's tree subtree, or path crossed a
-    /// `subtree: None` intermediate). The carried snapshot is the prior
-    /// unchanged — `replacement` was not integrated. Caller emits
-    /// [`crate::Diagnostic::SpliceCrossedUncovered`] so the contract
-    /// violation is visible in operator logs.
+    /// `subtree: None` intermediate). The carried `Arc<DirSnapshot>`
+    /// is the prior unchanged — `replacement` was not integrated.
+    /// Caller emits [`crate::Diagnostic::SpliceCrossedUncovered`] so
+    /// the contract violation is visible in operator logs.
     ///
     /// Engine contract: "graft only into observed subtrees". Reaching
     /// this variant in v1 implies a state-machine bug; the variant
     /// exists to surface it without crashing the engine.
-    CrossedUncovered(TreeSnapshot),
+    CrossedUncovered(Arc<DirSnapshot>),
 }
 
 impl SpliceResult {
@@ -589,30 +589,34 @@ impl SpliceResult {
     #[must_use]
     pub fn into_snapshot(self) -> TreeSnapshot {
         match self {
-            Self::Spliced(s) | Self::CrossedUncovered(s) => s,
+            Self::Spliced(s) => s,
+            Self::CrossedUncovered(arc) => TreeSnapshot::Dir(arc),
         }
     }
 }
 
-/// Tree-zipper splice that replaces the subtree at `target`.
+/// Tree-zipper splice that replaces the subtree at `target` within a
+/// Dir-shaped prior.
 ///
 /// Produces a new [`TreeSnapshot`] whose subtree at `target` equals
 /// `replacement`, sharing all off-path subtrees with `prior` via `Arc`.
 /// Rebuilds at most `depth(target)` `DirSnapshot`s along the
 /// path-to-anchor.
 ///
-/// `anchor` is the Profile's anchor `ResourceId`. It locks the
-/// Dir-prior path's `root.root_resource` invariant against any future
-/// drift and is the validation key for the File-prior path
-/// (a `File` prior only has a coherent splice when `target == anchor` —
-/// the only legitimate File-prior case is a kind change observed at
-/// the anchor itself).
+/// `anchor` is the Profile's anchor `ResourceId`. It locks the prior
+/// `root.root_resource` invariant against any future drift.
+///
+/// **File-anchored Profiles never call this helper.** Their
+/// `Profile.current` is `TreeSnapshot::File(leaf)`, integrated by an
+/// inline write at the relevant `dispatch_*_ok`. The typed
+/// [`crate::ProbeRequest`] contract guarantees File-anchored Profiles
+/// emit `AnchorFile` requests whose `SubtreeOk` payloads never reach
+/// `graft` / `splice`; the Dir-only signature here is the engine-side
+/// half of that contract.
 ///
 /// Returns [`SpliceResult::Spliced`] with `TreeSnapshot::Dir(replacement)`
 /// (Arc-cheap) for the trivial cases:
 /// - `prior == None` (first graft).
-/// - `prior == Some(File(_))` and `target == anchor` (kind change at
-///   the anchor).
 /// - `target == prior.root_resource` and the hashes differ (new root).
 ///
 /// Returns [`SpliceResult::Spliced`] with `TreeSnapshot::Dir(prior)`
@@ -628,18 +632,13 @@ impl SpliceResult {
 ///   out before reaching `anchor`).
 /// - The path from anchor to target crosses a `subtree: None` intermediate
 ///   (snapshot coverage gap), a missing entry, or a slot reaped mid-graft.
-/// - `prior` is `Some(File(_))` and `target != anchor`. A `File` prior
-///   means the only observation is the leaf at the anchor; integrating
-///   a `Dir` replacement at any other target would silently corrupt
-///   `Profile.current` to a Dir snapshot rooted off-anchor, violating
-///   the navigation invariant `current.root_resource == anchor`.
 ///
 /// Structurally unreachable in v1. The CrossedUncovered fallback preserves
 /// the prior view (no integration); the caller emits a Diagnostic so the
 /// contract breach is observable.
 #[must_use]
 pub fn splice(
-    prior: Option<TreeSnapshot>,
+    prior: Option<Arc<DirSnapshot>>,
     anchor: ResourceId,
     target: ResourceId,
     replacement: Arc<DirSnapshot>,
@@ -647,22 +646,7 @@ pub fn splice(
 ) -> SpliceResult {
     match prior {
         None => SpliceResult::Spliced(TreeSnapshot::Dir(replacement)),
-        Some(TreeSnapshot::File(leaf)) => {
-            if target == anchor {
-                // Kind change at the anchor (File on disk became Dir).
-                // Wholesale-replace with the Dir replacement is correct.
-                SpliceResult::Spliced(TreeSnapshot::Dir(replacement))
-            } else {
-                // File prior + non-anchor target violates the navigation
-                // invariant: there is no observation between the anchor
-                // leaf and `target` to splice through, and integrating
-                // `replacement` at `target` would re-root `current`
-                // outside the anchor. Keep the prior leaf unchanged and
-                // let the caller surface the breach.
-                SpliceResult::CrossedUncovered(TreeSnapshot::File(leaf))
-            }
-        }
-        Some(TreeSnapshot::Dir(root)) => splice_dir_prior(root, anchor, target, replacement, tree),
+        Some(root) => splice_dir_prior(root, anchor, target, replacement, tree),
     }
 }
 
@@ -694,7 +678,7 @@ fn splice_dir_prior(
         // `Profile.current` rooted at `target` (not anchor) and
         // violating the snapshot navigation invariants. Keeping prior
         // preserves the invariant and lets the next observation converge.
-        return SpliceResult::CrossedUncovered(TreeSnapshot::Dir(root));
+        return SpliceResult::CrossedUncovered(root);
     };
 
     // chain is [anchor, mid_1, ..., mid_k, target]; we already consumed
@@ -707,7 +691,7 @@ fn splice_dir_prior(
                 SpliceResult::Spliced(TreeSnapshot::Dir(new_root))
             }
         }
-        None => SpliceResult::CrossedUncovered(TreeSnapshot::Dir(root)),
+        None => SpliceResult::CrossedUncovered(root),
     }
 }
 

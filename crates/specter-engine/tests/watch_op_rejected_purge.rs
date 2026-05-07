@@ -10,9 +10,9 @@ use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClaimKind, ClassSet, CommandTemplate,
     Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
-    ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
-    TreeSnapshot, WatchFailure, WatchOp,
+    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, WatchFailure,
+    WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -31,7 +31,10 @@ fn empty_command() -> CommandTemplate {
     CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
+fn dir_snap(
+    root: ResourceId,
+    children: Vec<(&str, EntryKind, u64)>,
+) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -44,7 +47,7 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         };
         map.insert(CompactString::new(name), child);
     }
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    Arc::new(DirSnapshot::new(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -53,14 +56,12 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         },
         0,
         map,
-    )))
+    ))
 }
 
 fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
     out.probe_ops.iter().find_map(|op| match op {
-        ProbeOp::Probe {
-            request: ProbeRequest { correlation, .. },
-        } => Some(*correlation),
+        ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
 }
@@ -69,14 +70,14 @@ fn complete_seed_burst(
     e: &mut Engine,
     pid: ProfileId,
     attach_out: &StepOutput,
-    seed_snap: TreeSnapshot,
+    seed_snap: std::sync::Arc<DirSnapshot>,
 ) {
     let corr = first_probe_corr(attach_out).expect("Seed probe fires at attach");
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(seed_snap),
+            outcome: ProbeOutcome::SubtreeOk(seed_snap),
         }),
         Instant::now(),
     );
@@ -376,7 +377,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: initial_corr,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         Instant::now(),
     );

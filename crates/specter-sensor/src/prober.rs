@@ -8,7 +8,9 @@
 //! Layered:
 //! - [`pool`]: `WorkerProber` lifecycle, the cancellation expectation
 //!   map, and the shared `run_worker` loop.
-//! - [`walk`]: pure-IO `probe_file` and `probe_dir` walkers.
+//! - [`walk`]: pure-IO `probe_anchor_file`, `probe_subtree`,
+//!   `probe_descent` walkers — one per [`specter_core::ProbeRequest`]
+//!   variant.
 //!
 //! # Cancellation
 //!
@@ -24,7 +26,7 @@
 //! # Panic recovery
 //!
 //! Each `run_probe` call is wrapped in `catch_unwind`. A panic converts
-//! to `ProbeResult::Failed { errno: EIO }` and the worker continues on
+//! to `ProbeOutcome::Failed { errno: EIO }` and the worker continues on
 //! the next request. Aborts (`panic = "abort"` profile) bypass this and
 //! kill the worker — v1 uses the workspace's default unwind profile.
 

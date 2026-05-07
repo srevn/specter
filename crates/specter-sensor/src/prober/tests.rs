@@ -6,15 +6,15 @@
 //! cancellation, panic recovery, and post-run cleanup get
 //! deterministic coverage without relying on multi-thread scheduling.
 
-use super::pool::{ExpectedMap, WorkerProber, run_worker};
-use super::walk::{probe_dir, probe_file};
+use super::pool::{ExpectedMap, WorkerProber, run_probe, run_worker};
+use super::walk::{probe_anchor_file, probe_descent, probe_subtree};
 use crate::Prober;
 use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, GlobPattern, Input, LeafEntry,
-    ProbeCorrelation, ProbeRequest, ProbeResult, ProfileId, ResourceId, ScanConfig, TreeSnapshot,
+    ProbeCorrelation, ProbeOutcome, ProbeRequest, ProfileId, ResourceId, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -38,27 +38,20 @@ fn fresh_profile_ids(n: usize) -> Vec<ProfileId> {
     (0..n).map(|_| sm.insert(())).collect()
 }
 
-fn req(profile: ProfileId, correlation: u64, kind: specter_core::ProbeKind) -> ProbeRequest {
-    ProbeRequest {
+fn req_anchor(profile: ProfileId, correlation: u64) -> ProbeRequest {
+    ProbeRequest::AnchorFile {
         profile,
         correlation: ProbeCorrelation(correlation),
-        kind,
-        target_resource: ResourceId::default(),
         target_path: PathBuf::from("/dev/null"),
-        scan_config: ScanConfig::builder().build(),
-        captured_with: 0,
-        baseline_subtree: None,
-        force_walk: BTreeSet::new(),
-        forced: false,
     }
 }
 
-/// Default arg pack for `probe_dir` calls:
+/// Default arg pack for `probe_subtree` calls:
 /// `target_resource = default`, `captured_with = 0`, no baseline, empty
 /// `force_walk`, `forced = false`. Use the explicit form when the test
 /// wants to exercise mtime-skip / `force_walk` / forced.
-fn pdir(path: &std::path::Path, cfg: &ScanConfig) -> ProbeResult {
-    probe_dir(
+fn psub(path: &std::path::Path, cfg: &ScanConfig) -> ProbeOutcome {
+    probe_subtree(
         path,
         ResourceId::default(),
         cfg,
@@ -70,13 +63,10 @@ fn pdir(path: &std::path::Path, cfg: &ScanConfig) -> ProbeResult {
 }
 
 /// Recursively collect every entry's relative path (segment from the
-/// anchor) from a `ProbeResult::Ok(TreeSnapshot::Dir(...))`. Sorted.
-fn segments(result: &ProbeResult) -> Vec<String> {
-    let ProbeResult::Ok(snap) = result else {
-        panic!("expected Ok, got {result:?}");
-    };
-    let TreeSnapshot::Dir(arc) = snap else {
-        panic!("expected Dir, got File");
+/// anchor) from a `ProbeOutcome::SubtreeOk(...)`. Sorted.
+fn segments(outcome: &ProbeOutcome) -> Vec<String> {
+    let ProbeOutcome::SubtreeOk(arc) = outcome else {
+        panic!("expected SubtreeOk, got {outcome:?}");
     };
     let mut out = Vec::new();
     collect_paths(arc, "", &mut out);
@@ -100,89 +90,89 @@ fn collect_paths(d: &DirSnapshot, prefix: &str, out: &mut Vec<String>) {
     }
 }
 
-// ---------------------------------------------------------------- walk: probe_file
+// ---------------------------------------------------------------- walk: probe_anchor_file
 
 #[test]
-fn probe_file_returns_ok_for_regular_file() {
+fn probe_anchor_file_returns_leaf_for_regular_file() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("foo.c");
     std::fs::write(&path, b"hello").unwrap();
 
-    let result = probe_file(&path);
-    let ProbeResult::Ok(snap) = &result else {
-        panic!("expected Ok, got {result:?}");
-    };
-    let TreeSnapshot::File(leaf) = snap else {
-        panic!("expected TreeSnapshot::File");
+    let outcome = probe_anchor_file(&path);
+    let ProbeOutcome::AnchorOk(leaf) = outcome else {
+        panic!("expected AnchorOk, got {outcome:?}");
     };
     assert_eq!(leaf.kind, EntryKind::File);
     assert_eq!(leaf.size, 5);
 }
 
 #[test]
-fn probe_file_returns_vanished_for_missing_path() {
+fn probe_anchor_file_returns_vanished_for_missing_path() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("nope");
-    assert!(matches!(probe_file(&path), ProbeResult::Vanished));
+    assert!(matches!(probe_anchor_file(&path), ProbeOutcome::Vanished));
 }
 
 #[test]
-fn probe_file_returns_vanished_for_directory() {
+fn probe_anchor_file_returns_vanished_for_directory() {
     let tmp = TempDir::new().unwrap();
-    assert!(matches!(probe_file(tmp.path()), ProbeResult::Vanished));
+    assert!(matches!(
+        probe_anchor_file(tmp.path()),
+        ProbeOutcome::Vanished
+    ));
 }
 
 #[test]
-fn probe_file_returns_vanished_for_symlink() {
+fn probe_anchor_file_returns_vanished_for_symlink() {
     let tmp = TempDir::new().unwrap();
     let target = tmp.path().join("target.c");
     let link = tmp.path().join("link");
     std::fs::write(&target, b"x").unwrap();
     std::os::unix::fs::symlink(&target, &link).unwrap();
 
-    // probe_file uses lstat — the symlink is the kind it sees, not the
+    // probe_anchor_file uses lstat — the symlink is the kind it sees, not the
     // target. Symlink ≠ regular file ⇒ Vanished.
-    assert!(matches!(probe_file(&link), ProbeResult::Vanished));
+    assert!(matches!(probe_anchor_file(&link), ProbeOutcome::Vanished));
 }
 
-// ---------------------------------------------------------------- walk: probe_dir
+// ---------------------------------------------------------------- walk: probe_subtree
 
 #[test]
-fn probe_dir_returns_vanished_for_missing_path() {
+fn probe_subtree_returns_vanished_for_missing_path() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("nope");
     let cfg = ScanConfig::builder().build();
-    assert!(matches!(pdir(&path, &cfg), ProbeResult::Vanished));
+    assert!(matches!(psub(&path, &cfg), ProbeOutcome::Vanished));
 }
 
 #[test]
-fn probe_dir_returns_vanished_for_regular_file() {
+fn probe_subtree_returns_vanished_for_regular_file() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    assert!(matches!(pdir(&path, &cfg), ProbeResult::Vanished));
+    assert!(matches!(psub(&path, &cfg), ProbeOutcome::Vanished));
 }
 
 #[test]
-fn probe_dir_empty_dir_returns_zero_entries() {
+fn probe_subtree_empty_dir_returns_zero_entries() {
     let tmp = TempDir::new().unwrap();
     let cfg = ScanConfig::builder().build();
-    let result = pdir(tmp.path(), &cfg);
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let result = psub(tmp.path(), &cfg);
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("expected Ok(Dir)");
     };
     assert!(arc.entries.is_empty());
 }
 
 #[test]
-fn probe_dir_flat_lists_children() {
+fn probe_subtree_flat_lists_children() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a"), b"1").unwrap();
     std::fs::write(tmp.path().join("b"), b"2").unwrap();
     std::fs::write(tmp.path().join("c"), b"3").unwrap();
     let cfg = ScanConfig::builder().build();
-    let result = pdir(tmp.path(), &cfg);
+    let result = psub(tmp.path(), &cfg);
     let segs = segments(&result);
     assert_eq!(
         segs,
@@ -191,31 +181,31 @@ fn probe_dir_flat_lists_children() {
 }
 
 #[test]
-fn probe_dir_recursive_collects_descendants() {
+fn probe_subtree_recursive_collects_descendants() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
 
     let cfg = ScanConfig::builder().recursive(true).build();
-    let result = pdir(tmp.path(), &cfg);
+    let result = psub(tmp.path(), &cfg);
     let segs = segments(&result);
     assert_eq!(segs, vec!["sub".to_string(), "sub/file.c".to_string()]);
 }
 
 #[test]
-fn probe_dir_non_recursive_omits_grandchildren() {
+fn probe_subtree_non_recursive_omits_grandchildren() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
 
     let cfg = ScanConfig::builder().recursive(false).build();
-    let result = pdir(tmp.path(), &cfg);
+    let result = psub(tmp.path(), &cfg);
     let segs = segments(&result);
     assert_eq!(segs, vec!["sub".to_string()]);
 }
 
 #[test]
-fn probe_dir_max_depth_one_excludes_grandchildren() {
+fn probe_subtree_max_depth_one_excludes_grandchildren() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/grand.c"), b"x").unwrap();
@@ -224,12 +214,12 @@ fn probe_dir_max_depth_one_excludes_grandchildren() {
         .recursive(true)
         .max_depth(Some(1))
         .build();
-    let segs = segments(&pdir(tmp.path(), &cfg));
+    let segs = segments(&psub(tmp.path(), &cfg));
     assert_eq!(segs, vec!["sub".to_string()]);
 }
 
 #[test]
-fn probe_dir_max_depth_two_includes_grandchildren() {
+fn probe_subtree_max_depth_two_includes_grandchildren() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/grand.c"), b"x").unwrap();
@@ -238,12 +228,12 @@ fn probe_dir_max_depth_two_includes_grandchildren() {
         .recursive(true)
         .max_depth(Some(2))
         .build();
-    let segs = segments(&pdir(tmp.path(), &cfg));
+    let segs = segments(&psub(tmp.path(), &cfg));
     assert_eq!(segs, vec!["sub".to_string(), "sub/grand.c".to_string()]);
 }
 
 #[test]
-fn probe_dir_max_depth_three_collects_three_levels() {
+fn probe_subtree_max_depth_three_collects_three_levels() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("a/b/c")).unwrap();
     std::fs::write(tmp.path().join("a/b/c/file.c"), b"x").unwrap();
@@ -252,7 +242,7 @@ fn probe_dir_max_depth_three_collects_three_levels() {
         .recursive(true)
         .max_depth(Some(3))
         .build();
-    let segs = segments(&pdir(tmp.path(), &cfg));
+    let segs = segments(&psub(tmp.path(), &cfg));
     // Depth 1: "a"; depth 2: "a/b"; depth 3: "a/b/c". File is at depth
     // 4 — excluded by max_depth=3.
     assert_eq!(
@@ -262,7 +252,7 @@ fn probe_dir_max_depth_three_collects_three_levels() {
 }
 
 #[test]
-fn probe_dir_exclude_drops_matched_entries() {
+fn probe_subtree_exclude_drops_matched_entries() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("target")).unwrap();
     std::fs::write(tmp.path().join("target/foo"), b"x").unwrap();
@@ -274,7 +264,7 @@ fn probe_dir_exclude_drops_matched_entries() {
         .recursive(true)
         .exclude(exclude)
         .build();
-    let segs = segments(&pdir(tmp.path(), &cfg));
+    let segs = segments(&psub(tmp.path(), &cfg));
     // `target/**` matches paths under target (and `target` itself with
     // globset's `**` semantics). `target/foo` is excluded.
     assert!(!segs.iter().any(|s| s.starts_with("target/")));
@@ -283,7 +273,7 @@ fn probe_dir_exclude_drops_matched_entries() {
 }
 
 #[test]
-fn probe_dir_pattern_matches_files_only() {
+fn probe_subtree_pattern_matches_files_only() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
     std::fs::write(tmp.path().join("foo.txt"), b"x").unwrap();
@@ -291,7 +281,7 @@ fn probe_dir_pattern_matches_files_only() {
 
     let pattern = GlobPattern::compile("**/*.c").unwrap();
     let cfg = ScanConfig::builder().pattern(pattern).build();
-    let segs = segments(&pdir(tmp.path(), &cfg));
+    let segs = segments(&psub(tmp.path(), &cfg));
     // .c files: in. .txt: out. Subdirs: in (Dir bypass).
     assert!(segs.contains(&"main.c".to_string()));
     assert!(!segs.contains(&"foo.txt".to_string()));
@@ -299,7 +289,7 @@ fn probe_dir_pattern_matches_files_only() {
 }
 
 #[test]
-fn probe_dir_pattern_recursive_matches_nested_files() {
+fn probe_subtree_pattern_recursive_matches_nested_files() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("src")).unwrap();
     std::fs::write(tmp.path().join("src/main.c"), b"x").unwrap();
@@ -310,47 +300,47 @@ fn probe_dir_pattern_recursive_matches_nested_files() {
         .recursive(true)
         .pattern(pattern)
         .build();
-    let segs = segments(&pdir(tmp.path(), &cfg));
+    let segs = segments(&psub(tmp.path(), &cfg));
     assert!(segs.contains(&"src".to_string()));
     assert!(segs.contains(&"src/main.c".to_string()));
     assert!(!segs.iter().any(|s| s.contains("foo.txt")));
 }
 
 #[test]
-fn probe_dir_hidden_false_skips_dotfiles() {
+fn probe_subtree_hidden_false_skips_dotfiles() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
     std::fs::write(tmp.path().join(".git/HEAD"), b"x").unwrap();
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
 
     let cfg = ScanConfig::builder().recursive(true).hidden(false).build();
-    let segs = segments(&pdir(tmp.path(), &cfg));
+    let segs = segments(&psub(tmp.path(), &cfg));
     assert_eq!(segs, vec!["main.c".to_string()]);
 }
 
 #[test]
-fn probe_dir_hidden_true_includes_dotfiles() {
+fn probe_subtree_hidden_true_includes_dotfiles() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
     std::fs::write(tmp.path().join(".git/HEAD"), b"x").unwrap();
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
 
     let cfg = ScanConfig::builder().recursive(true).hidden(true).build();
-    let segs = segments(&pdir(tmp.path(), &cfg));
+    let segs = segments(&psub(tmp.path(), &cfg));
     assert!(segs.contains(&".git".to_string()));
     assert!(segs.contains(&".git/HEAD".to_string()));
     assert!(segs.contains(&"main.c".to_string()));
 }
 
 #[test]
-fn probe_dir_does_not_descend_symlinks() {
+fn probe_subtree_does_not_descend_symlinks() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("target")).unwrap();
     std::fs::write(tmp.path().join("target/file.c"), b"x").unwrap();
     std::os::unix::fs::symlink(tmp.path().join("target"), tmp.path().join("link")).unwrap();
 
     let cfg = ScanConfig::builder().recursive(true).build();
-    let segs = segments(&pdir(tmp.path(), &cfg));
+    let segs = segments(&psub(tmp.path(), &cfg));
     // `link` is a symlink: emitted as Symlink entry but not descended
     // through. `target` is a real dir: emitted and descended.
     assert!(segs.contains(&"link".to_string()));
@@ -361,15 +351,15 @@ fn probe_dir_does_not_descend_symlinks() {
 }
 
 #[test]
-fn probe_dir_emits_symlink_entry_kind() {
+fn probe_subtree_emits_symlink_entry_kind() {
     let tmp = TempDir::new().unwrap();
     let target = tmp.path().join("target.c");
     std::fs::write(&target, b"x").unwrap();
     std::os::unix::fs::symlink(&target, tmp.path().join("link")).unwrap();
 
     let cfg = ScanConfig::builder().build();
-    let result = pdir(tmp.path(), &cfg);
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let result = psub(tmp.path(), &cfg);
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("expected Ok(Dir)");
     };
     let link_entry = arc.entries.get("link").expect("link entry");
@@ -380,7 +370,7 @@ fn probe_dir_emits_symlink_entry_kind() {
 }
 
 #[test]
-fn probe_dir_skips_unreadable_subdir_emits_remaining() {
+fn probe_subtree_skips_unreadable_subdir_emits_remaining() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = TempDir::new().unwrap();
     let forbidden = tmp.path().join("forbidden");
@@ -390,7 +380,7 @@ fn probe_dir_skips_unreadable_subdir_emits_remaining() {
     std::fs::write(tmp.path().join("ok.c"), b"x").unwrap();
 
     let cfg = ScanConfig::builder().recursive(true).build();
-    let result = pdir(tmp.path(), &cfg);
+    let result = psub(tmp.path(), &cfg);
 
     // Restore perms before TempDir drops (else cleanup fails).
     std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -417,8 +407,8 @@ fn probe_dir_skips_unreadable_subdir_emits_remaining() {
 fn probe_then_reprobe_with_baseline(
     target: &std::path::Path,
     cfg: &ScanConfig,
-) -> (Arc<DirSnapshot>, ProbeResult) {
-    let first = probe_dir(
+) -> (Arc<DirSnapshot>, ProbeOutcome) {
+    let first = probe_subtree(
         target,
         ResourceId::default(),
         cfg,
@@ -427,10 +417,10 @@ fn probe_then_reprobe_with_baseline(
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = first else {
+    let ProbeOutcome::SubtreeOk(arc) = first else {
         panic!("first probe failed");
     };
-    let second = probe_dir(
+    let second = probe_subtree(
         target,
         ResourceId::default(),
         cfg,
@@ -448,7 +438,7 @@ fn mtime_skip_returns_arc_clone_when_root_meta_matches() {
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
     let (baseline, second) = probe_then_reprobe_with_baseline(tmp.path(), &cfg);
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = second else {
+    let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("second probe failed");
     };
     assert!(
@@ -462,7 +452,7 @@ fn mtime_skip_does_not_match_when_mtime_differs() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -471,7 +461,7 @@ fn mtime_skip_does_not_match_when_mtime_differs() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
     // Forge a baseline with a different mtime; walker enumerates fresh.
@@ -484,7 +474,7 @@ fn mtime_skip_does_not_match_when_mtime_differs() {
         baseline.captured_with,
         baseline.entries.clone(),
     ));
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -493,7 +483,7 @@ fn mtime_skip_does_not_match_when_mtime_differs() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = result else {
+    let ProbeOutcome::SubtreeOk(arc2) = result else {
         panic!("re-probe failed");
     };
     assert!(
@@ -507,7 +497,7 @@ fn mtime_skip_does_not_match_when_inode_differs() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -516,7 +506,7 @@ fn mtime_skip_does_not_match_when_inode_differs() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
     let forged = Arc::new(DirSnapshot::new(
@@ -528,7 +518,7 @@ fn mtime_skip_does_not_match_when_inode_differs() {
         baseline.captured_with,
         baseline.entries.clone(),
     ));
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -537,7 +527,7 @@ fn mtime_skip_does_not_match_when_inode_differs() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = result else {
+    let ProbeOutcome::SubtreeOk(arc2) = result else {
         panic!("re-probe failed");
     };
     assert!(!Arc::ptr_eq(&forged, &arc2));
@@ -548,7 +538,7 @@ fn mtime_skip_does_not_match_when_device_differs() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -557,7 +547,7 @@ fn mtime_skip_does_not_match_when_device_differs() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
     let forged = Arc::new(DirSnapshot::new(
@@ -569,7 +559,7 @@ fn mtime_skip_does_not_match_when_device_differs() {
         baseline.captured_with,
         baseline.entries.clone(),
     ));
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -578,7 +568,7 @@ fn mtime_skip_does_not_match_when_device_differs() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = result else {
+    let ProbeOutcome::SubtreeOk(arc2) = result else {
         panic!("re-probe failed");
     };
     assert!(!Arc::ptr_eq(&forged, &arc2));
@@ -592,7 +582,7 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -601,14 +591,14 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
     let prior_sub_arc = match baseline.entries.get("sub").expect("sub child") {
         ChildEntry::Dir(dc) => dc.subtree.clone().expect("sub subtree present"),
         ChildEntry::Leaf(_) => panic!("sub should be a Dir"),
     };
-    let second = probe_dir(
+    let second = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -617,7 +607,7 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(top)) = second else {
+    let ProbeOutcome::SubtreeOk(top) = second else {
         panic!("re-probe failed");
     };
     // Top is the baseline Arc (mtime matched) ⇒ ptr_eq.
@@ -637,7 +627,7 @@ fn force_walk_with_path_in_set_refuses_skip() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -646,13 +636,13 @@ fn force_walk_with_path_in_set_refuses_skip() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
     // force_walk = {target_path} — refuse the skip even though mtime matches.
     let mut force = BTreeSet::new();
     force.insert(tmp.path().to_path_buf());
-    let second = probe_dir(
+    let second = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -661,7 +651,7 @@ fn force_walk_with_path_in_set_refuses_skip() {
         &force,
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = second else {
+    let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("re-probe failed");
     };
     assert!(
@@ -676,7 +666,7 @@ fn force_walk_with_descendant_in_set_refuses_skip_at_target() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -685,14 +675,14 @@ fn force_walk_with_descendant_in_set_refuses_skip_at_target() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
     // force_walk = {tmp/sub/file.c}: descendant; root must enumerate so we
     // can recurse into `sub`.
     let mut force = BTreeSet::new();
     force.insert(tmp.path().join("sub").join("file.c"));
-    let second = probe_dir(
+    let second = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -701,7 +691,7 @@ fn force_walk_with_descendant_in_set_refuses_skip_at_target() {
         &force,
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = second else {
+    let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("re-probe failed");
     };
     assert!(!Arc::ptr_eq(&baseline, &arc2));
@@ -712,7 +702,7 @@ fn force_walk_with_unrelated_path_does_not_affect_skip() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -721,13 +711,13 @@ fn force_walk_with_unrelated_path_does_not_affect_skip() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
     // Path outside target's subtree — skip applies normally.
     let mut force = BTreeSet::new();
     force.insert(PathBuf::from("/totally/unrelated/path"));
-    let second = probe_dir(
+    let second = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -736,7 +726,7 @@ fn force_walk_with_unrelated_path_does_not_affect_skip() {
         &force,
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = second else {
+    let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("re-probe failed");
     };
     assert!(Arc::ptr_eq(&baseline, &arc2));
@@ -753,7 +743,7 @@ fn force_walk_propagates_through_recursion_to_descendant() {
     std::fs::create_dir(tmp.path().join("dir_c")).unwrap();
     std::fs::write(tmp.path().join("dir_c/x.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -762,7 +752,7 @@ fn force_walk_propagates_through_recursion_to_descendant() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
     let prior_dir_c_arc = match baseline.entries.get("dir_c").unwrap() {
@@ -771,7 +761,7 @@ fn force_walk_propagates_through_recursion_to_descendant() {
     };
     let mut force = BTreeSet::new();
     force.insert(tmp.path().join("dir_a").join("dir_b"));
-    let second = probe_dir(
+    let second = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -780,7 +770,7 @@ fn force_walk_propagates_through_recursion_to_descendant() {
         &force,
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(top)) = second else {
+    let ProbeOutcome::SubtreeOk(top) = second else {
         panic!("re-probe failed");
     };
     // dir_c was untouched and not under a forced path; the recursion
@@ -800,7 +790,7 @@ fn force_walk_empty_set_behaves_like_v4() {
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
     let (baseline, second) = probe_then_reprobe_with_baseline(tmp.path(), &cfg);
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = second else {
+    let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("re-probe failed");
     };
     assert!(Arc::ptr_eq(&baseline, &arc2));
@@ -813,7 +803,7 @@ fn forced_true_bypasses_mtime_skip_at_root() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -822,10 +812,10 @@ fn forced_true_bypasses_mtime_skip_at_root() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
-    let second = probe_dir(
+    let second = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -834,7 +824,7 @@ fn forced_true_bypasses_mtime_skip_at_root() {
         &BTreeSet::new(),
         true, // forced
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = second else {
+    let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("re-probe failed");
     };
     assert!(
@@ -849,7 +839,7 @@ fn forced_true_bypasses_mtime_skip_in_recursion() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -858,14 +848,14 @@ fn forced_true_bypasses_mtime_skip_in_recursion() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(baseline)) = first else {
+    let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
     let prior_sub_arc = match baseline.entries.get("sub").unwrap() {
         ChildEntry::Dir(dc) => dc.subtree.clone().unwrap(),
         ChildEntry::Leaf(_) => panic!(),
     };
-    let second = probe_dir(
+    let second = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -874,7 +864,7 @@ fn forced_true_bypasses_mtime_skip_in_recursion() {
         &BTreeSet::new(),
         true, // forced
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(top)) = second else {
+    let ProbeOutcome::SubtreeOk(top) = second else {
         panic!("re-probe failed");
     };
     let new_sub_arc = match top.entries.get("sub").unwrap().clone() {
@@ -894,7 +884,7 @@ fn forced_false_default_path_unaffected() {
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
     let (baseline, second) = probe_then_reprobe_with_baseline(tmp.path(), &cfg);
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc2)) = second else {
+    let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("re-probe failed");
     };
     assert!(Arc::ptr_eq(&baseline, &arc2));
@@ -948,7 +938,7 @@ fn cache_transfer_inherits_baseline_leaf_hash_on_identity_match() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"hello").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -957,12 +947,12 @@ fn cache_transfer_inherits_baseline_leaf_hash_on_identity_match() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(real)) = first else {
+    let ProbeOutcome::SubtreeOk(real) = first else {
         panic!("first probe failed");
     };
 
     let poisoned = poison_baseline(&real, None);
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -971,7 +961,7 @@ fn cache_transfer_inherits_baseline_leaf_hash_on_identity_match() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("re-probe failed");
     };
     let fresh = match arc.entries.get("a.c").unwrap() {
@@ -990,7 +980,7 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"hello").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -999,7 +989,7 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(real)) = first else {
+    let ProbeOutcome::SubtreeOk(real) = first else {
         panic!("first probe failed");
     };
     let real_leaf = match real.entries.get("a.c").unwrap() {
@@ -1018,7 +1008,7 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
     );
     let poisoned = poison_baseline(&real, Some(mismatch));
 
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1027,7 +1017,7 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("re-probe failed");
     };
     let fresh = match arc.entries.get("a.c").unwrap() {
@@ -1049,7 +1039,7 @@ fn cache_transfer_threads_through_recursion() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"hello").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_dir(
+    let first = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1058,7 +1048,7 @@ fn cache_transfer_threads_through_recursion() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(real)) = first else {
+    let ProbeOutcome::SubtreeOk(real) = first else {
         panic!("first probe failed");
     };
     let real_sub = match real.entries.get("sub").unwrap() {
@@ -1112,7 +1102,7 @@ fn cache_transfer_threads_through_recursion() {
         root_entries,
     ));
 
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1121,7 +1111,7 @@ fn cache_transfer_threads_through_recursion() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(top)) = result else {
+    let ProbeOutcome::SubtreeOk(top) = result else {
         panic!("re-probe failed");
     };
     let new_sub = match top.entries.get("sub").unwrap() {
@@ -1148,7 +1138,7 @@ fn dir_snapshot_root_meta_carries_lstat_triple() {
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
     let raw = std::fs::symlink_metadata(tmp.path()).unwrap();
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1157,7 +1147,7 @@ fn dir_snapshot_root_meta_carries_lstat_triple() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("expected Ok(Dir)");
     };
     assert_eq!(arc.root_meta.inode, raw.ino());
@@ -1170,7 +1160,7 @@ fn dir_snapshot_captured_with_carries_request_value() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1179,7 +1169,7 @@ fn dir_snapshot_captured_with_carries_request_value() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
     assert_eq!(arc.captured_with, STAMP);
@@ -1193,8 +1183,8 @@ fn dir_snapshot_target_resource_carries_request_value() {
     let cfg = ScanConfig::builder().build();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let rid = sm.insert(());
-    let result = probe_dir(tmp.path(), rid, &cfg, 0, None, &BTreeSet::new(), false);
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let result = probe_subtree(tmp.path(), rid, &cfg, 0, None, &BTreeSet::new(), false);
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
     assert_eq!(arc.root_resource, rid);
@@ -1207,8 +1197,8 @@ fn dir_snapshot_subtree_resources_are_default() {
     let cfg = ScanConfig::builder().recursive(true).build();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let rid = sm.insert(());
-    let result = probe_dir(tmp.path(), rid, &cfg, 0, None, &BTreeSet::new(), false);
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let result = probe_subtree(tmp.path(), rid, &cfg, 0, None, &BTreeSet::new(), false);
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
     let sub_arc = match arc.entries.get("sub").unwrap() {
@@ -1228,7 +1218,7 @@ fn dir_snapshot_uncovered_branches_have_subtree_none() {
         .recursive(true)
         .max_depth(Some(1))
         .build();
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1237,7 +1227,7 @@ fn dir_snapshot_uncovered_branches_have_subtree_none() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
     match arc.entries.get("sub").unwrap() {
@@ -1259,7 +1249,7 @@ fn dir_snapshot_pattern_filtered_files_absent() {
     let cfg = ScanConfig::builder()
         .pattern(GlobPattern::compile("**/*.c").unwrap())
         .build();
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1268,7 +1258,7 @@ fn dir_snapshot_pattern_filtered_files_absent() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
     assert!(arc.entries.contains_key("main.c"));
@@ -1285,7 +1275,7 @@ fn dir_snapshot_excluded_paths_absent() {
         .recursive(true)
         .exclude(GlobPattern::compile("target/**").unwrap())
         .build();
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1294,7 +1284,7 @@ fn dir_snapshot_excluded_paths_absent() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
     assert!(arc.entries.contains_key("main.c"));
@@ -1312,21 +1302,6 @@ fn dir_snapshot_excluded_paths_absent() {
     );
 }
 
-// ---------------------------------------------------------------- walk: ProbeKind::File
-
-#[test]
-fn probe_file_emits_tree_snapshot_file_for_regular_file() {
-    let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("foo.c");
-    std::fs::write(&path, b"hello").unwrap();
-    let result = probe_file(&path);
-    let ProbeResult::Ok(TreeSnapshot::File(leaf)) = result else {
-        panic!("expected Ok(File), got {result:?}");
-    };
-    assert_eq!(leaf.kind, EntryKind::File);
-    assert_eq!(leaf.size, 5);
-}
-
 // ---------------------------------------------------------------- walk: determinism
 
 #[test]
@@ -1338,7 +1313,7 @@ fn entries_are_lex_sorted_by_btreemap() {
     std::fs::write(tmp.path().join("alpha"), b"x").unwrap();
     std::fs::write(tmp.path().join("mu"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let result = probe_dir(
+    let result = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1347,7 +1322,7 @@ fn entries_are_lex_sorted_by_btreemap() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = result else {
+    let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
     let names: Vec<&str> = arc
@@ -1367,7 +1342,7 @@ fn dir_hash_recursive_is_deterministic_across_two_probes_on_stable_fs() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let r1 = probe_dir(
+    let r1 = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1376,7 +1351,7 @@ fn dir_hash_recursive_is_deterministic_across_two_probes_on_stable_fs() {
         &BTreeSet::new(),
         false,
     );
-    let r2 = probe_dir(
+    let r2 = probe_subtree(
         tmp.path(),
         ResourceId::default(),
         &cfg,
@@ -1385,13 +1360,87 @@ fn dir_hash_recursive_is_deterministic_across_two_probes_on_stable_fs() {
         &BTreeSet::new(),
         false,
     );
-    let ProbeResult::Ok(TreeSnapshot::Dir(a1)) = r1 else {
+    let ProbeOutcome::SubtreeOk(a1) = r1 else {
         panic!();
     };
-    let ProbeResult::Ok(TreeSnapshot::Dir(a2)) = r2 else {
+    let ProbeOutcome::SubtreeOk(a2) = r2 else {
         panic!();
     };
     assert_eq!(a1.dir_hash(), a2.dir_hash());
+}
+
+// ---------------------------------------------------------------- pool: run_probe dispatch
+//
+// `run_probe` is the variant-dispatch glue between `WorkerProber` and the
+// three walker entry points. The cases below pin that each variant
+// reaches the right walker, and that `Descent` honours its hardcoded
+// override config (hidden=true, no exclude/pattern) regardless of any
+// config baked into the request — the variant carries no `ScanConfig`.
+
+#[test]
+fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
+    let pids = fresh_profile_ids(1);
+    let p = pids[0];
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("foo.c");
+    std::fs::write(&file_path, b"hi").unwrap();
+
+    let leaf_req = ProbeRequest::AnchorFile {
+        profile: p,
+        correlation: ProbeCorrelation(1),
+        target_path: file_path,
+    };
+    assert!(matches!(run_probe(&leaf_req), ProbeOutcome::AnchorOk(_)));
+
+    // AnchorFile against a directory: kind mismatch ⇒ Vanished.
+    let dir_req = ProbeRequest::AnchorFile {
+        profile: p,
+        correlation: ProbeCorrelation(2),
+        target_path: tmp.path().to_path_buf(),
+    };
+    assert!(matches!(run_probe(&dir_req), ProbeOutcome::Vanished));
+}
+
+#[test]
+fn run_probe_dispatches_descent_to_probe_descent() {
+    let pids = fresh_profile_ids(1);
+    let p = pids[0];
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("alpha"), b"x").unwrap();
+    std::fs::write(tmp.path().join("beta"), b"x").unwrap();
+
+    let req = ProbeRequest::Descent {
+        profile: p,
+        correlation: ProbeCorrelation(1),
+        target_path: tmp.path().to_path_buf(),
+    };
+    let outcome = run_probe(&req);
+    let ProbeOutcome::SubtreeOk(arc) = outcome else {
+        panic!("expected SubtreeOk, got {outcome:?}");
+    };
+    // Descent enumerates one level — both children appear directly.
+    assert!(arc.entries.contains_key("alpha"));
+    assert!(arc.entries.contains_key("beta"));
+}
+
+#[test]
+fn probe_descent_uses_hardcoded_override_config() {
+    let tmp = TempDir::new().unwrap();
+    // `.hidden` would be filtered by the default `hidden=false`;
+    // `foo.tmp` would be filtered by an exclude/pattern. Descent's
+    // hardcoded override has hidden=true with no exclude/pattern, so
+    // every direct child must surface.
+    std::fs::write(tmp.path().join(".hidden"), b"x").unwrap();
+    std::fs::write(tmp.path().join("foo.tmp"), b"x").unwrap();
+    std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
+
+    let outcome = probe_descent(tmp.path());
+    let ProbeOutcome::SubtreeOk(arc) = outcome else {
+        panic!("expected SubtreeOk, got {outcome:?}");
+    };
+    assert!(arc.entries.contains_key(".hidden"));
+    assert!(arc.entries.contains_key("foo.tmp"));
+    assert!(arc.entries.contains_key("main.c"));
 }
 
 // ---------------------------------------------------------------- pool: run_worker
@@ -1406,7 +1455,7 @@ fn drain_worker_with<F>(
     probe: F,
 ) -> Vec<specter_core::ProbeResponse>
 where
-    F: Fn(&ProbeRequest) -> ProbeResult,
+    F: Fn(&ProbeRequest) -> ProbeOutcome,
 {
     run_worker(rx, &out_tx, expected, probe);
     drop(out_tx);
@@ -1432,16 +1481,14 @@ fn run_worker_skips_when_correlation_does_not_match() {
     // carries — simulates "cancel ran between submit and dequeue".
     seed(&expected, p, 99);
 
-    in_tx
-        .send(req(p, 1, specter_core::ProbeKind::File))
-        .unwrap();
+    in_tx.send(req_anchor(p, 1)).unwrap();
     drop(in_tx);
 
     let probe_calls = Arc::new(AtomicUsize::new(0));
     let probe_calls_clone = Arc::clone(&probe_calls);
     let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, move |_req| {
         probe_calls_clone.fetch_add(1, Ordering::SeqCst);
-        ProbeResult::Vanished
+        ProbeOutcome::Vanished
     });
 
     assert_eq!(
@@ -1462,18 +1509,16 @@ fn run_worker_runs_when_correlation_matches() {
     let expected = fresh_expected();
 
     seed(&expected, p, 7);
-    in_tx
-        .send(req(p, 7, specter_core::ProbeKind::File))
-        .unwrap();
+    in_tx.send(req_anchor(p, 7)).unwrap();
     drop(in_tx);
 
     let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, |_| {
-        ProbeResult::Vanished
+        ProbeOutcome::Vanished
     });
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0].profile, p);
     assert_eq!(responses[0].correlation, ProbeCorrelation(7));
-    assert!(matches!(responses[0].result, ProbeResult::Vanished));
+    assert!(matches!(responses[0].outcome, ProbeOutcome::Vanished));
 }
 
 #[test]
@@ -1486,9 +1531,7 @@ fn run_worker_panic_in_probe_emits_failed_eio() {
     let expected = fresh_expected();
     seed(&expected, p, 1);
 
-    in_tx
-        .send(req(p, 1, specter_core::ProbeKind::File))
-        .unwrap();
+    in_tx.send(req_anchor(p, 1)).unwrap();
     drop(in_tx);
 
     let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, |_| {
@@ -1496,8 +1539,8 @@ fn run_worker_panic_in_probe_emits_failed_eio() {
     });
     assert_eq!(responses.len(), 1);
     assert!(matches!(
-        responses[0].result,
-        ProbeResult::Failed { errno: libc::EIO }
+        responses[0].outcome,
+        ProbeOutcome::Failed { errno: libc::EIO }
     ));
 }
 
@@ -1511,27 +1554,26 @@ fn run_worker_panic_does_not_kill_loop() {
     seed(&expected, pids[0], 1);
     seed(&expected, pids[1], 2);
 
-    in_tx
-        .send(req(pids[0], 1, specter_core::ProbeKind::File))
-        .unwrap();
-    in_tx
-        .send(req(pids[1], 2, specter_core::ProbeKind::File))
-        .unwrap();
+    in_tx.send(req_anchor(pids[0], 1)).unwrap();
+    in_tx.send(req_anchor(pids[1], 2)).unwrap();
     drop(in_tx);
 
     let panic_for = pids[0];
     let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, move |req| {
-        assert!(req.profile != panic_for, "simulated panic on first request");
-        ProbeResult::Vanished
+        assert!(
+            req.profile() != panic_for,
+            "simulated panic on first request"
+        );
+        ProbeOutcome::Vanished
     });
     // First panicked → Failed(EIO); second succeeded → Vanished. Both
     // arrive — the worker survived the panic.
     assert_eq!(responses.len(), 2);
     assert!(matches!(
-        responses[0].result,
-        ProbeResult::Failed { errno: libc::EIO }
+        responses[0].outcome,
+        ProbeOutcome::Failed { errno: libc::EIO }
     ));
-    assert!(matches!(responses[1].result, ProbeResult::Vanished));
+    assert!(matches!(responses[1].outcome, ProbeOutcome::Vanished));
 }
 
 #[test]
@@ -1544,14 +1586,12 @@ fn run_worker_post_run_cleanup_removes_entry() {
     let expected = fresh_expected();
     seed(&expected, p, 5);
 
-    in_tx
-        .send(req(p, 5, specter_core::ProbeKind::File))
-        .unwrap();
+    in_tx.send(req_anchor(p, 5)).unwrap();
     drop(in_tx);
 
     let inner = Arc::clone(&expected);
     let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, |_| {
-        ProbeResult::Vanished
+        ProbeOutcome::Vanished
     });
     assert_eq!(responses.len(), 1);
     // Cleanup removed the entry.
@@ -1568,9 +1608,7 @@ fn run_worker_post_run_cleanup_preserves_resubmit() {
     let expected = fresh_expected();
     seed(&expected, p, 1);
 
-    in_tx
-        .send(req(p, 1, specter_core::ProbeKind::File))
-        .unwrap();
+    in_tx.send(req_anchor(p, 1)).unwrap();
     drop(in_tx);
 
     let inner = Arc::clone(&expected);
@@ -1582,7 +1620,7 @@ fn run_worker_post_run_cleanup_preserves_resubmit() {
             .lock()
             .unwrap()
             .insert(p, ProbeCorrelation(2));
-        ProbeResult::Vanished
+        ProbeOutcome::Vanished
     });
     assert_eq!(responses.len(), 1);
     assert_eq!(
@@ -1610,17 +1648,10 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
     let (out_tx, out_rx) = unbounded::<Input>();
     let prober = WorkerProber::new(&out_tx, 1).unwrap();
 
-    let request = ProbeRequest {
+    let request = ProbeRequest::AnchorFile {
         profile: pids[0],
         correlation: ProbeCorrelation(42),
-        kind: specter_core::ProbeKind::File,
-        target_resource: ResourceId::default(),
         target_path: path,
-        scan_config: ScanConfig::builder().build(),
-        captured_with: 0,
-        baseline_subtree: None,
-        force_walk: BTreeSet::new(),
-        forced: false,
     };
     prober.submit(request);
 
@@ -1633,7 +1664,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
     };
     assert_eq!(resp.profile, pids[0]);
     assert_eq!(resp.correlation, ProbeCorrelation(42));
-    assert!(matches!(resp.result, ProbeResult::Ok(_)));
+    assert!(matches!(resp.outcome, ProbeOutcome::AnchorOk(_)));
 
     // Cleanup ran.
     assert_eq!(prober.expected_len(), 0);
@@ -1679,17 +1710,10 @@ fn worker_prober_resubmit_after_cancel_runs() {
     // Submit c1, cancel, submit c2. Expect: c1 either runs or skips
     // (race), c2 runs deterministically (its expectation is fresh and
     // won't be cleared by anything before the worker pops it).
-    let mk_req = |c: u64| ProbeRequest {
+    let mk_req = |c: u64| ProbeRequest::AnchorFile {
         profile: p,
         correlation: ProbeCorrelation(c),
-        kind: specter_core::ProbeKind::File,
-        target_resource: ResourceId::default(),
         target_path: path.clone(),
-        scan_config: ScanConfig::builder().build(),
-        captured_with: 0,
-        baseline_subtree: None,
-        force_walk: BTreeSet::new(),
-        forced: false,
     };
     prober.submit(mk_req(1));
     prober.cancel(p);
@@ -1739,17 +1763,10 @@ fn worker_prober_concurrent_submit_is_safe() {
                     *g += 1;
                     *g
                 };
-                prober.submit(ProbeRequest {
+                prober.submit(ProbeRequest::AnchorFile {
                     profile: p,
                     correlation: ProbeCorrelation(c),
-                    kind: specter_core::ProbeKind::File,
-                    target_resource: ResourceId::default(),
                     target_path: path.clone(),
-                    scan_config: ScanConfig::builder().build(),
-                    captured_with: 0,
-                    baseline_subtree: None,
-                    force_walk: BTreeSet::new(),
-                    forced: false,
                 });
             }
         }));

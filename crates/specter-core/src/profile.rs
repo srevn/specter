@@ -287,24 +287,37 @@ pub struct Profile {
     /// - `Some(kind)` from the materialisation moment (descent → Idle) or
     ///   the first Seed-Ok dispatch onward.
     ///
-    /// **Why a Profile field, not a Tree lookup.** Three engine-side
-    /// dispatch sites need the anchor's kind on the hot path:
-    /// `transition_to_verifying` (probe-target dispatch), `emit_effects`
-    /// (`compute_cwd` dispatch), and `emit_probe_op` (probe-shape dispatch).
-    /// Each previously did `tree.get(profile.resource).and_then(Resource::kind)`
-    /// with a hand-rolled fallback for the unprobed case (File at the
-    /// burst site, Dir at the cwd site). Caching once on the Profile
-    /// removes the per-dispatch lookup, lets the call sites read the
-    /// invariant directly, and centralises the fallback rationale on this
-    /// field's documentation rather than repeating it at each reader.
+    /// **Why a Profile field, not a Tree lookup.** Engine-side dispatch
+    /// sites need the anchor's kind on the hot path: the burst-launch
+    /// helpers (`start_seed_burst`, `transition_to_verifying`,
+    /// `transition_to_rebasing`) read it to choose between
+    /// `emit_anchor_probe` and `emit_subtree_probe`, and `emit_effects`
+    /// reads it via `compute_cwd`. Each previously did
+    /// `tree.get(profile.resource).and_then(Resource::kind)` with a
+    /// hand-rolled fallback for the unprobed case. Caching once on the
+    /// Profile removes the per-dispatch lookup, lets the call sites read
+    /// the invariant directly, and centralises the fallback rationale on
+    /// this field's documentation rather than repeating it at each reader.
     ///
-    /// **Reader convention.** Sites use `profile.kind.unwrap_or(<default>)`
-    /// where the default matches the prior backend-mask convention at
-    /// that site (File for probe-target dispatch — the safer assumption
-    /// for an unprobed anchor, since a File probe at a Dir target collapses
-    /// to `Vanished` and recovery; Dir for `compute_cwd` — a Dir cwd at
+    /// **Reader convention.** Probe-shape dispatch matches the variant
+    /// directly (`Some(File) ⇒ AnchorFile`,
+    /// `Some(Dir | Unknown) | None ⇒ Subtree`); `Vanished` from a
+    /// kind-mismatched `Subtree` probe routes to descent recovery. The
+    /// `compute_cwd` reader uses `kind.unwrap_or(Dir)` since a Dir cwd at
     /// the path itself is recoverable via `EffectOutcome::Failed` if the
-    /// path is actually a File).
+    /// path turns out to be a File.
+    ///
+    /// **Snapshot-shape invariant.** When `current.is_some()`, the
+    /// `TreeSnapshot` variant must agree with `kind`:
+    /// `current = Some(TreeSnapshot::File(_)) ⇒ kind == Some(File)`;
+    /// `current = Some(TreeSnapshot::Dir(_)) ⇒ kind == Some(Dir)`. The
+    /// engine's typed [`crate::ProbeRequest`] / [`crate::ProbeOutcome`]
+    /// dispatch chain enforces this at runtime — not at compile time —
+    /// so the invariant is narrative; a sum-typed `current` would
+    /// type-enforce it but at the cost of every kind-agnostic reader of
+    /// `current` and `baseline` paying a per-variant dispatch tax. Any
+    /// future write site that mutates `current` and `kind` independently
+    /// must preserve the agreement.
     pub kind: Option<ResourceKind>,
     pub state: ProfileState,
     /// Engine-side slot for the **probe channel** — the per-Profile

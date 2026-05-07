@@ -8,11 +8,8 @@
 
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
-use specter_core::{
-    Input, ProbeCorrelation, ProbeKind, ProbeRequest, ProfileId, ResourceId, ScanConfig,
-};
+use specter_core::{Input, ProbeCorrelation, ProbeRequest, ProfileId};
 use specter_sensor::{Prober, WorkerProber};
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -22,18 +19,11 @@ fn fresh_profile_id() -> ProfileId {
     sm.insert(())
 }
 
-fn mk_request(profile: ProfileId, anchor: PathBuf, correlation: u64) -> ProbeRequest {
-    ProbeRequest {
+const fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
+    ProbeRequest::AnchorFile {
         profile,
         correlation: ProbeCorrelation(correlation),
-        kind: ProbeKind::File,
-        target_resource: ResourceId::default(),
-        target_path: anchor,
-        scan_config: ScanConfig::builder().build(),
-        captured_with: 0,
-        baseline_subtree: None,
-        force_walk: BTreeSet::new(),
-        forced: false,
+        target_path,
     }
 }
 

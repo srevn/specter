@@ -9,12 +9,8 @@
 
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
-use specter_core::{
-    Input, ProbeCorrelation, ProbeKind, ProbeRequest, ProbeResult, ProfileId, ResourceId,
-    ScanConfig,
-};
+use specter_core::{Input, ProbeCorrelation, ProbeOutcome, ProbeRequest, ProfileId};
 use specter_sensor::{Prober, WorkerProber};
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -24,18 +20,11 @@ fn fresh_profile_id() -> ProfileId {
     sm.insert(())
 }
 
-fn mk_request(profile: ProfileId, anchor: PathBuf, correlation: u64) -> ProbeRequest {
-    ProbeRequest {
+const fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
+    ProbeRequest::AnchorFile {
         profile,
         correlation: ProbeCorrelation(correlation),
-        kind: ProbeKind::File,
-        target_resource: ResourceId::default(),
-        target_path: anchor,
-        scan_config: ScanConfig::builder().build(),
-        captured_with: 0,
-        baseline_subtree: None,
-        force_walk: BTreeSet::new(),
-        forced: false,
+        target_path,
     }
 }
 
@@ -66,7 +55,7 @@ fn cancel_after_completion_is_noop() {
         Input::ProbeResponse(r) => r,
         other => panic!("unexpected: {other:?}"),
     };
-    assert!(matches!(resp.result, ProbeResult::Ok(_)));
+    assert!(matches!(resp.outcome, ProbeOutcome::AnchorOk(_)));
 
     // Cancel after completion: no panic; no spurious second response.
     prober.cancel(p);

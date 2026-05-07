@@ -15,9 +15,8 @@
 )]
 
 use specter_core::{
-    ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope, Input, ProbeOp, ProbeResponse,
-    ProbeResult, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
-    TreeSnapshot, WatchOp,
+    ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope, Input, ProbeOp, ProbeOutcome,
+    ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -35,8 +34,8 @@ fn empty_command() -> CommandTemplate {
 }
 
 /// Empty `TreeSnapshot::Dir` rooted at `root`.
-fn dir_snap(root: ResourceId) -> TreeSnapshot {
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+fn dir_snap(root: ResourceId) -> std::sync::Arc<DirSnapshot> {
+    Arc::new(DirSnapshot::new(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -45,7 +44,7 @@ fn dir_snap(root: ResourceId) -> TreeSnapshot {
         },
         0,
         BTreeMap::new(),
-    )))
+    ))
 }
 
 #[test]
@@ -137,7 +136,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         .probe_ops
         .iter()
         .find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation),
+            ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         })
         .unwrap();
@@ -145,7 +144,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(dir_snap(src)),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(src)),
         }),
         now,
     );

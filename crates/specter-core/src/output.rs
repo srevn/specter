@@ -42,12 +42,10 @@ mod tests {
     use crate::diff::Diff;
     use crate::effect::{CommandResolved, CorrelationId, DedupKey};
     use crate::ids::{ProfileId, ResourceId, SubId};
-    use crate::op::{ProbeKind, ProbeRequest};
+    use crate::op::ProbeRequest;
     use crate::resource::ResourceKind;
-    use crate::scan_config::ScanConfig;
     use crate::sub::ClassSet;
     use slotmap::KeyData;
-    use std::collections::BTreeSet;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -107,17 +105,10 @@ mod tests {
         let mut out = StepOutput::default();
         out.probe_ops.push(ProbeOp::Cancel { profile: p2 });
         out.probe_ops.push(ProbeOp::Probe {
-            request: ProbeRequest {
+            request: ProbeRequest::AnchorFile {
                 profile: p1,
                 correlation: crate::op::ProbeCorrelation(7),
-                kind: ProbeKind::File,
-                target_resource: ResourceId::default(),
                 target_path: PathBuf::from("/y"),
-                scan_config: ScanConfig::builder().build(),
-                captured_with: 0,
-                baseline_subtree: None,
-                force_walk: BTreeSet::new(),
-                forced: false,
             },
         });
 

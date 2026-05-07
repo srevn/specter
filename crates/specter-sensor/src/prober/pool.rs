@@ -34,11 +34,9 @@
 //!   our `recv` and our cleanup must not be clobbered.
 
 use crate::Prober;
-use crate::prober::walk::{probe_dir, probe_file};
+use crate::prober::walk::{probe_anchor_file, probe_descent, probe_subtree};
 use crossbeam::channel::{Receiver, Sender};
-use specter_core::{
-    Input, ProbeCorrelation, ProbeKind, ProbeRequest, ProbeResponse, ProbeResult, ProfileId,
-};
+use specter_core::{Input, ProbeCorrelation, ProbeOutcome, ProbeRequest, ProbeResponse, ProfileId};
 use std::collections::BTreeMap;
 use std::io;
 use std::panic::AssertUnwindSafe;
@@ -139,12 +137,12 @@ impl Prober for WorkerProber {
         // across the lock release.
         {
             let mut e = self.expected.lock().expect("prober expected map poisoned");
-            e.insert(req.profile, req.correlation);
+            e.insert(req.profile(), req.correlation());
         }
         if let Err(crossbeam::channel::SendError(req)) = self.queue_tx.send(req) {
             tracing::error!(
-                profile = ?req.profile,
-                correlation = ?req.correlation,
+                profile = ?req.profile(),
+                correlation = ?req.correlation(),
                 "prober queue closed; submit dropped",
             );
         }
@@ -159,20 +157,30 @@ impl Prober for WorkerProber {
     }
 }
 
-/// Production probe-runner: dispatch on `ProbeKind`. Pure-IO; no
-/// awareness of the worker loop or the expectation map.
-fn run_probe(req: &ProbeRequest) -> ProbeResult {
-    match req.kind {
-        ProbeKind::File => probe_file(&req.target_path),
-        ProbeKind::Directory => probe_dir(
-            &req.target_path,
-            req.target_resource,
-            &req.scan_config,
-            req.captured_with,
-            req.baseline_subtree.as_ref(),
-            &req.force_walk,
-            req.forced,
+/// Production probe-runner: dispatch on the `ProbeRequest` variant.
+/// Pure-IO; no awareness of the worker loop or the expectation map.
+pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
+    match req {
+        ProbeRequest::AnchorFile { target_path, .. } => probe_anchor_file(target_path),
+        ProbeRequest::Subtree {
+            target_path,
+            target_resource,
+            scan_config,
+            captured_with,
+            baseline_subtree,
+            force_walk,
+            forced,
+            ..
+        } => probe_subtree(
+            target_path,
+            *target_resource,
+            scan_config,
+            *captured_with,
+            baseline_subtree.as_ref(),
+            force_walk,
+            *forced,
         ),
+        ProbeRequest::Descent { target_path, .. } => probe_descent(target_path),
     }
 }
 
@@ -191,9 +199,11 @@ pub(super) fn run_worker<F>(
     expected: &ExpectedMap,
     probe: F,
 ) where
-    F: Fn(&ProbeRequest) -> ProbeResult,
+    F: Fn(&ProbeRequest) -> ProbeOutcome,
 {
     while let Ok(req) = rx.recv() {
+        let profile = req.profile();
+        let correlation = req.correlation();
         // Pre-run cancel check: the request was queued at submit time;
         // a `cancel` since then (or a fresh `submit` with a new
         // correlation) means our `(profile, correlation)` no longer
@@ -204,26 +214,22 @@ pub(super) fn run_worker<F>(
         let still_wanted = expected
             .lock()
             .expect("prober expected map poisoned")
-            .get(&req.profile)
+            .get(&profile)
             .copied()
-            == Some(req.correlation);
+            == Some(correlation);
         if !still_wanted {
-            tracing::debug!(
-                profile = ?req.profile,
-                correlation = ?req.correlation,
-                "probe cancelled before dispatch",
-            );
+            tracing::debug!(?profile, ?correlation, "probe cancelled before dispatch",);
             continue;
         }
 
-        let result =
+        let outcome =
             std::panic::catch_unwind(AssertUnwindSafe(|| probe(&req))).unwrap_or_else(|_| {
                 tracing::error!(
-                    profile = ?req.profile,
-                    correlation = ?req.correlation,
+                    ?profile,
+                    ?correlation,
                     "prober worker panicked; emitting Failed(EIO)",
                 );
-                ProbeResult::Failed { errno: libc::EIO }
+                ProbeOutcome::Failed { errno: libc::EIO }
             });
 
         // Post-run cleanup: remove iff still ours. A racing fresh
@@ -231,15 +237,15 @@ pub(super) fn run_worker<F>(
         // and now; clobbering would spuriously skip the new request.
         {
             let mut e = expected.lock().expect("prober expected map poisoned");
-            if e.get(&req.profile).copied() == Some(req.correlation) {
-                e.remove(&req.profile);
+            if e.get(&profile).copied() == Some(correlation) {
+                e.remove(&profile);
             }
         }
 
         let response = ProbeResponse {
-            profile: req.profile,
-            correlation: req.correlation,
-            result,
+            profile,
+            correlation,
+            outcome,
         };
         if out.send(Input::ProbeResponse(response)).is_err() {
             tracing::warn!("prober out channel closed; worker exiting");

@@ -18,49 +18,24 @@
 //! 2. Channel-state slot — only `mint_probe_correlation` writes
 //!    `pending_probe = Some(_)`; only `cancel_pending_probe` and the
 //!    `on_probe_response` pre-dispatch clear write `pending_probe = None`.
-//! 3. `ProbeOp::Probe` construction — `emit_probe_op` is the only path
-//!    that pushes a `ProbeOp::Probe`.
+//! 3. `ProbeOp::Probe` construction — the three typed helpers
+//!    (`emit_anchor_probe`, `emit_subtree_probe`, `emit_descent_probe`)
+//!    are the only paths that push a `ProbeOp::Probe`. Each helper bakes
+//!    the request variant: callers cannot accidentally ship a Subtree
+//!    request to a File-anchored Profile, or attach a baseline to a
+//!    descent prefix.
 //!
 //! The data-model slot (`Profile.pending_probe`) lives on the Profile;
 //! this module owns the discipline that mutates it.
 
 use crate::Engine;
 use specter_core::{
-    DirSnapshot, ProbeCorrelation, ProbeKind, ProbeOp, ProbeRequest, ProfileId, Resource,
-    ResourceId, ResourceKind, ScanConfig, StepOutput,
+    DirSnapshot, ProbeCorrelation, ProbeOp, ProbeRequest, ProfileId, ResourceId, ScanConfig,
+    StepOutput,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Parameters that vary between Burst-driven and Descent-driven probe
-/// emissions. The two cases are **disjoint** — descent never ships a
-/// baseline, force_walk, or forced flag — so the type encodes them as
-/// distinct enum variants. `ProbeEmissionParams::Descent` is unit; no
-/// future contributor can construct a "descent probe with a baseline"
-/// because the type forbids it.
-///
-/// Burst-side fields whose values come from the Profile (`scan_config`,
-/// `captured_with`) are NOT carried here — `emit_probe_op` reads them
-/// from the Profile at emission time, eliminating the parameter-passing
-/// redundancy a struct-shape would have introduced.
-pub(crate) enum ProbeEmissionParams {
-    /// Burst-driven probe: ships baseline (mtime-skip basis), force_walk
-    /// (kqueue-driven dirty paths), and the `forced` bit (max-settle
-    /// override). Used by `start_seed_burst` and `transition_to_verifying`.
-    Burst {
-        baseline_subtree: Option<Arc<DirSnapshot>>,
-        force_walk: BTreeSet<PathBuf>,
-        forced: bool,
-    },
-    /// Descent-driven probe: minimal single-level enumeration overriding
-    /// the Profile's `ScanConfig`. No baseline (the descent has no prior
-    /// observation at any prefix); no force_walk (the prefix is the
-    /// target); not forced. Used by `attach_sub_inner` Pending branch,
-    /// `start_pending_recovery`, `dispatch_descent_ok` advance branch,
-    /// `dispatch_descent_vanished` rewind branch, and `on_descent_event`.
-    Descent,
-}
 
 impl Engine {
     /// Open the probe channel: bump the engine-monotonic correlation
@@ -130,89 +105,97 @@ impl Engine {
         self.profiles.get(pid)?.pending_probe
     }
 
-    /// Push a `ProbeOp::Probe` onto `out.probe_ops`. The single source of
-    /// `ProbeOp::Probe` construction; both Burst and Descent emission
-    /// route through here.
+    /// Emit `ProbeRequest::AnchorFile`. The walker runs a single `lstat`
+    /// against `target_path` and returns `ProbeOutcome::AnchorOk` (or
+    /// `Vanished` / `Failed`).
     ///
     /// `correlation` must already be on `Profile.pending_probe` (the
     /// caller minted it via `mint_probe_correlation` immediately prior).
-    /// `params` carries the disjoint per-arm fields.
+    /// `target_path` is captured at the call site so this helper avoids
+    /// borrowing `&self.tree` during the emit.
     ///
-    /// Resolves the probe kind from the target's `ResourceKind`
-    /// (`Unknown` defaults to `Directory` — the more permissive choice;
-    /// the Sensor returns `Vanished` on kind mismatch, which the Engine
-    /// then handles as Removed).
-    pub(crate) fn emit_probe_op(
-        &self,
+    /// Associated function (no `self`): the helper is a thin variant
+    /// constructor with no Engine-state dependency. Callers reach it as
+    /// `Self::emit_anchor_probe(...)`.
+    pub(crate) fn emit_anchor_probe(
         profile_id: ProfileId,
-        target_resource: ResourceId,
         correlation: ProbeCorrelation,
-        params: ProbeEmissionParams,
+        target_path: PathBuf,
         out: &mut StepOutput,
     ) {
-        let Some(p) = self.profiles.get(profile_id) else {
-            return;
-        };
-        // Probe kind: definitively-File slots probe as File; everything
-        // else (Dir, unprobed, stale) probes as Directory — the more
-        // permissive choice. The Sensor returns `Vanished` on kind
-        // mismatch, which the Engine handles as Removed.
-        let kind = if self.tree.get(target_resource).and_then(Resource::kind)
-            == Some(ResourceKind::File)
-        {
-            ProbeKind::File
-        } else {
-            ProbeKind::Directory
-        };
-        let target_path = self.tree.path_of(target_resource).unwrap_or_default();
-
-        let (scan_config, baseline_subtree, force_walk, forced) = match params {
-            ProbeEmissionParams::Burst {
-                baseline_subtree,
-                force_walk,
-                forced,
-            } => (p.config.clone(), baseline_subtree, force_walk, forced),
-            // Descent probes only need the immediate children of the
-            // prefix to search for the next segment — a recursive walk
-            // is wasted I/O, and the user's pattern would filter out the
-            // very file we're looking for. Override to a minimal
-            // single-level enumeration: `recursive = false` (no descent
-            // into children), `pattern = None` (don't filter — we're
-            // looking for any segment by name), `exclude = []` (don't
-            // hide ancestors of the anchor), `hidden = true` (don't skip
-            // dot-prefixed ancestors), `max_depth = None` (irrelevant
-            // when `recursive=false`). The Seed burst that follows
-            // anchor materialization uses the Profile's real config.
-            ProbeEmissionParams::Descent => (
-                ScanConfig::builder()
-                    .recursive(false)
-                    .hidden(true)
-                    .max_depth(None)
-                    .build(),
-                None,
-                BTreeSet::new(),
-                false,
-            ),
-        };
-
         out.probe_ops.push(ProbeOp::Probe {
-            request: ProbeRequest {
+            request: ProbeRequest::AnchorFile {
                 profile: profile_id,
                 correlation,
-                kind,
+                target_path,
+            },
+        });
+    }
+
+    /// Emit `ProbeRequest::Subtree`. Recursive Dir walk honouring the
+    /// Profile's `ScanConfig`; walker returns
+    /// `ProbeOutcome::SubtreeOk(Arc<DirSnapshot>)` rooted at
+    /// `target_resource`.
+    ///
+    /// `scan_config` and `captured_with` come from the Profile — the
+    /// caller already holds a `&Profile` borrow at every call site (to
+    /// read `kind`, `current`, `resource`, etc.) and threads
+    /// `(p.config.clone(), p.config_hash)` through here. The helper does
+    /// not re-borrow `self` to look them up, which would also force the
+    /// helper to take `&self` for an otherwise stateless construction.
+    ///
+    /// Associated function (no `self`): same rationale as
+    /// [`Self::emit_anchor_probe`].
+    pub(crate) fn emit_subtree_probe(
+        profile_id: ProfileId,
+        correlation: ProbeCorrelation,
+        target_resource: ResourceId,
+        target_path: PathBuf,
+        scan_config: ScanConfig,
+        captured_with: u64,
+        baseline_subtree: Option<Arc<DirSnapshot>>,
+        force_walk: BTreeSet<PathBuf>,
+        forced: bool,
+        out: &mut StepOutput,
+    ) {
+        out.probe_ops.push(ProbeOp::Probe {
+            request: ProbeRequest::Subtree {
+                profile: profile_id,
+                correlation,
                 target_resource,
                 target_path,
                 scan_config,
-                // Profile identity is stable across Burst and Descent
-                // emission. For descent the override `scan_config` differs
-                // from the Profile's real one, but the walker stamps
-                // `captured_with` onto the synthesised `DirSnapshot` and
-                // the descent shim discards the snapshot before any
-                // consumer reads it.
-                captured_with: p.config_hash,
+                captured_with,
                 baseline_subtree,
                 force_walk,
                 forced,
+            },
+        });
+    }
+
+    /// Emit `ProbeRequest::Descent`. Single-level enumeration of the
+    /// prefix; walker hardcodes the override config (`recursive=false`,
+    /// `hidden=true`, no exclude/pattern, no `max_depth`) — the
+    /// Profile's user-facing filters would mask the very segment descent
+    /// is searching for.
+    ///
+    /// Walker still returns `ProbeOutcome::SubtreeOk(arc)` carrying the
+    /// prefix's direct children; descent dispatch reads
+    /// `arc.entries.get(name)` and discards the snapshot.
+    ///
+    /// Associated function (no `self`): same rationale as
+    /// [`Self::emit_anchor_probe`].
+    pub(crate) fn emit_descent_probe(
+        profile_id: ProfileId,
+        correlation: ProbeCorrelation,
+        target_path: PathBuf,
+        out: &mut StepOutput,
+    ) {
+        out.probe_ops.push(ProbeOp::Probe {
+            request: ProbeRequest::Descent {
+                profile: profile_id,
+                correlation,
+                target_path,
             },
         });
     }

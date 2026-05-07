@@ -7,17 +7,47 @@
 
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
-use specter_core::{
-    Input, ProbeCorrelation, ProbeKind, ProbeRequest, ProfileId, ResourceId, ScanConfig,
-};
+use specter_core::{Input, ProbeCorrelation, ProbeRequest, ProfileId, ResourceId, ScanConfig};
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn fresh_profile_ids(n: usize) -> Vec<ProfileId> {
     let mut sm = SlotMap::<ProfileId, ()>::with_key();
     (0..n).map(|_| sm.insert(())).collect()
+}
+
+const fn anchor_request(
+    profile: ProfileId,
+    target_path: PathBuf,
+    correlation: u64,
+) -> ProbeRequest {
+    ProbeRequest::AnchorFile {
+        profile,
+        correlation: ProbeCorrelation(correlation),
+        target_path,
+    }
+}
+
+fn subtree_request(
+    profile: ProfileId,
+    target_path: PathBuf,
+    scan_config: ScanConfig,
+    correlation: u64,
+) -> ProbeRequest {
+    ProbeRequest::Subtree {
+        profile,
+        correlation: ProbeCorrelation(correlation),
+        target_resource: ResourceId::default(),
+        target_path,
+        scan_config,
+        captured_with: 0,
+        baseline_subtree: None,
+        force_walk: BTreeSet::new(),
+        forced: false,
+    }
 }
 
 #[test]
@@ -31,18 +61,7 @@ fn single_worker_drains_more_than_concurrency_serially() {
     let pids = fresh_profile_ids(5);
 
     for (i, p) in pids.iter().enumerate() {
-        prober.submit(ProbeRequest {
-            profile: *p,
-            correlation: ProbeCorrelation(i as u64 + 1),
-            kind: ProbeKind::File,
-            target_resource: ResourceId::default(),
-            target_path: path.clone(),
-            scan_config: ScanConfig::builder().build(),
-            captured_with: 0,
-            baseline_subtree: None,
-            force_walk: BTreeSet::new(),
-            forced: false,
-        });
+        prober.submit(anchor_request(*p, path.clone(), i as u64 + 1));
     }
 
     // Single worker → responses arrive in submit order (FIFO).
@@ -79,18 +98,7 @@ fn pool_with_four_workers_handles_burst() {
     let pids = fresh_profile_ids(20);
 
     for (i, p) in pids.iter().enumerate() {
-        prober.submit(ProbeRequest {
-            profile: *p,
-            correlation: ProbeCorrelation(i as u64 + 1),
-            kind: ProbeKind::File,
-            target_resource: ResourceId::default(),
-            target_path: path.clone(),
-            scan_config: ScanConfig::builder().build(),
-            captured_with: 0,
-            baseline_subtree: None,
-            force_walk: BTreeSet::new(),
-            forced: false,
-        });
+        prober.submit(anchor_request(*p, path.clone(), i as u64 + 1));
     }
 
     let mut received = 0;
@@ -125,24 +133,18 @@ fn pool_runs_probes_concurrently_when_capacity_allows() {
     }
 
     let cfg = ScanConfig::builder().recursive(true).build();
-    let mk_burst = |concurrency: usize| -> Duration {
+    let mk_burst = |concurrency: usize, anchor: &Path| -> Duration {
         let (tx, rx) = unbounded::<Input>();
         let prober = WorkerProber::new(&tx, concurrency).unwrap();
         let pids = fresh_profile_ids(4);
         let start = Instant::now();
         for (i, p) in pids.iter().enumerate() {
-            prober.submit(ProbeRequest {
-                profile: *p,
-                correlation: ProbeCorrelation(i as u64 + 1),
-                kind: ProbeKind::Directory,
-                target_resource: ResourceId::default(),
-                target_path: tmp.path().to_path_buf(),
-                scan_config: cfg.clone(),
-                captured_with: 0,
-                baseline_subtree: None,
-                force_walk: BTreeSet::new(),
-                forced: false,
-            });
+            prober.submit(subtree_request(
+                *p,
+                anchor.to_path_buf(),
+                cfg.clone(),
+                i as u64 + 1,
+            ));
         }
         let mut received = 0;
         while received < 4 {
@@ -155,8 +157,8 @@ fn pool_runs_probes_concurrently_when_capacity_allows() {
         elapsed
     };
 
-    let serial = mk_burst(1);
-    let parallel = mk_burst(4);
+    let serial = mk_burst(1, tmp.path());
+    let parallel = mk_burst(4, tmp.path());
 
     // Loose bound: 4 workers should be at least 1.5x faster than 1
     // worker on a 4-probe burst. Real ratios are typically 3x+.

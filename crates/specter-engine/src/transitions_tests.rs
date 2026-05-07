@@ -21,9 +21,9 @@ use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet,
     CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
-    EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, Placeholder, ProbeKind,
-    ProbeOp, ProbeResponse, ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
+    EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, Placeholder, ProbeOp,
+    ProbeOutcome, ProbeRequest, ProbeResponse, ProfileState, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -83,8 +83,10 @@ fn engine_with_attached_sub() -> (
 /// V5-native test helper: build a `TreeSnapshot::Dir` with the supplied
 /// single-component children. Each child is `(name, EntryKind, inode)`;
 /// Dirs are emitted with `subtree: None` (uncovered). Tests that need
-/// nested subtrees should use `dir_with_subtree`.
-fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
+/// nested subtrees should use `dir_with_subtree`. Returns
+/// `Arc<DirSnapshot>` directly — the typed `ProbeOutcome::SubtreeOk`
+/// variant carries an `Arc<DirSnapshot>`, not a wrapping `TreeSnapshot`.
+fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -97,7 +99,7 @@ fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Tre
         };
         map.insert(CompactString::new(name), child);
     }
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    Arc::new(DirSnapshot::new(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -106,7 +108,7 @@ fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Tre
         },
         0,
         map,
-    )))
+    ))
 }
 
 /// Build a `DirSnapshot` with the given children, returning an `Arc`
@@ -130,10 +132,12 @@ fn dir_with_subtree(root: ResourceId, children: Vec<(&str, ChildEntry)>) -> Arc<
     ))
 }
 
-/// `LeafEntry`-only `TreeSnapshot::File` for File-anchored Profiles.
+/// `LeafEntry` for File-anchored Profiles. Consumed directly by
+/// `ProbeOutcome::AnchorOk`; the wrapping `TreeSnapshot::File` lives on
+/// the engine-internal `Profile.current`, not the wire response.
 #[allow(dead_code)]
-fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> TreeSnapshot {
-    TreeSnapshot::File(LeafEntry::new(kind, size, mtime, inode, 0))
+fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> LeafEntry {
+    LeafEntry::new(kind, size, mtime, inode, 0)
 }
 
 /// Drive the Profile from fresh-attach through Seed-Ok → Idle (post-Seed
@@ -146,7 +150,7 @@ fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId, root: Resou
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -237,7 +241,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         now,
     );
@@ -246,6 +250,232 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
         Some(ResourceKind::Dir),
         "Seed-Ok fallback caches the anchor kind from the response shape",
     );
+}
+
+/// `dispatch_burst_outcome` is the unified fan-out for both Seed and
+/// Standard intents, so the kind-classification fallback fires from every
+/// burst arm — not just Seed. Companion to
+/// `attach_sub_unprobed_anchor_seeds_kind_on_first_response`: that test
+/// pins the Seed-Ok / SubtreeOk path; this one pins it explicitly through
+/// the same outcome shape and asserts the Profile reaches its first
+/// classification before any subsequent dispatcher work runs.
+#[test]
+fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
+    let mut e = Engine::new();
+    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+    // Leave the Resource Unknown — anchor_kind from `Resource::kind()`
+    // collapses Unknown to None, so Profile.kind starts as None.
+    let req = SubAttachRequest {
+        name: String::from("test-sub"),
+        resource: r,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
+        log_output: false,
+    };
+    let now = Instant::now();
+    let (sid, _) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+    assert_eq!(
+        e.profiles.get(pid).and_then(|p| p.kind),
+        None,
+        "unprobed anchor → Profile.kind starts as None",
+    );
+
+    let correlation = e.pending_probe(pid).expect("Seed verify probe in flight");
+    let snap = dir_tree_snap(r, vec![]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        now,
+    );
+    assert_eq!(
+        e.profiles.get(pid).and_then(|p| p.kind),
+        Some(ResourceKind::Dir),
+        "SubtreeOk on a kind-None Profile classifies as Dir at dispatch_burst_outcome",
+    );
+}
+
+/// Mirror of the SubtreeOk test for the AnchorOk arm: an `AnchorOk(leaf)`
+/// response on a Profile whose `kind` was None classifies the anchor as
+/// `File`. The walker's response variant is the canonical witness, so the
+/// fallback cannot be specialised to one shape.
+#[test]
+fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
+    let mut e = Engine::new();
+    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+    // Resource is Unknown ⇒ Profile.kind starts as None. The Seed burst
+    // emits `ProbeRequest::Subtree` per the §2.2 unified-fallback (Subtree
+    // is the safe default for unclassified anchors). The walker, finding a
+    // regular file at the path, replies with `Vanished` in production
+    // (kind mismatch). For this test we synthesise an `AnchorOk(leaf)`
+    // response — a deliberate deviation that exercises the
+    // dispatch_burst_outcome classification path for AnchorOk; the walker
+    // never produces this response shape against a Subtree request, but
+    // the engine's classification logic must still fall out correctly if
+    // it ever does (defense-in-depth + symmetry with the SubtreeOk arm).
+    let req = SubAttachRequest {
+        name: String::from("test-sub"),
+        resource: r,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
+        log_output: false,
+    };
+    let now = Instant::now();
+    let (sid, _) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+    assert_eq!(
+        e.profiles.get(pid).and_then(|p| p.kind),
+        None,
+        "unprobed anchor → Profile.kind starts as None",
+    );
+
+    let correlation = e.pending_probe(pid).expect("Seed verify probe in flight");
+    let leaf = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            outcome: ProbeOutcome::AnchorOk(leaf),
+        }),
+        now,
+    );
+    assert_eq!(
+        e.profiles.get(pid).and_then(|p| p.kind),
+        Some(ResourceKind::File),
+        "AnchorOk on a kind-None Profile classifies as File at dispatch_burst_outcome",
+    );
+}
+
+/// Walker contract: a `Pending` Profile (descent state) probes a Dir
+/// prefix with `ProbeRequest::Descent`; the only valid responses are
+/// `SubtreeOk`, `Vanished`, or `Failed`. An `AnchorOk` in this slot is a
+/// walker-side bug — descent never queries an anchor's `lstat` shape. The
+/// `(DispatchTarget::Descent, ProbeOutcome::AnchorOk(_))` arm fires a
+/// `debug_assert!` in dev/CI and falls through to `StaleProbeResponse` in
+/// release. The test pins the dev/CI behaviour.
+///
+/// Disabled in release builds via the standard `cfg_attr` discipline,
+/// mirroring `mint_probe_correlation_panics_on_double_open`.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "debug_assert! is compiled out in release"
+)]
+#[should_panic(expected = "walker contract violated")]
+fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
+    let mut e = Engine::new();
+    let foo = e.tree.ensure(None, "foo", ResourceRole::User);
+    e.tree.set_kind(foo, ResourceKind::Dir);
+    let req = SubAttachRequest::for_path(
+        "guard".into(),
+        std::path::PathBuf::from("foo/bar"),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
+    let now = Instant::now();
+    let (sid, _) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+    assert!(
+        matches!(
+            e.profiles.get(pid).map(|p| &p.state),
+            Some(ProfileState::Pending(_)),
+        ),
+        "path-relative attach against an absent leaf goes Pending",
+    );
+    let correlation = e
+        .pending_probe(pid)
+        .expect("descent probe in flight at the prefix");
+
+    // `AnchorOk` from a Descent probe is structurally impossible from the
+    // production walker — `probe_descent` calls `probe_subtree`, whose
+    // root-`lstat` rejects non-Dir paths via `Vanished`. We synthesise the
+    // breach to exercise the walker-contract debug_assert in
+    // `on_probe_response`.
+    let leaf = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            outcome: ProbeOutcome::AnchorOk(leaf),
+        }),
+        now,
+    );
+}
+
+/// `Profile.kind = None` is the `(Some(Dir | Unknown) | None)` fallback
+/// arm in `transition_to_verifying`'s match: an unclassified anchor probes
+/// as `Subtree`, never as `AnchorFile`. The §2.2 unified fallback collapses
+/// the prior two-layer defensive defaults (File at the burst site,
+/// Directory at the probe-shape site) into one rule applied at one site.
+/// This test pins the rule for the Standard-burst path; the Seed-burst
+/// path is covered by
+/// `dispatch_burst_outcome_classifies_kind_on_first_seed_subtree` (whose
+/// initial probe shape is Subtree).
+#[test]
+fn standard_burst_on_unknown_anchor_emits_subtree_probe() {
+    let (mut e, pid, _sid, r, now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, r);
+    // After Seed completes, Profile.kind = Some(Dir). Reset to None to
+    // simulate the corner case where a Standard burst runs before any
+    // probe has classified the anchor (e.g., a future code path that
+    // attaches a Profile in Idle without driving a Seed first).
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.kind = None;
+    }
+
+    // Drive a Standard burst from an FsEvent at the anchor; advance the
+    // settle timer to reach Verifying.
+    let t1 = now + Duration::from_millis(10);
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    let t2 = t1 + SETTLE * 2;
+    let mut probe_request: Option<ProbeRequest> = None;
+    while let Some(entry) = e.pop_expired(t2) {
+        let out = e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
+        for op in &out.probe_ops {
+            if let ProbeOp::Probe { request } = op {
+                probe_request = Some(request.clone());
+            }
+        }
+    }
+
+    match probe_request {
+        Some(ProbeRequest::Subtree { .. }) => {}
+        other => panic!(
+            "Profile.kind = None on a Standard burst must emit ProbeRequest::Subtree \
+             (unified fallback); got {other:?}",
+        ),
+    }
 }
 
 #[test]
@@ -293,7 +523,7 @@ fn engine_dispatch_through_shim_matches_v4_behaviour() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -312,7 +542,7 @@ fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -338,7 +568,7 @@ fn probe_response_seed_vanished_clears_baseline_and_diagnoses() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         Instant::now(),
     );
@@ -366,7 +596,7 @@ fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed { errno: 13 },
         }),
         Instant::now(),
     );
@@ -393,7 +623,7 @@ fn probe_response_correlation_mismatch_drops_with_diagnostic() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: bogus,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -419,7 +649,7 @@ fn probe_response_for_idle_profile_drops_with_diagnostic() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: specter_core::ProbeCorrelation(1),
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -472,7 +702,7 @@ fn probe_response_in_batching_phase_panics_on_invariant_breach() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: bogus,
-            result: ProbeResult::Ok(file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1)),
+            outcome: ProbeOutcome::AnchorOk(file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1)),
         }),
         now,
     );
@@ -497,7 +727,7 @@ fn probe_response_in_batching_phase_drops_in_release() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: bogus,
-            result: ProbeResult::Ok(file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1)),
+            outcome: ProbeOutcome::AnchorOk(file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1)),
         }),
         now,
     );
@@ -538,7 +768,7 @@ fn probe_response_on_idle_state_panics_on_invariant_breach() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: bogus,
-            result: ProbeResult::Ok(dir_tree_snap(root, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(root, vec![])),
         }),
         Instant::now(),
     );
@@ -563,7 +793,7 @@ fn probe_response_on_idle_state_drops_in_release() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: bogus,
-            result: ProbeResult::Ok(dir_tree_snap(root, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(root, vec![])),
         }),
         Instant::now(),
     );
@@ -617,7 +847,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         now + SETTLE + Duration::from_millis(1),
     );
@@ -685,7 +915,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(snap.clone()),
+            outcome: ProbeOutcome::AnchorOk(snap.clone()),
         }),
         now,
     );
@@ -714,7 +944,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: std_corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::AnchorOk(snap),
         }),
         t2,
     );
@@ -775,13 +1005,13 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(snap.clone()),
+            outcome: ProbeOutcome::AnchorOk(snap.clone()),
         }),
         now,
     );
 
     // Drive a Standard burst from an FsEvent at the file. Capture the
-    // probe target emitted on the settle-timer expiry step.
+    // probe request emitted on the settle-timer expiry step.
     let t1 = now + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -791,8 +1021,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         t1,
     );
     let t2 = t1 + SETTLE * 2;
-    let mut probe_target: Option<ResourceId> = None;
-    let mut probe_kind: Option<ProbeKind> = None;
+    let mut probe_request: Option<ProbeRequest> = None;
     while let Some(entry) = e.pop_expired(t2) {
         let out = e.step(
             Input::TimerExpired {
@@ -804,23 +1033,29 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         );
         for op in &out.probe_ops {
             if let ProbeOp::Probe { request } = op {
-                probe_target = Some(request.target_resource);
-                probe_kind = Some(request.kind);
+                probe_request = Some(request.clone());
             }
         }
     }
 
-    // (1) The Standard probe targeted the file anchor itself.
-    assert_eq!(
-        probe_target,
-        Some(file_anchor),
-        "Standard burst on a File-anchored Profile must probe the anchor (not the parent dir)",
-    );
-    assert_eq!(
-        probe_kind,
-        Some(ProbeKind::File),
-        "File-anchor target ⇒ ProbeKind::File (single-file lstat path in the walker)",
-    );
+    // (1) The Standard probe is `AnchorFile` and its `target_path` is
+    // the anchor's filesystem path. The two assertions are the structural
+    // witnesses for the v1 design: File anchors take the typed
+    // `AnchorFile` arm (single-`lstat` walker dispatch) and never promote
+    // past the anchor to the parent dir.
+    let anchor_path = e.tree.path_of(file_anchor).expect("anchor path resolves");
+    match probe_request.as_ref() {
+        Some(ProbeRequest::AnchorFile { target_path, .. }) => {
+            assert_eq!(
+                *target_path, anchor_path,
+                "AnchorFile target_path is the anchor's filesystem path",
+            );
+        }
+        other => panic!(
+            "Standard burst on a File-anchored Profile must emit ProbeRequest::AnchorFile; \
+             got {other:?}",
+        ),
+    }
 
     // (2) Inject a realistic File response (kqueue per-file FD path).
     // After dispatch, Profile.current must remain File-shaped.
@@ -831,7 +1066,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: std_corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::AnchorOk(snap),
         }),
         t2,
     );
@@ -895,7 +1130,7 @@ fn standard_burst_force_fires_on_max_settle() {
             Input::ProbeResponse(ProbeResponse {
                 profile: pid,
                 correlation,
-                result: ProbeResult::Ok(snap),
+                outcome: ProbeOutcome::SubtreeOk(snap),
             }),
             deadline,
         );
@@ -1025,7 +1260,7 @@ fn stale_probe_response_emits_exactly_one_diagnostic() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: bogus,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -1558,7 +1793,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
             Input::ProbeResponse(ProbeResponse {
                 profile: pid,
                 correlation,
-                result: ProbeResult::Ok(snap_with_entry.clone()),
+                outcome: ProbeOutcome::SubtreeOk(snap_with_entry.clone()),
             }),
             t,
         );
@@ -1593,7 +1828,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -1627,11 +1862,14 @@ fn probe_op_for_file_anchor_is_file_kind() {
         log_output: false,
     };
     let (_sid, out) = e.attach_sub(req, Instant::now());
-    let probe_kind = out.probe_ops.iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.kind),
+    let probe_request = out.probe_ops.iter().find_map(|op| match op {
+        ProbeOp::Probe { request } => Some(request.clone()),
         _ => None,
     });
-    assert_eq!(probe_kind, Some(ProbeKind::File));
+    assert!(
+        matches!(probe_request, Some(ProbeRequest::AnchorFile { .. })),
+        "File-anchored Profile's seed burst must emit ProbeRequest::AnchorFile",
+    );
 }
 
 // ---- on_watch_op_rejected ----
@@ -1781,7 +2019,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: initial_corr,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         Instant::now(),
     );
@@ -2139,7 +2377,7 @@ fn seed_vanished_then_reap_releases_anchor_via_claim() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         Instant::now(),
     );
@@ -2262,7 +2500,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         t2,
     );
@@ -2574,7 +2812,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_tree_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
         }),
         now,
     );
@@ -2617,7 +2855,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: std_corr,
-            result: ProbeResult::Ok(snap.clone()),
+            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
         }),
         t2,
     );
@@ -2638,7 +2876,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: std_corr2,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         t3,
     );
@@ -2711,7 +2949,7 @@ fn per_stable_file_skips_dir_entries() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(seed_snap),
+            outcome: ProbeOutcome::SubtreeOk(seed_snap),
         }),
         now,
     );
@@ -2754,7 +2992,7 @@ fn per_stable_file_skips_dir_entries() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: std_corr,
-            result: ProbeResult::Ok(mixed_snap.clone()),
+            outcome: ProbeOutcome::SubtreeOk(mixed_snap.clone()),
         }),
         t2,
     );
@@ -2774,7 +3012,7 @@ fn per_stable_file_skips_dir_entries() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: std_corr2,
-            result: ProbeResult::Ok(mixed_snap),
+            outcome: ProbeOutcome::SubtreeOk(mixed_snap),
         }),
         t3,
     );
@@ -2849,7 +3087,7 @@ fn drive_to_first_effect(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap1),
+            outcome: ProbeOutcome::SubtreeOk(snap1),
         }),
         now + SETTLE,
     );
@@ -2876,7 +3114,7 @@ fn drive_to_first_effect(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: correlation2,
-            result: ProbeResult::Ok(snap2),
+            outcome: ProbeOutcome::SubtreeOk(snap2),
         }),
         now + SETTLE + SETTLE,
     )
@@ -2963,7 +3201,7 @@ fn per_file_effect_target_matches_dedup_key_resource() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_tree_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
         }),
         now,
     );
@@ -3000,7 +3238,7 @@ fn per_file_effect_target_matches_dedup_key_resource() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: std_corr,
-            result: ProbeResult::Ok(snap.clone()),
+            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
         }),
         t2,
     );
@@ -3022,7 +3260,7 @@ fn per_file_effect_target_matches_dedup_key_resource() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: std_corr2,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         t3,
     );
@@ -3099,7 +3337,7 @@ fn recovery_seed_no_prior_emit_does_not_fire() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -3192,7 +3430,7 @@ fn recovery_seed_per_key_only_drifted_subs_fire() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -3255,7 +3493,7 @@ fn drift_fire_emits_with_effect_forced_false() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_tree_snap(root, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(root, vec![])),
         }),
         Instant::now(),
     );
@@ -3334,7 +3572,7 @@ fn drift_fire_skips_per_stable_file_subs() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_tree_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
         }),
         Instant::now(),
     );
@@ -3429,7 +3667,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_tree_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
         }),
         now,
     );
@@ -3462,7 +3700,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
             Input::ProbeResponse(ProbeResponse {
                 profile: pid,
                 correlation,
-                result: ProbeResult::Ok(snap_with_file.clone()),
+                outcome: ProbeOutcome::SubtreeOk(snap_with_file.clone()),
             }),
             t,
         );
@@ -3628,7 +3866,7 @@ mod props {
                         *t,
                     );
                     for c in s.probe_ops.iter().filter_map(|op| match op {
-                        ProbeOp::Probe { request } => Some(request.correlation),
+                        ProbeOp::Probe { request } => Some(request.correlation()),
                         _ => None,
                     }) {
                         *last_correlation = Some(c);
@@ -3644,7 +3882,7 @@ mod props {
                     Input::ProbeResponse(ProbeResponse {
                         profile: pid,
                         correlation: corr,
-                        result: ProbeResult::Ok(snap),
+                        outcome: ProbeOutcome::SubtreeOk(snap),
                     }),
                     *t,
                 )
@@ -3655,7 +3893,7 @@ mod props {
                     Input::ProbeResponse(ProbeResponse {
                         profile: pid,
                         correlation: corr,
-                        result: ProbeResult::Vanished,
+                        outcome: ProbeOutcome::Vanished,
                     }),
                     *t,
                 )
@@ -3666,7 +3904,7 @@ mod props {
                     Input::ProbeResponse(ProbeResponse {
                         profile: pid,
                         correlation: corr,
-                        result: ProbeResult::Failed { errno },
+                        outcome: ProbeOutcome::Failed { errno },
                     }),
                     *t,
                 )
@@ -3686,7 +3924,7 @@ mod props {
 
         // Update last_correlation from any Probe in the output.
         for c in out.probe_ops.iter().filter_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation),
+            ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         }) {
             *last_correlation = Some(c);
@@ -3735,7 +3973,7 @@ mod props {
         };
         let (sid, out) = e.attach_sub(req, now);
         let last_correlation = out.probe_ops.iter().find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation),
+            ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         });
         (e, sid, r, now, last_correlation)
@@ -3867,17 +4105,17 @@ mod props {
                 fresh_engine_with_sub();
             let pid = e.subs.get(sid).unwrap().profile;
             let corr = last_correlation.expect("seed probe correlation");
-            let result = match seed_outcome {
-                0 => ProbeResult::Ok(dir_tree_snap(r, vec![])),
-                1 => ProbeResult::Vanished,
-                _ => ProbeResult::Failed { errno: 13 },
+            let outcome = match seed_outcome {
+                0 => ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
+                1 => ProbeOutcome::Vanished,
+                _ => ProbeOutcome::Failed { errno: 13 },
             };
             let _ = now;
             let out = e.step(
                 Input::ProbeResponse(ProbeResponse {
                     profile: pid,
                     correlation: corr,
-                    result,
+                    outcome,
                 }),
                 now,
             );

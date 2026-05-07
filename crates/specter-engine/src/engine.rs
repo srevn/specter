@@ -789,7 +789,7 @@ fn decompose_attach_path<'a>(
 mod tests {
     use super::*;
     use specter_core::{
-        DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeResponse, ProbeResult,
+        DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeOutcome, ProbeResponse,
         ProfileId, ResourceId, ScanConfig, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind,
         WatchOp,
     };
@@ -828,7 +828,7 @@ mod tests {
         let resp = ProbeResponse {
             profile: ProfileId::default(),
             correlation: ProbeCorrelation(0),
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         };
         let out = e.step(Input::ProbeResponse(resp), Instant::now());
         let has_diag = out

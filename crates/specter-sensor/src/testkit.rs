@@ -295,8 +295,7 @@ mod tests {
     use crate::{FsWatcher, OverflowScope, Prober, WakeHandle, WatchFailure, WatcherEvent};
     use slotmap::SlotMap;
     use specter_core::{
-        ClassSet, FsEvent, ProbeCorrelation, ProbeKind, ProbeRequest, ProfileId, ResourceId,
-        ResourceKind, ScanConfig,
+        ClassSet, FsEvent, ProbeCorrelation, ProbeRequest, ProfileId, ResourceId, ResourceKind,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -654,17 +653,10 @@ mod tests {
     }
 
     fn mk_req(profile: ProfileId, c: u64) -> ProbeRequest {
-        ProbeRequest {
+        ProbeRequest::AnchorFile {
             profile,
             correlation: ProbeCorrelation(c),
-            kind: ProbeKind::File,
-            target_resource: specter_core::ResourceId::default(),
             target_path: PathBuf::from("/dev/null"),
-            scan_config: ScanConfig::builder().build(),
-            captured_with: 0,
-            baseline_subtree: None,
-            force_walk: std::collections::BTreeSet::new(),
-            forced: false,
         }
     }
 
@@ -676,8 +668,8 @@ mod tests {
         mp.submit(mk_req(pids[0], 1));
         let drained = mp.take_submitted();
         assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].profile, pids[0]);
-        assert_eq!(drained[0].correlation, ProbeCorrelation(1));
+        assert_eq!(drained[0].profile(), pids[0]);
+        assert_eq!(drained[0].correlation(), ProbeCorrelation(1));
     }
 
     #[test]

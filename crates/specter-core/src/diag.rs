@@ -205,8 +205,11 @@ pub enum Diagnostic {
     /// keeping its prior view (no integration of `replacement`) and
     /// converges on the next probe.
     ///
-    /// Structurally unreachable in v1; the variant is defense-in-depth
-    /// against future scope changes that might reach it.
+    /// File-anchored Profiles never call `splice` (their Profile.current
+    /// is `TreeSnapshot::File(leaf)`, integrated by an inline write at
+    /// dispatch time, never grafted) — so only the Dir-prior structural
+    /// triggers above remain. Structurally unreachable in v1;
+    /// defense-in-depth against future scope changes.
     SpliceCrossedUncovered {
         profile: ProfileId,
         target: ResourceId,

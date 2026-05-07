@@ -16,9 +16,9 @@
 use compact_str::CompactString;
 use specter_core::{
     ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp, ProbeResponse,
-    ProbeResult, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
-    SubRegistryDiff, TreeSnapshot, WatchOp,
+    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp, ProbeOutcome,
+    ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
+    SubRegistryDiff, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -38,7 +38,10 @@ fn empty_command() -> CommandTemplate {
 
 /// V5-native helper: build a `TreeSnapshot::Dir` with single-component
 /// children. Tests in this file use leaf-name segments only (no `/`).
-fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
+fn dir_snap(
+    root: ResourceId,
+    children: Vec<(&str, EntryKind, u64)>,
+) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -51,7 +54,7 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         };
         map.insert(CompactString::new(name), child);
     }
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    Arc::new(DirSnapshot::new(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -60,7 +63,7 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         },
         0,
         map,
-    )))
+    ))
 }
 
 #[test]
@@ -147,7 +150,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         .probe_ops
         .iter()
         .find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation),
+            ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         })
         .unwrap();
@@ -155,7 +158,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
         now,
     );
@@ -206,7 +209,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         .probe_ops
         .iter()
         .find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation),
+            ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         })
         .unwrap();
@@ -214,7 +217,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
         now,
     );
@@ -257,7 +260,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: std_corr,
-            result: ProbeResult::Ok(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
         t2,
     );
@@ -297,7 +300,7 @@ fn effect_complete_after_detach_drops_silently() {
         .probe_ops
         .iter()
         .find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation),
+            ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         })
         .unwrap();
@@ -305,7 +308,7 @@ fn effect_complete_after_detach_drops_silently() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
         now,
     );
@@ -371,7 +374,7 @@ fn config_diff_modified_remove_then_add() {
         .probe_ops
         .iter()
         .find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation),
+            ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         })
         .unwrap();
@@ -379,7 +382,7 @@ fn config_diff_modified_remove_then_add() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid_a,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
         now,
     );

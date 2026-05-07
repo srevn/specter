@@ -7,8 +7,9 @@
 //! rows (e.g., emit Effects on Standard stable verdict) is factored into
 //! private helpers within this module.
 //!
-//! The match on `(intent, ProbeResult)` is the single dispatch site for the
-//! post-probe state-transition chain — six rows, all reachable.
+//! The match on `(DispatchTarget, ProbeOutcome)` in `on_probe_response` is
+//! the single post-probe dispatch site; per-intent fan-out lives in
+//! `dispatch_burst_outcome`.
 
 use crate::Engine;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
@@ -17,7 +18,7 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     AnchorClaim, BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic,
-    Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeResponse, ProbeResult,
+    Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeOutcome, ProbeResponse,
     ProfileId, ProfileState, Resource, ResourceId, ResourceKind, StepOutput, SubId,
     SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp,
 };
@@ -200,6 +201,18 @@ impl Engine {
     /// misroute. The remaining benign route is `None` (stale `ProfileId`
     /// from a Profile detached / reaped between FsEvent ingestion and
     /// step), which emits the same diagnostic without a debug assertion.
+    ///
+    /// **Walker-contract violations.** A `Pending` Profile receiving an
+    /// `AnchorOk` outcome (or a Verifying/Rebasing Profile whose
+    /// `Profile.kind == Some(Dir)` receiving an `AnchorOk`) is a walker
+    /// bug — the engine emitted a Subtree request and got back a leaf.
+    /// The structural error path is `debug_assert!` in dev/CI plus
+    /// `StaleProbeResponse` in release, so the engine never grafts a
+    /// kind-mismatched payload. The mirror case (File-anchored Profile
+    /// receiving `SubtreeOk`) routes through the existing dispatch arm
+    /// — `dispatch_*_ok` synthesises a `TreeSnapshot::Dir`, and
+    /// `current_target_hash` / graft handle the kind change at the
+    /// snapshot level.
     pub(crate) fn on_probe_response(
         &mut self,
         response: ProbeResponse,
@@ -240,18 +253,18 @@ impl Engine {
         // the slot was minted, then the phase changed without a matching
         // cancel_pending_probe. The debug_assert! arms surface those as
         // panics in dev/CI; release builds fall through to
-        // ProbeDispatch::Stale so the engine never dispatches a
+        // DispatchTarget::Stale so the engine never dispatches a
         // misclassified response (which would, e.g., drive
         // dispatch_standard_ok against an Awaiting Profile and overwrite
         // outstanding via a spurious transition_to_awaiting).
         let dispatch = match self.profiles.get(profile_id).map(|p| &p.state) {
-            Some(ProfileState::Pending(_)) => ProbeDispatch::Descent,
+            Some(ProfileState::Pending(_)) => DispatchTarget::Descent,
             Some(ProfileState::Active(burst)) => match &burst.phase {
-                BurstPhase::Verifying => ProbeDispatch::Burst {
+                BurstPhase::Verifying => DispatchTarget::Burst {
                     intent: burst.intent,
                     forced: burst.forced,
                 },
-                BurstPhase::Rebasing => ProbeDispatch::Rebase,
+                BurstPhase::Rebasing => DispatchTarget::Rebase,
                 BurstPhase::Batching { .. }
                 | BurstPhase::Draining
                 | BurstPhase::Awaiting { .. } => {
@@ -261,7 +274,7 @@ impl Engine {
                          (profile = {profile_id:?}, phase = {:?})",
                         burst.phase,
                     );
-                    ProbeDispatch::Stale
+                    DispatchTarget::Stale
                 }
             },
             Some(ProfileState::Idle) => {
@@ -270,59 +283,127 @@ impl Engine {
                     "I5 violated: live probe response on Idle Profile \
                      (profile = {profile_id:?}); Idle must hold pending_probe = None",
                 );
-                ProbeDispatch::Stale
+                DispatchTarget::Stale
             }
-            None => ProbeDispatch::Stale,
+            None => DispatchTarget::Stale,
         };
 
-        match dispatch {
-            ProbeDispatch::Descent => {
-                let arm = match response.result {
-                    ProbeResult::Ok(tree_snap) => crate::descent::ProbeResultArm::Ok(tree_snap),
-                    ProbeResult::Vanished => crate::descent::ProbeResultArm::Vanished,
-                    ProbeResult::Failed { errno } => {
-                        crate::descent::ProbeResultArm::Failed { errno }
-                    }
-                };
-                self.dispatch_descent_probe(profile_id, arm, now, out);
+        match (dispatch, response.outcome) {
+            // ----- Pending (descent) -----
+            (DispatchTarget::Descent, ProbeOutcome::SubtreeOk(arc)) => {
+                self.dispatch_descent_ok(profile_id, &arc, now, out);
             }
-            ProbeDispatch::Rebase => match response.result {
-                ProbeResult::Ok(tree_snap) => {
-                    self.dispatch_rebase_ok(profile_id, tree_snap, out);
-                }
-                ProbeResult::Vanished => {
-                    self.dispatch_rebase_vanished(profile_id, out);
-                }
-                ProbeResult::Failed { errno } => {
-                    self.dispatch_rebase_failed(profile_id, errno, out);
-                }
-            },
-            ProbeDispatch::Burst { intent, forced } => match (intent, response.result) {
-                (BurstIntent::Seed, ProbeResult::Ok(tree_snap)) => {
-                    self.dispatch_seed_ok(profile_id, tree_snap, now, out);
-                }
-                (BurstIntent::Seed, ProbeResult::Vanished) => {
-                    self.dispatch_seed_vanished(profile_id, out);
-                }
-                (BurstIntent::Seed, ProbeResult::Failed { errno }) => {
-                    self.dispatch_seed_failed(profile_id, errno, out);
-                }
-                (BurstIntent::Standard, ProbeResult::Ok(tree_snap)) => {
-                    self.dispatch_standard_ok(profile_id, tree_snap, forced, now, out);
-                }
-                (BurstIntent::Standard, ProbeResult::Vanished) => {
-                    self.dispatch_standard_vanished(profile_id, out);
-                }
-                (BurstIntent::Standard, ProbeResult::Failed { errno }) => {
-                    self.dispatch_standard_failed(profile_id, errno, out);
-                }
-            },
-            ProbeDispatch::Stale => {
+            (DispatchTarget::Descent, ProbeOutcome::Vanished) => {
+                self.dispatch_descent_vanished(profile_id, now, out);
+            }
+            (DispatchTarget::Descent, ProbeOutcome::Failed { errno }) => {
+                self.dispatch_descent_failed(profile_id, errno, out);
+            }
+            (DispatchTarget::Descent, ProbeOutcome::AnchorOk(_)) => {
+                // Walker-contract violation: descent always probes a Dir
+                // prefix, walker must return SubtreeOk or Vanished. Surface
+                // as a debug_assert in dev/CI; release builds emit
+                // StaleProbeResponse so the engine never dispatches a
+                // kind-mismatched payload.
+                debug_assert!(
+                    false,
+                    "walker contract violated: descent received AnchorOk \
+                     (profile = {profile_id:?})",
+                );
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
                     profile: profile_id,
                     correlation: received,
                 });
             }
+
+            // ----- Burst Verifying -----
+            (DispatchTarget::Burst { intent, forced }, outcome) => {
+                self.dispatch_burst_outcome(profile_id, intent, forced, outcome, now, out);
+            }
+
+            // ----- Rebase -----
+            (DispatchTarget::Rebase, ProbeOutcome::AnchorOk(leaf)) => {
+                self.dispatch_rebase_ok(profile_id, TreeSnapshot::File(leaf), out);
+            }
+            (DispatchTarget::Rebase, ProbeOutcome::SubtreeOk(arc)) => {
+                self.dispatch_rebase_ok(profile_id, TreeSnapshot::Dir(arc), out);
+            }
+            (DispatchTarget::Rebase, ProbeOutcome::Vanished) => {
+                self.dispatch_rebase_vanished(profile_id, out);
+            }
+            (DispatchTarget::Rebase, ProbeOutcome::Failed { errno }) => {
+                self.dispatch_rebase_failed(profile_id, errno, out);
+            }
+
+            (DispatchTarget::Stale, _) => {
+                out.diagnostics.push(Diagnostic::StaleProbeResponse {
+                    profile: profile_id,
+                    correlation: received,
+                });
+            }
+        }
+    }
+
+    /// Dispatch a Verifying-phase [`ProbeOutcome`] for `profile_id`.
+    ///
+    /// Centralises two responsibilities:
+    /// 1. **First-classify fallback for `Profile.kind`.** Resource-based
+    ///    attach against an `Unknown` slot leaves `Profile.kind = None`
+    ///    until the first probe response classifies the anchor. The
+    ///    outcome variant is the canonical witness — `AnchorOk(_)` ⇒
+    ///    `File`, `SubtreeOk(_)` ⇒ `Dir`, `Vanished` / `Failed` carry no
+    ///    kind. Set only when None to keep the "first observation wins"
+    ///    invariant on the field. Sharing this fallback across Seed and
+    ///    Standard burst arms is strictly more consistent than the
+    ///    Seed-only write at the prior `dispatch_seed_ok`.
+    /// 2. **Outcome → TreeSnapshot routing.** The two `*Ok` outcomes
+    ///    convert to a `TreeSnapshot` (`AnchorOk → TreeSnapshot::File`,
+    ///    `SubtreeOk → TreeSnapshot::Dir`) which the per-intent helpers
+    ///    consume; `Vanished` / `Failed` route to the per-intent failure
+    ///    helpers.
+    fn dispatch_burst_outcome(
+        &mut self,
+        profile_id: ProfileId,
+        intent: BurstIntent,
+        forced: bool,
+        outcome: ProbeOutcome,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        // First-classify fallback. Idempotent: only writes when None.
+        let response_kind = match &outcome {
+            ProbeOutcome::AnchorOk(_) => Some(ResourceKind::File),
+            ProbeOutcome::SubtreeOk(_) => Some(ResourceKind::Dir),
+            ProbeOutcome::Vanished | ProbeOutcome::Failed { .. } => None,
+        };
+        if let (Some(k), Some(p)) = (response_kind, self.profiles.get_mut(profile_id))
+            && p.kind.is_none()
+        {
+            p.kind = Some(k);
+        }
+
+        let snapshot = match outcome {
+            ProbeOutcome::AnchorOk(leaf) => Some(TreeSnapshot::File(leaf)),
+            ProbeOutcome::SubtreeOk(arc) => Some(TreeSnapshot::Dir(arc)),
+            ProbeOutcome::Vanished => None,
+            ProbeOutcome::Failed { errno } => {
+                match intent {
+                    BurstIntent::Seed => self.dispatch_seed_failed(profile_id, errno, out),
+                    BurstIntent::Standard => self.dispatch_standard_failed(profile_id, errno, out),
+                }
+                return;
+            }
+        };
+        let Some(snap) = snapshot else {
+            match intent {
+                BurstIntent::Seed => self.dispatch_seed_vanished(profile_id, out),
+                BurstIntent::Standard => self.dispatch_standard_vanished(profile_id, out),
+            }
+            return;
+        };
+        match intent {
+            BurstIntent::Seed => self.dispatch_seed_ok(profile_id, snap, now, out),
+            BurstIntent::Standard => self.dispatch_standard_ok(profile_id, snap, forced, now, out),
         }
     }
 
@@ -918,6 +999,9 @@ impl Engine {
     ) {
         // Seed always targets anchor — `probe_target` was set to the
         // anchor at `start_seed_burst` / `transition_to_verifying`.
+        // The First-Seed-Ok fallback for `Profile.kind` runs once, in
+        // `dispatch_burst_outcome`, before any per-intent dispatcher;
+        // see that helper for the rationale.
         let target = match self.profiles.get(profile_id) {
             Some(p) => match &p.state {
                 ProfileState::Active(b) => b.probe_target.unwrap_or(p.resource),
@@ -925,25 +1009,6 @@ impl Engine {
             },
             None => return,
         };
-
-        // First-Seed-Ok fallback for `Profile.kind`. Resource-based attach
-        // against an `Unknown` slot leaves `kind` unset until the first
-        // probe response classifies the anchor; descent-materialised
-        // Profiles already have it set. Either way, the response shape
-        // is the canonical witness — Dir snapshot ⇒ Dir anchor, File
-        // snapshot ⇒ File anchor (the walker returns `Vanished` on kind
-        // mismatch, so the response shape always reflects on-disk
-        // reality). Set only when None to keep the "first observation
-        // wins" invariant on the field.
-        let response_kind = match &snapshot {
-            TreeSnapshot::Dir(_) => ResourceKind::Dir,
-            TreeSnapshot::File(_) => ResourceKind::File,
-        };
-        if let Some(p) = self.profiles.get_mut(profile_id)
-            && p.kind.is_none()
-        {
-            p.kind = Some(response_kind);
-        }
 
         match snapshot {
             TreeSnapshot::Dir(arc) => {
@@ -1985,14 +2050,15 @@ enum AwaitAction {
 /// short `&self.profiles` borrow, then dispatched under `&mut self`.
 ///
 /// Variants:
-/// - `Descent`: the live response targets `ProfileState::Pending(_)`. Routes
-///   to `dispatch_descent_probe`.
+/// - `Descent`: the live response targets `ProfileState::Pending(_)`.
+///   Routes to the descent dispatchers (`dispatch_descent_ok` /
+///   `_vanished` / `_failed`).
 /// - `Rebase`: the live response targets `ProfileState::Active(_)` with
 ///   phase `BurstPhase::Rebasing`. Routes to `dispatch_rebase_*` (post-fire
 ///   rebase — no stability verdict; graft + `baseline := current` + finish).
 /// - `Burst { intent, forced }`: the live response targets `Verifying`.
-///   The intent + forced flags are captured here so the dispatch arm can
-///   act on them.
+///   The intent + forced flags are captured here so `dispatch_burst_outcome`
+///   can act on them.
 /// - `Stale`: the live response cannot be routed coherently. Two reasons:
 ///   stale `ProfileId` (`None`, benign post-detach race) or I5 invariant
 ///   breach (Idle / non-mint Active phase with a non-empty `pending_probe`
@@ -2003,7 +2069,7 @@ enum AwaitAction {
 /// `on_probe_response` filters correlation-mismatch staleness before this
 /// enum is constructed; `Stale` here covers shape mismatches that survive
 /// that filter.
-enum ProbeDispatch {
+enum DispatchTarget {
     Descent,
     Rebase,
     Burst { intent: BurstIntent, forced: bool },

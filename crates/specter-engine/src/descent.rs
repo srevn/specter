@@ -50,8 +50,8 @@
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, ClassSet, DescentState, Diagnostic, EntryKind, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, StepOutput, TreeSnapshot,
+    AnchorClaim, ClassSet, DescentState, Diagnostic, DirSnapshot, EntryKind, ProfileId,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput,
 };
 use std::time::Instant;
 
@@ -70,15 +70,6 @@ pub(crate) enum MaterializeResult {
         prefix: ResourceId,
         remaining: Vec<CompactString>,
     },
-}
-
-/// Variant-free echo of `ProbeResult`. Used internally by
-/// `dispatch_descent_probe` to route on the variant without re-cloning
-/// at the dispatch boundary.
-pub(crate) enum ProbeResultArm {
-    Ok(TreeSnapshot),
-    Vanished,
-    Failed { errno: i32 },
 }
 
 impl crate::Engine {
@@ -255,50 +246,23 @@ impl crate::Engine {
             });
         }
 
-        self.emit_probe_op(
-            profile_id,
-            prefix,
-            correlation,
-            crate::probe_channel::ProbeEmissionParams::Descent,
-            out,
-        );
+        let target_path = self.tree.path_of(prefix).unwrap_or_default();
+        Self::emit_descent_probe(profile_id, correlation, target_path, out);
     }
 
-    /// Dispatch a `ProbeResponse` for a Profile whose state is
-    /// `ProfileState::Pending`. `on_probe_response` matches on `&p.state`
-    /// and routes here if the Pending arm wins. The probe channel
-    /// (`Profile.pending_probe`) was closed at the top of
-    /// `on_probe_response`; this function may re-open it via
-    /// `mint_probe_correlation` in the advance / rewind paths.
-    pub(crate) fn dispatch_descent_probe(
+    /// Dispatch a successful descent response. The walker honoured the
+    /// `Descent` request shape and returned a single-level
+    /// `Arc<DirSnapshot>` for the prefix; this routine looks up the next
+    /// remaining segment by name and either advances descent one level,
+    /// materializes the anchor, or awaits the next event.
+    ///
+    /// **Caller (`on_probe_response`).** The probe channel
+    /// (`Profile.pending_probe`) was closed before dispatch; this function
+    /// may re-open it via `mint_probe_correlation` in the advance branch.
+    pub(crate) fn dispatch_descent_ok(
         &mut self,
         profile_id: ProfileId,
-        result: ProbeResultArm,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
-        match result {
-            ProbeResultArm::Ok(snapshot) => {
-                self.dispatch_descent_ok(profile_id, snapshot, now, out);
-            }
-            ProbeResultArm::Vanished => {
-                self.dispatch_descent_vanished(profile_id, now, out);
-            }
-            ProbeResultArm::Failed { errno } => {
-                self.dispatch_descent_failed(profile_id, errno, out);
-            }
-        }
-    }
-
-    // `snapshot: TreeSnapshot` is taken by-value to mirror the
-    // `dispatch_*_ok` family in `transitions.rs`; clippy notes we only
-    // borrow it. Allow it — keeping the signature uniform across descent
-    // and standard dispatch is the higher-order concern.
-    #[allow(clippy::needless_pass_by_value)]
-    fn dispatch_descent_ok(
-        &mut self,
-        profile_id: ProfileId,
-        snapshot: TreeSnapshot,
+        snapshot: &DirSnapshot,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -334,21 +298,13 @@ impl crate::Engine {
         // Descent probes ship `recursive=false`, so the response is a
         // single-level Dir snapshot — look up the next segment by name in
         // the BTreeMap directly.
-        let entry_kind = match &snapshot {
-            TreeSnapshot::Dir(arc) => match arc.entries.get(next_segment.as_str()) {
-                Some(child) => child.kind(),
-                None => {
-                    // Next segment not yet present; await next event. v1
-                    // descent doesn't mtime-skip, so no need to retain the
-                    // snapshot — the next probe will get a fresh
-                    // `lstat`-walked DirSnapshot anyway.
-                    return;
-                }
-            },
-            TreeSnapshot::File(_) => {
-                // Descent probed a Dir; got a File. Treat as Vanished —
-                // kind mismatch on the prefix.
-                self.dispatch_descent_vanished(profile_id, now, out);
+        let entry_kind = match snapshot.entries.get(next_segment.as_str()) {
+            Some(child) => child.kind(),
+            None => {
+                // Next segment not yet present; await next event. v1
+                // descent doesn't mtime-skip, so no need to retain the
+                // snapshot — the next probe will get a fresh
+                // `lstat`-walked DirSnapshot anyway.
                 return;
             }
         };
@@ -464,17 +420,12 @@ impl crate::Engine {
             );
             add_watch_demand(&mut self.tree, new_resource, ClassSet::STRUCTURE, out);
 
-            self.emit_probe_op(
-                profile_id,
-                new_resource,
-                correlation,
-                crate::probe_channel::ProbeEmissionParams::Descent,
-                out,
-            );
+            let target_path = self.tree.path_of(new_resource).unwrap_or_default();
+            Self::emit_descent_probe(profile_id, correlation, target_path, out);
         }
     }
 
-    fn dispatch_descent_vanished(
+    pub(crate) fn dispatch_descent_vanished(
         &mut self,
         profile_id: ProfileId,
         _now: Instant,
@@ -534,13 +485,8 @@ impl crate::Engine {
 
                 add_watch_demand(&mut self.tree, parent_id, ClassSet::STRUCTURE, out);
 
-                self.emit_probe_op(
-                    profile_id,
-                    parent_id,
-                    correlation,
-                    crate::probe_channel::ProbeEmissionParams::Descent,
-                    out,
-                );
+                let target_path = self.tree.path_of(parent_id).unwrap_or_default();
+                Self::emit_descent_probe(profile_id, correlation, target_path, out);
             }
             None => {
                 // Root prefix vanished — no rewind target. Clear the
@@ -565,7 +511,12 @@ impl crate::Engine {
         }
     }
 
-    fn dispatch_descent_failed(&self, profile_id: ProfileId, errno: i32, out: &mut StepOutput) {
+    pub(crate) fn dispatch_descent_failed(
+        &self,
+        profile_id: ProfileId,
+        errno: i32,
+        out: &mut StepOutput,
+    ) {
         let prefix = match self.descent_state(profile_id) {
             Some(d) => d.current_prefix,
             None => return,
@@ -601,13 +552,8 @@ impl crate::Engine {
         let Some(correlation) = self.mint_probe_correlation(profile_id) else {
             return;
         };
-        self.emit_probe_op(
-            profile_id,
-            prefix,
-            correlation,
-            crate::probe_channel::ProbeEmissionParams::Descent,
-            out,
-        );
+        let target_path = self.tree.path_of(prefix).unwrap_or_default();
+        Self::emit_descent_probe(profile_id, correlation, target_path, out);
     }
 }
 

@@ -19,8 +19,8 @@
 use compact_str::CompactString;
 use specter_core::{
     ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope,
-    FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, TreeSnapshot,
+    FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput,
 };
 use specter_engine::{Engine, SubAttachRequest};
 use std::collections::BTreeMap;
@@ -34,8 +34,8 @@ fn empty_command() -> CommandTemplate {
     CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn empty_dir_snap(root: ResourceId) -> TreeSnapshot {
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+fn empty_dir_snap(root: ResourceId) -> Arc<DirSnapshot> {
+    Arc::new(DirSnapshot::new(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -44,14 +44,12 @@ fn empty_dir_snap(root: ResourceId) -> TreeSnapshot {
         },
         0,
         BTreeMap::<CompactString, ChildEntry>::new(),
-    )))
+    ))
 }
 
 fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
     out.probe_ops.iter().find_map(|op| match op {
-        ProbeOp::Probe {
-            request: ProbeRequest { correlation, .. },
-        } => Some(*correlation),
+        ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
 }
@@ -62,14 +60,14 @@ fn complete_seed(
     e: &mut Engine,
     pid: specter_core::ProfileId,
     seed_correlation: ProbeCorrelation,
-    snap: TreeSnapshot,
+    snap: Arc<DirSnapshot>,
     now: Instant,
 ) {
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         now,
     );
@@ -149,7 +147,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: probe_correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         resp_t,
     );
@@ -249,7 +247,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
                 0,
             )),
         );
-        let unstable_snap = TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+        let unstable_snap = Arc::new(DirSnapshot::new(
             r,
             DirMeta {
                 mtime: UNIX_EPOCH,
@@ -258,12 +256,12 @@ fn sustained_unstable_response_storm_paces_at_settle() {
             },
             0,
             entries,
-        )));
+        ));
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 profile: pid,
                 correlation: probe_correlation,
-                result: ProbeResult::Ok(unstable_snap),
+                outcome: ProbeOutcome::SubtreeOk(unstable_snap),
             }),
             response_at,
         );

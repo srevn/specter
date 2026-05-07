@@ -1,14 +1,15 @@
-//! `probe_file` and `probe_dir` — pure-IO walkers.
+//! `probe_anchor_file`, `probe_subtree`, `probe_descent` — pure-IO walkers.
 //!
-//! Both probes return [`ProbeResult`]; on success they emit a
-//! [`TreeSnapshot`] (file leaf or recursive `Arc<DirSnapshot>` tree).
-//! Kind mismatches collapse to `Vanished` ("a file probe that finds a
-//! directory (or vice versa) returns `ProbeResult::Vanished`").
-//! Errors at the *root* anchor map to `Failed { errno }`; errors mid-walk
-//! on a *subtree* skip-and-continue with `tracing::warn!` —
-//! `exclude` is the user-facing surface for declaring expected-EACCES paths.
+//! All three probes return [`ProbeOutcome`]; on success they emit either
+//! a leaf observation (`AnchorOk(LeafEntry)`) or a recursive
+//! `Arc<DirSnapshot>` tree (`SubtreeOk`). Kind mismatches collapse to
+//! `Vanished` ("a file probe that finds a directory, or vice versa,
+//! returns `Vanished`"). Errors at the *root* anchor map to
+//! `Failed { errno }`; errors mid-walk on a *subtree* skip-and-continue
+//! with `tracing::warn!` — `exclude` is the user-facing surface for
+//! declaring expected-EACCES paths.
 //!
-//! Three controls live on the request:
+//! Three controls live on the [`ProbeRequest::Subtree`] variant:
 //! - `baseline_subtree`: the engine's last-known view of the target's
 //!   subtree. Equal `(mtime, inode, device)` against the freshly `lstat`-ed
 //!   directory ⇒ return `Arc::clone(prior)` (mtime-skip). The skip
@@ -20,6 +21,12 @@
 //! - `forced`: defensive bypass for max-settle force-fire. When `true`,
 //!   every recursion frame enumerates regardless of `baseline_subtree` or
 //!   `force_walk`.
+//!
+//! [`ProbeRequest::AnchorFile`] runs a single `lstat` (no controls — a
+//! leaf has no descendants to skip). [`ProbeRequest::Descent`] hardcodes
+//! a minimal override config (`recursive=false`, `hidden=true`, no
+//! exclude/pattern, no `max_depth`) — the Profile's user-facing filters
+//! would mask the very segment descent is searching for.
 //!
 //! Symlinks are never traversed (`symlink_metadata` ≡ `lstat`); they
 //! appear as `EntryKind::Symlink` leaves when encountered as direct
@@ -34,8 +41,8 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, LeafEntry, ProbeResult, ResourceId,
-    ScanConfig, TreeSnapshot,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, LeafEntry, ProbeOutcome, ResourceId,
+    ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -44,25 +51,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-/// File probe. Single `lstat` against `target_path`.
+/// Anchor-file probe. Single `lstat` against `target_path`.
 ///
 /// Returns:
-/// - `Ok(TreeSnapshot::File(LeafEntry))` for a regular file.
+/// - `AnchorOk(LeafEntry)` for a regular file.
 /// - `Vanished` when the path doesn't exist *or* is not a regular file
 ///   (kind mismatch — symlink, directory, FIFO, etc.).
 /// - `Failed { errno }` for any other I/O error.
-pub(super) fn probe_file(target_path: &Path) -> ProbeResult {
+pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
     let meta = match std::fs::symlink_metadata(target_path) {
         Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return ProbeResult::Vanished,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return ProbeOutcome::Vanished,
         Err(e) => {
-            return ProbeResult::Failed {
+            return ProbeOutcome::Failed {
                 errno: e.raw_os_error().unwrap_or(libc::EIO),
             };
         }
     };
     if !meta.is_file() {
-        return ProbeResult::Vanished;
+        return ProbeOutcome::Vanished;
     }
     let leaf = LeafEntry::new(
         EntryKind::File,
@@ -71,10 +78,10 @@ pub(super) fn probe_file(target_path: &Path) -> ProbeResult {
         meta.ino(),
         meta.dev(),
     );
-    ProbeResult::Ok(TreeSnapshot::File(leaf))
+    ProbeOutcome::AnchorOk(leaf)
 }
 
-/// Directory probe. Recursive DFS walk against `target_path` honoring
+/// Subtree probe. Recursive DFS walk against `target_path` honoring
 /// `recursive`, `hidden`, `exclude`, `pattern`, and `max_depth`.
 ///
 /// Each recursion frame may short-circuit via mtime-skip when:
@@ -93,7 +100,7 @@ pub(super) fn probe_file(target_path: &Path) -> ProbeResult {
 /// → `Vanished`, anything else → `Failed { errno }`); subtree errors
 /// during walk skip-and-continue with `tracing::warn!` and the affected
 /// subtree becomes `DirChild { subtree: None }`.
-pub(super) fn probe_dir(
+pub(super) fn probe_subtree(
     target_path: &Path,
     target_resource: ResourceId,
     config: &ScanConfig,
@@ -101,18 +108,18 @@ pub(super) fn probe_dir(
     baseline: Option<&Arc<DirSnapshot>>,
     force_walk: &BTreeSet<PathBuf>,
     forced: bool,
-) -> ProbeResult {
+) -> ProbeOutcome {
     let root_meta_raw = match std::fs::symlink_metadata(target_path) {
         Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return ProbeResult::Vanished,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return ProbeOutcome::Vanished,
         Err(e) => {
-            return ProbeResult::Failed {
+            return ProbeOutcome::Failed {
                 errno: e.raw_os_error().unwrap_or(libc::EIO),
             };
         }
     };
     if !root_meta_raw.is_dir() {
-        return ProbeResult::Vanished;
+        return ProbeOutcome::Vanished;
     }
     let root_meta = DirMeta {
         mtime: root_meta_raw.modified().unwrap_or(SystemTime::UNIX_EPOCH),
@@ -127,7 +134,7 @@ pub(super) fn probe_dir(
         && let Some(prior) = baseline
         && prior.root_meta == root_meta
     {
-        return ProbeResult::Ok(TreeSnapshot::Dir(Arc::clone(prior)));
+        return ProbeOutcome::SubtreeOk(Arc::clone(prior));
     }
 
     let entries = enumerate_dir(
@@ -141,12 +148,40 @@ pub(super) fn probe_dir(
         0,
         root_meta.device,
     );
-    ProbeResult::Ok(TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    ProbeOutcome::SubtreeOk(Arc::new(DirSnapshot::new(
         target_resource,
         root_meta,
         captured_with,
         entries,
-    ))))
+    )))
+}
+
+/// Descent prefix probe. Single-level enumeration of `target_path` with
+/// a hardcoded override config: `recursive=false`, `hidden=true`, no
+/// `exclude`, no `pattern`, no `max_depth`. The walker owns the override
+/// config because the engine's user-facing filters would mask the very
+/// segment descent is searching for; descent dispatch reads
+/// `arc.entries.get(name)` directly and discards the snapshot.
+///
+/// `captured_with` is stamped as `0` — descent dispatch never reads the
+/// field (the snapshot is consumed by the engine and dropped before any
+/// consumer compares hashes), so the value is observationally
+/// irrelevant. Callers should not rely on a particular sentinel.
+pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
+    let cfg = ScanConfig::builder()
+        .recursive(false)
+        .hidden(true)
+        .max_depth(None)
+        .build();
+    probe_subtree(
+        target_path,
+        ResourceId::default(),
+        &cfg,
+        0,
+        None,
+        &BTreeSet::new(),
+        false,
+    )
 }
 
 /// Returns `true` iff any path in `force_walk` is at-or-under `path`.
@@ -190,7 +225,7 @@ fn enumerate_dir(
         Ok(rd) => rd,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return entries,
         Err(e) => {
-            tracing::warn!(?path, ?e, "probe_dir readdir failed; skipping subtree");
+            tracing::warn!(?path, ?e, "probe_subtree readdir failed; skipping subtree");
             return entries;
         }
     };
@@ -199,21 +234,21 @@ fn enumerate_dir(
         let dirent = match dirent_result {
             Ok(d) => d,
             Err(e) => {
-                tracing::trace!(?path, ?e, "probe_dir dirent error; skipping");
+                tracing::trace!(?path, ?e, "probe_subtree dirent error; skipping");
                 continue;
             }
         };
         let child_path = dirent.path();
         let name_os = dirent.file_name();
         let Some(name_str) = name_os.to_str() else {
-            tracing::trace!(?child_path, "probe_dir non-UTF-8 filename; skipping");
+            tracing::trace!(?child_path, "probe_subtree non-UTF-8 filename; skipping");
             continue;
         };
         if !config.hidden && name_str.starts_with('.') {
             continue;
         }
         let Ok(rel) = child_path.strip_prefix(anchor_path) else {
-            tracing::trace!(?child_path, "probe_dir strip_prefix failed; skipping");
+            tracing::trace!(?child_path, "probe_subtree strip_prefix failed; skipping");
             continue;
         };
         if config.exclude.iter().any(|g| g.matches_path(rel)) {

@@ -3,7 +3,7 @@
 use crate::ids::{ProfileId, ResourceId};
 use crate::resource::ResourceKind;
 use crate::scan_config::ScanConfig;
-use crate::snapshot::tree::{DirSnapshot, TreeSnapshot};
+use crate::snapshot::tree::{DirSnapshot, LeafEntry};
 use crate::sub::ClassSet;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -14,105 +14,175 @@ use std::sync::Arc;
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProbeCorrelation(pub u64);
 
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum ProbeKind {
-    #[default]
-    File,
-    Directory,
-}
-
-/// Stateless probe request.
+/// Engine→walker probe request.
 ///
-/// The Sensor's Prober pool is stateless re Profile — every field needed
-/// to perform the syscall lives on the message. `scan_config` is cloned at
-/// emission time; `correlation` pairs the response with the engine-side
-/// `BurstPhase::Verifying` slot. Cloning is allocation-cheap on the hot path:
-/// `baseline_subtree` is `Arc::clone` and `force_walk` is a small
-/// `BTreeSet`.
-#[derive(Clone, Debug)]
-pub struct ProbeRequest {
-    /// Profile this probe belongs to. The Sensor uses it for the
-    /// expectation map and echoes it back on `ProbeResponse`.
-    pub profile: ProfileId,
-    /// Engine-monotonic correlation token — pairs request with response.
-    pub correlation: ProbeCorrelation,
-    /// File vs Directory dispatch. Walker dispatches on this; an on-disk
-    /// kind mismatch returns `Vanished`.
-    pub kind: ProbeKind,
-    /// Resource the prober walks. Often `Profile.resource` (Seed bursts);
-    /// for Standard bursts this becomes the LCA of dirty resources. The
-    /// walker stamps it onto `DirSnapshot.root_resource` (advisory) but
-    /// otherwise doesn't consult it — the walker has no Tree.
-    pub target_resource: ResourceId,
-    /// Filesystem path of `target_resource` at probe-emission time.
-    /// Engine builds via `tree.path_of(target_resource)`. Empty `PathBuf`
-    /// is the lone failure mode; the walker treats empty as `Vanished`.
-    pub target_path: PathBuf,
-    /// `ScanConfig` to honour (recursive, hidden, exclude, pattern,
-    /// `max_depth`). Cloned at emit time.
-    pub scan_config: ScanConfig,
-    /// `Profile.config_hash` at emission time. Walker stamps every
-    /// `DirSnapshot.captured_with` so two Profiles sharing a Resource
-    /// with different filters cannot produce identical `dir_hash` for
-    /// divergent in-scope content.
-    pub captured_with: u64,
-    /// Engine's last-known view of `target_resource`'s subtree. The
-    /// walker consults `baseline_subtree.root_meta` for mtime-skip and
-    /// propagates child baselines via `entries[name].subtree`. `None`
-    /// means "no prior observation": first Seed of a fresh Profile.
-    ///
-    /// Cheap to ship — `Arc::clone` on the channel send. Multiple
-    /// workers may hold the same Arc concurrently (immutable
-    /// post-construction except for the `OnceLock<u128>` hash cache,
-    /// which is `Sync`).
-    pub baseline_subtree: Option<Arc<DirSnapshot>>,
-    /// Set of paths the walker MUST enumerate (refusing mtime-skip) at
-    /// any directory whose path equals one of these OR is an ancestor of
-    /// one. Populated from `dirty_resources ∩ subtree(target_resource)`:
-    /// kqueue events that arrived since the last probe at this target.
-    ///
-    /// Walker checks `force_walk.iter().any(|p| p.starts_with(current))`
-    /// — O(N) per directory, N = `|force_walk|` (typically 1–5). The set
-    /// is *minimal* (only the dirty paths); the walker's prefix-match
-    /// covers the "ancestor of forced descendant" case without engine-side
-    /// closure construction.
-    ///
-    /// `BTreeSet<PathBuf>` (not `Vec<PathBuf>`) so iteration order is
-    /// deterministic for replay.
-    pub force_walk: BTreeSet<PathBuf>,
-    /// `true` ⇒ walker bypasses mtime-skip at every directory regardless
-    /// of `baseline_subtree` and `force_walk`. Engine sets this when
-    /// `Burst.forced` is true (max-settle deadline elapsed; force-fire).
-    ///
-    /// Defensive: mtime-skip is correct under normal semantics, but a
-    /// forced probe wants the freshest possible snapshot regardless of cost.
-    pub forced: bool,
-}
-
+/// The variant is the contract: the walker dispatches on it; the engine
+/// reads it back at no point. Each variant carries exactly the fields its
+/// walker arm consumes — no over-fetching.
+///
+/// Boxing the heavy `Subtree` variant was considered and rejected: every
+/// non-Descent burst produces one, the channel ships one Probe per burst,
+/// and `Arc<DirSnapshot>` baselines are already the dominant payload (the
+/// inline allocation is amortised). `#[allow(clippy::large_enum_variant)]`
+/// mirrors the same allowance on `ProbeOp`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
-pub enum ProbeResult {
-    /// Successful probe: a `TreeSnapshot` rooted at `target_resource`.
-    /// The variant of the inner `TreeSnapshot` matches `req.kind`:
-    /// File ⇒ `TreeSnapshot::File(LeafEntry)`; Directory ⇒
-    /// `TreeSnapshot::Dir(Arc<DirSnapshot>)`. A walker-internal kind
-    /// mismatch on the on-disk entry yields `Vanished`, never a
-    /// kind-mismatched `Ok`.
-    Ok(TreeSnapshot),
-    /// Path doesn't exist (`ENOENT`) or kind doesn't match `req.kind`
-    /// (file probe found dir, dir probe found file). The engine routes
-    /// `Vanished` through `on_anchor_terminal_event`.
-    Vanished,
-    /// Other I/O error at the *root* of the probe (root `lstat`,
-    /// permission, etc.). Mid-walk errors don't produce `Failed` — they
-    /// skip-and-continue with `tracing::warn!`.
-    Failed { errno: i32 },
+pub enum ProbeRequest {
+    /// File-anchor verify / Seed / Rebase. The walker runs a single
+    /// `lstat` and returns `ProbeOutcome::AnchorOk(LeafEntry)` (or
+    /// `Vanished` on absent / kind-mismatch / `Failed { errno }` on I/O).
+    /// No baseline (a leaf has no descendants to skip), no `force_walk`
+    /// (the path is one syscall), no `forced` (mtime-skip is not a
+    /// concept for `lstat`).
+    AnchorFile {
+        /// Profile this probe addresses. Echoed back on `ProbeResponse`
+        /// and used by the Sensor's expectation-map insertion.
+        profile: ProfileId,
+        /// Engine-monotonic correlation token — pairs request with response.
+        correlation: ProbeCorrelation,
+        /// Filesystem path of the anchor at probe-emission time. Engine
+        /// builds via `tree.path_of(profile.resource)`.
+        target_path: PathBuf,
+    },
+    /// Subtree verify / Seed / Rebase / Standard. Recursive Dir walk
+    /// honouring `scan_config`. Walker returns
+    /// `ProbeOutcome::SubtreeOk(Arc<DirSnapshot>)` rooted at
+    /// `target_resource` (or `Vanished` / `Failed`).
+    Subtree {
+        /// Profile this probe addresses. Echoed back on `ProbeResponse`
+        /// and used by the Sensor's expectation-map insertion.
+        profile: ProfileId,
+        /// Engine-monotonic correlation token — pairs request with response.
+        correlation: ProbeCorrelation,
+        /// Resource the prober walks. Often `Profile.resource` (Seed
+        /// bursts); for Standard bursts this becomes the LCA of dirty
+        /// resources. The walker stamps it onto `DirSnapshot.root_resource`
+        /// (advisory) but otherwise doesn't consult it — the walker has
+        /// no Tree.
+        target_resource: ResourceId,
+        /// Filesystem path of `target_resource` at probe-emission time.
+        /// Engine builds via `tree.path_of(target_resource)`. Empty
+        /// `PathBuf` is the lone failure mode; the walker treats empty
+        /// as `Vanished`.
+        target_path: PathBuf,
+        /// `ScanConfig` to honour (recursive, hidden, exclude, pattern,
+        /// `max_depth`). Cloned at emit time.
+        scan_config: ScanConfig,
+        /// `Profile.config_hash` at emission time. Walker stamps every
+        /// `DirSnapshot.captured_with` so two Profiles sharing a Resource
+        /// with different filters cannot produce identical `dir_hash` for
+        /// divergent in-scope content.
+        captured_with: u64,
+        /// Engine's last-known view of `target_resource`'s subtree. The
+        /// walker consults `baseline_subtree.root_meta` for mtime-skip and
+        /// propagates child baselines via `entries[name].subtree`. `None`
+        /// means "no prior observation": first Seed of a fresh Profile.
+        ///
+        /// Cheap to ship — `Arc::clone` on the channel send. Multiple
+        /// workers may hold the same Arc concurrently (immutable
+        /// post-construction except for the `OnceLock<u128>` hash cache,
+        /// which is `Sync`).
+        baseline_subtree: Option<Arc<DirSnapshot>>,
+        /// Set of paths the walker MUST enumerate (refusing mtime-skip)
+        /// at any directory whose path equals one of these OR is an
+        /// ancestor of one. Populated from
+        /// `dirty_resources ∩ subtree(target_resource)`: kqueue events
+        /// that arrived since the last probe at this target.
+        ///
+        /// Walker checks `force_walk.iter().any(|p| p.starts_with(current))`
+        /// — O(N) per directory, N = `|force_walk|` (typically 1–5). The
+        /// set is *minimal* (only the dirty paths); the walker's
+        /// prefix-match covers the "ancestor of forced descendant" case
+        /// without engine-side closure construction.
+        ///
+        /// `BTreeSet<PathBuf>` (not `Vec<PathBuf>`) so iteration order is
+        /// deterministic for replay.
+        force_walk: BTreeSet<PathBuf>,
+        /// `true` ⇒ walker bypasses mtime-skip at every directory
+        /// regardless of `baseline_subtree` and `force_walk`. Engine sets
+        /// this when `Burst.forced` is true (max-settle deadline elapsed;
+        /// force-fire).
+        ///
+        /// Defensive: mtime-skip is correct under normal semantics, but a
+        /// forced probe wants the freshest possible snapshot regardless
+        /// of cost.
+        forced: bool,
+    },
+    /// Pending-descent prefix probe. Walker enumerates one level of
+    /// `target_path` (no recursion, no exclude/pattern, hidden=true) and
+    /// returns `ProbeOutcome::SubtreeOk(arc)` containing the prefix's
+    /// direct children — descent dispatch reads `arc.entries.get(name)`
+    /// and discards the snapshot (it is never spliced into
+    /// `Profile.current`).
+    Descent {
+        /// Profile this probe addresses. Echoed back on `ProbeResponse`
+        /// and used by the Sensor's expectation-map insertion.
+        profile: ProfileId,
+        /// Engine-monotonic correlation token — pairs request with response.
+        correlation: ProbeCorrelation,
+        /// Filesystem path of the descent prefix at probe-emission time.
+        target_path: PathBuf,
+    },
 }
 
+impl ProbeRequest {
+    /// Profile this probe addresses. Determinism-sort key for
+    /// [`crate::StepOutput::probe_ops`] (via [`ProbeOp::profile`]).
+    #[must_use]
+    pub const fn profile(&self) -> ProfileId {
+        match self {
+            Self::AnchorFile { profile, .. }
+            | Self::Subtree { profile, .. }
+            | Self::Descent { profile, .. } => *profile,
+        }
+    }
+
+    /// Correlation token. Used by the bin's expectation-map insertion in
+    /// [`crate::Prober::submit`] (via `WorkerProber`) and by the worker's
+    /// post-run cleanup. Never read by the engine after emit.
+    #[must_use]
+    pub const fn correlation(&self) -> ProbeCorrelation {
+        match self {
+            Self::AnchorFile { correlation, .. }
+            | Self::Subtree { correlation, .. }
+            | Self::Descent { correlation, .. } => *correlation,
+        }
+    }
+}
+
+/// Walker→engine probe response. Flat — `(profile, correlation)` is the
+/// I5 invariant key; `outcome` carries the per-variant payload.
 #[derive(Debug, Clone)]
 pub struct ProbeResponse {
     pub profile: ProfileId,
     pub correlation: ProbeCorrelation,
-    pub result: ProbeResult,
+    pub outcome: ProbeOutcome,
+}
+
+/// Walker outcome.
+///
+/// Four variants, intent-agnostic on Vanished/Failed (the engine routes
+/// those by `(Profile.state, BurstPhase)`, not by request shape — a
+/// vanished anchor is a vanished anchor regardless of whether the walker
+/// was looking at a file or a directory).
+#[derive(Debug, Clone)]
+pub enum ProbeOutcome {
+    /// `AnchorFile` request returned a leaf observation. Sole producer is
+    /// the walker's `probe_anchor_file`.
+    AnchorOk(LeafEntry),
+    /// `Subtree` *or* `Descent` request returned a directory observation.
+    /// Descent and Subtree share a wire shape (`Arc<DirSnapshot>`) — what
+    /// differs is the Profile's state at dispatch time, not the data the
+    /// walker hands back.
+    SubtreeOk(Arc<DirSnapshot>),
+    /// Path absent (`ENOENT`) or kind mismatch (file probe found dir, dir
+    /// probe found file). Routed to whichever `dispatch_*_vanished`
+    /// corresponds to the Profile's state.
+    Vanished,
+    /// I/O error at the *root* of the probe (root `lstat`, permission,
+    /// `EIO`). Mid-walk errors don't surface here — they
+    /// skip-and-continue with `tracing::warn!`.
+    Failed { errno: i32 },
 }
 
 #[derive(Debug, Clone)]
@@ -218,11 +288,12 @@ impl WatchFailure {
     }
 }
 
-// `ProbeRequest` carries baseline_subtree/force_walk/forced etc.
-// `Probe` is the dominant variant — every burst emits one — and boxing
-// it would add an allocation per probe with no observable benefit since
-// `Cancel` is sparse (per Profile reap, not per burst). The size delta
-// rides on `SmallVec` inline slots, which is why we accept it explicitly.
+// `ProbeRequest::Subtree` carries baseline_subtree / force_walk / forced
+// etc. `Probe` is the dominant variant — every burst emits one — and
+// boxing it would add an allocation per probe with no observable benefit
+// since `Cancel` is sparse (per Profile reap, not per burst). The size
+// delta rides on `SmallVec` inline slots, which is why we accept it
+// explicitly.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProbeOp {
@@ -237,7 +308,7 @@ impl ProbeOp {
     #[must_use]
     pub const fn profile(&self) -> ProfileId {
         match self {
-            Self::Probe { request } => request.profile,
+            Self::Probe { request } => request.profile(),
             Self::Cancel { profile } => *profile,
         }
     }

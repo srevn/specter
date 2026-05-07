@@ -33,9 +33,9 @@ use compact_str::CompactString;
 use specter_core::{
     ArgPart, ArgTemplate, BurstPhase, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic,
     DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input,
-    LeafEntry, ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
-    SubId, TimerKind, TreeSnapshot,
+    LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
+    TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -50,7 +50,10 @@ fn empty_command() -> CommandTemplate {
     CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
+fn dir_snap(
+    root: ResourceId,
+    children: Vec<(&str, EntryKind, u64)>,
+) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -63,7 +66,7 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         };
         map.insert(CompactString::new(name), child);
     }
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    Arc::new(DirSnapshot::new(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -72,14 +75,12 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         },
         0,
         map,
-    )))
+    ))
 }
 
 fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
     out.probe_ops.iter().find_map(|op| match op {
-        ProbeOp::Probe {
-            request: ProbeRequest { correlation, .. },
-        } => Some(*correlation),
+        ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
 }
@@ -131,7 +132,7 @@ fn attach_and_complete_seed_with(
     e: &mut Engine,
     req: SubAttachRequest,
     pid_resource: ResourceId,
-    snap: TreeSnapshot,
+    snap: std::sync::Arc<DirSnapshot>,
     now: Instant,
 ) -> (SubId, ProfileId) {
     let (sid, out) = e.attach_sub(req, now);
@@ -141,7 +142,7 @@ fn attach_and_complete_seed_with(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         now,
     );
@@ -157,7 +158,7 @@ fn attach_and_complete_seed_with(
 fn attach_and_complete_seed(
     e: &mut Engine,
     r: ResourceId,
-    snap: TreeSnapshot,
+    snap: std::sync::Arc<DirSnapshot>,
     now: Instant,
 ) -> (SubId, ProfileId) {
     let (sid, out) = e.attach_sub(subtree_request("test", r), now);
@@ -167,7 +168,7 @@ fn attach_and_complete_seed(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         now,
     );
@@ -193,7 +194,7 @@ fn drive_to_awaiting(
     e: &mut Engine,
     pid: ProfileId,
     r: ResourceId,
-    snap: TreeSnapshot,
+    snap: std::sync::Arc<DirSnapshot>,
     t: Instant,
 ) -> StepOutput {
     e.step(
@@ -227,7 +228,7 @@ fn drive_to_awaiting(
                 Input::ProbeResponse(ProbeResponse {
                     profile: pid,
                     correlation: c,
-                    result: ProbeResult::Ok(snap.clone()),
+                    outcome: ProbeOutcome::SubtreeOk(snap.clone()),
                 }),
                 t_drain,
             );
@@ -300,7 +301,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: rebase_corr,
-            result: ProbeResult::Ok(snap.clone()),
+            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
         }),
         now + Duration::from_millis(30),
     );
@@ -465,7 +466,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: rebase_corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         now + Duration::from_millis(30),
     );
@@ -525,7 +526,7 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     let rebase_emitted = combined
         .probe_ops
         .iter()
-        .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid));
+        .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid));
     assert!(
         rebase_emitted,
         "rebase probe emitted on gate-deadline force-transition"
@@ -714,7 +715,7 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
         now + Duration::from_millis(1),
     );
@@ -770,7 +771,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: rebase_corr,
-            result: ProbeResult::Ok(snap.clone()),
+            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
         }),
         now + Duration::from_millis(30),
     );
@@ -829,7 +830,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
         now,
     );
@@ -1120,7 +1121,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: rebase_corr,
-            result: ProbeResult::Ok(snap_after_edit),
+            outcome: ProbeOutcome::SubtreeOk(snap_after_edit),
         }),
         now + Duration::from_millis(30),
     );

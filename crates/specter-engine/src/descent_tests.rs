@@ -17,8 +17,8 @@ use crate::Engine;
 use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, Input, LeafEntry, ProbeOp, ProbeResponse, ProbeResult, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, SubAttachRequest, TreeSnapshot,
+    EntryKind, Input, LeafEntry, ProbeOp, ProbeOutcome, ProbeRequest, ProbeResponse, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -39,12 +39,14 @@ fn empty_command() -> specter_core::CommandTemplate {
     ])])
 }
 
-/// Build a `TreeSnapshot::Dir` carrying the supplied single-component
+/// Build an `Arc<DirSnapshot>` carrying the supplied single-component
 /// children. Descent probes ship `recursive=false`, so every descent test
 /// response is a single-level `DirSnapshot`; this helper matches that shape
 /// exactly. Recursive uses are out of scope for the descent test surface
-/// (recursive walks live in burst tests).
-fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
+/// (recursive walks live in burst tests). The typed `ProbeOutcome::SubtreeOk`
+/// variant takes `Arc<DirSnapshot>` directly — no `TreeSnapshot::Dir`
+/// wrap is needed at the wire boundary.
+fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -57,7 +59,7 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
         };
         map.insert(CompactString::new(name), child);
     }
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    Arc::new(DirSnapshot::new(
         ResourceId::default(),
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -66,7 +68,7 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
         },
         0,
         map,
-    )))
+    ))
 }
 
 /// Set up an Engine with `/foo` as a Dir; attach a Sub at path
@@ -111,7 +113,7 @@ fn descent_one_level_advances_on_created_entry() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -122,7 +124,7 @@ fn descent_one_level_advances_on_created_entry() {
         .probe_ops
         .iter()
         .filter_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.profile),
+            ProbeOp::Probe { request } => Some(request.profile()),
             ProbeOp::Cancel { .. } => None,
         })
         .collect();
@@ -162,7 +164,7 @@ fn descent_two_levels_advances_progressively() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr1,
-            result: ProbeResult::Ok(snap1),
+            outcome: ProbeOutcome::SubtreeOk(snap1),
         }),
         Instant::now(),
     );
@@ -182,7 +184,7 @@ fn descent_two_levels_advances_progressively() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr2,
-            result: ProbeResult::Ok(snap2),
+            outcome: ProbeOutcome::SubtreeOk(snap2),
         }),
         Instant::now(),
     );
@@ -202,7 +204,7 @@ fn descent_no_progress_keeps_pending() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -226,7 +228,7 @@ fn descent_event_at_prefix_emits_fresh_probe() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -247,7 +249,7 @@ fn descent_event_at_prefix_emits_fresh_probe() {
     let probe_for_pid = out
         .probe_ops
         .iter()
-        .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid));
+        .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid));
     assert!(probe_for_pid, "descent probe emitted on prefix event");
     assert!(e.pending_probe(pid).is_some());
 }
@@ -271,7 +273,7 @@ fn descent_event_during_in_flight_probe_drops() {
     let descent_probes = out
         .probe_ops
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid))
         .count();
     assert_eq!(descent_probes, 0);
 }
@@ -285,7 +287,7 @@ fn descent_failed_retains_state() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed { errno: 13 },
         }),
         Instant::now(),
     );
@@ -317,7 +319,7 @@ fn descent_anchor_kind_set_from_entry() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -353,7 +355,7 @@ fn descent_materialization_caches_profile_kind() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -425,8 +427,15 @@ fn absolute_attach_bootstraps_fs_root_segment() {
 
     // The probe op for the descent also carries an absolute prefix path.
     let probe_path = out.probe_ops.iter().find_map(|op| match op {
-        ProbeOp::Probe { request } if request.profile == pid => Some(&request.target_path),
-        ProbeOp::Cancel { .. } | ProbeOp::Probe { .. } => None,
+        ProbeOp::Probe {
+            request:
+                ProbeRequest::Descent {
+                    profile,
+                    target_path,
+                    ..
+                },
+        } if *profile == pid => Some(target_path),
+        _ => None,
     });
     assert_eq!(probe_path, Some(&PathBuf::from("/")));
 }
@@ -503,14 +512,14 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
     );
 }
 
-/// The descent probe uses a *minimal* `ScanConfig`: non-recursive,
-/// hidden=true, no pattern, no exclude, max_depth unbounded — just a
-/// single-level enumeration of the prefix's children. Otherwise the
-/// user's recursive scan would walk the entire filesystem from `/` for
-/// every absolute attach, and a user pattern would filter out the very
-/// segment we're descending into.
+/// Descent probes ride a dedicated `ProbeRequest::Descent` variant —
+/// the engine ships only `(profile, correlation, target_path)`, leaving
+/// the scan-config override (recursive=false, hidden=true, no
+/// pattern/exclude) entirely to the walker. Since the engine carries
+/// no scan-config on the wire, the override correctness lives in the
+/// sensor's walker tests; this engine test pins the variant choice.
 #[test]
-fn descent_probe_uses_minimal_scan_config() {
+fn descent_probe_uses_descent_variant() {
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
@@ -532,23 +541,19 @@ fn descent_probe_uses_minimal_scan_config() {
     );
     let (_sid, out) = e.attach_sub(req, Instant::now());
 
-    let probe_cfg = out
-        .probe_ops
-        .iter()
-        .find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(&request.scan_config),
-            ProbeOp::Cancel { .. } => None,
-        })
-        .expect("descent probe emitted");
-    assert!(!probe_cfg.recursive, "descent probe is non-recursive");
-    assert!(probe_cfg.hidden, "descent probe shows hidden entries");
+    let descent_emitted = out.probe_ops.iter().any(|op| {
+        matches!(
+            op,
+            ProbeOp::Probe {
+                request: ProbeRequest::Descent { .. },
+            }
+        )
+    });
     assert!(
-        probe_cfg.pattern.is_none(),
-        "descent probe ignores user pattern (would hide next segment)",
-    );
-    assert!(
-        probe_cfg.exclude.is_empty(),
-        "descent probe ignores user excludes",
+        descent_emitted,
+        "Pending descent must emit ProbeRequest::Descent (not Subtree); \
+         the typed variant is the structural guarantee that user filters \
+         can't mask the next path segment",
     );
 }
 
@@ -564,7 +569,7 @@ fn descent_materialization_sets_anchor_claim_held() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -660,7 +665,7 @@ fn descent_state_helper_returns_none_for_idle() {
             Input::ProbeResponse(ProbeResponse {
                 profile: pid,
                 correlation: specter_core::ProbeCorrelation(1),
-                result: ProbeResult::Vanished,
+                outcome: ProbeOutcome::Vanished,
             }),
             Instant::now(),
         )
@@ -740,7 +745,7 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -801,7 +806,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         Instant::now(),
     );
@@ -856,7 +861,7 @@ fn on_probe_response_routes_descent_via_state_match() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -944,7 +949,7 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -1061,7 +1066,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -1084,7 +1089,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         Instant::now(),
     );
@@ -1129,10 +1134,15 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         ProfileState::Pending(_),
     ));
     // The descent probe was emitted at foo (the parent / new prefix).
+    // Descent variants carry `target_path` but not `target_resource`
+    // (the walker resolves the path against the live filesystem, not
+    // against an engine-side ResourceId). Cross-check by comparing the
+    // descent's path-of(foo) against the request's `target_path`.
+    let foo_path = e.tree().path_of(foo).expect("foo path resolves");
     assert!(
         out.probe_ops.iter().any(|op| matches!(op,
-            ProbeOp::Probe { request } if request.target_resource == foo
-                && request.profile == pid)),
+            ProbeOp::Probe { request: ProbeRequest::Descent { profile, target_path, .. } }
+                if *profile == pid && *target_path == foo_path)),
         "descent probe emitted at the parent prefix; got {:?}",
         out.probe_ops,
     );

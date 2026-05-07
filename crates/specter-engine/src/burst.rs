@@ -22,10 +22,13 @@
 //! makes a stray Cancel on the just-responded path structurally
 //! impossible.
 //!
-//! Probe emission flows through `probe_channel::emit_probe_op` (single
-//! source for `ProbeOp::Probe` construction); `start_seed_burst` and
-//! `transition_to_verifying` build a `ProbeEmissionParams::Burst` and
-//! route through it.
+//! Probe emission flows through the typed helpers in `probe_channel`
+//! (`emit_anchor_probe` / `emit_subtree_probe`). Each burst-launch helper
+//! reads `Profile.kind` and routes: `Some(File)` ⇒ `emit_anchor_probe`
+//! at the anchor; `Some(Dir | Unknown)` or `None` ⇒ `emit_subtree_probe`
+//! at the computed target. Unclassified anchors take the same Subtree
+//! arm — the walker returns `Vanished` on kind mismatch and the engine
+//! recovers via descent.
 
 use crate::Engine;
 use crate::refcounts::{add_suppress, sub_suppress};
@@ -73,6 +76,9 @@ impl Engine {
         );
         let resource = p.resource;
         let max_settle = p.max_settle;
+        let anchor_kind = p.kind;
+        let scan_config = p.config.clone();
+        let captured_with = p.config_hash;
         // Seed targets the anchor; baseline_subtree is current.subtree_at(anchor)
         // for post-Effect Seeds (gives the walker mtime-skip for noop Effects)
         // and None for fresh-Profile / recovery Seeds (no prior observation).
@@ -101,17 +107,32 @@ impl Engine {
         }
 
         add_suppress(&mut self.tree, resource, out);
-        self.emit_probe_op(
-            profile_id,
-            resource,
-            correlation,
-            crate::probe_channel::ProbeEmissionParams::Burst {
-                baseline_subtree,
-                force_walk: BTreeSet::new(),
-                forced: false,
-            },
-            out,
-        );
+        let target_path = self.tree.path_of(resource).unwrap_or_default();
+        match anchor_kind {
+            Some(ResourceKind::File) => {
+                Self::emit_anchor_probe(profile_id, correlation, target_path, out);
+            }
+            // Dir or unclassified ⇒ unified Subtree fallback. An Unknown
+            // anchor (resource-based attach whose first probe hasn't yet
+            // returned, or a slot whose kind never propagated past the
+            // default) probes as a Dir; the walker returns `Vanished` on
+            // kind mismatch and the engine routes through
+            // `dispatch_seed_vanished` to recover via descent.
+            Some(ResourceKind::Dir | ResourceKind::Unknown) | None => {
+                Self::emit_subtree_probe(
+                    profile_id,
+                    correlation,
+                    resource,
+                    target_path,
+                    scan_config,
+                    captured_with,
+                    baseline_subtree,
+                    BTreeSet::new(),
+                    false,
+                    out,
+                );
+            }
+        }
     }
 
     /// Start a Standard burst: schedule settle + `burst_deadline`,
@@ -303,29 +324,24 @@ impl Engine {
         let dirty_for_lca = burst.dirty_resources.clone();
         let force_set = burst.force_walk_resources.clone();
         let forced = burst.forced;
-        // Read the cached anchor classification. `None` means a
-        // resource-based attach landed on an `Unknown` slot whose Seed
-        // probe hasn't yet returned — collapse to `File`, the safer
-        // dispatch (probing AT an anchor that turns out to be a Dir
-        // returns `Vanished` and the engine recovers; probing at the
-        // parent of an anchor that turns out to be a File reproduces the
-        // Session-1 splice corruption bug class).
-        let anchor_kind = p.kind.unwrap_or(ResourceKind::File);
+        // Cached anchor classification. `None` is a resource-based
+        // attach whose Seed probe hasn't yet returned (or any case where
+        // the kind hasn't propagated past the default); the typed
+        // contract routes both `None` and `Some(Dir)` through Subtree
+        // emission, so the value is preserved unchanged here.
+        let anchor_kind = p.kind;
+        let scan_config = p.config.clone();
+        let captured_with = p.config_hash;
 
-        // Decide target. The kind dispatch sits at the call site rather than
-        // inside `lca_target` so the LCA helper has a single contract:
-        // "lowest covering ancestor over a Dir-anchored Profile's dirty set."
-        // File-anchored Profiles always probe the anchor itself — kqueue
-        // per-file FDs surface events at the file directly and the walker's
-        // `ProbeKind::File` path returns a `TreeSnapshot::File(leaf)` rooted
-        // there. Promoting past the anchor to the parent dir would route
-        // the probe outside the Profile's coverage, and downstream
-        // `splice` would replace `Profile.current` wholesale with a
-        // Dir snapshot at the parent — corrupting the snapshot navigation
-        // invariant `current.root_resource == Profile.resource`.
+        // Decide target. File anchors always target the anchor itself
+        // (kqueue per-file FDs surface events at the file directly,
+        // and the walker's AnchorFile arm lstat's the leaf — promoting
+        // past the anchor to the parent dir would route the probe
+        // outside the Profile's coverage). Dir / unclassified anchors
+        // pick LCA / prior / anchor by phase.
         let target = match (intent, phase, anchor_kind) {
+            (_, _, Some(ResourceKind::File)) => p.resource,
             (BurstIntent::Seed, _, _) => p.resource,
-            (BurstIntent::Standard, _, ResourceKind::File) => p.resource,
             (BurstIntent::Standard, PhaseKind::Draining, _) => {
                 // Reconfirm probe — re-use the previous target. dirty_resources
                 // is empty in Draining, so LCA would degenerate to anchor and
@@ -338,13 +354,17 @@ impl Engine {
             (BurstIntent::Standard, _, _) => lca_target(p, &dirty_for_lca, &self.tree),
         };
 
-        // baseline_subtree (always at `target`, never anchor for Standard).
+        // baseline_subtree at the target. Unused by AnchorFile emission
+        // (a leaf has no descendants to mtime-skip) but cheap to compute
+        // unconditionally — `subtree_at` is a tree-zipper walk over
+        // existing snapshots.
         let baseline_subtree = p
             .current
             .as_ref()
             .and_then(|s| s.subtree_at(target, &self.tree));
         // force_walk paths (filtered to subtree(target); engine-side close).
         let force_walk_paths = build_force_walk(&force_set, target, &self.tree);
+        let target_path = self.tree.path_of(target).unwrap_or_default();
 
         let Some(correlation) = self.mint_probe_correlation(profile_id) else {
             return;
@@ -357,17 +377,29 @@ impl Engine {
             b.force_walk_resources.clear();
         }
 
-        self.emit_probe_op(
-            profile_id,
-            target,
-            correlation,
-            crate::probe_channel::ProbeEmissionParams::Burst {
-                baseline_subtree,
-                force_walk: force_walk_paths,
-                forced,
-            },
-            out,
-        );
+        match anchor_kind {
+            Some(ResourceKind::File) => {
+                Self::emit_anchor_probe(profile_id, correlation, target_path, out);
+            }
+            // Dir or unclassified ⇒ Subtree probe at the chosen target.
+            // See `start_seed_burst` for the unified-fallback rationale
+            // (an Unknown anchor that's actually a File on disk surfaces
+            // as a `Vanished` Subtree response and recovers via descent).
+            Some(ResourceKind::Dir | ResourceKind::Unknown) | None => {
+                Self::emit_subtree_probe(
+                    profile_id,
+                    correlation,
+                    target,
+                    target_path,
+                    scan_config,
+                    captured_with,
+                    baseline_subtree,
+                    force_walk_paths,
+                    forced,
+                    out,
+                );
+            }
+        }
     }
 
     /// Phase: `Verifying` → `Draining`. Phase swap only — the exit body
@@ -476,6 +508,9 @@ impl Engine {
             return;
         };
         let resource = p.resource;
+        let anchor_kind = p.kind;
+        let scan_config = p.config.clone();
+        let captured_with = p.config_hash;
         let baseline_subtree = p
             .current
             .as_ref()
@@ -492,17 +527,26 @@ impl Engine {
             burst.probe_target = Some(resource);
         }
 
-        self.emit_probe_op(
-            profile_id,
-            resource,
-            correlation,
-            crate::probe_channel::ProbeEmissionParams::Burst {
-                baseline_subtree,
-                force_walk: BTreeSet::new(),
-                forced: false,
-            },
-            out,
-        );
+        let target_path = self.tree.path_of(resource).unwrap_or_default();
+        match anchor_kind {
+            Some(ResourceKind::File) => {
+                Self::emit_anchor_probe(profile_id, correlation, target_path, out);
+            }
+            Some(ResourceKind::Dir | ResourceKind::Unknown) | None => {
+                Self::emit_subtree_probe(
+                    profile_id,
+                    correlation,
+                    resource,
+                    target_path,
+                    scan_config,
+                    captured_with,
+                    baseline_subtree,
+                    BTreeSet::new(),
+                    false,
+                    out,
+                );
+            }
+        }
     }
 
     /// Active → Idle. Single source of `-suppress` and `propagate(-1)`.
@@ -623,7 +667,12 @@ const _: fn() = || {
 /// **Caller contract.** This helper is intended for Dir-anchored Profiles
 /// only. File-anchored Profiles probe the anchor itself unconditionally
 /// (kqueue per-file FDs surface events at the file directly); the kind
-/// dispatch lives at the call site in [`Engine::transition_to_verifying`].
+/// dispatch in [`Engine::transition_to_verifying`] routes File anchors to
+/// [`Engine::emit_anchor_probe`] without consulting this helper, so a
+/// File-anchored Profile never reaches `lca_target` in production. The
+/// `live.contains(&profile.resource)` short-circuit below remains valid
+/// for the Dir-anchor case where the anchor itself is the event source
+/// (e.g., an in-place mtime bump on the anchor directory).
 ///
 /// **Invariants.**
 /// - Returns a live `ResourceId` (always — defaults to `profile.resource`).
@@ -775,8 +824,8 @@ mod tests {
 
     use crate::Engine;
     use specter_core::{
-        BurstIntent, BurstPhase, ClassSet, ProbeOp, Profile, ProfileState, ResourceKind,
-        ResourceRole, ScanConfig, StepOutput, WatchOp,
+        BurstIntent, BurstPhase, ClassSet, ProbeOp, ProbeRequest, Profile, ProfileState,
+        ResourceKind, ResourceRole, ScanConfig, StepOutput, WatchOp,
     };
     use std::time::{Duration, Instant};
 
@@ -893,7 +942,7 @@ mod tests {
 
         // Output: one Probe whose correlation matches.
         let probe_correlation = out.probe_ops.iter().find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation),
+            ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         });
         assert_eq!(probe_correlation, Some(correlation));
@@ -1176,7 +1225,10 @@ mod tests {
 
     /// Build an Engine with a File-anchored Profile under a parent dir.
     /// `parent/main.rs` (file) is the anchor; the parent dir exists but is
-    /// outside the Profile's coverage.
+    /// outside the Profile's coverage. Mirrors the production
+    /// `attach_sub` flow's anchor-classification step by stamping
+    /// `Profile.kind = Some(File)` post-attach — without it the typed
+    /// dispatch in `transition_to_verifying` defaults to Subtree.
     fn engine_with_file_anchor() -> (
         Engine,
         specter_core::ProfileId,
@@ -1198,6 +1250,9 @@ mod tests {
                 NO_EVENTS,
             ),
         );
+        if let Some(p) = e.profiles.get_mut(pid) {
+            p.kind = Some(ResourceKind::File);
+        }
         (e, pid, parent, file_anchor)
     }
 
@@ -1267,9 +1322,14 @@ mod tests {
                 ProbeOp::Cancel { .. } => None,
             })
             .expect("Standard probe emitted");
-        assert_eq!(
-            req.target_resource, file_anchor,
-            "Standard burst on a File-anchored Profile must probe the anchor itself",
+        let anchor_path = e.tree.path_of(file_anchor).expect("anchor path resolves");
+        assert!(
+            matches!(
+                req,
+                ProbeRequest::AnchorFile { target_path, .. } if *target_path == anchor_path,
+            ),
+            "Standard burst on a File-anchored Profile must emit ProbeRequest::AnchorFile \
+             at the anchor's path",
         );
     }
 
@@ -1310,9 +1370,22 @@ mod tests {
             })
             .expect("Standard probe emitted");
         // a + b's LCA is root (the anchor) because they're siblings under root.
-        assert_eq!(req.target_resource, e.profiles.get(pid).unwrap().resource);
-        // force_walk has both event-dirty paths.
-        assert_eq!(req.force_walk.len(), 2);
+        // Subtree variant carries `target_resource` and `force_walk` directly;
+        // a Standard burst on a Dir-anchored Profile must produce this variant.
+        match req {
+            ProbeRequest::Subtree {
+                target_resource,
+                force_walk,
+                ..
+            } => {
+                assert_eq!(*target_resource, e.profiles.get(pid).unwrap().resource);
+                assert_eq!(force_walk.len(), 2);
+            }
+            other => panic!(
+                "Standard burst on Dir-anchored Profile must emit ProbeRequest::Subtree; \
+                 got {other:?}",
+            ),
+        }
     }
 
     #[test]

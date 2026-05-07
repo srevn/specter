@@ -27,9 +27,8 @@ use compact_str::CompactString;
 use specter_core::{
     ArgPart, ArgTemplate, BurstIntent, ChildEntry, ClassSet, CommandTemplate, Diagnostic, DirChild,
     DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
-    Placeholder, ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, Profile,
-    ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, TreeSnapshot,
-    WatchOp,
+    Placeholder, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, Profile, ProfileMap,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, WatchOp,
 };
 use specter_engine::{Engine, SubAttachRequest, covers, nearest_covering_ancestor};
 use std::collections::BTreeMap;
@@ -157,9 +156,7 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
 /// Pluck the correlation from the Probe (if any) in a `StepOutput`.
 fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
     out.probe_ops.iter().find_map(|op| match op {
-        ProbeOp::Probe {
-            request: ProbeRequest { correlation, .. },
-        } => Some(*correlation),
+        ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
 }
@@ -178,7 +175,10 @@ fn diff_aware_command() -> CommandTemplate {
 /// V5-native helper: build a `TreeSnapshot::Dir` from a list of
 /// `(name, kind, inode)` triples. Multi-segment names (e.g. "sub/foo.rs")
 /// are *not* supported — tests in this file use leaf-name segments only.
-fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
+fn dir_snap(
+    root: ResourceId,
+    children: Vec<(&str, EntryKind, u64)>,
+) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         debug_assert!(
@@ -195,7 +195,7 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         };
         map.insert(CompactString::new(name), child);
     }
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    Arc::new(DirSnapshot::new(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -204,7 +204,7 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         },
         0,
         map,
-    )))
+    ))
 }
 
 /// Walk through a Standard burst — drains settle timers, injects probe
@@ -216,7 +216,7 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
 fn drive_standard_burst_to_stable(
     e: &mut Engine,
     pid: specter_core::ProfileId,
-    snap: TreeSnapshot,
+    snap: std::sync::Arc<DirSnapshot>,
     t0: Instant,
 ) -> StepOutput {
     let mut t = t0;
@@ -228,7 +228,7 @@ fn drive_standard_burst_to_stable(
                 Input::ProbeResponse(ProbeResponse {
                     profile: pid,
                     correlation: c,
-                    result: ProbeResult::Ok(snap.clone()),
+                    outcome: ProbeOutcome::SubtreeOk(snap.clone()),
                 }),
                 t,
             );
@@ -305,7 +305,7 @@ fn golden_path_full_lifecycle() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid_of(&e, sid),
             correlation: seed_correlation,
-            result: ProbeResult::Ok(snap_seed.clone()),
+            outcome: ProbeOutcome::SubtreeOk(snap_seed.clone()),
         }),
         now + Duration::from_millis(1),
     );
@@ -362,7 +362,7 @@ fn golden_path_full_lifecycle() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: rebase_correlation,
-            result: ProbeResult::Ok(snap_seed),
+            outcome: ProbeOutcome::SubtreeOk(snap_seed),
         }),
         t1 + SETTLE * 16 + Duration::from_millis(1),
     );
@@ -393,7 +393,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         Instant::now(),
     );
@@ -442,7 +442,7 @@ fn pending_event_race_late_probe_response_discarded() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: stale_correlation,
-            result: ProbeResult::Ok(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
         now + Duration::from_millis(1),
     );
@@ -483,7 +483,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -524,7 +524,7 @@ fn force_fire_emits_effect_with_forced_true() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
         now + Duration::from_millis(1),
     );
@@ -550,7 +550,7 @@ fn force_fire_emits_effect_with_forced_true() {
             Input::ProbeResponse(ProbeResponse {
                 profile: pid,
                 correlation: corr,
-                result: ProbeResult::Ok(snap),
+                outcome: ProbeOutcome::SubtreeOk(snap),
             }),
             deadline_t,
         );
@@ -599,7 +599,7 @@ fn step_output_is_sorted() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );

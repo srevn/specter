@@ -25,9 +25,8 @@ use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic,
     DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
-    ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse, ProbeResult, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, TreeSnapshot,
-    WatchOp,
+    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -46,7 +45,10 @@ fn empty_command() -> CommandTemplate {
     CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
+fn dir_snap(
+    root: ResourceId,
+    children: Vec<(&str, EntryKind, u64)>,
+) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -59,7 +61,7 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         };
         map.insert(CompactString::new(name), child);
     }
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    Arc::new(DirSnapshot::new(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -68,14 +70,12 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> TreeSnap
         },
         0,
         map,
-    )))
+    ))
 }
 
 fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
     out.probe_ops.iter().find_map(|op| match op {
-        ProbeOp::Probe {
-            request: ProbeRequest { correlation, .. },
-        } => Some(*correlation),
+        ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
 }
@@ -86,14 +86,14 @@ fn complete_seed_burst(
     e: &mut Engine,
     pid: ProfileId,
     attach_out: &StepOutput,
-    seed_snap: TreeSnapshot,
+    seed_snap: std::sync::Arc<DirSnapshot>,
 ) {
     let corr = first_probe_corr(attach_out).expect("Seed probe fires at attach");
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(seed_snap),
+            outcome: ProbeOutcome::SubtreeOk(seed_snap),
         }),
         Instant::now(),
     );
@@ -175,7 +175,7 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -226,7 +226,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(snap),
+            outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
     );
@@ -787,7 +787,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         Instant::now(),
     );
@@ -843,7 +843,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         Instant::now(),
     );
@@ -909,7 +909,7 @@ fn seed_failed_releases_anchor_claim() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed { errno: 13 },
         }),
         Instant::now(),
     );
@@ -1012,7 +1012,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         t2,
     );
@@ -1066,7 +1066,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed { errno: 13 },
         }),
         t2,
     );
@@ -1422,7 +1422,7 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         t2,
     );
@@ -1529,7 +1529,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: verify_corr,
-            result: ProbeResult::Ok(dir_snap(root, vec![("subdir", EntryKind::Dir, 99)])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(root, vec![("subdir", EntryKind::Dir, 99)])),
         }),
         t2,
     );
@@ -1570,7 +1570,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: rebase_corr,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         t2,
     );
@@ -1689,7 +1689,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid_p,
             correlation,
-            result: ProbeResult::Vanished,
+            outcome: ProbeOutcome::Vanished,
         }),
         t2,
     );
@@ -1808,7 +1808,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     // Probe response: subdir is GONE (P sees a tree where it's been
     // deleted). dispatch_standard_ok → graft → walk_pair → delete_child
     // fires sub_watch_demand for subdir with releasing_descendant=Some(P).
-    let response = TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    let response = Arc::new(DirSnapshot::new(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -1817,12 +1817,12 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         },
         0,
         BTreeMap::new(),
-    )));
+    ));
     let _out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid_p,
             correlation,
-            result: ProbeResult::Ok(response),
+            outcome: ProbeOutcome::SubtreeOk(response),
         }),
         t2,
     );

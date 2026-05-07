@@ -16,9 +16,8 @@
 use compact_str::CompactString;
 use specter_core::{
     ChildEntry, ClassSet, CommandTemplate, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeRequest, ProbeResponse,
-    ProbeResult, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachRequest, TreeSnapshot,
+    EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -39,7 +38,7 @@ fn empty_command() -> CommandTemplate {
 /// V5-native helper: build a `TreeSnapshot::Dir` rooted at the default
 /// `ResourceId` with single-component children. Tests in this file use
 /// leaf-name segments only.
-fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
+fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -52,7 +51,7 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
         };
         map.insert(CompactString::new(name), child);
     }
-    TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+    Arc::new(DirSnapshot::new(
         ResourceId::default(),
         DirMeta {
             mtime: UNIX_EPOCH,
@@ -61,15 +60,13 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> TreeSnapshot {
         },
         0,
         map,
-    )))
+    ))
 }
 
 /// Pluck the correlation from the (single) Probe in `out`.
 fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
     out.probe_ops.iter().find_map(|op| match op {
-        ProbeOp::Probe {
-            request: ProbeRequest { correlation, .. },
-        } => Some(*correlation),
+        ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
 }
@@ -121,7 +118,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: var_corr,
-            result: ProbeResult::Ok(dir_snap_with(vec![("log", EntryKind::Dir, 1)])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![("log", EntryKind::Dir, 1)])),
         }),
         now,
     );
@@ -132,7 +129,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: log_corr,
-            result: ProbeResult::Ok(dir_snap_with(vec![("myapp", EntryKind::Dir, 2)])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![("myapp", EntryKind::Dir, 2)])),
         }),
         now,
     );
@@ -159,7 +156,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_snap_with(vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
         }),
         now,
     );
@@ -195,7 +192,7 @@ fn pending_path_failed_probe_retains_state() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed { errno: 13 },
         }),
         Instant::now(),
     );
@@ -242,7 +239,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: corr,
-            result: ProbeResult::Ok(dir_snap_with(vec![("other", EntryKind::File, 99)])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![("other", EntryKind::File, 99)])),
         }),
         Instant::now(),
     );
@@ -258,7 +255,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     let probes = out
         .probe_ops
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid))
         .count();
     assert_eq!(probes, 1, "FsEvent at prefix triggers fresh descent probe");
 }
@@ -298,7 +295,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
             correlation: seed_corr,
-            result: ProbeResult::Ok(dir_snap_with(vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
         }),
         now,
     );
@@ -333,7 +330,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     let recovery_probe = out
         .probe_ops
         .iter()
-        .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid));
+        .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid));
     assert!(
         recovery_probe,
         "recovery emits descent probe at watch_root_parent",
@@ -519,7 +516,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid_a,
             correlation: a_corr,
-            result: ProbeResult::Ok(dir_snap_with(vec![("bar", EntryKind::Dir, 1)])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![("bar", EntryKind::Dir, 1)])),
         }),
         now,
     );
@@ -551,7 +548,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid_b,
             correlation: b_corr,
-            result: ProbeResult::Ok(dir_snap_with(vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
         }),
         now,
     );
@@ -591,7 +588,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Input::ProbeResponse(ProbeResponse {
             profile: pid_c,
             correlation: c_corr,
-            result: ProbeResult::Ok(dir_snap_with(vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
         }),
         now,
     );
@@ -617,7 +614,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let a_probes = out
         .probe_ops
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid_a))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid_a))
         .count();
     assert_eq!(a_probes, 1, "A's descent advance emits one probe");
     assert!(
@@ -632,7 +629,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let b_probes = out
         .probe_ops
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid_b))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid_b))
         .count();
     assert_eq!(b_probes, 1, "B's recovery emits one descent probe");
     assert!(
@@ -647,7 +644,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let c_probes = out
         .probe_ops
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile == pid_c))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid_c))
         .count();
     assert_eq!(c_probes, 0, "C is unrelated to /root; no probe");
     assert!(matches!(

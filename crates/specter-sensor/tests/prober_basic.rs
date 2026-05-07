@@ -1,13 +1,13 @@
 //! `WorkerProber` round-trip smoke tests against real `tempfile::TempDir`
-//! fixtures: File and Dir probes, Vanished on missing/kind-mismatch.
+//! fixtures: AnchorFile and Subtree probes, Vanished on missing/kind-mismatch.
 
 #![cfg(unix)]
 
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
 use specter_core::{
-    ChildEntry, EntryKind, Input, ProbeCorrelation, ProbeKind, ProbeRequest, ProbeResult,
-    ProfileId, ResourceId, ScanConfig, TreeSnapshot,
+    ChildEntry, EntryKind, Input, ProbeCorrelation, ProbeOutcome, ProbeRequest, ProfileId,
+    ResourceId, ScanConfig,
 };
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
@@ -20,18 +20,24 @@ fn fresh_profile_id() -> ProfileId {
     sm.insert(())
 }
 
-fn mk_request(
+const fn anchor_request(
     profile: ProfileId,
-    kind: ProbeKind,
-    anchor: PathBuf,
+    target_path: PathBuf,
     correlation: u64,
 ) -> ProbeRequest {
-    ProbeRequest {
+    ProbeRequest::AnchorFile {
         profile,
         correlation: ProbeCorrelation(correlation),
-        kind,
+        target_path,
+    }
+}
+
+fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
+    ProbeRequest::Subtree {
+        profile,
+        correlation: ProbeCorrelation(correlation),
         target_resource: ResourceId::default(),
-        target_path: anchor,
+        target_path,
         scan_config: ScanConfig::builder().recursive(true).build(),
         captured_with: 0,
         baseline_subtree: None,
@@ -51,7 +57,7 @@ fn recv_response(rx: &crossbeam::channel::Receiver<Input>) -> specter_core::Prob
 }
 
 #[test]
-fn probe_file_round_trip_emits_ok_with_one_entry() {
+fn anchor_file_round_trip_emits_anchor_ok_with_leaf() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("foo.c");
     std::fs::write(&path, b"hello").unwrap();
@@ -60,13 +66,13 @@ fn probe_file_round_trip_emits_ok_with_one_entry() {
     let prober = WorkerProber::new(&tx, 1).unwrap();
 
     let p = fresh_profile_id();
-    prober.submit(mk_request(p, ProbeKind::File, path, 1));
+    prober.submit(anchor_request(p, path, 1));
 
     let resp = recv_response(&rx);
     assert_eq!(resp.profile, p);
     assert_eq!(resp.correlation, ProbeCorrelation(1));
-    let ProbeResult::Ok(TreeSnapshot::File(leaf)) = resp.result else {
-        panic!("expected Ok(File), got {:?}", resp.result);
+    let ProbeOutcome::AnchorOk(leaf) = resp.outcome else {
+        panic!("expected AnchorOk, got {:?}", resp.outcome);
     };
     assert_eq!(leaf.kind, EntryKind::File);
     assert_eq!(leaf.size, 5);
@@ -75,7 +81,7 @@ fn probe_file_round_trip_emits_ok_with_one_entry() {
 }
 
 #[test]
-fn probe_dir_round_trip_emits_ok_with_children() {
+fn subtree_round_trip_emits_subtree_ok_with_children() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
@@ -85,17 +91,12 @@ fn probe_dir_round_trip_emits_ok_with_children() {
     let prober = WorkerProber::new(&tx, 1).unwrap();
 
     let p = fresh_profile_id();
-    prober.submit(mk_request(
-        p,
-        ProbeKind::Directory,
-        tmp.path().to_path_buf(),
-        7,
-    ));
+    prober.submit(subtree_request(p, tmp.path().to_path_buf(), 7));
 
     let resp = recv_response(&rx);
     assert_eq!(resp.correlation, ProbeCorrelation(7));
-    let ProbeResult::Ok(TreeSnapshot::Dir(arc)) = resp.result else {
-        panic!("expected Ok(Dir)");
+    let ProbeOutcome::SubtreeOk(arc) = resp.outcome else {
+        panic!("expected SubtreeOk");
     };
     let names: Vec<&str> = arc
         .entries
@@ -119,54 +120,54 @@ fn probe_dir_round_trip_emits_ok_with_children() {
 }
 
 #[test]
-fn probe_file_missing_yields_vanished() {
+fn anchor_file_missing_yields_vanished() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("nope");
 
     let (tx, rx) = unbounded::<Input>();
     let prober = WorkerProber::new(&tx, 1).unwrap();
     let p = fresh_profile_id();
-    prober.submit(mk_request(p, ProbeKind::File, path, 1));
+    prober.submit(anchor_request(p, path, 1));
 
     let resp = recv_response(&rx);
-    assert!(matches!(resp.result, ProbeResult::Vanished));
+    assert!(matches!(resp.outcome, ProbeOutcome::Vanished));
 
     let _ = prober.shutdown();
 }
 
 #[test]
-fn probe_dir_missing_yields_vanished() {
+fn subtree_missing_yields_vanished() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("nope");
 
     let (tx, rx) = unbounded::<Input>();
     let prober = WorkerProber::new(&tx, 1).unwrap();
     let p = fresh_profile_id();
-    prober.submit(mk_request(p, ProbeKind::Directory, path, 1));
+    prober.submit(subtree_request(p, path, 1));
 
     let resp = recv_response(&rx);
-    assert!(matches!(resp.result, ProbeResult::Vanished));
+    assert!(matches!(resp.outcome, ProbeOutcome::Vanished));
 
     let _ = prober.shutdown();
 }
 
 #[test]
-fn probe_file_on_directory_yields_vanished() {
+fn anchor_file_on_directory_yields_vanished() {
     let tmp = TempDir::new().unwrap();
 
     let (tx, rx) = unbounded::<Input>();
     let prober = WorkerProber::new(&tx, 1).unwrap();
     let p = fresh_profile_id();
-    prober.submit(mk_request(p, ProbeKind::File, tmp.path().to_path_buf(), 1));
+    prober.submit(anchor_request(p, tmp.path().to_path_buf(), 1));
 
     let resp = recv_response(&rx);
-    assert!(matches!(resp.result, ProbeResult::Vanished));
+    assert!(matches!(resp.outcome, ProbeOutcome::Vanished));
 
     let _ = prober.shutdown();
 }
 
 #[test]
-fn probe_dir_on_file_yields_vanished() {
+fn subtree_on_file_yields_vanished() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, b"x").unwrap();
@@ -174,10 +175,10 @@ fn probe_dir_on_file_yields_vanished() {
     let (tx, rx) = unbounded::<Input>();
     let prober = WorkerProber::new(&tx, 1).unwrap();
     let p = fresh_profile_id();
-    prober.submit(mk_request(p, ProbeKind::Directory, path, 1));
+    prober.submit(subtree_request(p, path, 1));
 
     let resp = recv_response(&rx);
-    assert!(matches!(resp.result, ProbeResult::Vanished));
+    assert!(matches!(resp.outcome, ProbeOutcome::Vanished));
 
     let _ = prober.shutdown();
 }
@@ -191,7 +192,7 @@ fn correlation_is_echoed_unchanged() {
     let (tx, rx) = unbounded::<Input>();
     let prober = WorkerProber::new(&tx, 1).unwrap();
     let p = fresh_profile_id();
-    prober.submit(mk_request(p, ProbeKind::File, path, 99));
+    prober.submit(anchor_request(p, path, 99));
 
     let resp = recv_response(&rx);
     assert_eq!(resp.correlation, ProbeCorrelation(99));

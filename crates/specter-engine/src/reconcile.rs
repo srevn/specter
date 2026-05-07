@@ -287,33 +287,21 @@ pub(crate) fn graft(
     profiles: &mut ProfileMap,
     out: &mut StepOutput,
 ) {
-    // Read anchor + prior-shape from the Profile up front. The anchor
-    // threads through `splice` to lock the navigation invariant; the
-    // prior-shape gates an early-return for the File-prior + non-anchor
-    // target contract violation (without it, `walk_pair` below would
-    // mutate Tree slots before `splice` rejected the request, polluting
-    // `watch_demand` and creating User-role scaffold for siblings of
-    // the anchor).
-    let (anchor, prior_is_file) = match profiles.get(profile_id) {
-        Some(p) => (
-            p.resource,
-            matches!(p.current.as_ref(), Some(TreeSnapshot::File(_))),
-        ),
+    // Anchor threads through `splice` to lock the navigation invariant.
+    //
+    // **Dir-only contract.** This helper is reachable only with a
+    // `TreeSnapshot::Dir(_)` `Profile.current` (or `None` for the first
+    // graft). File-anchored Profiles never call `graft` — their
+    // `Profile.current` is `TreeSnapshot::File(leaf)`, integrated by an
+    // inline write at `dispatch_*_ok`. The [`crate::ProbeRequest`] variant
+    // (`AnchorFile` vs `Subtree`) is the structural guarantee. The match
+    // below treats any `File` prior as a routing breach: `debug_assert!` in
+    // dev/CI, fall through to `None` in release so the next observation
+    // converges.
+    let anchor = match profiles.get(profile_id) {
+        Some(p) => p.resource,
         None => return,
     };
-    if prior_is_file && target != anchor {
-        // A `File` prior means the only observation is the leaf at the
-        // anchor; integrating a `Dir` response anywhere but the anchor
-        // is a state-machine bug upstream (the kind dispatch in
-        // `transition_to_verifying` is supposed to keep File-anchored
-        // probes targeted at the anchor). Surface the breach and leave
-        // `Profile.current` unchanged — the next observation converges.
-        out.diagnostics.push(Diagnostic::SpliceCrossedUncovered {
-            profile: profile_id,
-            target,
-        });
-        return;
-    }
 
     // Identify the prior subtree at this target. None ⇒ Seed first probe,
     // or a path that became covered between probes. Read-only borrow of
@@ -363,15 +351,38 @@ pub(crate) fn graft(
     // short-circuits when per-level hashes match. Mutable borrow now —
     // the prior and the walk_pair borrow are released.
     //
-    // `SpliceResult::CrossedUncovered` flags the engine-contract
-    // violation "graft only into observed subtrees" (target outside
-    // anchor's tree subtree, or coverage gap on the path-to-target).
-    // Carrier is the prior unchanged; the response is intentionally
-    // dropped on the floor and the next probe converges. Surface the
-    // breach via Diagnostic so operator logs see it instead of a silent
-    // information loss.
-    let prior_current = profiles.get_mut(profile_id).and_then(|p| p.current.take());
-    let result = splice(prior_current, anchor, target, response_arc, tree);
+    // The `take` extracts the prior `Arc<DirSnapshot>` if it was a Dir
+    // (the contract case); `None` is the first-graft case. A `File`
+    // prior is a routing breach: `debug_assert!` in dev/CI, drop through
+    // to `None` in release. The `SpliceResult` write below
+    // unconditionally overwrites `Profile.current` with the response's
+    // Dir shape, so the breach self-corrects on this very step — the
+    // dropped leaf is observationally indistinguishable from a normal
+    // Dir-shape transition (the next AnchorFile probe response would
+    // reset `Profile.current` to `TreeSnapshot::File(leaf)` anyway).
+    //
+    // `SpliceResult::CrossedUncovered` flags "graft only into observed
+    // subtrees" violations (target outside anchor's tree subtree, or
+    // coverage gap on the path-to-target). The carrier is the prior
+    // unchanged; the response is intentionally dropped on the floor and
+    // the next probe converges. Surface the breach via Diagnostic so
+    // operator logs see it instead of a silent information loss.
+    let prior_arc = profiles
+        .get_mut(profile_id)
+        .and_then(|p| match p.current.take() {
+            Some(TreeSnapshot::Dir(arc)) => Some(arc),
+            None => None,
+            Some(TreeSnapshot::File(_)) => {
+                debug_assert!(
+                    false,
+                    "graft: File-shaped Profile.current reached splice; \
+                     dispatch routing breach (profile = {profile_id:?})",
+                );
+                None
+            }
+        });
+
+    let result = splice(prior_arc, anchor, target, response_arc, tree);
     if matches!(result, SpliceResult::CrossedUncovered(_)) {
         out.diagnostics.push(Diagnostic::SpliceCrossedUncovered {
             profile: profile_id,
@@ -422,12 +433,10 @@ pub(crate) fn purge_per_file_dedup_for_reaped_slots(profiles: &mut ProfileMap, t
 /// for File-anchored Profiles. Returns `None` when there is no prior
 /// observation at `target` (covered-in-this-probe path; treat as not-stable).
 ///
-/// **Invariant.** When `profile.current` is `TreeSnapshot::File(_)`, the
-/// only meaningful target is the anchor itself — File-anchored Profiles
-/// observe one resource (the leaf), and the engine's kind dispatch
-/// guarantees probes target the anchor for File anchors. The debug-only
-/// assertion locks that invariant: any future caller that hits this arm
-/// with a non-anchor target has violated the dispatch rule.
+/// File-anchored Profiles never reach this helper with `target != anchor`:
+/// `transition_to_verifying`'s kind dispatch routes File anchors through
+/// `emit_anchor_probe` whose response feeds straight into the leaf's
+/// stability comparison without needing this helper at a non-anchor target.
 pub(crate) fn current_target_hash(
     profile: &Profile,
     target: ResourceId,
@@ -439,13 +448,7 @@ pub(crate) fn current_target_hash(
             .as_ref()
             .and_then(|s| s.subtree_at(target, tree))
             .map(|s| s.dir_hash()),
-        TreeSnapshot::File(leaf) => {
-            debug_assert_eq!(
-                target, profile.resource,
-                "current_target_hash: File prior implies target == anchor",
-            );
-            Some(leaf.leaf_hash())
-        }
+        TreeSnapshot::File(leaf) => Some(leaf.leaf_hash()),
     }
 }
 
