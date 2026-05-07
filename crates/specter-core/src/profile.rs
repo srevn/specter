@@ -152,7 +152,7 @@ pub enum BurstPhase {
 /// correlation of the in-flight probe, regardless of which lifecycle state
 /// drives it. Pending and Active remain mutually exclusive at the type
 /// level, so the dispatch site routes a live response on state identity
-/// alone (see [`crate::Engine::on_probe_response`]).
+/// alone (see `Engine::on_probe_response` in `specter-engine`).
 #[derive(Debug, Default)]
 pub enum ProfileState {
     #[default]
@@ -214,8 +214,8 @@ pub enum BurstIntent {
 /// timer is structurally relevant only in pre-fire phases (`Batching`,
 /// `Verifying`, `Draining`); once the burst transitions to `Awaiting` the
 /// fire has already happened, the deadline is moot, and a stale fire is
-/// dropped silently by the validation in
-/// [`crate::Engine::is_timer_referenced`].
+/// dropped silently by the validation in `Engine::is_timer_referenced`
+/// (in `specter-engine`).
 /// `AwaitGateDeadline` — recovery timer armed at
 /// [`BurstPhase::Awaiting`] entry. Expiry indicates the actuator is
 /// taking longer than expected (likely a hung child); the engine

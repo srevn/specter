@@ -198,7 +198,8 @@ impl std::fmt::Debug for LeafEntry {
 /// `subtree: None` means *uncovered*: excluded by glob, beyond
 /// `max_depth`, or `recursive=false` — three causes, indistinguishable to
 /// the engine. The walker stored the entry but did not recurse; the parent's
-/// [`dir_hash`] contributes `(inode, device, 0u128)` for the subtree slot.
+/// [`DirSnapshot::dir_hash`] contributes `(inode, device, 0u128)` for the
+/// subtree slot.
 ///
 /// Subtree mtime is **not** stored on `DirChild` — the canonical mtime
 /// lives at `subtree.root_meta.mtime`, and the parent fold pulls it

@@ -840,6 +840,16 @@ impl Engine {
     /// stale `baseline` / `current` snapshots, and finish the burst to
     /// Idle if Active.
     ///
+    /// **`watch_root_parent` is intentionally preserved.** After anchor
+    /// loss the Profile remains "interested" in anchor reappearance via
+    /// the parent's `StructureChanged`. `start_pending_recovery` triggers
+    /// descent on such an event; releasing the parent watch here would
+    /// close the recovery channel. The contribution is released only
+    /// when the Profile itself reaps (`reap_profile` →
+    /// `release_watch_root_parent_claim`). Sibling helpers — anchor,
+    /// descendants, descent prefix — *are* released here; the asymmetry
+    /// is by design.
+    ///
     /// **Ordering.** The anchor release runs BEFORE `finish_burst_to_idle`,
     /// so any deferred `reap_profile` (`reap_pending`) sees a cleared
     /// `anchor_contribution` flag and skips its redundant release inside
@@ -1154,13 +1164,13 @@ impl Engine {
         }
 
         if is_stable && dirty_zero {
-            // Row 3: stable + dirty=0 → fire Effect. Awaiting on count > 0;
+            // Stable + dirty=0 → fire Effect. Awaiting on count > 0;
             // finish-to-Idle on count == 0 (dedup-hash suppressed
             // everything, no Subs matched, or `reap_pending` skipped the
-            // emit). baseline
-            // is NOT pinned here on the firing branch — it will rebase
-            // when the Rebasing probe response lands (`dispatch_rebase_ok`).
-            // No drift filter — Standard bursts emit for every matching Sub.
+            // emit). baseline is NOT pinned here on the firing branch —
+            // it will rebase when the Rebasing probe response lands
+            // (`dispatch_rebase_ok`). No drift filter — Standard bursts
+            // emit for every matching Sub.
             let outcome = self.emit_effects(profile_id, forced, None, out);
             if outcome.count > 0 {
                 self.transition_to_awaiting(profile_id, outcome.count, now);
@@ -1168,16 +1178,17 @@ impl Engine {
                 self.finish_burst_to_idle(profile_id, out);
             }
         } else if is_stable {
-            // Row 4: stable + dirty>0 → Draining. The stable snapshot lives
-            // on `Profile.current` (just spliced in by graft); the reconfirm
+            // Stable + dirty>0 → Draining. The stable snapshot lives on
+            // `Profile.current` (just spliced in by graft); the reconfirm
             // probe compares against `current`. No need to pin a duplicate
             // snapshot on the phase variant.
             self.transition_to_draining(profile_id);
         } else if forced {
-            // Row 5: not-stable + forced → fire Effect with forced=true.
-            // Same Awaiting / finish-to-Idle branching as row 3 — `forced`
-            // overrides dedup-hash suppression inside `emit_effects`, but
-            // a Profile with no matching Subs still returns count == 0.
+            // Not-stable + forced → fire Effect with forced=true. Same
+            // Awaiting / finish-to-Idle branching as the stable + dirty=0
+            // case — `forced` overrides dedup-hash suppression inside
+            // `emit_effects`, but a Profile with no matching Subs still
+            // returns count == 0.
             let outcome = self.emit_effects(profile_id, true, None, out);
             if outcome.count > 0 {
                 self.transition_to_awaiting(profile_id, outcome.count, now);
@@ -1185,9 +1196,9 @@ impl Engine {
                 self.finish_burst_to_idle(profile_id, out);
             }
         } else {
-            // Row 5 else: not-stable + !forced → re-arm debounce in
-            // `Batching`. By construction no probe is in flight (we're
-            // inside the response handler), so no Cancel is emitted.
+            // Not-stable + !forced → re-arm debounce in `Batching`. By
+            // construction no probe is in flight (we're inside the
+            // response handler), so no Cancel is emitted.
             self.unstable_response_drives_batching(profile_id, now);
         }
     }

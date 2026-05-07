@@ -37,8 +37,8 @@ pub(crate) const FS_ROOT_SEG: &str = "/";
 ///
 /// Per-Profile pending-path descent state lives inline on
 /// `ProfileState::Pending(DescentState)`. Read through
-/// [`Engine::descent_state`] / [`Engine::descent_state_mut`];
-/// fan-out queries use [`Engine::descents_at_prefix`].
+/// `Engine::descent_state` / `Engine::descent_state_mut` (both
+/// `pub(crate)`); fan-out queries use `Engine::descents_at_prefix`.
 #[derive(Debug, Default)]
 pub struct Engine {
     pub(crate) tree: Tree,
@@ -136,8 +136,8 @@ impl Engine {
     /// Attach a Sub to an existing Resource (`req.resource`). Reuses an
     /// existing Profile when `(resource, config_hash)` matches; otherwise
     /// creates a fresh Profile, emits `WatchOp::Watch` on its anchor, and
-    /// starts a `Burst { intent: Seed, phase: Probing }` to establish the
-    /// initial baseline.
+    /// starts a `Burst { intent: Seed, phase: Verifying }` to establish
+    /// the initial baseline.
     ///
     /// Returns the minted [`SubId`] and a sorted [`StepOutput`].
     ///
@@ -417,8 +417,9 @@ impl Engine {
     /// - **Active Profile:** set `Profile.reap_pending = true`. The active
     ///   burst runs to completion; on `finish_burst_to_idle`, the Engine
     ///   skips Effect emission (`emit_effects` checks `reap_pending`) and
-    ///   reaps the Profile in the same step as the Probing → Idle
-    ///   transition.
+    ///   reaps the Profile in the same step as the Active → Idle
+    ///   transition (any pre-fire phase converges through
+    ///   `finish_burst_to_idle`).
     ///
     /// If the count remains > 0, the Profile stays alive; only
     /// `Profile.settle` is recomputed.
@@ -547,11 +548,12 @@ impl Engine {
 
         // Close the probe channel BEFORE the descent-prefix helper
         // transitions the Profile to Idle. Idempotent: emits Cancel
-        // iff a probe was in flight (Pending+Probing for this call
-        // path; Active+Verifying never reaches `reap_profile`'s entry
-        // — `finish_burst_to_idle` runs `reap_profile` only after the
-        // burst response cleared the channel). Mirrors
-        // `on_watch_op_rejected`'s descent-purge pattern.
+        // iff a probe was in flight (Pending with a descent probe in
+        // flight for this call path; Active+Verifying never reaches
+        // `reap_profile`'s entry — `finish_burst_to_idle` runs
+        // `reap_profile` only after the burst response cleared the
+        // channel). Mirrors `on_watch_op_rejected`'s descent-purge
+        // pattern.
         self.cancel_pending_probe(profile_id, out);
 
         // Release every claim this Profile may hold. Helpers are

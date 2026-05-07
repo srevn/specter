@@ -40,14 +40,24 @@ use std::time::Instant;
 
 impl Engine {
     /// Start a Seed burst: no settle wait, immediate Probe.
-    /// Caller has verified `Profile.state == Idle`. Constructs the Burst,
-    /// schedules `burst_deadline`, mints the probe correlation, emits Probe
-    /// (with the Profile's whole `current` as `baseline_subtree` when
-    /// post-Effect Seed has one, enabling mtime-skip), and `+suppress` on
-    /// the anchor.
     ///
-    /// Used in two places: `attach_sub` (fresh Profile baseline) and
-    /// `EffectComplete::Ok` while Idle (post-Effect rebase). Same machinery.
+    /// **Callers** (post-`Awaiting`/`Rebasing` lifecycle):
+    /// - `attach_sub_inner` immediate-Seed path (fresh attach, anchor
+    ///   materialised on disk).
+    /// - `dispatch_descent_ok` anchor materialization (descent terminus).
+    /// - `on_sensor_overflow` Idle path (reseed every Profile in scope).
+    /// - `on_sensor_overflow` Active path (after `finish_burst_to_idle`).
+    /// - `drive_burst`'s Idle + `current.is_none()` branch (post-Vanished
+    ///   re-arming when an event arrives at a still-watched anchor).
+    ///
+    /// `EffectComplete::Ok` does NOT call this helper; post-Effect rebase
+    /// routes through `transition_to_rebasing`.
+    ///
+    /// Caller has verified `Profile.state == Idle`. Constructs the Burst,
+    /// schedules `burst_deadline`, mints the probe correlation, emits
+    /// Probe (with `current.subtree_at(anchor)` as `baseline_subtree`
+    /// when post-recovery Seed has one — enables walker mtime-skip on
+    /// idempotent events), and `+suppress` on the anchor.
     pub(crate) fn start_seed_burst(
         &mut self,
         profile_id: ProfileId,
@@ -206,16 +216,27 @@ impl Engine {
     }
 
     /// Caller: `dispatch_standard_ok` not-stable + not-forced — a verify
-    /// just responded with an unstable verdict. By construction no probe
-    /// is in flight (the caller is in the response handler), so this
-    /// helper structurally cannot emit `ProbeOp::Cancel`. Arms a fresh
-    /// settle timer and writes `phase = Batching { settle_timer }`.
+    /// just responded with an unstable verdict. The probe channel was
+    /// already closed at the top of `on_probe_response`; no Cancel needed.
+    /// Arms a fresh settle timer and writes
+    /// `phase = Batching { settle_timer }`.
     ///
-    /// `dirty_resources` is intentionally preserved so the next verify
-    /// re-targets the same LCA; `force_walk_resources` is already empty
-    /// (cleared at the prior `transition_to_verifying`, and no `FsEvent`
-    /// can have arrived during `Verifying` without first routing through
-    /// `event_drives_batching`).
+    /// **`dirty_resources` preserved; `force_walk` empty.** The next
+    /// verify re-targets the same LCA via the preserved
+    /// `dirty_resources`. Empty `force_walk_resources` is correct: the
+    /// prior verify already had the dirty paths' fresh observations,
+    /// so the walker can mtime-skip on the second pass. If the disk
+    /// has settled, the second verify reuses the prior `current`
+    /// (subtree mtime unchanged) and the resulting hash matches the
+    /// just-stored response hash — stable verdict, fire.
+    ///
+    /// **Reachability.** This helper runs *only* when no `FsEvent`
+    /// intercepted the verify. An `FsEvent` during `Verifying` routes
+    /// through `event_drives_batching`, which Cancels the in-flight
+    /// probe and clears `pending_probe`; the eventual late response
+    /// then fails the live-slot check and drops as `StaleProbeResponse`.
+    /// The forced + not-stable case in `dispatch_standard_ok` also
+    /// bypasses this helper — forced + unstable still fires.
     pub(crate) fn unstable_response_drives_batching(
         &mut self,
         profile_id: ProfileId,
@@ -342,10 +363,10 @@ impl Engine {
         );
     }
 
-    /// Phase: `Probing` → `Draining`. Phase swap only — the exit body
-    /// (`Draining → Probing` reconfirm) is driven by `finish_burst_to_idle`
-    /// when a child Profile's `propagate(-1)` returns this Profile in its
-    /// hit-zero list.
+    /// Phase: `Verifying` → `Draining`. Phase swap only — the exit body
+    /// (`Draining` → `Verifying` reconfirm) is driven by
+    /// `finish_burst_to_idle` when a child Profile's `propagate(-1)`
+    /// returns this Profile in its hit-zero list.
     ///
     /// `Draining` is a unit variant: the stable snapshot lives on
     /// `Profile.current` (set by `dispatch_standard_ok` immediately
@@ -361,10 +382,11 @@ impl Engine {
     }
 
     /// Phase: `Verifying` → `Awaiting`. The single source of the post-fire
-    /// transition: `dispatch_standard_ok` row 3 / row 5 and
-    /// `dispatch_seed_ok` drift path call this immediately after
-    /// `emit_effects` returns a non-zero `EmitOutcome.count`. The match
-    /// is structural (count > 0) — callers know they pushed Effects.
+    /// transition: `dispatch_standard_ok`'s stable-fire and forced-fire
+    /// branches and `dispatch_seed_ok`'s drift branch call this
+    /// immediately after `emit_effects` returns a non-zero
+    /// `EmitOutcome.count`. The match is structural (count > 0) —
+    /// callers know they pushed Effects.
     ///
     /// `outstanding` is the count of in-flight Effects this Profile owns
     /// (the `EmitOutcome.count` from the just-completed

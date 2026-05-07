@@ -114,7 +114,7 @@ pub struct SubSpec {
     pub settle: Duration,
     pub max_settle: Duration,
     pub scan: ScanConfig,
-    /// User-declared event-class mask. Materialized by [`validate_watch`]
+    /// User-declared event-class mask. Materialized by `validate_watch`
     /// — explicit when the TOML carries an `events` array, otherwise the
     /// scope-conditional default ([`ClassSet::DEFAULT_SUBTREE_ROOT`] for
     /// `subtree-root`, [`ClassSet::DEFAULT_PER_FILE`] for

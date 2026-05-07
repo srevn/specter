@@ -153,7 +153,7 @@ fn engine_in_standard_batching() -> (Engine, specter_core::ProfileId, Instant) {
 fn attach_sub_fresh_profile_emits_watch_suppress_probe() {
     let (e, _pid, _sid, r, _now) = engine_with_attached_sub();
     // After attach: anchor watch_demand=1, suppress_count=1, Profile is
-    // Active(Seed Probing).
+    // Active(Seed Verifying).
     assert_eq!(e.tree.get(r).unwrap().watch_demand, 1);
     assert_eq!(e.tree.get(r).unwrap().suppress_count, 1);
 }
@@ -312,7 +312,7 @@ fn probe_response_correlation_mismatch_drops_with_diagnostic() {
         .iter()
         .any(|d| matches!(d, Diagnostic::StaleProbeResponse { .. }));
     assert!(stale);
-    // State unchanged: still Active(Seed Probing).
+    // State unchanged: still Active(Seed Verifying).
     assert!(matches!(
         e.profiles.get(pid).unwrap().state,
         ProfileState::Active(_),
@@ -518,7 +518,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
             now + SETTLE,
         );
     }
-    // We're in Probing; pick up the correlation.
+    // We're in Verifying; pick up the correlation.
     let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
     // Reproduce the seed-burst's empty snapshot — both shim to the same
     // V4 content_hash (entries.len() == 0), so `stable_against` holds.
@@ -808,7 +808,7 @@ fn standard_burst_force_fires_on_max_settle() {
             deadline,
         );
     }
-    // After force-fire, we're either in Probing (forced=true) or already
+    // After force-fire, we're either in Verifying (forced=true) or already
     // Awaiting if the deadline race resolved both timers. Drive the
     // response back if needed.
     if let Some(correlation) = e.pending_probe(pid) {
@@ -844,8 +844,8 @@ fn standard_burst_force_fires_on_max_settle() {
 #[test]
 fn fs_event_modified_during_seed_probing_preserves_intent() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    // Profile is in Active(Seed Probing) right after attach. Inject an
-    // FsEvent — should transition to Active(Seed Settling), emit Cancel.
+    // Profile is in Active(Seed Verifying) right after attach. Inject an
+    // FsEvent — should transition to Active(Seed Batching), emit Cancel.
     let out = e.step(
         Input::FsEvent {
             resource: root,
@@ -1301,7 +1301,7 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
     let p = e.profiles.get(pid).unwrap();
     assert!(matches!(
         p.state,
-        ProfileState::Active(_) // Probing
+        ProfileState::Active(_) // Verifying
     ));
     let probes = out
         .probe_ops
@@ -2138,7 +2138,7 @@ fn detach_sub_idle_profile_reaps_immediately() {
 #[test]
 fn detach_sub_active_profile_marks_reap_pending() {
     let (mut e, pid, sid, _r, _now) = engine_with_attached_sub();
-    // Profile is Active(Seed Probing) — Seed-burst still in flight.
+    // Profile is Active(Seed Verifying) — Seed-burst still in flight.
     let _out = e.detach_sub(sid, Instant::now());
     let p = e.profiles.get(pid).expect("profile alive until burst ends");
     assert!(p.reap_pending);
@@ -2166,7 +2166,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
     let _ = e.detach_sub(sid, t1);
     assert!(e.profiles.get(pid).unwrap().reap_pending);
 
-    // Drain the settle timer to advance to Probing.
+    // Drain the settle timer to advance to Verifying.
     let t2 = t1 + SETTLE * 2;
     while let Some(entry) = e.pop_expired(t2) {
         e.step(

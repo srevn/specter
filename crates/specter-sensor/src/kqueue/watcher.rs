@@ -205,7 +205,7 @@ impl KqueueWatcher {
 }
 
 impl FsWatcher for KqueueWatcher {
-    /// Trait wrapper around [`Self::watch_inner`]: classifies the inner
+    /// Trait wrapper around `Self::watch_inner`: classifies the inner
     /// `io::Error` into a typed [`WatchFailure`] at the boundary so the
     /// engine demuxes on the variant rather than on raw errno values.
     fn watch(

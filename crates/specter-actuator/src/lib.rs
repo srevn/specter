@@ -18,7 +18,7 @@
 //! [`ChildWaiter`], [`ChildSignaler`] — so coalescing / concurrency /
 //! shutdown logic is testable without forking real children. Production
 //! impl is [`OsSpawner`]; the `testkit` Cargo feature exposes
-//! [`testkit::MockSpawner`].
+//! `testkit::MockSpawner`.
 //!
 //! [`Diff`]: specter_core::Diff
 //! [`Effect`]: specter_core::Effect

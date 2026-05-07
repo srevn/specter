@@ -37,7 +37,7 @@ use tinyvec::TinyVec;
 ///
 /// Lives in `core::sub` rather than `engine::engine` so
 /// [`SubRegistryDiff`] (a `core` type, consumed via
-/// [`Input::ConfigDiff`]) can carry pre-id `SubAttachRequest`s without
+/// [`crate::Input::ConfigDiff`]) can carry pre-id `SubAttachRequest`s without
 /// introducing a `core → engine` cycle. `Clone` is derived for the
 /// (rare) call sites that fan a request out to multiple Engines —
 /// production paths consume by value.
@@ -331,7 +331,7 @@ pub struct Sub {
     /// by construction.
     pub events: ClassSet,
     /// Forward subprocess stdout/stderr to Specter's own stdio. Threaded
-    /// onto each emitted [`Effect`] as `capture_output`; the actuator
+    /// onto each emitted [`crate::Effect`] as `capture_output`; the actuator
     /// switches between `Stdio::null()` (false, the default) and
     /// `Stdio::inherit()` (true). Not folded into `config_hash`.
     pub log_output: bool,
