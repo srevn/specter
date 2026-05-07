@@ -394,6 +394,53 @@ fn probe_subtree_skips_unreadable_subdir_emits_remaining() {
     assert!(!segs.iter().any(|s| s.contains("inside")));
 }
 
+/// EACCES contract: `read_dir` failure on a subdir produces
+/// `DirChild { subtree: Some(empty_arc) }` — covered-but-empty. The
+/// `None` sentinel is reserved for uncovered slots (`recursive=false`,
+/// `max_depth`, cross-filesystem, mid-walk `lstat`/kind-flip on the
+/// subdir itself). The engine's reconcile path debug-asserts on
+/// (Some, None) | (None, Some) coverage flips, so collapsing the
+/// EACCES'd `Some(empty)` into a `None` would route a perms-change
+/// through an unreachable arm.
+#[test]
+fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let forbidden = tmp.path().join("forbidden");
+    std::fs::create_dir(&forbidden).unwrap();
+    std::fs::write(forbidden.join("inside.c"), b"x").unwrap();
+    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let result = psub(tmp.path(), &cfg);
+
+    // Restore perms before TempDir drops, else cleanup fails.
+    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ProbeOutcome::SubtreeOk(arc) = result else {
+        panic!("expected SubtreeOk, got {result:?}");
+    };
+    let forbidden_entry = arc
+        .entries
+        .get("forbidden")
+        .expect("forbidden entry present in parent map");
+    let ChildEntry::Dir(DirChild { subtree, .. }) = forbidden_entry else {
+        panic!("forbidden must be a Dir entry, got {forbidden_entry:?}");
+    };
+    let sub = subtree.as_ref().unwrap_or_else(|| {
+        panic!(
+            "EACCES'd subdir must emit Some(empty_arc), not None — \
+             None is reserved for uncovered slots (config / cross-fs / \
+             mid-walk lstat-or-kind failure)",
+        )
+    });
+    assert!(
+        sub.entries.is_empty(),
+        "EACCES read_dir produces an empty entries map; got {} entries",
+        sub.entries.len(),
+    );
+}
+
 // ---------------------------------------------------------------- walk: mtime-skip
 //
 // The mtime-skip path: equal `(mtime, inode, device)` between
