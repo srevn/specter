@@ -677,12 +677,6 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     // post-dispatch — the snapshot navigation invariant
     // `current` is anchor-shaped breaks if a Standard burst graft
     // wholesale-replaces with a Dir snapshot rooted at the parent.
-    //
-    // Pre-fix this test would have been impossible to write: the
-    // pre-fix `lca_target` promoted the File anchor to the parent dir,
-    // the walker would return `Dir(parent_snap)`, and dispatch would
-    // graft → splice → wholesale-replace `Profile.current` with the
-    // parent snapshot. Asserting "current is File" would fail.
     let mut e = Engine::new();
     let parent = e.tree.ensure(None, "parentdir", ResourceRole::User);
     e.tree.set_kind(parent, ResourceKind::Dir);
@@ -760,9 +754,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     );
 
     // (2) Inject a realistic File response (kqueue per-file FD path).
-    // After dispatch, Profile.current must remain File-shaped — pre-fix
-    // it would have been wholesale-replaced with a Dir snapshot rooted
-    // at the parent dir, breaking the navigation invariant.
+    // After dispatch, Profile.current must remain File-shaped.
     let std_corr = e
         .pending_probe(pid)
         .expect("Standard verify probe in flight");
@@ -785,8 +777,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         None => panic!("Profile.current must be Some(File(leaf)) post-Standard"),
     }
 
-    // (3) Stable verdict (same leaf hash) + dirty=0 ⇒ exactly one
-    // Effect fires.
+    // (3) Stable verdict (same leaf hash) + dirty=0 ⇒ exactly one Effect fires.
     assert_eq!(
         out.effects.len(),
         1,
@@ -794,10 +785,6 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     );
 
     // (4) The anchor's `watch_demand` is exactly 1 (Profile claim only).
-    // Pre-fix, the buggy graft path called `walk_pair` against a
-    // Dir-shaped probe target; `create_child` ran on the file_anchor
-    // entry and bumped the anchor's watch_demand to 2 — a quiet
-    // resource leak that survives Profile detach.
     assert_eq!(
         e.tree.get(file_anchor).map(|r| r.watch_demand),
         Some(1),
@@ -2065,11 +2052,6 @@ fn sensor_overflow_resource_scope_filters_profiles() {
 
 #[test]
 fn seed_vanished_then_reap_releases_anchor_via_contribution_flag() {
-    // Regression: a Profile that had anchor_contribution = true (set on
-    // immediate-Seed attach) but Seed Vanished (clearing baseline /
-    // current) must still release the anchor's watch_demand on reap.
-    // The pre-fix `had_watch_contribution = baseline.is_some() ||
-    // current.is_some()` heuristic missed this case.
     let (mut e, pid, sid, r, _now) = engine_with_attached_sub();
     // Anchor watch_demand is 1, anchor_contribution is true.
     assert_eq!(e.tree.get(r).unwrap().watch_demand, 1);

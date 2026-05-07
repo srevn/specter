@@ -77,13 +77,6 @@ fn complete_seed(
 
 #[test]
 fn dense_event_storm_converges_naturally_below_burst_deadline() {
-    // Reproduces TextEdit / yt-dlp-style atomic-save shapes: a dense
-    // storm of FsEvents during the first second, then quiet. Pre-fix
-    // the storm pushed the per-event settle backoff up the exponential
-    // curve until the schedule clamped to `burst_deadline` (~6s), at
-    // which point the Effect fired with `forced = true`. Post-fix every
-    // event re-arms `now + settle`, so the burst converges within one
-    // settle window of the last event.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -150,7 +143,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     };
 
     // Stable response → Effect, → Idle. Effect is NOT forced (the burst
-    // converged naturally; pre-fix this path force-fired at burst_deadline).
+    // converged naturally;
     let resp_t = probe_emit + Duration::from_millis(1);
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -275,10 +268,6 @@ fn sustained_unstable_response_storm_paces_at_settle() {
             response_at,
         );
 
-        // The next settle timer must be at `response_at + SETTLE`. If the
-        // pre-fix exponential were back, the deadline would be
-        // `response_at + settle * 2^N`, which would not fire by
-        // `response_at + SETTLE + epsilon`.
         let probe_due = response_at + SETTLE;
         assert!(
             e.next_deadline().is_some_and(|d| d <= probe_due),

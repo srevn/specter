@@ -1,16 +1,3 @@
-//! F-HIGH-2 regression: `Input::WatchOpRejected` must clean up every
-//! Profile-side claim on the rejected resource, not just descent
-//! prefixes. Pre-fix the engine clamped `watch_demand := 0` and walked
-//! Pending descents only, leaving `anchor_contribution` and
-//! `watch_root_parent` flags claiming a now-zero counter. The next
-//! Profile-driven release on the affected resource then read the stale
-//! flag, recomputed the wrong `events_union`, or underflowed
-//! `sub_watch_demand` on the next decrement.
-//!
-//! This file exercises the four claim configurations that the post-fix
-//! fan-out handles: anchor (single & multi-Profile), watch-root parent,
-//! and descent prefix (regression-pinning the existing path).
-
 #![allow(
     clippy::items_after_statements,
     clippy::manual_let_else,
@@ -163,10 +150,6 @@ fn anchor_claim_purged_then_detach_no_panic() {
         "ProfileClaimPurged{{Anchor}} emitted",
     );
 
-    // Detach the Sub. Pre-fix this would underflow sub_watch_demand
-    // because anchor_contribution stayed true after the clamp; the
-    // subsequent reap_profile would call sub_watch_demand on the
-    // already-zeroed counter.
     let _ = e.detach_sub(sid, Instant::now());
     assert!(e.profiles().get(pid).is_none(), "Profile reaped cleanly");
 }
@@ -220,11 +203,6 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
         .count();
     assert_eq!(anchor_purge_count, 2, "one purge per Profile");
 
-    // Subsequent dispatch_seed_vanished on either Profile must not
-    // panic. Pre-fix this was the F-HIGH-2 multi-Profile manifestation:
-    // the clamp left both flags dangling, and the first vanished
-    // dispatch underflowed `sub_watch_demand`. Post-fix the helper is
-    // counter-aware and the flag is already cleared by the purge.
     let p_seed_vanished = e.step(
         Input::FsEvent {
             resource: root,
@@ -304,9 +282,6 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
         "ProfileClaimPurged{{WatchRootParent}} emitted",
     );
 
-    // Detach. Pre-fix `reap_profile` would call
-    // `sub_watch_demand(parent, STRUCTURE)` against the now-zero
-    // counter and underflow.
     let _ = e.detach_sub(sid, Instant::now());
     assert!(e.profiles().get(pid).is_none(), "Profile reaped cleanly");
 }

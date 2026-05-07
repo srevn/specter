@@ -815,18 +815,7 @@ fn seed_vanished_releases_anchor_contribution_for_recovery() {
 
 #[test]
 fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
-    // The full failure sequence pre-fix:
-    //   1. attach_sub: anchor_contribution=true.
-    //   2. Seed probe → Vanished. Old code: anchor_contribution stayed
-    //      true; current=None; Profile Idle.
-    //   3. StructureChanged at watch_root_parent → start_pending_recovery
-    //      transitions Profile → Pending. State now violates the
-    //      trichotomy: Pending + anchor_contribution=true.
-    //   4. detach_sub → reap_profile → debug_assert panic OR (release)
-    //      memory leak (anchor watch_demand never released).
-    //
-    // With the fix: step 2 releases anchor_contribution, so step 3 sees
-    // a clean state and step 4 reaps cleanly.
+    // Step 1: attach_sub: anchor_contribution=true
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure(None, "p", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
@@ -938,14 +927,6 @@ fn seed_failed_releases_anchor_contribution() {
 /// Set up a Profile + a covered Dir child so the anchor cannot reap
 /// when the Profile detaches (the child's existence keeps the slot
 /// alive). Returns (root, child, sid, pid, attach_out).
-///
-/// Pre-fix `dispatch_standard_vanished` runs `sub_watch_demand` on the
-/// anchor AFTER `finish_burst_to_idle` (which already released it via
-/// `reap_pending → reap_profile`); without surviving children the
-/// anchor is reaped and the post-finish call early-exits silently.
-/// With a covered Dir child, the anchor slot survives the reap and the
-/// post-finish decrement underflows the now-zero `watch_demand`,
-/// tripping the `debug_assert!`.
 fn setup_with_surviving_child(
     e: &mut Engine,
 ) -> (
@@ -1018,14 +999,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
     }
     let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
 
-    // Inject Vanished. Pre-fix: `dispatch_standard_vanished` called
-    // `finish_burst_to_idle` first (which called `reap_profile`,
-    // releasing the anchor's `watch_demand` 1→0) AND then called
-    // `sub_watch_demand` on the same anchor — tripping the
-    // `debug_assert!(prev > 0, …)` because the surviving child kept the
-    // slot alive long enough for the post-finish decrement to find a
-    // zero counter. Post-fix: release happens BEFORE finish; reap sees
-    // a cleared flag and skips the redundant decrement.
+    // Inject Vanished
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             profile: pid,
@@ -1183,10 +1157,6 @@ fn anchor_terminal_revoked_with_reap_pending_active_burst_no_double_release() {
 fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
     // Two Profiles co-anchored at the same Resource (different
     // config_hash). P has reap_pending + Active(Probing); Q is Idle.
-    // Pre-fix: P's double-release decremented the counter past Q's
-    // contribution; Q's later release would underflow. Post-fix: each
-    // Profile's anchor flag clears exactly once and the counter walks
-    // 2 → 1 → 0 cleanly.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);

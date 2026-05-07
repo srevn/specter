@@ -340,20 +340,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     );
 }
 
-// ───────────────────────────────────────────────────────────────────────
-// F-MED-1 regression: detach Pending Profile with in-flight descent probe
-//
-// Pre-fix `reap_profile`'s Pending branch released the prefix's
-// `watch_demand` and detached the Profile, but did NOT emit
-// `ProbeOp::Cancel`. The prober finishes the syscall and ships a
-// `ProbeResponse` for a now-detached Profile, which the engine drops as
-// `StaleProbeResponse` — wasted prober capacity and I/O.
-//
-// Post-fix `reap_profile` invokes `cancel_pending_probe` (which checks
-// `Profile.pending_probe` and emits `ProbeOp::Cancel` if the channel is
-// open) before `release_descent_prefix_claim` (which transitions the
-// Profile to Idle).
-// ───────────────────────────────────────────────────────────────────────
+// Detach Pending Profile with in-flight descent probe
 #[test]
 fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let mut e = Engine::new();
@@ -408,8 +395,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     );
 }
 
-// ───────────────────────────────────────────────────────────────────────
-// F-HIGH-1 regression: anchor terminal event on a Pending Profile
+// Anchor terminal event on a Pending Profile
 //
 // `was_active = !matches!(state, Idle)` historically included Pending,
 // so a terminal event at a Pending Profile's anchor (degenerate path:
@@ -417,18 +403,6 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
 // reachable only via test-fixture relative-path attaches against an
 // empty Tree) routed through `finish_burst_to_idle` and underflowed
 // `sub_suppress` (Pending never bumped suppress_count).
-//
-// Production reach is sealed by the FS_ROOT_SEG bootstrap: absolute
-// paths always have at least the bootstrapped root pre-existing, so
-// `prefix_idx >= Some(0)` and the None branch never fires. This test
-// uses the relative-path test fixture to construct the degenerate state
-// and asserts no panic.
-//
-// Post-fix:
-//   - `covering_profiles` filters Pending at the source.
-//   - `finalize_anchor_lost` early-returns on Pending defensively.
-//   - `finish_burst_to_idle` tightens `was_active` to `Active(_)`.
-// ───────────────────────────────────────────────────────────────────────
 #[test]
 fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
     let mut e = Engine::new();
@@ -505,26 +479,9 @@ fn pending_profile_anchor_terminal_event_does_not_underflow_suppress() {
     );
 }
 
-// ───────────────────────────────────────────────────────────────────────
 // Behavioral parity: a single FsEvent at one Resource fans out to a
 // Pending Profile (descent dispatch) AND an Idle Profile with absent
 // anchor (recovery dispatch), without disturbing an unrelated Profile.
-//
-// Pre-fix: `on_fs_event` walks `self.profiles` twice — once to collect
-// `descents_at_prefix(resource)`, then again to filter recovery
-// candidates (`watch_root_parent == Some(resource) && Idle &&
-// current.is_none()`). Both passes produce disjoint Profile sets.
-//
-// Post-fix: `classify_event_carriers` collects both classes in a single
-// pass over `self.profiles`, returning an `EventCarriers { descents,
-// recoveries }`. Mutual exclusivity holds structurally — `Pending`
-// excludes `Idle` at the `ProfileState` level.
-//
-// This test asserts the routing observable: A receives a fresh descent
-// probe; B transitions Idle → Pending and emits a recovery descent
-// probe; C is untouched. It passes both pre- and post-refactor — the
-// refactor's purpose is performance, not behavior.
-// ───────────────────────────────────────────────────────────────────────
 #[test]
 #[allow(clippy::similar_names)]
 fn classifier_routes_descent_and_recovery_in_single_pass() {
