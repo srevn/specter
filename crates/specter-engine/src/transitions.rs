@@ -942,32 +942,31 @@ impl Engine {
         if matches!(p.state, ProfileState::Pending(_)) {
             return;
         }
+        // Capture `was_active` BEFORE discard_anchor_state. The helper
+        // does not mutate Profile.state (only `finish_burst_to_idle`
+        // does), so the read is order-insensitive in v1; pinning it
+        // before the helper guards against any future helper change
+        // that touches state.
         let was_active = matches!(p.state, ProfileState::Active(_));
 
         // Idempotent: emits Cancel iff the probe channel is open
         // (Active+Verifying ⇒ pending_probe = Some(_)). For
         // Active+Batching/Draining no probe is in flight and the helper
         // is a no-op — replaces the prior `was_verifying` snapshot's
-        // role with field-discipline equivalence.
+        // role with field-discipline equivalence. Required by
+        // discard_anchor_state's cancel-first contract.
         self.cancel_pending_probe(profile_id, out);
 
-        // Release per-descendant `watch_demand` contributions — the
-        // helper take-and-walks `Profile.current`, decrementing each
-        // covered Tree slot's counter. Must run BEFORE the anchor and
-        // burst-end paths so the recompute sees this Profile's
-        // descendant claims as gone (closes F-CRIT-1). The take leaves
-        // `current = None`, redundant with the explicit clear below
-        // but kept for clarity in the snapshot-drop semantic.
-        self.release_descendant_claim(profile_id, out);
-
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-            // current is already None — release_descendant_claim took it.
-        }
-
-        // Release BEFORE finish_burst_to_idle. See the ordering note
-        // above.
-        self.release_anchor_claim(profile_id, out);
+        // Discard runs BEFORE finish_burst_to_idle. The release-helpers
+        // inside emit `AnchorClaim::None` and clear `Profile.kind`
+        // before any deferred `reap_profile` (`reap_pending`) fires
+        // from `finish_burst_to_idle` — preserves the trichotomy
+        // invariant `!(Pending && Held)` across the eventual
+        // `start_pending_recovery` transition, and lets the next Seed
+        // burst route through the kind-agnostic Subtree probe rather
+        // than misroute against a recreated anchor of a different
+        // shape.
+        self.discard_anchor_state(profile_id, out);
 
         if was_active {
             self.finish_burst_to_idle(profile_id, out);
@@ -1137,22 +1136,14 @@ impl Engine {
             profile: profile_id,
             intent: BurstIntent::Seed,
         });
-        // Release the per-descendant `watch_demand` contributions
-        // encoded in `Profile.current` (F-CRIT-1). The helper takes
-        // `current`, walks it, and runs the per-file dedup-hygiene
-        // purge. Must run BEFORE `release_anchor_claim` so the
-        // recompute (multi-Profile case) sees this Profile's
-        // descendant claims as released.
-        self.release_descendant_claim(profile_id, out);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-            // current already None — release_descendant_claim took it.
-        }
-        // Release BEFORE finish_burst_to_idle so any deferred
+        // Discard runs BEFORE finish_burst_to_idle so any deferred
         // `reap_profile` (reap_pending) sees `AnchorClaim::None` —
         // preserves the trichotomy invariant `!(Pending && Held)`
         // across the eventual `start_pending_recovery` transition.
-        self.release_anchor_claim(profile_id, out);
+        // Clearing `Profile.kind` lets the next Seed burst route
+        // through the kind-agnostic Subtree probe rather than
+        // misrouting against a recreated anchor of a different shape.
+        self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
 
@@ -1170,11 +1161,7 @@ impl Engine {
             intent: BurstIntent::Seed,
             errno,
         });
-        self.release_descendant_claim(profile_id, out);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-        }
-        self.release_anchor_claim(profile_id, out);
+        self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
 
@@ -1299,11 +1286,7 @@ impl Engine {
             profile: profile_id,
             intent: BurstIntent::Standard,
         });
-        self.release_descendant_claim(profile_id, out);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-        }
-        self.release_anchor_claim(profile_id, out);
+        self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
 
@@ -1325,11 +1308,7 @@ impl Engine {
             intent: BurstIntent::Standard,
             errno,
         });
-        self.release_descendant_claim(profile_id, out);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-        }
-        self.release_anchor_claim(profile_id, out);
+        self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
 
@@ -1394,16 +1373,17 @@ impl Engine {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
+        // Read intent BEFORE discard_anchor_state. The helper does not
+        // mutate Burst.intent (it leaves `state` alone — only
+        // `finish_burst_to_idle` flips Active → Idle), so the read is
+        // order-insensitive in v1; pinning it before the helper guards
+        // against future helpers that might touch state.
         let intent = self.rebase_burst_intent(profile_id);
         out.diagnostics.push(Diagnostic::ProbeVanished {
             profile: profile_id,
             intent,
         });
-        self.release_descendant_claim(profile_id, out);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-        }
-        self.release_anchor_claim(profile_id, out);
+        self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
 
@@ -1421,11 +1401,7 @@ impl Engine {
             intent,
             errno,
         });
-        self.release_descendant_claim(profile_id, out);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = None;
-        }
-        self.release_anchor_claim(profile_id, out);
+        self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
     }
 

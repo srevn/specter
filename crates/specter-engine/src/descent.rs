@@ -425,6 +425,29 @@ impl crate::Engine {
         }
     }
 
+    /// **Rewind chain depth.** A `Vanished` response on a rewound prefix
+    /// triggers a further rewind via the same path. The chain depth is
+    /// bounded by the tree-distance from the original prefix to its
+    /// ultimate ancestor — at most one rewind cycle per ancestor level.
+    /// Each rewind step **adds** a `+1 STRUCTURE` `watch_demand` on the
+    /// new prefix; in production the chain auto-extends watches up the
+    /// ancestor chain until it reaches a still-present ancestor, whose
+    /// probe returns `Ok` and routes to `dispatch_descent_ok`'s
+    /// "next segment not yet present; await next event" branch.
+    ///
+    /// For absolute-path attaches the FS-root bootstrap in
+    /// `materialize_path_or_pending` guarantees the chain terminates at
+    /// `/`'s `Ok` response (the kernel always `lstat`s `/` successfully
+    /// on Unix). The `None` branch below is reachable only for
+    /// relative-path attaches against an empty Tree (test fixtures);
+    /// the production cascade `rm -rf /a/b/c/d` with anchor at `/d`
+    /// rewinds through `/c`, `/b`, `/a`, `/` and terminates on `/`'s
+    /// `Ok` rather than reaching this branch. The branch is preserved
+    /// for test coverage and defensive-future-bootstrap reasons.
+    ///
+    /// For an `N`-level cascade with a Profile anchored at the leaf,
+    /// the engine emits up to `N` rewind cycles per Pending Profile
+    /// (one Watch + one descent probe per cycle). Acceptable in v1.
     pub(crate) fn dispatch_descent_vanished(
         &mut self,
         profile_id: ProfileId,

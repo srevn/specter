@@ -3799,6 +3799,271 @@ fn structure_only_profile_has_per_file_fds_false() {
     assert!(!e.profiles.get(pid).unwrap().has_per_file_fds);
 }
 
+// ---------- Anchor-loss kind-cache invalidation ----------
+//
+// Per-site assertions that every dispatch path through
+// `Engine::discard_anchor_state` clears the cached `Profile.kind`. The
+// helper unit tests in `claims_tests.rs` pin the contract in
+// isolation; these tests pin the integration at the seven production
+// call sites so the kind-clear cannot regress at any one of them
+// without a test failure.
+
+/// Drive a Profile from fresh-attach into `Active(Standard, Verifying)`
+/// with `pending_probe.is_some()`. Returns the live correlation.
+fn drive_to_standard_verifying(
+    e: &mut Engine,
+    pid: specter_core::ProfileId,
+    root: ResourceId,
+    now: Instant,
+) -> specter_core::ProbeCorrelation {
+    complete_seed_burst(e, pid, root);
+    let _ = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::StructureChanged,
+        },
+        now,
+    );
+    let settle_timer = match &e.profiles.get(pid).unwrap().state {
+        ProfileState::Active(b) => match &b.phase {
+            BurstPhase::Batching { settle_timer } => *settle_timer,
+            _ => panic!("expected Standard Batching"),
+        },
+        _ => panic!("expected Active"),
+    };
+    let _ = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::Settle,
+            id: settle_timer,
+        },
+        now + SETTLE,
+    );
+    e.pending_probe(pid).expect("Verifying probe in flight")
+}
+
+/// Drive into `Active(_, Rebasing)` by completing a Standard burst's
+/// stable verdict + Effect → EffectComplete::Ok. Returns
+/// `(correlation, sub_id)` so the caller can drive the rebase response.
+fn drive_to_rebasing(
+    e: &mut Engine,
+    pid: specter_core::ProfileId,
+    sid: SubId,
+    root: ResourceId,
+    now: Instant,
+) -> specter_core::ProbeCorrelation {
+    let stable_out = drive_to_first_effect(e, pid, root, now);
+    assert_eq!(
+        stable_out.effects.len(),
+        1,
+        "Standard stable verdict fires one Effect; got {:?}",
+        stable_out.effects,
+    );
+    let key = stable_out.effects[0].key.clone();
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key,
+            result: EffectOutcome::Ok,
+        },
+        now + SETTLE * 3,
+    );
+    rebase_out
+        .probe_ops
+        .iter()
+        .find_map(|op| match op {
+            ProbeOp::Probe { request } => Some(request.correlation()),
+            ProbeOp::Cancel { .. } => None,
+        })
+        .expect("Rebase probe minted on EffectComplete::Ok")
+}
+
+#[test]
+fn dispatch_seed_vanished_clears_profile_kind() {
+    let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
+    assert_eq!(
+        e.profiles.get(pid).unwrap().kind,
+        Some(ResourceKind::Dir),
+        "fresh attach caches anchor's classified kind",
+    );
+    let correlation = e.pending_probe(pid).expect("Seed Verifying probe");
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        Instant::now(),
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().kind.is_none(),
+        "Seed-Vanished must clear the cached anchor kind",
+    );
+}
+
+#[test]
+fn dispatch_seed_failed_clears_profile_kind() {
+    let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
+    let correlation = e.pending_probe(pid).expect("Seed Verifying probe");
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            outcome: ProbeOutcome::Failed { errno: 5 },
+        }),
+        Instant::now(),
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().kind.is_none(),
+        "Seed-Failed must clear the cached anchor kind",
+    );
+}
+
+#[test]
+fn dispatch_standard_vanished_clears_profile_kind() {
+    let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
+    let correlation = drive_to_standard_verifying(&mut e, pid, root, now);
+    assert_eq!(
+        e.profiles.get(pid).unwrap().kind,
+        Some(ResourceKind::Dir),
+        "kind cached pre-dispatch",
+    );
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        now + SETTLE,
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().kind.is_none(),
+        "Standard-Vanished must clear the cached anchor kind",
+    );
+}
+
+#[test]
+fn dispatch_standard_failed_clears_profile_kind() {
+    let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
+    let correlation = drive_to_standard_verifying(&mut e, pid, root, now);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            outcome: ProbeOutcome::Failed { errno: 13 },
+        }),
+        now + SETTLE,
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().kind.is_none(),
+        "Standard-Failed must clear the cached anchor kind",
+    );
+}
+
+#[test]
+fn dispatch_rebase_vanished_clears_profile_kind() {
+    let (mut e, pid, sid, root, now) = engine_with_attached_sub();
+    let correlation = drive_to_rebasing(&mut e, pid, sid, root, now);
+    assert_eq!(
+        e.profiles.get(pid).unwrap().kind,
+        Some(ResourceKind::Dir),
+        "kind cached pre-rebase",
+    );
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        now + SETTLE * 4,
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().kind.is_none(),
+        "Rebase-Vanished must clear the cached anchor kind",
+    );
+}
+
+#[test]
+fn dispatch_rebase_failed_clears_profile_kind() {
+    let (mut e, pid, sid, root, now) = engine_with_attached_sub();
+    let correlation = drive_to_rebasing(&mut e, pid, sid, root, now);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation,
+            outcome: ProbeOutcome::Failed { errno: 5 },
+        }),
+        now + SETTLE * 4,
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().kind.is_none(),
+        "Rebase-Failed must clear the cached anchor kind",
+    );
+}
+
+#[test]
+fn finalize_anchor_lost_clears_profile_kind() {
+    // Anchor terminal event during a materialised burst.
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+    assert_eq!(
+        e.profiles.get(pid).unwrap().kind,
+        Some(ResourceKind::Dir),
+        "kind cached post-Seed-Ok",
+    );
+    let _ = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().kind.is_none(),
+        "anchor terminal event must clear the cached anchor kind",
+    );
+}
+
+/// Pin `finalize_anchor_lost`'s ordering invariant: `was_active` is
+/// captured BEFORE `discard_anchor_state` runs. Exercises the
+/// Active-burst path and asserts the burst is finished to Idle (i.e.
+/// the `was_active = true` branch ran). A future helper change that
+/// flips `state` mid-helper would otherwise silently break the
+/// burst-end pathway.
+#[test]
+fn finalize_anchor_lost_was_active_pre_helper_ordering() {
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+    // Re-enter Active by injecting an FsEvent → Standard Batching.
+    let _ = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::StructureChanged,
+        },
+        Instant::now(),
+    );
+    assert!(
+        matches!(e.profiles.get(pid).unwrap().state, ProfileState::Active(_)),
+        "harness pre-condition: Profile is Active",
+    );
+
+    let mut out = StepOutput::default();
+    e.finalize_anchor_lost(pid, &mut out);
+
+    let p = e.profiles.get(pid).expect("Profile lives");
+    assert!(
+        matches!(p.state, ProfileState::Idle),
+        "was_active=true ⇒ finish_burst_to_idle ran ⇒ state is Idle; got {:?}",
+        p.state,
+    );
+    assert!(p.kind.is_none(), "kind cleared by discard_anchor_state");
+    assert_eq!(
+        p.anchor_claim,
+        AnchorClaim::None,
+        "anchor claim released by discard_anchor_state",
+    );
+}
+
 // ---------- Property tests ----------
 
 mod props {

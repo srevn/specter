@@ -1,0 +1,361 @@
+//! Unit tests for `Engine::discard_anchor_state` — pins the helper's
+//! contract: which Profile fields are cleared, which are preserved,
+//! idempotence, post-clamp safety, and invariance of the
+//! lifetime-fixed fields (`events_union`, `has_per_file_fds`).
+//!
+//! Co-located via `#[path]` on `claims.rs`. Goes hand-in-hand with the
+//! per-site `dispatch_*_clears_profile_kind` assertions in
+//! `transitions_tests.rs`, which exercise the helper through each
+//! production call site.
+
+#![allow(
+    clippy::items_after_statements,
+    clippy::manual_let_else,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines
+)]
+
+use crate::Engine;
+use crate::refcounts::clamp_watch_demand_to_zero;
+use compact_str::CompactString;
+use specter_core::{
+    AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DedupKey, DirChild,
+    DirMeta, DirSnapshot, EffectScope, EntryKind, Input, LeafEntry, ProbeCorrelation, ProbeOp,
+    ProbeOutcome, ProbeResponse, ProfileId, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachRequest, SubId, WatchOp,
+};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant, UNIX_EPOCH};
+
+const SETTLE: Duration = Duration::from_millis(100);
+const MAX_SETTLE: Duration = Duration::from_secs(6);
+
+fn empty_command() -> CommandTemplate {
+    CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
+}
+
+fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
+    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
+    for (name, kind, inode) in children {
+        let child = match kind {
+            EntryKind::Dir => ChildEntry::Dir(DirChild {
+                inode,
+                device: 0,
+                subtree: None,
+            }),
+            _ => ChildEntry::Leaf(LeafEntry::new(kind, 0, UNIX_EPOCH, inode, 0)),
+        };
+        map.insert(CompactString::new(name), child);
+    }
+    Arc::new(DirSnapshot::new(
+        root,
+        DirMeta {
+            mtime: UNIX_EPOCH,
+            inode: 0,
+            device: 0,
+        },
+        0,
+        map,
+    ))
+}
+
+fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
+    out.probe_ops.iter().find_map(|op| match op {
+        ProbeOp::Probe { request } => Some(request.correlation()),
+        ProbeOp::Cancel { .. } => None,
+    })
+}
+
+/// Build an Engine + a Profile materialised at `root`. Returns the
+/// `(SubId, ProfileId, anchor_id, parent_id)` tuple. The anchor sits
+/// under a parent slot so `watch_root_parent` is set; both are Dir;
+/// `events = ClassSet::EMPTY` keeps `has_per_file_fds = false`.
+fn engine_with_materialised_profile(
+    events: ClassSet,
+) -> (Engine, SubId, ProfileId, ResourceId, ResourceId) {
+    let mut e = Engine::new();
+    let parent = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    e.tree_mut().set_kind(parent, ResourceKind::Dir);
+    let anchor = e.tree_mut().ensure(Some(parent), "log", ResourceRole::User);
+    e.tree_mut().set_kind(anchor, ResourceKind::Dir);
+
+    let req = SubAttachRequest::for_resource(
+        "watch".into(),
+        anchor,
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        events,
+        false,
+    );
+    let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let pid = e.subs().get(sid).unwrap().profile;
+
+    // Drive Seed-Ok to materialise current + baseline.
+    let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(anchor, vec![])),
+        }),
+        Instant::now(),
+    );
+
+    (e, sid, pid, anchor, parent)
+}
+
+#[test]
+fn discard_anchor_state_clears_kind_baseline_current_anchor_claim() {
+    let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+
+    // Pre-condition.
+    {
+        let p = e.profiles().get(pid).expect("Profile lives");
+        assert_eq!(p.kind, Some(ResourceKind::Dir));
+        assert!(p.baseline.is_some());
+        assert!(p.current.is_some());
+        assert_eq!(p.anchor_claim, AnchorClaim::Held);
+    }
+
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+
+    let p = e.profiles().get(pid).expect("Profile lives");
+    assert!(p.kind.is_none(), "kind cleared");
+    assert!(p.baseline.is_none(), "baseline cleared");
+    assert!(p.current.is_none(), "current taken by descendant release");
+    assert_eq!(p.anchor_claim, AnchorClaim::None, "anchor claim released");
+}
+
+#[test]
+fn discard_anchor_state_preserves_watch_root_parent() {
+    let (mut e, _sid, pid, _anchor, parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+    assert_eq!(
+        e.profiles().get(pid).unwrap().watch_root_parent,
+        Some(parent),
+    );
+
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+
+    assert_eq!(
+        e.profiles().get(pid).unwrap().watch_root_parent,
+        Some(parent),
+        "recovery channel preserved across anchor loss",
+    );
+    // Parent's watch_demand still carries this Profile's STRUCTURE
+    // contribution — the recompute walks covering Profiles, finds this
+    // one still claims the parent, and keeps the union.
+    assert!(
+        e.tree().get(parent).is_some_and(|r| r.watch_demand >= 1),
+        "parent watch_demand preserved",
+    );
+}
+
+#[test]
+fn discard_anchor_state_preserves_last_emitted_dir_hash() {
+    // Stamp a synthetic dedup-hash entry on the Profile, then discard.
+    let (mut e, sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+    let key = DedupKey::Subtree {
+        sub: sid,
+        profile: pid,
+    };
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.last_emitted_dir_hash.insert(key, 0xdead_beef);
+    }
+    let map_before = e.profiles().get(pid).unwrap().last_emitted_dir_hash.clone();
+
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+
+    let map_after = &e.profiles().get(pid).unwrap().last_emitted_dir_hash;
+    assert_eq!(
+        &map_before, map_after,
+        "dedup memory survives across anchor loss",
+    );
+}
+
+#[test]
+fn discard_anchor_state_idempotent() {
+    let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+
+    let snap_after_first = {
+        let p = e.profiles().get(pid).expect("Profile lives");
+        (
+            p.kind,
+            p.baseline.is_some(),
+            p.current.is_some(),
+            p.anchor_claim,
+        )
+    };
+
+    let mut out2 = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out2);
+
+    let snap_after_second = {
+        let p = e.profiles().get(pid).expect("Profile lives");
+        (
+            p.kind,
+            p.baseline.is_some(),
+            p.current.is_some(),
+            p.anchor_claim,
+        )
+    };
+
+    assert_eq!(
+        snap_after_first, snap_after_second,
+        "second invocation observes the same Profile state",
+    );
+    assert!(
+        out2.watch_ops.is_empty() && out2.probe_ops.is_empty(),
+        "second invocation emits no ops; got watch_ops={:?} probe_ops={:?}",
+        out2.watch_ops,
+        out2.probe_ops,
+    );
+}
+
+#[test]
+fn discard_anchor_state_safe_after_clamp() {
+    // anchor watch_demand was clamped to 0 (e.g., by WatchOpRejected
+    // pre-helper); the counter-existence guard inside
+    // release_anchor_claim must prevent sub_watch_demand underflow and
+    // suppress the stray Unwatch that the clamp already emitted.
+    let (mut e, _sid, pid, anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+
+    // Capture the pre-clamp counter to make sure clamp actually fired.
+    assert!(e.tree().get(anchor).is_some_and(|r| r.watch_demand > 0));
+
+    let mut clamp_out = StepOutput::default();
+    clamp_watch_demand_to_zero(e.tree_mut(), anchor, &mut clamp_out);
+    assert_eq!(
+        e.tree().get(anchor).map_or(0, |r| r.watch_demand),
+        0,
+        "clamp zeroed the counter",
+    );
+
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+    // Anchor's edge already fired during the clamp; the helper must
+    // not emit a second Unwatch on the post-clamp counter.
+    assert!(
+        !out.watch_ops
+            .iter()
+            .any(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == anchor)),
+        "no stray Unwatch on post-clamp anchor; got {:?}",
+        out.watch_ops,
+    );
+    // Profile state still cleared correctly.
+    let p = e.profiles().get(pid).expect("Profile lives");
+    assert_eq!(p.anchor_claim, AnchorClaim::None);
+    assert!(p.kind.is_none());
+}
+
+#[test]
+fn discard_anchor_state_no_op_on_already_lost_profile() {
+    let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+    let mut first_out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut first_out);
+
+    // Second call against a fully-cleared Profile — no ops, no
+    // diagnostics.
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+
+    assert!(
+        out.watch_ops.is_empty(),
+        "no watch ops; got {:?}",
+        out.watch_ops
+    );
+    assert!(
+        out.probe_ops.is_empty(),
+        "no probe ops; got {:?}",
+        out.probe_ops
+    );
+    assert!(
+        out.diagnostics.is_empty(),
+        "no diagnostics; got {:?}",
+        out.diagnostics,
+    );
+    assert!(out.effects.is_empty());
+}
+
+#[test]
+fn discard_anchor_state_preserves_events_union_and_per_file_fds() {
+    // events_union and has_per_file_fds are invariant for the Profile's
+    // lifetime under the events-folds-into-config_hash discipline; the
+    // helper must not touch them.
+    let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::CONTENT);
+    let (events_before, fds_before) = {
+        let p = e.profiles().get(pid).expect("Profile lives");
+        (p.events_union, p.has_per_file_fds)
+    };
+    assert_eq!(events_before, ClassSet::CONTENT);
+    assert!(fds_before, "CONTENT events ⇒ per-file FDs enabled");
+
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+
+    let p = e.profiles().get(pid).expect("Profile lives");
+    assert_eq!(p.events_union, events_before, "events_union invariant");
+    assert_eq!(p.has_per_file_fds, fds_before, "has_per_file_fds invariant");
+}
+
+#[test]
+fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
+    // Materialise a Profile with a Dir child; verify the per-descendant
+    // contribution is released by the helper.
+    let mut e = Engine::new();
+    let anchor = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    e.tree_mut().set_kind(anchor, ResourceKind::Dir);
+
+    let req = SubAttachRequest::for_resource(
+        "watch".into(),
+        anchor,
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        ClassSet::EMPTY,
+        false,
+    );
+    let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let pid = e.subs().get(sid).unwrap().profile;
+    let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
+    let snap = dir_snap(anchor, vec![("nested", EntryKind::Dir, 1)]);
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+
+    // Confirm the child slot is materialised + watched.
+    let nested_id = e.tree().lookup(Some(anchor), "nested").expect("child slot");
+    assert!(
+        e.tree().get(nested_id).is_some_and(|r| r.watch_demand >= 1),
+        "child watch_demand bumped by graft",
+    );
+
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+
+    // Child's contribution from this Profile released; the slot may
+    // even have been reaped if no other claimers remain. Either way,
+    // its watch_demand drops to 0.
+    let child_demand = e.tree().get(nested_id).map_or(0, |r| r.watch_demand);
+    assert_eq!(
+        child_demand, 0,
+        "descendant contribution released after discard_anchor_state",
+    );
+    let _ = sid;
+}

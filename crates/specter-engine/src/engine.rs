@@ -522,6 +522,29 @@ impl Engine {
     /// so the call order is "all four, in any sequence" — none of them
     /// fault if their corresponding bookkeeping is already cleared.
     ///
+    /// **Note on `discard_anchor_state` overlap.** This helper performs
+    /// `release_descendant_claim` + `release_anchor_claim` inline
+    /// rather than via [`Engine::discard_anchor_state`]. The two
+    /// helpers differ in purpose:
+    ///
+    /// - `discard_anchor_state` exists for the "anchor lost, Profile
+    ///   lives" case — the seven `dispatch_*_vanished/failed` +
+    ///   `finalize_anchor_lost` sites. Its `kind = None` and
+    ///   `baseline = None` writes prepare the Profile for the next
+    ///   Seed burst's probe-shape dispatch, and it deliberately
+    ///   preserves `watch_root_parent` (the recovery channel).
+    /// - `reap_profile` is "Profile dies entirely." There is no next
+    ///   Seed burst — the Profile detaches on the line below the four
+    ///   release helpers — so the `kind` and `baseline` writes that
+    ///   `discard_anchor_state` would perform are wasted on a struct
+    ///   about to drop. Reap also releases `watch_root_parent`, which
+    ///   `discard_anchor_state` deliberately preserves.
+    ///
+    /// The structural overlap (both call `release_descendant_claim +
+    /// release_anchor_claim`) is intentional; the field clears and
+    /// `watch_root_parent` release are deliberately partitioned across
+    /// the two helpers.
+    ///
     /// Sole call sites: `detach_sub_inner` (Idle / Pending Profile,
     /// immediate reap) and `finish_burst_to_idle` (deferred reap when
     /// `reap_pending` was set mid-burst).

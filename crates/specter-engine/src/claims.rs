@@ -223,4 +223,102 @@ impl Engine {
         // their `ResourceId`. Mirrors graft's post-walk_pair purge.
         purge_per_file_dedup_for_reaped_slots(&mut self.profiles, &self.tree);
     }
+
+    /// Discard every anchor-derived state when the anchor is lost or
+    /// kernel-rejected. The Profile transitions to "Idle without
+    /// anchor": no claim, no snapshot, no cached kind. Recovery flows
+    /// exclusively through [`specter_core::Profile::watch_root_parent`]'s
+    /// next `StructureChanged` → `Engine::start_pending_recovery` →
+    /// descent → `Engine::dispatch_descent_ok` anchor branch (which
+    /// re-classifies `kind` from the parent's directory listing).
+    ///
+    /// **Cleared.**
+    /// - `Profile.current` — taken by [`Engine::release_descendant_claim`].
+    /// - `Profile.baseline = None`.
+    /// - `Profile.kind = None`. The anchor's on-disk shape may have
+    ///   changed across the lost-recovered cycle; the cache must not
+    ///   misroute the next Seed burst's probe-shape dispatch. With
+    ///   `kind = None`, `start_seed_burst` falls through to its
+    ///   `Subtree` arm — a kind-mismatched `Vanished` then routes
+    ///   through the normal descent-recovery path in either direction
+    ///   (`Some(File)` against a now-Dir slot is the path that would
+    ///   otherwise misroute as `AnchorFile` and waste a round-trip).
+    /// - `Profile.anchor_claim = AnchorClaim::None` — via
+    ///   [`Engine::release_anchor_claim`].
+    ///
+    /// **Preserved — by design.**
+    /// - `Profile.watch_root_parent` — the recovery channel. Releasing
+    ///   it here would close auto-recovery on anchor reappearance;
+    ///   only `reap_profile` and `on_watch_op_rejected`'s parent purge
+    ///   clear it.
+    /// - `Profile.last_emitted_dir_hash` — the post-recovery Seed's
+    ///   `seed_drift_observed` compares against these entries;
+    ///   clearing them would silently re-fire emitted-once Effects on
+    ///   every recovery.
+    /// - All other fields (`parent_profile`, `events_union`,
+    ///   `has_per_file_fds`, `config*`, `resource`, `reap_pending`,
+    ///   `settle*`).
+    ///
+    /// **Pre-condition.** The probe channel must already be closed.
+    /// Callers either took the response-dispatch path (which closes
+    /// the channel before any dispatch arm runs, see
+    /// `on_probe_response`) or invoked [`Engine::cancel_pending_probe`]
+    /// first (`finalize_anchor_lost`'s pattern). The helper does not
+    /// call `cancel_pending_probe` itself — matches the
+    /// `release_*_claim` cancel-first contract.
+    ///
+    /// **Idempotence.** Each step short-circuits on already-cleared
+    /// state: `release_descendant_claim` finds `current.is_none()` and
+    /// returns; `baseline = None` and `kind = None` are no-ops against
+    /// already-`None` fields; `release_anchor_claim` sees
+    /// `AnchorClaim::None` and short-circuits.
+    ///
+    /// **Counter-aware.** Inherits from
+    /// [`Engine::release_anchor_claim`]'s counter-existence guard —
+    /// post-clamp slots (zero counter via `clamp_watch_demand_to_zero`)
+    /// skip the recompute without underflow.
+    ///
+    /// **Snapshot-shape invariant.**
+    /// [`specter_core::Profile::kind`]'s rustdoc pins
+    /// `current = Some(File) ⇒ kind == Some(File)` and
+    /// `current = Some(Dir) ⇒ kind == Some(Dir)`. The helper preserves
+    /// the invariant by clearing both atomically: `current` is taken
+    /// in step 1, `kind = None` in step 2, before any reader can
+    /// observe an intermediate state (the helper runs synchronously
+    /// inside one `Engine::step` under `&mut self`).
+    ///
+    /// **Sole call sites.** The seven `dispatch_*_vanished/failed` +
+    /// `finalize_anchor_lost` sites in `transitions.rs`. **Not** called
+    /// by [`Engine::reap_profile`] — the reap path performs the same
+    /// two release calls inline rather than via this helper. "Profile
+    /// dies" has no next Seed burst, so the `kind` and `baseline`
+    /// writes would be wasted on a struct about to drop; see
+    /// `reap_profile`'s rustdoc for the asymmetry rationale.
+    pub(crate) fn discard_anchor_state(&mut self, pid: ProfileId, out: &mut StepOutput) {
+        // Order:
+        //   1. release_descendant_claim runs first — it `take()`s
+        //      `current`. The descendant walk and its per-slot
+        //      recompute need the snapshot, and downstream recomputes
+        //      (including release_anchor_claim's `events_union` walk)
+        //      must see the post-take world with this Profile's
+        //      descendant contributions already gone.
+        //   2. Field clears (`baseline`, `kind`) are pure
+        //      Profile-state writes; no Tree-side recompute reads
+        //      them.
+        //   3. release_anchor_claim runs last so its recompute walks
+        //      a fully-cleared Profile.
+        self.release_descendant_claim(pid, out);
+
+        if let Some(p) = self.profiles.get_mut(pid) {
+            p.baseline = None;
+            // `current` is already None — release_descendant_claim took it.
+            p.kind = None;
+        }
+
+        self.release_anchor_claim(pid, out);
+    }
 }
+
+#[cfg(test)]
+#[path = "claims_tests.rs"]
+mod tests;

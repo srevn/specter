@@ -284,8 +284,19 @@ pub struct Profile {
     ///   yet materialised the anchor) **or** while a fresh resource-based
     ///   attach hasn't yet seen its first probe response (the Resource
     ///   slot was `Unknown` at attach-time and no probe has classified it).
-    /// - `Some(kind)` from the materialisation moment (descent → Idle) or
-    ///   the first Seed-Ok dispatch onward.
+    /// - `None` after anchor loss (`Vanished` / `Failed` /
+    ///   `WatchOpRejected` on the anchor) — `Engine::discard_anchor_state`
+    ///   clears the cache so the next Seed burst routes through the
+    ///   kind-agnostic Subtree probe and avoids a wasted round-trip
+    ///   against a recreated anchor of a different on-disk shape.
+    /// - `Some(kind)` from the materialisation moment (descent → Idle, or
+    ///   first Seed-Ok dispatch, or resource-based attach against a
+    ///   classified slot) until the next anchor loss.
+    ///
+    /// The "first observation wins" invariant applies **within a single
+    /// materialised epoch**. Across recovery cycles the cache is
+    /// deliberately invalidated so the kind-shape dispatch doesn't
+    /// misroute against a recreated anchor of a different shape.
     ///
     /// **Why a Profile field, not a Tree lookup.** Engine-side dispatch
     /// sites need the anchor's kind on the hot path: the burst-launch
@@ -307,6 +318,21 @@ pub struct Profile {
     /// the path itself is recoverable via `EffectOutcome::Failed` if the
     /// path turns out to be a File.
     ///
+    /// **Coherence with `Resource.kind`.** The Tree slot's `kind` field
+    /// (`Resource::kind`) is a parallel cache of the same observation,
+    /// updated by reconcile and explicit `Tree::set_kind` calls. The
+    /// engine reads `Profile.kind` for anchor-kind decisions; it does
+    /// not consult `Tree.kind` for the anchor in any post-attach path.
+    /// The Tree-side cache may stay stale across an
+    /// anchor-loss-recover cycle for shared anchors (the slot survives
+    /// because other Profiles anchor it). No production reader sees
+    /// the stale value because no engine path consults
+    /// `tree.get(anchor).kind` for the anchor's own kind in the
+    /// post-loss window — the invariant is "engine reads
+    /// `Profile.kind`, never `Tree.kind` for the anchor's kind."
+    /// Future write sites that introduce such a reader must
+    /// invalidate the Tree-side cache at the appropriate sites.
+    ///
     /// **Snapshot-shape invariant.** When `current.is_some()`, the
     /// `TreeSnapshot` variant must agree with `kind`:
     /// `current = Some(TreeSnapshot::File(_)) ⇒ kind == Some(File)`;
@@ -317,7 +343,8 @@ pub struct Profile {
     /// type-enforce it but at the cost of every kind-agnostic reader of
     /// `current` and `baseline` paying a per-variant dispatch tax. Any
     /// future write site that mutates `current` and `kind` independently
-    /// must preserve the agreement.
+    /// must preserve the agreement; `Engine::discard_anchor_state`
+    /// clears both atomically inside one `Engine::step`.
     pub kind: Option<ResourceKind>,
     pub state: ProfileState,
     /// Engine-side slot for the **probe channel** — the per-Profile

@@ -166,6 +166,69 @@ fn anchor_claim_purged_then_detach_no_panic() {
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
+fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
+    // Two Profiles share an anchor classified as Dir. WatchOpRejected
+    // on the anchor purges the kernel watch and runs
+    // `finalize_anchor_lost` for each anchor claimer; the helper's
+    // `discard_anchor_state` must clear `Profile.kind` on each so any
+    // subsequent recovery uses the safe Subtree fallback rather than
+    // misrouting against a recreated anchor of a different shape.
+    let mut e = Engine::new();
+    let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
+
+    let (_sid_p, pid_p, out_p) = attach_subtree_root(&mut e, "P", root, MAX_SETTLE);
+    let (_sid_q, pid_q, out_q) =
+        attach_subtree_root(&mut e, "Q", root, MAX_SETTLE + Duration::from_secs(1));
+    complete_seed_burst(&mut e, pid_p, &out_p, dir_snap(root, vec![]));
+    complete_seed_burst(&mut e, pid_q, &out_q, dir_snap(root, vec![]));
+
+    // Pre-condition: both Profiles cache the anchor's kind.
+    assert_eq!(
+        e.profiles().get(pid_p).unwrap().kind,
+        Some(ResourceKind::Dir),
+    );
+    assert_eq!(
+        e.profiles().get(pid_q).unwrap().kind,
+        Some(ResourceKind::Dir),
+    );
+
+    let _ = e.step(
+        Input::WatchOpRejected {
+            resource: root,
+            op: WatchOp::Watch {
+                resource: root,
+                path: PathBuf::from("src"),
+                kind: ResourceKind::Unknown,
+                events: ClassSet::EMPTY,
+            },
+            failure: WatchFailure::Pressure { errno: 24 },
+        },
+        Instant::now(),
+    );
+
+    assert!(
+        e.profiles().get(pid_p).unwrap().kind.is_none(),
+        "P's kind cleared by WatchOpRejected anchor purge",
+    );
+    assert!(
+        e.profiles().get(pid_q).unwrap().kind.is_none(),
+        "Q's kind cleared by WatchOpRejected anchor purge",
+    );
+    // Sibling assertion that the existing claim-side discipline is
+    // also intact — both anchor claims released, counter zeroed.
+    assert_eq!(
+        e.profiles().get(pid_p).unwrap().anchor_claim,
+        AnchorClaim::None,
+    );
+    assert_eq!(
+        e.profiles().get(pid_q).unwrap().anchor_claim,
+        AnchorClaim::None,
+    );
+    assert_eq!(e.tree().get(root).unwrap().watch_demand, 0);
+}
+
+#[test]
 fn anchor_claim_purged_for_two_profiles_each_no_panic() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
