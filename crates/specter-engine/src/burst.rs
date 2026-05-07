@@ -31,8 +31,8 @@ use crate::Engine;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
-    Burst, BurstIntent, BurstPhase, Profile, ProfileId, ProfileState, ResourceId, ResourceKind,
-    StepOutput, TimerKind, Tree, TreeSnapshot,
+    Burst, BurstIntent, BurstPhase, Profile, ProfileId, ProfileState, Resource, ResourceId,
+    ResourceKind, StepOutput, TimerKind, Tree, TreeSnapshot,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -282,11 +282,23 @@ impl Engine {
         let dirty_for_lca = burst.dirty_resources.clone();
         let force_set = burst.force_walk_resources.clone();
         let forced = burst.forced;
+        let anchor_kind = anchor_kind(p, &self.tree);
 
-        // Decide target.
-        let target = match (intent, phase) {
-            (BurstIntent::Seed, _) => p.resource,
-            (BurstIntent::Standard, PhaseKind::Draining) => {
+        // Decide target. The kind dispatch sits at the call site rather than
+        // inside `lca_target` so the LCA helper has a single contract:
+        // "lowest covering ancestor over a Dir-anchored Profile's dirty set."
+        // File-anchored Profiles always probe the anchor itself — kqueue
+        // per-file FDs surface events at the file directly and the walker's
+        // `ProbeKind::File` path returns a `TreeSnapshot::File(leaf)` rooted
+        // there. Promoting past the anchor to the parent dir would route
+        // the probe outside the Profile's coverage, and downstream
+        // `splice` would replace `Profile.current` wholesale with a
+        // Dir snapshot at the parent — corrupting the snapshot navigation
+        // invariant `current.root_resource == Profile.resource`.
+        let target = match (intent, phase, anchor_kind) {
+            (BurstIntent::Seed, _, _) => p.resource,
+            (BurstIntent::Standard, _, ResourceKind::File) => p.resource,
+            (BurstIntent::Standard, PhaseKind::Draining, _) => {
                 // Reconfirm probe — re-use the previous target. dirty_resources
                 // is empty in Draining, so LCA would degenerate to anchor and
                 // lose the correct subtree.
@@ -295,7 +307,7 @@ impl Engine {
             // PostFire is unreachable courtesy of the early-return guard
             // above; routed alongside `Batching | Verifying` to keep the
             // match exhaustive without a wildcard.
-            (BurstIntent::Standard, _) => lca_target(p, &dirty_for_lca, &self.tree),
+            (BurstIntent::Standard, _, _) => lca_target(p, &dirty_for_lca, &self.tree),
         };
 
         // baseline_subtree (always at `target`, never anchor for Standard).
@@ -576,20 +588,30 @@ const _: fn() = || {
     let _ = std::mem::size_of::<TreeSnapshot>();
 };
 
-/// "Lowest covering ancestor of all event-dirty Resources."
-/// The single probe target per Standard burst.
+/// "Lowest covering ancestor of all event-dirty Resources" for a
+/// Dir-anchored Profile. The single probe target per Standard burst.
 ///
-/// Invariants:
+/// **Caller contract.** This helper is intended for Dir-anchored Profiles
+/// only. File-anchored Profiles probe the anchor itself unconditionally
+/// (kqueue per-file FDs surface events at the file directly); the kind
+/// dispatch lives at the call site in [`Engine::transition_to_verifying`].
+///
+/// **Invariants.**
 /// - Returns a live `ResourceId` (always — defaults to `profile.resource`).
-/// - Result is ALWAYS `ResourceKind::Dir` (Files / Unknown promoted to
-///   their parent Dir; probes target Dirs because Files are observed as
-///   child entries of their parent).
+/// - Result is `ResourceKind::Dir`: descendant LCAs that resolve to a
+///   Leaf (or unprobed slot) are promoted to their parent Dir — probes
+///   target Dirs because Files are observed as child entries of their
+///   parent in the descendant-observation model.
 /// - Result is at-or-above every live entry in `dirty`. Reaped entries
 ///   are filtered first — a stale `ResourceId` whose slot was vacated
-///   mid-burst would yield no parent chain, and the intersection would
-///   degenerate.
+///   mid-burst yields `None` on `tree.parent` and would skew the
+///   reduction otherwise.
 /// - When `dirty` is empty, returns `profile.resource` (anchor): falls
 ///   back to a full-walk gracefully.
+///
+/// **Complexity.** O(depth × n_dirty) — pairwise reduction with
+/// depth-equalisation + lockstep ancestor walk per pair. No per-pair
+/// `BTreeSet` allocation.
 pub(crate) fn lca_target(
     profile: &Profile,
     dirty: &BTreeSet<ResourceId>,
@@ -597,8 +619,7 @@ pub(crate) fn lca_target(
 ) -> ResourceId {
     // 1. Filter stale ResourceIds. A `dirty_resources` entry whose slot
     // was reaped between FsEvent ingestion and probe emission
-    // (delete-recreate-different-inode race) yields None on `tree.parent`,
-    // narrowing the intersection to nothing.
+    // (delete-recreate-different-inode race) is dropped here.
     let live: SmallVec<[ResourceId; 4]> = dirty
         .iter()
         .copied()
@@ -613,34 +634,55 @@ pub(crate) fn lca_target(
         return promote_to_dir(profile.resource, profile, tree);
     }
 
-    // 2. LCA via ancestor-chain intersection. The result is the deepest
-    // (max-depth) Resource present in every chain. Empty intersection
-    // (rare: cross-anchor dirty mix that should not happen — `on_fs_event`
-    // filters by covering Profiles) falls back to anchor.
-    let first = live[0];
-    let mut chain: BTreeSet<ResourceId> = std::iter::once(first)
-        .chain(tree.ancestors(first))
-        .collect();
+    // 2. Pairwise LCA reduction. For each new entry, walk both candidates
+    // up to a common depth, then up in lockstep until they match.
+    let mut acc = live[0];
     for &r in &live[1..] {
-        let mine: BTreeSet<ResourceId> = std::iter::once(r).chain(tree.ancestors(r)).collect();
-        chain = chain.intersection(&mine).copied().collect();
-        if chain.is_empty() {
-            return profile.resource;
+        match lca_pair(acc, r, tree) {
+            Some(joint) => acc = joint,
+            None => return profile.resource,
         }
     }
-    // Pick the deepest candidate (max ancestor count).
-    let lca = chain
-        .into_iter()
-        .max_by_key(|&r| tree.ancestors(r).count())
-        .unwrap_or(profile.resource);
-
-    promote_to_dir(lca, profile, tree)
+    promote_to_dir(acc, profile, tree)
 }
 
-/// Promote a non-Dir candidate to its parent Dir; probes target Dirs.
-/// Falls back to `profile.resource` if the chain crosses a reaped slot.
-/// Unprobed slots (`kind() == None`) walk up like File-shape — we don't
-/// know what they are, the parent is the safer probe target.
+/// LCA of two resources via depth-equalisation + lockstep ancestor walk.
+/// O(max(depth_a, depth_b)). Returns `None` only when an input slot is
+/// stale or a parent walk runs out of ancestors before the candidates
+/// align — the caller falls back to anchor.
+fn lca_pair(a: ResourceId, b: ResourceId, tree: &Tree) -> Option<ResourceId> {
+    if a == b {
+        return Some(a);
+    }
+    let depth_a = tree.ancestors(a).count();
+    let depth_b = tree.ancestors(b).count();
+    let mut a = a;
+    let mut b = b;
+    // Walk the deeper one up to the same depth as the shallower.
+    for _ in 0..depth_a.saturating_sub(depth_b) {
+        a = tree.parent(a)?;
+    }
+    for _ in 0..depth_b.saturating_sub(depth_a) {
+        b = tree.parent(b)?;
+    }
+    // Walk both up in lockstep until they match.
+    while a != b {
+        a = tree.parent(a)?;
+        b = tree.parent(b)?;
+    }
+    Some(a)
+}
+
+/// Promote a non-Dir candidate to its parent Dir; descendant-observation
+/// probes target Dirs. Falls back to `profile.resource` if the chain
+/// crosses a reaped slot or runs out of ancestors. Unprobed slots
+/// (`kind() == None`) walk up like File-shape — we don't know what they
+/// are, the parent is the safer probe target.
+///
+/// **Pre-condition.** The caller has filtered out File-anchored Profiles;
+/// this helper assumes a Dir anchor and may walk past a non-Dir start to
+/// reach the Profile's anchor when `start == profile.resource` is itself
+/// a File (which wouldn't happen for a Dir-anchored Profile).
 fn promote_to_dir(start: ResourceId, profile: &Profile, tree: &Tree) -> ResourceId {
     let mut current = start;
     loop {
@@ -655,6 +697,15 @@ fn promote_to_dir(start: ResourceId, profile: &Profile, tree: &Tree) -> Resource
         };
         current = p;
     }
+}
+
+/// Read the Profile's anchor kind, collapsing the unprobed case to
+/// [`ResourceKind::File`] per the backend-mask convention. Used at probe-
+/// emission decision sites to route File anchors to the anchor itself
+/// while Dir anchors take the LCA path.
+fn anchor_kind(profile: &Profile, tree: &Tree) -> ResourceKind {
+    tree.get(profile.resource)
+        .map_or(ResourceKind::File, Resource::kind_or_file)
 }
 
 /// Build the `force_walk` set the walker consumes. Engine-side closure of
@@ -1101,6 +1152,105 @@ mod tests {
         let dirty: BTreeSet<_> = std::iter::once(a).collect();
         let target = lca_target(e.profiles.get(pid).unwrap(), &dirty, &e.tree);
         assert_eq!(target, root);
+    }
+
+    /// Build an Engine with a File-anchored Profile under a parent dir.
+    /// `parent/main.rs` (file) is the anchor; the parent dir exists but is
+    /// outside the Profile's coverage.
+    fn engine_with_file_anchor() -> (
+        Engine,
+        specter_core::ProfileId,
+        specter_core::ResourceId,
+        specter_core::ResourceId,
+    ) {
+        let mut e = Engine::new();
+        let parent = e.tree.ensure(None, "parentdir", ResourceRole::User);
+        e.tree.set_kind(parent, ResourceKind::Dir);
+        let file_anchor = e.tree.ensure(Some(parent), "main.rs", ResourceRole::User);
+        e.tree.set_kind(file_anchor, ResourceKind::File);
+        let pid = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(
+                file_anchor,
+                ScanConfig::builder().recursive(false).build(),
+                MAX_SETTLE,
+                SETTLE,
+                NO_EVENTS,
+            ),
+        );
+        (e, pid, parent, file_anchor)
+    }
+
+    #[test]
+    fn lca_pairwise_reduction_resolves_to_shared_intermediate_ancestor() {
+        // Witness for the pairwise LCA reduction. Two leaves under
+        // disjoint mid-3 branches share a depth-2 ancestor (`l2`); the
+        // reduction must resolve to that ancestor, not collapse to the
+        // anchor and not return either leaf.
+        let mut e = Engine::new();
+        let l0 = e.tree.ensure(None, "l0", ResourceRole::User);
+        e.tree.set_kind(l0, ResourceKind::Dir);
+        let l1 = e.tree.ensure(Some(l0), "l1", ResourceRole::User);
+        e.tree.set_kind(l1, ResourceKind::Dir);
+        let l2 = e.tree.ensure(Some(l1), "l2", ResourceRole::User);
+        e.tree.set_kind(l2, ResourceKind::Dir);
+        let l3a = e.tree.ensure(Some(l2), "a", ResourceRole::User);
+        e.tree.set_kind(l3a, ResourceKind::Dir);
+        let l3b = e.tree.ensure(Some(l2), "b", ResourceRole::User);
+        e.tree.set_kind(l3b, ResourceKind::Dir);
+        let leaf_a = e.tree.ensure(Some(l3a), "x", ResourceRole::User);
+        e.tree.set_kind(leaf_a, ResourceKind::File);
+        let leaf_b = e.tree.ensure(Some(l3b), "y", ResourceRole::User);
+        e.tree.set_kind(leaf_b, ResourceKind::File);
+        let pid = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(
+                l0,
+                ScanConfig::builder().recursive(true).build(),
+                MAX_SETTLE,
+                SETTLE,
+                NO_EVENTS,
+            ),
+        );
+
+        let dirty: BTreeSet<_> = [leaf_a, leaf_b].iter().copied().collect();
+        let target = lca_target(e.profiles.get(pid).unwrap(), &dirty, &e.tree);
+        assert_eq!(
+            target, l2,
+            "LCA of leaves under l3a and l3b is l2 (their shared depth-2 ancestor)",
+        );
+    }
+
+    #[test]
+    fn transition_to_verifying_on_file_anchor_targets_anchor() {
+        // File-anchored Profile: a Standard burst's probe target must be
+        // the anchor itself, not the parent dir. The kind dispatch lives
+        // at `transition_to_verifying`'s call site (rather than inside
+        // `lca_target`) so the LCA helper has a single, narrow contract:
+        // "lowest covering ancestor for a Dir-anchored Profile." This
+        // test pins the call-site dispatch — promoting past the anchor
+        // would route the probe outside the Profile's coverage and
+        // (downstream) wholesale-replace `Profile.current` with a Dir
+        // snapshot at the parent.
+        let (mut e, pid, _parent, file_anchor) = engine_with_file_anchor();
+        let mut start_out = StepOutput::default();
+        e.start_standard_burst(pid, file_anchor, Instant::now(), &mut start_out);
+
+        let mut probe_out = StepOutput::default();
+        e.transition_to_verifying(pid, &mut probe_out);
+
+        let req = probe_out
+            .probe_ops
+            .iter()
+            .find_map(|op| match op {
+                ProbeOp::Probe { request } => Some(request),
+                ProbeOp::Cancel { .. } => None,
+            })
+            .expect("Standard probe emitted");
+        assert_eq!(
+            req.target_resource, file_anchor,
+            "Standard burst on a File-anchored Profile must probe the anchor itself",
+        );
     }
 
     #[test]

@@ -600,10 +600,18 @@ impl SpliceResult {
 /// Rebuilds at most `depth(target)` `DirSnapshot`s along the
 /// path-to-anchor.
 ///
+/// `anchor` is the Profile's anchor `ResourceId`. It locks the
+/// Dir-prior path's `root.root_resource` invariant against any future
+/// drift and is the validation key for the File-prior path
+/// (a `File` prior only has a coherent splice when `target == anchor` —
+/// the only legitimate File-prior case is a kind change observed at
+/// the anchor itself).
+///
 /// Returns [`SpliceResult::Spliced`] with `TreeSnapshot::Dir(replacement)`
 /// (Arc-cheap) for the trivial cases:
 /// - `prior == None` (first graft).
-/// - `prior == Some(File(_))` (kind change at the anchor).
+/// - `prior == Some(File(_))` and `target == anchor` (kind change at
+///   the anchor).
 /// - `target == prior.root_resource` and the hashes differ (new root).
 ///
 /// Returns [`SpliceResult::Spliced`] with `TreeSnapshot::Dir(prior)`
@@ -619,6 +627,11 @@ impl SpliceResult {
 ///   out before reaching `anchor`).
 /// - The path from anchor to target crosses a `subtree: None` intermediate
 ///   (snapshot coverage gap), a missing entry, or a slot reaped mid-graft.
+/// - `prior` is `Some(File(_))` and `target != anchor`. A `File` prior
+///   means the only observation is the leaf at the anchor; integrating
+///   a `Dir` replacement at any other target would silently corrupt
+///   `Profile.current` to a Dir snapshot rooted off-anchor, violating
+///   the navigation invariant `current.root_resource == anchor`.
 ///
 /// Structurally unreachable in v1. The CrossedUncovered fallback preserves
 /// the prior view (no integration); the caller emits a Diagnostic so the
@@ -626,15 +639,46 @@ impl SpliceResult {
 #[must_use]
 pub fn splice(
     prior: Option<TreeSnapshot>,
+    anchor: ResourceId,
     target: ResourceId,
     replacement: Arc<DirSnapshot>,
     tree: &Tree,
 ) -> SpliceResult {
-    let Some(TreeSnapshot::Dir(root)) = prior else {
-        // None or File(_) prior: replace wholesale.
-        return SpliceResult::Spliced(TreeSnapshot::Dir(replacement));
-    };
-    let anchor = root.root_resource;
+    match prior {
+        None => SpliceResult::Spliced(TreeSnapshot::Dir(replacement)),
+        Some(TreeSnapshot::File(leaf)) => {
+            if target == anchor {
+                // Kind change at the anchor (File on disk became Dir).
+                // Wholesale-replace with the Dir replacement is correct.
+                SpliceResult::Spliced(TreeSnapshot::Dir(replacement))
+            } else {
+                // File prior + non-anchor target violates the navigation
+                // invariant: there is no observation between the anchor
+                // leaf and `target` to splice through, and integrating
+                // `replacement` at `target` would re-root `current`
+                // outside the anchor. Keep the prior leaf unchanged and
+                // let the caller surface the breach.
+                SpliceResult::CrossedUncovered(TreeSnapshot::File(leaf))
+            }
+        }
+        Some(TreeSnapshot::Dir(root)) => splice_dir_prior(root, anchor, target, replacement, tree),
+    }
+}
+
+/// Dir-prior splice path. Extracted so [`splice`]'s top-level match
+/// reads as one branch per `prior` shape rather than mixing Dir-only
+/// flow into the dispatcher.
+fn splice_dir_prior(
+    root: Arc<DirSnapshot>,
+    anchor: ResourceId,
+    target: ResourceId,
+    replacement: Arc<DirSnapshot>,
+    tree: &Tree,
+) -> SpliceResult {
+    debug_assert_eq!(
+        root.root_resource, anchor,
+        "splice: Dir prior's root_resource must match the Profile anchor",
+    );
     if target == anchor {
         if root.dir_hash() == replacement.dir_hash() {
             return SpliceResult::Spliced(TreeSnapshot::Dir(root));
@@ -644,11 +688,11 @@ pub fn splice(
 
     let Some(chain) = ancestor_chain(target, anchor, tree) else {
         // Target outside anchor's tree subtree. Keep prior unchanged;
-        // surface the contract violation. Behaviour change vs. pre-PR:
-        // the prior `wholesale-replace with replacement` left
-        // `Profile.current` rooted at `target` (not anchor), violating
-        // the snapshot navigation invariants. Keeping prior preserves
-        // the invariant and lets the next observation converge.
+        // surface the contract violation. Pre-PR behaviour was to
+        // wholesale-replace with `replacement`, leaving
+        // `Profile.current` rooted at `target` (not anchor) and
+        // violating the snapshot navigation invariants. Keeping prior
+        // preserves the invariant and lets the next observation converge.
         return SpliceResult::CrossedUncovered(TreeSnapshot::Dir(root));
     };
 

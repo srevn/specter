@@ -401,9 +401,13 @@ fn standard_burst_stable_emits_effect_and_awaits() {
 
 #[test]
 fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
-    // SubtreeRoot Sub anchored at a File-kind Profile: cwd should be the
-    // parent dir, not the file itself (Command::current_dir requires a
-    // directory).
+    // Contract: SubtreeRoot Sub anchored at a File-kind Profile derives
+    // the Effect's `cwd` from the file's parent dir (not the file
+    // itself — `Command::current_dir` requires a directory). The
+    // surrounding burst flow (probe target, current-shape preservation,
+    // graft path) is exercised by
+    // `standard_burst_on_file_anchor_targets_anchor_not_parent_dir`;
+    // this test asserts only the cwd / env-var contract.
     let mut e = Engine::new();
     let parent = e.tree.ensure(None, "parentdir", ResourceRole::User);
     e.tree.set_kind(parent, ResourceKind::Dir);
@@ -480,6 +484,141 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     assert_eq!(
         env.iter().find(|(k, _)| k == "SPECTER_ANCHOR").unwrap().1,
         "parentdir/main.rs",
+    );
+}
+
+#[test]
+fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
+    // Realistic Standard-burst-on-File-anchor flow. A real Sensor
+    // probing a File anchor returns `TreeSnapshot::File(leaf)`; the
+    // engine must (1) probe the anchor itself rather than the parent
+    // dir and (2) preserve `Profile.current` as `TreeSnapshot::File(_)`
+    // post-dispatch — the snapshot navigation invariant
+    // `current` is anchor-shaped breaks if a Standard burst graft
+    // wholesale-replaces with a Dir snapshot rooted at the parent.
+    //
+    // Pre-fix this test would have been impossible to write: the
+    // pre-fix `lca_target` promoted the File anchor to the parent dir,
+    // the walker would return `Dir(parent_snap)`, and dispatch would
+    // graft → splice → wholesale-replace `Profile.current` with the
+    // parent snapshot. Asserting "current is File" would fail.
+    let mut e = Engine::new();
+    let parent = e.tree.ensure(None, "parentdir", ResourceRole::User);
+    e.tree.set_kind(parent, ResourceKind::Dir);
+    let file_anchor = e.tree.ensure(Some(parent), "main.rs", ResourceRole::User);
+    e.tree.set_kind(file_anchor, ResourceKind::File);
+    let now = Instant::now();
+    let req = SubAttachRequest {
+        name: String::from("build"),
+        resource: file_anchor,
+        path: None,
+        config: ScanConfig::builder().recursive(false).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
+        log_output: false,
+    };
+    let (sid, _) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+
+    // Seed → leaf v1; Standard injects the same leaf so the verdict
+    // is stable (matching the conventional pattern across this file).
+    let snap = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
+    let seed_corr = e.pending_probe(pid).expect("Seed verify probe in flight");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: seed_corr,
+            result: ProbeResult::Ok(snap.clone()),
+        }),
+        now,
+    );
+
+    // Drive a Standard burst from an FsEvent at the file. Capture the
+    // probe target emitted on the settle-timer expiry step.
+    let t1 = now + Duration::from_millis(10);
+    e.step(
+        Input::FsEvent {
+            resource: file_anchor,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    let t2 = t1 + SETTLE * 2;
+    let mut probe_target: Option<ResourceId> = None;
+    let mut probe_kind: Option<ProbeKind> = None;
+    while let Some(entry) = e.pop_expired(t2) {
+        let out = e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
+        for op in &out.probe_ops {
+            if let ProbeOp::Probe { request } = op {
+                probe_target = Some(request.target_resource);
+                probe_kind = Some(request.kind);
+            }
+        }
+    }
+
+    // (1) The Standard probe targeted the file anchor itself.
+    assert_eq!(
+        probe_target,
+        Some(file_anchor),
+        "Standard burst on a File-anchored Profile must probe the anchor (not the parent dir)",
+    );
+    assert_eq!(
+        probe_kind,
+        Some(ProbeKind::File),
+        "File-anchor target ⇒ ProbeKind::File (single-file lstat path in the walker)",
+    );
+
+    // (2) Inject a realistic File response (kqueue per-file FD path).
+    // After dispatch, Profile.current must remain File-shaped — pre-fix
+    // it would have been wholesale-replaced with a Dir snapshot rooted
+    // at the parent dir, breaking the navigation invariant.
+    let std_corr = e.pending_probe(pid).expect("Standard verify probe in flight");
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: std_corr,
+            result: ProbeResult::Ok(snap),
+        }),
+        t2,
+    );
+
+    let p = e.profiles.get(pid).expect("Profile alive");
+    match &p.current {
+        Some(TreeSnapshot::File(_)) => {} // navigation invariant preserved
+        Some(TreeSnapshot::Dir(arc)) => panic!(
+            "Profile.current corrupted to Dir(root_resource={:?}); expected File(leaf)",
+            arc.root_resource,
+        ),
+        None => panic!("Profile.current must be Some(File(leaf)) post-Standard"),
+    }
+
+    // (3) Stable verdict (same leaf hash) + dirty=0 ⇒ exactly one
+    // Effect fires.
+    assert_eq!(
+        out.effects.len(),
+        1,
+        "stable verdict + dirty=0 ⇒ exactly one Effect fires",
+    );
+
+    // (4) The anchor's `watch_demand` is exactly 1 (Profile claim only).
+    // Pre-fix, the buggy graft path called `walk_pair` against a
+    // Dir-shaped probe target; `create_child` ran on the file_anchor
+    // entry and bumped the anchor's watch_demand to 2 — a quiet
+    // resource leak that survives Profile detach.
+    assert_eq!(
+        e.tree.get(file_anchor).map(|r| r.watch_demand),
+        Some(1),
+        "no spurious watch_demand bump on the anchor",
     );
 }
 

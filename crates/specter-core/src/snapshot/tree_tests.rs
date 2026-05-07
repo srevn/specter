@@ -737,7 +737,7 @@ fn splice_no_prior_returns_replacement() {
     let mut tree = Tree::new();
     let id = tree.ensure(None, "anchor", ResourceRole::User);
     let r = make_dir(id, meta(1, 1, 0), 0, BTreeMap::new());
-    let s = unwrap_spliced(splice(None, id, Arc::clone(&r), &tree));
+    let s = unwrap_spliced(splice(None, id, id, Arc::clone(&r), &tree));
     if let TreeSnapshot::Dir(d) = s {
         assert!(Arc::ptr_eq(&d, &r));
     } else {
@@ -758,6 +758,7 @@ fn splice_at_anchor_replaces_root() {
     let replacement = make_dir(id, meta(2, 1, 0), 0, new_entries);
     let s = unwrap_spliced(splice(
         Some(TreeSnapshot::Dir(Arc::clone(&prior))),
+        id,
         id,
         Arc::clone(&replacement),
         &tree,
@@ -780,6 +781,7 @@ fn splice_at_anchor_equal_hash_keeps_prior_arc() {
     assert_eq!(prior.dir_hash(), replacement.dir_hash());
     let s = unwrap_spliced(splice(
         Some(TreeSnapshot::Dir(Arc::clone(&prior))),
+        id,
         id,
         replacement,
         &tree,
@@ -818,7 +820,13 @@ fn splice_one_level_deep_off_path_arc_ptr_eq() {
     // Replacement at `a` differs from prior_a (different mtime).
     let replacement = make_dir(a, meta(20, 2, 0), 0, BTreeMap::new());
     assert_ne!(prior_a.dir_hash(), replacement.dir_hash());
-    let s = unwrap_spliced(splice(Some(TreeSnapshot::Dir(root)), a, replacement, &tree));
+    let s = unwrap_spliced(splice(
+        Some(TreeSnapshot::Dir(root)),
+        anchor,
+        a,
+        replacement,
+        &tree,
+    ));
     let TreeSnapshot::Dir(new_root) = s else {
         panic!()
     };
@@ -861,6 +869,7 @@ fn splice_three_levels_deep_off_path_arc_ptr_eq() {
     let replacement_c = make_dir(c, meta(40, 4, 0), 0, BTreeMap::new());
     let s = unwrap_spliced(splice(
         Some(TreeSnapshot::Dir(root)),
+        anchor,
         c,
         replacement_c,
         &tree,
@@ -897,6 +906,7 @@ fn splice_equal_hash_at_leaf_keeps_prior() {
     assert_eq!(prior_a.dir_hash(), replacement_a.dir_hash());
     let s = unwrap_spliced(splice(
         Some(TreeSnapshot::Dir(Arc::clone(&root))),
+        anchor,
         a,
         replacement_a,
         &tree,
@@ -931,6 +941,7 @@ fn splice_equal_hash_at_intermediate_keeps_prior_spine() {
     let replacement_b = make_dir(b, meta(3, 3, 0), 0, BTreeMap::new());
     let s = unwrap_spliced(splice(
         Some(TreeSnapshot::Dir(Arc::clone(&root))),
+        anchor,
         b,
         replacement_b,
         &tree,
@@ -960,6 +971,7 @@ fn splice_replacement_changes_dir_hash_uncached_recompute_correct() {
     let replacement_a = make_dir(a, meta(20, 2, 0), 0, BTreeMap::new());
     let s = unwrap_spliced(splice(
         Some(TreeSnapshot::Dir(root)),
+        anchor,
         a,
         replacement_a,
         &tree,
@@ -986,6 +998,7 @@ fn splice_target_outside_observed_returns_crossed_uncovered_keeping_prior() {
     let replacement = make_dir(stranger, meta(2, 2, 0), 0, BTreeMap::new());
     let s = splice(
         Some(TreeSnapshot::Dir(Arc::clone(&prior))),
+        anchor,
         stranger,
         Arc::clone(&replacement),
         &tree,
@@ -1017,13 +1030,53 @@ fn splice_target_chain_through_uncovered_returns_crossed_uncovered_keeping_prior
     let prior = TreeSnapshot::Dir(Arc::clone(&root));
 
     let replacement_b = make_dir(b, meta(3, 3, 0), 0, BTreeMap::new());
-    let s = splice(Some(prior), b, replacement_b, &tree);
+    let s = splice(Some(prior), anchor, b, replacement_b, &tree);
     let SpliceResult::CrossedUncovered(TreeSnapshot::Dir(d)) = s else {
         panic!("expected CrossedUncovered with Dir snapshot");
     };
     assert!(
         Arc::ptr_eq(&d, &root),
         "uncovered intermediate ⇒ keep prior unchanged",
+    );
+}
+
+#[test]
+fn splice_file_prior_at_anchor_replaces_with_dir() {
+    // File-prior + target == anchor: legitimate kind change at the
+    // anchor (file became a dir on disk). Wholesale-replace with the
+    // Dir replacement.
+    let mut tree = Tree::new();
+    let anchor = tree.ensure(None, "anchor", ResourceRole::User);
+    let prior = TreeSnapshot::File(leaf(EntryKind::File, 7, 0, 1, 0));
+    let replacement = make_dir(anchor, meta(2, 2, 0), 0, BTreeMap::new());
+    let s = splice(Some(prior), anchor, anchor, Arc::clone(&replacement), &tree);
+    let SpliceResult::Spliced(TreeSnapshot::Dir(d)) = s else {
+        panic!("expected Spliced(Dir) for File-prior + target == anchor");
+    };
+    assert!(Arc::ptr_eq(&d, &replacement));
+}
+
+#[test]
+fn splice_file_prior_with_non_anchor_target_keeps_prior() {
+    // File-prior + target != anchor: the engine has only observed the
+    // leaf at the anchor; integrating a Dir replacement at any other
+    // target would re-root `current` outside the anchor, violating the
+    // navigation invariant. Defense-in-depth: surface as
+    // `CrossedUncovered` carrying the prior leaf unchanged.
+    let mut tree = Tree::new();
+    let parent = tree.ensure(None, "parentdir", ResourceRole::User);
+    let anchor = tree.ensure(Some(parent), "main.rs", ResourceRole::User);
+    let prior_leaf = leaf(EntryKind::File, 7, 0, 1, 0);
+    let prior = TreeSnapshot::File(prior_leaf.clone());
+    let replacement = make_dir(parent, meta(2, 2, 0), 0, BTreeMap::new());
+    let s = splice(Some(prior), anchor, parent, Arc::clone(&replacement), &tree);
+    let SpliceResult::CrossedUncovered(TreeSnapshot::File(got)) = s else {
+        panic!("expected CrossedUncovered(File) for File-prior + non-anchor target");
+    };
+    assert_eq!(
+        got.leaf_hash(),
+        prior_leaf.leaf_hash(),
+        "prior leaf preserved unchanged",
     );
 }
 
@@ -2008,7 +2061,7 @@ proptest! {
 
         let replacement = make_dir(a, meta(meta_secs.saturating_add(100), 2, 0), 0, BTreeMap::new());
         prop_assume!(prior_a.dir_hash() != replacement.dir_hash());
-        let s = splice(Some(TreeSnapshot::Dir(root)), a, replacement, &tree);
+        let s = splice(Some(TreeSnapshot::Dir(root)), anchor, a, replacement, &tree);
         let SpliceResult::Spliced(TreeSnapshot::Dir(new_root)) = s else { unreachable!() };
         for (i, sib) in siblings.iter().enumerate() {
             let key = format!("sib_{i}");
@@ -2017,7 +2070,7 @@ proptest! {
         }
     }
 
-    /// splice(prior, target, replacement) ⇒ subtree_at(target) == replacement.
+    /// splice(prior, anchor, target, replacement) ⇒ subtree_at(target) == replacement.
     #[test]
     fn prop_splice_then_subtree_at_returns_replacement(
         meta_secs in 1u64..50,
@@ -2042,7 +2095,7 @@ proptest! {
         );
         let replacement = make_dir(b, meta(meta_secs, 3, 0), 0, BTreeMap::new());
         prop_assume!(prior_b.dir_hash() != replacement.dir_hash());
-        let s = splice(Some(TreeSnapshot::Dir(root)), b, Arc::clone(&replacement), &tree);
+        let s = splice(Some(TreeSnapshot::Dir(root)), anchor, b, Arc::clone(&replacement), &tree);
         let SpliceResult::Spliced(snap) = s else { unreachable!() };
         let got = snap.subtree_at(b, &tree).expect("b resolves after splice");
         prop_assert_eq!(got.dir_hash(), replacement.dir_hash());
@@ -2069,7 +2122,7 @@ proptest! {
         // Equal hash because all data fields agree.
         let replacement = make_dir(a, m, 0, BTreeMap::new());
         prop_assert_eq!(prior_a.dir_hash(), replacement.dir_hash());
-        let s = splice(Some(TreeSnapshot::Dir(Arc::clone(&root))), a, replacement, &tree);
+        let s = splice(Some(TreeSnapshot::Dir(Arc::clone(&root))), anchor, a, replacement, &tree);
         let SpliceResult::Spliced(TreeSnapshot::Dir(new_root)) = s else { unreachable!() };
         prop_assert!(Arc::ptr_eq(&new_root, &root));
     }
