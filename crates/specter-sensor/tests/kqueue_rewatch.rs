@@ -233,10 +233,10 @@ fn rewatch_with_same_mask_preserves_registration() {
 }
 
 /// Suppression and mask changes interact. A re-watch after `suppress()`
-/// must keep the resource silenced even when the new mask widens. The
-/// watcher composes `EV_ADD | EV_CLEAR | EV_DISABLE` on a single change
-/// record so the kernel-side filter never observes an enabled state
-/// mid-update.
+/// must keep the resource silenced even when the new mask widens.
+/// Suppression lives in the watcher's userspace `suppressed` map, so a
+/// re-register that updates the kernel mask leaves the gate intact and
+/// `poll_until` continues dropping events for `r` until `unsuppress`.
 #[test]
 fn rewatch_preserves_suppress_state() {
     let tmp = TempDir::new().unwrap();
@@ -293,25 +293,21 @@ fn rewatch_preserves_suppress_state() {
     drop(w);
 }
 
-/// Race property: events queued in the kernel filter BEFORE the initial
-/// `suppress()` must remain silenced across a subsequent `watch()`
-/// (re-register) call on the suppressed FD. The re-register's
-/// single-syscall `EV_ADD | EV_CLEAR | EV_DISABLE` change record collapses
-/// the prior two-syscall window — under the old shape an `EV_ADD`-then-
-/// `EV_DISABLE` sequence transiently enabled the kernel-side filter, so
-/// any pending event on it would become deliverable on a concurrent
-/// `kevent` drain.
+/// Userspace-gate contract: events arriving while a resource is
+/// suppressed are dropped at the watcher boundary, not queued for
+/// replay on `unsuppress`. A re-watch that updates the kernel mask
+/// during the suppressed window does not change this — `poll_until`
+/// continues dropping events for `r` until `unsuppress` lifts the gate,
+/// and the post-`unsuppress` event stream contains only events that
+/// occurred AFTER `unsuppress`.
 ///
-/// The watcher's `poll_until` is the only consumer of the kqueue fd, so
-/// the race is single-thread quiescent — but the property the kernel
-/// guarantees is "no transient enable", and the test pins that contract
-/// regardless of when delivery fires. The harness writes BEFORE
-/// `suppress`, then issues a re-watch with a widened mask, then drains.
-/// Pre-fix, the drain after re-watch would surface the queued
-/// `Modified`; post-fix it stays buffered behind the disable bit until
+/// Pre-userspace-gate the watcher used `EV_DISABLE` and the kernel
+/// coalesced a `NOTE_WRITE` queued during suppress into a phantom
+/// kevent that delivered on `EV_ENABLE`. The userspace gate drops the
+/// event at drain time instead; there is nothing to flush on
 /// `unsuppress`.
 #[test]
-fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
+fn rewatch_on_suppressed_fd_drops_events_during_suppress() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, "x").unwrap();
@@ -324,9 +320,8 @@ fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
     w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
         .unwrap();
 
-    // Write — queues a NOTE_WRITE in the kernel filter. Drain it once so
-    // we know the event landed; this also clears any registration-time
-    // ack bits.
+    // Pre-suppress write must deliver — the kernel filter is enabled
+    // and the userspace gate is empty.
     std::fs::write(&path, "y").unwrap();
     let initial = drain_until(
         &mut w,
@@ -340,9 +335,9 @@ fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
         "initial write must deliver before suppress; got {initial:?}",
     );
 
-    // Suppress, then queue another write while suppressed. Under
-    // EV_DISABLE the filter still buffers events — they accumulate
-    // behind the disable bit and stay invisible to drains.
+    // Suppress, then write while suppressed. The kernel still queues
+    // the NOTE_WRITE on the live filter; the userspace gate drops it at
+    // `poll_until` drain time.
     w.suppress(r);
     std::fs::write(&path, "z").unwrap();
     let suppressed_drain = drain_for(&mut w, Duration::from_millis(200));
@@ -351,9 +346,8 @@ fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
         "writes during suppress must not deliver; got {suppressed_drain:?}",
     );
 
-    // Re-watch with a widened mask. The single-syscall change record
-    // re-registers AND keeps the disable bit set; the buffered NOTE_WRITE
-    // does not slip out.
+    // Re-watch with a widened mask. The kernel re-registration is
+    // independent of suppression state; the gate keeps `r` silenced.
     w.watch(
         r,
         &path,
@@ -364,17 +358,33 @@ fn rewatch_on_suppressed_fd_does_not_leak_pending_events() {
     let post_rewatch = drain_for(&mut w, Duration::from_millis(300));
     assert!(
         !post_rewatch.iter().any(|(rid, _)| *rid == r),
-        "re-watch on a suppressed FD must keep buffered events silenced; \
+        "re-watch under suppress must keep events for r silenced; \
          got {post_rewatch:?}",
     );
 
-    // Sanity check: unsuppress reveals the buffered event(s), confirming
-    // they were merely silenced (not lost) and the new mask took effect.
+    // `unsuppress` lifts the gate. There is nothing to flush — events
+    // queued during suppress were dropped at drain time. A drain over
+    // a short window must observe no events for `r`.
     w.unsuppress(r);
-    let restored = drain_until(&mut w, |(rid, _)| *rid == r, Duration::from_secs(2));
+    let post_unsuppress = drain_for(&mut w, Duration::from_millis(300));
     assert!(
-        restored.iter().any(|(rid, _)| *rid == r),
-        "unsuppress must flush buffered events; got {restored:?}",
+        !post_unsuppress.iter().any(|(rid, _)| *rid == r),
+        "post-unsuppress drain must contain no flushed events; got {post_unsuppress:?}",
+    );
+
+    // A write AFTER unsuppress fires normally — confirms the kernel
+    // registration is still live and the new mask is in effect.
+    std::fs::write(&path, "w").unwrap();
+    let restored = drain_until(
+        &mut w,
+        |(rid, e)| *rid == r && *e == FsEvent::Modified,
+        Duration::from_secs(2),
+    );
+    assert!(
+        restored
+            .iter()
+            .any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
+        "post-unsuppress write must deliver; got {restored:?}",
     );
 
     drop(w);

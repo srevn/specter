@@ -104,10 +104,11 @@ pub struct InotifyWatcher {
     /// `IN_MODIFY` on Dir vs File defensive paths.
     kinds: SecondaryMap<ResourceId, ResourceKind>,
 
-    /// Suppressed set. inotify has no kernel-level disable analogue to
-    /// kqueue's `EV_DISABLE`, so `poll_until` filters delivery
-    /// user-side using this map. Mutated by `suppress`/`unsuppress`;
-    /// the trait's idempotency contract is satisfied by `BTreeMap`'s
+    /// Suppressed set. `poll_until` consults this map before lifting an
+    /// event onto the engine's input channel; events for a suppressed
+    /// resource drop at the watcher boundary per the
+    /// [`FsWatcher::suppress`] contract. Mutated by `suppress` /
+    /// `unsuppress`; idempotency is satisfied by `SecondaryMap`'s
     /// insert/remove semantics.
     suppressed: SecondaryMap<ResourceId, ()>,
 
@@ -533,28 +534,23 @@ impl FsWatcher for InotifyWatcher {
         tracing::debug!(?r, wd, "inotify unwatch");
     }
 
-    /// Silence event delivery on `r` via a user-space filter — inotify
-    /// has no kernel-level disable analogue to kqueue's `EV_DISABLE`,
-    /// so the [`Self::suppressed`] map is the authoritative source and
-    /// `poll_until` consults it before lifting an event onto the
-    /// engine's input channel.
+    /// Silence event delivery on `r`. Inserts into [`Self::suppressed`];
+    /// `poll_until` consults the map before lifting an event onto the
+    /// engine's input channel, so events for a suppressed resource drop
+    /// at the watcher boundary per the [`FsWatcher::suppress`] contract.
     ///
     /// Idempotent on stale ids (the engine emits Suppress only on the
     /// 0→1 `suppress_count` edge, but the operation is safe under any
-    /// race). The trait doc pins the kernel-disable vs user-space-filter
-    /// wording so the engine's caller doesn't depend on a kernel-side
-    /// flush semantic kqueue happens to provide and inotify cannot.
-    ///
-    /// Mirrors the kqueue branch's "warn on unwatched" discipline so
-    /// the two backends produce comparable diagnostic output on a
-    /// `WatchOp::Suppress` that races a concurrent `WatchOp::Unwatch`.
+    /// race). Warns on an unwatched id so a `WatchOp::Suppress` that
+    /// races a concurrent `WatchOp::Unwatch` is observable in operator
+    /// logs — mirrored by the kqueue branch.
     fn suppress(&mut self, r: ResourceId) {
         if !self.by_resource.contains_key(r) {
             tracing::warn!(?r, "inotify suppress on unwatched resource (race; dropped)");
             return;
         }
         self.suppressed.insert(r, ());
-        tracing::debug!(?r, "inotify suppress (user-space)");
+        tracing::debug!(?r, "inotify suppress");
     }
 
     /// Restore event delivery on `r`. Idempotent; mirror of
@@ -562,11 +558,6 @@ impl FsWatcher for InotifyWatcher {
     /// discipline. A watched-but-not-suppressed `r` is silently fine
     /// — the [`Self::suppressed`] removal is a no-op and event
     /// delivery resumes (or, more accurately, was already happening).
-    /// Symmetry with kqueue's
-    /// [`crate::kqueue::watcher::KqueueWatcher::unsuppress`] keeps the
-    /// engine's caller backend-agnostic; the kqueue branch's
-    /// `EV_ENABLE` syscall is the structural counterpart of this
-    /// `suppressed.remove(r)` call.
     fn unsuppress(&mut self, r: ResourceId) {
         if !self.by_resource.contains_key(r) {
             tracing::warn!(
@@ -576,7 +567,7 @@ impl FsWatcher for InotifyWatcher {
             return;
         }
         self.suppressed.remove(r);
-        tracing::debug!(?r, "inotify unsuppress (user-space)");
+        tracing::debug!(?r, "inotify unsuppress");
     }
 
     /// Block on `epoll_wait` over `(inotify_fd, wake_fd)` until the
@@ -773,9 +764,10 @@ impl FsWatcher for InotifyWatcher {
                 continue;
             };
 
-            // User-space suppression filter (no kernel disable on
-            // inotify). Mirror of kqueue's EV_DISABLE from the
-            // engine's POV.
+            // User-space suppression filter — drop events for resources
+            // the engine has marked suppressed. Symmetric with the
+            // kqueue branch's same gate; satisfies the
+            // [`FsWatcher::suppress`] drop-at-boundary contract.
             if self.suppressed.contains_key(r) {
                 continue;
             }

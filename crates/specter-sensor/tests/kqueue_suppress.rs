@@ -1,5 +1,8 @@
-//! `EV_DISABLE` / `EV_ENABLE` round-trip — suppress silences delivery,
-//! unsuppress restores it. macOS / FreeBSD only.
+//! `suppress` / `unsuppress` round-trip — suppress silences delivery,
+//! unsuppress restores it. The watcher's userspace gate at `poll_until`
+//! drops events for suppressed resources at the watcher boundary;
+//! kernel registration is unchanged across the round-trip.
+//! macOS / FreeBSD only.
 
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
@@ -78,14 +81,14 @@ fn suppress_then_unwatch_then_unsuppress_does_not_panic() {
         .unwrap();
     w.suppress(r);
     w.unwatch(r);
-    // EV_ENABLE on a closed fd hits ENOENT inside ffi; the watcher logs
-    // warn and drops — no return value to assert beyond "we get here."
+    // `unwatch` clears the userspace `suppressed` entry and the FD; a
+    // subsequent `unsuppress` warns "on unwatched resource" and returns.
     w.unsuppress(r);
     drop(w);
 }
 
 #[test]
-fn double_suppress_is_idempotent_at_kernel_level() {
+fn double_suppress_is_idempotent() {
     let tmp = TempDir::new().unwrap();
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
@@ -94,7 +97,7 @@ fn double_suppress_is_idempotent_at_kernel_level() {
     w.watch(r, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
         .unwrap();
     w.suppress(r);
-    w.suppress(r); // No error; kernel re-applies EV_DISABLE harmlessly.
+    w.suppress(r); // `SecondaryMap::insert` overwrites; second call is a no-op.
 
     std::fs::write(tmp.path().join("c.txt"), "z").unwrap();
     let out = drain_for(&mut w, Duration::from_millis(300));

@@ -91,23 +91,9 @@ pub(super) fn trigger_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<
 }
 
 /// Register (or re-register) a vnode watch with the caller-supplied
-/// fflags mask, edge-triggered, in the requested enabled/disabled state.
-/// `udata` carries the engine's `ResourceId.as_ffi()` so events
-/// round-trip the id without the watcher needing a separate fd↔id map.
-///
-/// `enabled = false` composes `EV_DISABLE` onto the change record so the
-/// install-and-disable happens in **one syscall**. Per `kqueue(2)`:
-/// > Adding an event automatically enables it, unless overridden by the
-/// > EV_DISABLE flag.
-///
-/// (FreeBSD `kqueue(2)` § EV_ADD; macOS `kqueue(2)` § EV_ADD.)
-///
-/// Single-record install-with-state matters on the re-watch path of a
-/// previously suppressed FD: a two-syscall sequence (`EV_ADD` then
-/// `EV_DISABLE`) leaves a window where the kernel-side filter is enabled,
-/// during which any pending event on the filter (queued before the prior
-/// `suppress`) becomes deliverable. Composing the bits in one change
-/// record collapses that window to zero.
+/// fflags mask, edge-triggered. `udata` carries the engine's
+/// `ResourceId.as_ffi()` so events round-trip the id without the watcher
+/// needing a separate fd↔id map.
 ///
 /// `fflags` is the caller's responsibility — the kqueue translator
 /// (`super::translate::class_set_to_fflags`) is the single producer of
@@ -118,46 +104,8 @@ pub(super) fn register_vnode(
     target: &OwnedFd,
     r: ResourceId,
     fflags: u32,
-    enabled: bool,
 ) -> io::Result<()> {
-    let mut change_flags = libc::EV_ADD | libc::EV_CLEAR;
-    if !enabled {
-        change_flags |= libc::EV_DISABLE;
-    }
-    vnode_change(kq, target, r, change_flags, fflags)
-}
-
-/// `EV_DISABLE` — silences delivery without removing the registration.
-///
-/// `fflags` should be the **currently-registered** mask for this vnode
-/// (the value the watcher's `registered_fflags` cache holds). Passing
-/// the live mask matters: empirically, macOS xnu's `EV_DISABLE` /
-/// `EV_ENABLE` paths overwrite the registered fflags with whatever the
-/// caller supplies — passing `0` would silently clear `NOTE_WRITE` /
-/// `NOTE_ATTRIB` / etc. on the next re-enable. FreeBSD preserves fflags
-/// across disable/enable per `kqueue_register`, so the value is a no-op
-/// there. Treating both backends identically (always pass the cached
-/// mask) is correct on both. Only the disable bit is intentionally
-/// changed.
-pub(super) fn disable_vnode(
-    kq: &OwnedFd,
-    target: &OwnedFd,
-    r: ResourceId,
-    fflags: u32,
-) -> io::Result<()> {
-    vnode_change(kq, target, r, libc::EV_DISABLE, fflags)
-}
-
-/// `EV_ENABLE` — restores delivery on a previously disabled
-/// registration. See [`disable_vnode`] for the fflags-passthrough
-/// rationale.
-pub(super) fn enable_vnode(
-    kq: &OwnedFd,
-    target: &OwnedFd,
-    r: ResourceId,
-    fflags: u32,
-) -> io::Result<()> {
-    vnode_change(kq, target, r, libc::EV_ENABLE, fflags)
+    vnode_change(kq, target, r, libc::EV_ADD | libc::EV_CLEAR, fflags)
 }
 
 #[allow(clippy::similar_names)]

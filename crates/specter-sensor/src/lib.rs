@@ -173,18 +173,21 @@ pub trait FsWatcher: Send {
     /// Silence event delivery on a watched resource. Idempotent; no-op
     /// (with `tracing::warn!`) if `r` is not currently watched.
     ///
-    /// Backends with kernel-level disable (kqueue's `EV_DISABLE`)
-    /// preserve the registration; backends without (inotify) filter
-    /// delivery in user space using the same `(ResourceId)` key. Either
-    /// way, no re-stat happens on `unsuppress`, and the post-unsuppress
-    /// event stream includes any state-change-since-suppress signal the
-    /// kernel emits (kqueue: edge-triggered registration; inotify:
-    /// continuous delivery).
+    /// Events arriving while suppressed are dropped at the watcher
+    /// boundary; the post-unsuppress event stream contains only events
+    /// that occur after [`unsuppress`](Self::unsuppress). Implementations
+    /// realise this as a userspace filter consulted by `poll_until`
+    /// before lifting an event onto the engine's input channel —
+    /// kernel-level disable mechanisms are not used because their
+    /// queue-and-replay semantics would deliver a coalesced phantom
+    /// on re-enable, breaking the engine's "no events for `r` while
+    /// suppressed" expectation. The kernel registration is unchanged
+    /// across suppress/unsuppress; no re-stat happens on either edge.
     fn suppress(&mut self, r: ResourceId);
 
     /// Restore event delivery. Idempotent; no-op (with `tracing::warn!`)
     /// if `r` is not currently suppressed. See [`suppress`](Self::suppress)
-    /// for the kernel-level-disable vs user-space-filter discipline.
+    /// for the drop-at-boundary contract.
     fn unsuppress(&mut self, r: ResourceId);
 
     /// Block until the next event(s), the deadline, or a wake. Pushes

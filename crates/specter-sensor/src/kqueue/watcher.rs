@@ -117,13 +117,10 @@ impl KqueueWatcher {
         // ── Re-watch path ───────────────────────────────────────────
         // FD already held: compute the new fflags from the cached kind
         // + incoming events; diff against the installed mask; re-register
-        // iff different. The re-register composes EV_ADD | EV_CLEAR with
-        // an optional EV_DISABLE on the **same change record**, so the
-        // kernel-side filter never observes an enabled state mid-update
-        // when re-registering on a previously suppressed FD. This closes
-        // the two-syscall race that an EV_ADD-then-EV_DISABLE sequence
-        // exposed (per kqueue(2) § EV_ADD: "Adding an event automatically
-        // enables it, unless overridden by the EV_DISABLE flag").
+        // iff different. Suppression lives in userspace (`self.suppressed`
+        // gate at `poll_until`) and is independent of the kernel
+        // registration, so re-register installs the new mask without
+        // threading suppress state through the syscall.
         //
         // The engine-supplied `kind` is ignored on the re-watch path:
         // the cached kind (verified against `fstat` at fresh-watch time)
@@ -148,7 +145,7 @@ impl KqueueWatcher {
                     .by_resource
                     .get(r)
                     .expect("by_resource.contains_key(r) was true");
-                ffi::register_vnode(&self.kq, fd, r, new_fflags, !suppressed)?;
+                ffi::register_vnode(&self.kq, fd, r, new_fflags)?;
             }
             self.registered_fflags.insert(r, new_fflags);
             tracing::debug!(
@@ -166,11 +163,9 @@ impl KqueueWatcher {
         // 1) Open. 2) Stat + verify against engine's expected kind.
         // 3) Translate. 4) Register. 5) Insert. Each step's failure
         // drops anything earlier (the OwnedFd auto-closes) so a
-        // partially-failed `watch` leaves zero state. Fresh watches
-        // start enabled — `suppressed` is populated by `suppress(r)`
-        // after the WatchOp ordering puts a `Watch` before any
-        // same-step `Suppress`, so any later silencing rides the
-        // dedicated `disable_vnode` syscall path.
+        // partially-failed `watch` leaves zero state. The kernel
+        // registration is unconditional; userspace silencing happens
+        // via `self.suppressed` at `poll_until` drain time.
         let fd = fd::open_for_watch(path)?;
         let observed_kind = fd::stat_kind(&fd)?;
         if !kind.matches_or_unknown(observed_kind) {
@@ -188,7 +183,7 @@ impl KqueueWatcher {
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
         }
         let fflags = translate::class_set_to_fflags(events, observed_kind);
-        ffi::register_vnode(&self.kq, &fd, r, fflags, true)?;
+        ffi::register_vnode(&self.kq, &fd, r, fflags)?;
         self.by_resource.insert(r, fd);
         self.kinds.insert(r, observed_kind);
         self.registered_fflags.insert(r, fflags);
@@ -232,16 +227,8 @@ impl FsWatcher for KqueueWatcher {
     }
 
     fn suppress(&mut self, r: ResourceId) {
-        let Some(fd) = self.by_resource.get(r) else {
+        if !self.by_resource.contains_key(r) {
             tracing::warn!(?r, "kqueue suppress on unwatched resource (race; dropped)");
-            return;
-        };
-        // Pass the cached fflags so macOS's EV_DISABLE path preserves
-        // the registered mask (FreeBSD ignores fflags on disable; macOS
-        // overwrites). See `ffi::disable_vnode` for the platform note.
-        let fflags = self.registered_fflags.get(r).copied().unwrap_or(0);
-        if let Err(e) = ffi::disable_vnode(&self.kq, fd, r, fflags) {
-            tracing::warn!(?r, error = ?e, "kqueue EV_DISABLE failed (likely race; dropped)");
             return;
         }
         self.suppressed.insert(r, ());
@@ -249,18 +236,11 @@ impl FsWatcher for KqueueWatcher {
     }
 
     fn unsuppress(&mut self, r: ResourceId) {
-        let Some(fd) = self.by_resource.get(r) else {
+        if !self.by_resource.contains_key(r) {
             tracing::warn!(
                 ?r,
                 "kqueue unsuppress on unwatched resource (race; dropped)"
             );
-            return;
-        };
-        // See `suppress` — pass cached fflags so EV_ENABLE preserves
-        // the registered mask on macOS.
-        let fflags = self.registered_fflags.get(r).copied().unwrap_or(0);
-        if let Err(e) = ffi::enable_vnode(&self.kq, fd, r, fflags) {
-            tracing::warn!(?r, error = ?e, "kqueue EV_ENABLE failed (likely race; dropped)");
             return;
         }
         self.suppressed.remove(r);
@@ -293,6 +273,16 @@ impl FsWatcher for KqueueWatcher {
                 tracing::trace!(?ev, "kevent with unparseable udata; dropped");
                 continue;
             };
+            // User-space suppression filter (mirror of inotify's gate at
+            // its `poll_until`). The kernel registration is always
+            // enabled; suppression lives entirely in `self.suppressed`,
+            // and events for a suppressed resource drop here without
+            // crossing the watcher boundary. Kernel-level disable is
+            // not used because its queue-and-replay semantics deliver a
+            // coalesced phantom on re-enable.
+            if self.suppressed.contains_key(r) {
+                continue;
+            }
             // Kind cache miss is possible if the resource was unwatched
             // between the kernel's queue-add and our drain; default to
             // `Unknown` and let `normalize` apply its defensive map.
