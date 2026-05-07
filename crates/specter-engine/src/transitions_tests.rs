@@ -109,6 +109,27 @@ fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Tre
     )))
 }
 
+/// Build a `DirSnapshot` with the given children, returning an `Arc`
+/// suitable for embedding as a parent's `DirChild::subtree`. Generalizes
+/// [`dir_tree_snap`] (which always passes `subtree: None`) so tests can
+/// build deeply nested structures by composing levels bottom-up.
+fn dir_with_subtree(root: ResourceId, children: Vec<(&str, ChildEntry)>) -> Arc<DirSnapshot> {
+    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
+    for (name, child) in children {
+        map.insert(CompactString::new(name), child);
+    }
+    Arc::new(DirSnapshot::new(
+        root,
+        DirMeta {
+            mtime: UNIX_EPOCH,
+            inode: 0,
+            device: 0,
+        },
+        0,
+        map,
+    ))
+}
+
 /// `LeafEntry`-only `TreeSnapshot::File` for File-anchored Profiles.
 #[allow(dead_code)]
 fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> TreeSnapshot {
@@ -2315,6 +2336,156 @@ fn config_diff_removed_then_added_atomic() {
     assert_eq!(e.subs().len(), 1);
     // Single sorted StepOutput; multiple watch_ops merged.
     assert!(!out.watch_ops.is_empty());
+}
+
+// ---- lookup_leaf_hash_in_current ----
+
+#[test]
+fn lookup_leaf_hash_walks_deeply_nested_current() {
+    // Pin the per-component navigation invariant across the no-alloc
+    // rewrite: `lookup_leaf_hash_in_current` walks nested `subtree`s and
+    // returns the leaf's `leaf_hash()` when the relative path resolves
+    // to a Leaf entry.
+    use slotmap::KeyData;
+    let rid = |n: u64| ResourceId::from(KeyData::from_ffi(n));
+
+    let leaf = LeafEntry::new(EntryKind::File, 17, UNIX_EPOCH, 7, 0);
+    let leaf_hash = leaf.leaf_hash();
+
+    let level3 = dir_with_subtree(rid(40), vec![("leaf.txt", ChildEntry::Leaf(leaf))]);
+    let level2 = dir_with_subtree(
+        rid(30),
+        vec![(
+            "c",
+            ChildEntry::Dir(DirChild {
+                inode: 30,
+                device: 0,
+                subtree: Some(level3),
+            }),
+        )],
+    );
+    let level1 = dir_with_subtree(
+        rid(20),
+        vec![(
+            "b",
+            ChildEntry::Dir(DirChild {
+                inode: 20,
+                device: 0,
+                subtree: Some(level2),
+            }),
+        )],
+    );
+    let root = dir_with_subtree(
+        rid(10),
+        vec![(
+            "a",
+            ChildEntry::Dir(DirChild {
+                inode: 10,
+                device: 0,
+                subtree: Some(level1),
+            }),
+        )],
+    );
+    let current = TreeSnapshot::Dir(root);
+
+    assert_eq!(
+        super::lookup_leaf_hash_in_current(Some(&current), "a/b/c/leaf.txt"),
+        Some(leaf_hash),
+    );
+}
+
+#[test]
+fn lookup_leaf_hash_returns_none_for_dir_target() {
+    // Path resolves to a Dir, not a Leaf — must return None so the
+    // caller's suppress check fires conservatively (no false-positive
+    // hash match against a directory).
+    use slotmap::KeyData;
+    let rid = |n: u64| ResourceId::from(KeyData::from_ffi(n));
+
+    let inner = dir_with_subtree(rid(20), vec![]);
+    let root = dir_with_subtree(
+        rid(10),
+        vec![(
+            "subdir",
+            ChildEntry::Dir(DirChild {
+                inode: 20,
+                device: 0,
+                subtree: Some(inner),
+            }),
+        )],
+    );
+    let current = TreeSnapshot::Dir(root);
+
+    assert_eq!(
+        super::lookup_leaf_hash_in_current(Some(&current), "subdir"),
+        None,
+    );
+}
+
+#[test]
+fn lookup_leaf_hash_returns_none_for_missing_path() {
+    // Path component doesn't exist in any level — None.
+    use slotmap::KeyData;
+    let rid = |n: u64| ResourceId::from(KeyData::from_ffi(n));
+
+    let root = dir_with_subtree(
+        rid(10),
+        vec![(
+            "real_file.txt",
+            ChildEntry::Leaf(LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, 1, 0)),
+        )],
+    );
+    let current = TreeSnapshot::Dir(root);
+
+    assert_eq!(
+        super::lookup_leaf_hash_in_current(Some(&current), "missing.txt"),
+        None,
+    );
+    assert_eq!(
+        super::lookup_leaf_hash_in_current(Some(&current), "missing/deeper.txt"),
+        None,
+    );
+}
+
+#[test]
+fn lookup_leaf_hash_returns_none_for_file_current() {
+    // A `TreeSnapshot::File(_)` current (File-anchored Profile) cannot
+    // be navigated by relative segments — the function only walks Dir
+    // snapshots.
+    let leaf = LeafEntry::new(EntryKind::File, 17, UNIX_EPOCH, 7, 0);
+    let current = TreeSnapshot::File(leaf);
+
+    assert_eq!(
+        super::lookup_leaf_hash_in_current(Some(&current), "anything"),
+        None,
+    );
+}
+
+#[test]
+fn lookup_leaf_hash_returns_none_for_uncovered_intermediate() {
+    // Intermediate `Dir` with `subtree: None` (uncovered) — the walk
+    // cannot descend, so the function returns None even when the
+    // continuation path beyond the gap might match.
+    use slotmap::KeyData;
+    let rid = |n: u64| ResourceId::from(KeyData::from_ffi(n));
+
+    let root = dir_with_subtree(
+        rid(10),
+        vec![(
+            "uncovered",
+            ChildEntry::Dir(DirChild {
+                inode: 20,
+                device: 0,
+                subtree: None,
+            }),
+        )],
+    );
+    let current = TreeSnapshot::Dir(root);
+
+    assert_eq!(
+        super::lookup_leaf_hash_in_current(Some(&current), "uncovered/leaf.txt"),
+        None,
+    );
 }
 
 // ---- emit_effects PerStableFile ----

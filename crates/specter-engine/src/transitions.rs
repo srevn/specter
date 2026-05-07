@@ -1988,28 +1988,47 @@ const _: fn() = || {
 /// conservatively" — correctness over efficiency on the rare path where
 /// reconcile materialised the slot but the leaf isn't reachable from
 /// `current` at emission time (e.g., diff-entry's parent uncovered).
+/// Walk `current` down `rel` and return the terminal leaf's `leaf_hash()`.
+///
+/// Returns `None` when:
+/// - `current` is `None` or `TreeSnapshot::File(_)` (only Dir snapshots
+///   are navigable);
+/// - `rel` resolves to a Dir entry, not a Leaf;
+/// - any path component is missing in the current level's entries;
+/// - any intermediate Dir has `subtree: None` (uncovered region — the
+///   walk cannot descend through a snapshot gap).
+///
+/// Each component is borrowed from `rel` (lifetime `'_`), so the walk
+/// allocates zero `String`s. The per-level `Arc::clone` is a refcount
+/// bump — `DirSnapshot` is shared between the engine and walker, so
+/// cloning a level is the same cost as a borrow.
 fn lookup_leaf_hash_in_current(current: Option<&TreeSnapshot>, rel: &str) -> Option<u128> {
+    use specter_core::ChildEntry;
+
     let TreeSnapshot::Dir(root) = current? else {
         return None;
     };
-    let mut comps = rel.split('/').filter(|s| !s.is_empty()).peekable();
-    let first = comps.next()?;
-    let mut cur_dir = root.clone();
-    let mut next_name = first.to_string();
+    let mut comps = rel.split('/').filter(|s| !s.is_empty());
+    let mut name: &str = comps.next()?;
+    let mut cur_dir: Arc<specter_core::DirSnapshot> = Arc::clone(root);
     loop {
-        let entry = cur_dir.entries.get(next_name.as_str())?;
-        if comps.peek().is_none() {
-            return match entry {
-                specter_core::ChildEntry::Leaf(l) => Some(l.leaf_hash()),
-                specter_core::ChildEntry::Dir(_) => None,
-            };
+        let entry = cur_dir.entries.get(name)?;
+        match comps.next() {
+            None => {
+                return match entry {
+                    ChildEntry::Leaf(l) => Some(l.leaf_hash()),
+                    ChildEntry::Dir(_) => None,
+                };
+            }
+            Some(next) => {
+                let next_dir = match entry {
+                    ChildEntry::Dir(dc) => Arc::clone(dc.subtree.as_ref()?),
+                    ChildEntry::Leaf(_) => return None,
+                };
+                cur_dir = next_dir;
+                name = next;
+            }
         }
-        let sub = match entry {
-            specter_core::ChildEntry::Dir(dc) => dc.subtree.clone()?,
-            specter_core::ChildEntry::Leaf(_) => return None,
-        };
-        cur_dir = sub;
-        next_name = comps.next()?.to_string();
     }
 }
 
