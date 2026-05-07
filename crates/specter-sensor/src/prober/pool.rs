@@ -111,13 +111,22 @@ impl WorkerProber {
     }
 
     /// Drop the queue sender (workers exit on `Disconnected` at next
-    /// `recv`) and join every worker handle. Returns the
-    /// per-worker `thread::Result<()>` for the bin to log — `Err` here
+    /// `recv`) and join every worker handle. Returns each worker's
+    /// `(index, thread::Result<()>)` for the bin to log — `Err` here
     /// means the worker thread itself panicked outside of `run_probe`'s
     /// catch-unwind, which is a v1 bug to investigate.
-    pub fn shutdown(self) -> Vec<thread::Result<()>> {
+    ///
+    /// The index matches the spawn order (the thread is named
+    /// `specter-prober-{i}` for the same `i`), so post-mortem logs can
+    /// correlate a panicking handle back to its thread name without
+    /// reaching for thread-local state.
+    pub fn shutdown(self) -> Vec<(usize, thread::Result<()>)> {
         drop(self.queue_tx);
-        self.workers.into_iter().map(JoinHandle::join).collect()
+        self.workers
+            .into_iter()
+            .enumerate()
+            .map(|(i, h)| (i, h.join()))
+            .collect()
     }
 
     /// Test-only inspection of the expectation map size; used by

@@ -1,6 +1,6 @@
 //! `shutdown(self)` cleanly drops the queue Sender, joins workers, and
-//! returns each worker's `thread::Result<()>` for the bin to log.
-//! `drop(prober)` without an explicit shutdown still terminates
+//! returns each worker's `(index, thread::Result<()>)` for the bin to
+//! log. `drop(prober)` without an explicit shutdown still terminates
 //! workers via channel disconnect — workers run to completion on
 //! pending probes, then exit.
 
@@ -33,8 +33,8 @@ fn shutdown_with_no_pending_probes_returns_ok_per_worker() {
     let prober = WorkerProber::new(&tx, 4).unwrap();
     let results = prober.shutdown();
     assert_eq!(results.len(), 4);
-    for r in results {
-        r.expect("worker exited cleanly");
+    for (i, r) in results {
+        r.unwrap_or_else(|_| panic!("worker {i} exited unclean"));
     }
 }
 
@@ -51,8 +51,8 @@ fn shutdown_after_completed_probe_returns_ok() {
     let _ = rx.recv_timeout(Duration::from_secs(2)).expect("response");
     let results = prober.shutdown();
     assert_eq!(results.len(), 2);
-    for r in results {
-        r.expect("worker exited cleanly");
+    for (i, r) in results {
+        r.unwrap_or_else(|_| panic!("worker {i} exited unclean"));
     }
 }
 

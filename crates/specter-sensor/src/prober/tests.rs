@@ -1733,13 +1733,20 @@ fn worker_prober_cancel_removes_expectation() {
 }
 
 #[test]
-fn worker_prober_shutdown_returns_ok_for_clean_workers() {
+fn worker_prober_shutdown_returns_indexed_join_results() {
     let (out_tx, _out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&out_tx, 4).unwrap();
+    let prober = WorkerProber::new(&out_tx, 4).expect("spawn 4 workers");
     let results = prober.shutdown();
     assert_eq!(results.len(), 4);
-    for r in results {
-        r.expect("worker exited cleanly");
+    let indices: Vec<usize> = results.iter().map(|(i, _)| *i).collect();
+    assert_eq!(
+        indices,
+        vec![0, 1, 2, 3],
+        "shutdown must hand back workers in spawn order so the index \
+         lines up with the `specter-prober-{{i}}` thread name",
+    );
+    for (i, r) in results {
+        r.unwrap_or_else(|_| panic!("worker {i} panicked during clean shutdown"));
     }
 }
 

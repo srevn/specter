@@ -181,9 +181,9 @@ pub fn run(cli: Cli) -> ExitCode {
     // Arc. `try_unwrap` succeeds → `shutdown` joins workers.
     match Arc::try_unwrap(prober) {
         Ok(p) => {
-            for r in p.shutdown() {
+            for (worker, r) in p.shutdown() {
                 if let Err(e) = r {
-                    tracing::warn!(?e, "prober worker join error");
+                    tracing::warn!(worker, ?e, "prober worker join error");
                 }
             }
         }
