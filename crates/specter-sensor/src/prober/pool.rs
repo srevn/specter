@@ -32,6 +32,26 @@
 //! - Worker post-run cleanup: remove iff still equal to *our*
 //!   correlation. A racing `submit` that wrote a fresh entry between
 //!   our `recv` and our cleanup must not be clobbered.
+//!
+//! # Panic recovery
+//!
+//! Two layered primitives keep a worker thread alive across local
+//! panics:
+//!
+//! - The inner `catch_unwind` in [`run_worker`] catches probe-side
+//!   panics and emits `Failed { errno: EIO }`. The worker survives and
+//!   resumes its `recv → check → run → cleanup → send` loop.
+//! - Lock-acquisition panics (e.g., a panicking allocator during
+//!   `BTreeMap::insert`) recover silently via [`lock_expected`]. The
+//!   `BTreeMap` operations we run inside the lock are exception-safe
+//!   under Rust's allocator-panic semantics, so the recovered map is
+//!   structurally consistent and the surviving worker continues
+//!   dispatching probes against it.
+//!
+//! There is no outer `catch_unwind` around the worker loop body: with
+//! the two primitives above, the only remaining panic surface is
+//! `out.send` (which returns `SendError`, never panics) and the
+//! channel-disconnect path (the clean-shutdown signal).
 
 use crate::Prober;
 use crate::prober::walk::{probe_anchor_file, probe_descent, probe_subtree};
@@ -54,6 +74,32 @@ pub const DEFAULT_CONCURRENCY: usize = 4;
 /// rates. Visible to sibling tests so they can drive `run_worker`
 /// directly with a hand-seeded map.
 pub(super) type ExpectedMap = Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>;
+
+/// Lock the expectation map, recovering from `Mutex` poisoning by
+/// extracting the inner state via `PoisonError::into_inner`.
+///
+/// Every lock body in this module is `BTreeMap` get / insert / remove
+/// on a small map. Those operations are exception-safe under Rust's
+/// allocator-panic semantics — allocation happens *before* tree
+/// mutation, so an allocator panic inside `insert` cannot leave the
+/// recovered map structurally torn. A worker that panics while holding
+/// the lock therefore corrupts no invariant we depend on, and silent
+/// recovery is the right policy: surviving workers continue
+/// dispatching probes against an unchanged-or-cleanly-updated
+/// expectation map rather than panic-cascading the whole pool.
+///
+/// This is the single panic-recovery primitive in the prober. The
+/// `catch_unwind` boundary in [`run_worker`] handles probe panics;
+/// this helper handles lock-acquisition panics. Together they keep a
+/// worker thread alive across any local panic — probe, allocator, or
+/// any future allocation we add inside the lock.
+pub(super) fn lock_expected(
+    expected: &ExpectedMap,
+) -> std::sync::MutexGuard<'_, BTreeMap<ProfileId, ProbeCorrelation>> {
+    expected
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Multi-threaded probe pool. See module rustdoc for the cancellation
 /// contract and lifecycle.
@@ -134,6 +180,7 @@ impl WorkerProber {
     /// `specter-prober-{i}` for the same `i`), so post-mortem logs can
     /// correlate a panicking handle back to its thread name without
     /// reaching for thread-local state.
+    #[must_use]
     pub fn shutdown(self) -> Vec<(usize, thread::Result<()>)> {
         drop(self.queue_tx);
         self.workers
@@ -147,7 +194,7 @@ impl WorkerProber {
     /// sibling unit tests to assert post-run cleanup mechanics.
     #[cfg(test)]
     pub(super) fn expected_len(&self) -> usize {
-        self.expected.lock().expect("poisoned").len()
+        lock_expected(&self.expected).len()
     }
 }
 
@@ -159,7 +206,7 @@ impl Prober for WorkerProber {
         // released before the send; the BTreeMap insert is durable
         // across the lock release.
         {
-            let mut e = self.expected.lock().expect("prober expected map poisoned");
+            let mut e = lock_expected(&self.expected);
             e.insert(req.profile(), req.correlation());
         }
         if let Err(crossbeam::channel::SendError(req)) = self.queue_tx.send(req) {
@@ -172,10 +219,7 @@ impl Prober for WorkerProber {
     }
 
     fn cancel(&self, profile: ProfileId) {
-        self.expected
-            .lock()
-            .expect("prober expected map poisoned")
-            .remove(&profile);
+        lock_expected(&self.expected).remove(&profile);
         tracing::trace!(?profile, "prober cancel");
     }
 }
@@ -234,12 +278,7 @@ pub(super) fn run_worker<F>(
         // response — the engine has structurally closed the per-Profile
         // probe channel on cancel-emit, so a missing response is
         // harmless.
-        let still_wanted = expected
-            .lock()
-            .expect("prober expected map poisoned")
-            .get(&profile)
-            .copied()
-            == Some(correlation);
+        let still_wanted = lock_expected(expected).get(&profile).copied() == Some(correlation);
         if !still_wanted {
             tracing::debug!(?profile, ?correlation, "probe cancelled before dispatch",);
             continue;
@@ -259,7 +298,7 @@ pub(super) fn run_worker<F>(
         // `submit` may have written a new correlation between our recv
         // and now; clobbering would spuriously skip the new request.
         {
-            let mut e = expected.lock().expect("prober expected map poisoned");
+            let mut e = lock_expected(expected);
             if e.get(&profile).copied() == Some(correlation) {
                 e.remove(&profile);
             }

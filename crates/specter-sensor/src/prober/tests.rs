@@ -6,7 +6,7 @@
 //! cancellation, panic recovery, and post-run cleanup get
 //! deterministic coverage without relying on multi-thread scheduling.
 
-use super::pool::{ExpectedMap, WorkerProber, run_probe, run_worker};
+use super::pool::{ExpectedMap, WorkerProber, lock_expected, run_probe, run_worker};
 use super::walk::{probe_anchor_file, probe_descent, probe_subtree};
 use crate::Prober;
 use compact_str::CompactString;
@@ -1676,6 +1676,43 @@ fn run_worker_post_run_cleanup_preserves_resubmit() {
     );
 }
 
+// ---------------------------------------------------------------- pool: lock_expected
+//
+// `lock_expected` is the prober's single panic-recovery primitive for
+// the expectation map. The test pins poison resilience: a worker that
+// panics while holding the lock must not bring down the rest of the
+// pool — surviving callers re-lock the map and continue.
+
+#[test]
+fn lock_expected_recovers_from_poisoned_mutex() {
+    let map: ExpectedMap = Arc::new(Mutex::new(BTreeMap::new()));
+    // Poison the mutex by panicking with the guard held.
+    let map_clone = Arc::clone(&map);
+    let _ = std::thread::spawn(move || {
+        let _guard = map_clone.lock().unwrap();
+        panic!("intentional poison");
+    })
+    .join();
+    assert!(
+        map.is_poisoned(),
+        "panic-in-lock must leave the mutex in poisoned state",
+    );
+
+    // The helper recovers the inner state and hands back a usable
+    // guard; the caller writes through it normally.
+    let pid = fresh_profile_ids(1)[0];
+    {
+        let mut guard = lock_expected(&map);
+        guard.insert(pid, ProbeCorrelation(42));
+    }
+
+    // A second call observes the post-poison write — the map is
+    // structurally consistent across the recovery boundary. Lift the
+    // value out so the guard drops at end-of-statement.
+    let recovered = lock_expected(&map).get(&pid).copied();
+    assert_eq!(recovered, Some(ProbeCorrelation(42)));
+}
+
 // ---------------------------------------------------------------- pool: WorkerProber
 
 #[test]
@@ -1742,8 +1779,8 @@ fn worker_prober_shutdown_returns_indexed_join_results() {
     assert_eq!(
         indices,
         vec![0, 1, 2, 3],
-        "shutdown must hand back workers in spawn order so the index \
-         lines up with the `specter-prober-{{i}}` thread name",
+        "shutdown must hand back workers in spawn order so each index \
+         lines up with its `specter-prober-N` thread name",
     );
     for (i, r) in results {
         r.unwrap_or_else(|_| panic!("worker {i} panicked during clean shutdown"));
