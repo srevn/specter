@@ -3156,6 +3156,141 @@ fn recovery_seed_per_key_only_drifted_subs_fire() {
     );
 }
 
+/// Drift-fire is triggered by a stable Seed verdict + per-key hash
+/// mismatch — the engine reached a clean stable verdict; it just
+/// observed that a recorded fire is now stale. The user-visible
+/// `SPECTER_FORCED` env signal is reserved for max-settle force-fires
+/// (`Burst.forced=true`), where the engine couldn't reach a stable
+/// verdict on time. Drift-fire emissions must carry `Effect.forced =
+/// false` to keep the two signals distinct.
+///
+/// This test pins the contract against silent drift in intent: a future
+/// reader who flips drift-fire to `forced=true` (e.g., to gain dedup-
+/// hash bypass for free) must update the assertion *and* reckon with
+/// the user-facing semantic change.
+#[test]
+fn drift_fire_emits_with_effect_forced_false() {
+    use specter_core::DedupKey;
+
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid, root);
+
+    // Inject a drifted Subtree key for the live Sub.
+    let curr_hash: u128 = match e.profiles.get(pid).unwrap().current.as_ref().unwrap() {
+        TreeSnapshot::Dir(arc) => arc.dir_hash(),
+        TreeSnapshot::File(_) => unreachable!("dir-anchored Profile"),
+    };
+    let key = DedupKey::Subtree {
+        sub: sid,
+        profile: pid,
+    };
+    {
+        let p = e.profiles.get_mut(pid).unwrap();
+        p.last_emitted_dir_hash
+            .insert(key, curr_hash.wrapping_add(1));
+        p.current = None;
+        p.baseline = None;
+    }
+
+    // Drive a recovery-style Seed: `start_seed_burst` + injected Ok.
+    let mut out = StepOutput::default();
+    e.start_seed_burst(pid, Instant::now(), &mut out);
+    let seed_corr = e.pending_probe(pid).expect("Seed probe in flight");
+    let seed_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: seed_corr,
+            result: ProbeResult::Ok(dir_tree_snap(root, vec![])),
+        }),
+        Instant::now(),
+    );
+
+    assert_eq!(seed_out.effects.len(), 1, "drift fires one Effect");
+    assert!(
+        !seed_out.effects[0].forced,
+        "drift-fire emits with forced=false (engine reached a stable \
+         verdict; drift is the trigger, not a max-settle force-fire)",
+    );
+}
+
+/// On the SeedDrift fire mode, `PerStableFile` Subs are skipped
+/// entirely — Seed-time drift is `Subtree`-only (PerFile keys lack the
+/// per-leaf history needed for Seed-time drift detection; see
+/// `seed_drift_observed`'s documented limitation).
+///
+/// Setup: a Profile with a single `PerStableFile` Sub. Inject a
+/// synthetic drifted Subtree key into `last_emitted_dir_hash` so
+/// `seed_drift_observed` returns a non-empty drifted set, routing
+/// `dispatch_seed_ok` through the `EmitMode::SeedDrift` arm. The
+/// PerFile Sub iterates inside `emit_effects` and hits the
+/// `EmitMode::SeedDrift` early-return; no PerFile Effect emits.
+#[test]
+fn drift_fire_skips_per_stable_file_subs() {
+    use slotmap::KeyData;
+    use specter_core::DedupKey;
+
+    let mut e = Engine::new();
+    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+    e.tree.set_kind(r, ResourceKind::Dir);
+    let now = Instant::now();
+    let req = SubAttachRequest {
+        name: String::from("fmt"),
+        resource: r,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: diff_command(),
+        scope: EffectScope::PerStableFile,
+        events: ClassSet::CONTENT,
+        log_output: false,
+    };
+    let (sid, _) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+    complete_seed_burst(&mut e, pid, r);
+
+    // Inject a drifted Subtree key for a synthetic Sub so
+    // `seed_drift_observed` returns non-empty. The synthetic Sub need
+    // not be in the registry — the helper reads `last_emitted_dir_hash`
+    // directly. The PerStableFile Sub is the only Sub on the Profile;
+    // when `emit_effects` iterates the live Sub list it sees PerFile
+    // and hits the SeedDrift skip.
+    let curr_hash: u128 = match e.profiles.get(pid).unwrap().current.as_ref().unwrap() {
+        TreeSnapshot::Dir(arc) => arc.dir_hash(),
+        TreeSnapshot::File(_) => unreachable!("dir-anchored Profile"),
+    };
+    let synthetic_sub = SubId::from(KeyData::from_ffi(0xfeed_face));
+    let drifted_key = DedupKey::Subtree {
+        sub: synthetic_sub,
+        profile: pid,
+    };
+    {
+        let p = e.profiles.get_mut(pid).unwrap();
+        p.last_emitted_dir_hash
+            .insert(drifted_key, curr_hash.wrapping_add(1));
+        p.current = None;
+        p.baseline = None;
+    }
+
+    let mut out = StepOutput::default();
+    e.start_seed_burst(pid, Instant::now(), &mut out);
+    let seed_corr = e.pending_probe(pid).expect("Seed probe in flight");
+    let seed_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: seed_corr,
+            result: ProbeResult::Ok(dir_tree_snap(r, vec![])),
+        }),
+        Instant::now(),
+    );
+
+    assert!(
+        seed_out.effects.is_empty(),
+        "PerStableFile Sub does not fire on Seed-drift; got {} effects",
+        seed_out.effects.len(),
+    );
+}
+
 /// Per-key drift check is bool-equivalent at the boundaries: empty
 /// `last_emitted_dir_hash` ⇒ empty result; all entries match ⇒ empty
 /// result; at least one differs ⇒ non-empty result.

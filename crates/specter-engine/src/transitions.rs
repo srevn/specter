@@ -973,7 +973,13 @@ impl Engine {
         // (Awaiting/Rebasing).
         let drifted_keys = self.seed_drift_observed(profile_id);
         if !drifted_keys.is_empty() {
-            let outcome = self.emit_effects(profile_id, false, Some(&drifted_keys), out);
+            let outcome = self.emit_effects(
+                profile_id,
+                EmitMode::SeedDrift {
+                    drifted: &drifted_keys,
+                },
+                out,
+            );
             if outcome.count > 0 {
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.baseline = p.current.clone();
@@ -1169,9 +1175,9 @@ impl Engine {
             // everything, no Subs matched, or `reap_pending` skipped the
             // emit). baseline is NOT pinned here on the firing branch —
             // it will rebase when the Rebasing probe response lands
-            // (`dispatch_rebase_ok`). No drift filter — Standard bursts
-            // emit for every matching Sub.
-            let outcome = self.emit_effects(profile_id, forced, None, out);
+            // (`dispatch_rebase_ok`). Standard mode: every matching Sub
+            // emits, suppress controlled by `forced`.
+            let outcome = self.emit_effects(profile_id, EmitMode::Standard { forced }, out);
             if outcome.count > 0 {
                 self.transition_to_awaiting(profile_id, outcome.count, now);
             } else {
@@ -1189,7 +1195,7 @@ impl Engine {
             // case — `forced` overrides dedup-hash suppression inside
             // `emit_effects`, but a Profile with no matching Subs still
             // returns count == 0.
-            let outcome = self.emit_effects(profile_id, true, None, out);
+            let outcome = self.emit_effects(profile_id, EmitMode::Standard { forced: true }, out);
             if outcome.count > 0 {
                 self.transition_to_awaiting(profile_id, outcome.count, now);
             } else {
@@ -1443,16 +1449,23 @@ impl Engine {
         self.transition_to_rebasing(profile_id, out);
     }
 
-    /// Emit Effects at a Standard burst's stable verdict. Routes per scope:
+    /// Emit Effects at a stable verdict. Routes per scope:
     /// `SubtreeRoot` Subs fire one Effect anchored at the Profile's resource;
     /// `PerStableFile` Subs fire one Effect per matching diff entry. The
     /// `Diff` is built at most once and shared across both helpers via `Arc`.
     ///
-    /// `drift_filter` narrows emission on the Seed-drift path: when `Some`,
-    /// only `SubtreeRoot` Subs whose `DedupKey::Subtree` is in the filter
-    /// fire, and PerStableFile Subs are skipped entirely (the drift signal
-    /// is Subtree-only — see `seed_drift_observed`). On the Standard
-    /// burst path the filter is `None` and every matching Sub emits.
+    /// `mode` ([`EmitMode`]) selects the fire mode — Standard burst
+    /// stable verdict vs Seed-drift fire — and carries the per-mode
+    /// configuration (Standard's `forced`; SeedDrift's pre-narrowed
+    /// `drifted` key set). The variant determines:
+    ///
+    /// - which `SubtreeRoot` Subs fire (Standard: all; SeedDrift: only
+    ///   those whose `DedupKey::Subtree` is in `drifted`),
+    /// - whether dedup-hash suppression applies (Standard: yes unless
+    ///   `forced`; SeedDrift: structurally unreachable),
+    /// - whether `PerStableFile` Subs fire (Standard: yes; SeedDrift:
+    ///   skipped — Seed-time drift is Subtree-only), and
+    /// - the [`Effect::forced`] value carried into the spawned process.
     ///
     /// `Profile.reap_pending` suppresses all emission — the Profile is on its
     /// way out and any remaining Subs (none, by construction of
@@ -1467,8 +1480,7 @@ impl Engine {
     fn emit_effects(
         &mut self,
         profile_id: ProfileId,
-        forced: bool,
-        drift_filter: Option<&[DedupKey]>,
+        mode: EmitMode<'_>,
         out: &mut StepOutput,
     ) -> EmitOutcome {
         let Some(p) = self.profiles.get(profile_id) else {
@@ -1517,6 +1529,8 @@ impl Engine {
             TreeSnapshot::File(leaf) => leaf.leaf_hash(),
         });
 
+        let effect_forced = mode.effect_forced();
+
         // Snapshot the Sub IDs to avoid holding `&self.subs` across the
         // loop body's `out.effects.push`.
         let sub_ids: Vec<SubId> = self.subs.at(profile_id).to_vec();
@@ -1532,26 +1546,29 @@ impl Engine {
                         sub: sub_id,
                         profile: profile_id,
                     };
-                    // Drift filter (Seed-drift path): emit only when this
-                    // Sub's `Subtree` key is in the requested set. The
-                    // Standard burst path passes `None` and emits
-                    // unconditionally (modulo dedup-hash suppression below).
-                    if let Some(allowed) = drift_filter
-                        && !allowed.contains(&dk)
+                    // SeedDrift narrows to its pre-filtered key set; Standard
+                    // emits every Sub (modulo the suppress check below).
+                    if let EmitMode::SeedDrift { drifted } = mode
+                        && !drifted.contains(&dk)
                     {
                         continue;
                     }
-                    // Suppress when the post-burst hash equals the hash we
-                    // last fired against for this DedupKey AND the burst
-                    // is not forced. `forced=true` is the "max-settle
-                    // elapsed; give up and run" path — suppressing it
-                    // would lie about progress.
-                    let suppress = !forced
-                        && self
-                            .profiles
-                            .get(profile_id)
-                            .and_then(|p| p.last_emitted_dir_hash.get(&dk))
-                            == Some(&current_dir_hash);
+                    // Dedup-hash suppression. SeedDrift's `drifted` is built
+                    // from keys where `last_emitted ≠ current` by
+                    // construction (see `seed_drift_observed`), so the
+                    // SeedDrift arm returns `false` directly — the
+                    // unreachability is structural, not analytical.
+                    let suppress = match mode {
+                        EmitMode::Standard { forced } => {
+                            !forced
+                                && self
+                                    .profiles
+                                    .get(profile_id)
+                                    .and_then(|p| p.last_emitted_dir_hash.get(&dk))
+                                    == Some(&current_dir_hash)
+                        }
+                        EmitMode::SeedDrift { .. } => false,
+                    };
                     if suppress {
                         continue;
                     }
@@ -1570,21 +1587,22 @@ impl Engine {
                         &anchor_path,
                         &anchor_path,
                         "",
-                        forced,
+                        effect_forced,
                         correlation,
                         diff_for_effect.as_deref(),
                     );
                     out.effects.push(Effect {
                         key: dk.clone(),
                         // Subtree's target is the anchor — `resource` was
-                        // captured at line 1445 from `Profile.resource`.
-                        // Frozen-at-emit so sort survives any post-emit
-                        // state churn without a ProfileMap lookup.
+                        // captured at the function head from
+                        // `Profile.resource`. Frozen-at-emit so sort
+                        // survives any post-emit state churn without a
+                        // ProfileMap lookup.
                         target: resource,
                         command,
                         env,
                         cwd: anchor_cwd.clone(),
-                        forced,
+                        forced: effect_forced,
                         correlation,
                         diff: diff_for_effect,
                         capture_output: log_output,
@@ -1598,12 +1616,11 @@ impl Engine {
                     }
                 }
                 EffectScope::PerStableFile => {
-                    // The drift path is Subtree-only — PerFile keys are
-                    // not drift sources (per the helper's documented
-                    // limitation). On the Seed-drift path the filter is
-                    // `Some` and PerStableFile Subs do not fire; PerFile
-                    // keys reach the actuator only via Standard bursts.
-                    if drift_filter.is_some() {
+                    // SeedDrift skips PerFile entirely — the drift signal
+                    // is Subtree-only (PerFile keys lack the per-leaf
+                    // history needed for Seed-time drift detection; see
+                    // `seed_drift_observed`'s documented limitation).
+                    if matches!(mode, EmitMode::SeedDrift { .. }) {
                         continue;
                     }
                     // PerStableFile implies `needs_diff = true` at Sub::new;
@@ -1614,7 +1631,7 @@ impl Engine {
                     let pushed = self.emit_effects_per_stable_file(
                         sub_id,
                         resource,
-                        forced,
+                        effect_forced,
                         pattern.as_ref(),
                         &diff,
                         &anchor_path,
@@ -1844,6 +1861,51 @@ impl Engine {
 #[must_use]
 pub(crate) struct EmitOutcome {
     pub count: u32,
+}
+
+/// Fire-mode for [`Engine::emit_effects`]. Captures the structural
+/// distinction between Standard burst stable-verdict emission and
+/// Seed-drift emission, replacing the prior `(forced: bool,
+/// drift_filter: Option<&[DedupKey]>)` parameter pair where the
+/// interaction between the two flags was load-bearing but unmodelled.
+///
+/// The two modes differ along three axes that all fall out of the
+/// variant — no separate field discipline:
+///
+/// - **Subtree key gating.** Standard fires every `SubtreeRoot` Sub on
+///   the Profile (modulo the suppress check). SeedDrift fires only the
+///   Subs whose `DedupKey::Subtree` is in `drifted`.
+/// - **Suppress.** Standard honours dedup-hash suppression unless
+///   `forced` is set. SeedDrift's `drifted` is built from keys where
+///   `last_emitted ≠ current` by construction, so suppression is
+///   structurally unreachable on this mode and the `match` returns
+///   `false` directly (no analytical claim, no debug-assert, just a
+///   variant arm).
+/// - **PerStableFile.** Standard emits `PerStableFile` Effects per
+///   matching diff entry. SeedDrift skips PerFile entirely — the
+///   Seed-time drift signal is Subtree-only (per
+///   [`Engine::seed_drift_observed`]'s documented limitation: a
+///   post-Seed `current` lacks the per-leaf history needed for a
+///   faithful per-file diff).
+///
+/// [`Effect::forced`] is derived from the variant via
+/// [`Self::effect_forced`]: `true` only on `Standard { forced: true }`.
+/// SeedDrift always emits with `forced = false` — the engine reached a
+/// stable verdict; drift is the trigger, not a time-pressured
+/// force-fire. Conflating the two would silently change the meaning of
+/// the user-visible `SPECTER_FORCED` env signal.
+#[derive(Copy, Clone)]
+enum EmitMode<'a> {
+    Standard { forced: bool },
+    SeedDrift { drifted: &'a [DedupKey] },
+}
+
+impl EmitMode<'_> {
+    /// Value to mirror into [`Effect::forced`] for emissions on this
+    /// mode. `true` only on `Standard { forced: true }`.
+    const fn effect_forced(self) -> bool {
+        matches!(self, Self::Standard { forced: true })
+    }
 }
 
 /// Routing classifier for [`Engine::on_effect_complete`]. Computed under
