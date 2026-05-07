@@ -363,6 +363,7 @@ mod tests {
         add_suppress, add_watch_demand, clamp_watch_demand_to_zero, recompute_resource_events,
         sub_suppress, sub_watch_demand,
     };
+    use compact_str::CompactString;
     use specter_core::{
         AnchorClaim, ClassSet, DescentState, Profile, ProfileMap, ProfileState, ResourceKind,
         ResourceRole, ScanConfig, StepOutput, Tree, WatchOp,
@@ -874,7 +875,7 @@ mod tests {
         );
         profiles.get_mut(pid).unwrap().state = ProfileState::Pending(DescentState {
             current_prefix: prefix,
-            remaining_components: vec!["anchor".to_string()],
+            remaining_components: vec![CompactString::from("anchor")],
         });
 
         assert_eq!(
@@ -920,7 +921,7 @@ mod tests {
         );
         profiles.get_mut(p_c).unwrap().state = ProfileState::Pending(DescentState {
             current_prefix: r,
-            remaining_components: vec!["x".to_string()],
+            remaining_components: vec![CompactString::from("x")],
         });
 
         // Anchor of A (CONTENT) | parent-edge of B (STRUCTURE) | descent of C (STRUCTURE)

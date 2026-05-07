@@ -13,6 +13,7 @@ use crate::scan_config::{ScanConfig, compute_config_hash};
 use crate::snapshot::tree::TreeSnapshot;
 use crate::sub::ClassSet;
 use crate::tree::Tree;
+use compact_str::CompactString;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -193,7 +194,9 @@ pub struct DescentState {
     pub current_prefix: ResourceId,
     /// Path components from `current_prefix` (exclusive) down to the
     /// anchor (inclusive). Single-component segments (no `/`).
-    pub remaining_components: Vec<String>,
+    /// `CompactString` keeps typical-length names (≤24 bytes) inline,
+    /// so advance / rewind clones avoid the heap.
+    pub remaining_components: Vec<CompactString>,
 }
 
 /// `Standard` — event-driven burst; preserves baseline; fires Effect on stable.

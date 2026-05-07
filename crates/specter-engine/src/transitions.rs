@@ -13,6 +13,7 @@
 use crate::Engine;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use crate::refcounts::clamp_watch_demand_to_zero;
+use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     AnchorClaim, BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic,
@@ -172,7 +173,7 @@ impl Engine {
         let Some(anchor) = self.profiles.get(profile_id).map(|p| p.resource) else {
             return;
         };
-        let Some(anchor_name) = self.tree.name(anchor).map(str::to_string) else {
+        let Some(anchor_name) = self.tree.name(anchor).map(CompactString::from) else {
             return;
         };
         self.enter_pending_descent(profile_id, parent, vec![anchor_name], out);

@@ -100,7 +100,10 @@ fn descent_one_level_advances_on_created_entry() {
     assert!(e.descent_state(pid).is_some());
     let descent = e.descent_state(pid).unwrap();
     let correlation = e.pending_probe(pid).expect("first probe in flight");
-    assert_eq!(descent.remaining_components, vec!["bar".to_string()]);
+    assert_eq!(
+        descent.remaining_components,
+        vec![CompactString::from("bar")]
+    );
 
     // Inject a probe response showing `bar` now exists.
     let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
@@ -151,7 +154,7 @@ fn descent_two_levels_advances_progressively() {
     let corr1 = e.pending_probe(pid).unwrap();
     assert_eq!(
         descent.remaining_components,
-        vec!["bar".to_string(), "baz".to_string()]
+        vec![CompactString::from("bar"), CompactString::from("baz")]
     );
 
     let snap1 = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
@@ -166,7 +169,10 @@ fn descent_two_levels_advances_progressively() {
 
     // Now descent should be at /foo/bar with remaining=[baz].
     let descent = e.descent_state(pid).expect("still pending");
-    assert_eq!(descent.remaining_components, vec!["baz".to_string()]);
+    assert_eq!(
+        descent.remaining_components,
+        vec![CompactString::from("baz")]
+    );
     let corr2 = e.pending_probe(pid).expect("fresh probe");
     assert_ne!(corr1, corr2, "fresh correlation per descent step");
 
@@ -203,7 +209,10 @@ fn descent_no_progress_keeps_pending() {
 
     // Still pending; no new probe.
     let descent = e.descent_state(pid).unwrap();
-    assert_eq!(descent.remaining_components, vec!["bar".to_string()]);
+    assert_eq!(
+        descent.remaining_components,
+        vec![CompactString::from("bar")]
+    );
     assert!(e.pending_probe(pid).is_none(), "no probe in flight");
 }
 
@@ -288,7 +297,10 @@ fn descent_failed_retains_state() {
     assert!(has_diag);
     // Still pending; no probe in flight.
     let descent = e.descent_state(pid).unwrap();
-    assert_eq!(descent.remaining_components, vec!["bar".to_string()]);
+    assert_eq!(
+        descent.remaining_components,
+        vec![CompactString::from("bar")]
+    );
     assert!(e.pending_probe(pid).is_none());
 }
 
@@ -350,7 +362,10 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         .descent_state(pid)
         .expect("absolute attach against empty Tree is pending");
     assert_eq!(descent.current_prefix, root);
-    assert_eq!(descent.remaining_components, vec!["tmp".to_string()]);
+    assert_eq!(
+        descent.remaining_components,
+        vec![CompactString::from("tmp")]
+    );
     assert!(e.pending_probe(pid).is_some());
 
     // The FS-root carries the descent's watch_demand contribution; the
@@ -442,7 +457,11 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
     assert_eq!(descent.current_prefix, root);
     assert_eq!(
         descent.remaining_components,
-        vec!["var".to_string(), "log".to_string(), "myapp".to_string()],
+        vec![
+            CompactString::from("var"),
+            CompactString::from("log"),
+            CompactString::from("myapp")
+        ],
     );
 }
 
@@ -646,7 +665,10 @@ fn descent_state_helper_returns_none_for_active() {
 fn descent_state_helper_returns_some_for_pending() {
     let (e, _sid, pid) = setup_pending_one_level();
     let descent = e.descent_state(pid).expect("Pending state populated");
-    assert_eq!(descent.remaining_components, vec!["bar".to_string()]);
+    assert_eq!(
+        descent.remaining_components,
+        vec![CompactString::from("bar")]
+    );
     assert!(e.pending_probe(pid).is_some());
 }
 
@@ -1050,7 +1072,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     // `start_pending_recovery` re-entry path. The helper's debug_assert
     // pins Profile=Idle + closed-channel; both hold.
     let mut out = specter_core::StepOutput::default();
-    e.enter_pending_descent(pid, foo, vec!["bar".to_string()], &mut out);
+    e.enter_pending_descent(pid, foo, vec![CompactString::from("bar")], &mut out);
 
     // Recovery overlap: foo's watch_demand is now +2 (watch_root_parent
     // STRUCTURE + descent STRUCTURE). The helper opened the channel and

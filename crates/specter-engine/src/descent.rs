@@ -48,6 +48,7 @@
 //!    probe is already in flight (`Profile.pending_probe.is_some()`).
 
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
+use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ClassSet, DescentState, Diagnostic, EntryKind, ProfileId, ProfileState,
     ResourceId, ResourceKind, ResourceRole, StepOutput, TreeSnapshot,
@@ -67,7 +68,7 @@ pub(crate) enum MaterializeResult {
     Pending {
         anchor: ResourceId,
         prefix: ResourceId,
-        remaining: Vec<String>,
+        remaining: Vec<CompactString>,
     },
 }
 
@@ -155,9 +156,9 @@ impl crate::Engine {
             Some(i) => {
                 // Segments [0..=i] pre-existed; [i+1..] are scaffolds.
                 let prefix = self.resolve_components(&components[..=i]);
-                let remaining: Vec<String> = components[i + 1..]
+                let remaining: Vec<CompactString> = components[i + 1..]
                     .iter()
-                    .map(|s| (*s).to_string())
+                    .map(|&s| CompactString::from(s))
                     .collect();
                 MaterializeResult::Pending {
                     anchor,
@@ -176,7 +177,8 @@ impl crate::Engine {
                 // first probe at the root will return `Vanished` and the
                 // rewind is a no-op (root has no parent, see
                 // `dispatch_descent_vanished`'s `None` branch).
-                let remaining: Vec<String> = components.iter().map(|s| (*s).to_string()).collect();
+                let remaining: Vec<CompactString> =
+                    components.iter().map(|&s| CompactString::from(s)).collect();
                 let root = self.resolve_components(&components[..1]).unwrap_or(anchor);
                 MaterializeResult::Pending {
                     anchor,
@@ -228,7 +230,7 @@ impl crate::Engine {
         &mut self,
         profile_id: ProfileId,
         prefix: ResourceId,
-        remaining: Vec<String>,
+        remaining: Vec<CompactString>,
         out: &mut StepOutput,
     ) {
         debug_assert!(
@@ -300,14 +302,15 @@ impl crate::Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // Read what we need from descent state, then drop the borrow.
+        // Sample the head segment + arity from descent state, then drop
+        // the borrow. We clone only the head (cheap when CompactString
+        // stays inline); the tail mutation runs in place via
+        // `descent_state_mut` later, no whole-vec rebuild.
         let Some(descent) = self.descent_state(profile_id) else {
             return;
         };
         let prefix = descent.current_prefix;
-        let remaining = descent.remaining_components.clone();
-
-        if remaining.is_empty() {
+        let Some(next_segment) = descent.remaining_components.first().cloned() else {
             // The DescentState invariant (core/profile.rs) says
             // `remaining_components` is non-empty: the anchor itself is
             // the last component, and descent transitions Pending → Idle
@@ -325,10 +328,8 @@ impl crate::Engine {
             });
             self.release_descent_prefix_claim(profile_id, out);
             return;
-        }
-
-        let next_segment = remaining[0].clone();
-        let is_anchor = remaining.len() == 1;
+        };
+        let is_anchor = descent.remaining_components.len() == 1;
 
         // Descent probes ship `recursive=false`, so the response is a
         // single-level Dir snapshot — look up the next segment by name in
@@ -432,13 +433,16 @@ impl crate::Engine {
             // Update descent state BEFORE sub_watch_demand so the recompute
             // (multi-contributor case) attributes the prefix's STRUCTURE
             // contribution to the new prefix, not the old one.
+            //
+            // In-place mutation: drop the head segment from
+            // `remaining_components` rather than rebuilding the tail —
+            // saves the per-step `Vec::to_vec` allocation.
             let Some(correlation) = self.mint_probe_correlation(profile_id) else {
                 return;
             };
-            let new_remaining: Vec<String> = remaining[1..].to_vec();
             if let Some(d) = self.descent_state_mut(profile_id) {
                 d.current_prefix = new_resource;
-                d.remaining_components = new_remaining;
+                d.remaining_components.remove(0);
             }
 
             sub_watch_demand(
@@ -477,16 +481,11 @@ impl crate::Engine {
             prefix,
         });
 
-        // Capture the prior remaining-components and the prefix's
-        // segment name BEFORE we mutate descent state. The vanished
-        // prefix's segment becomes the first remaining component on
-        // rewind.
+        // Capture the parent + the prefix's segment name BEFORE we mutate
+        // descent state. `parent` selects the rewind branch; `prefix_name`
+        // becomes the new first remaining component.
         let parent = self.tree.parent(prefix);
-        let prior_remaining: Vec<String> = self
-            .descent_state(profile_id)
-            .map(|s| s.remaining_components.clone())
-            .unwrap_or_default();
-        let prefix_name = self.tree.name(prefix).map(str::to_string);
+        let prefix_name = self.tree.name(prefix).map(CompactString::from);
 
         match parent {
             Some(parent_id) => {
@@ -498,19 +497,19 @@ impl crate::Engine {
                 // recompute attributes this Profile's STRUCTURE
                 // contribution to the new prefix (parent_id), not the
                 // vanished one.
-                let mut new_remaining = prior_remaining;
-                if let Some(name) = prefix_name {
-                    new_remaining.insert(0, name);
-                }
-
+                //
+                // In-place mutation: prepend onto the existing
+                // `remaining_components` rather than cloning + rebuilding
+                // a fresh DescentState — saves both the whole-vec clone
+                // and the per-element CompactString clone.
                 let Some(correlation) = self.mint_probe_correlation(profile_id) else {
                     return;
                 };
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.state = ProfileState::Pending(DescentState {
-                        current_prefix: parent_id,
-                        remaining_components: new_remaining,
-                    });
+                if let Some(d) = self.descent_state_mut(profile_id) {
+                    d.current_prefix = parent_id;
+                    if let Some(name) = prefix_name {
+                        d.remaining_components.insert(0, name);
+                    }
                 }
 
                 sub_watch_demand(
