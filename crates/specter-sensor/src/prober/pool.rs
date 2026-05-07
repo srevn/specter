@@ -95,9 +95,23 @@ impl WorkerProber {
             match spawned {
                 Ok(h) => workers.push(h),
                 Err(e) => {
+                    // Partial-spawn cleanup: drop the queue Sender so
+                    // any worker already in `recv` exits on
+                    // `Disconnected`, then join each spawned handle.
+                    // A panic here means a worker died before it ever
+                    // entered its loop body — log it so the operator
+                    // sees the real failure alongside the spawn error
+                    // we're about to return.
                     drop(queue_tx);
-                    for h in workers {
-                        let _ = h.join();
+                    for (worker, h) in workers.into_iter().enumerate() {
+                        if let Err(panic) = h.join() {
+                            tracing::error!(
+                                worker,
+                                ?panic,
+                                "prober worker panicked during partial-spawn cleanup; \
+                                 the original spawn error will still be returned",
+                            );
+                        }
                     }
                     return Err(e);
                 }
