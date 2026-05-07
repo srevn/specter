@@ -438,8 +438,7 @@ impl Engine {
         let profile_id = match self.subs.remove(sub) {
             Some(s) => s.profile,
             None => {
-                out.diagnostics
-                    .push(Diagnostic::EffectCompleteForUnknownSub { sub });
+                out.diagnostics.push(Diagnostic::DetachUnknownSub { sub });
                 return;
             }
         };
@@ -803,12 +802,14 @@ fn decompose_attach_path<'a>(
             },
             Component::CurDir | Component::ParentDir => {
                 out.diagnostics.push(Diagnostic::AttachPathInvalid {
+                    path: path.to_path_buf(),
                     hint: "non-canonical attach path (`.`/`..`); canonicalize before attach",
                 });
                 return None;
             }
             Component::Prefix(_) => {
                 out.diagnostics.push(Diagnostic::AttachPathInvalid {
+                    path: path.to_path_buf(),
                     hint: "Windows path prefix not supported on Unix v1",
                 });
                 return None;
@@ -817,6 +818,7 @@ fn decompose_attach_path<'a>(
     }
     if comps.is_empty() {
         out.diagnostics.push(Diagnostic::AttachPathInvalid {
+            path: path.to_path_buf(),
             hint: "empty attach path",
         });
         return None;
@@ -1286,7 +1288,8 @@ mod tests {
         assert!(result.is_none());
         assert!(out.diagnostics.iter().any(|d| matches!(
             d,
-            specter_core::Diagnostic::AttachPathInvalid { hint } if hint.contains("empty"),
+            specter_core::Diagnostic::AttachPathInvalid { path, hint }
+                if path == std::path::Path::new("") && hint.contains("empty"),
         )));
     }
 
@@ -1300,7 +1303,8 @@ mod tests {
         assert!(result.is_none());
         assert!(out.diagnostics.iter().any(|d| matches!(
             d,
-            specter_core::Diagnostic::AttachPathInvalid { hint } if hint.contains("non-canonical"),
+            specter_core::Diagnostic::AttachPathInvalid { path, hint }
+                if path == std::path::Path::new("./foo") && hint.contains("non-canonical"),
         )));
     }
 
@@ -1311,7 +1315,8 @@ mod tests {
         assert!(result.is_none());
         assert!(out.diagnostics.iter().any(|d| matches!(
             d,
-            specter_core::Diagnostic::AttachPathInvalid { hint } if hint.contains("non-canonical"),
+            specter_core::Diagnostic::AttachPathInvalid { path, hint }
+                if path == std::path::Path::new("/var/../log") && hint.contains("non-canonical"),
         )));
     }
 
@@ -1321,6 +1326,57 @@ mod tests {
         let comps = decompose_attach_path(std::path::Path::new("/"), &mut out)
             .expect("root-only path decomposes");
         assert_eq!(comps, vec![FS_ROOT_SEG]);
+    }
+
+    #[test]
+    fn attach_path_invalid_carries_offending_path() {
+        let mut e = Engine::new();
+        let bad = std::path::PathBuf::from("./relative/with/dot");
+        let req = SubAttachRequest::for_path(
+            "bad".to_string(),
+            bad.clone(),
+            ScanConfig::builder().recursive(false).build(),
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+            specter_core::CommandTemplate::new(std::iter::empty()),
+            specter_core::EffectScope::SubtreeRoot,
+            specter_core::ClassSet::default(),
+            false,
+        );
+        let (_sub, out) = e.attach_sub(req, Instant::now());
+
+        let saw = out.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                specter_core::Diagnostic::AttachPathInvalid { path, .. } if path == &bad,
+            )
+        });
+        assert!(saw, "AttachPathInvalid must carry the offending path");
+    }
+
+    #[test]
+    fn detach_unknown_sub_emits_dedicated_diagnostic() {
+        let mut e = Engine::new();
+        let bogus = SubId::default();
+        let out = e.detach_sub(bogus, Instant::now());
+
+        let saw_dedicated = out.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                specter_core::Diagnostic::DetachUnknownSub { sub } if *sub == bogus,
+            )
+        });
+        let saw_wrong = out.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                specter_core::Diagnostic::EffectCompleteForUnknownSub { .. },
+            )
+        });
+        assert!(saw_dedicated, "detach miss must emit DetachUnknownSub");
+        assert!(
+            !saw_wrong,
+            "detach miss must NOT emit EffectCompleteForUnknownSub",
+        );
     }
 
     // ===== set_watch_root_parent idempotence =====

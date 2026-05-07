@@ -426,8 +426,10 @@ impl EngineDriver {
 ///
 /// Most variants are `warn` (drops + race conditions are warnings, not
 /// errors). `EffectCompleteForUnknownSub` is `error` (variant docstring
-/// marks it as a bug or hot-reload race the operator should see).
-/// `ReapPendingResolved` is `info` (informational; the late reap completed).
+/// marks it as a bug or hot-reload race the operator should see);
+/// `DetachUnknownSub` is `warn` — a benign hot-reload race rather than a
+/// bug. `ReapPendingResolved` is `info` (informational; the late reap
+/// completed).
 pub fn log_diagnostic(d: &Diagnostic) {
     match d {
         Diagnostic::StaleProbeResponse {
@@ -447,6 +449,10 @@ pub fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::EffectCompleteForUnknownSub { sub } => tracing::error!(
             ?sub,
             "effect_complete for unknown Sub — engine bug or hot-reload race",
+        ),
+        Diagnostic::DetachUnknownSub { sub } => tracing::warn!(
+            ?sub,
+            "detach for unknown Sub (hot-reload race or stale id; dropped)",
         ),
         Diagnostic::ProbeVanished { profile, intent } => {
             tracing::warn!(?profile, ?intent, "probe returned Vanished");
@@ -516,8 +522,12 @@ pub fn log_diagnostic(d: &Diagnostic) {
             errno = failure.errno(),
             "profile claim purged (WatchOpRejected at claimed resource)",
         ),
-        Diagnostic::AttachPathInvalid { hint } => {
-            tracing::error!(hint, "attach path invalid; request dropped");
+        Diagnostic::AttachPathInvalid { path, hint } => {
+            tracing::error!(
+                path = %path.display(),
+                hint,
+                "attach path invalid; request dropped",
+            );
         }
         Diagnostic::DescentInvariantViolation { profile, prefix } => tracing::error!(
             ?profile,

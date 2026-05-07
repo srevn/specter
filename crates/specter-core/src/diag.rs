@@ -8,6 +8,7 @@ use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::input::{FsEvent, OverflowScope};
 use crate::op::{ProbeCorrelation, WatchFailure};
 use crate::profile::BurstIntent;
+use std::path::PathBuf;
 
 /// Which Profile-side claim was the subject of a [`Diagnostic::ProfileClaimPurged`]
 /// emission. Each claim type has a dedicated bookkeeping field on
@@ -50,8 +51,18 @@ pub enum Diagnostic {
     /// state to update — the burst is already over) and emits this
     /// Diagnostic so operators can see the late arrival.
     EffectCompleteOutsideAwaiting { sub: SubId, profile: ProfileId },
-    /// `EffectComplete` for a Sub not in the registry.
+    /// `EffectComplete` for a Sub not in the registry. Emitted by
+    /// `on_effect_complete` when the actuator delivers a completion for a
+    /// `SubId` already removed from the engine. Distinct from
+    /// [`Self::DetachUnknownSub`] (a stale-id detach attempt) — the
+    /// triggering input is an `EffectComplete`, not a detach request.
     EffectCompleteForUnknownSub { sub: SubId },
+    /// `Engine::detach_sub` (or `Input::ConfigDiff::removed`) targeted a
+    /// `SubId` not in the registry. Reachable when hot reload races with
+    /// a previous detach, or when an external caller submits a stale id.
+    /// Distinct from [`Self::EffectCompleteForUnknownSub`] — that variant
+    /// fires on a stray completion arrival, not on a detach miss.
+    DetachUnknownSub { sub: SubId },
     /// Probe returned `Vanished` during a `Seed` or `Standard` burst. The
     /// Engine's response differs by intent; the variant preserves the intent
     /// for log readability.
@@ -162,7 +173,11 @@ pub enum Diagnostic {
     /// engine drops the attach. Defense-in-depth: config validation is
     /// the canonical guard, but the engine surfaces the reason separately
     /// so a misuse from the bin or hot reload is visible.
-    AttachPathInvalid { hint: &'static str },
+    ///
+    /// `path` carries the offending request so operators submitting
+    /// multi-path attach batches (hot reload `ConfigDiff::added`) can
+    /// identify which entry failed without re-scanning the config.
+    AttachPathInvalid { path: PathBuf, hint: &'static str },
     /// A descent dispatch ran with `DescentState.remaining_components`
     /// empty. The invariant on `DescentState` (see `core/profile.rs`)
     /// says this can't happen: the anchor itself is the last remaining
