@@ -21,14 +21,20 @@
 //! ## Hashing
 //!
 //! - [`LeafEntry::leaf_hash`] folds `(kind, size, mtime, inode, device)` to
-//!   a 128-bit signature, cached in `OnceLock`.
+//!   a 128-bit signature, cached in `OnceLock`. A leaf's mtime is its
+//!   per-file content fingerprint, so it belongs in the identity.
 //! - [`DirSnapshot::dir_hash`] folds `captured_with`, the directory's own
-//!   `root_meta` (mtime/inode/device), an entry-count length-prefix, then
-//!   each `(name, ChildEntry)` pair in lex order. Per-`Dir` child carries
+//!   `(inode, device)`, an entry-count length-prefix, then each
+//!   `(name, ChildEntry)` pair in lex order. Per-`Dir` child carries
 //!   `(inode, device, subtree.dir_hash())`; subtree=None contributes a
-//!   constant `0u128`. The fold *includes* `root_meta`, so `dir_hash(d)` is
-//!   a complete signature of `d`'s observable state — two-source-of-truth
-//!   drift between `dir_hash` and the parent's `subtree_mtime` is impossible.
+//!   constant `0u128`. `root_meta.mtime` is **not** folded — `dir_hash`
+//!   is filter-aware identity ("are these snapshots observably the same
+//!   to the user?"), and a directory's mtime bumps on every dirent-block
+//!   change including filtered-out entries (`.DS_Store`, hidden files,
+//!   excluded paths) the user-configured filter would never present.
+//!   The walker's mtime-skip optimisation reads `root_meta.mtime` as a
+//!   struct field on [`DirSnapshot`] (its own kernel-aware identity);
+//!   no consumer needs the value composed into the hash.
 //! - 128-bit width (`siphasher::sip128`): pair-comparison space at scale
 //!   (`O(levels × bursts × profiles)`) makes 64-bit collision probability
 //!   uncomfortable; 128 bits is astronomically safe.
@@ -214,9 +220,10 @@ impl std::fmt::Debug for LeafEntry {
 ///   `specter-sensor::prober::walk::probe_subtree` is authoritative.
 ///
 /// Subtree mtime is **not** stored on `DirChild` — the canonical mtime
-/// lives at `subtree.root_meta.mtime`, and the parent fold pulls it
-/// transitively via the child's `dir_hash`. One indirection beats
-/// two-fields-that-must-agree.
+/// lives at `subtree.root_meta.mtime` and is consumed by the walker's
+/// mtime-skip directly off the [`DirSnapshot`] struct field. The parent
+/// `dir_hash` fold deliberately omits subtree mtime (filter-aware
+/// identity is independent of kernel-side dirent-block churn).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirChild {
     pub inode: u64,
@@ -306,9 +313,13 @@ impl DirSnapshot {
         }
     }
 
-    /// Lazy 128-bit signature of `(captured_with, root_meta, entries)`.
-    /// The cache is process-local and never invalidated; the snapshot is
-    /// immutable post-construction.
+    /// Lazy 128-bit signature of `(captured_with, root_meta.{inode,
+    /// device}, entries)`. `root_meta.mtime` is intentionally absent
+    /// from the fold — `dir_hash` is filter-aware identity, while the
+    /// raw `lstat` mtime lives on the [`DirSnapshot::root_meta`] struct
+    /// field for kernel-aware comparisons (the walker's mtime-skip).
+    /// The cache is process-local and never invalidated; the snapshot
+    /// is immutable post-construction.
     #[must_use]
     pub fn dir_hash(&self) -> u128 {
         *self.dir_hash.get_or_init(|| compute_dir_hash(self))
@@ -461,11 +472,13 @@ fn compute_leaf_hash(l: &LeafEntry) -> u128 {
 fn compute_dir_hash(d: &DirSnapshot) -> u128 {
     let mut h = hasher_128();
 
-    // Header: ScanConfig hash + the directory's own lstat triple.
-    // root_meta is folded HERE (not on the parent's contribution), so
-    // dir_hash(d) is a complete signature of d's observable state.
+    // Header: ScanConfig hash + the directory's own (inode, device).
+    // `root_meta.mtime` is **not** folded — filter-aware identity is
+    // independent of kernel-side dirent-block churn (filtered-out
+    // entries bump mtime without changing the user-visible state).
+    // The walker reads `root_meta.mtime` directly off the struct
+    // field for its mtime-skip; no consumer needs it via the hash.
     d.captured_with.hash(&mut h);
-    hash_systemtime_into(d.root_meta.mtime, &mut h);
     d.root_meta.inode.hash(&mut h);
     d.root_meta.device.hash(&mut h);
 

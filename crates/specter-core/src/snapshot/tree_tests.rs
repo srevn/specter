@@ -181,10 +181,16 @@ fn dir_hash_idempotent_via_oncelock() {
 }
 
 #[test]
-fn dir_hash_distinguishes_root_meta_mtime() {
+fn dir_hash_invariant_under_root_meta_mtime() {
+    // `root_meta.mtime` is intentionally absent from the dir_hash fold:
+    // filter-aware identity must be independent of the directory's own
+    // lstat-mtime, which the kernel bumps for any dirent-block change
+    // (including filtered-out entries the user-configured filter removes
+    // from `entries`). Two snapshots whose `(captured_with, inode,
+    // device, entries)` agree must hash equal regardless of mtime.
     let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
     let b = make_dir(ResourceId::default(), meta(2, 100, 1), 0, BTreeMap::new());
-    assert_ne!(a.dir_hash(), b.dir_hash());
+    assert_eq!(a.dir_hash(), b.dir_hash());
 }
 
 #[test]
@@ -331,7 +337,7 @@ fn dir_hash_known_good_golden() {
     assert_eq!(d.dir_hash(), GOLDEN_DIR_HASH);
 }
 
-const GOLDEN_DIR_HASH: u128 = 0x02cb_bfa4_fcc8_0b55_86d1_ecd8_830d_39bb;
+const GOLDEN_DIR_HASH: u128 = 0x689b_b808_8bed_61eb_18e1_e6e8_675b_e51f;
 
 // ---------------------------------------------------------------------------
 // LeafEntry leaf_hash
@@ -531,15 +537,22 @@ fn stable_against_self_file() {
 
 #[test]
 fn stable_against_distinct_dir_hashes_false() {
+    // Two snapshots with distinct entries hash to distinct values; the
+    // stability verdict says they are not observably the same.
+    let mut entries_a: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
+    entries_a.insert(
+        name("foo"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 7, 0)),
+    );
     let a = TreeSnapshot::Dir(make_dir(
         ResourceId::default(),
         meta(1, 100, 1),
         0,
-        BTreeMap::new(),
+        entries_a,
     ));
     let b = TreeSnapshot::Dir(make_dir(
         ResourceId::default(),
-        meta(2, 100, 1),
+        meta(1, 100, 1),
         0,
         BTreeMap::new(),
     ));
@@ -811,8 +824,14 @@ fn splice_one_level_deep_off_path_arc_ptr_eq() {
     root_entries.insert(name("off_path"), dir(99, 0, Some(Arc::clone(&off_path))));
     let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
 
-    // Replacement at `a` differs from prior_a (different mtime).
-    let replacement = make_dir(a, meta(20, 2, 0), 0, BTreeMap::new());
+    // Replacement at `a` carries a child the prior didn't — observably
+    // different snapshots, distinct dir_hash.
+    let mut replacement_entries = BTreeMap::new();
+    replacement_entries.insert(
+        name("file"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 7, 0)),
+    );
+    let replacement = make_dir(a, meta(2, 2, 0), 0, replacement_entries);
     assert_ne!(prior_a.dir_hash(), replacement.dir_hash());
     let s = unwrap_spliced(splice(Some(root), anchor, a, replacement, &tree));
     let TreeSnapshot::Dir(new_root) = s else {
@@ -949,8 +968,14 @@ fn splice_replacement_changes_dir_hash_uncached_recompute_correct() {
     let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
     let prior_root_hash = root.dir_hash();
 
-    // Replacement at `a` has different mtime → different dir_hash.
-    let replacement_a = make_dir(a, meta(20, 2, 0), 0, BTreeMap::new());
+    // Replacement at `a` carries a child the prior didn't — observably
+    // different, so the spine rebuild produces a different root hash.
+    let mut replacement_entries = BTreeMap::new();
+    replacement_entries.insert(
+        name("file"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 7, 0)),
+    );
+    let replacement_a = make_dir(a, meta(2, 2, 0), 0, replacement_entries);
     let s = unwrap_spliced(splice(Some(root), anchor, a, replacement_a, &tree));
     let TreeSnapshot::Dir(new_root) = s else {
         panic!()
@@ -1973,7 +1998,7 @@ proptest! {
     /// other top-level children Arc::ptr_eq with their pre-splice values.
     #[test]
     fn prop_splice_off_path_unchanged(
-        meta_secs in 1u64..10,
+        leaf_size in 1u64..10,
         sibling_count in 0usize..4,
     ) {
         let mut tree = Tree::new();
@@ -1994,8 +2019,16 @@ proptest! {
         }
         let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
 
-        let replacement = make_dir(a, meta(meta_secs.saturating_add(100), 2, 0), 0, BTreeMap::new());
-        prop_assume!(prior_a.dir_hash() != replacement.dir_hash());
+        // Replacement carries a child whose size is proptest-driven; this
+        // yields a structurally distinct snapshot whose dir_hash differs
+        // from the empty prior_a regardless of `root_meta.mtime`.
+        let mut replacement_entries = BTreeMap::new();
+        replacement_entries.insert(
+            name("file"),
+            ChildEntry::Leaf(leaf(EntryKind::File, leaf_size, 1, 7, 0)),
+        );
+        let replacement = make_dir(a, meta(2, 2, 0), 0, replacement_entries);
+        prop_assert_ne!(prior_a.dir_hash(), replacement.dir_hash());
         let s = splice(Some(root), anchor, a, replacement, &tree);
         let SpliceResult::Spliced(TreeSnapshot::Dir(new_root)) = s else { unreachable!() };
         for (i, sib) in siblings.iter().enumerate() {
@@ -2008,7 +2041,7 @@ proptest! {
     /// splice(prior, anchor, target, replacement) ⇒ subtree_at(target) == replacement.
     #[test]
     fn prop_splice_then_subtree_at_returns_replacement(
-        meta_secs in 1u64..50,
+        leaf_size in 1u64..50,
     ) {
         let mut tree = Tree::new();
         let ids = ensure_chain(&mut tree, &["anchor", "a", "b"]);
@@ -2028,8 +2061,16 @@ proptest! {
             0,
             BTreeMap::from_iter([(name("a"), dir(2, 0, Some(a_snap)))]),
         );
-        let replacement = make_dir(b, meta(meta_secs, 3, 0), 0, BTreeMap::new());
-        prop_assume!(prior_b.dir_hash() != replacement.dir_hash());
+        // Replacement carries a structurally-distinct entry (size is
+        // proptest-driven); under filter-aware `dir_hash` this guarantees
+        // a hash difference regardless of `root_meta.mtime`.
+        let mut replacement_entries = BTreeMap::new();
+        replacement_entries.insert(
+            name("file"),
+            ChildEntry::Leaf(leaf(EntryKind::File, leaf_size, 1, 7, 0)),
+        );
+        let replacement = make_dir(b, meta(3, 3, 0), 0, replacement_entries);
+        prop_assert_ne!(prior_b.dir_hash(), replacement.dir_hash());
         let s = splice(Some(root), anchor, b, Arc::clone(&replacement), &tree);
         let SpliceResult::Spliced(snap) = s else { unreachable!() };
         let got = snap.subtree_at(b, &tree).expect("b resolves after splice");
