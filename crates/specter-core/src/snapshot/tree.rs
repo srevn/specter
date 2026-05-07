@@ -195,11 +195,23 @@ impl std::fmt::Debug for LeafEntry {
 /// Direct child that *is* a directory. Carries inode/device for rename
 /// detection and an optional `Arc<DirSnapshot>` for the recursive subtree.
 ///
-/// `subtree: None` means *uncovered*: excluded by glob, beyond
-/// `max_depth`, or `recursive=false` — three causes, indistinguishable to
-/// the engine. The walker stored the entry but did not recurse; the parent's
-/// [`DirSnapshot::dir_hash`] contributes `(inode, device, 0u128)` for the
-/// subtree slot.
+/// `subtree: None` means *uncovered*: `recursive=false`, beyond
+/// `max_depth`, cross-filesystem boundary (the child's `dev` differs
+/// from the anchor's `root_dev`), or a mid-walk `lstat`/kind-flip
+/// failure on the subdir itself. The walker stored the entry but did
+/// not recurse; the parent's [`DirSnapshot::dir_hash`] contributes
+/// `(inode, device, 0u128)` for the subtree slot.
+///
+/// Two boundary cases to keep distinct:
+/// - **`exclude` glob**: filtered entries are absent from the parent's
+///   `entries` map entirely — the walker never constructs a `DirChild`
+///   for them, so `subtree: None` is the wrong mental model.
+/// - **`read_dir` failure (EACCES, EIO, …)**: the parent's `lstat`
+///   succeeded but enumeration of *this* directory's contents failed.
+///   The walker emits a *covered-but-empty* `DirChild { subtree:
+///   Some(empty_arc) }` — the engine sees a known-empty subtree, not an
+///   uncovered slot. The walker contract in
+///   `specter-sensor::prober::walk::probe_subtree` is authoritative.
 ///
 /// Subtree mtime is **not** stored on `DirChild` — the canonical mtime
 /// lives at `subtree.root_meta.mtime`, and the parent fold pulls it

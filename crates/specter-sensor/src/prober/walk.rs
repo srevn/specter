@@ -97,9 +97,15 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
 /// composes recursively).
 ///
 /// Errors: root errors propagate (`NotFound → Vanished`, kind mismatch
-/// → `Vanished`, anything else → `Failed { errno }`); subtree errors
-/// during walk skip-and-continue with `tracing::warn!` and the affected
-/// subtree becomes `DirChild { subtree: None }`.
+/// → `Vanished`, anything else → `Failed { errno }`). Mid-walk
+/// `read_dir` errors on a *subdirectory* (EACCES, EIO, ENOENT after a
+/// raced delete) skip-and-continue with `tracing::warn!`; the affected
+/// subtree becomes `DirChild { subtree: Some(empty_or_partial_arc) }` —
+/// *covered-but-empty*. The uncovered sentinel
+/// `DirChild { subtree: None }` is reserved for `recursive=false`,
+/// beyond `max_depth`, cross-filesystem (`dev` differs from
+/// `root_dev`), and mid-walk `lstat`/kind-flip failures on the subdir
+/// itself.
 pub(super) fn probe_subtree(
     target_path: &Path,
     target_resource: ResourceId,
@@ -203,11 +209,18 @@ fn any_forced_under(path: &Path, force_walk: &BTreeSet<PathBuf>) -> bool {
 /// Read one directory level, applying filters and recursing into covered
 /// Dir children. Returns the constructed entries map.
 ///
-/// Errors are skip-and-continue: a missing/unreadable subdir yields no
-/// entry (in the case of a raced delete) or a `DirChild { subtree: None }`
-/// (in the case of an unreadable but enumerable parent — `read_dir`
-/// errored after `lstat` succeeded). Empty `BTreeMap` is the honest
-/// representation of "we tried, found nothing readable."
+/// Errors at this level are skip-and-continue. `read_dir` failure on
+/// `path` (EACCES, EIO, ENOENT after a raced delete, etc.) returns the
+/// already-accumulated `BTreeMap` — empty when the failure was at the
+/// `read_dir` open boundary, partially-populated if dirent iteration
+/// errored mid-walk after some entries had already been folded in. The
+/// caller ([`walk_subdir`] or [`probe_subtree`]) wraps the result in
+/// `Arc::new(DirSnapshot::new(…))`, so the parent emits
+/// `DirChild { subtree: Some(empty_or_partial_arc) }` — covered-but-
+/// empty, distinct from the uncovered `DirChild { subtree: None }`
+/// sentinel reserved for `recursive=false`, beyond `max_depth`,
+/// cross-filesystem boundaries, and mid-walk `lstat`/kind-flip failures
+/// on a subdir itself.
 fn enumerate_dir(
     path: &Path,
     anchor_path: &Path,
