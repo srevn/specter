@@ -708,7 +708,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
 
 // ───────────────────────────────────────────────────────────────────────
 // IT-EF-2 dedup — Subtree-keyed effect uses Profile id, so two Profiles
-// with different masks don't collide on `last_emitted_dir_hash`.
+// with different masks don't collide on `fired_subs`.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]

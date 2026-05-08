@@ -95,8 +95,12 @@ pub enum Input {
     /// scope (`Engine::on_sensor_overflow`): cancel any in-flight burst
     /// and start a fresh Seed burst whose post-probe `dispatch_seed_ok`
     /// re-establishes baseline against disk reality and runs the
-    /// drift detection (a recorded `last_emitted_dir_hash[Subtree]`
-    /// disagreement fires Effects once, then rebases).
+    /// drift detection. Active-mode drift (overflow path: `baseline`
+    /// persists across the reseed) compares `baseline.hash()` against
+    /// the post-graft `current.hash()`; survival-mode drift (anchor-
+    /// loss recovery path) compares `last_settled_hash_at_loss` against
+    /// `current.hash()`. On drift, fires once for every Subtree-scoped
+    /// key in `fired_subs`, then rebases.
     ///
     /// Always [`OverflowScope::Global`] on the v1 inotify backend
     /// (`IN_Q_OVERFLOW` is queue-wide). The [`OverflowScope::Resource`]

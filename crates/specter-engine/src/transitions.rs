@@ -517,12 +517,12 @@ impl Engine {
     /// The Profile is resolved from `key` ([`DedupKey::profile`] is O(1));
     /// the Sub registry is consulted only for the unknown-Sub diagnostic.
     ///
-    /// Failed arrivals always clear `last_emitted_dir_hash[key]` — a
-    /// failed Effect leaves no observable state to deduplicate against,
-    /// so the next stable verdict at the same `DedupKey` must fire.
-    /// This happens regardless of phase (Awaiting decrement, late
-    /// arrival, or unknown — the cleared entry is correct in every
-    /// case).
+    /// Failed arrivals always remove `key` from `Profile.fired_subs` —
+    /// a failed Effect produced no observable state to deduplicate
+    /// against, so its fire history is wiped and the next stable
+    /// verdict at the same `DedupKey` must fire fresh. This happens
+    /// regardless of phase (Awaiting decrement, late arrival, or
+    /// unknown — the cleared entry is correct in every case).
     ///
     /// The phase routing matches the fire-cycle's `Awaiting` counter:
     /// - `Active(Awaiting { outstanding > 1, .. })` ⇒ decrement.
@@ -557,7 +557,6 @@ impl Engine {
         if matches!(result, EffectOutcome::Failed { .. })
             && let Some(p) = self.profiles.get_mut(profile_id)
         {
-            p.last_emitted_dir_hash.remove(key);
             p.fired_subs.remove(key);
         }
 
@@ -794,9 +793,9 @@ impl Engine {
     /// Sensor reports it dropped events at the kernel level (inotify's
     /// `IN_Q_OVERFLOW`). Reseed every Profile in scope so the engine's
     /// post-probe `dispatch_seed_ok` re-establishes baseline against
-    /// disk reality and runs drift detection (a recorded
-    /// `last_emitted_dir_hash[Subtree]` disagreement fires Effects once,
-    /// then rebases).
+    /// disk reality and runs drift detection. Active-mode drift
+    /// (`baseline.hash() != current.hash()`) fires once for every
+    /// Subtree-scoped key in `fired_subs`, then rebases.
     ///
     /// # Per-Profile dispatch
     ///
@@ -1068,19 +1067,19 @@ impl Engine {
     /// (Seed, Ok).
     ///
     /// Graft the response into `Profile.current` at the burst's
-    /// `probe_target` (= anchor for Seeds). Hash-only drift check: if the
-    /// post-graft `current` diverges from a recorded
-    /// `last_emitted_dir_hash[Subtree]` for this Profile, fire
-    /// `emit_effects` once and route through the same fire-tail as a
-    /// Standard burst (`emit_effects` count > 0 ⇒ `transition_to_awaiting`;
-    /// the eventual rebase probe captures the post-command tree).
-    /// Otherwise rebase directly: `baseline := current` and finish.
+    /// `probe_target` (= anchor for Seeds). Hash-only drift check via
+    /// [`Engine::seed_drift_observed`] — `true` ⇒ fire `emit_effects`
+    /// once over the Subtree subset of `fired_subs` and route through
+    /// the same fire-tail as a Standard burst (`emit_effects` count > 0
+    /// ⇒ `transition_to_awaiting`; the eventual rebase probe captures
+    /// the post-command tree). Otherwise rebase directly: `baseline :=
+    /// current` and finish.
     ///
-    /// Fresh-attach Seed cannot enter the drift branch — `last_emitted_dir_hash`
-    /// is empty by construction at fresh attach, so `seed_drift_observed`
-    /// returns false. The drift branch fires only on recovery / post-Effect
-    /// rebase paths where the Profile has already emitted at least one
-    /// Subtree key.
+    /// Fresh-attach Seed cannot enter the drift branch — `fired_subs`
+    /// is empty by construction at fresh attach, so
+    /// `seed_drift_observed` returns false. The drift branch fires only
+    /// on recovery / post-Effect rebase paths where the Profile has
+    /// already emitted at least one Effect.
     fn dispatch_seed_ok(
         &mut self,
         profile_id: ProfileId,
@@ -1434,15 +1433,6 @@ impl Engine {
     /// the next rebase would see drift; loop) or be silently a no-op
     /// (the post-fire hash matches itself by construction). The
     /// helper deliberately avoids `seed_drift_observed` here.
-    ///
-    /// **Settle-time refresh.** After `baseline := current`, the
-    /// helper calls [`crate::reconcile::refresh_dedup_after_rebase`]
-    /// to bring every recorded dedup hash on this Profile into
-    /// agreement with the new baseline. The emit-time writes captured
-    /// the pre-Effect input; this rebase observed the post-Effect
-    /// output. The refresh closes the gap for non-idempotent Effects
-    /// (the next Standard burst at the post-Effect state is then
-    /// correctly suppressed by B1 dedup).
     fn dispatch_rebase_ok(
         &mut self,
         profile_id: ProfileId,
@@ -1476,50 +1466,7 @@ impl Engine {
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.rebase_baseline();
         }
-        // Settle-time refresh: pull every recorded dedup hash on this
-        // Profile up to the post-rebase baseline-derived value. The
-        // emit-time writes captured the pre-Effect input; this rebase
-        // observed the post-Effect output. Closes the non-idempotent
-        // command's B1-dedup hole — see
-        // `crate::reconcile::refresh_dedup_after_rebase`.
-        crate::reconcile::refresh_dedup_after_rebase(&mut self.profiles, &self.tree, profile_id);
-        debug_assert!(
-            self.dedup_subtree_invariant_holds(profile_id),
-            "dispatch_rebase_ok: settle-time invariant breach on Profile {profile_id:?}",
-        );
         self.finish_burst_to_idle(profile_id, out);
-    }
-
-    /// Verify the Subtree arm of the post-rebase settle-time
-    /// invariant for Profile `profile_id`: every `DedupKey::Subtree`
-    /// entry whose `profile()` is `profile_id` carries the value
-    /// derived from `baseline` (`Dir → dir_hash`, `File → leaf_hash`).
-    /// Vacuously true on Profiles whose baseline is `None`, whose map
-    /// is empty, or whose `reap_pending` flag is set — matching the
-    /// helper's short-circuit conditions.
-    ///
-    /// Companion to [`crate::reconcile::refresh_dedup_after_rebase`];
-    /// invoked only via `debug_assert!`, so the body is dead code in
-    /// release builds (`#[allow(dead_code)]` silences the lint).
-    #[allow(dead_code)]
-    fn dedup_subtree_invariant_holds(&self, profile_id: ProfileId) -> bool {
-        let Some(p) = self.profiles.get(profile_id) else {
-            return true;
-        };
-        if p.reap_pending {
-            return true;
-        }
-        let Some(baseline) = p.baseline.as_ref() else {
-            return true;
-        };
-        let expected = match baseline {
-            TreeSnapshot::Dir(arc) => arc.dir_hash(),
-            TreeSnapshot::File(leaf) => leaf.leaf_hash(),
-        };
-        p.last_emitted_dir_hash.iter().all(|(k, h)| match k {
-            DedupKey::Subtree { profile, .. } if *profile == profile_id => *h == expected,
-            _ => true,
-        })
     }
 
     /// (Rebase, Vanished). Anchor disappeared between fire and rebase.
@@ -1732,18 +1679,10 @@ impl Engine {
         // "first emission" — even when the tree happens to match. Both
         // reads hit the cached `OnceLock<u128>` on each snapshot; same cost
         // class as the per-Sub map value compare it replaces.
-        let nothing_changed = match (baseline_snap.as_ref(), current_snap.as_ref()) {
-            (Some(b), Some(c)) => b.hash() == c.hash(),
-            _ => false,
-        };
-
-        // Snapshot the post-graft `current` hash once for SubtreeRoot
-        // dedup-hash suppression. PerStableFile uses per-leaf hashes
-        // (computed inside `emit_effects_per_stable_file`).
-        let current_dir_hash: u128 = current_snap.as_ref().map_or(0, |s| match s {
-            TreeSnapshot::Dir(arc) => arc.dir_hash(),
-            TreeSnapshot::File(leaf) => leaf.leaf_hash(),
-        });
+        let nothing_changed = baseline_snap
+            .as_ref()
+            .zip(current_snap.as_ref())
+            .is_some_and(|(b, c)| b.hash() == c.hash());
 
         let effect_forced = mode.effect_forced();
 
@@ -1830,18 +1769,7 @@ impl Engine {
                     });
                     count = count.saturating_add(1);
 
-                    // Defensive scaffolding for anchor-loss-mid-fire.
-                    // The canonical settle-time write happens at
-                    // `dispatch_rebase_ok` →
-                    // `reconcile::refresh_dedup_after_rebase`, which
-                    // overwrites this value with the post-rebase
-                    // baseline-derived hash. This emit-time write only
-                    // matters when the anchor is lost between emit and
-                    // rebase: `discard_anchor_state` preserves the
-                    // map, so post-recovery `seed_drift_observed` sees
-                    // a conservative pre-Effect signal and re-fires.
                     if let Some(p) = self.profiles.get_mut(profile_id) {
-                        p.last_emitted_dir_hash.insert(dk.clone(), current_dir_hash);
                         p.fired_subs.insert(dk);
                     }
                 }
@@ -1867,7 +1795,6 @@ impl Engine {
                         &anchor_path,
                         &anchor_cwd,
                         out,
-                        current_snap.as_ref(),
                     );
                     count = count.saturating_add(pushed);
                 }
@@ -1901,7 +1828,6 @@ impl Engine {
         anchor_path: &Path,
         anchor_cwd: &Path,
         out: &mut StepOutput,
-        current: Option<&TreeSnapshot>,
     ) -> u32 {
         let profile_id = match self.subs.get(sub_id) {
             Some(s) => s.profile,
@@ -1960,12 +1886,6 @@ impl Engine {
                 profile: profile_id,
                 resource,
             };
-            // Captured for the post-emit map mirror only — the per-leaf B1
-            // suppress check it gated is structurally unreachable: the diff
-            // iteration only yields entries where `current != baseline`, so
-            // a per-leaf hash compare against the recorded baseline-derived
-            // value never matches.
-            let leaf_hash = lookup_leaf_hash_in_current(current, entry.segment.as_str());
 
             let target_path = anchor_path.join(entry.segment.as_str());
             let target_rel = entry.segment.as_str();
@@ -2001,18 +1921,7 @@ impl Engine {
             });
             count = count.saturating_add(1);
 
-            // Defensive scaffolding for anchor-loss-mid-fire (per-leaf
-            // mirror of the SubtreeRoot write above). The canonical
-            // settle-time refresh at `dispatch_rebase_ok` overwrites
-            // this with the baseline-derived leaf hash; the emit-time
-            // pre-Effect value only matters when the anchor is lost
-            // between emit and rebase. The None-fallback above is
-            // intentionally not memoised — we want the next probe to
-            // fire too.
-            if let Some(h) = leaf_hash
-                && let Some(p) = self.profiles.get_mut(profile_id)
-            {
-                p.last_emitted_dir_hash.insert(dk.clone(), h);
+            if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.fired_subs.insert(dk);
             }
         }
@@ -2306,75 +2215,6 @@ const fn kind_from_entry(k: specter_core::EntryKind) -> ResourceKind {
 const _: fn() = || {
     let _ = ResourceKind::Unknown;
 };
-
-/// Resolve a `LeafEntry`'s `leaf_hash` from a snapshot by walking the
-/// snapshot's `Dir` chain by relative segment. `rel` is `"a/b/file.txt"`
-/// shape (forward-slash separated, never absolute). Returns `None` for:
-///
-/// - `current == None` (Profile has no snapshot yet).
-/// - `current` is a File-anchored snapshot (no Dir children to walk into;
-///   the relative path can only refer to the leaf itself, which is the
-///   File anchor — handled by callers via the Subtree `DedupKey` path).
-/// - The walk crosses an uncovered branch (`subtree: None`) or a Leaf at a
-///   non-final segment.
-/// - Any segment fails to resolve.
-///
-/// `PerStableFile` dedup-hash suppression treats `None` as "fire
-/// conservatively" — correctness over efficiency on the rare path where
-/// reconcile materialised the slot but the leaf isn't reachable from
-/// `current` at emission time (e.g., diff-entry's parent uncovered).
-/// Walk `current` down `rel` and return the terminal leaf's `leaf_hash()`.
-///
-/// Returns `None` when:
-/// - `current` is `None` or `TreeSnapshot::File(_)` (only Dir snapshots
-///   are navigable);
-/// - `rel` resolves to a Dir entry, not a Leaf;
-/// - any path component is missing in the current level's entries;
-/// - any intermediate Dir has `subtree: None` (uncovered region — the
-///   walk cannot descend through a snapshot gap).
-///
-/// Each component is borrowed from `rel` (lifetime `'_`), so the walk
-/// allocates zero `String`s. The per-level `Arc::clone` is a refcount
-/// bump — `DirSnapshot` is shared between the engine and walker, so
-/// cloning a level is the same cost as a borrow.
-///
-/// Call sites:
-/// - [`Engine::emit_effects_per_stable_file`] — per-leaf B1 dedup at
-///   emit time.
-/// - [`crate::reconcile::refresh_dedup_after_rebase`] — settle-time
-///   refresh of `Profile.last_emitted_dir_hash` for `PerFile` keys.
-pub(crate) fn lookup_leaf_hash_in_current(
-    current: Option<&TreeSnapshot>,
-    rel: &str,
-) -> Option<u128> {
-    use specter_core::ChildEntry;
-
-    let TreeSnapshot::Dir(root) = current? else {
-        return None;
-    };
-    let mut comps = rel.split('/').filter(|s| !s.is_empty());
-    let mut name: &str = comps.next()?;
-    let mut cur_dir: Arc<specter_core::DirSnapshot> = Arc::clone(root);
-    loop {
-        let entry = cur_dir.entries.get(name)?;
-        match comps.next() {
-            None => {
-                return match entry {
-                    ChildEntry::Leaf(l) => Some(l.leaf_hash()),
-                    ChildEntry::Dir(_) => None,
-                };
-            }
-            Some(next) => {
-                let next_dir = match entry {
-                    ChildEntry::Dir(dc) => Arc::clone(dc.subtree.as_ref()?),
-                    ChildEntry::Leaf(_) => return None,
-                };
-                cur_dir = next_dir;
-                name = next;
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 #[path = "transitions_tests.rs"]

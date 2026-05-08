@@ -252,7 +252,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     // EffectComplete::Ok → Rebasing (probe at anchor). ProbeResponse Ok
     // with the SAME snapshot (idempotent command) → Idle, baseline ==
     // current. A fresh FsEvent identical to the first must NOT re-fire
-    // — hash dedup catches it because last_emitted_dir_hash matches
+    // — hash dedup catches it because fired_subs matches
     // the current view.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
@@ -312,7 +312,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     assert!(e.profiles().get(pid).unwrap().baseline.is_some());
 
     // Fresh FsEvent identical to the first → Standard burst starts but
-    // hash dedup suppresses the Effect (current == last_emitted_dir_hash).
+    // hash dedup suppresses the Effect (current == fired_subs).
     let later_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(40));
     assert!(
         later_out.effects.is_empty(),
@@ -701,7 +701,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
 
 #[test]
 fn fire_cycle_fresh_seed_skips_awaiting() {
-    // Fresh attach → Seed-Ok → no prior `last_emitted_dir_hash` ⇒
+    // Fresh attach → Seed-Ok → no prior `fired_subs` ⇒
     // seed_drift_observed returns false ⇒ no emit ⇒ finish_to_idle
     // directly. Verify no Awaiting state is entered.
     let mut e = Engine::new();
@@ -728,18 +728,14 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
         ProfileState::Idle
     ));
     assert!(
-        e.profiles()
-            .get(pid)
-            .unwrap()
-            .last_emitted_dir_hash
-            .is_empty(),
-        "fresh Seed leaves last_emitted_dir_hash empty",
+        e.profiles().get(pid).unwrap().fired_subs.is_empty(),
+        "fresh Seed leaves fired_subs empty",
     );
 }
 
 #[test]
 fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
-    // Drive a complete fire cycle once (populates last_emitted_dir_hash).
+    // Drive a complete fire cycle once (populates fired_subs).
     // Then trigger an identical Standard burst whose stable verdict has
     // the same hash — emit_effects returns count == 0 → finish_to_idle.
     // Profile must NOT enter Awaiting.
@@ -780,7 +776,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
         ProfileState::Idle
     ));
     assert_eq!(
-        e.profiles().get(pid).unwrap().last_emitted_dir_hash.len(),
+        e.profiles().get(pid).unwrap().fired_subs.len(),
         1,
         "first fire cycle records the SubtreeRoot DedupKey hash",
     );
@@ -1211,35 +1207,27 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
         now + Duration::from_millis(30),
     );
 
-    // Settle-time invariant: recorded[Subtree] is the post-rebase
-    // baseline-derived hash, NOT the pre-emit value.
+    // Post-rebase: baseline := current (= post_effect). The fire
+    // history records the Sub's Subtree key — used to gate the B1
+    // suppress in the phantom burst below.
     let p = e.profiles().get(pid).unwrap();
     assert!(matches!(p.state, ProfileState::Idle));
-    let (recorded_key, recorded_hash) = p
-        .last_emitted_dir_hash
-        .iter()
-        .next()
-        .expect("recorded entry");
+    let recorded_key = p.fired_subs.iter().next().expect("fire history recorded");
     assert!(
         matches!(recorded_key, DedupKey::Subtree { profile, .. } if *profile == pid),
-        "recorded entry is the Subtree key for this Profile",
+        "fire history records the Subtree key for this Profile",
     );
     assert_eq!(
-        *recorded_hash,
+        p.baseline.as_ref().unwrap().hash(),
         post_effect.dir_hash(),
-        "recorded[Subtree] aligned with post-rebase baseline",
-    );
-    assert_ne!(
-        *recorded_hash,
-        pre_emit.dir_hash(),
-        "fix verification: recorded is post-rebase, not pre-emit",
+        "rebase aligned baseline with the post-Effect tree",
     );
 
     // Burst 2 — phantom event. The verify probe responds with
     // post_effect (the tree the user actually has now). B1 dedup
-    // compares current_dir_hash (post_effect.dir_hash()) against
-    // recorded[Subtree] (= post_effect.dir_hash() after refresh) →
-    // match → suppress.
+    // derives suppress from `baseline.hash() == current.hash()` AND
+    // `fired_subs.contains(dk)` — both true here, so the phantom is
+    // suppressed.
     let phantom_out =
         drive_to_awaiting(&mut e, pid, r, post_effect, now + Duration::from_millis(40));
     assert!(
@@ -1366,42 +1354,28 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         now + Duration::from_millis(30),
     );
 
-    // Settle-time invariant: recorded[PerFile{foo.rs}] is the
-    // post-rebase leaf hash. The slot survived graft (same inode), so
-    // the entry's resource id is unchanged from emit time.
-    let post_effect_leaf_hash = LeafEntry::new(EntryKind::File, 1, UNIX_EPOCH, 42, 0).leaf_hash();
-    let pre_emit_leaf_hash = LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, 42, 0).leaf_hash();
-    assert_ne!(
-        post_effect_leaf_hash, pre_emit_leaf_hash,
-        "test sanity: pre/post-Effect leaf hashes differ",
-    );
-    let recorded = e
-        .profiles()
-        .get(pid)
-        .unwrap()
-        .last_emitted_dir_hash
-        .iter()
-        .find_map(|(k, h)| match k {
-            DedupKey::PerFile { resource, .. } if *resource == foo_resource => Some(*h),
-            _ => None,
-        })
-        .expect("recorded[PerFile{foo.rs}] present (slot survived graft)");
-    assert_eq!(
-        recorded, post_effect_leaf_hash,
-        "recorded[PerFile] aligned with post-rebase leaf hash",
-    );
-    assert_ne!(
-        recorded, pre_emit_leaf_hash,
-        "fix verification: recorded is post-rebase, not pre-emit",
+    // Post-rebase: baseline := current carries the post-Effect leaf
+    // hash; the fire history records a PerFile key keyed at the file
+    // resource (slot survived graft via inode identity). Both signals
+    // are required to gate the phantom-suppress path below.
+    assert!(
+        e.profiles()
+            .get(pid)
+            .unwrap()
+            .fired_subs
+            .iter()
+            .any(|k| matches!(k, DedupKey::PerFile { resource, .. } if *resource == foo_resource)),
+        "fire history records the PerFile key at foo.rs's resource id",
     );
 
     // Burst 2 — phantom event. The verify probe responds with
     // post_effect (foo.rs at inode 42, size 1 — the "formatted"
     // content). The diff is empty (baseline == response), so
-    // `emit_effects_per_stable_file` walks zero entries — no fire
-    // anyway. The salient check is the **stored** leaf hash above:
-    // had the refresh not run, a phantom event with a probe response
-    // that revealed any change at foo.rs would B1-mismatch and refire.
+    // `emit_effects_per_stable_file` walks zero entries — no fire.
+    // The Subtree-arm B1 suppress (`baseline.hash() == current.hash()`
+    // AND `fired_subs.contains(dk)`) holds for the SubtreeRoot key
+    // implicitly recorded alongside the PerFile one — so the burst
+    // returns to Idle without entering Awaiting.
     let phantom_out =
         drive_to_awaiting(&mut e, pid, r, post_effect, now + Duration::from_millis(40));
     assert!(

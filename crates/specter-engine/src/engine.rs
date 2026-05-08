@@ -472,21 +472,14 @@ impl Engine {
         p.sub_refcount = p.sub_refcount.saturating_sub(1);
         let new_refcount = p.sub_refcount;
 
-        // Purge `last_emitted_dir_hash` entries keyed by the detached
-        // Sub. Their suppress-targets are stale; leaving them
-        // would let a *different* Sub on the same Profile (sharing a
-        // DedupKey by accident — only PerFile keys collide on
-        // `(sub, resource)`, so this is mostly a hygienic guard) inherit
-        // a stale fingerprint. The full reap path below drops the whole
-        // map alongside the Profile, so we only run this purge on the
+        // Purge `fired_subs` entries keyed by the detached Sub. The fire
+        // history must drop with the Sub: a future drift verdict on the
+        // Profile must not re-fire an Effect for a Sub the user has
+        // detached. The full reap path below drops the whole set
+        // alongside the Profile, so this targeted purge runs only on the
         // refcount-still-positive branch.
         if new_refcount > 0 {
             if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.last_emitted_dir_hash.retain(|k, _| match k {
-                    DedupKey::Subtree { sub: s, .. } | DedupKey::PerFile { sub: s, .. } => {
-                        *s != sub
-                    }
-                });
                 p.fired_subs.retain(|k| match k {
                     DedupKey::Subtree { sub: s, .. } | DedupKey::PerFile { sub: s, .. } => {
                         *s != sub

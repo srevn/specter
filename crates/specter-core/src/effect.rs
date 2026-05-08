@@ -75,7 +75,7 @@ pub struct CorrelationId(pub u64);
 /// lookup is hot.
 ///
 /// `Ord` drives the actuator's `BTreeMap<DedupKey, Slot>` and the
-/// engine's `BTreeMap<DedupKey, u128>` (`Profile::last_emitted_dir_hash`).
+/// engine's `BTreeSet<DedupKey>` (`Profile::fired_subs`).
 /// `Hash` is intentionally not derived — no `HashMap`/`HashSet` keys on
 /// this type and `core` bans `hashbrown` outright.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]

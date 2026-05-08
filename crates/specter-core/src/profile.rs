@@ -16,7 +16,7 @@ use crate::sub::ClassSet;
 use crate::tree::Tree;
 use compact_str::CompactString;
 use slotmap::{SecondaryMap, SlotMap};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 use tinyvec::TinyVec;
 
@@ -503,35 +503,6 @@ pub struct Profile {
     /// overcounts in multi-Profile sharing (would steal another
     /// Profile's contribution).
     pub anchor_claim: AnchorClaim,
-    /// Per-`DedupKey` `dir_hash` (or `leaf_hash`) of the post-Effect
-    /// settle-time tree state. The invariant is two-mode:
-    ///
-    /// **Active mode** (`baseline.is_some()`). After every successful
-    /// rebase, every entry for this Profile equals the value derived
-    /// from `baseline`:
-    /// - `Subtree` keys carry `baseline.dir_hash()` (or
-    ///   `leaf.leaf_hash()` for File-anchored Profiles).
-    /// - `PerFile { resource }` keys carry the leaf hash at
-    ///   `baseline`'s navigation of `resource`'s relative path under
-    ///   the anchor (or the entry is absent if the leaf doesn't exist
-    ///   in `baseline`).
-    ///
-    /// Established by the refresh inside `dispatch_rebase_ok`; B1 dedup
-    /// at `emit_effects` then suppresses any next stable verdict whose
-    /// observed state matches the settled state.
-    ///
-    /// **Survival mode** (`baseline.is_none()` after
-    /// `discard_anchor_state`). The map preserves the last active-mode
-    /// snapshot, or the emit-time pre-Effect hash when the burst lost
-    /// its anchor between emit and rebase. The next Seed-Ok's
-    /// `seed_drift_observed` consults these values and re-fires when
-    /// the post-recovery state differs (a conservative re-fire signal
-    /// for non-idempotent Effects whose completion the engine never
-    /// observed).
-    ///
-    /// Cleared on `EffectComplete::Failed` — the failed Effect leaves no
-    /// observation to deduplicate against.
-    pub last_emitted_dir_hash: BTreeMap<DedupKey, u128>,
     /// Set of `DedupKey`s for which this Profile has emitted at least one
     /// Effect that has not been cleared by a `Failed` outcome,
     /// `detach_sub`, or covered-leaf reap. Pure existence — no value
@@ -622,7 +593,6 @@ impl Profile {
             reap_pending: false,
             watch_root_parent: None,
             anchor_claim: AnchorClaim::None,
-            last_emitted_dir_hash: BTreeMap::new(),
             fired_subs: BTreeSet::new(),
             last_settled_hash_at_loss: None,
             events_union: events,
@@ -801,14 +771,14 @@ mod tests {
         assert_eq!(p.settle, SETTLE);
     }
 
-    /// `last_emitted_dir_hash` defaults to an empty map; engine fills it on
+    /// `fired_subs` defaults to an empty map; engine fills it on
     /// first successful Effect emission.
     #[test]
-    fn new_profile_initialises_last_emitted_dir_hash_empty() {
+    fn new_profile_initialises_fired_subs_empty() {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
-        assert!(p.last_emitted_dir_hash.is_empty());
+        assert!(p.fired_subs.is_empty());
     }
 
     /// `has_per_file_fds` defaults to false when `events` excludes both

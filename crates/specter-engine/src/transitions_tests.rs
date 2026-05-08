@@ -112,27 +112,6 @@ fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc
     ))
 }
 
-/// Build a `DirSnapshot` with the given children, returning an `Arc`
-/// suitable for embedding as a parent's `DirChild::subtree`. Generalizes
-/// [`dir_tree_snap`] (which always passes `subtree: None`) so tests can
-/// build deeply nested structures by composing levels bottom-up.
-fn dir_with_subtree(root: ResourceId, children: Vec<(&str, ChildEntry)>) -> Arc<DirSnapshot> {
-    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-    for (name, child) in children {
-        map.insert(CompactString::new(name), child);
-    }
-    Arc::new(DirSnapshot::new(
-        root,
-        DirMeta {
-            mtime: UNIX_EPOCH,
-            inode: 0,
-            device: 0,
-        },
-        0,
-        map,
-    ))
-}
-
 /// `LeafEntry` for File-anchored Profiles. Consumed directly by
 /// `ProbeOutcome::AnchorOk`; the wrapping `TreeSnapshot::File` lives on
 /// the engine-internal `Profile.current`, not the wire response.
@@ -1786,7 +1765,7 @@ fn effect_complete_ok_in_idle_diagnoses_outside_awaiting() {
 
 #[test]
 fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
-    // Failed always clears `last_emitted_dir_hash[key]` regardless of
+    // Failed always clears `fired_subs[key]` regardless of
     // phase — a failed Effect leaves no observable state to dedupe
     // against. In Idle the completion is also "late" (the engine isn't
     // tracking it), so it diagnoses with EffectCompleteOutsideAwaiting.
@@ -2726,156 +2705,6 @@ fn config_diff_removed_then_added_atomic() {
     assert!(!out.watch_ops.is_empty());
 }
 
-// ---- lookup_leaf_hash_in_current ----
-
-#[test]
-fn lookup_leaf_hash_walks_deeply_nested_current() {
-    // Pin the per-component navigation invariant across the no-alloc
-    // rewrite: `lookup_leaf_hash_in_current` walks nested `subtree`s and
-    // returns the leaf's `leaf_hash()` when the relative path resolves
-    // to a Leaf entry.
-    use slotmap::KeyData;
-    let rid = |n: u64| ResourceId::from(KeyData::from_ffi(n));
-
-    let leaf = LeafEntry::new(EntryKind::File, 17, UNIX_EPOCH, 7, 0);
-    let leaf_hash = leaf.leaf_hash();
-
-    let level3 = dir_with_subtree(rid(40), vec![("leaf.txt", ChildEntry::Leaf(leaf))]);
-    let level2 = dir_with_subtree(
-        rid(30),
-        vec![(
-            "c",
-            ChildEntry::Dir(DirChild {
-                inode: 30,
-                device: 0,
-                subtree: Some(level3),
-            }),
-        )],
-    );
-    let level1 = dir_with_subtree(
-        rid(20),
-        vec![(
-            "b",
-            ChildEntry::Dir(DirChild {
-                inode: 20,
-                device: 0,
-                subtree: Some(level2),
-            }),
-        )],
-    );
-    let root = dir_with_subtree(
-        rid(10),
-        vec![(
-            "a",
-            ChildEntry::Dir(DirChild {
-                inode: 10,
-                device: 0,
-                subtree: Some(level1),
-            }),
-        )],
-    );
-    let current = TreeSnapshot::Dir(root);
-
-    assert_eq!(
-        super::lookup_leaf_hash_in_current(Some(&current), "a/b/c/leaf.txt"),
-        Some(leaf_hash),
-    );
-}
-
-#[test]
-fn lookup_leaf_hash_returns_none_for_dir_target() {
-    // Path resolves to a Dir, not a Leaf — must return None so the
-    // caller's suppress check fires conservatively (no false-positive
-    // hash match against a directory).
-    use slotmap::KeyData;
-    let rid = |n: u64| ResourceId::from(KeyData::from_ffi(n));
-
-    let inner = dir_with_subtree(rid(20), vec![]);
-    let root = dir_with_subtree(
-        rid(10),
-        vec![(
-            "subdir",
-            ChildEntry::Dir(DirChild {
-                inode: 20,
-                device: 0,
-                subtree: Some(inner),
-            }),
-        )],
-    );
-    let current = TreeSnapshot::Dir(root);
-
-    assert_eq!(
-        super::lookup_leaf_hash_in_current(Some(&current), "subdir"),
-        None,
-    );
-}
-
-#[test]
-fn lookup_leaf_hash_returns_none_for_missing_path() {
-    // Path component doesn't exist in any level — None.
-    use slotmap::KeyData;
-    let rid = |n: u64| ResourceId::from(KeyData::from_ffi(n));
-
-    let root = dir_with_subtree(
-        rid(10),
-        vec![(
-            "real_file.txt",
-            ChildEntry::Leaf(LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, 1, 0)),
-        )],
-    );
-    let current = TreeSnapshot::Dir(root);
-
-    assert_eq!(
-        super::lookup_leaf_hash_in_current(Some(&current), "missing.txt"),
-        None,
-    );
-    assert_eq!(
-        super::lookup_leaf_hash_in_current(Some(&current), "missing/deeper.txt"),
-        None,
-    );
-}
-
-#[test]
-fn lookup_leaf_hash_returns_none_for_file_current() {
-    // A `TreeSnapshot::File(_)` current (File-anchored Profile) cannot
-    // be navigated by relative segments — the function only walks Dir
-    // snapshots.
-    let leaf = LeafEntry::new(EntryKind::File, 17, UNIX_EPOCH, 7, 0);
-    let current = TreeSnapshot::File(leaf);
-
-    assert_eq!(
-        super::lookup_leaf_hash_in_current(Some(&current), "anything"),
-        None,
-    );
-}
-
-#[test]
-fn lookup_leaf_hash_returns_none_for_uncovered_intermediate() {
-    // Intermediate `Dir` with `subtree: None` (uncovered) — the walk
-    // cannot descend, so the function returns None even when the
-    // continuation path beyond the gap might match.
-    use slotmap::KeyData;
-    let rid = |n: u64| ResourceId::from(KeyData::from_ffi(n));
-
-    let root = dir_with_subtree(
-        rid(10),
-        vec![(
-            "uncovered",
-            ChildEntry::Dir(DirChild {
-                inode: 20,
-                device: 0,
-                subtree: None,
-            }),
-        )],
-    );
-    let current = TreeSnapshot::Dir(root);
-
-    assert_eq!(
-        super::lookup_leaf_hash_in_current(Some(&current), "uncovered/leaf.txt"),
-        None,
-    );
-}
-
 // ---- emit_effects PerStableFile ----
 
 #[test]
@@ -3216,17 +3045,17 @@ fn drive_to_first_effect(
 }
 
 #[test]
-fn records_last_emitted_dir_hash_after_subtree_effect() {
+fn records_fired_subs_after_subtree_effect() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     let now = Instant::now();
     let out = drive_to_first_effect(&mut e, pid, root, now);
 
     // First Effect fires (no prior emission).
     assert_eq!(out.effects.len(), 1, "first Standard-Ok fires Effect");
-    // last_emitted_dir_hash now has one entry for the SubtreeRoot key.
+    // fired_subs now has one entry for the SubtreeRoot key.
     let p = e.profiles.get(pid).unwrap();
-    assert_eq!(p.last_emitted_dir_hash.len(), 1);
-    let (key, _hash) = p.last_emitted_dir_hash.iter().next().unwrap();
+    assert_eq!(p.fired_subs.len(), 1);
+    let key = p.fired_subs.iter().next().unwrap();
     assert!(matches!(
         key,
         DedupKey::Subtree {
@@ -3380,19 +3209,13 @@ fn per_file_effect_target_matches_dedup_key_resource() {
 }
 
 #[test]
-fn clears_last_emitted_dir_hash_on_effect_complete_failed() {
+fn clears_fired_subs_on_effect_complete_failed() {
     let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
     let now = Instant::now();
     let _ = drive_to_first_effect(&mut e, pid, root, now);
 
     // Confirm the dedup-hash entry was written.
-    assert!(
-        !e.profiles
-            .get(pid)
-            .unwrap()
-            .last_emitted_dir_hash
-            .is_empty()
-    );
+    assert!(!e.profiles.get(pid).unwrap().fired_subs.is_empty());
 
     // EffectComplete::Failed clears the dedup-hash entry for this DedupKey.
     let dk = DedupKey::Subtree {
@@ -3411,18 +3234,14 @@ fn clears_last_emitted_dir_hash_on_effect_complete_failed() {
         now,
     );
     assert!(
-        e.profiles
-            .get(pid)
-            .unwrap()
-            .last_emitted_dir_hash
-            .is_empty(),
+        e.profiles.get(pid).unwrap().fired_subs.is_empty(),
         "Failed Effect clears the suppression entry",
     );
 }
 
 #[test]
 fn recovery_seed_no_prior_emit_does_not_fire() {
-    // Fresh attach → Seed-Ok → no prior `last_emitted_dir_hash` ⇒
+    // Fresh attach → Seed-Ok → no prior `fired_subs` ⇒
     // seed_drift_observed returns an empty key set ⇒ no Effect
     // (preserves "fresh Seed never fires Effect").
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
@@ -3437,79 +3256,6 @@ fn recovery_seed_no_prior_emit_does_not_fire() {
         Instant::now(),
     );
     assert!(out.effects.is_empty(), "fresh-Profile Seed fires no Effect");
-}
-
-/// Concern B fix — direct test of the `dispatch_rebase_ok` integration
-/// point. Drives a Profile into `Active(Rebasing)`, supplies a rebase
-/// response whose hash differs from the recorded value, and asserts
-/// the post-call recorded value equals the post-rebase
-/// baseline-derived hash. Without the wired refresh, recorded would
-/// keep its pre-Effect value.
-#[test]
-fn dispatch_rebase_ok_refreshes_last_emitted_dir_hash() {
-    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
-    let now = Instant::now();
-    // Drive to first Effect, EffectComplete::Ok → Rebasing.
-    let stable_out = drive_to_first_effect(&mut e, pid, root, now);
-    assert_eq!(stable_out.effects.len(), 1);
-    let effect_key = stable_out.effects[0].key.clone();
-
-    let pre_rebase_hash = *e
-        .profiles
-        .get(pid)
-        .unwrap()
-        .last_emitted_dir_hash
-        .iter()
-        .next()
-        .unwrap()
-        .1;
-
-    let rebase_out = e.step(
-        Input::EffectComplete {
-            sub: sid,
-            key: effect_key,
-            result: EffectOutcome::Ok,
-        },
-        now + SETTLE * 3,
-    );
-    let rebase_corr = rebase_out
-        .probe_ops
-        .iter()
-        .find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation()),
-            ProbeOp::Cancel { .. } => None,
-        })
-        .expect("rebase probe");
-
-    // Rebase response carries a non-idempotent post-Effect snapshot
-    // (different children → different dir_hash).
-    let post_rebase = dir_tree_snap(root, vec![("post.rs", EntryKind::File, 99)]);
-    let post_rebase_hash = post_rebase.dir_hash();
-    assert_ne!(
-        post_rebase_hash, pre_rebase_hash,
-        "test sanity: pre/post-rebase hashes differ",
-    );
-
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            profile: pid,
-            correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(post_rebase),
-        }),
-        now + SETTLE * 4,
-    );
-
-    let p = e.profiles.get(pid).unwrap();
-    assert!(matches!(p.state, ProfileState::Idle));
-    let recorded = *p.last_emitted_dir_hash.iter().next().unwrap().1;
-    assert_eq!(
-        recorded, post_rebase_hash,
-        "dispatch_rebase_ok refreshed recorded[Subtree] to baseline.dir_hash()",
-    );
-    assert_ne!(
-        recorded, pre_rebase_hash,
-        "fix verification: recorded is post-rebase, not pre-emit",
-    );
 }
 
 /// Standard burst with a per-stable-file Sub: drift filter is `None`,
@@ -4241,7 +3987,7 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
         // post-graft current.hash() — the bool drift signal triggers
         // and the SeedDrift filter (Subtree subset of fired_subs)
         // narrows to `dk`.
-        p.last_emitted_dir_hash.insert(dk.clone(), 0xfeed_face_u128);
+        p.fired_subs.insert(dk.clone());
         p.fired_subs.insert(dk);
         p.last_settled_hash_at_loss = Some(0xdead_beef);
         p.baseline = None;
@@ -4337,7 +4083,7 @@ fn seed_drift_observed_returns_true_on_post_recovery_drift() {
 /// the witness-only design would have lost this case (overflow
 /// doesn't go through `discard_anchor_state`, so the witness stays
 /// `None`); the baseline-or-witness arm preserves the conservative
-/// re-fire contract that the original `last_emitted_dir_hash`-
+/// re-fire contract that the original `fired_subs`-
 /// based drift performed.
 #[test]
 fn seed_drift_observed_returns_true_on_active_mode_drift() {

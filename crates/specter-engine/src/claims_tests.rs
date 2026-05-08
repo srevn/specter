@@ -158,29 +158,6 @@ fn discard_anchor_state_preserves_watch_root_parent() {
 }
 
 #[test]
-fn discard_anchor_state_preserves_last_emitted_dir_hash() {
-    // Stamp a synthetic dedup-hash entry on the Profile, then discard.
-    let (mut e, sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
-    let key = DedupKey::Subtree {
-        sub: sid,
-        profile: pid,
-    };
-    if let Some(p) = e.profiles.get_mut(pid) {
-        p.last_emitted_dir_hash.insert(key, 0xdead_beef);
-    }
-    let map_before = e.profiles().get(pid).unwrap().last_emitted_dir_hash.clone();
-
-    let mut out = StepOutput::default();
-    e.discard_anchor_state(pid, &mut out);
-
-    let map_after = &e.profiles().get(pid).unwrap().last_emitted_dir_hash;
-    assert_eq!(
-        &map_before, map_after,
-        "dedup memory survives across anchor loss",
-    );
-}
-
-#[test]
 fn discard_anchor_state_captures_last_settled_hash_at_loss() {
     let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
 

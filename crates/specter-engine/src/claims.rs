@@ -29,7 +29,7 @@
 //! `debug_assert!(prev > 0)`. With it, the helper is safe in any state.
 
 use crate::Engine;
-use crate::reconcile::{delete_child, purge_per_file_dedup_for_reaped_slots};
+use crate::reconcile::{delete_child, purge_per_file_fired_subs_for_reaped_slots};
 use crate::refcounts::sub_watch_demand;
 use specter_core::{AnchorClaim, ClassSet, ProfileId, ProfileState, StepOutput, TreeSnapshot};
 
@@ -162,11 +162,11 @@ impl Engine {
     ///
     /// **Per-file dedup hygiene.** The walk reaps covered Leaves; their
     /// `ResourceId`s may key entries in OTHER Profiles' (or this one's)
-    /// `last_emitted_dir_hash` map. Mirror [`graft`]'s post-walk purge
-    /// across the whole registry to drop the now-stale entries.
-    /// Cross-Profile sharing makes the registry-wide scan necessary —
-    /// a per-Profile purge would miss entries other Profiles wrote
-    /// against the same descendant slot.
+    /// `fired_subs` set. Mirror [`graft`]'s post-walk purge across the
+    /// whole registry to drop the now-stale entries. Cross-Profile
+    /// sharing makes the registry-wide scan necessary — a per-Profile
+    /// purge would miss entries other Profiles wrote against the same
+    /// descendant slot.
     ///
     /// **Sole call sites.** [`Engine::reap_profile`] and the seven
     /// `dispatch_*_vanished/failed` + `finalize_anchor_lost` sites in
@@ -219,9 +219,9 @@ impl Engine {
         }
 
         // Cross-Profile dedup hygiene: covered Leaves reaped above may
-        // appear in any Profile's `last_emitted_dir_hash` keyed at
-        // their `ResourceId`. Mirrors graft's post-walk_pair purge.
-        purge_per_file_dedup_for_reaped_slots(&mut self.profiles, &self.tree);
+        // appear in any Profile's `fired_subs` set keyed at their
+        // `ResourceId`. Mirrors graft's post-walk_pair purge.
+        purge_per_file_fired_subs_for_reaped_slots(&mut self.profiles, &self.tree);
     }
 
     /// Discard every anchor-derived state when the anchor is lost or
@@ -251,20 +251,27 @@ impl Engine {
     ///   it here would close auto-recovery on anchor reappearance;
     ///   only `reap_profile` and `on_watch_op_rejected`'s parent purge
     ///   clear it.
-    /// - `Profile.last_emitted_dir_hash` — the recorded hashes
-    ///   survive anchor loss in **survival mode**. After the next
-    ///   Seed-Ok re-establishes baseline, the Subtree-key drift check
-    ///   fires for any Sub whose recorded hash differs from the
-    ///   post-recovery state. The eventual rebase restores the
-    ///   active-mode invariant via
-    ///   `reconcile::refresh_dedup_after_rebase`
-    ///   (`recorded == baseline.dir_hash()` for Subtree keys;
-    ///   symmetric per-leaf rule for PerFile keys). Clearing here
-    ///   would silently re-fire emitted-once Effects on every
-    ///   recovery.
+    /// - `Profile.fired_subs` — fire history survives anchor loss.
+    ///   The post-recovery Seed-Ok consults
+    ///   [`Engine::seed_drift_observed`] to decide whether to re-fire;
+    ///   the SeedDrift filter narrows to the Subtree subset of
+    ///   `fired_subs`. Clearing here would silently fail to re-fire
+    ///   emitted-once Effects on every recovery.
     /// - All other fields (`parent_profile`, `events_union`,
     ///   `has_per_file_fds`, `config*`, `resource`, `reap_pending`,
     ///   `settle*`).
+    ///
+    /// **Captured then later cleared on recovery.**
+    /// - `Profile.last_settled_hash_at_loss` — set from
+    ///   `baseline.hash()` immediately before this helper clears
+    ///   `baseline` (via [`specter_core::Profile::capture_witness_at_loss`]).
+    ///   The witness substitutes for the now-cleared `baseline.hash()`
+    ///   in the next Seed-Ok's drift verdict; both branches of
+    ///   `dispatch_seed_ok` and `dispatch_rebase_ok` call
+    ///   [`specter_core::Profile::rebase_baseline`], which clears it on
+    ///   consume. The cross-field invariant
+    ///   `baseline.is_some() ⇒ last_settled_hash_at_loss.is_none()`
+    ///   holds at every step boundary outside this helper's lifetime.
     ///
     /// **Pre-condition.** The probe channel must already be closed.
     /// Callers either took the response-dispatch path (which closes
