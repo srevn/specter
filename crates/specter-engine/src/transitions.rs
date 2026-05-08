@@ -410,18 +410,27 @@ impl Engine {
     /// Dispatch a [`Input::TimerExpired`].
     ///
     /// `kind` tells us which transition this timer drives — settle expiry
-    /// (Batching → Verifying) or burst-deadline expiry (force-fire). The
-    /// `id` epoch survives the validation re-check that
+    /// (Batching → Verifying, with possible reschedule), burst-deadline
+    /// expiry (force-fire), or gate-deadline expiry (actuator-hang
+    /// recovery). The `id` epoch survives the validation re-check that
     /// [`Engine::is_timer_referenced`] performs against the live burst
     /// slot for that `kind`; `pop_expired` already ran the same check
     /// before `step` was called, so the production path runs it twice
     /// (cheap), and any direct `step(Input::TimerExpired)` from a test
     /// or fuzzer falls through the same gate.
+    ///
+    /// `now` flows through to [`Engine::on_settle_expired`]: the settle
+    /// expiry handler reads it to decide whether to reschedule for
+    /// `last_event_time + settle` (events arrived since) or transition
+    /// to Verifying (quiet for ≥ settle). Other dispatch arms ignore
+    /// it — `BurstDeadline` and `AwaitGateDeadline` are unconditional
+    /// transitions whose decisions depend only on burst state.
     pub(crate) fn on_timer_expired(
         &mut self,
         profile: ProfileId,
         kind: TimerKind,
         id: TimerId,
+        now: Instant,
         out: &mut StepOutput,
     ) {
         if !Self::is_timer_referenced(&self.profiles, profile, kind, id) {
@@ -429,10 +438,78 @@ impl Engine {
             return;
         }
         match kind {
-            TimerKind::Settle => self.transition_to_verifying(profile, out),
+            TimerKind::Settle => self.on_settle_expired(profile, now, out),
             TimerKind::BurstDeadline => self.handle_burst_deadline(profile, out),
             TimerKind::AwaitGateDeadline => self.handle_gate_deadline(profile, out),
         }
+    }
+
+    /// Settle-timer expiry. Either reschedule (events arrived since the
+    /// timer was scheduled) or transition to Verifying (quiet for ≥
+    /// settle).
+    ///
+    /// Reschedule path: `now − last_event_time < settle`. Schedules a
+    /// fresh `TimerKind::Settle` at `last_event_time + settle` and
+    /// updates `burst.phase` to point at the new id; the old (just-
+    /// expired) id is no longer referenced and would lazily drop on a
+    /// subsequent `pop_expired`. The phase stays Batching.
+    ///
+    /// Transition path: `now − last_event_time ≥ settle` (or
+    /// `last_event_time` is `None`, which only occurs as a defensive
+    /// fall-through — Standard bursts seed it at burst start, and
+    /// Seed-burst Batching re-entries via `event_drives_batching`
+    /// populate it before any settle timer is scheduled). Forwards to
+    /// [`Engine::transition_to_verifying`].
+    ///
+    /// **Preconditions** (guaranteed by [`Engine::is_timer_referenced`]
+    /// upstream): `Profile.state == Active(Burst)` and
+    /// `burst.phase == BurstPhase::Batching { settle_timer == popped_id }`.
+    /// The defensive early returns below cover direct
+    /// `step(Input::TimerExpired)` calls that bypass `pop_expired`.
+    pub(crate) fn on_settle_expired(
+        &mut self,
+        profile_id: ProfileId,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        let Some(p) = self.profiles.get(profile_id) else {
+            return;
+        };
+        let ProfileState::Active(burst) = &p.state else {
+            return;
+        };
+        // is_timer_referenced upstream guarantees Batching, but the
+        // direct-step path may bypass it; gate the read defensively.
+        if !matches!(burst.phase, BurstPhase::Batching { .. }) {
+            return;
+        }
+        let settle = p.settle;
+        let last = burst.last_event_time;
+
+        // saturating_duration_since handles `now < last` (test mockclock
+        // rewind / non-monotonic clocks): returns Duration::ZERO, which
+        // satisfies `< settle` and triggers a reschedule. Safe under any
+        // clock skew the harness can produce.
+        if let Some(last) = last
+            && now.saturating_duration_since(last) < settle
+        {
+            let new_deadline = last + settle;
+            let new_timer = self
+                .timers
+                .schedule(new_deadline, profile_id, TimerKind::Settle);
+            if let Some(p) = self.profiles.get_mut(profile_id)
+                && let ProfileState::Active(b) = &mut p.state
+            {
+                b.phase = BurstPhase::Batching {
+                    settle_timer: new_timer,
+                };
+            }
+            return;
+        }
+
+        // Quiet for ≥ settle (or last_event_time is None — defensive):
+        // proceed with the original Batching → Verifying transition.
+        self.transition_to_verifying(profile_id, out);
     }
 
     /// Dispatch a [`Input::EffectComplete`].

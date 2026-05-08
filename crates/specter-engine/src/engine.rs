@@ -89,7 +89,7 @@ impl Engine {
                 self.on_probe_response(resp, now, &mut out);
             }
             Input::TimerExpired { profile, kind, id } => {
-                self.on_timer_expired(profile, kind, id, &mut out);
+                self.on_timer_expired(profile, kind, id, now, &mut out);
             }
             Input::EffectComplete { sub, key, result } => {
                 self.on_effect_complete(sub, &key, &result, now, &mut out);

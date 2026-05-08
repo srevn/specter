@@ -48,8 +48,18 @@ impl PartialOrd for TimerEntry {
 /// spec's lazy form is cheaper for the typical "schedule, fire,
 /// occasionally cancel" workload.
 ///
-/// Sizing: at most two timers per Active Profile (settle + burst-deadline)
-/// plus stale entries pending lazy collection.
+/// Sizing: live count is at most two per Active Profile —
+/// `Batching` holds `Settle` + `BurstDeadline`; `Verifying` /
+/// `Draining` hold `BurstDeadline` alone; `Awaiting` holds
+/// `AwaitGateDeadline` alone; `Rebasing` holds none. Stale entries
+/// are bounded by the settle-reuse discipline: at most one per
+/// settle reschedule (events during Batching update
+/// `Burst.last_event_time` without re-inserting; the on-expiry
+/// handler reschedules at `last_event_time + settle` only when
+/// events arrived since), plus the per-burst orphans from post-fire
+/// transitions (`BurstDeadline` orphans at `Awaiting` entry;
+/// `AwaitGateDeadline` orphans at `Rebasing` entry); all clear
+/// lazily at their original deadlines.
 #[derive(Debug, Default)]
 pub struct TimerHeap {
     inner: BinaryHeap<Reverse<TimerEntry>>,

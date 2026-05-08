@@ -103,6 +103,10 @@ impl Engine {
                 dirty_resources: BTreeSet::new(),
                 force_walk_resources: BTreeSet::new(),
                 probe_target: Some(resource),
+                // Seed bursts skip Batching; the field has no consumer
+                // until a fresh FsEvent during the verify routes through
+                // `event_drives_batching` and repopulates it.
+                last_event_time: None,
             });
         }
 
@@ -181,6 +185,11 @@ impl Engine {
                 dirty_resources: dirty,
                 force_walk_resources: force_walk,
                 probe_target: None,
+                // The burst-start FsEvent IS the first event; seed the
+                // settle-deadline source of truth with `now`. Subsequent
+                // events update this in `event_drives_batching` without
+                // re-inserting a fresh heap entry.
+                last_event_time: Some(now),
             });
         }
 
@@ -191,9 +200,10 @@ impl Engine {
     /// Caller: `drive_burst` Active branch — an `FsEvent` arrived during a
     /// burst. Cancels any in-flight verify (iff the prior phase was
     /// `Verifying`), accumulates the event into `dirty_resources` and
-    /// `force_walk_resources`, arms a fresh settle timer, and writes
-    /// `phase = Batching { settle_timer }`. `intent`, `forced`, and the
-    /// `burst_deadline` are preserved.
+    /// `force_walk_resources`, updates `last_event_time`, arms a fresh
+    /// settle timer **only when re-entering Batching from Verifying or
+    /// Draining**, and writes `phase = Batching { settle_timer }`.
+    /// `intent`, `forced`, and the `burst_deadline` are preserved.
     ///
     /// Why this is one of two batching mutators rather than a single
     /// helper with a flag: the caller has static knowledge that the
@@ -202,6 +212,21 @@ impl Engine {
     /// the prior phase was `Batching` or `Draining`, no probe is in
     /// flight. Encoding that as a runtime flag is a category error — the
     /// caller always knows the right answer.
+    ///
+    /// **Settle-timer reuse.** In steady-state Batching the live
+    /// settle timer's heap entry is preserved; the per-event update is
+    /// just `last_event_time = Some(now)`. The on-expiry handler
+    /// (`Engine::on_settle_expired`) reschedules a fresh entry at
+    /// `last_event_time + settle` if events arrived since, otherwise
+    /// transitions to Verifying. This collapses the per-event
+    /// `BinaryHeap::push` that previously orphaned the prior entry to
+    /// at most one push per `last_event_time + settle` boundary —
+    /// roughly `ceil(burst_duration / settle)` settle-timer entries
+    /// per burst, instead of one per `FsEvent`.
+    ///
+    /// Re-entries from `Verifying` or `Draining` have no live settle
+    /// timer to reuse and therefore schedule a fresh entry. `Batching`
+    /// re-entries skip the schedule.
     pub(crate) fn event_drives_batching(
         &mut self,
         profile_id: ProfileId,
@@ -212,10 +237,20 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let ProfileState::Active(_) = &p.state else {
+        let ProfileState::Active(burst) = &p.state else {
             return;
         };
         let settle = p.settle;
+
+        // Read phase before mutating self via `cancel_pending_probe`. The
+        // Cancel emission doesn't touch `burst.phase`, but it does take
+        // `&mut self` and so invalidates the borrow on `burst`. Decide
+        // here whether the existing Batching settle timer (if any) carries
+        // over, or whether we mint a fresh one for a Verifying/Draining
+        // re-entry. The decision is structural: a live Batching has its
+        // own timer slot; Verifying/Draining have none.
+        let needs_fresh_timer =
+            matches!(burst.phase, BurstPhase::Verifying | BurstPhase::Draining,);
 
         // Idempotent: emits Cancel iff the probe channel is open
         // (Verifying ⇒ pending_probe = Some(_)). For Batching / Draining
@@ -223,16 +258,30 @@ impl Engine {
         // matching the prior `was_verifying` snapshot's role.
         self.cancel_pending_probe(profile_id, out);
 
-        let settle_timer = self
-            .timers
-            .schedule(now + settle, profile_id, TimerKind::Settle);
+        let new_settle_timer = if needs_fresh_timer {
+            Some(
+                self.timers
+                    .schedule(now + settle, profile_id, TimerKind::Settle),
+            )
+        } else {
+            None
+        };
 
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(burst) = &mut p.state
         {
+            burst.last_event_time = Some(now);
             burst.dirty_resources.insert(event_resource);
             burst.force_walk_resources.insert(event_resource);
-            burst.phase = BurstPhase::Batching { settle_timer };
+            if let Some(timer_id) = new_settle_timer {
+                burst.phase = BurstPhase::Batching {
+                    settle_timer: timer_id,
+                };
+            }
+            // else: phase already Batching, settle_timer unchanged. The
+            // existing timer fires at its scheduled deadline; the expiry
+            // handler reads `last_event_time` and reschedules if events
+            // have arrived since.
         }
     }
 
@@ -258,6 +307,15 @@ impl Engine {
     /// then fails the live-slot check and drops as `StaleProbeResponse`.
     /// The forced + not-stable case in `dispatch_standard_ok` also
     /// bypasses this helper — forced + unstable still fires.
+    ///
+    /// **`last_event_time` preserved.** The verify just responded;
+    /// no fresh `FsEvent` drove this transition, so the field carries
+    /// its prior value into the new Batching cycle. If no event arrives
+    /// before the freshly-scheduled settle timer fires, the on-expiry
+    /// handler observes `now − last_event_time ≥ settle`
+    /// (`now ≥ unstable_response_at + settle ≥ prior_last_event +
+    /// settle`) and transitions cleanly to Verifying — the cycle
+    /// completes without spurious reschedules.
     pub(crate) fn unstable_response_drives_batching(
         &mut self,
         profile_id: ProfileId,
@@ -278,10 +336,18 @@ impl Engine {
     }
 
     /// Phase: `Batching` (or `Draining`) → `Verifying`. Mints a fresh
-    /// correlation; emits `ProbeOp::Probe`. The just-fired `settle_timer`
-    /// is no longer referenced (lazy invalidation drops the heap entry on
-    /// `pop_expired` once the prior `Batching` variant — and with it the
-    /// `TimerId` — is overwritten by the assignment below).
+    /// correlation; emits `ProbeOp::Probe`.
+    ///
+    /// **Settle-timer lifecycle on entry.** The `Batching → Verifying`
+    /// arm runs only after `on_settle_expired` has decided to transition
+    /// (rather than reschedule), and the expired timer entry has already
+    /// been removed from the heap by `pop_expired` upstream — the
+    /// phase-variant overwrite below drops the engine's reference, not
+    /// a heap entry. The `BurstDeadline` arm (force-fire path) leaves
+    /// the live settle_timer in the heap when overwriting `burst.phase`;
+    /// that stale entry lazy-drops on its original deadline. The
+    /// `Draining → Verifying` reconfirm arm has no settle_timer to
+    /// orphan (Draining never armed one).
     ///
     /// Standard probes target the LCA of the burst's `dirty_resources`,
     /// ship `current.subtree_at(target)` as the walker's mtime-skip
@@ -841,8 +907,8 @@ mod tests {
 
     use crate::Engine;
     use specter_core::{
-        BurstIntent, BurstPhase, ClassSet, ProbeOp, ProbeRequest, Profile, ProfileState,
-        ResourceKind, ResourceRole, ScanConfig, StepOutput, WatchOp,
+        BurstIntent, BurstPhase, ClassSet, Input, ProbeOp, ProbeRequest, Profile, ProfileState,
+        ResourceKind, ResourceRole, ScanConfig, StepOutput, TimerKind, WatchOp,
     };
     use std::time::{Duration, Instant};
 
@@ -1052,16 +1118,19 @@ mod tests {
 
     #[test]
     fn event_storm_during_batching_does_not_amplify_settle() {
-        // Fire ten FsEvents at 50 ms intervals during a Standard burst.
-        // The settle timer's deadline must equal `last_event + settle`,
-        // not be amplified by the prior backoff curve. This is the
-        // direct assertion that the conflation has been removed.
+        // Settle-reuse contract: a storm of FsEvents during Batching does
+        // NOT re-insert a fresh settle timer per event; only
+        // `last_event_time` updates. The on-expiry handler reschedules at
+        // `last_event_time + settle` if events arrived since, otherwise
+        // transitions. The semantic invariant — settle deadline pinned at
+        // `last_event + settle` — holds without per-event heap pushes.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         let r = e.profiles.get(pid).unwrap().resource;
         let t0 = Instant::now();
         e.start_standard_burst(pid, r, t0, &mut out);
 
+        // Fire ten FsEvents at 50 ms intervals during the Standard burst.
         let mut last_event = t0;
         for k in 1..=10 {
             last_event = t0 + Duration::from_millis(50 * k);
@@ -1069,24 +1138,101 @@ mod tests {
             e.event_drives_batching(pid, r, last_event, &mut out);
         }
 
-        let phase = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => &b.phase,
+        // ── Invariant 1: last_event_time is the source of truth. The
+        // most recent event imprints on the field; intermediate events
+        // overwrite without trace.
+        let burst = match &e.profiles.get(pid).unwrap().state {
+            ProfileState::Active(b) => b,
             _ => panic!("expected Active"),
         };
-        let settle_timer = match phase {
-            BurstPhase::Batching { settle_timer } => *settle_timer,
-            _ => panic!("expected Batching"),
-        };
-        let deadline = e
+        assert_eq!(
+            burst.last_event_time,
+            Some(last_event),
+            "last_event_time pinned to most recent FsEvent",
+        );
+
+        // ── Invariant 2: only one settle timer for this profile in the
+        // heap. The initial timer from `start_standard_burst` carries
+        // through the storm; per-event reschedules are gone.
+        let settle_timers: usize = e
             .timers
             .iter()
-            .find(|entry| entry.id == settle_timer)
-            .map(|entry| entry.deadline)
-            .expect("settle timer present in heap");
+            .filter(|entry| entry.profile == pid && entry.kind == TimerKind::Settle)
+            .count();
         assert_eq!(
-            deadline,
+            settle_timers, 1,
+            "exactly one settle timer per burst (no per-event reinsert)",
+        );
+
+        let initial_settle_timer = match burst.phase {
+            BurstPhase::Batching { settle_timer } => settle_timer,
+            _ => panic!("expected Batching"),
+        };
+
+        // ── Invariant 3: on the initial timer's expiry while events are
+        // recent (last_event > initial deadline in this contrived
+        // unit-test timeline; saturating_duration_since clamps to 0
+        // and the recency check fires), `on_settle_expired` reschedules
+        // a fresh timer at `last_event + settle`. The phase stays
+        // Batching with the new id.
+        let expiry_now = t0 + SETTLE; // initial timer's deadline
+        let _ = e.step(
+            Input::TimerExpired {
+                profile: pid,
+                kind: TimerKind::Settle,
+                id: initial_settle_timer,
+            },
+            expiry_now,
+        );
+
+        let phase = match &e.profiles.get(pid).unwrap().state {
+            ProfileState::Active(b) => &b.phase,
+            _ => panic!("expected Active after reschedule"),
+        };
+        let rescheduled_timer = match phase {
+            BurstPhase::Batching { settle_timer } => *settle_timer,
+            other => panic!("expected Batching after reschedule, got {other:?}"),
+        };
+        assert_ne!(
+            rescheduled_timer, initial_settle_timer,
+            "reschedule mints a fresh TimerId; the initial id is no longer referenced",
+        );
+
+        // ── Invariant 4: the rescheduled deadline equals
+        // `last_event + settle` — the settle deadline tracks the most
+        // recent event regardless of which timer carries it.
+        let rescheduled_deadline = e
+            .timers
+            .iter()
+            .find(|entry| entry.id == rescheduled_timer)
+            .map(|entry| entry.deadline)
+            .expect("rescheduled settle timer present in heap");
+        assert_eq!(
+            rescheduled_deadline,
             last_event + SETTLE,
-            "settle timer pinned at last_event + settle, not amplified",
+            "rescheduled deadline pinned at last_event + settle",
+        );
+
+        // ── Invariant 5: when the rescheduled timer expires and no
+        // further events have come in, on_settle_expired transitions
+        // to Verifying — the cycle completes.
+        let final_expiry = last_event + SETTLE;
+        let _ = e.step(
+            Input::TimerExpired {
+                profile: pid,
+                kind: TimerKind::Settle,
+                id: rescheduled_timer,
+            },
+            final_expiry,
+        );
+        let final_phase = match &e.profiles.get(pid).unwrap().state {
+            ProfileState::Active(b) => &b.phase,
+            other => panic!("expected Active, got {other:?}"),
+        };
+        assert!(
+            matches!(final_phase, BurstPhase::Verifying),
+            "after quiet ≥ settle, on_settle_expired transitions to Verifying; \
+             got {final_phase:?}",
         );
     }
 

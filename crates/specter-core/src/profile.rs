@@ -17,7 +17,7 @@ use crate::tree::Tree;
 use compact_str::CompactString;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tinyvec::TinyVec;
 
 /// One fire cycle.
@@ -49,6 +49,13 @@ use tinyvec::TinyVec;
 /// `dirty_resources` and `force_walk_resources` are accumulators consumed
 /// at every `transition_to_verifying`; `probe_target` survives Verifying
 /// → Draining → Verifying so the reconfirm probe reuses the original LCA.
+///
+/// `last_event_time` is the source of truth for the settle deadline: the
+/// settle timer is scheduled once on Batching entry and reschedules on
+/// expiry only when `last_event_time` has advanced since. Event arrivals
+/// while already in Batching update this field but do **not** re-insert
+/// a fresh heap entry — heap inserts are bounded to one per
+/// `last_event_time + settle` boundary, regardless of event density.
 #[derive(Debug)]
 pub struct Burst {
     pub burst_deadline: TimerId,
@@ -86,6 +93,45 @@ pub struct Burst {
     /// subtree of `Profile.current` to compare against `response_subtree`
     /// for the stability verdict. `None` until the first probe emits.
     pub probe_target: Option<ResourceId>,
+    /// Wall-clock instant of the most recent `FsEvent` that drove this
+    /// burst. The **source of truth** for the Batching settle deadline:
+    /// the live settle timer's heap entry pins to a fixed deadline
+    /// (`burst-start + settle`, or `prior_last_event + settle` after a
+    /// reschedule), but the deadline the burst is *waiting for* is
+    /// `last_event_time + settle`. The on-expiry reschedule check
+    /// reconciles the two — if `now − last_event_time < settle` the
+    /// expiry handler reschedules a fresh entry at `last_event_time +
+    /// settle` and stays in Batching; otherwise it transitions to
+    /// Verifying.
+    ///
+    /// **Lifecycle.**
+    /// - `Some(now)` from `start_standard_burst` — the burst-start
+    ///   `FsEvent` is the first event and seeds the field.
+    /// - `None` from `start_seed_burst` — Seed bursts transition Idle →
+    ///   Active(Verifying) directly, with no Batching phase at start.
+    ///   If a fresh `FsEvent` later arrives during the Seed verify
+    ///   (`event_drives_batching` from the `Verifying → Batching` arm),
+    ///   the field is repopulated.
+    /// - Updated by `event_drives_batching` on every event, regardless
+    ///   of which pre-fire phase (`Batching | Verifying | Draining`)
+    ///   preceded.
+    /// - **Preserved** across `unstable_response_drives_batching` — the
+    ///   verify just responded; the next event repopulates. The
+    ///   freshly-scheduled settle timer fires at `now + settle`; the
+    ///   on-expiry handler then sees `now − last_event_time ≥ settle`
+    ///   (because `now ≥ unstable_response_at + settle ≥
+    ///   last_event_time + settle`) and transitions cleanly.
+    /// - **Preserved** across `transition_to_verifying` (the reconfirm
+    ///   path) and `transition_to_draining` — phase swaps without
+    ///   semantic resets.
+    /// - Cleared implicitly when the `Burst` is dropped at
+    ///   `finish_burst_to_idle`.
+    ///
+    /// **Distinct from the watcher's `last_event_at`.** The watcher's
+    /// field is per-watcher, scoped to drain-cadence recency. This field
+    /// is per-burst, scoped to settle-deadline reschedule. Different
+    /// consumers, different cadences.
+    pub last_event_time: Option<Instant>,
 }
 
 /// What the burst is waiting on, as a discriminator.
