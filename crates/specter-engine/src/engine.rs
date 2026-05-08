@@ -487,6 +487,11 @@ impl Engine {
                         *s != sub
                     }
                 });
+                p.fired_subs.retain(|k| match k {
+                    DedupKey::Subtree { sub: s, .. } | DedupKey::PerFile { sub: s, .. } => {
+                        *s != sub
+                    }
+                });
             }
             // Recompute Profile.settle = min(remaining_subs.settles).
             //

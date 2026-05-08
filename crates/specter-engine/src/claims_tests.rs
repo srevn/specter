@@ -181,6 +181,80 @@ fn discard_anchor_state_preserves_last_emitted_dir_hash() {
 }
 
 #[test]
+fn discard_anchor_state_captures_last_settled_hash_at_loss() {
+    let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+
+    let pre_loss_hash = e
+        .profiles()
+        .get(pid)
+        .and_then(|p| p.baseline.as_ref().map(specter_core::TreeSnapshot::hash))
+        .expect("fixture must produce baseline");
+    assert!(
+        e.profiles()
+            .get(pid)
+            .unwrap()
+            .last_settled_hash_at_loss
+            .is_none(),
+        "active mode: witness must be None pre-loss",
+    );
+
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+
+    let p = e.profiles().get(pid).unwrap();
+    assert!(p.baseline.is_none(), "discard cleared baseline");
+    assert_eq!(
+        p.last_settled_hash_at_loss,
+        Some(pre_loss_hash),
+        "witness captured pre-loss baseline hash",
+    );
+}
+
+#[test]
+fn discard_anchor_state_preserves_fired_subs() {
+    // Negative-space contract: the helper does not touch fired_subs.
+    // Fire history must survive anchor loss for post-recovery drift to
+    // re-fire emitted-once Effects.
+    let (mut e, sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+    let key = DedupKey::Subtree {
+        sub: sid,
+        profile: pid,
+    };
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.fired_subs.insert(key);
+    }
+    let set_before = e.profiles().get(pid).unwrap().fired_subs.clone();
+
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+
+    let set_after = &e.profiles().get(pid).unwrap().fired_subs;
+    assert_eq!(&set_before, set_after, "fired_subs survives anchor loss");
+}
+
+#[test]
+fn discard_anchor_state_no_witness_when_baseline_already_none() {
+    let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+
+    let mut out = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out);
+    let witness_after_first = e.profiles().get(pid).unwrap().last_settled_hash_at_loss;
+    assert!(
+        witness_after_first.is_some(),
+        "first discard captures witness",
+    );
+
+    let mut out2 = StepOutput::default();
+    e.discard_anchor_state(pid, &mut out2);
+
+    assert_eq!(
+        e.profiles().get(pid).unwrap().last_settled_hash_at_loss,
+        witness_after_first,
+        "second discard with baseline = None preserves prior witness",
+    );
+}
+
+#[test]
 fn discard_anchor_state_idempotent() {
     let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
     let mut out = StepOutput::default();

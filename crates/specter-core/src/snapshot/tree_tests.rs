@@ -1871,6 +1871,24 @@ fn diff_tree_recursive_three_levels_deep_change() {
 }
 
 // ---------------------------------------------------------------------------
+// TreeSnapshot::hash
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tree_snapshot_hash_returns_dir_hash_for_dir_variant() {
+    let arc = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
+    let snap = TreeSnapshot::Dir(Arc::clone(&arc));
+    assert_eq!(snap.hash(), arc.dir_hash());
+}
+
+#[test]
+fn tree_snapshot_hash_returns_leaf_hash_for_file_variant() {
+    let l = leaf(EntryKind::File, 10, 1, 42, 0);
+    let snap = TreeSnapshot::File(l.clone());
+    assert_eq!(snap.hash(), l.leaf_hash());
+}
+
+// ---------------------------------------------------------------------------
 // Property tests
 // ---------------------------------------------------------------------------
 

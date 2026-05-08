@@ -532,6 +532,38 @@ pub struct Profile {
     /// Cleared on `EffectComplete::Failed` — the failed Effect leaves no
     /// observation to deduplicate against.
     pub last_emitted_dir_hash: BTreeMap<DedupKey, u128>,
+    /// Set of `DedupKey`s for which this Profile has emitted at least one
+    /// Effect that has not been cleared by a `Failed` outcome,
+    /// `detach_sub`, or covered-leaf reap. Pure existence — no value
+    /// payload. Drives drift recovery's "should we conservative-fire?"
+    /// question by gating the `SeedDrift` filter; B1 dedup derives
+    /// directly from `baseline.hash() == current.hash()` and does not
+    /// consult this field.
+    ///
+    /// **Lifecycle.** Inserted at successful emit (`emit_effects` Subtree
+    /// and PerFile arms). Removed on `EffectComplete::Failed`,
+    /// `detach_sub_inner`, and `purge_per_file_fired_subs_for_reaped_slots`.
+    /// Preserved across anchor loss by `discard_anchor_state` — the fire
+    /// history is the answer to "which Subs should re-fire on recovery if
+    /// drift is detected?"
+    pub fired_subs: BTreeSet<DedupKey>,
+    /// Anchor-rooted snapshot hash of `baseline` at the moment of
+    /// `discard_anchor_state` — the survival witness used by
+    /// `seed_drift_observed` to detect post-recovery drift after
+    /// `baseline` has been cleared. `None` whenever `baseline.is_some()`.
+    ///
+    /// **Lifecycle.** Set by [`Profile::capture_witness_at_loss`] (called
+    /// from `discard_anchor_state`, only when `baseline` was `Some` at the
+    /// time of loss). Cleared by [`Profile::rebase_baseline`] (called
+    /// from `dispatch_seed_ok` — both branches — and `dispatch_rebase_ok`).
+    ///
+    /// **Cross-field invariant.** `baseline.is_some() ⇒
+    /// last_settled_hash_at_loss.is_none()`. The witness exists *only*
+    /// during the survival window between anchor loss and recovery.
+    /// Active-mode drift detection consults `baseline` directly; the
+    /// witness substitutes for `baseline.hash()` once `baseline` is
+    /// cleared.
+    pub last_settled_hash_at_loss: Option<u128>,
     /// User-declared event-class mask for this Profile. Every Sub on a
     /// Profile shares the same `events` by construction (mask folds into
     /// `config_hash`), so this field is the Sub's mask — the "union"
@@ -591,8 +623,39 @@ impl Profile {
             watch_root_parent: None,
             anchor_claim: AnchorClaim::None,
             last_emitted_dir_hash: BTreeMap::new(),
+            fired_subs: BTreeSet::new(),
+            last_settled_hash_at_loss: None,
             events_union: events,
             has_per_file_fds,
+        }
+    }
+
+    /// Reassert active mode after a rebase: lift `current` into `baseline`
+    /// (Arc bump on `Dir`, copy on `File`) and clear the survival witness.
+    /// Called from `dispatch_rebase_ok` and from both branches of
+    /// `dispatch_seed_ok` after a successful graft.
+    ///
+    /// **Post-condition.** Cross-field invariant
+    /// `baseline.is_some() ⇒ last_settled_hash_at_loss.is_none()` holds at
+    /// exit (assuming `current.is_some()` at entry, which holds at every
+    /// post-graft call site).
+    pub fn rebase_baseline(&mut self) {
+        self.baseline = self.current.clone();
+        self.last_settled_hash_at_loss = None;
+    }
+
+    /// Capture the survival witness from `baseline` at anchor loss. Called
+    /// from `discard_anchor_state` immediately before the helper clears
+    /// `baseline = None`. Idempotent against `baseline.is_none()` —
+    /// leaves any previously-captured witness in place rather than
+    /// overwriting with `None`.
+    ///
+    /// **Post-condition (when `baseline.is_some()` at entry).**
+    /// `last_settled_hash_at_loss == Some(baseline.hash())` at exit; the
+    /// caller then clears `baseline` to honour the cross-field invariant.
+    pub fn capture_witness_at_loss(&mut self) {
+        if let Some(b) = self.baseline.as_ref() {
+            self.last_settled_hash_at_loss = Some(b.hash());
         }
     }
 }
@@ -706,9 +769,14 @@ impl ProfileMap {
 #[cfg(test)]
 mod tests {
     use super::{ClassSet, Profile, ProfileMap, ProfileState, ScanConfig, compute_config_hash};
+    use crate::ids::ResourceId;
     use crate::resource::ResourceRole;
+    use crate::snapshot::EntryKind;
+    use crate::snapshot::tree::{DirMeta, DirSnapshot, LeafEntry, TreeSnapshot};
     use crate::tree::Tree;
-    use std::time::Duration;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::{Duration, UNIX_EPOCH};
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
@@ -925,6 +993,106 @@ mod tests {
         let _pid2 = profiles.attach(
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // rebase_baseline / capture_witness_at_loss
+    // -----------------------------------------------------------------------
+
+    fn empty_dir_snapshot(resource: ResourceId) -> Arc<DirSnapshot> {
+        Arc::new(DirSnapshot::new(
+            resource,
+            DirMeta {
+                mtime: UNIX_EPOCH,
+                inode: 0,
+                device: 0,
+            },
+            0,
+            BTreeMap::new(),
+        ))
+    }
+
+    fn empty_leaf_entry() -> LeafEntry {
+        LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, 0, 0)
+    }
+
+    #[test]
+    fn rebase_baseline_clones_current_into_baseline() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot(r)));
+        assert!(p.baseline.is_none());
+
+        p.rebase_baseline();
+
+        assert!(p.baseline.is_some());
+        assert_eq!(
+            p.baseline.as_ref().unwrap().hash(),
+            p.current.as_ref().unwrap().hash(),
+            "baseline matches current",
+        );
+    }
+
+    #[test]
+    fn rebase_baseline_clears_witness() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot(r)));
+        p.last_settled_hash_at_loss = Some(0xdead_beef);
+
+        p.rebase_baseline();
+
+        assert!(
+            p.last_settled_hash_at_loss.is_none(),
+            "rebase clears the witness",
+        );
+    }
+
+    #[test]
+    fn capture_witness_at_loss_sets_witness_from_baseline_dir_hash() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let snap = TreeSnapshot::Dir(empty_dir_snapshot(r));
+        let expected = snap.hash();
+        p.baseline = Some(snap);
+
+        p.capture_witness_at_loss();
+
+        assert_eq!(p.last_settled_hash_at_loss, Some(expected));
+    }
+
+    #[test]
+    fn capture_witness_at_loss_sets_witness_from_baseline_leaf_hash() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "file", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let snap = TreeSnapshot::File(empty_leaf_entry());
+        let expected = snap.hash();
+        p.baseline = Some(snap);
+
+        p.capture_witness_at_loss();
+
+        assert_eq!(p.last_settled_hash_at_loss, Some(expected));
+    }
+
+    #[test]
+    fn capture_witness_at_loss_no_op_when_baseline_none() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        // Pre-populate witness; helper must not overwrite with None.
+        p.last_settled_hash_at_loss = Some(0x00c0_ffee);
+
+        p.capture_witness_at_loss();
+
+        assert_eq!(
+            p.last_settled_hash_at_loss,
+            Some(0x00c0_ffee),
+            "no-op preserves prior witness",
         );
     }
 }

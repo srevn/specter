@@ -409,6 +409,19 @@ pub enum TreeSnapshot {
 }
 
 impl TreeSnapshot {
+    /// Anchor-rooted snapshot hash. Dispatches to the variant's cached
+    /// digest: [`DirSnapshot::dir_hash`] for `Dir`, [`LeafEntry::leaf_hash`]
+    /// for `File`. Both are 128-bit SipHash-2-4 digests cached lazily in
+    /// `OnceLock`s on the snapshot itself; first call computes, subsequent
+    /// calls hit the cache.
+    #[must_use]
+    pub fn hash(&self) -> u128 {
+        match self {
+            Self::Dir(arc) => arc.dir_hash(),
+            Self::File(leaf) => leaf.leaf_hash(),
+        }
+    }
+
     /// Stability verdict. One `dir_hash` (or `leaf_hash`) comparison; O(1)
     /// after the cache is filled.
     ///

@@ -317,6 +317,7 @@ impl Engine {
         self.release_descendant_claim(pid, out);
 
         if let Some(p) = self.profiles.get_mut(pid) {
+            p.capture_witness_at_loss();
             p.baseline = None;
             // `current` is already None — release_descendant_claim took it.
             p.kind = None;

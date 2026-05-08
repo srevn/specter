@@ -26,7 +26,7 @@ use specter_core::{
     ProbeOutcome, ProbeRequest, ProbeResponse, ProfileState, ResourceId, ResourceKind,
     ResourceRole, ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -4437,6 +4437,166 @@ fn rebasing_without_absorbed_events_ships_empty_force_walk() {
         }
         other => panic!("expected Subtree probe; got {other:?}"),
     }
+}
+
+// ---------- rebase_baseline witness clears at every site ----------
+
+/// Construct an `Active(Burst)` state populated with default empty
+/// per-burst sets and the supplied phase / intent / probe target. Used
+/// by witness-clear tests that drive `dispatch_*_ok` directly with a
+/// pre-staged Profile and have no Batching / Awaiting timer to track.
+fn active_burst(
+    e: &mut Engine,
+    pid: specter_core::ProfileId,
+    phase: BurstPhase,
+    intent: BurstIntent,
+    probe_target: ResourceId,
+    now: Instant,
+) -> ProfileState {
+    let burst_deadline = e
+        .timers
+        .schedule(now + MAX_SETTLE, pid, TimerKind::BurstDeadline);
+    ProfileState::Active(specter_core::Burst {
+        burst_deadline,
+        phase,
+        intent,
+        forced: false,
+        dirty_resources: BTreeSet::new(),
+        force_walk_resources: BTreeSet::new(),
+        probe_target: Some(probe_target),
+        suppressed_resources: BTreeSet::new(),
+        last_event_time: None,
+    })
+}
+
+#[test]
+fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
+    let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+
+    let state = active_burst(
+        &mut e,
+        pid,
+        BurstPhase::Rebasing,
+        BurstIntent::Standard,
+        anchor,
+        now,
+    );
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.last_settled_hash_at_loss = Some(0xdead_beef);
+        p.baseline = Some(TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])));
+        p.current = Some(TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])));
+        p.state = state;
+    }
+
+    let mut out = StepOutput::default();
+    e.dispatch_rebase_ok(
+        pid,
+        TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])),
+        &mut out,
+    );
+
+    let p = e.profiles.get(pid).expect("Profile lives");
+    assert!(
+        p.last_settled_hash_at_loss.is_none(),
+        "witness cleared on rebase",
+    );
+    assert!(p.baseline.is_some(), "baseline set to current");
+}
+
+#[test]
+fn dispatch_seed_ok_no_drift_branch_clears_last_settled_hash_at_loss() {
+    let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+
+    let state = active_burst(
+        &mut e,
+        pid,
+        BurstPhase::Verifying,
+        BurstIntent::Seed,
+        anchor,
+        now,
+    );
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.last_settled_hash_at_loss = Some(0xdead_beef);
+        // Survival mode at entry: baseline = None, witness populated.
+        // Empty dedup map and empty fired_subs ⇒ no drift, no fire.
+        p.baseline = None;
+        p.current = None;
+        p.state = state;
+    }
+
+    let mut out = StepOutput::default();
+    e.dispatch_seed_ok(
+        pid,
+        TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])),
+        now,
+        &mut out,
+    );
+
+    assert!(
+        e.profiles
+            .get(pid)
+            .unwrap()
+            .last_settled_hash_at_loss
+            .is_none(),
+        "no-drift Seed-Ok cleared witness",
+    );
+}
+
+#[test]
+fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
+    // Sub fired pre-loss; anchor lost; recovery Seed-Ok with drift.
+    // The eager clear (on the drift branch, before transition_to_awaiting)
+    // is what gives us the strict cross-field invariant at every step
+    // boundary — not just at consumption sites.
+    let (mut e, pid, sid, anchor, now) = engine_with_attached_sub();
+
+    let dk = DedupKey::Subtree {
+        sub: sid,
+        profile: pid,
+    };
+
+    let state = active_burst(
+        &mut e,
+        pid,
+        BurstPhase::Verifying,
+        BurstIntent::Seed,
+        anchor,
+        now,
+    );
+    if let Some(p) = e.profiles.get_mut(pid) {
+        // Pre-loss fire history. `last_emitted_dir_hash` carries a hash
+        // that won't match the post-graft current — Phase-1 era
+        // `seed_drift_observed` consults the map, so this is what
+        // actually triggers the drift branch under this commit.
+        // `fired_subs` is populated alongside for Phase 2 forward-compat.
+        p.last_emitted_dir_hash.insert(dk.clone(), 0xfeed_face_u128);
+        p.fired_subs.insert(dk);
+        p.last_settled_hash_at_loss = Some(0xdead_beef);
+        p.baseline = None;
+        p.current = None;
+        p.state = state;
+    }
+
+    let mut out = StepOutput::default();
+    e.dispatch_seed_ok(
+        pid,
+        TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])),
+        now,
+        &mut out,
+    );
+
+    // Drift branch must have fired one Effect.
+    assert_eq!(out.effects.len(), 1, "drift branch emitted one Effect");
+
+    let p = e.profiles.get(pid).unwrap();
+    assert!(
+        p.last_settled_hash_at_loss.is_none(),
+        "drift Seed-Ok cleared witness eagerly",
+    );
+    assert!(
+        p.baseline.is_some(),
+        "drift branch rebased baseline = current",
+    );
 }
 
 // ---------- Property tests ----------

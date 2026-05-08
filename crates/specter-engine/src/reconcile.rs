@@ -420,13 +420,18 @@ pub(crate) fn graft(
 /// negligible compared to the rest of the graft work.
 pub(crate) fn purge_per_file_dedup_for_reaped_slots(profiles: &mut ProfileMap, tree: &Tree) {
     for (_, p) in profiles.iter_mut() {
-        if p.last_emitted_dir_hash.is_empty() {
-            continue;
+        if !p.last_emitted_dir_hash.is_empty() {
+            p.last_emitted_dir_hash.retain(|k, _| match *k {
+                DedupKey::PerFile { resource, .. } => tree.get(resource).is_some(),
+                DedupKey::Subtree { .. } => true,
+            });
         }
-        p.last_emitted_dir_hash.retain(|k, _| match *k {
-            DedupKey::PerFile { resource, .. } => tree.get(resource).is_some(),
-            DedupKey::Subtree { .. } => true,
-        });
+        if !p.fired_subs.is_empty() {
+            p.fired_subs.retain(|k| match *k {
+                DedupKey::PerFile { resource, .. } => tree.get(resource).is_some(),
+                DedupKey::Subtree { .. } => true,
+            });
+        }
     }
 }
 

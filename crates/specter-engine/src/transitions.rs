@@ -560,6 +560,7 @@ impl Engine {
             && let Some(p) = self.profiles.get_mut(profile_id)
         {
             p.last_emitted_dir_hash.remove(key);
+            p.fired_subs.remove(key);
         }
 
         // Resolve the action under a short read borrow, then mutate.
@@ -1143,7 +1144,7 @@ impl Engine {
             );
             if outcome.count > 0 {
                 if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.baseline = p.current.clone();
+                    p.rebase_baseline();
                 }
                 self.transition_to_awaiting(profile_id, outcome.count, now);
                 return;
@@ -1158,7 +1159,7 @@ impl Engine {
         // dedup-hash-suppressed drift): rebase and finish. No Effect
         // fires, no Awaiting tail.
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = p.current.clone();
+            p.rebase_baseline();
         }
         self.finish_burst_to_idle(profile_id, out);
     }
@@ -1458,7 +1459,7 @@ impl Engine {
             }
         }
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.baseline = p.current.clone();
+            p.rebase_baseline();
         }
         // Settle-time refresh: pull every recorded dedup hash on this
         // Profile up to the post-rebase baseline-derived value. The
@@ -1808,7 +1809,8 @@ impl Engine {
                     // map, so post-recovery `seed_drift_observed` sees
                     // a conservative pre-Effect signal and re-fires.
                     if let Some(p) = self.profiles.get_mut(profile_id) {
-                        p.last_emitted_dir_hash.insert(dk, current_dir_hash);
+                        p.last_emitted_dir_hash.insert(dk.clone(), current_dir_hash);
+                        p.fired_subs.insert(dk);
                     }
                 }
                 EffectScope::PerStableFile => {
@@ -1987,7 +1989,8 @@ impl Engine {
             if let Some(h) = leaf_hash
                 && let Some(p) = self.profiles.get_mut(profile_id)
             {
-                p.last_emitted_dir_hash.insert(dk, h);
+                p.last_emitted_dir_hash.insert(dk.clone(), h);
+                p.fired_subs.insert(dk);
             }
         }
         count
