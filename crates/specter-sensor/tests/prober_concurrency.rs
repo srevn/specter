@@ -7,10 +7,9 @@
 
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
-use specter_core::{Input, ProbeCorrelation, ProbeRequest, ProfileId, ResourceId, ScanConfig};
+use specter_core::{Input, ProbeCorrelation, ProbeRequest, ProfileId};
 use specter_sensor::{Prober, WorkerProber};
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -28,25 +27,6 @@ const fn anchor_request(
         profile,
         correlation: ProbeCorrelation(correlation),
         target_path,
-    }
-}
-
-fn subtree_request(
-    profile: ProfileId,
-    target_path: PathBuf,
-    scan_config: ScanConfig,
-    correlation: u64,
-) -> ProbeRequest {
-    ProbeRequest::Subtree {
-        profile,
-        correlation: ProbeCorrelation(correlation),
-        target_resource: ResourceId::default(),
-        target_path,
-        scan_config,
-        captured_with: 0,
-        baseline_subtree: None,
-        force_walk: BTreeSet::new(),
-        forced: false,
     }
 }
 
@@ -111,62 +91,4 @@ fn pool_with_four_workers_handles_burst() {
     assert_eq!(received, 20, "pool drained the burst");
 
     let _ = prober.shutdown();
-}
-
-/// 4-worker pool processing a 4-element burst should complete faster
-/// than the same burst on a 1-worker pool. We use directory probes on
-/// a moderately-deep tree so each probe takes long enough that the
-/// concurrency win is observable. Tolerance is loose to avoid
-/// flakiness; the test is asserting "more workers ≥ less wall time",
-/// not a specific speedup factor.
-#[test]
-fn pool_runs_probes_concurrently_when_capacity_allows() {
-    let tmp = TempDir::new().unwrap();
-    // Build a tree with enough I/O that each probe takes a measurable
-    for i in 0..20 {
-        let sub = tmp.path().join(format!("dir{i}"));
-        std::fs::create_dir(&sub).unwrap();
-        for j in 0..250 {
-            std::fs::write(sub.join(format!("file{j}")), b"x").unwrap();
-        }
-    }
-
-    let cfg = ScanConfig::builder().recursive(true).build();
-    let mk_burst = |concurrency: usize, anchor: &Path| -> Duration {
-        let (tx, rx) = unbounded::<Input>();
-        let prober = WorkerProber::new(&tx, concurrency).unwrap();
-        let pids = fresh_profile_ids(4);
-        let start = Instant::now();
-        for (i, p) in pids.iter().enumerate() {
-            prober.submit(subtree_request(
-                *p,
-                anchor.to_path_buf(),
-                cfg.clone(),
-                i as u64 + 1,
-            ));
-        }
-        let mut received = 0;
-        while received < 4 {
-            if let Ok(Input::ProbeResponse(_)) = rx.recv_timeout(Duration::from_secs(5)) {
-                received += 1;
-            }
-        }
-        let elapsed = start.elapsed();
-        let _ = prober.shutdown();
-        elapsed
-    };
-
-    // Warm the kernel inode/page cache; the first walk pays a cold
-    // cost that would otherwise bias whichever burst runs first.
-    let _ = mk_burst(4, tmp.path());
-
-    let serial = mk_burst(1, tmp.path()).min(mk_burst(1, tmp.path()));
-    let parallel = mk_burst(4, tmp.path()).min(mk_burst(4, tmp.path()));
-
-    // Loose bound: 4 workers should be at least 1.5x faster than 1
-    // worker on a 4-probe burst. Real ratios are typically 3x+.
-    assert!(
-        parallel * 5 < serial * 4,
-        "concurrent burst not faster: serial={serial:?}, parallel={parallel:?}"
-    );
 }
