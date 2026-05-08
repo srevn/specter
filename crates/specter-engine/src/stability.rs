@@ -278,6 +278,7 @@ mod tests {
                 dirty_resources: std::collections::BTreeSet::new(),
                 force_walk_resources: std::collections::BTreeSet::new(),
                 probe_target: None,
+                suppressed_resources: std::collections::BTreeSet::new(),
                 last_event_time: None,
             });
             mid.dirty_descendants = 1;

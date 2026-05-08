@@ -214,9 +214,32 @@ pub enum WatchOp {
     Unwatch {
         resource: ResourceId,
     },
+    /// Suppress event delivery on `resource`.
+    ///
+    /// **Two-tier discipline.** Suppression is refcounted on the
+    /// Resource (`suppress_count`); the `Suppress` op fires only on the
+    /// 0→1 edge.
+    /// - **Anchor suppress** is bracketed by `start_*_burst` ↔
+    ///   `finish_burst_to_idle` for every Profile's burst.
+    /// - **Per-resource suppress** is bracketed by
+    ///   `event_drives_batching` ↔ `transition_to_verifying` for
+    ///   non-anchor resources that received events during the
+    ///   Profile's Batching window. The lifecycle is contained in one
+    ///   Batching → Verifying transition per (burst, resource) and
+    ///   re-arms automatically across unstable-verify cycles
+    ///   (`transition_to_verifying` clears the burst's
+    ///   `suppressed_resources` set; the next `event_drives_batching`
+    ///   repopulates).
+    ///
+    /// Multiple bursts (across Profiles or across Batching cycles
+    /// within one Profile) compose cleanly: each `add_suppress`
+    /// increments; the corresponding `sub_suppress` decrements; only
+    /// the last hit-zero emits `Unsuppress`.
     Suppress {
         resource: ResourceId,
     },
+    /// Restore event delivery on `resource`. Symmetric inverse of
+    /// `Suppress`; the same two-tier discipline applies.
     Unsuppress {
         resource: ResourceId,
     },

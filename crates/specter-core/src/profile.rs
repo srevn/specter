@@ -93,6 +93,35 @@ pub struct Burst {
     /// subtree of `Profile.current` to compare against `response_subtree`
     /// for the stability verdict. `None` until the first probe emits.
     pub probe_target: Option<ResourceId>,
+    /// Non-anchor resources whose `suppress_count` was bumped 0→1 by
+    /// `event_drives_batching` during this burst's pre-fire phases.
+    /// Drained at `transition_to_verifying` (`sub_suppress` per entry,
+    /// then cleared) and defensively at `finish_burst_to_idle` for
+    /// abnormal-end paths (`finalize_anchor_lost`, reap mid-burst).
+    ///
+    /// **Anchor explicitly excluded.** The anchor's suppress is the
+    /// existing `start_*_burst → finish_burst_to_idle` lifecycle and is
+    /// unrelated to this set. The exclusion is currently expressed as
+    /// `event_resource != anchor` in `event_drives_batching`; a future
+    /// change that adds parent-dir or other identity-floor resources to
+    /// the Profile should widen the exclusion to "any resource in the
+    /// Profile's identity-floor set" rather than continue to spell
+    /// `event_resource != anchor` literally.
+    ///
+    /// Empty after every `transition_to_verifying`. Re-armed by the next
+    /// `event_drives_batching` call after an unstable verify routes the
+    /// burst back to Batching. Empty for `Seed` bursts (no Batching
+    /// phase); the field exists for struct uniformity.
+    ///
+    /// `BTreeSet` (not `Vec`) so iteration order is deterministic — the
+    /// `sub_suppress` drain emits `Unsuppress` ops in `ResourceId`
+    /// ascending order, matching `StepOutput.watch_ops`'s sort
+    /// discipline. Size is typically 0 (W_ssh — anchor-only event
+    /// source) to N (W_build — distinct per-file resources receiving
+    /// events during one Batching window). No allocation pressure
+    /// relative to the existing `dirty_resources` /
+    /// `force_walk_resources`.
+    pub suppressed_resources: BTreeSet<ResourceId>,
     /// Wall-clock instant of the most recent `FsEvent` that drove this
     /// burst. The **source of truth** for the Batching settle deadline:
     /// the live settle timer's heap entry pins to a fixed deadline
