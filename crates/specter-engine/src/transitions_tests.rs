@@ -3351,6 +3351,203 @@ fn recovery_seed_no_prior_emit_does_not_fire() {
     assert!(out.effects.is_empty(), "fresh-Profile Seed fires no Effect");
 }
 
+/// Concern B fix — direct test of the `dispatch_rebase_ok` integration
+/// point. Drives a Profile into `Active(Rebasing)`, supplies a rebase
+/// response whose hash differs from the recorded value, and asserts
+/// the post-call recorded value equals the post-rebase
+/// baseline-derived hash. Without the wired refresh, recorded would
+/// keep its pre-Effect value.
+#[test]
+fn dispatch_rebase_ok_refreshes_last_emitted_dir_hash() {
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    let now = Instant::now();
+    // Drive to first Effect, EffectComplete::Ok → Rebasing.
+    let stable_out = drive_to_first_effect(&mut e, pid, root, now);
+    assert_eq!(stable_out.effects.len(), 1);
+    let effect_key = stable_out.effects[0].key.clone();
+
+    let pre_rebase_hash = *e
+        .profiles
+        .get(pid)
+        .unwrap()
+        .last_emitted_dir_hash
+        .iter()
+        .next()
+        .unwrap()
+        .1;
+
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key: effect_key,
+            result: EffectOutcome::Ok,
+        },
+        now + SETTLE * 3,
+    );
+    let rebase_corr = rebase_out
+        .probe_ops
+        .iter()
+        .find_map(|op| match op {
+            ProbeOp::Probe { request } => Some(request.correlation()),
+            ProbeOp::Cancel { .. } => None,
+        })
+        .expect("rebase probe");
+
+    // Rebase response carries a non-idempotent post-Effect snapshot
+    // (different children → different dir_hash).
+    let post_rebase = dir_tree_snap(root, vec![("post.rs", EntryKind::File, 99)]);
+    let post_rebase_hash = post_rebase.dir_hash();
+    assert_ne!(
+        post_rebase_hash, pre_rebase_hash,
+        "test sanity: pre/post-rebase hashes differ",
+    );
+
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: rebase_corr,
+            outcome: ProbeOutcome::SubtreeOk(post_rebase),
+        }),
+        now + SETTLE * 4,
+    );
+
+    let p = e.profiles.get(pid).unwrap();
+    assert!(matches!(p.state, ProfileState::Idle));
+    let recorded = *p.last_emitted_dir_hash.iter().next().unwrap().1;
+    assert_eq!(
+        recorded, post_rebase_hash,
+        "dispatch_rebase_ok refreshed recorded[Subtree] to baseline.dir_hash()",
+    );
+    assert_ne!(
+        recorded, pre_rebase_hash,
+        "fix verification: recorded is post-rebase, not pre-emit",
+    );
+}
+
+/// Recovery semantics — fix scenario. After a complete fire cycle on
+/// a non-idempotent command (rebase response = post-Effect state),
+/// recorded[Subtree] equals the post-Effect anchor hash. If the
+/// anchor is later lost and recovery's Seed-Ok lands at the same
+/// post-Effect state, `seed_drift_observed` must return empty —
+/// recorded matches current, no drift, no spurious re-fire.
+///
+/// This test demonstrates the fix's value at the seed-drift level:
+/// without the rebase refresh, recorded would still be the pre-Effect
+/// hash from emit time, and recovery to the post-Effect state would
+/// observe drift and re-fire the already-completed command.
+#[test]
+fn seed_drift_after_rebase_refresh_does_not_refire_on_recovery_to_post_effect_state() {
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    let now = Instant::now();
+    let stable_out = drive_to_first_effect(&mut e, pid, root, now);
+    let effect_key = stable_out.effects[0].key.clone();
+
+    // EffectComplete::Ok → Rebasing.
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key: effect_key,
+            result: EffectOutcome::Ok,
+        },
+        now + SETTLE * 3,
+    );
+    let rebase_corr = rebase_out
+        .probe_ops
+        .iter()
+        .find_map(|op| match op {
+            ProbeOp::Probe { request } => Some(request.correlation()),
+            ProbeOp::Cancel { .. } => None,
+        })
+        .expect("rebase probe");
+
+    // Non-idempotent rebase response.
+    let post_effect = dir_tree_snap(root, vec![("post.rs", EntryKind::File, 99)]);
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: rebase_corr,
+            outcome: ProbeOutcome::SubtreeOk(Arc::clone(&post_effect)),
+        }),
+        now + SETTLE * 4,
+    );
+    // Refresh ran: recorded[Subtree] == post_effect.dir_hash().
+
+    // Simulate anchor loss: clear baseline (survival mode) but
+    // preserve the map. Then simulate recovery's Seed-Ok by setting
+    // current to the same post-Effect state.
+    {
+        let p = e.profiles.get_mut(pid).unwrap();
+        p.baseline = None;
+        p.current = Some(TreeSnapshot::Dir(Arc::clone(&post_effect)));
+    }
+
+    let drifted = e.seed_drift_observed(pid);
+    assert!(
+        drifted.is_empty(),
+        "post-rebase recorded matches recovery state: no drift, no re-fire (got {drifted:?})",
+    );
+}
+
+/// Recovery semantics — survival-mode emit-time scaffolding. When
+/// the anchor is lost between emit and rebase (no rebase ever ran),
+/// `recorded[Subtree]` carries the **pre-Effect** hash from the
+/// emit-time defensive write. If recovery's Seed-Ok lands at a
+/// **post-Effect** state (the Effect did execute, even though the
+/// engine never observed its completion), `seed_drift_observed` must
+/// return the key — drift detected → conservative re-fire.
+///
+/// This pins the role of the emit-time write under the S2 design:
+/// it's the conservative re-fire signal for anchor-loss-mid-fire,
+/// preserved across `discard_anchor_state` by design.
+#[test]
+fn seed_drift_after_anchor_loss_during_fire_tail_refires_conservatively() {
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let now = Instant::now();
+    let stable_out = drive_to_first_effect(&mut e, pid, root, now);
+    assert_eq!(stable_out.effects.len(), 1);
+    let pre_effect_hash = *e
+        .profiles
+        .get(pid)
+        .unwrap()
+        .last_emitted_dir_hash
+        .iter()
+        .next()
+        .unwrap()
+        .1;
+
+    // No EffectComplete arrives — the engine never observed the
+    // command's completion. Simulate anchor-loss-mid-fire: clear
+    // baseline + current (matches `discard_anchor_state`'s effects
+    // on a Profile in Awaiting), preserve the map.
+    {
+        let p = e.profiles.get_mut(pid).unwrap();
+        p.baseline = None;
+        p.current = None;
+    }
+
+    // Recovery's Seed-Ok lands at a different state — the Effect did
+    // execute and rewrote the tree, even though the engine never saw
+    // the EffectComplete.
+    let post_effect = dir_tree_snap(root, vec![("post.rs", EntryKind::File, 99)]);
+    let post_effect_hash = post_effect.dir_hash();
+    assert_ne!(
+        pre_effect_hash, post_effect_hash,
+        "test sanity: pre/post-Effect states differ",
+    );
+    e.profiles.get_mut(pid).unwrap().current = Some(TreeSnapshot::Dir(post_effect));
+
+    let drifted = e.seed_drift_observed(pid);
+    assert_eq!(
+        drifted.len(),
+        1,
+        "drift detected: emit-time recorded != post-Effect current",
+    );
+    assert!(
+        matches!(&drifted[0], DedupKey::Subtree { profile, .. } if *profile == pid),
+        "drifted key is the Subtree key for this Profile",
+    );
+}
+
 /// Multi-Sub Profile with two `SubtreeRoot` Subs sharing one
 /// `(resource, config_hash)`. Manually populate
 /// `last_emitted_dir_hash` so one Sub's recorded hash matches the

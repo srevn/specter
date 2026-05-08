@@ -59,6 +59,7 @@
 
 use crate::coverage::covers;
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
+use crate::transitions::lookup_leaf_hash_in_current;
 use specter_core::{
     ChildEntry, DedupKey, Diagnostic, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
     ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot, splice,
@@ -427,6 +428,101 @@ pub(crate) fn purge_per_file_dedup_for_reaped_slots(profiles: &mut ProfileMap, t
             DedupKey::Subtree { .. } => true,
         });
     }
+}
+
+/// Refresh every `last_emitted_dir_hash` entry on Profile `pid` to the
+/// post-rebase baseline-derived value, restoring the settle-time
+/// invariant.
+///
+/// **Settle-time invariant** (active mode — `baseline.is_some()`):
+/// - `DedupKey::Subtree` keys carry `baseline.dir_hash()` (or
+///   `leaf.leaf_hash()` for File-anchored Profiles).
+/// - `DedupKey::PerFile { resource }` keys carry the leaf hash at
+///   `resource`'s relative path under the anchor evaluated against
+///   `baseline`, or the entry is absent if the leaf doesn't exist in
+///   `baseline`.
+///
+/// Iterates **existing keys only** — never inserts. This preserves the
+/// `EffectComplete::Failed` clear contract: a Failed arrival that
+/// removed an entry mid-burst stays removed, since the helper has
+/// nothing to refresh. A `PerFile` key whose leaf vanished from
+/// `baseline` (Effect deleted the file but the slot is still live —
+/// multi-Profile case) is dropped so the next burst at a different
+/// state will fire fresh.
+///
+/// Caller: [`Engine::dispatch_rebase_ok`] after `baseline := current`.
+/// Skipped on `reap_pending` Profiles (the whole map drops with the
+/// Profile) and on `baseline.is_none()` (survival mode — the map
+/// preserves the last active-mode snapshot for recovery's Seed-drift
+/// check).
+///
+/// **Pre-condition.** `purge_per_file_dedup_for_reaped_slots` ran
+/// already inside `graft`, so every surviving `PerFile` entry's
+/// `resource` resolves to a live Tree slot at this point.
+///
+/// Cost: `O(N_keys × tree-depth)` per call. Typical N is small (≤ a
+/// handful per Profile); the per-level walk inside
+/// `lookup_leaf_hash_in_current` is the same cost class as the
+/// per-leaf B1 dedup read path already in
+/// `emit_effects_per_stable_file`.
+pub(crate) fn refresh_dedup_after_rebase(profiles: &mut ProfileMap, tree: &Tree, pid: ProfileId) {
+    // Capture baseline + anchor under an immutable borrow; re-borrow
+    // mutably for `retain`. The clone is an `Arc`-bump (`Dir`) or a
+    // single-leaf copy (`File`) — both cheap. Hoisting the work out of
+    // the closure keeps `retain` zero-allocation in the typical case.
+    let (baseline, anchor_path, anchor_hash) = {
+        let Some(p) = profiles.get(pid) else { return };
+        if p.last_emitted_dir_hash.is_empty() || p.reap_pending {
+            return;
+        }
+        let Some(baseline) = p.baseline.clone() else {
+            return;
+        };
+        let anchor_hash = match &baseline {
+            TreeSnapshot::Dir(arc) => arc.dir_hash(),
+            TreeSnapshot::File(leaf) => leaf.leaf_hash(),
+        };
+        let anchor_path = tree.path_of(p.resource).unwrap_or_default();
+        (baseline, anchor_path, anchor_hash)
+    };
+
+    let Some(p) = profiles.get_mut(pid) else {
+        return;
+    };
+    p.last_emitted_dir_hash.retain(|key, value| {
+        debug_assert_eq!(
+            key.profile(),
+            pid,
+            "refresh_dedup_after_rebase: cross-Profile key on Profile {pid:?}",
+        );
+        let new_hash: Option<u128> = match key {
+            DedupKey::Subtree { .. } => Some(anchor_hash),
+            DedupKey::PerFile { resource, .. } => {
+                // Slot was reaped between `graft`'s purge and this
+                // call: drop. (Structurally unreachable given the
+                // pre-condition; defensive.)
+                let Some(leaf_path) = tree.path_of(*resource) else {
+                    return false;
+                };
+                // Resource is not under the anchor: only reachable
+                // when a stale cross-anchor key slipped through. Drop.
+                let Ok(rel) = leaf_path.strip_prefix(&anchor_path) else {
+                    return false;
+                };
+                let rel_str = rel.to_string_lossy();
+                lookup_leaf_hash_in_current(Some(&baseline), &rel_str)
+            }
+        };
+        match new_hash {
+            Some(h) => {
+                *value = h;
+                true
+            }
+            // `Subtree` always yields `Some(anchor_hash)`; only
+            // `PerFile` reaches `None` (leaf vanished from baseline).
+            None => false,
+        }
+    });
 }
 
 /// Extract the `dir_hash` of `current.subtree_at(target)` or `current` itself
@@ -1256,6 +1352,275 @@ mod tests {
         assert!(
             Arc::ptr_eq(current_arc, &prior_current),
             "graft kept prior current unchanged on CrossedUncovered",
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // refresh_dedup_after_rebase — settle-time invariant
+    // ---------------------------------------------------------------------------
+
+    /// Compute the leaf hash a fixture leaf would carry at the given
+    /// `(kind, inode)` pair. The fixture's `leaf` helper fixes
+    /// `size = 0`, `mtime = UNIX_EPOCH`, `device = 0`; constructing a
+    /// matching `LeafEntry` here yields the same `leaf_hash`.
+    fn fixture_leaf_hash(kind: EntryKind, inode: u64) -> u128 {
+        LeafEntry::new(kind, 0, UNIX_EPOCH, inode, 0).leaf_hash()
+    }
+
+    #[test]
+    fn refresh_dedup_after_rebase_subtree_overwrites_pre_emit_value() {
+        // Profile fires once at H_pre_emit; the rebase observes a
+        // different post-Effect state H_post_rebase. Refresh aligns
+        // the recorded value with baseline.dir_hash() — the canonical
+        // settle-time write.
+        let (tree, mut profiles, root, pid) = anchor(false);
+        let post_rebase = dir_snap(root, 200, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        let post_rebase_hash = post_rebase.dir_hash();
+        profiles.get_mut(pid).unwrap().baseline = Some(TreeSnapshot::Dir(Arc::clone(&post_rebase)));
+
+        let key = DedupKey::Subtree {
+            sub: SubId::default(),
+            profile: pid,
+        };
+        let pre_emit_hash = 0xdead_beef_u128;
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(key.clone(), pre_emit_hash);
+        assert_ne!(
+            pre_emit_hash, post_rebase_hash,
+            "test sanity: pre/post-rebase hashes differ",
+        );
+
+        super::refresh_dedup_after_rebase(&mut profiles, &tree, pid);
+
+        assert_eq!(
+            profiles.get(pid).unwrap().last_emitted_dir_hash.get(&key),
+            Some(&post_rebase_hash),
+            "Subtree key refreshes to baseline.dir_hash()",
+        );
+    }
+
+    #[test]
+    fn refresh_dedup_after_rebase_perfile_overwrites_with_baseline_leaf_hash() {
+        // PerStableFile Profile records a leaf hash at emit time; the
+        // post-Effect baseline carries a different hash for the same
+        // leaf (formatter rewrote the file). Refresh aligns recorded
+        // with baseline's leaf hash at the resource's relpath.
+        let (mut tree, mut profiles, root, pid) = anchor(true);
+        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        tree.set_kind(a_rs_id, ResourceKind::File);
+
+        // Baseline leaf at inode 99 — distinct from the pre-emit value.
+        let baseline = dir_snap(root, 200, vec![("a.rs", leaf(EntryKind::File, 99))]);
+        let expected = fixture_leaf_hash(EntryKind::File, 99);
+        profiles.get_mut(pid).unwrap().baseline = Some(TreeSnapshot::Dir(Arc::clone(&baseline)));
+
+        let key = DedupKey::PerFile {
+            sub: SubId::default(),
+            profile: pid,
+            resource: a_rs_id,
+        };
+        let stale = 0xdead_beef_u128;
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(key.clone(), stale);
+        assert_ne!(stale, expected);
+
+        super::refresh_dedup_after_rebase(&mut profiles, &tree, pid);
+
+        assert_eq!(
+            profiles.get(pid).unwrap().last_emitted_dir_hash.get(&key),
+            Some(&expected),
+            "PerFile key refreshes to baseline's leaf hash at the resource's relpath",
+        );
+    }
+
+    #[test]
+    fn refresh_dedup_after_rebase_perfile_removes_when_leaf_absent() {
+        // The Effect deleted the file but the slot is still live (a
+        // second covering Profile holds a watch_demand contribution).
+        // graft's purge keeps the slot in the map; refresh drops the
+        // entry because the leaf is absent in baseline.
+        let (mut tree, mut profiles, root, pid) = anchor(true);
+        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        tree.set_kind(a_rs_id, ResourceKind::File);
+
+        // Baseline doesn't contain a.rs.
+        let baseline = dir_snap(root, 200, vec![("other.rs", leaf(EntryKind::File, 1))]);
+        profiles.get_mut(pid).unwrap().baseline = Some(TreeSnapshot::Dir(Arc::clone(&baseline)));
+
+        let key = DedupKey::PerFile {
+            sub: SubId::default(),
+            profile: pid,
+            resource: a_rs_id,
+        };
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(key.clone(), 0xdead_beef_u128);
+
+        super::refresh_dedup_after_rebase(&mut profiles, &tree, pid);
+
+        assert!(
+            !profiles
+                .get(pid)
+                .unwrap()
+                .last_emitted_dir_hash
+                .contains_key(&key),
+            "PerFile entry dropped when leaf absent in baseline",
+        );
+    }
+
+    #[test]
+    fn refresh_dedup_after_rebase_skips_reap_pending() {
+        // Profile is mid-reap; the whole map drops with the Profile.
+        // Helper short-circuits — no work, map unchanged.
+        let (tree, mut profiles, root, pid) = anchor(false);
+        let baseline = dir_snap(root, 200, vec![]);
+        let baseline_hash = baseline.dir_hash();
+        {
+            let p = profiles.get_mut(pid).unwrap();
+            p.baseline = Some(TreeSnapshot::Dir(Arc::clone(&baseline)));
+            p.reap_pending = true;
+        }
+
+        let key = DedupKey::Subtree {
+            sub: SubId::default(),
+            profile: pid,
+        };
+        let stale = 0xdead_beef_u128;
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(key.clone(), stale);
+        assert_ne!(stale, baseline_hash);
+
+        super::refresh_dedup_after_rebase(&mut profiles, &tree, pid);
+
+        assert_eq!(
+            profiles.get(pid).unwrap().last_emitted_dir_hash.get(&key),
+            Some(&stale),
+            "reap_pending Profile: helper short-circuits, map unchanged",
+        );
+    }
+
+    #[test]
+    fn refresh_dedup_after_rebase_skips_when_baseline_none() {
+        // Survival mode: baseline cleared by `discard_anchor_state`.
+        // The map preserves the last active-mode snapshot as a
+        // conservative re-fire signal for `seed_drift_observed`.
+        // Helper must not touch it.
+        let (tree, mut profiles, _root, pid) = anchor(false);
+        assert!(
+            profiles.get(pid).unwrap().baseline.is_none(),
+            "fixture sanity: fresh Profile has no baseline",
+        );
+
+        let key = DedupKey::Subtree {
+            sub: SubId::default(),
+            profile: pid,
+        };
+        let preserved = 0xdead_beef_u128;
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(key.clone(), preserved);
+
+        super::refresh_dedup_after_rebase(&mut profiles, &tree, pid);
+
+        assert_eq!(
+            profiles.get(pid).unwrap().last_emitted_dir_hash.get(&key),
+            Some(&preserved),
+            "survival mode: helper short-circuits, map preserved",
+        );
+    }
+
+    #[test]
+    fn refresh_dedup_after_rebase_does_not_insert_for_failed_cleared_keys() {
+        // Two Subs share the Profile; both fired. The Failed handler
+        // removed sub_a's entry mid-burst. Refresh updates sub_b's
+        // entry to the post-rebase value but must NOT reinsert
+        // sub_a's — the helper iterates existing keys only.
+        use slotmap::KeyData;
+
+        let (tree, mut profiles, root, pid) = anchor(false);
+        let baseline = dir_snap(root, 200, vec![]);
+        let post_rebase_hash = baseline.dir_hash();
+        profiles.get_mut(pid).unwrap().baseline = Some(TreeSnapshot::Dir(Arc::clone(&baseline)));
+
+        let sub_a = SubId::from(KeyData::from_ffi(0xa));
+        let sub_b = SubId::from(KeyData::from_ffi(0xb));
+        let key_a = DedupKey::Subtree {
+            sub: sub_a,
+            profile: pid,
+        };
+        let key_b = DedupKey::Subtree {
+            sub: sub_b,
+            profile: pid,
+        };
+
+        // Only sub_b's entry exists — sub_a's was Failed-removed.
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(key_b.clone(), 0xdead_beef_u128);
+
+        super::refresh_dedup_after_rebase(&mut profiles, &tree, pid);
+
+        let p = profiles.get(pid).unwrap();
+        assert_eq!(
+            p.last_emitted_dir_hash.get(&key_b),
+            Some(&post_rebase_hash),
+            "sub_b's entry refreshed to baseline-derived value",
+        );
+        assert!(
+            !p.last_emitted_dir_hash.contains_key(&key_a),
+            "sub_a's Failed-removed entry stays removed (no reinsert)",
+        );
+        assert_eq!(p.last_emitted_dir_hash.len(), 1, "no synthetic insertions");
+    }
+
+    #[test]
+    fn refresh_dedup_after_rebase_subtree_for_file_anchor_uses_leaf_hash() {
+        // File-anchored Profile: baseline is `TreeSnapshot::File(leaf)`.
+        // Subtree keys carry `leaf.leaf_hash()`, not a directory hash.
+        // PerFile keys are structurally impossible on File anchors
+        // (PerStableFile Subs scope against directories) — covered by
+        // the `Subtree`-only invariant here.
+        let (mut tree, mut profiles, _root, pid) = anchor(false);
+        // Re-anchor at a File slot for this Profile.
+        let file_id = tree.ensure(None, "a.rs", ResourceRole::User);
+        tree.set_kind(file_id, ResourceKind::File);
+        profiles.get_mut(pid).unwrap().resource = file_id;
+
+        let baseline_leaf = LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, 99, 0);
+        let expected = baseline_leaf.leaf_hash();
+        profiles.get_mut(pid).unwrap().baseline = Some(TreeSnapshot::File(baseline_leaf));
+
+        let key = DedupKey::Subtree {
+            sub: SubId::default(),
+            profile: pid,
+        };
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .last_emitted_dir_hash
+            .insert(key.clone(), 0xdead_beef_u128);
+
+        super::refresh_dedup_after_rebase(&mut profiles, &tree, pid);
+
+        assert_eq!(
+            profiles.get(pid).unwrap().last_emitted_dir_hash.get(&key),
+            Some(&expected),
+            "File-anchored Subtree key carries baseline leaf_hash()",
         );
     }
 }

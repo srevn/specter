@@ -1341,6 +1341,15 @@ impl Engine {
     /// the next rebase would see drift; loop) or be silently a no-op
     /// (the post-fire hash matches itself by construction). The
     /// helper deliberately avoids `seed_drift_observed` here.
+    ///
+    /// **Settle-time refresh.** After `baseline := current`, the
+    /// helper calls [`crate::reconcile::refresh_dedup_after_rebase`]
+    /// to bring every recorded dedup hash on this Profile into
+    /// agreement with the new baseline. The emit-time writes captured
+    /// the pre-Effect input; this rebase observed the post-Effect
+    /// output. The refresh closes the gap for non-idempotent Effects
+    /// (the next Standard burst at the post-Effect state is then
+    /// correctly suppressed by B1 dedup).
     fn dispatch_rebase_ok(
         &mut self,
         profile_id: ProfileId,
@@ -1374,7 +1383,50 @@ impl Engine {
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.baseline = p.current.clone();
         }
+        // Settle-time refresh: pull every recorded dedup hash on this
+        // Profile up to the post-rebase baseline-derived value. The
+        // emit-time writes captured the pre-Effect input; this rebase
+        // observed the post-Effect output. Closes the non-idempotent
+        // command's B1-dedup hole — see
+        // `crate::reconcile::refresh_dedup_after_rebase`.
+        crate::reconcile::refresh_dedup_after_rebase(&mut self.profiles, &self.tree, profile_id);
+        debug_assert!(
+            self.dedup_subtree_invariant_holds(profile_id),
+            "dispatch_rebase_ok: settle-time invariant breach on Profile {profile_id:?}",
+        );
         self.finish_burst_to_idle(profile_id, out);
+    }
+
+    /// Verify the Subtree arm of the post-rebase settle-time
+    /// invariant for Profile `profile_id`: every `DedupKey::Subtree`
+    /// entry whose `profile()` is `profile_id` carries the value
+    /// derived from `baseline` (`Dir → dir_hash`, `File → leaf_hash`).
+    /// Vacuously true on Profiles whose baseline is `None`, whose map
+    /// is empty, or whose `reap_pending` flag is set — matching the
+    /// helper's short-circuit conditions.
+    ///
+    /// Companion to [`crate::reconcile::refresh_dedup_after_rebase`];
+    /// invoked only via `debug_assert!`, so the body is dead code in
+    /// release builds (`#[allow(dead_code)]` silences the lint).
+    #[allow(dead_code)]
+    fn dedup_subtree_invariant_holds(&self, profile_id: ProfileId) -> bool {
+        let Some(p) = self.profiles.get(profile_id) else {
+            return true;
+        };
+        if p.reap_pending {
+            return true;
+        }
+        let Some(baseline) = p.baseline.as_ref() else {
+            return true;
+        };
+        let expected = match baseline {
+            TreeSnapshot::Dir(arc) => arc.dir_hash(),
+            TreeSnapshot::File(leaf) => leaf.leaf_hash(),
+        };
+        p.last_emitted_dir_hash.iter().all(|(k, h)| match k {
+            DedupKey::Subtree { profile, .. } if *profile == profile_id => *h == expected,
+            _ => true,
+        })
     }
 
     /// (Rebase, Vanished). Anchor disappeared between fire and rebase.
@@ -1668,8 +1720,16 @@ impl Engine {
                     });
                     count = count.saturating_add(1);
 
-                    // Record the post-fire hash so the next stable verdict
-                    // can suppress an idempotent re-fire.
+                    // Defensive scaffolding for anchor-loss-mid-fire.
+                    // The canonical settle-time write happens at
+                    // `dispatch_rebase_ok` →
+                    // `reconcile::refresh_dedup_after_rebase`, which
+                    // overwrites this value with the post-rebase
+                    // baseline-derived hash. This emit-time write only
+                    // matters when the anchor is lost between emit and
+                    // rebase: `discard_anchor_state` preserves the
+                    // map, so post-recovery `seed_drift_observed` sees
+                    // a conservative pre-Effect signal and re-fires.
                     if let Some(p) = self.profiles.get_mut(profile_id) {
                         p.last_emitted_dir_hash.insert(dk, current_dir_hash);
                     }
@@ -1839,11 +1899,14 @@ impl Engine {
             });
             count = count.saturating_add(1);
 
-            // Record the post-fire leaf hash so the next stable verdict
-            // at the same DedupKey can suppress an idempotent re-fire.
-            // Only insert when we have a real leaf hash; the
-            // None-fallback above is intentionally not memoised (we want
-            // the next probe to fire too).
+            // Defensive scaffolding for anchor-loss-mid-fire (per-leaf
+            // mirror of the SubtreeRoot write above). The canonical
+            // settle-time refresh at `dispatch_rebase_ok` overwrites
+            // this with the baseline-derived leaf hash; the emit-time
+            // pre-Effect value only matters when the anchor is lost
+            // between emit and rebase. The None-fallback above is
+            // intentionally not memoised — we want the next probe to
+            // fire too.
             if let Some(h) = leaf_hash
                 && let Some(p) = self.profiles.get_mut(profile_id)
             {
@@ -2171,7 +2234,16 @@ const _: fn() = || {
 /// allocates zero `String`s. The per-level `Arc::clone` is a refcount
 /// bump — `DirSnapshot` is shared between the engine and walker, so
 /// cloning a level is the same cost as a borrow.
-fn lookup_leaf_hash_in_current(current: Option<&TreeSnapshot>, rel: &str) -> Option<u128> {
+///
+/// Call sites:
+/// - [`Engine::emit_effects_per_stable_file`] — per-leaf B1 dedup at
+///   emit time.
+/// - [`crate::reconcile::refresh_dedup_after_rebase`] — settle-time
+///   refresh of `Profile.last_emitted_dir_hash` for `PerFile` keys.
+pub(crate) fn lookup_leaf_hash_in_current(
+    current: Option<&TreeSnapshot>,
+    rel: &str,
+) -> Option<u128> {
     use specter_core::ChildEntry;
 
     let TreeSnapshot::Dir(root) = current? else {

@@ -251,10 +251,17 @@ impl Engine {
     ///   it here would close auto-recovery on anchor reappearance;
     ///   only `reap_profile` and `on_watch_op_rejected`'s parent purge
     ///   clear it.
-    /// - `Profile.last_emitted_dir_hash` — the post-recovery Seed's
-    ///   `seed_drift_observed` compares against these entries;
-    ///   clearing them would silently re-fire emitted-once Effects on
-    ///   every recovery.
+    /// - `Profile.last_emitted_dir_hash` — the recorded hashes
+    ///   survive anchor loss in **survival mode**. After the next
+    ///   Seed-Ok re-establishes baseline, the Subtree-key drift check
+    ///   fires for any Sub whose recorded hash differs from the
+    ///   post-recovery state. The eventual rebase restores the
+    ///   active-mode invariant via
+    ///   `reconcile::refresh_dedup_after_rebase`
+    ///   (`recorded == baseline.dir_hash()` for Subtree keys;
+    ///   symmetric per-leaf rule for PerFile keys). Clearing here
+    ///   would silently re-fire emitted-once Effects on every
+    ///   recovery.
     /// - All other fields (`parent_profile`, `events_union`,
     ///   `has_per_file_fds`, `config*`, `resource`, `reap_pending`,
     ///   `settle*`).

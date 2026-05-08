@@ -1146,3 +1146,270 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
         TreeSnapshot::File(_) => panic!("expected Dir baseline"),
     }
 }
+
+#[test]
+fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_command() {
+    // Concern B fix: a non-idempotent command rewrites the watched
+    // tree mid-burst. Without the settle-time refresh,
+    // `recorded[Subtree]` carries the **pre-Effect** stable hash; the
+    // next Standard burst at the **post-Effect** state would
+    // B1-mismatch and fire a phantom Effect for the same intent.
+    //
+    // The refresh inside `dispatch_rebase_ok` aligns
+    // `recorded[Subtree]` with the post-rebase baseline-derived hash;
+    // the next burst's verify probe at the post-Effect state matches
+    // recorded → B1 suppress → no phantom.
+    let mut e = Engine::new();
+    let r = anchor(&mut e, "src");
+    let now = Instant::now();
+
+    let pre_emit = dir_snap(r, vec![]);
+    let post_effect = dir_snap(r, vec![("post.rs", EntryKind::File, 42)]);
+    assert_ne!(
+        pre_emit.dir_hash(),
+        post_effect.dir_hash(),
+        "test sanity: pre/post-Effect hashes differ",
+    );
+
+    let (sid, pid) = attach_and_complete_seed(&mut e, r, pre_emit.clone(), now);
+
+    // Burst 1 — verify response = pre_emit (matches the seed
+    // baseline; stable on first probe). emit_effects fires one Effect
+    // and writes recorded[Subtree] = pre_emit.dir_hash() (the
+    // emit-time defensive write).
+    let stable_out = drive_to_awaiting(
+        &mut e,
+        pid,
+        r,
+        pre_emit.clone(),
+        now + Duration::from_millis(10),
+    );
+    assert_eq!(stable_out.effects.len(), 1, "burst 1 fires one Effect");
+    let effect_key = stable_out.effects[0].key.clone();
+
+    // EffectComplete::Ok → Rebasing → rebase probe in flight.
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key: effect_key,
+            result: EffectOutcome::Ok,
+        },
+        now + Duration::from_millis(20),
+    );
+    let rebase_corr =
+        first_probe_correlation(&rebase_out).expect("rebase probe emitted on EffectComplete::Ok");
+
+    // Rebase response = post_effect (non-idempotent — the command
+    // rewrote the tree). dispatch_rebase_ok grafts, rebases baseline,
+    // then refreshes recorded[Subtree] to post_effect.dir_hash().
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: rebase_corr,
+            outcome: ProbeOutcome::SubtreeOk(post_effect.clone()),
+        }),
+        now + Duration::from_millis(30),
+    );
+
+    // Settle-time invariant: recorded[Subtree] is the post-rebase
+    // baseline-derived hash, NOT the pre-emit value.
+    let p = e.profiles().get(pid).unwrap();
+    assert!(matches!(p.state, ProfileState::Idle));
+    let (recorded_key, recorded_hash) = p
+        .last_emitted_dir_hash
+        .iter()
+        .next()
+        .expect("recorded entry");
+    assert!(
+        matches!(recorded_key, DedupKey::Subtree { profile, .. } if *profile == pid),
+        "recorded entry is the Subtree key for this Profile",
+    );
+    assert_eq!(
+        *recorded_hash,
+        post_effect.dir_hash(),
+        "recorded[Subtree] aligned with post-rebase baseline",
+    );
+    assert_ne!(
+        *recorded_hash,
+        pre_emit.dir_hash(),
+        "fix verification: recorded is post-rebase, not pre-emit",
+    );
+
+    // Burst 2 — phantom event. The verify probe responds with
+    // post_effect (the tree the user actually has now). B1 dedup
+    // compares current_dir_hash (post_effect.dir_hash()) against
+    // recorded[Subtree] (= post_effect.dir_hash() after refresh) →
+    // match → suppress.
+    let phantom_out =
+        drive_to_awaiting(&mut e, pid, r, post_effect, now + Duration::from_millis(40));
+    assert!(
+        phantom_out.effects.is_empty(),
+        "B1 dedup suppresses post-rebase phantom for non-idempotent command",
+    );
+    // Burst returned to Idle (no Awaiting because count==0).
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Idle
+    ));
+}
+
+#[test]
+fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format() {
+    // PerFile mirror of the Subtree test. A formatter-style
+    // non-idempotent command rewrites foo.rs's content **in place**
+    // (same inode, different leaf-hash inputs — `size` here, the same
+    // shape as a real formatter's `mtime`/`size` change). The slot
+    // survives `graft` (same inode/device → identity match), so the
+    // PerFile dedup entry survives the purge. Without the refresh,
+    // `recorded[PerFile]` would still carry the pre-Effect leaf hash;
+    // a phantom event at the same file would B1-mismatch and re-fire.
+    // The refresh aligns `recorded[PerFile]` with the post-rebase
+    // baseline's leaf hash; the next burst's leaf dedup matches and
+    // suppresses.
+    //
+    // Local snapshot helper: lets us build a `foo.rs` LeafEntry with
+    // an explicit `size` so post-rebase has a different leaf hash for
+    // the same `inode`. `dir_snap` (file-level helper) bakes
+    // `size = 0` and offers no override.
+    fn dir_snap_one_file(
+        root: ResourceId,
+        name: &str,
+        kind: EntryKind,
+        inode: u64,
+        size: u64,
+    ) -> std::sync::Arc<DirSnapshot> {
+        let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
+        map.insert(
+            CompactString::new(name),
+            ChildEntry::Leaf(LeafEntry::new(kind, size, UNIX_EPOCH, inode, 0)),
+        );
+        Arc::new(DirSnapshot::new(
+            root,
+            DirMeta {
+                mtime: UNIX_EPOCH,
+                inode: 0,
+                device: 0,
+            },
+            0,
+            map,
+        ))
+    }
+
+    let mut e = Engine::new();
+    let r = anchor(&mut e, "src");
+    let now = Instant::now();
+
+    // PerStableFile Sub on the anchor; CONTENT events so per-leaf FDs
+    // are issued. Seed baseline empty.
+    let req = SubAttachRequest::for_resource(
+        "fmt".into(),
+        r,
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::PerStableFile,
+        ClassSet::CONTENT,
+        false,
+    );
+    let (sid, attach_out) = e.attach_sub(req, now);
+    let pid = pid_of(&e, sid);
+    let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: seed_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+        }),
+        now,
+    );
+
+    // Burst 1 — verify response = pre_emit (foo.rs at inode 42,
+    // size 0). The Seed → Standard diff (created foo.rs) drives one
+    // PerFile Effect.
+    let pre_emit = dir_snap_one_file(r, "foo.rs", EntryKind::File, 42, 0);
+    let stable_out = drive_to_awaiting(
+        &mut e,
+        pid,
+        r,
+        pre_emit.clone(),
+        now + Duration::from_millis(10),
+    );
+    assert_eq!(stable_out.effects.len(), 1, "one PerFile Effect for foo.rs");
+    let effect_key = stable_out.effects[0].key.clone();
+    let foo_resource = match &effect_key {
+        DedupKey::PerFile { resource, .. } => *resource,
+        DedupKey::Subtree { .. } => panic!("expected PerFile key"),
+    };
+
+    // EffectComplete::Ok → Rebasing.
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key: effect_key,
+            result: EffectOutcome::Ok,
+        },
+        now + Duration::from_millis(20),
+    );
+    let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe");
+
+    // Rebase response: foo.rs at the **same inode 42** (in-place
+    // formatter rewrite, slot identity preserved) but `size = 1` —
+    // changes the leaf hash without triggering a delete/create cycle.
+    let post_effect = dir_snap_one_file(r, "foo.rs", EntryKind::File, 42, 1);
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: rebase_corr,
+            outcome: ProbeOutcome::SubtreeOk(post_effect.clone()),
+        }),
+        now + Duration::from_millis(30),
+    );
+
+    // Settle-time invariant: recorded[PerFile{foo.rs}] is the
+    // post-rebase leaf hash. The slot survived graft (same inode), so
+    // the entry's resource id is unchanged from emit time.
+    let post_effect_leaf_hash = LeafEntry::new(EntryKind::File, 1, UNIX_EPOCH, 42, 0).leaf_hash();
+    let pre_emit_leaf_hash = LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, 42, 0).leaf_hash();
+    assert_ne!(
+        post_effect_leaf_hash, pre_emit_leaf_hash,
+        "test sanity: pre/post-Effect leaf hashes differ",
+    );
+    let recorded = e
+        .profiles()
+        .get(pid)
+        .unwrap()
+        .last_emitted_dir_hash
+        .iter()
+        .find_map(|(k, h)| match k {
+            DedupKey::PerFile { resource, .. } if *resource == foo_resource => Some(*h),
+            _ => None,
+        })
+        .expect("recorded[PerFile{foo.rs}] present (slot survived graft)");
+    assert_eq!(
+        recorded, post_effect_leaf_hash,
+        "recorded[PerFile] aligned with post-rebase leaf hash",
+    );
+    assert_ne!(
+        recorded, pre_emit_leaf_hash,
+        "fix verification: recorded is post-rebase, not pre-emit",
+    );
+
+    // Burst 2 — phantom event. The verify probe responds with
+    // post_effect (foo.rs at inode 42, size 1 — the "formatted"
+    // content). The diff is empty (baseline == response), so
+    // `emit_effects_per_stable_file` walks zero entries — no fire
+    // anyway. The salient check is the **stored** leaf hash above:
+    // had the refresh not run, a phantom event with a probe response
+    // that revealed any change at foo.rs would B1-mismatch and refire.
+    let phantom_out =
+        drive_to_awaiting(&mut e, pid, r, post_effect, now + Duration::from_millis(40));
+    assert!(
+        phantom_out.effects.is_empty(),
+        "B1 dedup suppresses PerFile phantom for non-idempotent format",
+    );
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Idle
+    ));
+}
