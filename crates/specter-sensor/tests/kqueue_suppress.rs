@@ -8,7 +8,7 @@
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
+use specter_sensor::{DrainWindow, FsWatcher, KqueueWatcher, WatcherEvent};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -30,7 +30,7 @@ fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)>
 #[test]
 fn suppress_silences_subsequent_events() {
     let tmp = TempDir::new().unwrap();
-    let mut w = KqueueWatcher::new().unwrap();
+    let mut w = KqueueWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -60,7 +60,7 @@ fn suppress_silences_subsequent_events() {
 
 #[test]
 fn suppress_on_unwatched_resource_is_noop() {
-    let mut w = KqueueWatcher::new().unwrap();
+    let mut w = KqueueWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -73,7 +73,7 @@ fn suppress_on_unwatched_resource_is_noop() {
 #[test]
 fn suppress_then_unwatch_then_unsuppress_does_not_panic() {
     let tmp = TempDir::new().unwrap();
-    let mut w = KqueueWatcher::new().unwrap();
+    let mut w = KqueueWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -90,7 +90,7 @@ fn suppress_then_unwatch_then_unsuppress_does_not_panic() {
 #[test]
 fn double_suppress_is_idempotent() {
     let tmp = TempDir::new().unwrap();
-    let mut w = KqueueWatcher::new().unwrap();
+    let mut w = KqueueWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 

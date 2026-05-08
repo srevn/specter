@@ -25,7 +25,7 @@
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, OverflowScope, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, InotifyWatcher, WatcherEvent};
+use specter_sensor::{DrainWindow, FsWatcher, InotifyWatcher, WatcherEvent};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -62,7 +62,7 @@ fn massive_event_burst_emits_overflow() {
     }
 
     let tmp = TempDir::new().unwrap();
-    let mut w = InotifyWatcher::new().unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = sm.insert(());
 

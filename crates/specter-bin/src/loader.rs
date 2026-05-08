@@ -19,6 +19,7 @@ use compact_str::CompactString;
 use specter_config::{Config, LogConfig};
 use specter_core::SubId;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// Bin-side reload state. See module rustdoc.
 #[derive(Debug)]
@@ -46,6 +47,36 @@ impl Loader {
             current_log,
             ids: BTreeMap::new(),
         }
+    }
+
+    /// Derive the watcher's deferred-drain window from `current_config`.
+    ///
+    /// Formula: `min(settle for every Profile) / 4`, clamped to the
+    /// audit's `[10ms, 50ms]` band. The floor (`10ms`) is below
+    /// scheduler granularity on every supported platform — a 1ms-settle
+    /// Profile pays at most ~9ms latency on the second drain of a
+    /// sustained burst (the recency gate skips phase 2 entirely for
+    /// single touches in quiet periods); the ceiling (`50ms`) is the
+    /// audit §3.7 cap.
+    ///
+    /// **Empty `watches`** returns the floor — the watcher has no FDs
+    /// so the value is moot, but `Duration::ZERO` would disable
+    /// deferred drain permanently and miss the next added watch's
+    /// first burst.
+    ///
+    /// `settle_ms ≥ 1` is enforced at config-load
+    /// (`specter-config::config`), so `min_settle / 4` never
+    /// divides by zero.
+    ///
+    /// Not `const fn` — `Duration::clamp` is not const-stable on every
+    /// supported toolchain. `Loader::new` stays const.
+    #[must_use]
+    pub fn derive_drain_window(&self) -> Duration {
+        let Some(min_settle) = self.current_config.watches.iter().map(|w| w.settle).min() else {
+            return Duration::from_millis(10);
+        };
+        let raw = min_settle / 4;
+        raw.clamp(Duration::from_millis(10), Duration::from_millis(50))
     }
 }
 

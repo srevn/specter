@@ -32,14 +32,14 @@
 
 use crate::kqueue::wake::KqueueWakeHandle;
 use crate::kqueue::{fd, ffi, normalize, translate};
-use crate::{FsWatcher, WakeHandle, WatchFailure, WatchFailureExt, WatcherEvent};
+use crate::{DrainWindow, FsWatcher, WakeHandle, WatchFailure, WatchFailureExt, WatcherEvent};
 use slotmap::SecondaryMap;
 use specter_core::{ClassSet, ResourceId, ResourceKind};
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Wake-up ident reserved on the kqueue's `EVFILT_USER` filter. The
 /// value is arbitrary — kqueue keys events by `(ident, filter)` and
@@ -77,6 +77,23 @@ pub struct KqueueWatcher {
     /// borrowing from the watcher; drop of the last clone closes the
     /// kqueue fd.
     kq: Arc<OwnedFd>,
+    /// Cross-thread, runtime-tunable drain window. The bin updates on
+    /// `Config` load and SIGHUP via [`DrainWindow::set`]; this watcher
+    /// reads on every `poll_until` iteration via
+    /// [`DrainWindow::get`]. `Duration::ZERO` disables the deferred
+    /// drain entirely.
+    drain_window: DrainWindow,
+    /// Timestamp of the most recent drain that returned at least one
+    /// real (non-wake) event. The recency gate for the deferred-drain
+    /// phase reads this; a fresh-burst drain (no prior timestamp) or a
+    /// long-quiet drain (`now - last_event_at >= drain_window`) leaves
+    /// the gate closed and the second drain pass is skipped.
+    ///
+    /// `None` until the first non-wake-only `poll_until` return; held
+    /// across the watcher's lifetime so a quiet-then-burst pattern
+    /// re-engages on the second drain of the burst (single touches in
+    /// the gap stay fast).
+    last_event_at: Option<Instant>,
 }
 
 impl KqueueWatcher {
@@ -84,7 +101,11 @@ impl KqueueWatcher {
     /// ident. Returns the syscall error on `kqueue()` failure (`EMFILE`,
     /// `ENOMEM` are the only cases — the bin should treat startup
     /// failures as fatal).
-    pub fn new() -> io::Result<Self> {
+    ///
+    /// `drain_window` shapes the deferred-drain pass in `poll_until`;
+    /// see [`DrainWindow`] for the semantics. The handle is stored as
+    /// an `Arc` clone — cheap per construction.
+    pub fn new(drain_window: DrainWindow) -> io::Result<Self> {
         let kq = Arc::new(ffi::kqueue_new()?);
         ffi::register_user_event(&kq, WAKE_IDENT)?;
         Ok(Self {
@@ -93,6 +114,8 @@ impl KqueueWatcher {
             kinds: SecondaryMap::new(),
             registered_fflags: SecondaryMap::new(),
             kq,
+            drain_window,
+            last_event_at: None,
         })
     }
 
@@ -247,23 +270,97 @@ impl FsWatcher for KqueueWatcher {
         tracing::debug!(?r, "kqueue unsuppress");
     }
 
+    /// Block until events arrive (or the deadline elapses or a wake
+    /// fires), then optionally arm a second `kevent_drain` to capture
+    /// any kernel-queued events arriving within the drain window.
+    ///
+    /// **Two drain phases.** Phase 1 is the engine-driven blocking
+    /// drain that returns on the first kernel signal. Phase 2 is the
+    /// *deferred* drain — a short follow-up `kevent` that lets a
+    /// kernel-coalesced event burst surface in one `poll_until`
+    /// iteration instead of fragmenting across many.
+    ///
+    /// **Recency gate (`last_event_at`).** Phase 2 enters iff:
+    /// 1. Phase 1 returned at least one **real** (non-wake) event,
+    /// 2. The drain window is non-zero, AND
+    /// 3. The prior drain that returned real events was within one
+    ///    drain window of `now` (`now - last_event_at < window`).
+    ///
+    /// Together these gates keep the latency cost out of the
+    /// single-event-quiet-period path: the first event of a fresh
+    /// burst (or the only event of a quiet workload like W_edit) sees
+    /// `last_event_at` stale or unset and skips phase 2 entirely.
+    /// Sustained bursts (W_ssh / W_build) catch phase 2 from the
+    /// second drain in the burst onwards, batching the kernel's
+    /// coalesce stream into the engine's debounce window.
+    ///
+    /// **Buffer-full short-circuit.** When phase 1 fills `EVENT_BATCH`,
+    /// phase 2 is skipped (no buffer space). The kernel queue retains
+    /// the excess; the next `poll_until` iteration drains them, with
+    /// `last_event_at` updated so the recency gate opens.
+    ///
+    /// **Hot reload.** [`DrainWindow::get`] is read once per drain
+    /// iteration; subsequent updates apply to the next call. At most
+    /// one drain straddles a reload.
     fn poll_until(
         &mut self,
         deadline: Option<Instant>,
         out: &mut Vec<WatcherEvent>,
     ) -> Result<usize, WatchFailure> {
-        let timeout = deadline.map(deadline_instant_to_timespec);
+        let phase1_timeout = deadline.map(deadline_instant_to_timespec);
         let mut events = [ffi::Kevent::zeroed(); EVENT_BATCH];
         // `kevent` may itself signal pressure (`EMFILE` from a full
         // kernel queue) in addition to the per-syscall errno set; route
         // every error through the typed boundary so the bin can demux on
         // the variant rather than re-classifying `io::Error` upstream.
-        let n = ffi::kevent_drain(&self.kq, &mut events, timeout)
+        let n1 = ffi::kevent_drain(&self.kq, &mut events, phase1_timeout)
             .map_err(|e| WatchFailure::from_io(&e))?;
-        tracing::trace!(n, "kqueue drained");
+
+        // Filter wake events for the recency check. A wake-only return
+        // means the bin pushed fresh `WatchOp`s through the channel —
+        // file traffic hasn't materialised, so the burst-cadence
+        // heuristic mustn't update its timestamp on this drain.
+        let phase1_real = events[..n1]
+            .iter()
+            .filter(|ev| !ev.is_user_event(WAKE_IDENT))
+            .count();
+
+        let n_total = if phase1_real > 0 {
+            let now = Instant::now();
+            let window = self.drain_window.get();
+            // Recency check against the *prior* drain's timestamp, then
+            // update — so the first drain of a fresh burst always
+            // skips phase 2 (no prior timestamp ⇒ `recent == false`).
+            let recent = self
+                .last_event_at
+                .is_some_and(|t| now.saturating_duration_since(t) < window);
+            self.last_event_at = Some(now);
+
+            // Phase 2 enters only if we have buffer space, the window
+            // is enabled, and the prior drain was within window. The
+            // buffer-full case still updates `last_event_at` above so
+            // the next iteration's recency gate opens — pent-up
+            // events drain on the follow-up call.
+            if n1 < EVENT_BATCH && recent && window > Duration::ZERO {
+                let phase2_timeout = match deadline {
+                    Some(d) => d.saturating_duration_since(now).min(window),
+                    None => window,
+                };
+                let phase2_ts = ffi::duration_to_timespec(phase2_timeout);
+                let n2 = ffi::kevent_drain(&self.kq, &mut events[n1..], Some(phase2_ts))
+                    .map_err(|e| WatchFailure::from_io(&e))?;
+                n1 + n2
+            } else {
+                n1
+            }
+        } else {
+            n1
+        };
+
+        tracing::trace!(n1, n_total, "kqueue drained");
 
         let mut emitted = 0usize;
-        for ev in &events[..n] {
+        for ev in &events[..n_total] {
             // Wake events carry the EVFILT_USER ident and no ResourceId
             // payload — filter them silently before normalization.
             if ev.is_user_event(WAKE_IDENT) {

@@ -5,12 +5,12 @@
 
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
-use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
+use specter_sensor::{DrainWindow, FsWatcher, KqueueWatcher, WatcherEvent};
 use std::time::{Duration, Instant};
 
 #[test]
 fn wake_interrupts_long_poll_until() {
-    let mut w = KqueueWatcher::new().unwrap();
+    let mut w = KqueueWatcher::new(DrainWindow::default()).unwrap();
     let wake = w.wake_handle();
 
     // Spawn the wake-issuing thread first; the main thread blocks in
@@ -40,7 +40,7 @@ fn wake_interrupts_long_poll_until() {
 
 #[test]
 fn multiple_concurrent_wakes_coalesce() {
-    let mut w = KqueueWatcher::new().unwrap();
+    let mut w = KqueueWatcher::new(DrainWindow::default()).unwrap();
     let wake = w.wake_handle();
 
     let mut threads = Vec::new();
@@ -72,7 +72,7 @@ fn multiple_concurrent_wakes_coalesce() {
 
 #[test]
 fn wake_after_drop_does_not_panic() {
-    let watcher = KqueueWatcher::new().unwrap();
+    let watcher = KqueueWatcher::new(DrainWindow::default()).unwrap();
     let wake = watcher.wake_handle();
 
     // Drop the watcher; the wake handle's Arc<OwnedFd> keeps the
@@ -88,7 +88,7 @@ fn wake_after_drop_does_not_panic() {
 
 #[test]
 fn wake_handle_clone_box_is_independent() {
-    let w = KqueueWatcher::new().unwrap();
+    let w = KqueueWatcher::new(DrainWindow::default()).unwrap();
     let h1 = w.wake_handle();
     let h2 = h1.clone();
     drop(h1);
@@ -97,7 +97,7 @@ fn wake_handle_clone_box_is_independent() {
 
 #[test]
 fn poll_until_returns_promptly_with_zero_deadline() {
-    let mut w = KqueueWatcher::new().unwrap();
+    let mut w = KqueueWatcher::new(DrainWindow::default()).unwrap();
     let mut events: Vec<WatcherEvent> = Vec::new();
 
     let start = Instant::now();

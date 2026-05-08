@@ -26,7 +26,9 @@ use specter_actuator::{SubprocessActuator, default_spawner};
 use specter_config::{Cli, Config};
 use specter_core::{Input, WatchOp};
 use specter_engine::Engine;
-use specter_sensor::{FsWatcher, WakeHandle, WatcherEvent, WorkerProber, default_watcher};
+use specter_sensor::{
+    DrainWindow, FsWatcher, WakeHandle, WatcherEvent, WorkerProber, default_watcher,
+};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,8 +91,17 @@ pub fn run(cli: Cli) -> ExitCode {
         "specter starting"
     );
 
+    // Bookkeeping for the watcher's deferred-drain phase. The bin holds
+    // one `DrainWindow` and gives the watcher its own clone so the
+    // Atomic store on hot reload reaches both threads without a lock.
+    // Set once before `default_watcher` so the watcher reads the
+    // derived value on its very first `poll_until`.
+    let loader = Loader::new(initial_config, log_cfg);
+    let drain_window = DrainWindow::new();
+    drain_window.set(loader.derive_drain_window());
+
     // Kqueue (or Linux inotify, when that backend lands) + wake handle.
-    let watcher = match default_watcher() {
+    let watcher = match default_watcher(drain_window.clone()) {
         Ok(w) => w,
         Err(e) => {
             tracing::error!(?e, "watcher init failed");
@@ -146,13 +157,14 @@ pub fn run(cli: Cli) -> ExitCode {
     };
     let mut driver = EngineDriver::new(
         Engine::new(),
-        Loader::new(initial_config, log_cfg),
+        loader,
         config_path,
         cli_log_overrides,
         obs_handle,
         chans.take_engine_side(),
         prober.clone(),
         wake_handle.clone(),
+        drain_window,
     );
     drop(chans); // originals release; per-thread clones keep channels alive.
 

@@ -37,7 +37,7 @@
 
 use crate::inotify::wake::InotifyWakeHandle;
 use crate::inotify::{ffi, normalize, record, translate};
-use crate::{FsWatcher, WakeHandle, WatchFailure, WatchFailureExt, WatcherEvent};
+use crate::{DrainWindow, FsWatcher, WakeHandle, WatchFailure, WatchFailureExt, WatcherEvent};
 use slotmap::SecondaryMap;
 use specter_core::{ClassSet, FsEvent, OverflowScope, ResourceId, ResourceKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,7 +45,7 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Token tagging the inotify fd in epoll. The `poll_until` consumer
 /// reads `epoll_event.u64` to discriminate inotify-data-ready from
@@ -126,6 +126,29 @@ pub struct InotifyWatcher {
     /// and reused across drains — `poll_until` performs no allocation
     /// on the hot path.
     read_buf: Vec<u8>,
+    /// Cross-thread, runtime-tunable drain window. Mirror of
+    /// [`crate::kqueue::watcher::KqueueWatcher`]'s field; same
+    /// semantics. The bin updates on `Config` load and SIGHUP via
+    /// [`DrainWindow::set`]; this watcher reads on every `poll_until`
+    /// iteration via [`DrainWindow::get`]. `Duration::ZERO` disables
+    /// the deferred drain phase.
+    drain_window: DrainWindow,
+    /// Recency timestamp for the deferred-drain gate. See the kqueue
+    /// twin's docstring; same lifecycle.
+    last_event_at: Option<Instant>,
+    /// Per-`poll_until` dedup horizon. Cleared at the start of each
+    /// `poll_until` call so it spans both phase 1 and phase 2 — the
+    /// kernel's `IN_MODIFY` (phase 1) and `IN_CLOSE_WRITE` (phase 2),
+    /// which both normalize to [`FsEvent::Modified`] for the same
+    /// resource, must dedupe across the phase boundary or the engine
+    /// would see a phantom second event.
+    ///
+    /// Held as a struct field rather than a per-call local so the
+    /// shared horizon spans phases. Allocations recycle imperfectly
+    /// (`BTreeSet::clear` deallocates nodes), but moving it here is a
+    /// **correctness** fix for the cross-phase dedup, not an
+    /// allocation hygiene play.
+    seen: BTreeSet<(ResourceId, FsEvent)>,
 }
 
 /// Per-resource cached install state.
@@ -159,7 +182,7 @@ impl InotifyWatcher {
     /// and any [`OwnedFd`] already bound to a local drops via RAII so
     /// the kernel reaps every fd this constructor opened. No leak is
     /// possible.
-    pub fn new() -> io::Result<Self> {
+    pub fn new(drain_window: DrainWindow) -> io::Result<Self> {
         let inotify_fd = ffi::inotify_init()?;
         let wake_fd = Arc::new(ffi::eventfd_create()?);
         let epoll_fd = ffi::epoll_create()?;
@@ -177,6 +200,9 @@ impl InotifyWatcher {
             suppressed: SecondaryMap::new(),
             draining_wds: BTreeSet::new(),
             read_buf: vec![0u8; READ_BUF_BYTES],
+            drain_window,
+            last_event_at: None,
+            seen: BTreeSet::new(),
         })
     }
 
@@ -570,76 +596,147 @@ impl FsWatcher for InotifyWatcher {
         tracing::debug!(?r, "inotify unsuppress");
     }
 
-    /// Block on `epoll_wait` over `(inotify_fd, wake_fd)` until the
-    /// deadline, an inotify record, or a wake fires. Drains records
-    /// into `out` and returns the number of [`WatcherEvent`]s pushed
-    /// this call. Mirror of [`crate::kqueue::watcher::KqueueWatcher::poll_until`]
-    /// over the inotify substrate.
+    /// Block until events arrive (or the deadline elapses or a wake
+    /// fires), then optionally arm a second `epoll_wait` + drain pass
+    /// to capture kernel-coalesced bursts inside the configured drain
+    /// window. Mirror of
+    /// [`crate::kqueue::watcher::KqueueWatcher::poll_until`] over the
+    /// inotify substrate.
     ///
-    /// # Record dispatch
+    /// **Two drain phases.** Phase 1 is the engine-driven blocking
+    /// pass: one `epoll_wait` (bounded by `deadline`) followed by one
+    /// `read_inotify` and per-record demux. Phase 2 is the optional
+    /// follow-up pass armed iff phase 1 returned events and the
+    /// recency gate (`last_event_at`) is open.
     ///
-    /// Per-record demux into four cases:
+    /// **Recency gate (`last_event_at`).** Phase 2 enters iff:
+    /// 1. Phase 1 emitted ≥ 1 [`WatcherEvent`] (real events or a
+    ///    queue-overflow record),
+    /// 2. The drain window is non-zero, AND
+    /// 3. The prior drain that emitted events was within one drain
+    ///    window of `now`.
+    ///
+    /// Single-touch quiet workloads (W_edit) skip phase 2 entirely on
+    /// every drain — the recency clock is stale. Sustained bursts
+    /// (W_ssh / W_build) catch phase 2 from the second drain onwards,
+    /// so the engine's `event_drives_batching` sees ~99 % of a burst's
+    /// events folded into one `poll_until` iteration.
+    ///
+    /// **Cross-phase dedup ([`Self::seen`]).** inotify (unlike
+    /// kqueue's `EV_CLEAR`) does not coalesce kernel-side: a single
+    /// write produces both `IN_MODIFY` and `IN_CLOSE_WRITE` records,
+    /// both normalising to [`FsEvent::Modified`] for the same
+    /// resource. The dedup horizon must span phase 1 + phase 2 — an
+    /// `IN_MODIFY` from phase 1 paired with `IN_CLOSE_WRITE` from
+    /// phase 2 would otherwise emit twice. The `seen` set is cleared
+    /// at `poll_until` entry so it spans both phases, then carries no
+    /// further state between calls.
+    ///
+    /// **Wake handling.** `epoll_wait` distinguishes wake-fired from
+    /// inotify-data-ready via the per-fd token. A wake-only return
+    /// (no inotify data) returns `Ok(0)` so the bin's drain loop
+    /// re-checks pending `WatchOp`s + shutdown flag. Concurrent wakes
+    /// accumulate in the eventfd counter; one drain consumes them all
+    /// atomically.
+    ///
+    /// **Per-record demux.** Within `poll_once` (private helper), each
+    /// record routes by mask:
     ///
     /// 1. **`IN_Q_OVERFLOW`** — kernel signal that the per-instance
-    ///    event queue overflowed and dropped record(s). Lift to
-    ///    [`WatcherEvent::Overflow`] with [`OverflowScope::Global`];
-    ///    the engine reseeds every in-scope Profile.
-    ///    Per `inotify(7)` the record's `wd` is `-1` and no other
-    ///    actionable bit is set; the by_wd / draining checks below
-    ///    are bypassed via the early `continue`.
-    /// 2. **`IN_IGNORED`** — kernel cleanup signal; the watch
-    ///    descriptor is being reaped. Two legitimate paths reach
-    ///    here, distinguished by `draining_wds` membership: a
-    ///    watcher-initiated `inotify_rm_watch` (the wd is in
-    ///    `draining_wds` and per-resource state was already cleared
-    ///    by [`Self::unwatch`] — only the flag needs clearing here),
-    ///    or a kernel-side spontaneous reap (the watched inode was
-    ///    deleted/unmounted; the watcher still holds the per-resource
-    ///    maps and clears them now so the engine's eventual
-    ///    `Unwatch` finds a clean slate).
-    /// 3. **Stale event on a draining wd** — the kernel queued events
-    ///    on the wd before our `inotify_rm_watch`, but `IN_IGNORED`
-    ///    hasn't yet been consumed. Drop the event: the inode the wd
-    ///    referred to is no longer the ResourceId's intent, and a
-    ///    subsequent kernel-side wd reuse (a fresh `inotify_add_watch`
-    ///    receiving the same wd) would otherwise mis-attribute pre-rm
-    ///    events to the freshly attached resource.
-    /// 4. **Normal event** — resolve `wd → ResourceId` via `by_wd`,
-    ///    drop if [`Self::suppressed`] holds the resource (user-space
-    ///    filter; inotify has no kernel-level disable), normalize via
-    ///    [`normalize::mask_to_fs_event`] using the cached kind, and
-    ///    push as [`WatcherEvent::Fs`].
+    ///    event queue overflowed. Lift to [`WatcherEvent::Overflow`]
+    ///    with [`OverflowScope::Global`]; the engine reseeds every
+    ///    in-scope Profile.
+    /// 2. **`IN_IGNORED`** — kernel cleanup signal; the wd is being
+    ///    reaped. Two legitimate paths reach here, distinguished by
+    ///    `draining_wds` membership: a watcher-initiated
+    ///    `inotify_rm_watch` (the flag is cleared here), or a
+    ///    kernel-side spontaneous reap (the watched inode was
+    ///    deleted/unmounted — clear per-resource state so the
+    ///    engine's eventual `Unwatch` finds a clean slate).
+    /// 3. **Stale event on a draining wd** — pre-rm events on a
+    ///    wd whose `IN_IGNORED` hasn't arrived yet. Dropped to close
+    ///    the wd-reuse race with a subsequent `inotify_add_watch`.
+    /// 4. **Normal event** — resolve `wd → ResourceId`, drop if
+    ///    suppressed, normalize via [`normalize::mask_to_fs_event`],
+    ///    dedupe via `self.seen`, push as [`WatcherEvent::Fs`].
     ///
-    /// # Per-batch dedup
-    ///
-    /// inotify (unlike kqueue's `EV_CLEAR`) does not coalesce
-    /// kernel-side: a single write produces both `IN_MODIFY` and
-    /// `IN_CLOSE_WRITE` records, which both normalize to
-    /// [`FsEvent::Modified`] for the same resource. A
-    /// `BTreeSet<(ResourceId, FsEvent)>` collapses identical pairs
-    /// within this drain. Per-batch only — across-batch dedup would
-    /// suppress the engine's `Settling` debounce signal (the engine
-    /// debounces by re-arming its settle timer on every event;
-    /// suppressing redundant events across batches would let a
-    /// long-running write stream go undebounced after the first batch).
-    ///
-    /// # Wake handling
-    ///
-    /// `epoll_wait` distinguishes wake-fired from inotify-data-ready
-    /// via the per-fd token (`WAKE_TOKEN` vs `INOTIFY_TOKEN`). A wake
-    /// alone — without inotify data — drains the eventfd counter and
-    /// returns `Ok(0)` so the bin's drain loop re-checks pending
-    /// `WatchOp`s and shutdown flag. Concurrent wakes accumulate in
-    /// the eventfd counter; one drain consumes them all atomically.
-    ///
-    /// # Errors
-    ///
-    /// Syscall failures classify through [`WatchFailureExt::from_io`]
-    /// at the trait boundary — symmetric with [`Self::watch`] / kqueue.
-    /// `EINTR` is retried inside the FFI helpers (see
-    /// [`ffi::epoll_wait`] / [`ffi::read_inotify`]); the bin treats a
-    /// non-`EINTR` failure as terminal for the watcher thread.
+    /// **Errors.** Syscall failures classify through
+    /// [`WatchFailureExt::from_io`] at the trait boundary. `EINTR` is
+    /// retried inside the FFI helpers; the bin treats a non-`EINTR`
+    /// failure as terminal for the watcher thread.
     fn poll_until(
+        &mut self,
+        deadline: Option<Instant>,
+        out: &mut Vec<WatcherEvent>,
+    ) -> Result<usize, WatchFailure> {
+        // Reset the dedup horizon. `clear()` deallocates the BTreeSet's
+        // node arena, but the residency cost (a handful of nodes per
+        // burst) is negligible — the move from local to struct field is
+        // for the cross-phase dedup correctness above, not allocation
+        // hygiene.
+        self.seen.clear();
+
+        // Phase 1: blocking drain to the engine's deadline.
+        let n1 = self.poll_once(deadline, out)?;
+
+        if n1 == 0 {
+            // Timeout / wake-only / IN_IGNORED-only batch. Don't
+            // update `last_event_at` (no real activity observed) and
+            // don't enter phase 2.
+            return Ok(0);
+        }
+
+        // Phase 2 gate. Compute recency against the *prior* drain's
+        // timestamp, then update so the next drain sees the new value.
+        let now = Instant::now();
+        let window = self.drain_window.get();
+        let recent = self
+            .last_event_at
+            .is_some_and(|t| now.saturating_duration_since(t) < window);
+        self.last_event_at = Some(now);
+
+        if recent && window > Duration::ZERO {
+            // Bound phase 2 by the engine's deadline so timer cadence
+            // is preserved — even a window-deferred drain must respect
+            // the next settle timer.
+            let phase2_deadline = now + window;
+            let bounded = deadline.map_or(phase2_deadline, |d| d.min(phase2_deadline));
+            let n2 = self.poll_once(Some(bounded), out)?;
+            return Ok(n1 + n2);
+        }
+
+        Ok(n1)
+    }
+
+    /// Capture a wake handle. Clones the watcher's `Arc<OwnedFd>` of
+    /// the eventfd so the handle survives the watcher's drop without
+    /// UB (see [`InotifyWakeHandle`] for the `Arc` discipline). Cheap
+    /// (one `Arc` increment + one `Box` allocation); idempotent —
+    /// multiple handles coexist freely.
+    fn wake_handle(&self) -> Box<dyn WakeHandle> {
+        Box::new(InotifyWakeHandle::new(Arc::clone(&self.wake_fd)))
+    }
+}
+
+impl InotifyWatcher {
+    /// One full drain pass: `epoll_wait` (bounded by `deadline`),
+    /// optionally drain the wake-fd counter, optionally `read_inotify`
+    /// + per-record demux into `out`. Returns the count of
+    ///   [`WatcherEvent`]s pushed *this call*.
+    ///
+    /// Called twice from [`Self::poll_until`]: phase 1 with the
+    /// engine's deadline; phase 2 with a window-bounded deadline. The
+    /// per-call dedup state lives on `self.seen`, which `poll_until`
+    /// clears at entry — `poll_once` only inserts, so phase 2's first
+    /// inserts dedupe against phase 1's prior inserts.
+    ///
+    /// **Cross-phase invariant.** `poll_once` mutates `self.seen` but
+    /// never clears it; only `poll_until` clears the horizon. Tests
+    /// that drive `poll_once` directly must clear manually.
+    ///
+    /// **Per-record demux.** See [`Self::poll_until`] for the case
+    /// table — IN_Q_OVERFLOW, IN_IGNORED, draining-wd stale, normal.
+    fn poll_once(
         &mut self,
         deadline: Option<Instant>,
         out: &mut Vec<WatcherEvent>,
@@ -704,12 +801,6 @@ impl FsWatcher for InotifyWatcher {
         }
 
         let mut emitted = 0usize;
-        // Per-batch dedup over `(ResourceId, FsEvent)`. First-write
-        // wins (`BTreeSet::insert` returns `false` on duplicates), so
-        // the kernel's `IN_MODIFY` precedes its `IN_CLOSE_WRITE` in the
-        // emitted stream — matching the natural FIFO drain order.
-        let mut seen: BTreeSet<(ResourceId, FsEvent)> = BTreeSet::new();
-
         for rec in record::parse(&self.read_buf[..n_bytes]) {
             // 1. IN_Q_OVERFLOW: queue-wide kernel-side overflow signal.
             if rec.mask & libc::IN_Q_OVERFLOW != 0 {
@@ -786,7 +877,13 @@ impl FsWatcher for InotifyWatcher {
                 continue;
             };
 
-            if !seen.insert((r, fs_event)) {
+            // Per-batch dedup over `(ResourceId, FsEvent)`. First-write
+            // wins (`BTreeSet::insert` returns `false` on duplicates),
+            // so the kernel's `IN_MODIFY` precedes its `IN_CLOSE_WRITE`
+            // in the emitted stream — matching the natural FIFO drain
+            // order. The horizon spans phase 1 + phase 2 of one
+            // `poll_until` call; see `self.seen`'s docstring.
+            if !self.seen.insert((r, fs_event)) {
                 continue;
             }
 
@@ -799,15 +896,6 @@ impl FsWatcher for InotifyWatcher {
 
         tracing::trace!(emitted, n_bytes, "inotify drained");
         Ok(emitted)
-    }
-
-    /// Capture a wake handle. Clones the watcher's `Arc<OwnedFd>` of
-    /// the eventfd so the handle survives the watcher's drop without
-    /// UB (see [`InotifyWakeHandle`] for the `Arc` discipline). Cheap
-    /// (one `Arc` increment + one `Box` allocation); idempotent —
-    /// multiple handles coexist freely.
-    fn wake_handle(&self) -> Box<dyn WakeHandle> {
-        Box::new(InotifyWakeHandle::new(Arc::clone(&self.wake_fd)))
     }
 }
 

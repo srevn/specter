@@ -21,7 +21,7 @@
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, InotifyWatcher, WatchFailure};
+use specter_sensor::{DrainWindow, FsWatcher, InotifyWatcher, WatchFailure};
 use tempfile::TempDir;
 
 /// Read the per-user inotify watch ceiling. `Err` ⇒ skip the test.
@@ -68,7 +68,7 @@ fn watch_eventually_returns_pressure_under_low_max_user_watches() {
         paths.push(p);
     }
 
-    let mut w = InotifyWatcher::new().unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
 
     let mut pressure_seen = false;

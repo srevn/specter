@@ -15,7 +15,7 @@
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, InotifyWatcher, WatchFailure};
+use specter_sensor::{DrainWindow, FsWatcher, InotifyWatcher, WatchFailure};
 use tempfile::TempDir;
 
 #[test]
@@ -24,7 +24,7 @@ fn dir_watch_on_regular_file_returns_resource_enotdir() {
     let file_path = tmp.path().join("plain.txt");
     std::fs::write(&file_path, "x").unwrap();
 
-    let mut w = InotifyWatcher::new().unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -47,7 +47,7 @@ fn dir_watch_on_regular_file_returns_resource_enotdir() {
 fn file_watch_on_directory_returns_resource_enotdir() {
     let tmp = TempDir::new().unwrap();
 
-    let mut w = InotifyWatcher::new().unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -73,7 +73,7 @@ fn unknown_kind_accepts_any_inode_shape_dir() {
     // kind for downstream normalization.
     let tmp = TempDir::new().unwrap();
 
-    let mut w = InotifyWatcher::new().unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -89,7 +89,7 @@ fn unknown_kind_accepts_any_inode_shape_file() {
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, "x").unwrap();
 
-    let mut w = InotifyWatcher::new().unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 

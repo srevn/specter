@@ -12,7 +12,7 @@
 use nix::sys::resource::{Resource, setrlimit};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, ResourceId, ResourceKind};
-use specter_sensor::{FsWatcher, KqueueWatcher, WatchFailure};
+use specter_sensor::{DrainWindow, FsWatcher, KqueueWatcher, WatchFailure};
 use tempfile::TempDir;
 
 #[test]
@@ -34,7 +34,7 @@ fn watch_eventually_returns_emfile_under_low_rlimit() {
     // ~50 successful watches exhaust the budget.
     setrlimit(Resource::RLIMIT_NOFILE, 64, 64).expect("setrlimit");
 
-    let mut w = KqueueWatcher::new().expect("kqueue_new under rlimit");
+    let mut w = KqueueWatcher::new(DrainWindow::default()).expect("kqueue_new under rlimit");
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
 
     let mut emfile_seen = false;

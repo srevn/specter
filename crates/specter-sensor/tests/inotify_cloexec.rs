@@ -26,7 +26,7 @@
 
 #![cfg(target_os = "linux")]
 
-use specter_sensor::{FsWatcher, InotifyWatcher};
+use specter_sensor::{DrainWindow, FsWatcher, InotifyWatcher};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -48,7 +48,7 @@ fn child_fd_targets(pid: u32) -> Option<Vec<String>> {
 
 #[test]
 fn watcher_fds_are_cloexec() {
-    let watcher = InotifyWatcher::new().expect("InotifyWatcher::new");
+    let watcher = InotifyWatcher::new(DrainWindow::default()).expect("InotifyWatcher::new");
 
     // Sanity: the parent itself must hold the watcher's three fd
     // classes right now (otherwise the test premise is broken).
@@ -116,7 +116,7 @@ fn watcher_fds_are_cloexec() {
 /// continue to function in the parent afterwards.
 #[test]
 fn wake_handle_survives_actuator_style_spawn() {
-    let watcher = InotifyWatcher::new().unwrap();
+    let watcher = InotifyWatcher::new(DrainWindow::default()).unwrap();
     let wake = watcher.wake_handle();
 
     let mut cmd = Command::new("/bin/true");

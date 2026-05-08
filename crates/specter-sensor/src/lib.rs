@@ -11,7 +11,9 @@
 use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, ResourceKind};
 use std::io;
 use std::path::Path;
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 // Re-exported alongside the trait so the bin can name `WatcherEvent` and
 // its variant payloads (`OverflowScope`, `WatchFailure`) via one crate
@@ -20,6 +22,66 @@ use std::time::Instant;
 // touches `core` directly. The `pub use` doubles as the in-module import
 // the trait + `WatcherEvent` definitions below need.
 pub use specter_core::{OverflowScope, WatchFailure};
+
+/// Cross-thread, runtime-tunable drain window for the watcher's
+/// deferred-drain phase.
+///
+/// The bin owns one [`DrainWindow`]; clones are cheap (`Arc` bump). The
+/// engine driver writes the value at startup and on hot reload; the
+/// watcher thread reads it on every `poll_until` iteration. The
+/// `AtomicU64` is the cross-thread surface — no lock, no channel.
+///
+/// **Semantics.**
+/// - A value of `Duration::ZERO` (the initial state) disables deferred
+///   drain entirely. The watcher returns from `poll_until` as soon as
+///   the first `kevent_drain` / `epoll_wait` returns events.
+/// - A non-zero value arms a second drain pass after the first returns
+///   real events, **subject to the recency check** documented at each
+///   backend's `poll_until`. The check ensures W_edit single touches in
+///   quiet periods skip the second drain (zero latency cost) while
+///   sustained bursts catch it from the second drain onwards.
+///
+/// **Ordering.** Both `set` and `get` use `Ordering::Relaxed`. Engine
+/// correctness does not depend on which window value the watcher used
+/// for any given drain (settle deadlines are engine-timer driven; the
+/// window only shapes batch granularity), so the cheaper memory order
+/// is correct.
+#[derive(Debug, Clone)]
+pub struct DrainWindow(Arc<AtomicU64>);
+
+impl DrainWindow {
+    /// Construct a fresh handle in the disabled state (`Duration::ZERO`).
+    /// The bin computes the derived value (typically `min(settle) / 4`
+    /// clamped to the audit's bounds) and calls [`Self::set`] before
+    /// spawning the watcher thread.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(0)))
+    }
+
+    /// Atomically update the window. Subsequent watcher reads observe
+    /// the new value; at most one drain uses the prior value across a
+    /// reload. Saturates at `u64::MAX` nanoseconds (`~584 years`) for
+    /// pathologically large `Duration`s — well past any reasonable
+    /// settle / window derivation.
+    pub fn set(&self, d: Duration) {
+        let nanos = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        self.0.store(nanos, Ordering::Relaxed);
+    }
+
+    /// Read the current window. Returns `Duration::ZERO` when unset
+    /// (the initial / disabled state).
+    #[must_use]
+    pub fn get(&self) -> Duration {
+        Duration::from_nanos(self.0.load(Ordering::Relaxed))
+    }
+}
+
+impl Default for DrainWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Sensor-side extension on [`WatchFailure`] that classifies an
 /// `io::Error` from a watch-install syscall.
@@ -310,13 +372,17 @@ pub type DefaultWatcher = KqueueWatcher;
 #[cfg(target_os = "linux")]
 pub type DefaultWatcher = InotifyWatcher;
 
-/// Construct the platform's default watcher.
+/// Construct the platform's default watcher with the supplied drain
+/// window.
 ///
 /// Returns the same concrete type as [`DefaultWatcher`] — no
 /// trait-object overhead. See module docs on [`FsWatcher`] for the
 /// invariants the returned watcher must uphold (`Send`, single-threaded
 /// `poll_until` consumer, cross-thread mutation only via the bin's
 /// channel + [`WakeHandle`] discipline).
-pub fn default_watcher() -> io::Result<DefaultWatcher> {
-    DefaultWatcher::new()
+///
+/// `drain_window` is consumed by reference cheaply via `Arc` clone;
+/// the bin keeps its own clone for hot-reload writes.
+pub fn default_watcher(drain_window: DrainWindow) -> io::Result<DefaultWatcher> {
+    DefaultWatcher::new(drain_window)
 }
