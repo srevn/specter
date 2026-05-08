@@ -1227,11 +1227,10 @@ mod tests {
 
     // ===== Boundary rejection tests =====
     //
-    // Phase 5 Group D's gate-tightening pins three rejection categories
-    // at the decomposition seam: non-absolute paths, non-UTF-8 segments,
-    // and non-canonical components. The tests below cover the categories
-    // not already exercised above (`parentdir_is_rejected` covers the
-    // `..` case).
+    // Three rejection categories pin at the decomposition seam:
+    // non-absolute paths, non-UTF-8 segments, and non-canonical
+    // components. The tests below cover the categories not already
+    // exercised above (`parentdir_is_rejected` covers the `..` case).
 
     #[test]
     fn decompose_relative_multi_segment_path_emits_diagnostic() {

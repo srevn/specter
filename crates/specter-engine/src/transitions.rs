@@ -514,9 +514,8 @@ impl Engine {
 
     /// Dispatch a [`Input::EffectComplete`].
     ///
-    /// The Profile is resolved from `key` ([`DedupKey::profile`] is O(1)
-    /// post-Phase-09 commit 2); the Sub registry is consulted only for
-    /// the unknown-Sub diagnostic.
+    /// The Profile is resolved from `key` ([`DedupKey::profile`] is O(1));
+    /// the Sub registry is consulted only for the unknown-Sub diagnostic.
     ///
     /// Failed arrivals always clear `last_emitted_dir_hash[key]` — a
     /// failed Effect leaves no observable state to deduplicate against,
@@ -549,8 +548,7 @@ impl Engine {
         // its Effects' completions arrive, but the Profile is still
         // alive and waiting for the counter to drain — we must NOT
         // short-circuit here, or the counter would never advance.
-        // `key.profile()` is O(1) post-Phase-09 commit 2 and never
-        // depends on the Sub registry.
+        // `key.profile()` is O(1) and never depends on the Sub registry.
         let profile_id = key.profile();
 
         // Failed clears the dedup entry regardless of state. The Failed
@@ -1124,35 +1122,50 @@ impl Engine {
             }
         }
 
-        // Fire Effects only for the Subtree keys that drifted since the
-        // last successful emission. The dedup-hash path inside
-        // `emit_effects` runs against the freshly grafted current and
-        // updates `last_emitted_dir_hash` to the new post-fire hash. The
-        // rebase (`baseline := current`) happens in both branches below;
-        // on the drift-fires branch it must run before
-        // `transition_to_awaiting` so the Profile's view is consistent for
-        // any FsEvent absorbed during the post-fire tail
-        // (Awaiting/Rebasing).
-        let drifted_keys = self.seed_drift_observed(profile_id);
-        if !drifted_keys.is_empty() {
-            let outcome = self.emit_effects(
-                profile_id,
-                EmitMode::SeedDrift {
-                    drifted: &drifted_keys,
-                },
-                out,
-            );
-            if outcome.count > 0 {
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.rebase_baseline();
+        // Fire Effects only for the Subtree subset of `fired_subs` when
+        // drift is observed (post-graft current.hash() differs from the
+        // last settled state — `baseline.hash()` in active mode or the
+        // `last_settled_hash_at_loss` witness in survival mode). Every
+        // Sub that has a fire history on this Profile re-fires once,
+        // unconditionally — drift is a per-Profile signal under the
+        // cross-field invariant; per-key narrowing is gone. The rebase
+        // (`baseline := current`) happens in both branches below; on the
+        // drift-fires branch it must run before `transition_to_awaiting`
+        // so the Profile's view is consistent for any FsEvent absorbed
+        // during the post-fire tail (Awaiting/Rebasing).
+        if self.seed_drift_observed(profile_id) {
+            let drifted_keys: SmallVec<[DedupKey; 2]> = self
+                .profiles
+                .get(profile_id)
+                .map(|p| {
+                    p.fired_subs
+                        .iter()
+                        .filter(|k| matches!(k, DedupKey::Subtree { .. }))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            // `drifted_keys` may be empty if the Profile has only PerFile
+            // fires (Subtree filter excludes them) or if every Subtree Sub
+            // detached between record and now (a same-step race —
+            // `detach_sub_inner` normally purges fired_subs). Fall
+            // through to the no-drift finish path in either case.
+            if !drifted_keys.is_empty() {
+                let outcome = self.emit_effects(
+                    profile_id,
+                    EmitMode::SeedDrift {
+                        drifted: &drifted_keys,
+                    },
+                    out,
+                );
+                if outcome.count > 0 {
+                    if let Some(p) = self.profiles.get_mut(profile_id) {
+                        p.rebase_baseline();
+                    }
+                    self.transition_to_awaiting(profile_id, outcome.count, now);
+                    return;
                 }
-                self.transition_to_awaiting(profile_id, outcome.count, now);
-                return;
             }
-            // Drift observed but emit produced no effects: the drifted
-            // Subs were detached between record and now (their entries
-            // would normally be purged on detach, but a same-step race
-            // reaches here defensively). Fall through to the finish path.
         }
 
         // Non-drift Seed (fresh attach, no-drift recovery, or
@@ -1164,48 +1177,50 @@ impl Engine {
         self.finish_burst_to_idle(profile_id, out);
     }
 
-    /// Per-key hash-only drift check at Seed-Ok. Returns the
-    /// `DedupKey::Subtree` keys whose recorded `last_emitted_dir_hash`
-    /// differs from the post-graft `current`'s anchor-rooted hash. Empty
-    /// vec means "no drift" — fresh-Profile Seed (no prior emission) ⇒
-    /// `last_emitted_dir_hash` empty ⇒ empty result ⇒ no fire, preserving
-    /// "fresh Seed never fires Effect".
+    /// Decide whether a Seed-Ok should fire conservative-recovery Effects.
+    /// Returns `true` iff the Profile has fired before AND the post-graft
+    /// `current` snapshot's anchor-rooted hash differs from the most
+    /// recent settled state.
     ///
-    /// Per-key scoping (vs prior bool-OR-across-keys design): a multi-Sub
-    /// Profile in recovery only re-fires the Subs whose own emission
-    /// records have drifted. A Sub whose `last_emitted_dir_hash[Subtree]`
-    /// matches the post-recovery hash is skipped — its previous fire is
-    /// still consistent with disk reality, so re-running its command
-    /// would be a noop with side effects.
+    /// Source of "most recent settled state" depends on mode (mutually
+    /// exclusive under the cross-field invariant
+    /// `baseline.is_some() ⇒ last_settled_hash_at_loss.is_none()`):
+    /// - **Active mode** (`baseline.is_some()`, witness `None`):
+    ///   `baseline.hash()` is the witness directly. Covers
+    ///   `on_sensor_overflow` reseed, where the prior baseline persists
+    ///   across the overflow but `current` is freshly captured.
+    /// - **Survival mode** (`baseline.is_none()`, witness `Some`):
+    ///   [`crate::claims::Engine::discard_anchor_state`] stashed the
+    ///   pre-loss `baseline.hash()` into `last_settled_hash_at_loss`.
+    ///   Covers anchor-loss recovery via descent → Seed-Ok.
     ///
-    /// Limitation: `DedupKey::PerFile` entries are not drift sources. The
-    /// post-Seed `current` lacks the per-leaf history for a faithful
-    /// per-file diff. The dispatcher passes the returned filter to
-    /// `emit_effects`, which then skips PerStableFile Subs entirely on
-    /// the drift path — PerFile keys fire only via Standard bursts, never
-    /// from this drift path.
-    fn seed_drift_observed(&self, profile_id: ProfileId) -> SmallVec<[DedupKey; 2]> {
+    /// The witness is checked first because, when populated, the cross-
+    /// field invariant guarantees baseline is `None` — survival mode is
+    /// authoritative. The fresh-attach case (both `None`, `fired_subs`
+    /// empty by construction) returns `false` and preserves "fresh Seed
+    /// never fires Effect".
+    ///
+    /// The boolean answer is per-Profile; the caller
+    /// ([`Engine::dispatch_seed_ok`]) builds the SeedDrift fire filter
+    /// from the Subtree subset of [`Profile::fired_subs`].
+    fn seed_drift_observed(&self, profile_id: ProfileId) -> bool {
         let Some(p) = self.profiles.get(profile_id) else {
-            return SmallVec::new();
+            return false;
         };
-        if p.last_emitted_dir_hash.is_empty() {
-            return SmallVec::new();
+        if p.fired_subs.is_empty() {
+            return false;
         }
-        let curr_hash: u128 = match p.current.as_ref() {
-            Some(TreeSnapshot::Dir(arc)) => arc.dir_hash(),
-            Some(TreeSnapshot::File(leaf)) => leaf.leaf_hash(),
-            None => return SmallVec::new(),
+        let Some(current) = p.current.as_ref() else {
+            return false;
         };
-        p.last_emitted_dir_hash
-            .iter()
-            .filter_map(|(key, &h)| {
-                if matches!(key, DedupKey::Subtree { .. }) && h != curr_hash {
-                    Some(key.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
+        let curr = current.hash();
+        if let Some(witness) = p.last_settled_hash_at_loss {
+            return witness != curr;
+        }
+        match p.baseline.as_ref() {
+            Some(b) => b.hash() != curr,
+            None => false,
+        }
     }
 
     /// (Seed, Vanished).
@@ -1710,6 +1725,18 @@ impl Engine {
             diff_slot.clone()
         };
 
+        // Per-Profile structural component of B1 dedup. The full Subtree
+        // suppress decision combines `nothing_changed` with a per-Sub
+        // fire-history check (`fired_subs.contains(&dk)`) inside the loop:
+        // a Sub that has never fired suppresses nothing — it is its own
+        // "first emission" — even when the tree happens to match. Both
+        // reads hit the cached `OnceLock<u128>` on each snapshot; same cost
+        // class as the per-Sub map value compare it replaces.
+        let nothing_changed = match (baseline_snap.as_ref(), current_snap.as_ref()) {
+            (Some(b), Some(c)) => b.hash() == c.hash(),
+            _ => false,
+        };
+
         // Snapshot the post-graft `current` hash once for SubtreeRoot
         // dedup-hash suppression. PerStableFile uses per-leaf hashes
         // (computed inside `emit_effects_per_stable_file`).
@@ -1742,19 +1769,24 @@ impl Engine {
                     {
                         continue;
                     }
-                    // Dedup-hash suppression. SeedDrift's `drifted` is built
-                    // from keys where `last_emitted ≠ current` by
-                    // construction (see `seed_drift_observed`), so the
+                    // B1 suppress = "Sub has fired before AND tree state is
+                    // unchanged since the last rebase." `fired_subs.contains`
+                    // is the per-Sub fire-history gate; `nothing_changed` is
+                    // the per-Profile "no change" structural signal. Both
+                    // gates required: a fresh Sub on an unchanged tree must
+                    // still fire its first Effect. SeedDrift's `drifted` is
+                    // built from drifted keys by construction (see
+                    // `seed_drift_observed` + `dispatch_seed_ok`), so the
                     // SeedDrift arm returns `false` directly — the
                     // unreachability is structural, not analytical.
                     let suppress = match mode {
                         EmitMode::Standard { forced } => {
                             !forced
+                                && nothing_changed
                                 && self
                                     .profiles
                                     .get(profile_id)
-                                    .and_then(|p| p.last_emitted_dir_hash.get(&dk))
-                                    == Some(&current_dir_hash)
+                                    .is_some_and(|p| p.fired_subs.contains(&dk))
                         }
                         EmitMode::SeedDrift { .. } => false,
                     };
@@ -1928,21 +1960,12 @@ impl Engine {
                 profile: profile_id,
                 resource,
             };
-            // Per-leaf dedup-hash suppression. `lookup_leaf_hash_in_current`
-            // returns `None` when current's per-leaf hash isn't reachable
-            // (rare; defense-in-depth) — fire conservatively in that case
-            // (correctness over efficiency).
+            // Captured for the post-emit map mirror only — the per-leaf B1
+            // suppress check it gated is structurally unreachable: the diff
+            // iteration only yields entries where `current != baseline`, so
+            // a per-leaf hash compare against the recorded baseline-derived
+            // value never matches.
             let leaf_hash = lookup_leaf_hash_in_current(current, entry.segment.as_str());
-            let suppress = !forced
-                && leaf_hash.is_some()
-                && self
-                    .profiles
-                    .get(profile_id)
-                    .and_then(|p| p.last_emitted_dir_hash.get(&dk))
-                    == leaf_hash.as_ref();
-            if suppress {
-                continue;
-            }
 
             let target_path = anchor_path.join(entry.segment.as_str());
             let target_rel = entry.segment.as_str();
