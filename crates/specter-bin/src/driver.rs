@@ -49,7 +49,7 @@ use crate::channels::EngineSide;
 use crate::loader::Loader;
 use crate::observability::{LogReloadKind, ObservabilityHandle};
 use crossbeam::channel::Select;
-use specter_config::Config;
+use specter_config::{Config, FileMeta};
 use specter_core::{Diagnostic, Input, ProbeOp, PromoterId, StepOutput, SubId};
 use specter_engine::Engine;
 use specter_sensor::{DrainWindow, Prober, WakeHandle};
@@ -108,6 +108,19 @@ pub struct EngineDriver {
     /// underlying Atomic. Held here so the SIGHUP reload pipeline can
     /// rotate the value alongside `current_config`.
     drain_window: DrainWindow,
+    /// Auto-reload settle deadline — armed when a config-watcher pulse
+    /// arrives, expires after `CONFIG_SETTLE` of quiet, at which point
+    /// the driver runs the lstat-vs-`loader.config_meta` filter and
+    /// (on drift) calls `handle_reload`. Reset to `None` on expiry and
+    /// per-pulse (so a sustained burst defers the reload until the
+    /// edits actually settle).
+    ///
+    /// Field exists in this phase to lock in the deadline-source shape
+    /// of `tick`'s timeout math; the channel + watcher that arm it
+    /// land in subsequent phases. Until then, the value is `None` and
+    /// the deadline math is structurally identical to the
+    /// single-source form.
+    config_settle_until: Option<Instant>,
 }
 
 impl std::fmt::Debug for EngineDriver {
@@ -144,6 +157,7 @@ impl EngineDriver {
             prober,
             wake_handle,
             drain_window,
+            config_settle_until: None,
         }
     }
 
@@ -241,10 +255,18 @@ impl EngineDriver {
             self.forward(out);
         }
 
-        // Block until any source readies or timer fires.
-        let timeout = self.engine.next_deadline().map_or(FOREVER_TIMEOUT, |d| {
-            d.saturating_duration_since(Instant::now())
-        });
+        // Block until any source readies or timer fires. Deadlines come
+        // from two independent sources: the engine's internal timer
+        // heap, and (in subsequent phases) the auto-reload settle
+        // window. Both are `Option<Instant>`; `flatten` discards
+        // un-armed sources and `min` picks the soonest.
+        let timeout = [self.engine.next_deadline(), self.config_settle_until]
+            .into_iter()
+            .flatten()
+            .min()
+            .map_or(FOREVER_TIMEOUT, |d| {
+                d.saturating_duration_since(Instant::now())
+            });
 
         let mut sel = Select::new();
         let _i_sensor = sel.recv(&self.sides.sensor_in_rx);
@@ -260,8 +282,9 @@ impl EngineDriver {
 
     /// Read the config from disk; on success, diff against the current
     /// snapshot, apply via `Input::ConfigDiff`, sync `loader.ids`,
-    /// rotate `loader.current_config`. On failure, log + retain
-    /// running config.
+    /// rotate `loader.current_config` and `loader.config_meta`. On
+    /// failure, log + retain running config + meta (preserving the
+    /// auto-reload retry loop on the next pulse).
     ///
     /// Log-side reload is integrated here:
     ///   - The `[log]` block is re-resolved (CLI overrides re-applied);
@@ -270,8 +293,18 @@ impl EngineDriver {
     ///     operator to restart (v1 doesn't hot-reload destinations).
     ///   - `obs_handle.reopen_file()` fires unconditionally so logrotate
     ///     `copytruncate`-style rotation works without a config diff.
+    ///
+    /// **Meta rotation discipline.** `loader.config_meta` rotates on
+    /// **every** successful read — both the empty-diff and the
+    /// apply-diff branches — so the auto-reload settle-expiry filter
+    /// (next phase) sees a freshly-stored identity after each reload.
+    /// Skipping the empty-diff rotation would loop the filter against
+    /// the same already-applied edit forever (the lstat reflects the
+    /// post-edit inode but `loader.config_meta` would still hold the
+    /// pre-edit value). Parse-fail does **not** rotate — preserving
+    /// the retry loop until the operator fixes the file.
     fn handle_reload(&mut self, now: Instant) {
-        let Some(new_config) = self.read_and_parse_config() else {
+        let Some((new_config, new_meta)) = self.read_and_parse_config() else {
             return;
         };
         let new_log_resolved = self.parse_and_resolve_log(&new_config);
@@ -288,6 +321,7 @@ impl EngineDriver {
             tracing::info!("config reload: no watch changes");
             self.loader.current_config = new_config;
             self.loader.current_log = new_log_resolved;
+            self.loader.config_meta = new_meta;
             return;
         }
 
@@ -318,6 +352,7 @@ impl EngineDriver {
 
         self.loader.current_config = new_config;
         self.loader.current_log = new_log_resolved;
+        self.loader.config_meta = new_meta;
         self.apply_drain_window_rotation();
         tracing::info!(
             added = added_n,
@@ -331,16 +366,24 @@ impl EngineDriver {
         self.forward(out);
     }
 
-    /// Read + parse the on-disk config. Returns `None` on I/O / parse
-    /// failure (with an `error!` log); the caller keeps the running
-    /// config rather than aborting.
+    /// Read + parse the on-disk config, capturing `FileMeta` atomically
+    /// alongside the bytes. Returns `None` on I/O / parse failure (with
+    /// an `error!` log); the caller keeps the running config rather
+    /// than aborting.
     ///
     /// Sole I/O surface for the reload pipeline — both the SIGHUP path
-    /// and the file-watch path (landing in later phases) call here so
-    /// the failure-handling discipline lives in one place.
-    pub(crate) fn read_and_parse_config(&self) -> Option<Config> {
-        match Config::from_path(&self.config_path) {
-            Ok(c) => Some(c),
+    /// and the file-watch path (landing in subsequent phases) call here
+    /// so the failure-handling discipline lives in one place. The
+    /// returned [`FileMeta`] is captured from the same `File` handle
+    /// that produced the bytes ([`Config::from_path_with_meta`]), so a
+    /// concurrent atomic-save cannot rotate the meta out from under
+    /// the parsed [`Config`]. Callers rotate `loader.config_meta` from
+    /// this value on every successful read — including the empty-diff
+    /// branch, so the auto-reload settle filter doesn't loop on an
+    /// already-applied edit.
+    pub(crate) fn read_and_parse_config(&self) -> Option<(Config, FileMeta)> {
+        match Config::from_path_with_meta(&self.config_path) {
+            Ok(pair) => Some(pair),
             Err(e) => {
                 tracing::error!(
                     error = %e,
@@ -830,6 +873,25 @@ mod tests {
     use specter_sensor::testkit::{MockFsWatcher, MockProber, MockWaker};
     use std::sync::Arc;
 
+    /// Sentinel meta used in fixtures whose config file may not exist
+    /// on disk. Inode 0 is reserved by every supported kernel; this
+    /// value never compares equal to a real `FileMeta::from_path`
+    /// capture, so tests that *do* exercise the meta-rotation path
+    /// can assert "rotated to a real value" by comparing against a
+    /// fresh `FileMeta::from_path` (which differs from this sentinel
+    /// in every field).
+    fn dummy_meta() -> FileMeta {
+        FileMeta {
+            inode: 0,
+            device: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            size: 0,
+        }
+    }
+
     /// Bundle of handles a test holds to drive [`EngineDriver`] without the
     /// [`crate::app`] orchestration layer.
     struct TestRig {
@@ -870,7 +932,7 @@ mod tests {
         // tests assert the *driver*'s reload-pipeline behaviour, not the
         // subscriber's filter state.
         let obs_handle = crate::observability::ObservabilityHandle::noop();
-        let loader = Loader::new(config, log_cfg);
+        let loader = Loader::new(config, log_cfg, dummy_meta());
         // Mirror the production path: derive the initial window from the
         // loader's config so reload-driven rotation tests have a real
         // baseline to compare against.
@@ -1621,6 +1683,7 @@ mod tests {
         let mut loader = Loader::new(
             Config::from_str("").expect("empty config parses"),
             specter_config::LogConfig::default(),
+            dummy_meta(),
         );
         let static_id = SubId::from(KeyData::from_ffi(1));
         let dynamic_id = SubId::from(KeyData::from_ffi(2));
@@ -1656,10 +1719,14 @@ mod tests {
         );
     }
 
-    /// `read_and_parse_config` on a valid file returns `Some(Config)`
-    /// with the parsed `[[watch]]` blocks populated. Pins the helper's
-    /// happy-path contract — the SIGHUP path and the auto-reload path
-    /// (landing in later phases) both rely on this signature.
+    /// `read_and_parse_config` on a valid file returns
+    /// `Some((Config, FileMeta))` with the parsed `[[watch]]` blocks
+    /// populated and `FileMeta` matching the on-disk lstat. Pins the
+    /// helper's happy-path contract — the SIGHUP path and the
+    /// auto-reload path (landing in later phases) both rely on this
+    /// signature, and the meta-rotation discipline in `handle_reload`
+    /// depends on the captured value being lstat-equivalent in the
+    /// absence of concurrent edits.
     #[test]
     fn read_and_parse_config_returns_some_on_valid_file() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1678,11 +1745,172 @@ command = ["true"]
         )
         .unwrap();
         let config = Config::from_str("").expect("empty config parses");
-        let rig = rig_for(config, cfg_path);
-        let parsed = rig.driver.read_and_parse_config();
-        let parsed = parsed.expect("valid file parses to Some");
-        assert_eq!(parsed.watches.len(), 1);
-        assert_eq!(parsed.watches[0].name, "build");
+        let rig = rig_for(config, cfg_path.clone());
+        let (parsed_config, parsed_meta) = rig
+            .driver
+            .read_and_parse_config()
+            .expect("valid file parses to Some");
+        assert_eq!(parsed_config.watches.len(), 1);
+        assert_eq!(parsed_config.watches[0].name, "build");
+        // No concurrent edits between the helper's atomic capture and
+        // this fresh path-level stat — both must observe the same
+        // inode-level identity.
+        let lstat = FileMeta::from_path(&cfg_path).expect("lstat ok");
+        assert_eq!(parsed_meta, lstat);
+        assert_ne!(
+            parsed_meta,
+            dummy_meta(),
+            "captured meta is real, not the placeholder"
+        );
+    }
+
+    /// SIGHUP reload that introduces a substantive diff (added watch)
+    /// rotates `loader.config_meta` to the post-edit lstat. Pins the
+    /// apply-branch half of the meta-rotation discipline.
+    #[test]
+    fn reload_rotates_config_meta_on_apply_branch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        let v1_text = format!(
+            r#"
+[[watch]]
+name      = "a"
+path      = "{}"
+command   = ["true"]
+"#,
+            tmp.path().display(),
+        );
+        let v2_text = format!(
+            r#"
+[[watch]]
+name      = "a"
+path      = "{0}"
+command   = ["true"]
+
+[[watch]]
+name      = "b"
+path      = "{0}"
+command   = ["true"]
+settle_ms = 100
+"#,
+            tmp.path().display(),
+        );
+        std::fs::write(&cfg_path, &v1_text).unwrap();
+        let initial = Config::from_str(&v1_text).expect("v1 parses");
+
+        let mut rig = rig_for(initial, cfg_path.clone());
+        rig.driver.run_initial_attach();
+        assert_eq!(
+            rig.driver.loader.config_meta,
+            dummy_meta(),
+            "rig starts with placeholder meta",
+        );
+
+        // Substantive edit — diff is non-empty (one added watch).
+        std::fs::write(&cfg_path, &v2_text).unwrap();
+        let expected_meta = FileMeta::from_path(&cfg_path).expect("lstat ok");
+
+        rig.reload_tx.try_send(()).expect("reload send");
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        rig.driver.tick();
+
+        assert_eq!(
+            rig.driver.loader.config_meta, expected_meta,
+            "apply-branch reload rotates loader.config_meta to the on-disk identity",
+        );
+        // Confirm the apply branch ran (added "b" landed in loader.ids).
+        assert!(
+            rig.driver.loader.ids.contains_key("b"),
+            "v2's added watch attached — apply-branch path was exercised",
+        );
+    }
+
+    /// SIGHUP reload whose new content differs only in metadata
+    /// (re-write of identical bytes; mtime / ctime move, content
+    /// identical) takes the empty-diff branch, but **must still
+    /// rotate `loader.config_meta`** — otherwise the auto-reload
+    /// settle filter would observe `lstat != stored_meta` on every
+    /// subsequent pulse for the same already-applied edit and loop
+    /// `handle_reload` against unchanged content. Pins the
+    /// empty-diff half of the meta-rotation discipline.
+    #[test]
+    fn reload_rotates_config_meta_on_empty_diff_branch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        let cfg_text = format!(
+            r#"
+[[watch]]
+name      = "build"
+path      = "{}"
+command   = ["true"]
+"#,
+            tmp.path().display(),
+        );
+        std::fs::write(&cfg_path, &cfg_text).unwrap();
+        let initial = Config::from_str(&cfg_text).expect("v1 parses");
+
+        let mut rig = rig_for(initial.clone(), cfg_path.clone());
+        rig.driver.run_initial_attach();
+        let ids_before: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
+
+        // Re-save the same content. Real `FileMeta::from_path` after
+        // this returns nonzero inode + non-placeholder mtime/ctime,
+        // which is enough to distinguish from `dummy_meta()` and to
+        // observe rotation.
+        std::fs::write(&cfg_path, &cfg_text).unwrap();
+        let expected_meta = FileMeta::from_path(&cfg_path).expect("lstat ok");
+        assert_ne!(
+            expected_meta,
+            dummy_meta(),
+            "real lstat is non-placeholder — comparison is meaningful",
+        );
+
+        rig.reload_tx.try_send(()).expect("reload send");
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        rig.driver.tick();
+
+        assert_eq!(
+            rig.driver.loader.config_meta, expected_meta,
+            "empty-diff reload rotates loader.config_meta — \
+             skipping rotation here would loop the Phase-4 settle filter",
+        );
+        // Confirm the empty-diff branch ran (loader state unchanged
+        // semantically — same config, same ids, same SubIds).
+        assert_eq!(
+            rig.driver.loader.current_config, initial,
+            "v1 ≡ v1 → empty-diff branch was exercised",
+        );
+        let ids_after: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
+        assert_eq!(
+            ids_before, ids_after,
+            "ids unchanged across empty-diff reload"
+        );
+    }
+
+    /// Parse-fail must **not** rotate `loader.config_meta`. Rotating
+    /// on failure would suppress the auto-reload retry loop: the next
+    /// pulse's lstat-vs-stored-meta check would compare the (still
+    /// broken) on-disk file against the freshly-stored meta from the
+    /// failed attempt, decide "unchanged," and never retry. Pins the
+    /// negative invariant.
+    #[test]
+    fn reload_parse_failure_does_not_rotate_meta() {
+        // `/dev/null/no/such/file.toml` — a guaranteed-ENOTDIR path
+        // (because `/dev/null` is a character device, not a directory).
+        // The reload pipeline observes a parse-fail equivalent.
+        let cfg_path = PathBuf::from("/dev/null/no/such/file.toml");
+        let config = Config::from_str("").expect("empty config parses");
+        let mut rig = rig_for(config, cfg_path);
+        let pre_reload_meta = rig.driver.loader.config_meta;
+
+        rig.reload_tx.try_send(()).expect("reload send");
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        rig.driver.tick();
+
+        assert_eq!(
+            rig.driver.loader.config_meta, pre_reload_meta,
+            "parse-fail must not rotate meta — would suppress retry pulses",
+        );
     }
 
     /// `PromoterReaped` clears the matching id from
@@ -1700,6 +1928,7 @@ command = ["true"]
         let mut loader = Loader::new(
             Config::from_str("").expect("empty config parses"),
             specter_config::LogConfig::default(),
+            dummy_meta(),
         );
         let old_pid = PromoterId::from(KeyData::from_ffi(10));
         let new_pid = PromoterId::from(KeyData::from_ffi(11));

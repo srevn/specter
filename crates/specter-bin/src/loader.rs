@@ -16,7 +16,7 @@
 //! isn't directly subject to it).
 
 use compact_str::CompactString;
-use specter_config::{Config, LogConfig};
+use specter_config::{Config, FileMeta, LogConfig};
 use specter_core::{PromoterId, SubId};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -31,6 +31,18 @@ pub struct Loader {
     /// `obs_handle.set_level` and / or fail-with-error on a destination
     /// change.
     pub current_log: LogConfig,
+    /// Inode-level identity of `current_config`'s on-disk source —
+    /// captured atomically with the content read via
+    /// [`Config::from_path_with_meta`] (the `f.metadata()` call binds to
+    /// the same `File` handle that produced the bytes, so a concurrent
+    /// `rename(2)` cannot rotate the meta out from under the bytes).
+    /// Rotated alongside `current_config` on every successful reload —
+    /// **including the empty-diff branch**, so a re-saved-but-identical
+    /// file still updates the stored identity. Without that rotation,
+    /// the auto-reload settle-expiry filter (Phase 4) would observe a
+    /// fresh lstat that differs from the stored value forever, looping
+    /// `handle_reload` against the same content.
+    pub config_meta: FileMeta,
     /// `name → SubId` map for currently-attached static Subs. Threaded
     /// into `specter_config::diff` so the diff function can populate
     /// `removed` / `modified` with the live `SubId`s. Mutated only on
@@ -58,12 +70,18 @@ impl Loader {
     /// engine's `Diagnostic::PromoterAttached` once the corresponding
     /// reconciliation lands. `current_log` is the resolved log config —
     /// the bin computes it once at startup (config + CLI merge) and
-    /// hands it in.
+    /// hands it in. `config_meta` is the inode-level identity captured
+    /// atomically with `current_config` (see [`Self::config_meta`]).
     #[must_use]
-    pub const fn new(current_config: Config, current_log: LogConfig) -> Self {
+    pub const fn new(
+        current_config: Config,
+        current_log: LogConfig,
+        config_meta: FileMeta,
+    ) -> Self {
         Self {
             current_config,
             current_log,
+            config_meta,
             ids: BTreeMap::new(),
             promoter_ids: BTreeMap::new(),
         }
@@ -109,6 +127,22 @@ mod tests {
     use super::*;
     use specter_config::Config;
 
+    /// Sentinel meta used in fixtures that don't exercise the
+    /// auto-reload meta-comparison path. Inode 0 is reserved by every
+    /// supported kernel; this value never compares equal to a real
+    /// `FileMeta::from_path` capture.
+    fn dummy_meta() -> FileMeta {
+        FileMeta {
+            inode: 0,
+            device: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            size: 0,
+        }
+    }
+
     fn config_with_one_watch() -> Config {
         let toml = r#"
     [[watch]]
@@ -122,7 +156,7 @@ mod tests {
     fn fresh_loader() -> Loader {
         let cfg = config_with_one_watch();
         let log = cfg.log.clone();
-        Loader::new(cfg, log)
+        Loader::new(cfg, log, dummy_meta())
     }
 
     #[test]
@@ -176,7 +210,7 @@ mod tests {
     fn loader_with_toml(toml: &str) -> Loader {
         let cfg = Config::from_str(toml).expect("fixture parses");
         let log = cfg.log.clone();
-        Loader::new(cfg, log)
+        Loader::new(cfg, log, dummy_meta())
     }
 
     /// Empty config (no static, no dynamic) returns the floor.

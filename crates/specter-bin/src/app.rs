@@ -47,9 +47,15 @@ use std::thread::{self, JoinHandle};
 /// dropped); the `needless_pass_by_value` allow documents the intent.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run(cli: Cli) -> ExitCode {
-    // Load config (fail-fast, pre-tracing).
-    let initial_config = match Config::from_path(&cli.config) {
-        Ok(c) => c,
+    // Load config (fail-fast, pre-tracing). `from_path_with_meta`
+    // captures `FileMeta` atomically with the bytes via a single `File`
+    // handle — closing the startup TOCTOU between the content read
+    // and a separate path-level lstat. The captured value seeds
+    // `loader.config_meta` and is consulted by the auto-reload settle
+    // filter (subsequent phases) to decide whether a watcher pulse
+    // reflects substantive change.
+    let (initial_config, initial_meta) = match Config::from_path_with_meta(&cli.config) {
+        Ok(pair) => pair,
         Err(e) => {
             eprintln!("specter: config load failed:\n{e}");
             return ExitCode::from(1);
@@ -96,7 +102,7 @@ pub fn run(cli: Cli) -> ExitCode {
     // Atomic store on hot reload reaches both threads without a lock.
     // Set once before `default_watcher` so the watcher reads the
     // derived value on its very first `poll_until`.
-    let loader = Loader::new(initial_config, log_cfg);
+    let loader = Loader::new(initial_config, log_cfg, initial_meta);
     let drain_window = DrainWindow::new();
     drain_window.set(loader.derive_drain_window());
 
