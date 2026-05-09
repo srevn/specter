@@ -639,6 +639,31 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?resource,
             "fs event for promoter proxy that was unregistered earlier in step (stale; dropped)",
         ),
+        Diagnostic::PromoterEnumerationVanished { promoter, proxy } => tracing::debug!(
+            ?promoter,
+            ?proxy,
+            "promoter enumeration probe Vanished (proxy gone; subtree unwound)",
+        ),
+        Diagnostic::PromoterEnumerationFailed {
+            promoter,
+            proxy,
+            errno,
+        } => tracing::warn!(
+            ?promoter,
+            ?proxy,
+            errno,
+            "promoter enumeration probe Failed (retaining proxy state)",
+        ),
+        Diagnostic::DynamicSubReaped {
+            promoter,
+            sub,
+            path,
+        } => tracing::debug!(
+            ?promoter,
+            ?sub,
+            path = %path.display(),
+            "dynamic Sub reaped (anchor terminal — Promoter dynamic_subs entry dropped)",
+        ),
     }
 }
 

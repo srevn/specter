@@ -330,4 +330,36 @@ pub enum Diagnostic {
         promoter: PromoterId,
         resource: ResourceId,
     },
+    /// Promoter enumeration probe at `proxy` returned `Vanished` — the
+    /// proxy directory is gone from disk. The engine cascade-cleans the
+    /// proxy and any sub-proxies rooted under it via
+    /// `unregister_proxy_subtree`; dynamic Subs anchored at or below
+    /// `proxy` reap via their own anchor-terminal events. Distinct from
+    /// [`Self::PromoterDescentVanished`] — that variant fires during
+    /// the literal-prefix descent (`PrefixPending` state); this one
+    /// during the proxy-fanout enumeration (`Active` state).
+    PromoterEnumerationVanished {
+        promoter: PromoterId,
+        proxy: ResourceId,
+    },
+    /// Promoter enumeration probe at `proxy` returned `Failed { errno }`.
+    /// The engine retains proxy state; the next event at `proxy` will
+    /// re-trigger enumeration. Typical errnos are transient (`EACCES`,
+    /// `EIO`); a permanent failure leaves the proxy stalled until the
+    /// underlying condition clears or the operator restarts.
+    PromoterEnumerationFailed {
+        promoter: PromoterId,
+        proxy: ResourceId,
+        errno: i32,
+    },
+    /// A dynamic Sub minted by `promoter` at `path` has been reaped
+    /// because its anchor disappeared (the all-dynamic teardown of
+    /// `on_anchor_terminal_event`). The Promoter's `dynamic_subs` map
+    /// drops the entry; the Promoter re-promotes if/when the path
+    /// re-materialises and a fresh enumeration matches it.
+    DynamicSubReaped {
+        promoter: PromoterId,
+        sub: SubId,
+        path: PathBuf,
+    },
 }

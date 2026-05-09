@@ -26,14 +26,14 @@
     clippy::too_many_lines
 )]
 
-use crate::Engine;
 use crate::engine::FS_ROOT_SEG;
+use crate::{Engine, SubAttachRequest};
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind,
-    FsEvent, Input, LeafEntry, PatternSpec, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    PromoterAttachRequest, PromoterId, PromoterState, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig,
+    AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
+    EntryKind, FsEvent, Input, LeafEntry, PatternSpec, ProbeOp, ProbeOutcome, ProbeOwner,
+    ProbeResponse, PromoterAttachRequest, PromoterId, PromoterState, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, SubId,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -601,4 +601,720 @@ fn register_proxy_is_idempotent_on_re_registration() {
         &[pid],
         "back-ref unchanged (single entry) on re-registration",
     );
+}
+
+// ---- Phase 9: pending_enumeration_target lifecycle ----
+
+#[test]
+fn dispatch_next_enumeration_records_pending_target() {
+    // The slot is set in lockstep with `pending_probe` at probe-emit
+    // time so `Vanished` / `Failed` responses can identify the proxy.
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    // Initial enumeration was dispatched by `enter_active`; the
+    // pending_enumeration_target now points at /var/log.
+    assert_eq!(
+        e.promoters
+            .get(pid)
+            .and_then(|q| q.pending_enumeration_target),
+        Some(var_log),
+        "pending_enumeration_target tracks the in-flight proxy",
+    );
+    // The probe correlation is also live.
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
+        "probe correlation in flight alongside the target slot",
+    );
+}
+
+#[test]
+fn pending_enumeration_target_clears_on_response() {
+    // The slot clears in lockstep with `pending_probe` when the
+    // response arrives — both fields go to None *before* dispatch
+    // arms run.
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+
+    let snap = dir_snap_at(var_log, &[]);
+    let _out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+
+    assert!(
+        e.promoters
+            .get(pid)
+            .unwrap()
+            .pending_enumeration_target
+            .is_none(),
+        "target slot cleared after response",
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
+        "probe slot cleared after response",
+    );
+}
+
+#[test]
+fn cancel_owner_probe_clears_pending_enumeration_target() {
+    // `cancel_owner_probe` is the canonical close-on-cancel path.
+    // For Promoter owners it clears `pending_enumeration_target`
+    // unconditionally (the slot tracks the correlation channel's
+    // lifecycle).
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    assert_eq!(
+        e.promoters.get(pid).unwrap().pending_enumeration_target,
+        Some(var_log),
+        "pre-cancel target slot points at /var/log",
+    );
+
+    let mut out = specter_core::StepOutput::default();
+    e.cancel_owner_probe(ProbeOwner::Promoter(pid), &mut out);
+
+    assert!(
+        e.promoters
+            .get(pid)
+            .unwrap()
+            .pending_enumeration_target
+            .is_none(),
+        "target slot cleared by cancel_owner_probe",
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
+        "probe slot cleared by cancel_owner_probe",
+    );
+    assert!(
+        out.probe_ops.iter().any(|op| matches!(
+            op,
+            ProbeOp::Cancel { owner: ProbeOwner::Promoter(p) } if *p == pid,
+        )),
+        "Cancel op emitted for the open channel",
+    );
+}
+
+// ---- Phase 9: dispatch_promoter_enumeration_vanished cascade ----
+
+#[test]
+fn enumeration_vanished_unregisters_proxy_and_emits_diagnostic() {
+    // Pattern /var/log/*.log; proxy at /var/log. Inject a Vanished
+    // response — the proxy's directory is gone. The dispatcher
+    // emits PromoterEnumerationVanished {proxy: /var/log} and
+    // cascades unregister_proxy_subtree(/var/log) which clears the
+    // proxy's back-ref, watch_demand contribution, and removes it
+    // from `Promoter.state.proxies`.
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+    assert!(
+        e.tree()
+            .get(var_log)
+            .unwrap()
+            .proxy_promoters()
+            .contains(&pid),
+        "back-ref present pre-vanish",
+    );
+    assert!(
+        e.tree().get(var_log).unwrap().watch_demand >= 1,
+        "watch_demand carries the proxy contribution pre-vanish",
+    );
+
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        Instant::now(),
+    );
+
+    // Diagnostic carries the vanished proxy.
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::PromoterEnumerationVanished { promoter, proxy }
+                if *promoter == pid && *proxy == var_log,
+        )),
+        "PromoterEnumerationVanished emitted with the proxy: {:?}",
+        out.diagnostics,
+    );
+    // Old descent-side variant is NOT emitted by the enumeration arm.
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::PromoterDescentVanished { .. },)),
+        "old descent variant must not fire on enumeration vanish",
+    );
+
+    // Proxy unregistered: removed from Active.proxies. Whether the
+    // Tree slot survives depends on its retention signals — for a
+    // User-roled slot with no children/profiles/other-promoters,
+    // `try_reap` collects it; we only assert the Promoter-side
+    // invariant (back-ref absent, proxies map empty).
+    let q = e.promoters.get(pid).expect("promoter alive");
+    let proxies = match &q.state {
+        PromoterState::Active { proxies } => proxies,
+        PromoterState::PrefixPending(_) => panic!("expected Active, got PrefixPending"),
+    };
+    assert!(
+        !proxies.contains_key(&var_log),
+        "proxy removed from Active.proxies",
+    );
+    let back_ref_intact = e
+        .tree()
+        .get(var_log)
+        .is_some_and(|r| r.proxy_promoters().contains(&pid));
+    assert!(!back_ref_intact, "back-ref cleared (or slot reaped)");
+}
+
+#[test]
+fn enumeration_vanished_cascades_subproxies() {
+    // Pattern /srv/*/site — sub-proxy at /srv/alpha after a forward
+    // pass. A Vanished at /srv (impossible in production but lets us
+    // unit-test the cascade scope) clears /srv AND /srv/alpha.
+    let mut e = Engine::new();
+    let srv = ensure_dir(&mut e, &["srv"]);
+    let (pid, _out) = e.attach_promoter(req_for("sites", "/srv/*/site"), Instant::now());
+    let corr1 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+
+    // Forward pass at /srv: alpha (Dir) → register sub-proxy at /srv/alpha.
+    let snap = dir_snap_at(srv, &[("alpha", EntryKind::Dir, 1)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr1,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+
+    // Two proxies registered: /srv and /srv/alpha.
+    assert_eq!(active_proxies(&e, pid).len(), 2);
+
+    // Drain the queued enumeration at /srv/alpha by responding empty.
+    let alpha = e.tree().lookup(Some(srv), "alpha").expect("alpha present");
+    let corr2 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+    let snap = dir_snap_at(alpha, &[]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr2,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+
+    // Trigger an enumeration at /srv via FsEvent and Vanish it.
+    let _ = e.step(
+        Input::FsEvent {
+            resource: srv,
+            event: FsEvent::StructureChanged,
+        },
+        Instant::now(),
+    );
+    let corr3 = e
+        .pending_probe_for(ProbeOwner::Promoter(pid))
+        .expect("re-enumeration probe in flight");
+    let _out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr3,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        Instant::now(),
+    );
+
+    // Both /srv and /srv/alpha are unregistered.
+    let proxies = active_proxies(&e, pid);
+    assert!(!proxies.contains_key(&srv), "/srv unregistered");
+    assert!(
+        !proxies.contains_key(&alpha),
+        "/srv/alpha (descendant proxy) cascaded",
+    );
+}
+
+// ---- Phase 9: dispatch_promoter_enumeration_failed retains state ----
+
+#[test]
+fn enumeration_failed_retains_proxy_state_with_diagnostic() {
+    // Failed responses preserve proxy state (next event re-triggers
+    // enumeration); only the diagnostic emits.
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::Failed {
+                errno: 13, /* EACCES */
+            },
+        }),
+        Instant::now(),
+    );
+
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::PromoterEnumerationFailed { promoter, proxy, errno }
+                if *promoter == pid && *proxy == var_log && *errno == 13,
+        )),
+        "PromoterEnumerationFailed carries promoter, proxy, and errno: {:?}",
+        out.diagnostics,
+    );
+
+    // Proxy still registered and watch_demand intact.
+    let proxies = active_proxies(&e, pid);
+    assert!(proxies.contains_key(&var_log), "proxy retained");
+    assert_eq!(
+        e.tree().get(var_log).unwrap().proxy_promoters(),
+        &[pid],
+        "back-ref intact",
+    );
+}
+
+// ---- Phase 9: reap_promoter ----
+
+#[test]
+fn reap_promoter_active_with_proxy_unregisters_and_removes() {
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    assert_eq!(e.tree().get(var_log).unwrap().watch_demand, 1);
+
+    let out = e.reap_promoter(pid, Instant::now());
+
+    // PromoterReaped emitted.
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::PromoterReaped { promoter } if *promoter == pid,
+        )),
+        "PromoterReaped emitted: {:?}",
+        out.diagnostics,
+    );
+
+    // Promoter removed from registry.
+    assert!(e.promoters.get(pid).is_none(), "Promoter removed");
+
+    // The proxy slot's contribution was released. The slot itself
+    // may have been reaped (User-roled with no other anchors) — read
+    // both the surviving and reaped cases through `Option`.
+    let post_reap_demand = e.tree().get(var_log).map_or(0, |r| r.watch_demand);
+    assert_eq!(
+        post_reap_demand, 0,
+        "watch_demand dropped after unregister_proxy",
+    );
+    let back_ref_intact = e
+        .tree()
+        .get(var_log)
+        .is_some_and(|r| r.proxy_promoters().contains(&pid));
+    assert!(!back_ref_intact, "back-ref cleared (or slot reaped)");
+
+    // In-flight initial enumeration cancelled.
+    assert!(
+        out.probe_ops.iter().any(|op| matches!(
+            op,
+            ProbeOp::Cancel { owner: ProbeOwner::Promoter(p) } if *p == pid,
+        )),
+        "Cancel op emitted for in-flight enumeration",
+    );
+}
+
+#[test]
+fn reap_promoter_prefix_pending_releases_prefix() {
+    // Pattern /var/log/*.log with /var/log absent → PrefixPending at FS-root.
+    let mut e = Engine::new();
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let fs_root = e.tree().lookup(None, FS_ROOT_SEG).unwrap();
+    assert!(matches!(
+        e.promoters.get(pid).unwrap().state,
+        PromoterState::PrefixPending(_),
+    ));
+    assert_eq!(
+        e.tree().get(fs_root).unwrap().watch_demand,
+        1,
+        "FS-root carries the prefix's STRUCTURE contribution",
+    );
+
+    let out = e.reap_promoter(pid, Instant::now());
+
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::PromoterReaped { promoter } if *promoter == pid,
+        )),
+        "PromoterReaped emitted",
+    );
+    assert!(e.promoters.get(pid).is_none(), "Promoter removed");
+    assert_eq!(
+        e.tree().get(fs_root).unwrap().watch_demand,
+        0,
+        "FS-root contribution released",
+    );
+    // In-flight descent probe cancelled.
+    assert!(
+        out.probe_ops.iter().any(|op| matches!(
+            op,
+            ProbeOp::Cancel { owner: ProbeOwner::Promoter(p) } if *p == pid,
+        )),
+        "Cancel op emitted for in-flight descent probe",
+    );
+}
+
+#[test]
+fn reap_promoter_drains_dynamic_subs() {
+    // Promoter with one dynamic Sub. `reap_promoter` detaches the
+    // Sub and removes the (path, sub) entry from `dynamic_subs`.
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+
+    // Mint a dynamic Sub at /var/log/foo.log.
+    let snap = dir_snap_at(var_log, &[("foo.log", EntryKind::File, 1)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+    let dynamic_count_after_promotion = e.promoters.get(pid).unwrap().dynamic_subs.len();
+    assert_eq!(dynamic_count_after_promotion, 1, "dynamic Sub minted");
+    let sub_id = *e
+        .promoters
+        .get(pid)
+        .unwrap()
+        .dynamic_subs
+        .values()
+        .next()
+        .unwrap();
+    assert!(e.subs().get(sub_id).is_some(), "Sub registered");
+
+    let _out = e.reap_promoter(pid, Instant::now());
+
+    assert!(e.promoters.get(pid).is_none(), "Promoter removed");
+    assert!(
+        e.subs().get(sub_id).is_none(),
+        "dynamic Sub detached from registry",
+    );
+}
+
+#[test]
+fn reap_promoter_stale_id_is_silent_noop() {
+    let mut e = Engine::new();
+    let stale = PromoterId::default();
+    let out = e.reap_promoter(stale, Instant::now());
+    assert!(
+        out.diagnostics.is_empty(),
+        "no diagnostic on stale id: {:?}",
+        out.diagnostics,
+    );
+    assert!(out.probe_ops.is_empty(), "no probe ops on stale id");
+    assert!(out.watch_ops.is_empty(), "no watch ops on stale id");
+}
+
+#[test]
+fn reap_promoter_active_with_subproxies_clears_all() {
+    // Pattern /srv/*/site with one sub-proxy registered. reap_promoter
+    // unregisters every proxy (including sub-proxies) and clears all
+    // back-refs.
+    let mut e = Engine::new();
+    let srv = ensure_dir(&mut e, &["srv"]);
+    let (pid, _out) = e.attach_promoter(req_for("sites", "/srv/*/site"), Instant::now());
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+
+    // Forward pass: alpha → sub-proxy at /srv/alpha.
+    let snap = dir_snap_at(srv, &[("alpha", EntryKind::Dir, 1)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+    let alpha = e.tree().lookup(Some(srv), "alpha").expect("alpha present");
+    assert_eq!(active_proxies(&e, pid).len(), 2);
+
+    let _out = e.reap_promoter(pid, Instant::now());
+
+    assert!(e.promoters.get(pid).is_none(), "Promoter removed");
+    assert!(
+        e.tree().get(srv).unwrap().proxy_promoters().is_empty(),
+        "/srv back-ref cleared",
+    );
+    assert!(
+        e.tree()
+            .get(alpha)
+            .is_none_or(|r| !r.proxy_promoters().contains(&pid)),
+        "/srv/alpha back-ref cleared (or slot reaped)",
+    );
+}
+
+// ---- Phase 8: recovery split (on_anchor_terminal_event dispatcher) ----
+
+/// Pre-materialise the leaf File slot at `parent_segs/leaf` so the
+/// Promoter's enumeration mints a Sub against an *existing* anchor
+/// (the dynamic Sub's Profile attaches in `Idle`, not `Pending` —
+/// the anchor's `watch_demand` is bumped, and a subsequent
+/// FsEvent::Removed reaches `on_anchor_terminal_event`).
+fn ensure_file(e: &mut Engine, parent_segs: &[&str], leaf: &str) -> ResourceId {
+    let mut comps: Vec<&str> = Vec::with_capacity(parent_segs.len() + 2);
+    comps.push(FS_ROOT_SEG);
+    comps.extend_from_slice(parent_segs);
+    comps.push(leaf);
+    let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
+    e.tree_mut().set_kind(r, ResourceKind::File);
+    r
+}
+
+/// Promote one match into a dynamic Sub against a pre-materialised
+/// leaf. Returns `(promoter_id, sub_id, anchor_resource)`.
+fn promote_one(
+    e: &mut Engine,
+    pattern: &str,
+    parent_segs: &[&str],
+    leaf: &str,
+) -> (PromoterId, SubId, ResourceId) {
+    let parent = ensure_dir(e, parent_segs);
+    let anchor_resource = ensure_file(e, parent_segs, leaf);
+    let (pid, _out) = e.attach_promoter(req_for("test", pattern), Instant::now());
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+    let snap = dir_snap_at(parent, &[(leaf, EntryKind::File, 1)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+    let q = e.promoters.get(pid).expect("promoter alive");
+    let sid = *q.dynamic_subs.values().next().expect("Sub minted");
+    (pid, sid, anchor_resource)
+}
+
+#[test]
+fn anchor_terminal_all_dynamic_reaps_profile_and_notifies_promoter() {
+    // Promoter `/var/log/*.log` mints a dynamic Sub at /var/log/foo.log.
+    // The Sub is the only attachment on the Profile (all_dynamic=true).
+    // FsEvent::Removed at the anchor → reap Profile, notify Promoter
+    // (DynamicSubReaped + PromoterReap-like teardown sequence).
+    let mut e = Engine::new();
+    let (pid, sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
+    assert_eq!(
+        e.promoters.get(pid).unwrap().dynamic_subs.len(),
+        1,
+        "exactly one dynamic Sub minted",
+    );
+    let profile_id = e.subs().get(sid).expect("Sub alive").profile;
+    assert!(e.profiles.get(profile_id).is_some(), "Profile attached");
+    // Sanity: the Sub carries source_promoter.
+    assert_eq!(e.subs().get(sid).and_then(|s| s.source_promoter), Some(pid),);
+
+    let out = e.step(
+        Input::FsEvent {
+            resource: anchor,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+
+    // DynamicSubReaped emitted with the (promoter, sub, path) triple.
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DynamicSubReaped { promoter, sub, .. }
+                if *promoter == pid && *sub == sid,
+        )),
+        "DynamicSubReaped emitted: {:?}",
+        out.diagnostics,
+    );
+    // ReapPendingResolved emitted (the all-dynamic teardown reaps the Profile).
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ReapPendingResolved { profile } if *profile == profile_id,
+        )),
+        "ReapPendingResolved emitted for the dynamic-only Profile: {:?}",
+        out.diagnostics,
+    );
+    // Profile gone, Sub gone, Promoter dynamic_subs entry cleared.
+    assert!(e.profiles.get(profile_id).is_none(), "Profile reaped");
+    assert!(
+        e.subs().get(sid).is_none(),
+        "dynamic Sub removed from registry"
+    );
+    assert!(
+        e.promoters.get(pid).unwrap().dynamic_subs.is_empty(),
+        "dynamic_subs entry dropped",
+    );
+}
+
+#[test]
+fn anchor_terminal_mixed_profile_preserves_recovery() {
+    // Promoter `/var/log/*.log` mints a dynamic Sub at /var/log/foo.log.
+    // A static Sub at the same anchor joins via Profile dedup.
+    // FsEvent::Removed at the anchor: NOT all_dynamic ⇒ falls to
+    // finalize_anchor_lost (Profile lives, watch_root_parent retained).
+    let mut e = Engine::new();
+    let (pid, dyn_sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
+    let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile;
+    let static_req = SubAttachRequest {
+        name: String::from("static-foo"),
+        resource: anchor,
+        path: None,
+        config: cfg(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: ClassSet::EMPTY,
+        log_output: false,
+        source_promoter: None,
+    };
+    let (static_sid, _attach_out) = e.attach_sub(static_req, Instant::now());
+    assert_eq!(
+        e.subs().get(static_sid).unwrap().profile,
+        profile_id,
+        "static Sub joins the dynamic Sub's Profile via dedup",
+    );
+
+    let out = e.step(
+        Input::FsEvent {
+            resource: anchor,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+
+    // Profile is NOT reaped — the recovery channel stays open.
+    assert!(
+        e.profiles.get(profile_id).is_some(),
+        "Profile preserved for the static Sub's recovery channel",
+    );
+    // anchor_claim cleared (finalize_anchor_lost path).
+    assert!(
+        matches!(
+            e.profiles.get(profile_id).unwrap().anchor_claim,
+            AnchorClaim::None,
+        ),
+        "anchor_claim cleared by finalize_anchor_lost",
+    );
+    // No DynamicSubReaped — the dynamic Sub remains attached (Promoter's
+    // dynamic_subs entry is intact; on path reappearance, try_promote's
+    // contains_check is the dedup gate).
+    assert!(
+        !out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DynamicSubReaped { promoter, .. } if *promoter == pid,
+        )),
+        "no DynamicSubReaped on mixed Profile teardown: {:?}",
+        out.diagnostics,
+    );
+    assert!(e.subs().get(dyn_sid).is_some(), "dynamic Sub retained");
+    assert_eq!(
+        e.promoters.get(pid).unwrap().dynamic_subs.len(),
+        1,
+        "Promoter.dynamic_subs entry retained",
+    );
+}
+
+#[test]
+fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
+    // Defense-in-depth: a Profile with empty subs (structurally
+    // unreachable in production) routes to finalize_anchor_lost.
+    // We can't construct an empty-subs Profile cleanly via public
+    // API, so this test exercises the predicate via a static-only
+    // Profile (which also picks the finalize_anchor_lost branch
+    // because all_dynamic is false).
+    let mut e = Engine::new();
+    let r = e.tree_mut().ensure(None, "anchor", ResourceRole::User);
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
+    let req = SubAttachRequest {
+        name: String::from("static"),
+        resource: r,
+        path: None,
+        config: cfg(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: ClassSet::EMPTY,
+        log_output: false,
+        source_promoter: None,
+    };
+    let (sid, _out) = e.attach_sub(req, Instant::now());
+    let profile_id = e.subs().get(sid).unwrap().profile;
+
+    let _out = e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+
+    // Static Sub: finalize_anchor_lost path. Profile lives.
+    assert!(
+        e.profiles.get(profile_id).is_some(),
+        "static Profile preserved (finalize_anchor_lost retains Profile)",
+    );
+    assert!(
+        matches!(
+            e.profiles.get(profile_id).unwrap().anchor_claim,
+            AnchorClaim::None,
+        ),
+        "anchor_claim cleared",
+    );
+}
+
+/// Pin the predicate: `subs.iter().all(s.source_promoter.is_some())` —
+/// a single static Sub (source_promoter=None) flips all_dynamic to
+/// false.
+#[test]
+fn anchor_terminal_predicate_static_sub_makes_mixed() {
+    let mut e = Engine::new();
+    let (pid, dyn_sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
+    let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile;
+    let req = SubAttachRequest {
+        name: String::from("static"),
+        resource: anchor,
+        path: None,
+        config: cfg(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: ClassSet::EMPTY,
+        log_output: false,
+        source_promoter: None,
+    };
+    let _ = e.attach_sub(req, Instant::now());
+
+    // Two Subs on this Profile: one static, one dynamic.
+    let subs_on_profile = e.subs().at(profile_id).len();
+    assert_eq!(subs_on_profile, 2);
+    let all_dynamic = e.subs().at(profile_id).iter().all(|sid| {
+        e.subs()
+            .get(*sid)
+            .is_some_and(|s| s.source_promoter.is_some())
+    });
+    assert!(!all_dynamic, "mixed Profile must not be all_dynamic");
+    let _ = pid; // pid only needed to anchor the Promoter alive
 }

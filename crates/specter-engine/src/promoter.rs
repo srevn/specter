@@ -154,6 +154,7 @@ impl Engine {
             log_output: req.log_output,
             state: initial_state,
             pending_probe: None,
+            pending_enumeration_target: None,
             pending_enumerations: BTreeSet::new(),
             dynamic_subs: BTreeMap::new(),
             warned_at_threshold: false,
@@ -470,13 +471,20 @@ impl Engine {
         let owner = response.owner;
         let received = response.correlation;
 
-        // I5 staleness check: live iff the slot held the received
-        // correlation. Catches stale-id (post-reap), post-cancel
-        // arrivals, out-of-order responses across Promoter lifetime.
-        let is_live = self
-            .promoters
-            .get(promoter_id)
-            .is_some_and(|q| q.pending_probe == Some(received));
+        // I5 staleness check + capture `pending_enumeration_target`
+        // under one read borrow. The captured target identifies the
+        // proxy a `Vanished` / `Failed` enumeration response refers to
+        // — those outcomes carry no payload, and `pending_enumerations`
+        // no longer holds the target after `pop_first` consumed it at
+        // probe-emit time. `None` while a descent probe is in flight
+        // (descent reads target from `DescentState`).
+        let (is_live, current_target) = match self.promoters.get(promoter_id) {
+            Some(q) => (
+                q.pending_probe == Some(received),
+                q.pending_enumeration_target,
+            ),
+            None => (false, None),
+        };
         if !is_live {
             out.diagnostics.push(Diagnostic::StaleProbeResponse {
                 owner,
@@ -489,8 +497,11 @@ impl Engine {
         // re-open a fresh channel (descent advance, post-enumeration
         // drain); they MUST see a closed channel on entry, otherwise
         // the I5 debug_assert in `mint_owner_correlation` fires.
+        // `pending_enumeration_target` clears in lockstep with
+        // `pending_probe`.
         if let Some(q) = self.promoters.get_mut(promoter_id) {
             q.pending_probe = None;
+            q.pending_enumeration_target = None;
         }
 
         // Route on state. PrefixPending → descent; Active → enumerate.
@@ -527,10 +538,10 @@ impl Engine {
                 self.dispatch_promoter_enumeration_ok(promoter_id, &arc, now, out);
             }
             (Some(PromoterDispatch::Enumerate), ProbeOutcome::Vanished) => {
-                self.dispatch_promoter_enumeration_vanished(promoter_id, out);
+                self.dispatch_promoter_enumeration_vanished(promoter_id, current_target, out);
             }
             (Some(PromoterDispatch::Enumerate), ProbeOutcome::Failed { errno }) => {
-                self.dispatch_promoter_enumeration_failed(promoter_id, errno, out);
+                self.dispatch_promoter_enumeration_failed(promoter_id, current_target, errno, out);
             }
             (Some(PromoterDispatch::Enumerate), ProbeOutcome::AnchorOk(_)) => {
                 debug_assert!(
@@ -792,6 +803,14 @@ impl Engine {
     /// Drain one queued enumeration target into a probe. No-op if a
     /// probe is already in flight (single-slot discipline) or the
     /// queue is empty.
+    ///
+    /// Records the popped target on `Promoter.pending_enumeration_target`
+    /// in lockstep with `pending_probe` — `Vanished` / `Failed`
+    /// responses carry no payload, so the dispatcher reads this slot
+    /// at response time to identify which proxy the response refers
+    /// to. The `Ok` arm reads `snapshot.root_resource` per [C-1] and
+    /// the slot's value is redundant for it; the field clears
+    /// uniformly in `on_promoter_probe_response`.
     pub(crate) fn dispatch_next_enumeration(
         &mut self,
         promoter_id: PromoterId,
@@ -821,6 +840,13 @@ impl Engine {
         let Some(correlation) = self.mint_owner_correlation(owner) else {
             return;
         };
+
+        // Lockstep with `pending_probe`: record the in-flight target
+        // so `Vanished` / `Failed` responses can identify the proxy.
+        if let Some(q) = self.promoters.get_mut(promoter_id) {
+            q.pending_enumeration_target = Some(target);
+        }
+
         let target_path = self.tree.path_of(target).unwrap_or_default();
         // [C-1] target_resource carried on the wire so the dispatch
         // arm can identify which proxy this response corresponds to
@@ -979,46 +1005,82 @@ impl Engine {
         }
     }
 
-    /// Vanished response on a proxy enumeration. Phase 6's stub
-    /// retains state and emits a diagnostic; Phase 9's mid-chain
-    /// unwind extends this with the proper cascade.
+    /// Vanished response on a proxy enumeration. The proxy directory
+    /// at `target` is gone from disk; the engine cascade-cleans the
+    /// proxy and any sub-proxies under it via
+    /// [`Self::unregister_proxy_subtree`]. Dynamic Subs anchored
+    /// inside the unwound subtree are NOT reaped here — they reap via
+    /// their own anchor-terminal events through the recovery-split
+    /// path, preserving I-Promoter-4 (only anchor-terminal removes
+    /// dynamic Subs).
     ///
-    /// Why retain: without a per-Promoter "current enumeration
-    /// target" slot the engine cannot identify which proxy vanished
-    /// from the response alone (`Vanished` carries no payload). The
-    /// proxy's parent's enumeration_ok reverse pass — triggered by
-    /// the kernel's `StructureChanged` event on the parent when the
-    /// proxy directory is removed — is the canonical cascade.
+    /// `target` comes from `Promoter.pending_enumeration_target`
+    /// captured at the response handler's read-borrow window. A
+    /// kernel-driven cascade (the proxy's parent's enumeration_ok
+    /// reverse pass triggered by the parent's `StructureChanged`
+    /// event when the proxy is removed) reaches the same end state;
+    /// observing `Vanished` directly short-circuits that round-trip.
     ///
-    /// `&self` is unused in this stub but retained on the method
-    /// signature so Phase 9 can extend in place without churning
-    /// every dispatch arm in [`Self::on_promoter_probe_response`].
-    #[allow(clippy::unused_self)]
+    /// On the rare path where `target` is `None` (lockstep invariant
+    /// broken — production paths set the slot at probe-emit time),
+    /// this is a defensive `debug_assert` + diagnostic-only fallback.
     pub(crate) fn dispatch_promoter_enumeration_vanished(
-        &self,
+        &mut self,
         promoter_id: PromoterId,
+        target: Option<ResourceId>,
         out: &mut StepOutput,
     ) {
-        out.diagnostics.push(Diagnostic::PromoterDescentVanished {
-            promoter: promoter_id,
-            prefix: ResourceId::default(),
-        });
+        let Some(target) = target else {
+            debug_assert!(
+                false,
+                "dispatch_promoter_enumeration_vanished: \
+                 pending_enumeration_target was None at response time \
+                 (promoter = {promoter_id:?})",
+            );
+            out.diagnostics
+                .push(Diagnostic::PromoterEnumerationVanished {
+                    promoter: promoter_id,
+                    proxy: ResourceId::default(),
+                });
+            return;
+        };
+        out.diagnostics
+            .push(Diagnostic::PromoterEnumerationVanished {
+                promoter: promoter_id,
+                proxy: target,
+            });
+        self.unregister_proxy_subtree(promoter_id, target, out);
     }
 
-    /// Failed response on a proxy enumeration. Retain state; await
-    /// next event at the proxy.
+    /// Failed response on a proxy enumeration. Retains proxy state;
+    /// the next kernel event at the proxy re-triggers enumeration.
+    /// Failures here are typically transient (`EACCES`, `EIO`); a
+    /// permanent failure leaves the proxy stalled until the
+    /// underlying condition clears or the operator restarts.
     ///
-    /// `&self` is unused — see [`Self::dispatch_promoter_enumeration_vanished`].
+    /// `target` is captured in lockstep with the probe correlation —
+    /// the `None` arm is defense-in-depth for the lockstep
+    /// invariant, mirroring [`Self::dispatch_promoter_enumeration_vanished`].
     #[allow(clippy::unused_self)]
     pub(crate) fn dispatch_promoter_enumeration_failed(
         &self,
         promoter_id: PromoterId,
+        target: Option<ResourceId>,
         errno: i32,
         out: &mut StepOutput,
     ) {
-        out.diagnostics.push(Diagnostic::PromoterDescentFailed {
+        let proxy = target.unwrap_or_else(|| {
+            debug_assert!(
+                false,
+                "dispatch_promoter_enumeration_failed: \
+                 pending_enumeration_target was None at response time \
+                 (promoter = {promoter_id:?})",
+            );
+            ResourceId::default()
+        });
+        out.diagnostics.push(Diagnostic::PromoterEnumerationFailed {
             promoter: promoter_id,
-            prefix: ResourceId::default(),
+            proxy,
             errno,
         });
     }
@@ -1160,6 +1222,200 @@ impl Engine {
         }
         self.dispatch_next_enumeration(promoter_id, now, out);
     }
+
+    /// Notify a Promoter that one of its dynamic Subs has reaped (the
+    /// Sub's anchor disappeared, and the all-dynamic teardown branch of
+    /// [`Engine::on_anchor_terminal_event`] is unwinding the Profile).
+    ///
+    /// Removes the `(path → sub_id)` entry from `Promoter.dynamic_subs`
+    /// and emits [`Diagnostic::DynamicSubReaped`]. I-Promoter-4: this is
+    /// one of three documented mutators of `dynamic_subs` (alongside
+    /// [`Self::try_promote`] for inserts and
+    /// [`Self::reap_promoter_inner`] for full drains).
+    ///
+    /// **Stale notification.** A concurrent
+    /// [`Self::reap_promoter_inner`] (e.g., reload removing the
+    /// Promoter in the same step) may have already cleared the
+    /// dynamic_subs map, in which case the lookup-by-`sub_id` returns
+    /// `None` and the call is a benign no-op (no diagnostic emitted).
+    pub(crate) fn on_dynamic_sub_reaped(
+        &mut self,
+        promoter_id: PromoterId,
+        sub_id: SubId,
+        out: &mut StepOutput,
+    ) {
+        let removed = self.promoters.get_mut(promoter_id).and_then(|q| {
+            let path = q
+                .dynamic_subs
+                .iter()
+                .find(|&(_, sid)| *sid == sub_id)
+                .map(|(p, _)| p.clone());
+            path.and_then(|p| q.dynamic_subs.remove(&p).map(|_| p))
+        });
+        if let Some(path) = removed {
+            out.diagnostics.push(Diagnostic::DynamicSubReaped {
+                promoter: promoter_id,
+                sub: sub_id,
+                path,
+            });
+        }
+    }
+
+    /// Reap a Promoter by id. Cancels any in-flight probe, detaches
+    /// every dynamic Sub the Promoter has minted, releases the per-Resource
+    /// `watch_demand` contributions (literal-prefix in `PrefixPending`,
+    /// every proxy in `Active`), and removes the Promoter from the
+    /// registry.
+    ///
+    /// Public entry point. Sole call site outside tests is the
+    /// hot-reload path (Phase 11's `on_config_diff`); the test surface
+    /// uses it directly to exercise teardown.
+    ///
+    /// Stale `pid` is a silent no-op (no diagnostic) — mirrors
+    /// `cancel_owner_probe` and `detach_sub_inner`'s defensive
+    /// idempotence on stale ids.
+    pub fn reap_promoter(&mut self, pid: PromoterId, now: Instant) -> StepOutput {
+        let mut out = StepOutput::default();
+        self.reap_promoter_inner(pid, now, &mut out);
+        out.sort_for_emission();
+        out
+    }
+
+    /// Inner reap used by `on_config_diff` (Phase 11) to compose
+    /// multiple detach/attach operations into a single (sorted)
+    /// [`StepOutput`].
+    ///
+    /// Sequence:
+    /// 1. Cancel any in-flight probe (descent or enumeration) and
+    ///    clear `pending_enumeration_target` in lockstep.
+    /// 2. Pre-clear `dynamic_subs` so any cascading detach paths see
+    ///    an empty map (defense-in-depth — `detach_sub_inner` itself
+    ///    doesn't read it). Then iterate the captured Sub ids and
+    ///    detach each via [`Engine::detach_sub_inner`]; each detach
+    ///    runs the standard deferred-reap-or-immediate-reap branch
+    ///    on the corresponding Profile.
+    /// 3. State-branch on `Promoter.state`:
+    ///    - `PrefixPending`: flip state to `Active{empty}` BEFORE
+    ///      `sub_watch_demand` so the recompute drops the prefix's 5a
+    ///      contribution. Try-reap the prefix.
+    ///    - `Active`: snapshot the proxies and call
+    ///      [`Self::unregister_proxy`] on each (which sub_watch_demands,
+    ///      clears the back-ref, and try-reaps the slot).
+    /// 4. Remove the Promoter from the registry. Emit
+    ///    [`Diagnostic::PromoterReaped`].
+    pub(crate) fn reap_promoter_inner(
+        &mut self,
+        promoter_id: PromoterId,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        // Stale id: silent no-op. Mirrors `detach_sub_inner`'s
+        // defensive shape but without the `DetachUnknownSub`-style
+        // diagnostic — there is no `DetachUnknownPromoter` variant in
+        // the catalog and the stale path is benign (the bin races a
+        // ConfigDiff against an in-flight reap).
+        if self.promoters.get(promoter_id).is_none() {
+            return;
+        }
+
+        // 1. Close the probe channel. `cancel_owner_probe` clears
+        // both `pending_probe` and `pending_enumeration_target` for
+        // Promoter owners and emits `ProbeOp::Cancel` iff the channel
+        // was open.
+        self.cancel_owner_probe(ProbeOwner::Promoter(promoter_id), out);
+        // Drain `pending_enumerations` for hygiene during the reap
+        // window. The BTreeSet drops with the Promoter at step 4, so
+        // this is defensive against any future mid-reap reader (and
+        // matches the plan's explicit drain).
+        if let Some(q) = self.promoters.get_mut(promoter_id) {
+            q.pending_enumerations.clear();
+        }
+
+        // 2. Detach every dynamic Sub. Pre-clear `dynamic_subs` so
+        // cascading paths observe an empty map; then iterate the
+        // captured Sub ids and route each through `detach_sub_inner`
+        // (which decrements profile refcount and reaps the underlying
+        // Profile when the dynamic Sub was its last attachment).
+        let sub_ids: Vec<SubId> = self
+            .promoters
+            .get(promoter_id)
+            .map(|q| q.dynamic_subs.values().copied().collect())
+            .unwrap_or_default();
+        if let Some(q) = self.promoters.get_mut(promoter_id) {
+            q.dynamic_subs.clear();
+        }
+        for sub_id in sub_ids {
+            self.detach_sub_inner(sub_id, now, out);
+        }
+
+        // 3. State-branch on the per-Resource cleanup.
+        let state_kind = self.promoters.get(promoter_id).map(|q| match &q.state {
+            PromoterState::PrefixPending(_) => PromoterReapStateKind::PrefixPending,
+            PromoterState::Active { .. } => PromoterReapStateKind::Active,
+        });
+        match state_kind {
+            Some(PromoterReapStateKind::PrefixPending) => {
+                // Capture the prefix BEFORE flipping state — the flip
+                // drops the recompute's attribution to this Promoter,
+                // and `sub_watch_demand` walks post-flip.
+                let prefix = self.promoters.get(promoter_id).and_then(|q| {
+                    if let PromoterState::PrefixPending(d) = &q.state {
+                        Some(d.current_prefix)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(q) = self.promoters.get_mut(promoter_id) {
+                    q.state = PromoterState::Active {
+                        proxies: BTreeMap::new(),
+                    };
+                }
+                if let Some(prefix) = prefix {
+                    sub_watch_demand(
+                        &mut self.tree,
+                        &self.profiles,
+                        &self.promoters,
+                        prefix,
+                        ClassSet::STRUCTURE,
+                        None,
+                        out,
+                    );
+                    self.tree.try_reap(prefix);
+                }
+            }
+            Some(PromoterReapStateKind::Active) => {
+                // Snapshot the proxy keys; `unregister_proxy` is
+                // idempotent and clears its own back-refs,
+                // watch_demand, and slot. Order doesn't matter: each
+                // proxy's cleanup is self-contained.
+                let proxy_list: Vec<ResourceId> = self
+                    .promoters
+                    .get(promoter_id)
+                    .map(|q| match &q.state {
+                        PromoterState::Active { proxies } => proxies.keys().copied().collect(),
+                        PromoterState::PrefixPending(_) => Vec::new(),
+                    })
+                    .unwrap_or_default();
+                for r in proxy_list {
+                    self.unregister_proxy(promoter_id, r, out);
+                }
+            }
+            None => {
+                // Promoter vanished mid-reap (a detach_sub_inner
+                // cascade reached `reap_promoter_inner` again — which
+                // it shouldn't, but defense-in-depth). Skip the
+                // per-Resource cleanup.
+            }
+        }
+
+        // 4. Remove the Promoter from the registry and emit the
+        // lifecycle diagnostic.
+        if self.promoters.remove(promoter_id).is_some() {
+            out.diagnostics.push(Diagnostic::PromoterReaped {
+                promoter: promoter_id,
+            });
+        }
+    }
 }
 
 /// Build a `PathBuf` from `spec.components()[0..spec.literal_prefix_len()]`.
@@ -1172,7 +1428,7 @@ fn render_literal_prefix(spec: &PatternSpec) -> PathBuf {
         match comp {
             PatternComponent::Literal(s) => p.push(s.as_str()),
             PatternComponent::Glob(_) => {
-                debug_assert!(false, "glob in literal prefix violates parse invariant",);
+                debug_assert!(false, "glob in literal prefix violates parse invariant");
             }
         }
     }
@@ -1187,6 +1443,18 @@ fn render_literal_prefix(spec: &PatternSpec) -> PathBuf {
 enum PromoterDispatch {
     Descent,
     Enumerate,
+}
+
+/// State-discriminant projection used by
+/// [`Engine::reap_promoter_inner`]. The branch logic mutates
+/// `Promoter.state` (PrefixPending → Active{empty} flip) and walks
+/// proxies under separate borrows; this projection captures the
+/// pre-mutation discriminant so the dispatcher doesn't hold a
+/// `&PromoterState` across the mutation window.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PromoterReapStateKind {
+    PrefixPending,
+    Active,
 }
 
 #[cfg(test)]

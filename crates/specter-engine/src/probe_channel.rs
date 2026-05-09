@@ -115,14 +115,27 @@ impl Engine {
     ///
     /// Sole caller surface for the Profile-side cancel-emission paths:
     /// `event_drives_batching`, `finalize_anchor_lost`,
-    /// `on_watch_op_rejected` descent purge, `reap_profile`. Future
-    /// owner kinds plug their own cancel sites into the same helper.
+    /// `on_watch_op_rejected` descent purge, `reap_profile`. Promoter
+    /// callers route through [`Engine::reap_promoter_inner`].
+    ///
+    /// **Per-owner sibling-state cleanup.** Promoter owners carry a
+    /// second slot (`pending_enumeration_target`) that pairs with
+    /// `pending_probe` for enumeration probes. The sibling clears
+    /// here unconditionally — it tracks the lifecycle of the
+    /// correlation slot and is None whenever the channel is closed.
+    /// Profile owners have no equivalent (descent target lives on
+    /// `Profile.state` directly).
     pub(crate) fn cancel_owner_probe(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
         let was_open = self
             .pending_slot_mut(owner)
             .is_some_and(|slot| slot.take().is_some());
         if was_open {
             out.probe_ops.push(ProbeOp::Cancel { owner });
+        }
+        if let ProbeOwner::Promoter(pid) = owner
+            && let Some(q) = self.promoters.get_mut(pid)
+        {
+            q.pending_enumeration_target = None;
         }
     }
 

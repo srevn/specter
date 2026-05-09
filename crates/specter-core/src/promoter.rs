@@ -96,6 +96,20 @@ pub struct Promoter {
     /// `ProbeOwner::Promoter(_)`.
     pub pending_probe: Option<ProbeCorrelation>,
 
+    /// Proxy currently being enumerated, paired with `pending_probe` for
+    /// enumeration probes. `None` while idle or while a *descent* probe
+    /// is in flight (descent reads its target from `DescentState`
+    /// directly). Set by `dispatch_next_enumeration` immediately after
+    /// minting the probe correlation; cleared in lockstep with
+    /// `pending_probe` on response or cancel.
+    ///
+    /// The dispatcher uses this slot to identify which proxy a
+    /// `Vanished` / `Failed` enumeration response refers to —
+    /// `ProbeOutcome::{Vanished, Failed}` carry no payload, and
+    /// `Promoter.pending_enumerations` no longer holds the target after
+    /// `pop_first` consumed it at probe-emit time.
+    pub pending_enumeration_target: Option<ResourceId>,
+
     /// Deterministic queue of proxies awaiting enumeration. `BTreeSet` for
     /// stable iteration; insertion is gated on `!already_carries` in
     /// `register_proxy` (Phase 5+) so re-registration of an already-known
@@ -278,6 +292,7 @@ mod tests {
                 proxies: BTreeMap::new(),
             },
             pending_probe: None,
+            pending_enumeration_target: None,
             pending_enumerations: BTreeSet::new(),
             dynamic_subs: BTreeMap::new(),
             warned_at_threshold: false,

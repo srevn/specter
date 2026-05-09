@@ -66,12 +66,13 @@ impl Engine {
         }
 
         // Snapshot the proxy back-ref BEFORE any dispatch — each
-        // `on_promoter_proxy_event` mutates Promoter state, and a
-        // cascading `unregister_proxy_subtree` (parent enumeration's
-        // reverse pass) could clear the back-ref mid-loop. The
-        // snapshot keeps the dispatch list stable across the loop.
-        // SmallVec inline cap of 1 covers the typical case (one
-        // proxy back-ref) without allocation.
+        // `on_promoter_proxy_event` mutates Promoter state, and the
+        // Phase 9 cascade (`dispatch_promoter_enumeration_vanished` →
+        // `unregister_proxy_subtree`, parent enumeration's reverse
+        // pass) clears the back-ref of co-resident Promoters
+        // mid-loop. The snapshot keeps the dispatch list stable across
+        // the iteration. SmallVec inline cap of 1 covers the typical
+        // case (one proxy back-ref) without allocation.
         let proxies: SmallVec<[specter_core::PromoterId; 1]> = self
             .tree
             .get(resource)
@@ -1038,11 +1039,103 @@ impl Engine {
     }
 
     /// Anchor terminal event (Removed/Renamed/Revoked at `Profile.resource`).
-    /// Thin wrapper over `finalize_anchor_lost` — the FsEvent dispatcher
-    /// and the WatchOpRejected purge share the same "anchor's FD is gone,
-    /// finalize the burst" logic.
+    /// Anchor-terminal dispatcher. Splits on whether every Sub on the
+    /// Profile is dynamic (originates from a Promoter) versus the
+    /// mixed/static case.
+    ///
+    /// **All-dynamic** ⇒ [`Self::on_anchor_terminal_all_dynamic`]: the
+    /// Profile has no static recovery channel; the Promoter re-promotes
+    /// on path reappearance, so the Profile is reaped entirely (anchor,
+    /// descendants, descent prefix, watch-root parent — the full
+    /// quartet) and each source Promoter is notified that its dynamic
+    /// Sub has reaped. I-Recovery-Split: the predicate is total over
+    /// non-empty Subs.
+    ///
+    /// **Mixed or pure-static** ⇒ [`Self::finalize_anchor_lost`]: the
+    /// existing recovery flow runs. The dynamic Subs (if any) stay
+    /// attached — the static Sub keeps the Profile alive via
+    /// `Profile.watch_root_parent`'s recovery channel. On
+    /// re-materialisation, the Promoter's enumeration's
+    /// `dynamic_subs.contains_key(path)` check returns `true` (the
+    /// engine never minted a fresh Sub for an already-known path), so
+    /// no engine work is needed for correctness — only the static
+    /// Sub's recovery flow drives the burst.
+    ///
+    /// The empty-Subs case is structurally unreachable: a Profile with
+    /// no Subs reaped on the last detach. Routed defensively to
+    /// `finalize_anchor_lost` for idempotence.
     fn on_anchor_terminal_event(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        self.finalize_anchor_lost(profile_id, out);
+        let subs = self.subs.at(profile_id);
+        if subs.is_empty() {
+            self.finalize_anchor_lost(profile_id, out);
+            return;
+        }
+        let all_dynamic = subs.iter().all(|sid| {
+            self.subs
+                .get(*sid)
+                .is_some_and(|s| s.source_promoter.is_some())
+        });
+        if all_dynamic {
+            self.on_anchor_terminal_all_dynamic(profile_id, out);
+        } else {
+            self.finalize_anchor_lost(profile_id, out);
+        }
+    }
+
+    /// All-dynamic anchor-terminal teardown. Notifies each source
+    /// Promoter (drops the Sub from the Promoter's `dynamic_subs`
+    /// map), removes every dynamic Sub from `SubRegistry`, then reaps
+    /// the Profile entirely.
+    ///
+    /// The reap delegates to [`Engine::reap_profile`] /
+    /// [`Engine::finish_burst_to_idle`] depending on the Profile's
+    /// state — mirrors `detach_sub_inner`'s lifecycle dispatch but
+    /// force-runs the deferred-end path synchronously (the anchor is
+    /// dead now; we cannot wait for the burst to complete naturally
+    /// against a stale anchor).
+    ///
+    /// Idempotent: re-entering on an already-reaped Profile finds
+    /// `subs.at(profile_id)` empty (caller filtered) and never enters
+    /// here. The Sub-removal loop is also idempotent: a stale Sub id
+    /// on the Profile's `by_profile` list is a structural impossibility
+    /// (the registry maintains by_profile in lockstep with subs).
+    fn on_anchor_terminal_all_dynamic(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        // 1. Close the probe channel — Active+Verifying may have one
+        // in flight. Idempotent on a closed channel.
+        self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
+
+        // 2. Notify each source Promoter; remove each dynamic Sub from
+        // SubRegistry. SubRegistry's `by_profile` index drops the
+        // entry on the last remove, so the post-loop registry has no
+        // back-references for this Profile.
+        let dynamic_subs: SmallVec<[SubId; 2]> = self.subs.at(profile_id).iter().copied().collect();
+        for sid in dynamic_subs.iter().copied() {
+            if let Some(pid) = self.subs.get(sid).and_then(|s| s.source_promoter) {
+                self.on_dynamic_sub_reaped(pid, sid, out);
+            }
+        }
+        for sid in dynamic_subs {
+            let _ = self.subs.remove(sid);
+        }
+
+        // 3. Reap the Profile. Active Profiles need their burst force-
+        // ended via `finish_burst_to_idle`; Idle / Pending Profiles
+        // reap synchronously. We set `reap_pending = true` for the
+        // Active branch so `finish_burst_to_idle` runs `reap_profile`
+        // internally (single source of truth for the four-claim
+        // release + ProfileMap detach).
+        let active = self
+            .profiles
+            .get(profile_id)
+            .is_some_and(|p| matches!(p.state, ProfileState::Active(_)));
+        if active {
+            if let Some(p) = self.profiles.get_mut(profile_id) {
+                p.reap_pending = true;
+            }
+            self.finish_burst_to_idle(profile_id, out);
+        } else if self.profiles.get(profile_id).is_some() {
+            self.reap_profile(profile_id, out);
+        }
     }
 
     /// Finalize the loss of a Profile's anchor: cancel any in-flight
