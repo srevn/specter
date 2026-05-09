@@ -15,6 +15,7 @@
 
 use crate::refcounts::add_watch_demand;
 use crate::timer::{TimerEntry, TimerHeap};
+use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Input, ProbeOwner,
     Profile, ProfileId, ProfileMap, ProfileState, PromoterRegistry, PromoterState, ResourceId,
@@ -276,6 +277,13 @@ impl Engine {
         // (operator-declared) attaches and `Some(promoter_id)` for
         // dynamic attaches synthesised by a Promoter's `try_promote`
         // (Phase 5+); the request carries the stamp.
+        //
+        // Capture diagnostic-shaped fields BEFORE the closure consumes
+        // `req.name` / `req.source_promoter`. Cheap: a `CompactString`
+        // copy of a typically-short user name (inline storage at ≤24
+        // bytes) and an `Option<PromoterId>` Copy.
+        let diag_name = CompactString::from(req.name.as_str());
+        let diag_source_promoter = req.source_promoter;
         let sub_id = self.subs.insert(|sid| {
             Sub::new(
                 sid,
@@ -294,6 +302,19 @@ impl Engine {
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.sub_refcount = p.sub_refcount.saturating_add(1);
         }
+
+        // Lifecycle diagnostic — single emit point that fires for both
+        // the existing-Profile join arm (`return sub_id` below) and the
+        // fresh-Profile arm (function-end `return sub_id`). Sole
+        // upstream early-return is the `decompose_attach_path` failure
+        // arm, which returns `SubId::default()` and emits
+        // `AttachPathInvalid` instead — `SubAttached` is unreachable
+        // for that branch.
+        out.diagnostics.push(Diagnostic::SubAttached {
+            sub: sub_id,
+            name: diag_name,
+            source_promoter: diag_source_promoter,
+        });
 
         if !is_fresh_profile {
             // Existing-Profile branch. Two semantic sub-cases:
@@ -780,6 +801,17 @@ impl Engine {
     #[must_use]
     pub const fn subs(&self) -> &SubRegistry {
         &self.subs
+    }
+
+    /// Read-only view of the `PromoterRegistry`.
+    ///
+    /// Symmetric with [`Self::subs`] / [`Self::profiles`]; integration
+    /// tests inspect Promoter state through this accessor (the field
+    /// itself is `pub(crate)` because all Promoter mutations go
+    /// through engine-internal paths).
+    #[must_use]
+    pub const fn promoters(&self) -> &PromoterRegistry {
+        &self.promoters
     }
 
     /// Earliest pending timer deadline, or `None` if no timers are armed.

@@ -263,6 +263,27 @@ pub enum Diagnostic {
     /// reseed schedules carry no per-Profile annotation that they were
     /// triggered by overflow rather than a normal `FsEvent`.
     SensorOverflow { scope: OverflowScope },
+    /// A Sub has been registered with the engine and assigned `sub`.
+    /// Emitted by `attach_sub_inner` on every successful insert —
+    /// static (operator-declared) attaches and dynamic Promoter-spawned
+    /// attaches alike. The bin layer reads the variant from
+    /// `StepOutput.diagnostics` to reconcile its `name → SubId` mapping
+    /// after a hot-reload diff applies, dropping the post-step
+    /// `find_by_name` linear scan.
+    ///
+    /// `name` carries the Sub's user-facing name verbatim — for static
+    /// Subs the operator's `[[watch]].name`; for dynamic Subs the
+    /// engine's synthesized `<promoter_name>@<resolved_path>` shape.
+    /// `source_promoter` lets the consumer route static and dynamic
+    /// emissions independently: the bin's static `Loader.ids` filters
+    /// on `source_promoter.is_none()` because dynamic Subs are owned
+    /// by the `Promoter.dynamic_subs` map inside the engine and would
+    /// leak across reload cycles if mirrored into the static index.
+    SubAttached {
+        sub: SubId,
+        name: CompactString,
+        source_promoter: Option<PromoterId>,
+    },
     /// A Promoter has been registered with the engine and assigned
     /// `promoter`. Emitted by `attach_promoter`. The bin layer reads
     /// the variant from `StepOutput.diagnostics` to reconcile its
