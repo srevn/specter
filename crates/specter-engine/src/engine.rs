@@ -17,8 +17,8 @@ use crate::refcounts::add_watch_demand;
 use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
     AnchorClaim, BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Input, ProbeOwner,
-    Profile, ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest,
-    SubId, SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
+    Profile, ProfileId, ProfileMap, ProfileState, PromoterRegistry, ResourceId, StepOutput, Sub,
+    SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -45,6 +45,12 @@ pub struct Engine {
     pub(crate) tree: Tree,
     pub(crate) profiles: ProfileMap,
     pub(crate) subs: SubRegistry,
+    /// Engine-resident dynamic-watch sources. Empty during Phase 4 (the
+    /// data shapes ship before any lifecycle code references them);
+    /// `recompute_resource_events` accepts a borrow of this field so the
+    /// signature is stable as Phase 5+ wires in actual Promoter
+    /// contributions to per-Resource `events_union`.
+    pub(crate) promoters: PromoterRegistry,
     pub(crate) timers: TimerHeap,
     pub(crate) next_correlation: u64,
 }
@@ -245,7 +251,10 @@ impl Engine {
             (pid, true)
         };
 
-        // Insert the Sub.
+        // Insert the Sub. `source_promoter` is `None` for static
+        // (operator-declared) attaches and `Some(promoter_id)` for
+        // dynamic attaches synthesised by a Promoter's `try_promote`
+        // (Phase 5+); the request carries the stamp.
         let sub_id = self.subs.insert(|sid| {
             Sub::new(
                 sid,
@@ -257,6 +266,7 @@ impl Engine {
                 req.max_settle,
                 req.events,
                 req.log_output,
+                req.source_promoter,
             )
         });
 
@@ -943,8 +953,8 @@ mod tests {
     use super::*;
     use specter_core::{
         DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeOutcome, ProbeResponse,
-        ProfileId, ResourceId, ScanConfig, StepOutput, SubId, SubRegistryDiff, TimerId, TimerKind,
-        WatchOp,
+        ProfileId, ResourceId, ScanConfig, StepOutput, SubId, TimerId, TimerKind, WatchOp,
+        WatchRegistryDiff,
     };
     use std::time::{Duration, Instant};
 
@@ -1064,7 +1074,7 @@ mod tests {
     fn step_config_diff_with_empty_diff_is_noop() {
         let mut e = Engine::new();
         let out = e.step(
-            Input::ConfigDiff(SubRegistryDiff::default()),
+            Input::ConfigDiff(WatchRegistryDiff::default()),
             Instant::now(),
         );
         assert!(out.watch_ops.is_empty());

@@ -33,11 +33,19 @@
 
 use crate::coverage::covers;
 use specter_core::{
-    AnchorClaim, ClassSet, Profile, ProfileId, ProfileMap, ProfileState, Resource, ResourceId,
-    ResourceKind, StepOutput, Tree, WatchOp,
+    AnchorClaim, ClassSet, Profile, ProfileId, ProfileMap, ProfileState, Promoter,
+    PromoterRegistry, PromoterState, Resource, ResourceId, ResourceKind, StepOutput, Tree, WatchOp,
 };
 
 /// `+watch_demand` on `r`, contributing `contribution` to `r.events_union`.
+///
+/// `add_watch_demand` is **unchanged** by the Promoter generalisation: it
+/// only ORs the incoming contribution onto the cached union; no
+/// recompute walk is involved. Promoter-side contributions surface
+/// through `sub_watch_demand`'s recompute path (the on-decrement
+/// recompute walks both registries) and by direct `add_watch_demand`
+/// emissions from the Promoter helpers (Phase 5+) that pass
+/// `ClassSet::STRUCTURE` for the proxy / prefix slot they own.
 ///
 /// Emits `WatchOp::Watch` when:
 /// - The refcount transitions 0→1 (existence edge), OR
@@ -104,6 +112,14 @@ pub fn add_watch_demand(
 /// (`anchor_claim`, `state == Pending(d)`, or `watch_root_parent`) has
 /// been cleared, so the recompute models the post-release state.
 ///
+/// `promoters` extends the recompute to the Promoter-side contributions
+/// (sources 5a / 5b in [`recompute_resource_events`]). Callers pass
+/// `&self.promoters` after the releasing Promoter's state field has
+/// been flipped (the analogue of the Profile-side flag-clear); the
+/// recompute walks both registries and ORs the union. Phase 4 callers
+/// pass an empty registry, so the second loop is a no-op until Phase
+/// 5+ wires the lifecycle.
+///
 /// `releasing_descendant` — when `Some(pid)`, the recompute (multi-
 /// contributor case) skips `pid`'s **descendant** contribution to `r`.
 /// This is the explicit signal for the descendant case where no
@@ -120,6 +136,7 @@ pub fn add_watch_demand(
 pub fn sub_watch_demand(
     tree: &mut Tree,
     profiles: &ProfileMap,
+    promoters: &PromoterRegistry,
     r: ResourceId,
     contribution: ClassSet,
     releasing_descendant: Option<ProfileId>,
@@ -157,7 +174,7 @@ pub fn sub_watch_demand(
     // contributions. The releasing Profile's state-tracking flag must be
     // cleared by the caller before this call; the recompute then yields
     // the correct post-release union.
-    let new_union = recompute_resource_events(tree, profiles, r, releasing_descendant);
+    let new_union = recompute_resource_events(tree, profiles, promoters, r, releasing_descendant);
     if new_union != prev_union {
         if let Some(res) = tree.get_mut(r) {
             res.events_union = new_union;
@@ -178,9 +195,11 @@ pub fn sub_watch_demand(
     }
 }
 
-/// Walk every Profile in `profiles` and OR each Profile's contribution to
-/// `resource` into a running union. Four contribution sources, each
-/// matched to its dedicated bookkeeping on `Profile`:
+/// Walk every Profile in `profiles` and every Promoter in `promoters`,
+/// ORing each entity's contribution to `resource` into a running union.
+///
+/// Profile contributions — four sources, each matched to its dedicated
+/// per-Profile bookkeeping field:
 ///
 /// 1. **Anchor.** `Profile.anchor_claim == AnchorClaim::Held` AND
 ///    `Profile.resource == resource` ⇒ contributes `Profile.events_union`.
@@ -214,9 +233,35 @@ pub fn sub_watch_demand(
 /// Together the two gates ensure the recompute reports the post-release
 /// union without depending on `current.is_some()` having flipped (graft
 /// hasn't taken `current` yet at `delete_child` time).
+///
+/// Promoter contributions — two mutually-exclusive sources (I-Promoter-3),
+/// each gated on `Promoter.state` exhaustively (the discriminator is the
+/// only way the same Promoter could over-contribute to the same
+/// resource):
+///
+/// 5a. **PrefixPending prefix.** `Promoter.state == PrefixPending(d)` AND
+///     `d.current_prefix == resource` ⇒ contributes `STRUCTURE`. The
+///     descent prefix watch lets the engine see the next literal
+///     segment materialize.
+/// 5b. **Active proxy.** `Promoter.state == Active { proxies }` AND
+///     `proxies.contains_key(&resource)` ⇒ contributes `STRUCTURE`. Each
+///     proxy is a directory the engine wants to enumerate on next
+///     event.
+///
+/// Both Promoter sources contribute `STRUCTURE` only — the proxy /
+/// prefix watch's purpose is to discover children appearing or
+/// disappearing. Proxy events route to the Promoter's enumeration
+/// dispatcher (Phase 7), independent of Profile-side bursts.
+///
+/// `releasing_descendant` is Profile-only (no Promoter analogue): a
+/// Promoter holds at most one contribution per resource (5a XOR 5b),
+/// and the lifecycle helpers flip `Promoter.state` *before* calling
+/// `sub_watch_demand`, mirroring the Profile-side flag-clear discipline.
+/// The recompute reads post-flip state directly.
 fn recompute_resource_events(
     tree: &Tree,
     profiles: &ProfileMap,
+    promoters: &PromoterRegistry,
     resource: ResourceId,
     releasing_descendant: Option<ProfileId>,
 ) -> ClassSet {
@@ -224,7 +269,31 @@ fn recompute_resource_events(
     for (pid, p) in profiles.iter() {
         union |= profile_contribution_for(p, pid, resource, tree, releasing_descendant);
     }
+    for (_qid, q) in promoters.iter() {
+        union |= promoter_contribution_for(q, resource);
+    }
     union
+}
+
+/// Single Promoter's contribution to `resource`'s `events_union`.
+///
+/// Two mutually-exclusive sources (I-Promoter-3), keyed off
+/// `Promoter.state`:
+/// - **5a. PrefixPending prefix** (state == PrefixPending && d.current_prefix == r) ⇒ STRUCTURE.
+/// - **5b. Active proxy** (state == Active && proxies.contains_key(&r)) ⇒ STRUCTURE.
+///
+/// The two arms cannot fire simultaneously: state is a sum-type, and a
+/// PrefixPending → Active transition is a single state-flip. The only
+/// race is during the helper that performs the transition itself, which
+/// flips `Promoter.state` *before* calling `sub_watch_demand` against
+/// the prior prefix — analogous to the Profile-side flag-clear
+/// discipline.
+fn promoter_contribution_for(promoter: &Promoter, resource: ResourceId) -> ClassSet {
+    match &promoter.state {
+        PromoterState::PrefixPending(d) if d.current_prefix == resource => ClassSet::STRUCTURE,
+        PromoterState::Active { proxies } if proxies.contains_key(&resource) => ClassSet::STRUCTURE,
+        _ => ClassSet::EMPTY,
+    }
 }
 
 /// Single Profile's contribution to `resource`'s `events_union`. Computes
@@ -365,8 +434,8 @@ mod tests {
     };
     use compact_str::CompactString;
     use specter_core::{
-        AnchorClaim, ClassSet, DescentState, Profile, ProfileMap, ProfileState, ResourceKind,
-        ResourceRole, ScanConfig, StepOutput, Tree, WatchOp,
+        AnchorClaim, ClassSet, DescentState, Profile, ProfileMap, ProfileState, PromoterRegistry,
+        ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, WatchOp,
     };
     use std::time::Duration;
 
@@ -381,6 +450,14 @@ mod tests {
 
     fn empty_profiles() -> ProfileMap {
         ProfileMap::new()
+    }
+
+    /// Empty promoter registry for `sub_watch_demand` /
+    /// `recompute_resource_events` test calls. Phase 4 unit tests
+    /// exercise Profile-only behaviour; Phase 5+ adds Promoter-side
+    /// recompute coverage with non-empty registries.
+    fn empty_promoters() -> PromoterRegistry {
+        PromoterRegistry::new()
     }
 
     fn cfg() -> ScanConfig {
@@ -462,11 +539,20 @@ mod tests {
     fn sub_watch_demand_one_to_zero_emits_unwatch_and_clears_union() {
         let (mut tree, r) = fresh();
         let profiles = empty_profiles();
+        let promoters = empty_promoters();
         let mut out = StepOutput::default();
         add_watch_demand(&mut tree, r, ClassSet::CONTENT, &mut out);
         out.watch_ops.clear();
 
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
+        sub_watch_demand(
+            &mut tree,
+            &profiles,
+            &promoters,
+            r,
+            ClassSet::CONTENT,
+            None,
+            &mut out,
+        );
         assert_eq!(tree.get(r).unwrap().watch_demand, 0);
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::EMPTY);
         assert_eq!(out.watch_ops.len(), 1);
@@ -484,6 +570,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
 
         // Profile A: events_union = CONTENT
         let p_a = profiles.attach(
@@ -521,7 +608,15 @@ mod tests {
         // state. The recompute should then yield METADATA only.
         profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::None;
         out.watch_ops.clear();
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
+        sub_watch_demand(
+            &mut tree,
+            &profiles,
+            &promoters,
+            r,
+            ClassSet::CONTENT,
+            None,
+            &mut out,
+        );
 
         assert_eq!(tree.get(r).unwrap().watch_demand, 1);
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::METADATA);
@@ -545,6 +640,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
 
         let p_a = profiles.attach(
             &mut tree,
@@ -569,7 +665,15 @@ mod tests {
         out.watch_ops.clear();
 
         profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::None;
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
+        sub_watch_demand(
+            &mut tree,
+            &profiles,
+            &promoters,
+            r,
+            ClassSet::CONTENT,
+            None,
+            &mut out,
+        );
 
         assert_eq!(tree.get(r).unwrap().watch_demand, 1);
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::CONTENT);
@@ -585,8 +689,17 @@ mod tests {
     fn sub_watch_demand_underflow_panics_in_debug() {
         let (mut tree, r) = fresh();
         let profiles = empty_profiles();
+        let promoters = empty_promoters();
         let mut out = StepOutput::default();
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::EMPTY, None, &mut out);
+        sub_watch_demand(
+            &mut tree,
+            &profiles,
+            &promoters,
+            r,
+            ClassSet::EMPTY,
+            None,
+            &mut out,
+        );
     }
 
     #[test]
@@ -605,8 +718,17 @@ mod tests {
         let r = tree.ensure(None, "ghost", ResourceRole::User);
         assert!(tree.try_reap(r));
         let profiles = empty_profiles();
+        let promoters = empty_promoters();
         let mut out = StepOutput::default();
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::EMPTY, None, &mut out);
+        sub_watch_demand(
+            &mut tree,
+            &profiles,
+            &promoters,
+            r,
+            ClassSet::EMPTY,
+            None,
+            &mut out,
+        );
         assert!(out.watch_ops.is_empty());
     }
 
@@ -662,13 +784,22 @@ mod tests {
     fn watch_and_suppress_are_independent() {
         let (mut tree, r) = fresh();
         let profiles = empty_profiles();
+        let promoters = empty_promoters();
         let mut out = StepOutput::default();
         add_watch_demand(&mut tree, r, ClassSet::CONTENT, &mut out);
         add_suppress(&mut tree, r, &mut out);
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand, 1);
         assert_eq!(res.suppress_count, 1);
-        sub_watch_demand(&mut tree, &profiles, r, ClassSet::CONTENT, None, &mut out);
+        sub_watch_demand(
+            &mut tree,
+            &profiles,
+            &promoters,
+            r,
+            ClassSet::CONTENT,
+            None,
+            &mut out,
+        );
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand, 0);
         // suppress unchanged by the watch decrement.
@@ -770,8 +901,9 @@ mod tests {
     fn recompute_with_zero_profiles_yields_empty() {
         let (tree, r) = fresh();
         let profiles = empty_profiles();
+        let promoters = empty_promoters();
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r, None),
+            recompute_resource_events(&tree, &profiles, &promoters, r, None),
             ClassSet::EMPTY,
         );
     }
@@ -781,6 +913,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let pid = profiles.attach(
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
@@ -788,7 +921,7 @@ mod tests {
         profiles.get_mut(pid).unwrap().anchor_claim = AnchorClaim::Held;
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r, None),
+            recompute_resource_events(&tree, &profiles, &promoters, r, None),
             ClassSet::CONTENT,
         );
     }
@@ -800,6 +933,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let pid = profiles.attach(
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
@@ -808,7 +942,7 @@ mod tests {
         assert_eq!(profiles.get(pid).unwrap().anchor_claim, AnchorClaim::None,);
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r, None),
+            recompute_resource_events(&tree, &profiles, &promoters, r, None),
             ClassSet::EMPTY,
         );
     }
@@ -818,6 +952,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let p_a = profiles.attach(
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
@@ -836,7 +971,7 @@ mod tests {
         profiles.get_mut(p_b).unwrap().anchor_claim = AnchorClaim::Held;
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r, None),
+            recompute_resource_events(&tree, &profiles, &promoters, r, None),
             ClassSet::CONTENT | ClassSet::METADATA,
         );
     }
@@ -849,6 +984,7 @@ mod tests {
         let parent = tree.ensure(None, "p", ResourceRole::WatchRootParent);
         let anchor = tree.ensure(Some(parent), "a", ResourceRole::User);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let pid = profiles.attach(
             &mut tree,
             Profile::new(anchor, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
@@ -858,7 +994,7 @@ mod tests {
         // Recomputing on `parent` yields STRUCTURE only — the Profile is
         // contributing to its watch-root parent, not its anchor.
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, parent, None),
+            recompute_resource_events(&tree, &profiles, &promoters, parent, None),
             ClassSet::STRUCTURE,
         );
     }
@@ -869,6 +1005,7 @@ mod tests {
         let prefix = tree.ensure(None, "p", ResourceRole::DescentScaffold);
         let scaffold = tree.ensure(Some(prefix), "anchor", ResourceRole::DescentScaffold);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let pid = profiles.attach(
             &mut tree,
             Profile::new(scaffold, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
@@ -879,7 +1016,7 @@ mod tests {
         });
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, prefix, None),
+            recompute_resource_events(&tree, &profiles, &promoters, prefix, None),
             ClassSet::STRUCTURE,
         );
     }
@@ -891,6 +1028,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "shared", ResourceRole::User);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
 
         // Profile A: anchored at r, mask = CONTENT.
         let p_a = profiles.attach(
@@ -927,7 +1065,7 @@ mod tests {
         // Anchor of A (CONTENT) | parent-edge of B (STRUCTURE) | descent of C (STRUCTURE)
         // = CONTENT | STRUCTURE.
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, r, None),
+            recompute_resource_events(&tree, &profiles, &promoters, r, None),
             ClassSet::CONTENT | ClassSet::STRUCTURE,
         );
     }
@@ -965,6 +1103,7 @@ mod tests {
         let sub = tree.ensure(Some(root), "sub", ResourceRole::User);
         tree.set_kind(sub, ResourceKind::Dir);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let pid = profiles.attach(
             &mut tree,
             Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE),
@@ -974,7 +1113,7 @@ mod tests {
         stub_current(&mut profiles, pid);
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, sub, None),
+            recompute_resource_events(&tree, &profiles, &promoters, sub, None),
             ClassSet::STRUCTURE,
         );
     }
@@ -990,6 +1129,7 @@ mod tests {
         let sub = tree.ensure(Some(root), "sub", ResourceRole::User);
         tree.set_kind(sub, ResourceKind::Dir);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let pid = profiles.attach(
             &mut tree,
             Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE),
@@ -997,7 +1137,7 @@ mod tests {
         assert!(profiles.get(pid).unwrap().current.is_none());
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, sub, None),
+            recompute_resource_events(&tree, &profiles, &promoters, sub, None),
             ClassSet::EMPTY,
         );
     }
@@ -1014,6 +1154,7 @@ mod tests {
         let sub = tree.ensure(Some(root), "sub", ResourceRole::User);
         tree.set_kind(sub, ResourceKind::Dir);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let pid = profiles.attach(
             &mut tree,
             Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE),
@@ -1022,12 +1163,12 @@ mod tests {
 
         // Without the skip: contributes STRUCTURE.
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, sub, None),
+            recompute_resource_events(&tree, &profiles, &promoters, sub, None),
             ClassSet::STRUCTURE,
         );
         // With the skip: this Profile's descendant contribution is excluded.
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, sub, Some(pid)),
+            recompute_resource_events(&tree, &profiles, &promoters, sub, Some(pid)),
             ClassSet::EMPTY,
         );
     }
@@ -1042,6 +1183,7 @@ mod tests {
         let leaf = tree.ensure(Some(root), "f.rs", ResourceRole::User);
         tree.set_kind(leaf, ResourceKind::File);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let pid = profiles.attach(
             &mut tree,
             Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE),
@@ -1050,7 +1192,7 @@ mod tests {
         stub_current(&mut profiles, pid);
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, leaf, None),
+            recompute_resource_events(&tree, &profiles, &promoters, leaf, None),
             ClassSet::EMPTY,
         );
     }
@@ -1065,6 +1207,7 @@ mod tests {
         let leaf = tree.ensure(Some(root), "f.rs", ResourceRole::User);
         tree.set_kind(leaf, ResourceKind::File);
         let mut profiles = ProfileMap::new();
+        let promoters = empty_promoters();
         let pid = profiles.attach(
             &mut tree,
             Profile::new(root, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT),
@@ -1072,7 +1215,7 @@ mod tests {
         stub_current(&mut profiles, pid);
 
         assert_eq!(
-            recompute_resource_events(&tree, &profiles, leaf, None),
+            recompute_resource_events(&tree, &profiles, &promoters, leaf, None),
             ClassSet::CONTENT,
         );
     }

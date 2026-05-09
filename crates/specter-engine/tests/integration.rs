@@ -279,6 +279,7 @@ fn golden_path_full_lifecycle() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
 
@@ -384,6 +385,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, out) = e.attach_sub(req, Instant::now());
     let correlation = first_probe_correlation(&out).expect("Seed probe");
@@ -422,6 +424,7 @@ fn pending_event_race_late_probe_response_discarded() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
     let pid = pid_of(&e, sid);
@@ -470,6 +473,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
     let pid = pid_of(&e, sid);
@@ -514,6 +518,7 @@ fn force_fire_emits_effect_with_forced_true() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
     let pid = pid_of(&e, sid);
@@ -581,6 +586,7 @@ fn step_output_is_sorted() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
     let pid = pid_of(&e, sid);

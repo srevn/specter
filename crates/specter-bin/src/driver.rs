@@ -50,7 +50,7 @@ use crate::loader::Loader;
 use crate::observability::{LogReloadKind, ObservabilityHandle};
 use crossbeam::channel::Select;
 use specter_config::Config;
-use specter_core::{Diagnostic, Input, ProbeOp, StepOutput, SubId};
+use specter_core::{Diagnostic, Input, ProbeOp, StepOutput, SubId, WatchRegistryDiff};
 use specter_engine::Engine;
 use specter_sensor::{DrainWindow, Prober, WakeHandle};
 use std::path::PathBuf;
@@ -305,7 +305,14 @@ impl EngineDriver {
             .map(|(id, r)| (*id, r.name.clone()))
             .collect();
 
-        let out = self.engine.step(Input::ConfigDiff(diff), now);
+        // Wrap the Sub-only diff into a watch-registry diff. Phase 11
+        // upgrades `specter_config::diff` to return `WatchRegistryDiff`
+        // directly, after which this wrapping idiom drops out.
+        let watch_diff = WatchRegistryDiff {
+            subs: diff,
+            ..Default::default()
+        };
+        let out = self.engine.step(Input::ConfigDiff(watch_diff), now);
 
         // Sync loader.ids: drop removed/old-modified ids; look up fresh
         // ids by name for added/modified. `find_by_name` is O(N_subs)

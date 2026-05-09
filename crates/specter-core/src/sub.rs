@@ -6,7 +6,7 @@
 //!
 //! v1 surface is argv-only — no shell variant.
 
-use crate::ids::{ProfileId, ResourceId, SubId};
+use crate::ids::{ProfileId, PromoterId, ResourceId, SubId};
 use crate::scan_config::ScanConfig;
 use compact_str::CompactString;
 use slotmap::SlotMap;
@@ -64,12 +64,22 @@ pub struct SubAttachRequest {
     /// changes how the actuator spawns, not which Profile a Sub
     /// belongs to.
     pub log_output: bool,
+    /// Promoter that synthesised this Sub — `None` for static
+    /// (operator-declared) Subs, `Some(pid)` for dynamic Subs spawned by
+    /// a Promoter's `try_promote`. Routed through the engine's recovery
+    /// fan-out at `on_anchor_terminal_event`: a Profile whose Subs are
+    /// all `Some(_)` reaps wholesale on anchor loss; mixed/static-only
+    /// Profiles preserve the existing recovery channel.
+    pub source_promoter: Option<PromoterId>,
 }
 
 impl SubAttachRequest {
     /// Build a request anchored at a pre-materialized `ResourceId`. The
     /// engine looks up the Resource by id; the request does not carry a
     /// path string.
+    ///
+    /// `source_promoter` defaults to `None` — static attach. Use
+    /// [`Self::for_dynamic`] when a Promoter is the source.
     #[must_use]
     pub const fn for_resource(
         name: String,
@@ -93,6 +103,7 @@ impl SubAttachRequest {
             scope,
             events,
             log_output,
+            source_promoter: None,
         }
     }
 
@@ -101,6 +112,9 @@ impl SubAttachRequest {
     /// immediate Seed and pending descent based on which segments already
     /// exist. `resource` defaults to `ResourceId::default()`; the engine
     /// treats that as the "use the path" signal.
+    ///
+    /// `source_promoter` defaults to `None` — static attach. Use
+    /// [`Self::for_dynamic`] when a Promoter is the source.
     #[must_use]
     pub fn for_path(
         name: String,
@@ -124,7 +138,34 @@ impl SubAttachRequest {
             scope,
             events,
             log_output,
+            source_promoter: None,
         }
+    }
+
+    /// Build a request for a dynamic Sub spawned by a Promoter. Wraps
+    /// [`Self::for_path`] and stamps `source_promoter`. The engine uses the
+    /// stamp at recovery time (`on_anchor_terminal_event`) to distinguish
+    /// all-dynamic Profiles (wholesale teardown) from mixed/static
+    /// Profiles (preserve recovery).
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_dynamic(
+        name: String,
+        path: PathBuf,
+        config: ScanConfig,
+        max_settle: Duration,
+        settle: Duration,
+        command: CommandTemplate,
+        scope: EffectScope,
+        events: ClassSet,
+        log_output: bool,
+        source_promoter: PromoterId,
+    ) -> Self {
+        let mut req = Self::for_path(
+            name, path, config, max_settle, settle, command, scope, events, log_output,
+        );
+        req.source_promoter = Some(source_promoter);
+        req
     }
 }
 
@@ -335,6 +376,11 @@ pub struct Sub {
     /// switches between `Stdio::null()` (false, the default) and
     /// `Stdio::inherit()` (true). Not folded into `config_hash`.
     pub log_output: bool,
+    /// Promoter that synthesised this Sub — `None` for static
+    /// (operator-declared) Subs, `Some(pid)` for dynamic Subs spawned by
+    /// a Promoter's `try_promote`. Read at the engine's recovery
+    /// fan-out (`on_anchor_terminal_event`); never mutated post-attach.
+    pub source_promoter: Option<PromoterId>,
 }
 
 impl Sub {
@@ -342,6 +388,7 @@ impl Sub {
     /// `scope == PerStableFile` OR the template references any diff entry.
     /// Pre-computed once; never re-evaluated.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: SubId,
         name: impl Into<CompactString>,
@@ -352,6 +399,7 @@ impl Sub {
         max_settle: Duration,
         events: ClassSet,
         log_output: bool,
+        source_promoter: Option<PromoterId>,
     ) -> Self {
         let needs_diff = scope == EffectScope::PerStableFile || command.references_diff();
         Self {
@@ -365,6 +413,7 @@ impl Sub {
             needs_diff,
             events,
             log_output,
+            source_promoter,
         }
     }
 }
@@ -503,6 +552,7 @@ mod tests {
             MAX_SETTLE,
             NO_EVENTS,
             false,
+            None,
         );
         assert!(sub.needs_diff);
     }
@@ -519,6 +569,7 @@ mod tests {
             MAX_SETTLE,
             NO_EVENTS,
             false,
+            None,
         );
         assert!(sub.needs_diff);
     }
@@ -535,6 +586,7 @@ mod tests {
             MAX_SETTLE,
             NO_EVENTS,
             false,
+            None,
         );
         assert!(!sub.needs_diff);
     }
@@ -554,6 +606,7 @@ mod tests {
                 MAX_SETTLE,
                 NO_EVENTS,
                 false,
+                None,
             )
         });
 
@@ -578,6 +631,7 @@ mod tests {
                 MAX_SETTLE,
                 NO_EVENTS,
                 false,
+                None,
             )
         });
         let s2 = reg.insert(|id| {
@@ -591,6 +645,7 @@ mod tests {
                 MAX_SETTLE,
                 NO_EVENTS,
                 false,
+                None,
             )
         });
 
@@ -622,6 +677,7 @@ mod tests {
                 MAX_SETTLE,
                 NO_EVENTS,
                 false,
+                None,
             )
         });
         assert_eq!(reg.find_by_name("build"), Some(id));
@@ -648,6 +704,7 @@ mod tests {
                 MAX_SETTLE,
                 NO_EVENTS,
                 false,
+                None,
             )
         });
         reg.remove(id);
@@ -669,6 +726,7 @@ mod tests {
                 MAX_SETTLE,
                 NO_EVENTS,
                 false,
+                None,
             )
         });
         let b = reg.insert(|id| {
@@ -682,6 +740,7 @@ mod tests {
                 MAX_SETTLE,
                 NO_EVENTS,
                 false,
+                None,
             )
         });
         let found = reg.find_by_name("shared").expect("at least one match");
@@ -703,6 +762,7 @@ mod tests {
                 MAX_SETTLE,
                 NO_EVENTS,
                 false,
+                None,
             )
         });
 
@@ -726,6 +786,7 @@ mod tests {
             MAX_SETTLE,
             ClassSet::CONTENT | ClassSet::METADATA,
             false,
+            None,
         );
         assert_eq!(sub.events, ClassSet::CONTENT | ClassSet::METADATA);
     }

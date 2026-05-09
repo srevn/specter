@@ -407,6 +407,7 @@ impl crate::Engine {
             sub_watch_demand(
                 &mut self.tree,
                 &self.profiles,
+                &self.promoters,
                 prefix,
                 ClassSet::STRUCTURE,
                 None,
@@ -444,6 +445,7 @@ impl crate::Engine {
             sub_watch_demand(
                 &mut self.tree,
                 &self.profiles,
+                &self.promoters,
                 prefix,
                 ClassSet::STRUCTURE,
                 None,
@@ -536,6 +538,7 @@ impl crate::Engine {
                 sub_watch_demand(
                     &mut self.tree,
                     &self.profiles,
+                    &self.promoters,
                     prefix,
                     ClassSet::STRUCTURE,
                     None,
@@ -561,6 +564,7 @@ impl crate::Engine {
                 sub_watch_demand(
                     &mut self.tree,
                     &self.profiles,
+                    &self.promoters,
                     prefix,
                     ClassSet::STRUCTURE,
                     None,

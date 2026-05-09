@@ -15,7 +15,9 @@ mod ids;
 mod input;
 mod op;
 mod output;
+mod pattern;
 mod profile;
+mod promoter;
 mod resource;
 mod scan_config;
 mod snapshot;
@@ -27,16 +29,21 @@ pub use diag::{ClaimKind, Diagnostic};
 pub use diff::{Diff, EntryRef, Rename};
 pub use effect::resolve::resolve_effect;
 pub use effect::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome};
-pub use ids::{ProfileId, ResourceId, SubId, TimerId};
-pub use input::{FsEvent, Input, OverflowScope};
+pub use ids::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
+pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};
 pub use op::{
     ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, WatchFailure,
     WatchOp,
 };
 pub use output::StepOutput;
+pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use profile::{
     AnchorClaim, Burst, BurstIntent, BurstPhase, DescentState, Profile, ProfileMap, ProfileState,
     TimerKind,
+};
+pub use promoter::{
+    Promoter, PromoterAttachRequest, PromoterRegistry, PromoterRegistryDiff, PromoterState,
+    ProxyState,
 };
 pub use resource::{Resource, ResourceKind, ResourceRole};
 pub use scan_config::{

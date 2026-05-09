@@ -61,7 +61,8 @@ use crate::coverage::covers;
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use specter_core::{
     ChildEntry, DedupKey, Diagnostic, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
-    ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot, splice,
+    PromoterRegistry, ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree,
+    TreeSnapshot, splice,
 };
 use std::sync::Arc;
 
@@ -161,6 +162,7 @@ pub(crate) fn walk_pair(
     profile_id: ProfileId,
     tree: &mut Tree,
     profiles: &ProfileMap,
+    promoters: &PromoterRegistry,
     out: &mut StepOutput,
 ) {
     // O(1) identity prune at this level.
@@ -183,6 +185,7 @@ pub(crate) fn walk_pair(
                 delete_child(
                     tree,
                     profiles,
+                    promoters,
                     profile,
                     profile_id,
                     current_id,
@@ -205,6 +208,7 @@ pub(crate) fn walk_pair(
             create_child(
                 tree,
                 profiles,
+                promoters,
                 profile,
                 profile_id,
                 current_id,
@@ -233,6 +237,7 @@ pub(crate) fn walk_pair(
                         profile_id,
                         tree,
                         profiles,
+                        promoters,
                         out,
                     );
                 }
@@ -285,6 +290,7 @@ pub(crate) fn graft(
     response_arc: Arc<DirSnapshot>,
     tree: &mut Tree,
     profiles: &mut ProfileMap,
+    promoters: &PromoterRegistry,
     out: &mut StepOutput,
 ) {
     // Anchor threads through `splice` to lock the navigation invariant.
@@ -333,6 +339,7 @@ pub(crate) fn graft(
             profile_id,
             tree,
             profiles,
+            promoters,
             out,
         );
     }
@@ -474,6 +481,7 @@ pub(crate) fn current_target_hash(
 pub(crate) fn delete_child(
     tree: &mut Tree,
     profiles: &ProfileMap,
+    promoters: &PromoterRegistry,
     profile: &Profile,
     profile_id: ProfileId,
     parent: ResourceId,
@@ -495,6 +503,7 @@ pub(crate) fn delete_child(
             delete_child(
                 tree,
                 profiles,
+                promoters,
                 profile,
                 profile_id,
                 resource,
@@ -520,6 +529,7 @@ pub(crate) fn delete_child(
         sub_watch_demand(
             tree,
             profiles,
+            promoters,
             resource,
             profile.events_union,
             Some(profile_id),
@@ -550,6 +560,7 @@ pub(crate) fn delete_child(
 fn create_child(
     tree: &mut Tree,
     profiles: &ProfileMap,
+    promoters: &PromoterRegistry,
     profile: &Profile,
     profile_id: ProfileId,
     parent: ResourceId,
@@ -578,7 +589,7 @@ fn create_child(
         && let Some(sub) = dc.subtree.as_deref()
     {
         walk_pair(
-            None, sub, resource, profile, profile_id, tree, profiles, out,
+            None, sub, resource, profile, profile_id, tree, profiles, promoters, out,
         );
     }
 }
@@ -594,8 +605,8 @@ mod tests {
     use compact_str::CompactString;
     use specter_core::{
         ChildEntry, ClassSet, DedupKey, DirChild, DirMeta, DirSnapshot, EntryKind, LeafEntry,
-        Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubId,
-        Tree, TreeSnapshot, WatchOp,
+        Profile, ProfileMap, PromoterRegistry, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+        StepOutput, SubId, Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -603,6 +614,13 @@ mod tests {
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
+
+    /// Empty promoter registry for `walk_pair` / `graft` test calls.
+    /// Phase 4 reconciler tests exercise Profile-only behaviour; Phase
+    /// 5+ adds Promoter-side coverage with non-empty registries.
+    fn empty_promoters() -> PromoterRegistry {
+        PromoterRegistry::new()
+    }
 
     // ---------------------------------------------------------------------------
     // Fixtures
@@ -702,6 +720,8 @@ mod tests {
                 ("sub", dir_child(2, None)),
             ],
         );
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         walk_pair(
             None,
@@ -711,6 +731,7 @@ mod tests {
             pid,
             &mut tree,
             &profiles,
+            &promoters,
             &mut out,
         );
         assert_eq!(count_watch(&out), 1, "one Watch for the Dir creation");
@@ -730,6 +751,8 @@ mod tests {
                 ("sub", dir_child(2, None)),
             ],
         );
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         walk_pair(
             None,
@@ -739,6 +762,7 @@ mod tests {
             pid,
             &mut tree,
             &profiles,
+            &promoters,
             &mut out,
         );
         assert_eq!(
@@ -759,6 +783,8 @@ mod tests {
         let prior = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         let new = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         assert_eq!(prior.dir_hash(), new.dir_hash());
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         walk_pair(
             Some(&prior),
@@ -768,6 +794,7 @@ mod tests {
             pid,
             &mut tree,
             &profiles,
+            &promoters,
             &mut out,
         );
         assert_eq!(count_watch(&out), 0);
@@ -798,6 +825,8 @@ mod tests {
 
         let prior = dir_snap(root, 100, vec![("sub", dir_child(2, None))]);
         let new = dir_snap(root, 200, vec![]); // bumped root meta to force descent
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         walk_pair(
             Some(&prior),
@@ -807,6 +836,7 @@ mod tests {
             pid,
             &mut tree,
             &profiles,
+            &promoters,
             &mut out,
         );
         assert_eq!(count_unwatch(&out), 1, "Unwatch for the deleted Dir");
@@ -829,6 +859,8 @@ mod tests {
 
         let prior = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         let new = dir_snap(root, 200, vec![]);
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         walk_pair(
             Some(&prior),
@@ -838,6 +870,7 @@ mod tests {
             pid,
             &mut tree,
             &profiles,
+            &promoters,
             &mut out,
         );
         assert_eq!(count_unwatch(&out), 1);
@@ -865,6 +898,8 @@ mod tests {
 
         let prior = dir_snap(root, 100, vec![("foo", dir_child(1, None))]);
         let new = dir_snap(root, 200, vec![("foo", dir_child(2, None))]);
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         walk_pair(
             Some(&prior),
@@ -874,6 +909,7 @@ mod tests {
             pid,
             &mut tree,
             &profiles,
+            &promoters,
             &mut out,
         );
         assert_eq!(count_unwatch(&out), 1);
@@ -894,6 +930,8 @@ mod tests {
         let response = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
         let prior_arc_count = Arc::strong_count(&snap_a);
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -901,6 +939,7 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
+            &promoters,
             &mut out,
         );
         assert_eq!(count_watch(&out), 0);
@@ -918,6 +957,8 @@ mod tests {
         // No prior subtree at target ⇒ graft splices wholesale.
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let response = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -925,6 +966,7 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
+            &promoters,
             &mut out,
         );
         let p = profiles.get(pid).unwrap();
@@ -988,6 +1030,8 @@ mod tests {
         // Probe response: a.rs is gone.
         let response = dir_snap(root, 200, vec![]);
 
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -995,6 +1039,7 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
+            &promoters,
             &mut out,
         );
 
@@ -1037,6 +1082,8 @@ mod tests {
         // forces graft to walk the level rather than equal-hash early-out.
         let response = dir_snap(root, 200, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -1044,6 +1091,7 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
+            &promoters,
             &mut out,
         );
 
@@ -1088,6 +1136,8 @@ mod tests {
         // Probe response deletes a.rs. The reap fires; the purge runs;
         // the Subtree entry should survive.
         let response = dir_snap(root, 200, vec![]);
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -1095,6 +1145,7 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
+            &promoters,
             &mut out,
         );
 
@@ -1158,6 +1209,8 @@ mod tests {
         );
 
         let response = dir_snap(root, 200, vec![]);
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         graft(
             pid_a,
@@ -1165,6 +1218,7 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
+            &promoters,
             &mut out,
         );
 
@@ -1227,6 +1281,8 @@ mod tests {
 
         let response = dir_snap(b_id, 200, vec![]);
 
+        let promoters = empty_promoters();
+
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -1234,6 +1290,7 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
+            &promoters,
             &mut out,
         );
 

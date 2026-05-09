@@ -56,7 +56,15 @@ impl Engine {
         }
 
         if self.tree.get(resource).is_some_and(|r| r.watch_demand > 0) {
-            sub_watch_demand(&mut self.tree, &self.profiles, resource, mask, None, out);
+            sub_watch_demand(
+                &mut self.tree,
+                &self.profiles,
+                &self.promoters,
+                resource,
+                mask,
+                None,
+                out,
+            );
         }
     }
 
@@ -81,6 +89,7 @@ impl Engine {
             sub_watch_demand(
                 &mut self.tree,
                 &self.profiles,
+                &self.promoters,
                 parent,
                 ClassSet::STRUCTURE,
                 None,
@@ -126,6 +135,7 @@ impl Engine {
             sub_watch_demand(
                 &mut self.tree,
                 &self.profiles,
+                &self.promoters,
                 prefix,
                 ClassSet::STRUCTURE,
                 None,
@@ -208,6 +218,7 @@ impl Engine {
                 delete_child(
                     &mut self.tree,
                     &self.profiles,
+                    &self.promoters,
                     profile,
                     pid,
                     anchor,

@@ -29,6 +29,7 @@ fn sub(name: &str, scope: EffectScope, argv: Vec<ArgTemplate>) -> Sub {
         Duration::from_secs(6),
         ClassSet::EMPTY,
         false,
+        None,
     )
 }
 

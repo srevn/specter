@@ -4,6 +4,7 @@ use crate::effect::{DedupKey, EffectOutcome};
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::op::{ProbeResponse, WatchFailure, WatchOp};
 use crate::profile::TimerKind;
+use crate::promoter::PromoterRegistryDiff;
 use crate::sub::SubRegistryDiff;
 
 /// Normalized filesystem event. `kqueue` / `inotify` / `FSEvents` flags
@@ -88,7 +89,7 @@ pub enum Input {
         op: WatchOp,
         failure: WatchFailure,
     },
-    ConfigDiff(SubRegistryDiff),
+    ConfigDiff(WatchRegistryDiff),
     /// Sensor reports it dropped events at the kernel level — the watch
     /// state is intact but the event stream is no longer trustworthy
     /// over `scope`. The engine response is to reseed every Profile in
@@ -109,4 +110,24 @@ pub enum Input {
     SensorOverflow {
         scope: OverflowScope,
     },
+}
+
+/// Hot-reload diff payload for [`Input::ConfigDiff`] — the watch-registry
+/// generalisation that carries both Sub and Promoter changes.
+///
+/// Composes the Sub side ([`SubRegistryDiff`]) and the Promoter side
+/// ([`PromoterRegistryDiff`]). The engine's `on_config_diff` applies
+/// both halves atomically in one step: Sub removals → Sub modifications
+/// → Sub additions → Promoter removals → Promoter modifications →
+/// Promoter additions, all merging into a single sorted [`StepOutput`].
+///
+/// `Default` is derived so call sites that touch only one half can
+/// construct via struct-update syntax: `WatchRegistryDiff { subs,
+/// ..Default::default() }`. Phase 11 wires the config layer's diff
+/// function to return this directly, after which point the wrapping
+/// idiom drops out at every production site.
+#[derive(Clone, Debug, Default)]
+pub struct WatchRegistryDiff {
+    pub subs: SubRegistryDiff,
+    pub promoters: PromoterRegistryDiff,
 }

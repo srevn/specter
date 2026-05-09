@@ -18,7 +18,7 @@ use specter_core::{
     ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp, ProbeOutcome,
     ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    SubAttachRequest, SubRegistryDiff, WatchOp,
+    SubAttachRequest, SubRegistryDiff, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -106,7 +106,13 @@ fn config_diff_add_sub_to_existing_profile() {
         NO_EVENTS,
         false,
     ));
-    let out = e.step(Input::ConfigDiff(diff), now);
+    let out = e.step(
+        Input::ConfigDiff(WatchRegistryDiff {
+            subs: diff,
+            ..Default::default()
+        }),
+        now,
+    );
 
     assert_eq!(e.profiles().get(pid).unwrap().sub_refcount, 2);
     let new_watches = out
@@ -166,7 +172,13 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     // Profile is Idle. Remove via ConfigDiff.
     let mut diff = SubRegistryDiff::default();
     diff.removed.push(sid_a);
-    let out = e.step(Input::ConfigDiff(diff), now);
+    let out = e.step(
+        Input::ConfigDiff(WatchRegistryDiff {
+            subs: diff,
+            ..Default::default()
+        }),
+        now,
+    );
 
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
     assert!(
@@ -235,7 +247,13 @@ fn config_diff_mid_burst_remove_defers_reap() {
     // Mid-burst ConfigDiff: remove A.
     let mut diff = SubRegistryDiff::default();
     diff.removed.push(sid_a);
-    let _ = e.step(Input::ConfigDiff(diff), t1);
+    let _ = e.step(
+        Input::ConfigDiff(WatchRegistryDiff {
+            subs: diff,
+            ..Default::default()
+        }),
+        t1,
+    );
     assert!(
         e.profiles().get(pid).unwrap().reap_pending,
         "reap deferred to burst end",
@@ -347,7 +365,13 @@ fn config_diff_mid_burst_modify_revives_profile() {
             false,
         ),
     ));
-    let out = e.step(Input::ConfigDiff(diff), t1);
+    let out = e.step(
+        Input::ConfigDiff(WatchRegistryDiff {
+            subs: diff,
+            ..Default::default()
+        }),
+        t1,
+    );
 
     let sid_b = e.subs().find_by_name("B").expect("B attached");
     let pid_b = e.subs().get(sid_b).unwrap().profile;
@@ -422,7 +446,13 @@ fn effect_complete_after_detach_drops_silently() {
     // Detach via ConfigDiff.
     let mut diff = SubRegistryDiff::default();
     diff.removed.push(sid);
-    e.step(Input::ConfigDiff(diff), now);
+    e.step(
+        Input::ConfigDiff(WatchRegistryDiff {
+            subs: diff,
+            ..Default::default()
+        }),
+        now,
+    );
 
     // Inject EffectComplete for the now-removed Sub.
     let out = e.step(
@@ -510,7 +540,13 @@ fn config_diff_modified_remove_then_add() {
             false,
         ),
     ));
-    let _out = e.step(Input::ConfigDiff(diff), now);
+    let _out = e.step(
+        Input::ConfigDiff(WatchRegistryDiff {
+            subs: diff,
+            ..Default::default()
+        }),
+        now,
+    );
 
     // Old Profile reaped; new Profile attached with different
     // config_hash. Old SubId no longer in registry; a fresh one was

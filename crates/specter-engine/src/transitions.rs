@@ -20,7 +20,7 @@ use specter_core::{
     AnchorClaim, BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic,
     Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeOutcome, ProbeOwner,
     ProbeResponse, ProfileId, ProfileState, Resource, ResourceId, ResourceKind, StepOutput, SubId,
-    SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp,
+    TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -661,11 +661,21 @@ impl Engine {
 
     /// Dispatch a [`Input::ConfigDiff`].
     ///
-    /// Atomic apply in the order **`removed → modified → added`**. Each
-    /// `removed` decrements its Sub's Profile refcount (reaping the
-    /// Profile if it hits zero, deferring if active); each `modified` is
-    /// a remove-then-add (`config_hash` may change ⇒ different Profile);
-    /// each `added` materializes the anchor and attaches the Sub.
+    /// Atomic apply of the Sub side in the order
+    /// **`removed → modified → added`**. Each `removed` decrements its
+    /// Sub's Profile refcount (reaping the Profile if it hits zero,
+    /// deferring if active); each `modified` is a remove-then-add
+    /// (`config_hash` may change ⇒ different Profile); each `added`
+    /// materializes the anchor and attaches the Sub.
+    ///
+    /// The `WatchRegistryDiff` payload also carries `promoters` for the
+    /// dynamic-watch side; that half is wired in Phase 11. Until then,
+    /// `diff.promoters` is expected to be empty (the bin's diff
+    /// function doesn't yet construct Promoter changes); the engine
+    /// silently ignores any Promoter entries because the registry,
+    /// dispatch tables, and lifecycle helpers don't exist yet. Phase 11
+    /// extends this body with the symmetric Promoter `removed →
+    /// modified → added` apply.
     ///
     /// Parent-edge recompute is **lazy**: each `detach_sub_inner` /
     /// `attach_sub_inner` calls the appropriate
@@ -673,23 +683,24 @@ impl Engine {
     /// merge into a single sorted `StepOutput`.
     pub(crate) fn on_config_diff(
         &mut self,
-        diff: SubRegistryDiff,
+        diff: WatchRegistryDiff,
         now: Instant,
         out: &mut StepOutput,
     ) {
+        let WatchRegistryDiff { subs, promoters: _ } = diff;
         // 1. Removals.
-        for sub_id in diff.removed {
+        for sub_id in subs.removed {
             self.detach_sub_inner(sub_id, now, out);
         }
         // 2. Modifications: remove + add. The Sub being modified may
         // share a Profile or move to a different one (different
         // config_hash).
-        for (sub_id, req) in diff.modified {
+        for (sub_id, req) in subs.modified {
             self.detach_sub_inner(sub_id, now, out);
             let _ = self.attach_sub_inner(req, now, out);
         }
         // 3. Additions.
-        for req in diff.added {
+        for req in subs.added {
             let _ = self.attach_sub_inner(req, now, out);
         }
         // The single-StepOutput sort happens at `step`'s caller.
@@ -1125,6 +1136,7 @@ impl Engine {
                     arc,
                     &mut self.tree,
                     &mut self.profiles,
+                    &self.promoters,
                     out,
                 );
             }
@@ -1340,6 +1352,7 @@ impl Engine {
                     arc,
                     &mut self.tree,
                     &mut self.profiles,
+                    &self.promoters,
                     out,
                 );
             }
@@ -1471,6 +1484,7 @@ impl Engine {
                     arc,
                     &mut self.tree,
                     &mut self.profiles,
+                    &self.promoters,
                     out,
                 );
             }

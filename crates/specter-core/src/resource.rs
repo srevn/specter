@@ -16,8 +16,9 @@
 //! The remaining pure-data fields (`watch_demand`, `suppress_count`,
 //! `events_union`, `role`) are `pub`; the engine writes them directly.
 
-use crate::ids::{ProfileId, ResourceId};
+use crate::ids::{ProfileId, PromoterId, ResourceId};
 use crate::sub::ClassSet;
+use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use string_interner::symbol::SymbolU32;
 use tinyvec::TinyVec;
@@ -28,6 +29,12 @@ pub struct Resource {
     pub(crate) segment: SymbolU32,
     pub(crate) children: BTreeMap<SymbolU32, ResourceId>,
     pub(crate) profiles: TinyVec<[(u64, ProfileId); 1]>,
+    /// Promoter back-ref. Maintained in lockstep with
+    /// `Promoter.proxies` by the engine's promoter-side helpers
+    /// (Phase 5+); empty until then. Inline cap 1 covers the typical
+    /// case: most Resources have zero proxies, and cross-Promoter
+    /// sharing on the same slot is rare.
+    pub(crate) proxy_promoters: SmallVec<[PromoterId; 1]>,
     /// Probed kind of this slot. `ResourceKind::Unknown` is the
     /// pre-classification placeholder — fresh slots created by
     /// `Tree::ensure`, `Tree::vacate`-reset slots, and descent
@@ -128,6 +135,7 @@ impl Resource {
             segment,
             children: BTreeMap::new(),
             profiles: TinyVec::new(),
+            proxy_promoters: SmallVec::new(),
             kind: ResourceKind::Unknown,
             watch_demand: 0,
             suppress_count: 0,
@@ -137,10 +145,15 @@ impl Resource {
     }
 
     /// Slot retention rule: `Tree::try_reap` removes the slot iff this returns `false`.
+    ///
+    /// `proxy_promoters` joins `children`, `profiles`, and the two anchored
+    /// roles as a retention signal: a Resource that backs a live Promoter
+    /// proxy must outlive the proxy.
     #[must_use]
     pub fn has_anchors(&self) -> bool {
         !self.children.is_empty()
             || !self.profiles.is_empty()
+            || !self.proxy_promoters.is_empty()
             || matches!(
                 self.role,
                 ResourceRole::WatchRootParent | ResourceRole::DescentScaffold
@@ -168,6 +181,15 @@ impl Resource {
     #[must_use]
     pub fn profiles(&self) -> &[(u64, ProfileId)] {
         &self.profiles
+    }
+
+    /// Promoter back-references at this slot. Each entry corresponds to a
+    /// live `Promoter.proxies` entry keyed by this Resource. Maintained in
+    /// lockstep by the engine's `register_proxy` / `unregister_proxy`
+    /// helpers (Phase 5+).
+    #[must_use]
+    pub fn proxy_promoters(&self) -> &[PromoterId] {
+        &self.proxy_promoters
     }
 
     /// Probed kind of this slot. `None` means the slot has not yet been
@@ -258,6 +280,20 @@ mod tests {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
         r.profiles.push((42, crate::ids::ProfileId::default()));
         assert!(r.has_anchors());
+    }
+
+    #[test]
+    fn anchored_when_proxy_promoters_present() {
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        r.proxy_promoters.push(crate::ids::PromoterId::default());
+        assert!(r.has_anchors());
+        assert_eq!(r.proxy_promoters().len(), 1);
+    }
+
+    #[test]
+    fn fresh_resource_has_empty_proxy_promoters() {
+        let r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        assert!(r.proxy_promoters().is_empty());
     }
 
     #[test]

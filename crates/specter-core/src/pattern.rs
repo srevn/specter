@@ -1,0 +1,370 @@
+//! Path-pattern parsing for dynamic watches.
+//!
+//! `PatternSpec` carries the canonical source string alongside its
+//! decomposed `Vec<PatternComponent>` and the `literal_prefix_len` —
+//! the number of leading consecutive `Literal` segments (root included).
+//! These two derived fields are a deterministic function of `source`, so
+//! equality and ordering route through `source` alone.
+//!
+//! The parser screens a few invariants beyond glob compilation:
+//! - **Absolute only.** Patterns must begin with `/`.
+//! - **Globstar rejected.** `**` is unsupported in v1 (see plan §20).
+//! - **No empty / `.` / `..` segments.** `//foo`, `/./x`, `/../x` are all
+//!   rejected at parse.
+//! - **No Windows prefix.** A `:` inside any segment fails parse.
+//!
+//! Brace expansion (`{a,b}`) stays as a *single* `Glob` component;
+//! globset compiles it natively. The parser does not enumerate brace
+//! alternatives.
+
+use crate::scan_config::{ConfigError, GlobPattern};
+use compact_str::CompactString;
+
+/// Decomposed glob path pattern. `components.len() >= 2` post-parse — a
+/// synthetic `Literal("/")` at index 0 plus at least one segment.
+///
+/// Equality and ordering are over `source` only; the `components` and
+/// `literal_prefix_len` fields are deterministic functions of `source`
+/// (the parser is pure), so two `PatternSpec`s with equal `source`
+/// strings have byte-equal decompositions.
+#[derive(Clone, Debug)]
+pub struct PatternSpec {
+    source: CompactString,
+    components: Vec<PatternComponent>,
+    literal_prefix_len: usize,
+}
+
+/// One segment of a parsed `PatternSpec`. `Literal` carries the raw
+/// segment name (or `/` for the synthetic root); `Glob` carries the
+/// compiled `globset::GlobMatcher` plus its source.
+///
+/// Brace patterns (`{a,b,c}`) compile to one `Glob` — globset matches
+/// alternatives natively. The parser never enumerates the alternation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PatternComponent {
+    Literal(CompactString),
+    Glob(GlobPattern),
+}
+
+/// Parse / classification errors. Surfaced through the config layer's
+/// `IssueKind::InvalidPattern` (Phase 10); never reaches the engine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PatternError {
+    /// `**` — recursive globbing is unsupported in v1.
+    GlobstarUnsupported,
+    /// `globset::Glob::new` rejected the segment.
+    InvalidGlob { source: String, message: String },
+    /// Empty source string.
+    EmptyPattern,
+    /// Source did not begin with `/`.
+    NonAbsolute,
+    /// `.` or `..` segment.
+    NonCanonical,
+    /// Empty segment between `/`s (e.g., `//foo`, trailing `/`).
+    EmptySegment,
+    /// Windows-style prefix detected (`:` inside a segment).
+    WindowsPrefix,
+}
+
+impl PatternSpec {
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    #[must_use]
+    pub fn components(&self) -> &[PatternComponent] {
+        &self.components
+    }
+
+    /// Count of leading consecutive `Literal` components, root included.
+    /// Always `>= 1` (the synthetic root `/` is `Literal`) and `<` the
+    /// total component count when the spec is dynamic (`is_dynamic` was
+    /// the parse precondition).
+    #[must_use]
+    pub const fn literal_prefix_len(&self) -> usize {
+        self.literal_prefix_len
+    }
+
+    /// Validator dispatch gate: returns `true` iff `source` contains any
+    /// of the four glob discriminator characters: `*`, `?`, `[`, `{`.
+    /// `{` is part of the set so brace patterns route to the dynamic
+    /// parser.
+    ///
+    /// `const fn` so the validator can fold the dispatch decision into
+    /// a `const` context if needed; the byte-by-byte scan avoids the
+    /// non-const `Iterator::any` machinery.
+    #[must_use]
+    pub const fn is_dynamic(source: &str) -> bool {
+        let bytes = source.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if matches!(bytes[i], b'*' | b'?' | b'[' | b'{') {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Parse `source` into a structurally-classified `PatternSpec`.
+    ///
+    /// **Pre-condition.** Caller must screen `source` via
+    /// [`Self::is_dynamic`] returning `true` before invoking this. A pure-
+    /// literal `source` reaches the `debug_assert!` at the end of the
+    /// body and panics in dev. Production callers (the validator's
+    /// dispatch in `specter-config`) always pre-screen.
+    pub fn parse(source: &str) -> Result<Self, PatternError> {
+        if source.is_empty() {
+            return Err(PatternError::EmptyPattern);
+        }
+        if !source.starts_with('/') {
+            return Err(PatternError::NonAbsolute);
+        }
+        if source.contains("**") {
+            return Err(PatternError::GlobstarUnsupported);
+        }
+
+        let parts: Vec<&str> = source[1..].split('/').collect();
+        let mut components: Vec<PatternComponent> = Vec::with_capacity(parts.len() + 1);
+        components.push(PatternComponent::Literal(CompactString::from("/")));
+
+        for part in parts {
+            if part.is_empty() {
+                return Err(PatternError::EmptySegment);
+            }
+            if part == "." || part == ".." {
+                return Err(PatternError::NonCanonical);
+            }
+            if part.contains(':') {
+                return Err(PatternError::WindowsPrefix);
+            }
+            // `is_dynamic` is the canonical predicate for the same byte
+            // set; reusing it here keeps the discriminator definition
+            // single-source.
+            if Self::is_dynamic(part) {
+                let g = GlobPattern::compile(part).map_err(|e| match e {
+                    ConfigError::InvalidGlob { source, message } => {
+                        PatternError::InvalidGlob { source, message }
+                    }
+                })?;
+                components.push(PatternComponent::Glob(g));
+            } else {
+                components.push(PatternComponent::Literal(CompactString::from(part)));
+            }
+        }
+
+        let literal_prefix_len = components
+            .iter()
+            .take_while(|c| matches!(c, PatternComponent::Literal(_)))
+            .count();
+
+        debug_assert!(
+            literal_prefix_len < components.len(),
+            "PatternSpec::parse: pure-literal pattern accepted (caller must \
+             screen via is_dynamic before calling parse)",
+        );
+
+        Ok(Self {
+            source: CompactString::from(source),
+            components,
+            literal_prefix_len,
+        })
+    }
+}
+
+impl PartialEq for PatternSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+
+impl Eq for PatternSpec {}
+
+#[cfg(test)]
+mod tests {
+    use super::{PatternComponent, PatternError, PatternSpec};
+
+    /// `is_dynamic` flips `true` for each of the four discriminator chars
+    /// and stays `false` for plain absolute paths.
+    #[test]
+    fn is_dynamic_flips_on_each_glob_discriminator() {
+        assert!(PatternSpec::is_dynamic("/srv/*/data"));
+        assert!(PatternSpec::is_dynamic("/srv/?/data"));
+        assert!(PatternSpec::is_dynamic("/srv/[a-z]/data"));
+        assert!(PatternSpec::is_dynamic("/srv/{a,b}/data"));
+    }
+
+    #[test]
+    fn is_dynamic_false_for_pure_literal_paths() {
+        assert!(!PatternSpec::is_dynamic("/var/log/myapp"));
+        assert!(!PatternSpec::is_dynamic("/"));
+        assert!(!PatternSpec::is_dynamic(""));
+    }
+
+    /// `parse` produces the synthetic root + segments and computes
+    /// `literal_prefix_len` over the leading consecutive `Literal`s.
+    #[test]
+    fn parse_mixed_pattern_decomposes_components() {
+        let spec = PatternSpec::parse("/srv/staging/*/data/*/log").expect("valid pattern");
+        assert_eq!(spec.components().len(), 7);
+        assert!(matches!(
+            spec.components()[0],
+            PatternComponent::Literal(ref s) if s == "/",
+        ));
+        assert!(matches!(
+            spec.components()[1],
+            PatternComponent::Literal(ref s) if s == "srv",
+        ));
+        assert!(matches!(
+            spec.components()[2],
+            PatternComponent::Literal(ref s) if s == "staging",
+        ));
+        assert!(matches!(spec.components()[3], PatternComponent::Glob(_)));
+        assert!(matches!(
+            spec.components()[4],
+            PatternComponent::Literal(ref s) if s == "data",
+        ));
+        assert!(matches!(spec.components()[5], PatternComponent::Glob(_)));
+        assert!(matches!(
+            spec.components()[6],
+            PatternComponent::Literal(ref s) if s == "log",
+        ));
+        assert_eq!(spec.literal_prefix_len(), 3);
+    }
+
+    #[test]
+    fn parse_leading_glob_has_minimal_literal_prefix() {
+        // Per plan §18.2: `/srv/*/site` ⇒ literal_prefix_len = 2.
+        let spec = PatternSpec::parse("/srv/*/site").expect("valid pattern");
+        assert_eq!(spec.literal_prefix_len(), 2);
+    }
+
+    #[test]
+    fn parse_brace_expansion_stays_one_glob_component() {
+        // Per plan §18.3: brace expansion is one Glob component, not
+        // multiple. globset matches alternatives natively.
+        let spec = PatternSpec::parse("/var/log/{app,system}/access.log").expect("valid pattern");
+        assert_eq!(spec.components().len(), 5);
+        assert_eq!(spec.literal_prefix_len(), 3);
+        assert!(matches!(spec.components()[3], PatternComponent::Glob(_)));
+    }
+
+    #[test]
+    fn parse_rejects_empty() {
+        assert_eq!(PatternSpec::parse(""), Err(PatternError::EmptyPattern));
+    }
+
+    #[test]
+    fn parse_rejects_non_absolute() {
+        assert_eq!(
+            PatternSpec::parse("var/log/*"),
+            Err(PatternError::NonAbsolute),
+        );
+    }
+
+    #[test]
+    fn parse_rejects_globstar() {
+        assert_eq!(
+            PatternSpec::parse("/var/log/**/x"),
+            Err(PatternError::GlobstarUnsupported),
+        );
+    }
+
+    #[test]
+    fn parse_rejects_double_slash_as_empty_segment() {
+        assert_eq!(
+            PatternSpec::parse("//var/log/*"),
+            Err(PatternError::EmptySegment),
+        );
+    }
+
+    #[test]
+    fn parse_rejects_trailing_slash_as_empty_segment() {
+        assert_eq!(
+            PatternSpec::parse("/var/log/*/"),
+            Err(PatternError::EmptySegment),
+        );
+    }
+
+    #[test]
+    fn parse_rejects_dot_segment() {
+        assert_eq!(
+            PatternSpec::parse("/var/./log/*"),
+            Err(PatternError::NonCanonical),
+        );
+    }
+
+    #[test]
+    fn parse_rejects_dotdot_segment() {
+        assert_eq!(
+            PatternSpec::parse("/var/../log/*"),
+            Err(PatternError::NonCanonical),
+        );
+    }
+
+    #[test]
+    fn parse_rejects_windows_prefix() {
+        assert_eq!(
+            PatternSpec::parse("/c:/Users/*"),
+            Err(PatternError::WindowsPrefix),
+        );
+    }
+
+    #[test]
+    fn parse_rejects_invalid_glob_segment() {
+        // Unbalanced `[` triggers globset's parse error.
+        assert!(matches!(
+            PatternSpec::parse("/var/log/[unbalanced"),
+            Err(PatternError::InvalidGlob { .. }),
+        ));
+    }
+
+    /// Per plan §18.11: `/*` is the FS-root pattern. It parses to one
+    /// literal segment (root) plus one glob, with `literal_prefix_len = 1`.
+    #[test]
+    fn parse_accepts_root_glob_pattern() {
+        let spec = PatternSpec::parse("/*").expect("valid pattern");
+        assert_eq!(spec.components().len(), 2);
+        assert_eq!(spec.literal_prefix_len(), 1);
+        assert!(matches!(
+            spec.components()[0],
+            PatternComponent::Literal(ref s) if s == "/",
+        ));
+        assert!(matches!(spec.components()[1], PatternComponent::Glob(_)));
+    }
+
+    /// Per plan §18.12: consecutive globs build a deeper proxy chain.
+    /// literal_prefix_len = 2; subsequent globs at idx 2, 3, etc.
+    #[test]
+    fn parse_consecutive_globs_after_literal_prefix() {
+        let spec = PatternSpec::parse("/data/*/*/log").expect("valid pattern");
+        assert_eq!(spec.components().len(), 5);
+        assert_eq!(spec.literal_prefix_len(), 2);
+        assert!(matches!(spec.components()[2], PatternComponent::Glob(_)));
+        assert!(matches!(spec.components()[3], PatternComponent::Glob(_)));
+        assert!(matches!(
+            spec.components()[4],
+            PatternComponent::Literal(ref s) if s == "log",
+        ));
+    }
+
+    /// `PartialEq` routes through `source` only — equal source strings
+    /// produce byte-equal `PatternSpec`s.
+    #[test]
+    fn equality_routes_through_source() {
+        let a = PatternSpec::parse("/srv/*/data").expect("valid");
+        let b = PatternSpec::parse("/srv/*/data").expect("valid");
+        assert_eq!(a, b);
+    }
+
+    /// Pre-condition contract: caller must pre-screen with `is_dynamic`.
+    /// A pure-literal source reaches the parse-end debug_assert and panics
+    /// in dev.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "pure-literal pattern accepted")]
+    fn parse_debug_asserts_on_pure_literal_source() {
+        let _ = PatternSpec::parse("/var/log/myapp");
+    }
+}

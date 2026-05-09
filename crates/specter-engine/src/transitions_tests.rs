@@ -25,6 +25,7 @@ use specter_core::{
     EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, Placeholder, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileState, ResourceId, ResourceKind,
     ResourceRole, ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
+    WatchRegistryDiff,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -75,6 +76,7 @@ fn engine_with_attached_sub() -> (
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _out) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -205,6 +207,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -260,6 +263,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let now = Instant::now();
     let (sid, _) = e.attach_sub(req, now);
@@ -318,6 +322,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let now = Instant::now();
     let (sid, _) = e.attach_sub(req, now);
@@ -487,6 +492,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid2, out) = e.attach_sub(req, now);
     assert_eq!(e.profiles.get(pid).unwrap().sub_refcount, pre_refcount + 1);
@@ -995,6 +1001,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -1087,6 +1094,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -1475,6 +1483,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::STRUCTURE,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _out) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -1848,6 +1857,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _out) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -1960,6 +1970,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (_sid, out) = e.attach_sub(req, Instant::now());
     let probe_request = out.probe_ops.iter().find_map(|op| match op {
@@ -2422,6 +2433,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let req_b = SubAttachRequest {
         name: "sub-b".into(),
@@ -2639,6 +2651,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             scope: EffectScope::SubtreeRoot,
             events: NO_EVENTS,
             log_output: false,
+            source_promoter: None,
         },
         now,
     );
@@ -2655,6 +2668,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             scope: EffectScope::SubtreeRoot,
             events: NO_EVENTS,
             log_output: false,
+            source_promoter: None,
         },
         now,
     );
@@ -2691,11 +2705,18 @@ fn config_diff_added_only_attaches_subs() {
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let mut diff = specter_core::SubRegistryDiff::default();
     diff.added.push(req);
 
-    let out = e.step(Input::ConfigDiff(diff), Instant::now());
+    let out = e.step(
+        Input::ConfigDiff(WatchRegistryDiff {
+            subs: diff,
+            ..Default::default()
+        }),
+        Instant::now(),
+    );
     assert!(
         out.watch_ops
             .iter()
@@ -2733,7 +2754,13 @@ fn config_diff_removed_then_added_atomic() {
     diff.removed.push(sid_a);
     diff.added.push(req_b);
 
-    let out = e.step(Input::ConfigDiff(diff), Instant::now());
+    let out = e.step(
+        Input::ConfigDiff(WatchRegistryDiff {
+            subs: diff,
+            ..Default::default()
+        }),
+        Instant::now(),
+    );
     // A reaped (sub registry no longer has it); B added.
     assert!(e.subs().get(sid_a).is_none());
     assert_eq!(e.subs().len(), 1);
@@ -2762,6 +2789,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         scope: EffectScope::PerStableFile,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -2902,6 +2930,7 @@ fn per_stable_file_skips_dir_entries() {
         scope: EffectScope::PerStableFile,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -3167,6 +3196,7 @@ fn per_file_effect_target_matches_dedup_key_resource() {
         scope: EffectScope::PerStableFile,
         events: NO_EVENTS,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -3340,6 +3370,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
         scope: EffectScope::PerStableFile,
         events: ClassSet::CONTENT,
         log_output: false,
+        source_promoter: None,
     };
     let (_sid, _) = e.attach_sub(req, now);
     let pid = e.profiles.iter().next().unwrap().0;
@@ -3428,6 +3459,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         scope: EffectScope::PerStableFile,
         events: ClassSet::CONTENT,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs.get(sid).unwrap().profile;
@@ -3449,6 +3481,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         scope: EffectScope::PerStableFile,
         events: ClassSet::CONTENT,
         log_output: false,
+        source_promoter: None,
     };
     let (_sid2, _) = e.attach_sub(req2, Instant::now());
     assert!(e.profiles.get(pid).unwrap().has_per_file_fds);
@@ -3479,6 +3512,7 @@ fn structure_only_profile_has_per_file_fds_false() {
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::STRUCTURE,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, Instant::now());
     let pid = e.subs.get(sid).unwrap().profile;
@@ -3787,6 +3821,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::CONTENT,
         log_output: false,
+        source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
@@ -4381,6 +4416,7 @@ mod props {
             scope: EffectScope::SubtreeRoot,
             events: NO_EVENTS,
             log_output: false,
+            source_promoter: None,
         };
         let (sid, out) = e.attach_sub(req, now);
         let last_correlation = out.probe_ops.iter().find_map(|op| match op {

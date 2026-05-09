@@ -8,6 +8,7 @@ slotmap::new_key_type! {
     pub struct ResourceId;
     pub struct ProfileId;
     pub struct SubId;
+    pub struct PromoterId;
     pub struct TimerId;
 }
 
