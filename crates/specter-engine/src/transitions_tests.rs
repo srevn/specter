@@ -303,7 +303,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
     let mut e = Engine::new();
     let r = e.tree.ensure(None, "anchor", ResourceRole::User);
     // Resource is Unknown ⇒ Profile.kind starts as None. The Seed burst
-    // emits `ProbeRequest::Subtree` per the §2.2 unified-fallback (Subtree
+    // emits `ProbeRequest::Subtree` per the unified fallback (Subtree
     // is the safe default for unclassified anchors). The walker, finding a
     // regular file at the path, replies with `Vanished` in production
     // (kind mismatch). For this test we synthesise an `AnchorOk(leaf)`
@@ -418,7 +418,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
 
 /// `Profile.kind = None` is the `(Some(Dir | Unknown) | None)` fallback
 /// arm in `transition_to_verifying`'s match: an unclassified anchor probes
-/// as `Subtree`, never as `AnchorFile`. The §2.2 unified fallback collapses
+/// as `Subtree`, never as `AnchorFile`. The unified fallback collapses
 /// the prior two-layer defensive defaults (File at the burst site,
 /// Directory at the probe-shape site) into one rule applied at one site.
 /// This test pins the rule for the Standard-burst path; the Seed-burst
@@ -2769,7 +2769,7 @@ fn config_diff_removed_then_added_atomic() {
     assert!(!out.watch_ops.is_empty());
 }
 
-// ---- on_config_diff: promoter half (Phase 11) ----
+// ---- on_config_diff: promoter half ----
 
 fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
     PromoterAttachRequest {
@@ -3016,7 +3016,7 @@ fn config_diff_promoter_removed_with_stale_id_is_silent_noop() {
 /// prefix doesn't exist); reload modifies. Reap unwinds the
 /// PrefixPending state, attach mints a fresh Promoter against the
 /// new pattern (which may or may not be PrefixPending depending on
-/// disk reality). Per §18.14 — the pre-flip state-branch in
+/// disk reality). The pre-flip state-branch in
 /// `reap_promoter_inner` handles the PrefixPending arm cleanly.
 #[test]
 fn config_diff_promoter_modify_during_prefix_pending() {

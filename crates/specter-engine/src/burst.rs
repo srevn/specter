@@ -1770,10 +1770,11 @@ mod tests {
 
     #[test]
     fn event_drives_batching_does_not_suppress_anchor() {
-        // FsEvents at the anchor are excluded from Phase 2: the anchor's
-        // suppress is the existing `start_*_burst → finish_burst_to_idle`
-        // bracket. `start_standard_burst` already bumped the anchor to 1;
-        // additional anchor-targeted events do not bump it further.
+        // FsEvents at the anchor are excluded from suppress bumping: the
+        // anchor's suppress is the existing `start_*_burst →
+        // finish_burst_to_idle` bracket. `start_standard_burst` already
+        // bumped the anchor to 1; additional anchor-targeted events do not
+        // bump it further.
         let (mut e, pid, root, _a, _b) = engine_with_two_children();
         let mut out = StepOutput::default();
         let now = Instant::now();

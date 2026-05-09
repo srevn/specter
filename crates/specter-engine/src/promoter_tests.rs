@@ -11,7 +11,7 @@
 //! - `dispatch_descent_ok` advance + materialise (Promoter owner).
 //! - `dispatch_promoter_enumeration_ok` forward pass (sub-proxy
 //!   registration + final-position promotion).
-//! - `try_promote` dedup ([I-Promoter-5]).
+//! - `try_promote` dedup.
 //! - Event routing: `on_promoter_proxy_event` enqueue + dispatch +
 //!   stale-event diagnostic.
 //! - `dispatch_descent_vanished` rewind (Promoter owner).
@@ -367,8 +367,8 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
 #[test]
 fn try_promote_is_idempotent_on_repeated_match() {
     // Two enumeration cycles (e.g., a parent's StructureChanged refire)
-    // for the same path do NOT mint two dynamic Subs. I-Promoter-5
-    // contains-check gates at try_promote.
+    // for the same path do NOT mint two dynamic Subs. The contains-check
+    // dedup gate fires at try_promote.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
@@ -819,7 +819,7 @@ fn register_proxy_is_idempotent_on_re_registration() {
     );
 }
 
-// ---- Phase 9: pending_enumeration_target lifecycle ----
+// ---- pending_enumeration_target lifecycle ----
 
 #[test]
 fn dispatch_next_enumeration_records_pending_target() {
@@ -918,7 +918,7 @@ fn cancel_owner_probe_clears_pending_enumeration_target() {
     );
 }
 
-// ---- Phase 9: dispatch_promoter_enumeration_vanished cascade ----
+// ---- dispatch_promoter_enumeration_vanished cascade ----
 
 #[test]
 fn enumeration_vanished_unregisters_proxy_and_emits_diagnostic() {
@@ -1059,7 +1059,7 @@ fn enumeration_vanished_cascades_subproxies() {
     );
 }
 
-// ---- Phase 9: dispatch_promoter_enumeration_failed retains state ----
+// ---- dispatch_promoter_enumeration_failed retains state ----
 
 #[test]
 fn enumeration_failed_retains_proxy_state_with_diagnostic() {
@@ -1101,7 +1101,7 @@ fn enumeration_failed_retains_proxy_state_with_diagnostic() {
     );
 }
 
-// ---- Phase 9: reap_promoter ----
+// ---- reap_promoter ----
 
 #[test]
 fn reap_promoter_active_with_proxy_unregisters_and_removes() {
@@ -1282,7 +1282,7 @@ fn reap_promoter_active_with_subproxies_clears_all() {
     );
 }
 
-// ---- Phase 8: recovery split (on_anchor_terminal_event dispatcher) ----
+// ---- recovery split (on_anchor_terminal_event dispatcher) ----
 
 /// Pre-materialise the leaf File slot at `parent_segs/leaf` so the
 /// Promoter's enumeration mints a Sub against an *existing* anchor

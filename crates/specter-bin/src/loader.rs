@@ -72,12 +72,12 @@ impl Loader {
     /// Derive the watcher's deferred-drain window from `current_config`.
     ///
     /// Formula: `min(settle for every static Sub *and* Promoter) / 4`,
-    /// clamped to the audit's `[10ms, 50ms]` band. The floor (`10ms`)
-    /// is below scheduler granularity on every supported platform — a
+    /// clamped to the `[10ms, 50ms]` band. The floor (`10ms`) is below
+    /// scheduler granularity on every supported platform — a
     /// 1ms-settle Profile pays at most ~9ms latency on the second
     /// drain of a sustained burst (the recency gate skips phase 2
     /// entirely for single touches in quiet periods); the ceiling
-    /// (`50ms`) is the audit §3.7 cap.
+    /// (`50ms`) is the cap.
     ///
     /// **Empty `watches` and `promoters`** returns the floor — the
     /// watcher has no FDs so the value is moot, but `Duration::ZERO`
@@ -187,7 +187,7 @@ mod tests {
     }
 
     /// Static-only with default settle (200ms) → 200/4 = 50ms (the
-    /// ceiling). Pre-Phase-10 behaviour preserved.
+    /// ceiling).
     #[test]
     fn derive_drain_window_static_only_uses_static_min() {
         let loader =

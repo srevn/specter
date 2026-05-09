@@ -19,8 +19,6 @@
 //! Promoter→dynamic-Sub→Standard-burst flow into a single
 //! integration test would re-test the well-pinned Standard-burst
 //! arms; cross-cutting value is in the Promoter-specific glue.
-//!
-//! Mirrors plan §19.2 (`promoter_lifecycle.rs`).
 
 #![allow(
     clippy::items_after_statements,
@@ -150,7 +148,7 @@ fn full_lifecycle_attach_promote_descend_seed_reap() {
     let now = Instant::now();
     let (pid, attach_out) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), now);
 
-    // ---- Phase 1: PromoterAttached + initial enumeration probe ----
+    // ---- PromoterAttached + initial enumeration probe ----
     assert!(
         attach_out.diagnostics.iter().any(|d| matches!(
             d,
@@ -177,7 +175,7 @@ fn full_lifecycle_attach_promote_descend_seed_reap() {
         .pending_probe_for(ProbeOwner::Promoter(pid))
         .expect("enumeration probe in flight");
 
-    // ---- Phase 2: enumeration response → promotion ----
+    // ---- enumeration response → promotion ----
     //
     // Inject a directory listing with one *.log match (foo.log) and
     // one non-matching entry (bar.txt). The match promotes; the
@@ -243,7 +241,7 @@ fn full_lifecycle_attach_promote_descend_seed_reap() {
         promote_out.diagnostics,
     );
 
-    // ---- Phase 3: dynamic Sub's anchor descent ----
+    // ---- dynamic Sub's anchor descent ----
     //
     // The dynamic Sub's path `/var/log/foo.log` had its leaf slot
     // freshly minted by `ensure_path` inside `attach_sub_inner`.
@@ -287,7 +285,7 @@ fn full_lifecycle_attach_promote_descend_seed_reap() {
         "Seed burst on a File-anchored Profile emits AnchorFile, not Subtree",
     );
 
-    // ---- Phase 4: Seed-burst baseline establishes; no fire ----
+    // ---- Seed-burst baseline establishes; no fire ----
     //
     // AnchorOk(LeafEntry) on the AnchorFile probe; the engine
     // integrates the leaf as `Profile.current` (the baseline) and
@@ -323,7 +321,7 @@ fn full_lifecycle_attach_promote_descend_seed_reap() {
         );
     }
 
-    // ---- Phase 5: reap Promoter → cascade ----
+    // ---- reap Promoter → cascade ----
     //
     // ConfigDiff with the Promoter id under `removed`. The cascade
     // detaches the dynamic Sub (DynamicSubReaped), unwinds the proxy

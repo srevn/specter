@@ -123,9 +123,7 @@ pub enum Input {
 ///
 /// `Default` is derived so call sites that touch only one half can
 /// construct via struct-update syntax: `WatchRegistryDiff { subs,
-/// ..Default::default() }`. Phase 11 wires the config layer's diff
-/// function to return this directly, after which point the wrapping
-/// idiom drops out at every production site.
+/// ..Default::default() }`.
 #[derive(Clone, Debug, Default)]
 pub struct WatchRegistryDiff {
     pub subs: SubRegistryDiff,

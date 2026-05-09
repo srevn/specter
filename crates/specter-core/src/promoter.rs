@@ -3,8 +3,8 @@
 //! A `Promoter` is a peer to `Profile` in the engine: each one carries a
 //! `PatternSpec`, a literal-prefix probe state, an `Active` proxy fan-out
 //! over matched directories, and a deduplicated map of synthesised
-//! dynamic Subs. The engine drives the lifecycle through a state machine
-//! (Phase 5+); `core::promoter` owns the data shapes and the registry.
+//! dynamic Subs. The engine drives the lifecycle through a state machine;
+//! `core::promoter` owns the data shapes and the registry.
 //!
 //! ## State
 //!
@@ -25,16 +25,16 @@
 //! `Promoter.pending_probe: Option<ProbeCorrelation>` mirrors
 //! `Profile.pending_probe`: at most one outstanding probe per Promoter.
 //! Concurrent enumerations queue via `pending_enumerations`. The slot
-//! discipline is owned by `engine::probe_channel` (Phase 2 already wired
-//! `mint_owner_correlation` / `cancel_owner_probe` against `ProbeOwner`).
+//! discipline is owned by `engine::probe_channel`'s
+//! `mint_owner_correlation` / `cancel_owner_probe` against `ProbeOwner`.
 //!
 //! ## Dynamic Sub deduplication
 //!
-//! `dynamic_subs: BTreeMap<PathBuf, SubId>` enforces I-Promoter-5: at most
-//! one dynamic Sub per `(promoter_id, resolved_path)`. Mutators are the
-//! three sites of I-Promoter-4: `try_promote` (insert with contains
-//! check), `on_dynamic_sub_reaped` (remove on anchor-terminal), and
-//! `reap_promoter_inner` (full drain on Promoter teardown).
+//! `dynamic_subs: BTreeMap<PathBuf, SubId>` enforces at most one dynamic
+//! Sub per `(promoter_id, resolved_path)`. Mutators are three sites:
+//! `try_promote` (insert with contains check), `on_dynamic_sub_reaped`
+//! (remove on anchor-terminal), and `reap_promoter_inner` (full drain on
+//! Promoter teardown).
 
 use crate::ids::{PromoterId, ResourceId, SubId};
 use crate::op::ProbeCorrelation;
@@ -90,8 +90,8 @@ pub struct Promoter {
 
     pub state: PromoterState,
 
-    /// I-Promoter-1: at most one outstanding probe. Slot discipline is
-    /// owned by `engine::probe_channel`'s
+    /// At most one outstanding probe. Slot discipline is owned by
+    /// `engine::probe_channel`'s
     /// `mint_owner_correlation` / `cancel_owner_probe` against
     /// `ProbeOwner::Promoter(_)`.
     pub pending_probe: Option<ProbeCorrelation>,
@@ -112,20 +112,19 @@ pub struct Promoter {
 
     /// Deterministic queue of proxies awaiting enumeration. `BTreeSet` for
     /// stable iteration; insertion is gated on `!already_carries` in
-    /// `register_proxy` (Phase 5+) so re-registration of an already-known
-    /// proxy is structurally idempotent on the queue and the
-    /// per-Resource counter.
+    /// `register_proxy` so re-registration of an already-known proxy is
+    /// structurally idempotent on the queue and the per-Resource counter.
     pub pending_enumerations: BTreeSet<ResourceId>,
 
-    /// `(resolved_path) → SubId`. I-Promoter-4 / I-Promoter-5: three
-    /// documented mutators — `try_promote` (insert with contains check),
+    /// `(resolved_path) → SubId`. Three documented mutators —
+    /// `try_promote` (insert with contains check),
     /// `on_dynamic_sub_reaped` (remove on anchor-terminal), and
     /// `reap_promoter_inner` (full drain).
     pub dynamic_subs: BTreeMap<PathBuf, SubId>,
 
-    /// Fanout-warning latch. Set on the first crossing of the threshold
-    /// (Phase 6+ defines the threshold value); suppresses repeats so
-    /// pathological patterns warn once per Promoter lifetime.
+    /// Fanout-warning latch. Set on the first crossing of the threshold;
+    /// suppresses repeats so pathological patterns warn once per Promoter
+    /// lifetime.
     pub warned_at_threshold: bool,
 }
 
@@ -257,8 +256,8 @@ impl PromoterRegistry {
 
 /// Hot-reload diff for the Promoter side.
 ///
-/// Computed by the TOML loader (Phase 10), consumed via
-/// `Input::ConfigDiff(WatchRegistryDiff)` (Phase 11). Mirrors
+/// Computed by the TOML loader, consumed via
+/// `Input::ConfigDiff(WatchRegistryDiff)`. Mirrors
 /// `SubRegistryDiff`'s shape; `modified` carries the new spec — the
 /// engine wholesale-replaces (`reap_promoter_inner` then
 /// `attach_promoter_inner`) on each entry.
@@ -434,7 +433,7 @@ mod tests {
     }
 
     /// Dynamic Sub dedup map round-trips path → SubId. The map is the
-    /// I-Promoter-5 unique-key store.
+    /// unique-key store.
     #[test]
     fn promoter_dynamic_subs_round_trip() {
         let mut p = build_promoter(PromoterId::default(), "logs", "/var/log/*.log");

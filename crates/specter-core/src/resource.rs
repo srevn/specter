@@ -191,7 +191,7 @@ impl Resource {
     /// Promoter back-references at this slot. Each entry corresponds to a
     /// live `Promoter.proxies` entry keyed by this Resource. Maintained in
     /// lockstep by the engine's `register_proxy` / `unregister_proxy`
-    /// helpers (Phase 5+).
+    /// helpers.
     #[must_use]
     pub fn proxy_promoters(&self) -> &[PromoterId] {
         &self.proxy_promoters

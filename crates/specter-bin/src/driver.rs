@@ -1213,7 +1213,7 @@ mod tests {
         );
     }
 
-    // ===== Phase 12 — diagnostic-driven id reconciliation =====
+    // ===== diagnostic-driven id reconciliation =====
     //
     // The bin's `loader.ids` and `loader.promoter_ids` are populated
     // from `Diagnostic::SubAttached` and `Diagnostic::PromoterAttached`

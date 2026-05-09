@@ -1,4 +1,4 @@
-//! CLOEXEC discipline (§ 1.4 of the inotify port plan).
+//! CLOEXEC discipline.
 //!
 //! The actuator's spawn path uses fork+exec; any fd without `CLOEXEC`
 //! leaks into every spawned command. The watcher's three persistent

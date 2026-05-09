@@ -48,11 +48,10 @@ pub struct Engine {
     pub(crate) tree: Tree,
     pub(crate) profiles: ProfileMap,
     pub(crate) subs: SubRegistry,
-    /// Engine-resident dynamic-watch sources. Empty during Phase 4 (the
-    /// data shapes ship before any lifecycle code references them);
-    /// `recompute_resource_events` accepts a borrow of this field so the
-    /// signature is stable as Phase 5+ wires in actual Promoter
-    /// contributions to per-Resource `events_union`.
+    /// Engine-resident dynamic-watch sources.
+    /// `recompute_resource_events` accepts a borrow of this field so
+    /// Promoter contributions to per-Resource `events_union` join the
+    /// recompute alongside Profile contributions.
     pub(crate) promoters: PromoterRegistry,
     pub(crate) timers: TimerHeap,
     pub(crate) next_correlation: u64,
@@ -275,8 +274,8 @@ impl Engine {
 
         // Insert the Sub. `source_promoter` is `None` for static
         // (operator-declared) attaches and `Some(promoter_id)` for
-        // dynamic attaches synthesised by a Promoter's `try_promote`
-        // (Phase 5+); the request carries the stamp.
+        // dynamic attaches synthesised by a Promoter's `try_promote`;
+        // the request carries the stamp.
         //
         // Capture diagnostic-shaped fields BEFORE the closure consumes
         // `req.name` / `req.source_promoter`. Cheap: a `CompactString`

@@ -13,10 +13,6 @@
 //! cases — Sub + Promoter add together, modify together, remove
 //! together — and the diagnostic-stream contract that the bin
 //! depends on.
-//!
-//! Mirrors plan §19.2 (`promoter_hot_reload.rs`) and §19.3
-//! (extending the existing E2E coverage in
-//! `crates/specter-bin/`).
 
 #![allow(
     clippy::items_after_statements,

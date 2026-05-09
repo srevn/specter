@@ -1,4 +1,4 @@
-//! wd-reuse race mitigation (§ 1.3 of the inotify port plan).
+//! wd-reuse race mitigation.
 //!
 //! When `inotify_rm_watch(wd=N)` is called, the kernel queues
 //! `IN_IGNORED` on the per-instance event queue and frees `N` on the

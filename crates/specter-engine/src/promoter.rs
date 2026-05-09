@@ -93,9 +93,8 @@ impl Engine {
         (pid, out)
     }
 
-    /// Inner attach used by `on_config_diff` (Phase 11) to compose
-    /// multiple detach/attach operations into a single (sorted)
-    /// `StepOutput`.
+    /// Inner attach used by `on_config_diff` to compose multiple
+    /// detach/attach operations into a single (sorted) `StepOutput`.
     ///
     /// Compute-then-insert: the materialisation outcome decides the
     /// initial `PromoterState` shape *before* the registry insert, so
@@ -434,10 +433,9 @@ impl Engine {
     /// proxy's directory is gone.
     ///
     /// Dynamic Subs whose anchor is at or below `r` are NOT cleaned up
-    /// here — they reap via their own anchor-terminal events (Phase
-    /// 8's recovery-split path). The decoupling preserves the
-    /// I-Promoter-4 contract: only enumeration adds, only
-    /// anchor-terminal removes.
+    /// here — they reap via their own anchor-terminal events through the
+    /// recovery-split path. The decoupling preserves the contract that
+    /// only enumeration adds, only anchor-terminal removes.
     pub(crate) fn unregister_proxy_subtree(
         &mut self,
         promoter_id: PromoterId,
@@ -599,7 +597,7 @@ impl Engine {
         _now: Instant,
         out: &mut StepOutput,
     ) {
-        // I-Promoter-1: at most one outstanding probe.
+        // At most one outstanding probe per Promoter.
         if self
             .pending_probe_for(ProbeOwner::Promoter(promoter_id))
             .is_some()
@@ -793,8 +791,8 @@ impl Engine {
     /// [`Self::unregister_proxy_subtree`]. Dynamic Subs anchored
     /// inside the unwound subtree are NOT reaped here — they reap via
     /// their own anchor-terminal events through the recovery-split
-    /// path, preserving I-Promoter-4 (only anchor-terminal removes
-    /// dynamic Subs).
+    /// path, preserving the rule that only anchor-terminal removes
+    /// dynamic Subs.
     ///
     /// `target` comes from `Promoter.pending_enumeration_target`
     /// captured at the response handler's read-borrow window. A
@@ -869,11 +867,10 @@ impl Engine {
 
     /// Mint a dynamic Sub at `promote_path` for `promoter_id`.
     ///
-    /// I-Promoter-4: enumeration ADDS; only anchor-terminal removes.
-    /// I-Promoter-5: at most one dynamic Sub per
-    /// `(promoter_id, resolved_path)` — the contains check below
-    /// gates re-promotion of a path the engine already minted a Sub
-    /// for.
+    /// Enumeration ADDS; only anchor-terminal removes. At most one
+    /// dynamic Sub per `(promoter_id, resolved_path)` — the contains
+    /// check below gates re-promotion of a path the engine already
+    /// minted a Sub for.
     pub(crate) fn try_promote(
         &mut self,
         promoter_id: PromoterId,
@@ -881,7 +878,7 @@ impl Engine {
         observed_kind: EntryKind,
         out: &mut StepOutput,
     ) {
-        // I-Promoter-5: dedup gate.
+        // Dedup gate: one dynamic Sub per `(promoter_id, resolved_path)`.
         let already_present = self
             .promoters
             .get(promoter_id)
@@ -933,7 +930,7 @@ impl Engine {
             return;
         }
 
-        // Register in dedup map (I-Promoter-4 ADD).
+        // Register in dedup map (enumeration ADD).
         if let Some(q) = self.promoters.get_mut(promoter_id) {
             q.dynamic_subs.insert(promote_path.to_path_buf(), sub_id);
         }
@@ -1010,8 +1007,8 @@ impl Engine {
     /// [`Engine::on_anchor_terminal_event`] is unwinding the Profile).
     ///
     /// Removes the `(path → sub_id)` entry from `Promoter.dynamic_subs`
-    /// and emits [`Diagnostic::DynamicSubReaped`]. I-Promoter-4: this is
-    /// one of three documented mutators of `dynamic_subs` (alongside
+    /// and emits [`Diagnostic::DynamicSubReaped`]. This is one of three
+    /// documented mutators of `dynamic_subs` (alongside
     /// [`Self::try_promote`] for inserts and
     /// [`Self::reap_promoter_inner`] for full drains).
     ///
@@ -1050,8 +1047,8 @@ impl Engine {
     /// registry.
     ///
     /// Public entry point. Sole call site outside tests is the
-    /// hot-reload path (Phase 11's `on_config_diff`); the test surface
-    /// uses it directly to exercise teardown.
+    /// hot-reload path (`on_config_diff`); the test surface uses it
+    /// directly to exercise teardown.
     ///
     /// Stale `pid` is a silent no-op (no diagnostic) — mirrors
     /// `cancel_owner_probe` and `detach_sub_inner`'s defensive
@@ -1063,9 +1060,8 @@ impl Engine {
         out
     }
 
-    /// Inner reap used by `on_config_diff` (Phase 11) to compose
-    /// multiple detach/attach operations into a single (sorted)
-    /// [`StepOutput`].
+    /// Inner reap used by `on_config_diff` to compose multiple
+    /// detach/attach operations into a single (sorted) [`StepOutput`].
     ///
     /// Sequence:
     /// 1. Cancel any in-flight probe (descent or enumeration) and

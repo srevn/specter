@@ -497,8 +497,8 @@ mod tests {
 
     /// Pattern source change is a structural modification (different
     /// `pattern_spec.source`); diff surfaces it as `modified`. The
-    /// engine wholesale-replaces, which (per §18.6) drains and re-mints
-    /// dynamic Subs against the new pattern.
+    /// engine wholesale-replaces, which drains and re-mints dynamic
+    /// Subs against the new pattern.
     #[test]
     fn promoter_pattern_change_yields_modified() {
         let old_blocks = [dyn_block("logs", "/var/log/*.log", "echo")];

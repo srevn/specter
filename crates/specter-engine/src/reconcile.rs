@@ -616,8 +616,8 @@ mod tests {
     const MAX_SETTLE: Duration = Duration::from_secs(6);
 
     /// Empty promoter registry for `walk_pair` / `graft` test calls.
-    /// Phase 4 reconciler tests exercise Profile-only behaviour; Phase
-    /// 5+ adds Promoter-side coverage with non-empty registries.
+    /// These reconciler tests exercise Profile-only behaviour;
+    /// Promoter-side coverage uses non-empty registries elsewhere.
     fn empty_promoters() -> PromoterRegistry {
         PromoterRegistry::new()
     }

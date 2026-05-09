@@ -3,10 +3,10 @@
 //! emit of `WatchOp::Watch { kind, path }` and the watcher's
 //! `inotify_add_watch` install.
 //!
-//! Without the [`crate::inotify::ffi::open_o_path`] race-free chain
-//! (per § 1.2 of the inotify port plan), the watcher would install on
-//! the new inode (kind-disagreement) and silently observe events for
-//! the wrong shape. With the chain — `O_PATH` open pins the inode,
+//! Without the [`crate::inotify::ffi::open_o_path`] race-free chain,
+//! the watcher would install on the new inode (kind-disagreement) and
+//! silently observe events for the wrong shape. With the chain —
+//! `O_PATH` open pins the inode,
 //! `fstat` yields the race-stable kind, kind verification rejects on
 //! disagreement — the install fails with [`WatchFailure::Resource`]
 //! (`ENOTDIR`) and the engine reseeds via descent.

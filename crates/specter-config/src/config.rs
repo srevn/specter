@@ -1424,7 +1424,7 @@ mod tests {
         );
     }
 
-    // ---- @-in-name rejection (audit §4.11) ----
+    // ---- @-in-name rejection ----
 
     /// `@` is reserved for the synthesized `<promoter_name>@<resolved_path>`
     /// shape of dynamic Subs. A static [[watch]] with `@` in its name
@@ -1672,7 +1672,7 @@ mod tests {
     }
 
     /// FS-root pattern `/*` parses to a one-segment glob; spec carries
-    /// `literal_prefix_len = 1`. Edge case §18.11.
+    /// `literal_prefix_len = 1`.
     #[test]
     fn fs_root_glob_pattern_accepted() {
         let toml = "[[watch]]\nname = \"root\"\npath = \"/*\"\ncommand = [\"echo\"]";
@@ -1684,8 +1684,8 @@ mod tests {
     /// The static validator's defensive `is_dynamic` re-check fires
     /// only for direct internal callers (tests bypass the dispatcher).
     /// The production dispatch path never lands here. Tested via the
-    /// validator function directly, mirroring the audit's defense-in-
-    /// depth contract.
+    /// validator function directly, mirroring the defense-in-depth
+    /// contract.
     #[test]
     fn static_validator_rejects_glob_path_via_defensive_check() {
         // Construct a `RawWatch` by hand so we bypass the dispatcher.

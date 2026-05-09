@@ -46,7 +46,7 @@ pub enum IssueKind {
     /// Reserved-character violation in the user-supplied `name` field.
     /// Currently emitted when `name` contains `@`, which the engine
     /// reserves for the synthesized `<promoter_name>@<resolved_path>`
-    /// shape of dynamic Subs (audit §4.11). Distinct from
+    /// shape of dynamic Subs. Distinct from
     /// [`Self::Empty`] (empty name) and [`Self::DuplicateName`].
     InvalidName,
     /// `path` of a dynamic `[[watch]]` failed `PatternSpec::parse` —

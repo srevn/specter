@@ -8,7 +8,7 @@
 //!
 //! The parser screens a few invariants beyond glob compilation:
 //! - **Absolute only.** Patterns must begin with `/`.
-//! - **Globstar rejected.** `**` is unsupported in v1 (see plan §20).
+//! - **Globstar rejected.** `**` is unsupported in v1.
 //! - **No empty / `.` / `..` segments.** `//foo`, `/./x`, `/../x` are all
 //!   rejected at parse.
 //! - **No Windows prefix.** A `:` inside any segment fails parse.
@@ -48,7 +48,7 @@ pub enum PatternComponent {
 }
 
 /// Parse / classification errors. Surfaced through the config layer's
-/// `IssueKind::InvalidPattern` (Phase 10); never reaches the engine.
+/// `IssueKind::InvalidPattern`; never reaches the engine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PatternError {
     /// `**` — recursive globbing is unsupported in v1.
@@ -258,15 +258,15 @@ mod tests {
 
     #[test]
     fn parse_leading_glob_has_minimal_literal_prefix() {
-        // Per plan §18.2: `/srv/*/site` ⇒ literal_prefix_len = 2.
+        // `/srv/*/site` ⇒ literal_prefix_len = 2.
         let spec = PatternSpec::parse("/srv/*/site").expect("valid pattern");
         assert_eq!(spec.literal_prefix_len(), 2);
     }
 
     #[test]
     fn parse_brace_expansion_stays_one_glob_component() {
-        // Per plan §18.3: brace expansion is one Glob component, not
-        // multiple. globset matches alternatives natively.
+        // Brace expansion is one Glob component, not multiple. globset
+        // matches alternatives natively.
         let spec = PatternSpec::parse("/var/log/{app,system}/access.log").expect("valid pattern");
         assert_eq!(spec.components().len(), 5);
         assert_eq!(spec.literal_prefix_len(), 3);
@@ -343,8 +343,8 @@ mod tests {
         ));
     }
 
-    /// Per plan §18.11: `/*` is the FS-root pattern. It parses to one
-    /// literal segment (root) plus one glob, with `literal_prefix_len = 1`.
+    /// `/*` is the FS-root pattern. It parses to one literal segment
+    /// (root) plus one glob, with `literal_prefix_len = 1`.
     #[test]
     fn parse_accepts_root_glob_pattern() {
         let spec = PatternSpec::parse("/*").expect("valid pattern");
@@ -357,7 +357,7 @@ mod tests {
         assert!(matches!(spec.components()[1], PatternComponent::Glob(_)));
     }
 
-    /// Per plan §18.12: consecutive globs build a deeper proxy chain.
+    /// Consecutive globs build a deeper proxy chain.
     /// literal_prefix_len = 2; subsequent globs at idx 2, 3, etc.
     #[test]
     fn parse_consecutive_globs_after_literal_prefix() {

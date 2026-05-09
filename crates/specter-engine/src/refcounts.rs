@@ -44,7 +44,7 @@ use specter_core::{
 /// recompute walk is involved. Promoter-side contributions surface
 /// through `sub_watch_demand`'s recompute path (the on-decrement
 /// recompute walks both registries) and by direct `add_watch_demand`
-/// emissions from the Promoter helpers (Phase 5+) that pass
+/// emissions from the Promoter helpers that pass
 /// `ClassSet::STRUCTURE` for the proxy / prefix slot they own.
 ///
 /// Emits `WatchOp::Watch` when:
@@ -116,9 +116,7 @@ pub fn add_watch_demand(
 /// (sources 5a / 5b in [`recompute_resource_events`]). Callers pass
 /// `&self.promoters` after the releasing Promoter's state field has
 /// been flipped (the analogue of the Profile-side flag-clear); the
-/// recompute walks both registries and ORs the union. Phase 4 callers
-/// pass an empty registry, so the second loop is a no-op until Phase
-/// 5+ wires the lifecycle.
+/// recompute walks both registries and ORs the union.
 ///
 /// `releasing_descendant` — when `Some(pid)`, the recompute (multi-
 /// contributor case) skips `pid`'s **descendant** contribution to `r`.
@@ -234,10 +232,9 @@ pub fn sub_watch_demand(
 /// union without depending on `current.is_some()` having flipped (graft
 /// hasn't taken `current` yet at `delete_child` time).
 ///
-/// Promoter contributions — two mutually-exclusive sources (I-Promoter-3),
-/// each gated on `Promoter.state` exhaustively (the discriminator is the
-/// only way the same Promoter could over-contribute to the same
-/// resource):
+/// Promoter contributions — two mutually-exclusive sources, each gated
+/// on `Promoter.state` exhaustively (the discriminator is the only way
+/// the same Promoter could over-contribute to the same resource):
 ///
 /// 5a. **PrefixPending prefix.** `Promoter.state == PrefixPending(d)` AND
 ///     `d.current_prefix == resource` ⇒ contributes `STRUCTURE`. The
@@ -251,7 +248,7 @@ pub fn sub_watch_demand(
 /// Both Promoter sources contribute `STRUCTURE` only — the proxy /
 /// prefix watch's purpose is to discover children appearing or
 /// disappearing. Proxy events route to the Promoter's enumeration
-/// dispatcher (Phase 7), independent of Profile-side bursts.
+/// dispatcher, independent of Profile-side bursts.
 ///
 /// `releasing_descendant` is Profile-only (no Promoter analogue): a
 /// Promoter holds at most one contribution per resource (5a XOR 5b),
@@ -277,8 +274,7 @@ fn recompute_resource_events(
 
 /// Single Promoter's contribution to `resource`'s `events_union`.
 ///
-/// Two mutually-exclusive sources (I-Promoter-3), keyed off
-/// `Promoter.state`:
+/// Two mutually-exclusive sources, keyed off `Promoter.state`:
 /// - **5a. PrefixPending prefix** (state == PrefixPending && d.current_prefix == r) ⇒ STRUCTURE.
 /// - **5b. Active proxy** (state == Active && proxies.contains_key(&r)) ⇒ STRUCTURE.
 ///
@@ -453,9 +449,9 @@ mod tests {
     }
 
     /// Empty promoter registry for `sub_watch_demand` /
-    /// `recompute_resource_events` test calls. Phase 4 unit tests
-    /// exercise Profile-only behaviour; Phase 5+ adds Promoter-side
-    /// recompute coverage with non-empty registries.
+    /// `recompute_resource_events` test calls. These unit tests
+    /// exercise Profile-only behaviour; Promoter-side recompute
+    /// coverage uses non-empty registries elsewhere.
     fn empty_promoters() -> PromoterRegistry {
         PromoterRegistry::new()
     }

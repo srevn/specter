@@ -67,7 +67,8 @@ impl Engine {
 
         // Snapshot the proxy back-ref BEFORE any dispatch — each
         // `on_promoter_proxy_event` mutates Promoter state, and the
-        // Phase 9 cascade (`dispatch_promoter_enumeration_vanished` →
+        // enumeration-vanished cascade
+        // (`dispatch_promoter_enumeration_vanished` →
         // `unregister_proxy_subtree`, parent enumeration's reverse
         // pass) clears the back-ref of co-resident Promoters
         // mid-loop. The snapshot keeps the dispatch list stable across
@@ -712,10 +713,10 @@ impl Engine {
     ///
     /// Sub-side runs first so that any Promoter modification observes
     /// a registry that already reflects the freshly-applied static
-    /// Subs — relevant for the cross-Promoter / static-Sub `Profile`
-    /// dedup in §18.5. Within each kind the order matches the audit:
-    /// removals before additions so a name-recycling rename doesn't
-    /// transiently alias against the old entry.
+    /// Subs — relevant for cross-Promoter / static-Sub `Profile` dedup.
+    /// Within each kind, removals run before additions so a
+    /// name-recycling rename doesn't transiently alias against the old
+    /// entry.
     ///
     /// Parent-edge recompute is **lazy**: each `detach_sub_inner` /
     /// `attach_sub_inner` calls the appropriate
