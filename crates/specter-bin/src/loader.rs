@@ -39,8 +39,8 @@ pub struct Loader {
     /// Rotated alongside `current_config` on every successful reload —
     /// **including the empty-diff branch**, so a re-saved-but-identical
     /// file still updates the stored identity. Without that rotation,
-    /// the auto-reload settle-expiry filter (Phase 4) would observe a
-    /// fresh lstat that differs from the stored value forever, looping
+    /// the auto-reload settle-expiry filter would observe a fresh
+    /// lstat that differs from the stored value forever, looping
     /// `handle_reload` against the same content.
     pub config_meta: FileMeta,
     /// `name → SubId` map for currently-attached static Subs. Threaded

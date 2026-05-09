@@ -52,8 +52,8 @@ pub fn run(cli: Cli) -> ExitCode {
     // handle — closing the startup TOCTOU between the content read
     // and a separate path-level lstat. The captured value seeds
     // `loader.config_meta` and is consulted by the auto-reload settle
-    // filter (subsequent phases) to decide whether a watcher pulse
-    // reflects substantive change.
+    // filter to decide whether a watcher pulse reflects substantive
+    // change.
     let (initial_config, initial_meta) = match Config::from_path_with_meta(&cli.config) {
         Ok(pair) => pair,
         Err(e) => {
@@ -172,6 +172,20 @@ pub fn run(cli: Cli) -> ExitCode {
         wake_handle.clone(),
         drain_window,
     );
+    // Auto-reload pulse channel: hold a cloned sender on the stack
+    // for the engine's lifetime so the engine's `config_event_rx`
+    // keeps a live producer until the watcher backend is wired.
+    // Without it, `drop(chans)` would release the only sender, the
+    // rx would observe Disconnected, and crossbeam's
+    // `Select::ready_timeout` would report that arm as
+    // immediately-ready every tick (busy loop).
+    //
+    // The sender is projected out of `ConfigWatcherSide` (rather than
+    // taken directly from `chans.config_event_tx`) so the bundle and
+    // its single field are both genuinely consumed in production —
+    // matching the eventual `spawn_config_watcher_thread(...)`
+    // call-site that owns the bundle.
+    let _config_event_keepalive = chans.config_watcher_side().config_event_tx;
     drop(chans); // originals release; per-thread clones keep channels alive.
 
     driver.run_initial_attach();

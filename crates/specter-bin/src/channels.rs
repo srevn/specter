@@ -2,16 +2,20 @@
 //!
 //! Senders are cloneable (`Sender<T>: Clone`); receivers move into a
 //! single consumer thread. Per-thread bundles ([`EngineSide`],
-//! [`WatcherSide`], [`ActuatorSide`], [`SignalSide`]) are produced via
-//! `take_*_side` accessors that move the bound receivers and clone the
-//! senders the consumer needs to fan-out into. The [`Channels`] struct
-//! itself is a one-shot dispenser: once every side has been taken, it
-//! can be dropped (the originals release; cloned handles in the threads
-//! keep each channel alive).
+//! [`WatcherSide`], [`ActuatorSide`], [`ConfigWatcherSide`],
+//! [`SignalSide`]) are produced via `take_*_side` (one-shot, panics on
+//! second call) or sibling clone-only accessors ([`Self::signal_side`],
+//! [`Self::config_watcher_side`]) that simply clone the senders their
+//! consumer needs. The [`Channels`] struct itself is a one-shot
+//! dispenser: once every side has been taken, it can be dropped (the
+//! originals release; cloned handles in the threads keep each channel
+//! alive).
 //!
 //! Two-channel inbound (`sensor_in` + `effect_in`) is load-bearing for
-//! drain ordering. `bounded(1)` for shutdown / reload coalesces redundant
-//! signals at the kernel-queue layer.
+//! drain ordering. `bounded(1)` for shutdown / reload / config-event
+//! coalesces redundant signals at the kernel-queue layer — a sustained
+//! editor burst on `config_event` lands as one pulse the driver
+//! debounces via `config_settle_until`, not 1000 redundant try_sends.
 //!
 //! There is no `probe_ops` channel — engine driver calls
 //! `Prober::submit/cancel` directly via an `Arc<dyn Prober>` clone.
@@ -20,7 +24,8 @@ use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
 use specter_core::{Effect, Input, WatchOp};
 
 /// All channel handles for the bin process. Construct once at startup;
-/// drain via the four `take_*_side` accessors; drop (originals release).
+/// drain via the `take_*_side` / clone-side accessors; drop (originals
+/// release).
 #[derive(Debug)]
 pub struct Channels {
     pub sensor_in_tx: Sender<Input>,
@@ -35,6 +40,16 @@ pub struct Channels {
     /// by the signal thread on second SIGINT/SIGTERM within the
     /// `HARD_EXIT_WINDOW`.
     pub hard_shutdown_actuator_tx: Sender<()>,
+    /// Auto-reload pulse channel — the config watcher thread produces
+    /// `()` per kernel event observed for the config file or its
+    /// parent dir; the engine driver consumes via [`EngineSide`] +
+    /// the per-tick drain in `EngineDriver::tick`. `bounded(1)` so a
+    /// sustained editor burst coalesces at the channel layer (the
+    /// driver-side `config_settle_until` deadline does the time-based
+    /// debounce). Distinct from [`Self::reload_signal_tx`] (SIGHUP) so
+    /// SIGHUP retains its immediate-handle semantics — both terminate
+    /// at `EngineDriver::handle_reload`.
+    pub config_event_tx: Sender<()>,
 
     sensor_in_rx: Option<Receiver<Input>>,
     effect_in_rx: Option<Receiver<Input>>,
@@ -44,6 +59,7 @@ pub struct Channels {
     shutdown_engine_rx: Option<Receiver<()>>,
     shutdown_actuator_rx: Option<Receiver<()>>,
     hard_shutdown_actuator_rx: Option<Receiver<()>>,
+    config_event_rx: Option<Receiver<()>>,
 }
 
 /// Receivers + sender clones the engine driver thread owns.
@@ -53,6 +69,10 @@ pub struct EngineSide {
     pub effect_in_rx: Receiver<Input>,
     pub reload_signal_rx: Receiver<()>,
     pub shutdown_engine_rx: Receiver<()>,
+    /// Auto-reload pulse — drained per tick (re-arms
+    /// `config_settle_until`); also wired into the tick's `Select`
+    /// arm so a pulse wakes the driver from a long block.
+    pub config_event_rx: Receiver<()>,
     pub watch_ops_tx: Sender<WatchOp>,
     pub effects_tx: Sender<Effect>,
 }
@@ -71,6 +91,19 @@ pub struct ActuatorSide {
     pub shutdown_actuator_rx: Receiver<()>,
     pub hard_shutdown_actuator_rx: Receiver<()>,
     pub effect_in_tx: Sender<Input>,
+}
+
+/// Sender clone the auto-reload config watcher thread owns. The watcher
+/// is the sole producer (one `try_send` per kernel event observed for
+/// the config file or its parent dir); the engine drains via
+/// [`EngineSide::config_event_rx`].
+///
+/// `_tx` postfix is the workspace convention; the
+/// `struct_field_names` lint is silenced for that reason.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_field_names)]
+pub struct ConfigWatcherSide {
+    pub config_event_tx: Sender<()>,
 }
 
 /// Sender clones the signal thread owns. The signal thread never reads
@@ -100,6 +133,7 @@ impl Channels {
         let (shutdown_engine_tx, shutdown_engine_rx) = bounded(1);
         let (shutdown_actuator_tx, shutdown_actuator_rx) = bounded(1);
         let (hard_shutdown_actuator_tx, hard_shutdown_actuator_rx) = bounded(1);
+        let (config_event_tx, config_event_rx) = bounded(1);
         Self {
             sensor_in_tx,
             effect_in_tx,
@@ -109,6 +143,7 @@ impl Channels {
             shutdown_engine_tx,
             shutdown_actuator_tx,
             hard_shutdown_actuator_tx,
+            config_event_tx,
             sensor_in_rx: Some(sensor_in_rx),
             effect_in_rx: Some(effect_in_rx),
             watch_ops_rx: Some(watch_ops_rx),
@@ -117,6 +152,7 @@ impl Channels {
             shutdown_engine_rx: Some(shutdown_engine_rx),
             shutdown_actuator_rx: Some(shutdown_actuator_rx),
             hard_shutdown_actuator_rx: Some(hard_shutdown_actuator_rx),
+            config_event_rx: Some(config_event_rx),
         }
     }
 
@@ -133,6 +169,10 @@ impl Channels {
                 .expect("engine side already taken"),
             shutdown_engine_rx: self
                 .shutdown_engine_rx
+                .take()
+                .expect("engine side already taken"),
+            config_event_rx: self
+                .config_event_rx
                 .take()
                 .expect("engine side already taken"),
             watch_ops_tx: self.watch_ops_tx.clone(),
@@ -179,6 +219,24 @@ impl Channels {
             shutdown_engine_tx: self.shutdown_engine_tx.clone(),
             shutdown_actuator_tx: self.shutdown_actuator_tx.clone(),
             hard_shutdown_actuator_tx: self.hard_shutdown_actuator_tx.clone(),
+        }
+    }
+
+    /// Clone the config-watcher's outbound sender. Idempotent for the
+    /// same reason as [`Self::signal_side`]: the side bundle is
+    /// clone-only — the watcher is the producer, the engine drains via
+    /// [`EngineSide::config_event_rx`].
+    ///
+    /// Production calls this exactly once (in `App::run`) and either
+    /// hands the bundle to the spawned watcher thread or projects out
+    /// `config_event_tx` as a stack-bound keepalive — either way the
+    /// engine's `config_event_rx` keeps a live producer (a
+    /// disconnected rx would crossbeam-report as immediately-ready
+    /// and busy-loop the tick).
+    #[must_use]
+    pub fn config_watcher_side(&self) -> ConfigWatcherSide {
+        ConfigWatcherSide {
+            config_event_tx: self.config_event_tx.clone(),
         }
     }
 }
@@ -288,6 +346,16 @@ mod tests {
             chans.shutdown_actuator_tx.try_send(()),
             Err(crossbeam::channel::TrySendError::Full(()))
         ));
+
+        // Config-event coalesces redundant pulses at the kernel-queue
+        // layer; a sustained editor burst that fills the slot relies on
+        // the consumer (driver tick) to drain via try_recv before the
+        // next pulse can land.
+        chans.config_event_tx.try_send(()).expect("first slot");
+        assert!(matches!(
+            chans.config_event_tx.try_send(()),
+            Err(crossbeam::channel::TrySendError::Full(()))
+        ));
     }
 
     #[test]
@@ -350,6 +418,50 @@ mod tests {
             sig2.reload_signal_tx.try_send(()),
             Err(crossbeam::channel::TrySendError::Full(()))
         ));
+    }
+
+    #[test]
+    fn config_watcher_side_clones_tx_and_is_idempotent() {
+        let mut chans = Channels::new();
+        // Take the engine side first so we hold a live receiver to assert
+        // delivery against (the second-best test signal — that the
+        // cloned sender talks to the same underlying channel).
+        let engine = chans.take_engine_side();
+
+        let cw1 = chans.config_watcher_side();
+        let cw2 = chans.config_watcher_side();
+        // Both clones target the same `bounded(1)` slot — the second
+        // try_send is Full because the first filled the slot.
+        cw1.config_event_tx.try_send(()).expect("first slot");
+        assert!(matches!(
+            cw2.config_event_tx.try_send(()),
+            Err(crossbeam::channel::TrySendError::Full(()))
+        ));
+        // Engine side observes the pulse — full round-trip across the
+        // cloned sender.
+        engine
+            .config_event_rx
+            .try_recv()
+            .expect("config_event pulse delivered");
+    }
+
+    #[test]
+    fn take_engine_side_moves_config_event_rx() {
+        let mut chans = Channels::new();
+        let engine = chans.take_engine_side();
+        // Receiver has moved out of `chans` — the original slot is None.
+        assert!(chans.config_event_rx.is_none());
+        // The engine-side rx is alive: a sender clone can still talk
+        // to it (the dispenser's original tx held by `chans` keeps the
+        // channel open until `drop(chans)`).
+        let cw = chans.config_watcher_side();
+        cw.config_event_tx
+            .try_send(())
+            .expect("send across channel");
+        engine
+            .config_event_rx
+            .try_recv()
+            .expect("engine receives pulse");
     }
 
     #[test]

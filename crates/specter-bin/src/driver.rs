@@ -12,9 +12,10 @@
 //!   [`EngineDriver::tick`]; returns [`ExitReason::Shutdown`] when the
 //!   shutdown channel signals.
 //! - [`EngineDriver::tick`] is the load-bearing single-iteration body:
-//!   drain sensor → drain timers → drain reload → drain effects →
-//!   block on `Select::ready_timeout` until any source readies (or a
-//!   timer deadline elapses, or shutdown).
+//!   drain sensor → drain timers → drain reload (SIGHUP) → drain
+//!   config-event + apply settle-expiry → drain effects → block on
+//!   `Select::ready_timeout` until any source readies (or a timer
+//!   deadline elapses, or shutdown).
 //!
 //! **Drain order rationale.** Sensor inputs (FsEvents) drain *before*
 //! effect completions because the fire-cycle's post-fire tail
@@ -27,6 +28,22 @@
 //! against an in-flight rebase). Sensor-first preserves the
 //! "fire-tail absorbs concurrent edits" contract documented on
 //! `BurstPhase::Awaiting`.
+//!
+//! **Auto-reload settle pipeline.** The config-event drain re-arms
+//! `config_settle_until` to `now + CONFIG_SETTLE` per pulse — sustained
+//! editor bursts (atomic-save sequences, in-place writes) defer the
+//! reload until quiet. Apply-side: on settle expiry, a single `lstat`
+//! of `config_path` filters phantom pulses (kqueue parent-dir
+//! spillover from sibling writes); on confirmed [`FileMeta`] drift the
+//! driver runs the same [`Self::handle_reload`] SIGHUP uses, so
+//! meta-rotation discipline converges across the two pulse sources.
+//! Config-event drain sits *after* the SIGHUP drain so an in-flight
+//! SIGHUP rotates `loader.config_meta` first — the subsequent
+//! settle-expiry's lstat then compares against the freshly-rotated
+//! identity and silent-drops the redundant edit. Drain sits *before*
+//! effect completions for the same reason as SIGHUP: file I/O latency
+//! lands on this thread, and effect drain stays tight by following
+//! both reload sources.
 //!
 //! `Select::ready_timeout` is a *peek* primitive — the message stays in
 //! its channel and the next iteration's `try_recv` drain re-imposes
@@ -86,6 +103,19 @@ pub enum TickOutcome {
 /// a concern; the next tick re-blocks identically.
 const FOREVER_TIMEOUT: Duration = Duration::from_hours(24);
 
+/// Auto-reload settle window. Each config-event pulse re-arms
+/// `EngineDriver::config_settle_until` to `now + CONFIG_SETTLE`;
+/// quiet for a full window expires the deadline and the driver runs
+/// the lstat-vs-`loader.config_meta` filter (and on drift,
+/// `handle_reload`).
+///
+/// `100ms` covers the editor patterns the design targets — atomic save
+/// (vim, Helix: write-tmp → rename → fsync; ~10–30ms wall) and
+/// in-place modify (`echo > file` ; ~1–5ms per syscall, sustained
+/// bursts well under 100ms). Fixed in v1; not operator-tunable per the
+/// project's "minimal config surface" alpha rule.
+const CONFIG_SETTLE: Duration = Duration::from_millis(100);
+
 /// Engine driver — see module rustdoc.
 pub struct EngineDriver {
     engine: Engine,
@@ -108,18 +138,22 @@ pub struct EngineDriver {
     /// underlying Atomic. Held here so the SIGHUP reload pipeline can
     /// rotate the value alongside `current_config`.
     drain_window: DrainWindow,
-    /// Auto-reload settle deadline — armed when a config-watcher pulse
-    /// arrives, expires after `CONFIG_SETTLE` of quiet, at which point
-    /// the driver runs the lstat-vs-`loader.config_meta` filter and
-    /// (on drift) calls `handle_reload`. Reset to `None` on expiry and
-    /// per-pulse (so a sustained burst defers the reload until the
-    /// edits actually settle).
+    /// Auto-reload settle deadline — armed by the config-event drain
+    /// (the watcher thread's `try_send` or a test rig's manual
+    /// `try_send`), expires after [`CONFIG_SETTLE`] of quiet, at
+    /// which point the driver runs the
+    /// lstat-vs-`loader.config_meta` filter and (on drift) calls
+    /// [`Self::handle_reload`]. Reset to `None` on expiry and
+    /// re-armed per pulse (settle resets, so sustained bursts defer
+    /// the reload until the edits actually settle).
     ///
-    /// Field exists in this phase to lock in the deadline-source shape
-    /// of `tick`'s timeout math; the channel + watcher that arm it
-    /// land in subsequent phases. Until then, the value is `None` and
-    /// the deadline math is structurally identical to the
-    /// single-source form.
+    /// Two consumers:
+    /// - The [`Self::tick`] timeout math feeds the deadline into
+    ///   `Select::ready_timeout` so the driver wakes precisely when
+    ///   the window expires, not on the next sensor / effect pulse.
+    /// - [`Self::apply_config_settle_expiry`] gates the lstat call
+    ///   on `now >= deadline` so the engine thread never lstats
+    ///   before the settle window has elapsed.
     config_settle_until: Option<Instant>,
 }
 
@@ -248,6 +282,20 @@ impl EngineDriver {
             self.handle_reload(now);
         }
 
+        // Drain auto-reload pulses (re-arm settle per pulse), then
+        // check whether the settle window has elapsed and (on
+        // confirmed meta drift) run handle_reload. Order matters:
+        // drain-then-expiry implements "settle resets per pulse" — a
+        // pulse arriving in the same tick as a stale deadline pushes
+        // the deadline forward, so a sustained editor burst keeps
+        // deferring the reload until the edits actually settle.
+        // Inverting (expiry-then-drain) would fire a reload in the
+        // middle of an in-flight burst.
+        while self.sides.config_event_rx.try_recv().is_ok() {
+            self.config_settle_until = Some(now + CONFIG_SETTLE);
+        }
+        self.apply_config_settle_expiry(now);
+
         // Drain effect completions. Disconnect tolerated (engine remains
         // functional against sensor + timers).
         while let Ok(input) = self.sides.effect_in_rx.try_recv() {
@@ -257,9 +305,9 @@ impl EngineDriver {
 
         // Block until any source readies or timer fires. Deadlines come
         // from two independent sources: the engine's internal timer
-        // heap, and (in subsequent phases) the auto-reload settle
-        // window. Both are `Option<Instant>`; `flatten` discards
-        // un-armed sources and `min` picks the soonest.
+        // heap, and the auto-reload settle window. Both are
+        // `Option<Instant>`; `flatten` discards un-armed sources and
+        // `min` picks the soonest.
         let timeout = [self.engine.next_deadline(), self.config_settle_until]
             .into_iter()
             .flatten()
@@ -272,11 +320,78 @@ impl EngineDriver {
         let _i_sensor = sel.recv(&self.sides.sensor_in_rx);
         let _i_effect = sel.recv(&self.sides.effect_in_rx);
         let _i_reload = sel.recv(&self.sides.reload_signal_rx);
+        // Wakes the driver from a long block when a config-event pulse
+        // arrives. The actual pulse handling lives in the per-tick
+        // drain above; this arm is purely for unblocking. The sender
+        // side must remain alive across the block — a Disconnected
+        // rx here would crossbeam-report as immediately-ready and
+        // busy-loop the driver.
+        let _i_config = sel.recv(&self.sides.config_event_rx);
         let i_shutdown = sel.recv(&self.sides.shutdown_engine_rx);
 
         match sel.ready_timeout(timeout) {
             Ok(idx) if idx == i_shutdown => TickOutcome::Shutdown,
             Ok(_) | Err(crossbeam::channel::ReadyTimeoutError) => TickOutcome::Continue,
+        }
+    }
+
+    /// Drive the auto-reload settle deadline forward by one tick.
+    ///
+    /// Called from [`Self::tick`] after the config-event drain. Three
+    /// branches:
+    ///
+    /// - `config_settle_until == None`: nothing armed; no-op.
+    /// - `now < deadline`: still inside the settle window; no-op
+    ///   (the next pulse may push the deadline forward; a future tick
+    ///   will reach `now >= deadline` if the burst goes quiet).
+    /// - `now >= deadline`: clear the deadline, run the lstat filter
+    ///   ([`Self::config_meta_changed`]), and call
+    ///   [`Self::handle_reload`] on drift. The lstat filter is what
+    ///   suppresses no-op pulses — a kqueue parent-dir spillover from
+    ///   a sibling write fires a pulse but doesn't move
+    ///   `loader.config_meta`, so the lstat compares equal and we
+    ///   skip the parse.
+    ///
+    /// `pub(crate)` so unit tests can drive the helper directly with
+    /// a synthetic `now`, avoiding real-time sleeps across the 100ms
+    /// settle window. Production callers go through `tick`, which
+    /// always passes `Instant::now()`.
+    pub(crate) fn apply_config_settle_expiry(&mut self, now: Instant) {
+        let Some(deadline) = self.config_settle_until else {
+            return;
+        };
+        if now < deadline {
+            return;
+        }
+        self.config_settle_until = None;
+        if self.config_meta_changed() {
+            self.handle_reload(now);
+        }
+    }
+
+    /// Cheap (one syscall) lstat-vs-stored-meta compare. Returns `true`
+    /// if the on-disk file's [`FileMeta`] differs from
+    /// `loader.config_meta`, **or** if the lstat itself fails.
+    ///
+    /// Treating an lstat error as "changed" is a defensive choice with
+    /// two desirable properties:
+    ///
+    /// 1. **Recovery semantics.** An ENOENT / EACCES that recovers
+    ///    (operator un-deletes / chmods 644) flips the lstat from `Err`
+    ///    to `Ok`, which is structurally a transition — handle_reload
+    ///    runs on the next pulse and either succeeds (rotation) or
+    ///    fails again (parse-fail; meta NOT rotated; retry on next
+    ///    pulse).
+    /// 2. **Fail-stable.** If the file is permanently unreachable, the
+    ///    next pulse fires a parse attempt that logs and returns
+    ///    early. `loader.config_meta` is preserved across parse-fails,
+    ///    so the next pulse repeats — but we do not loop on our own
+    ///    (`config_settle_until` is consumed regardless), so the
+    ///    error is paced by external pulse rate, not internal spinning.
+    fn config_meta_changed(&self) -> bool {
+        match FileMeta::from_path(&self.config_path) {
+            Ok(m) => m != self.loader.config_meta,
+            Err(_) => true,
         }
     }
 
@@ -297,12 +412,12 @@ impl EngineDriver {
     /// **Meta rotation discipline.** `loader.config_meta` rotates on
     /// **every** successful read — both the empty-diff and the
     /// apply-diff branches — so the auto-reload settle-expiry filter
-    /// (next phase) sees a freshly-stored identity after each reload.
-    /// Skipping the empty-diff rotation would loop the filter against
-    /// the same already-applied edit forever (the lstat reflects the
-    /// post-edit inode but `loader.config_meta` would still hold the
-    /// pre-edit value). Parse-fail does **not** rotate — preserving
-    /// the retry loop until the operator fixes the file.
+    /// sees a freshly-stored identity after each reload. Skipping the
+    /// empty-diff rotation would loop the filter against the same
+    /// already-applied edit forever (the lstat reflects the post-edit
+    /// inode but `loader.config_meta` would still hold the pre-edit
+    /// value). Parse-fail does **not** rotate — preserving the retry
+    /// loop until the operator fixes the file.
     fn handle_reload(&mut self, now: Instant) {
         let Some((new_config, new_meta)) = self.read_and_parse_config() else {
             return;
@@ -372,15 +487,15 @@ impl EngineDriver {
     /// than aborting.
     ///
     /// Sole I/O surface for the reload pipeline — both the SIGHUP path
-    /// and the file-watch path (landing in subsequent phases) call here
-    /// so the failure-handling discipline lives in one place. The
-    /// returned [`FileMeta`] is captured from the same `File` handle
-    /// that produced the bytes ([`Config::from_path_with_meta`]), so a
+    /// and the auto-reload settle-expiry path call here so the
+    /// failure-handling discipline lives in one place. The returned
+    /// [`FileMeta`] is captured from the same `File` handle that
+    /// produced the bytes ([`Config::from_path_with_meta`]), so a
     /// concurrent atomic-save cannot rotate the meta out from under
-    /// the parsed [`Config`]. Callers rotate `loader.config_meta` from
-    /// this value on every successful read — including the empty-diff
-    /// branch, so the auto-reload settle filter doesn't loop on an
-    /// already-applied edit.
+    /// the parsed [`Config`]. Callers rotate `loader.config_meta`
+    /// from this value on every successful read — including the
+    /// empty-diff branch, so the auto-reload settle filter doesn't
+    /// loop on an already-applied edit.
     pub(crate) fn read_and_parse_config(&self) -> Option<(Config, FileMeta)> {
         match Config::from_path_with_meta(&self.config_path) {
             Ok(pair) => Some(pair),
@@ -906,6 +1021,12 @@ mod tests {
         effect_in_tx: Sender<Input>,
         reload_tx: Sender<()>,
         shutdown_tx: Sender<()>,
+        /// Cloned config-event sender. Holding this clone alive in the
+        /// rig keeps the engine's `config_event_rx` connected (otherwise
+        /// `drop(chans)` would release the only sender and the
+        /// driver's `Select` arm would observe Disconnected). Tests
+        /// `try_send(())` here to simulate watcher pulses.
+        config_event_tx: Sender<()>,
     }
 
     fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
@@ -914,6 +1035,7 @@ mod tests {
         let effect_in_tx = chans.effect_in_tx.clone();
         let reload_tx = chans.reload_signal_tx.clone();
         let shutdown_tx = chans.shutdown_engine_tx.clone();
+        let config_event_tx = chans.config_event_tx.clone();
         let actuator_side = chans.take_actuator_side();
         let watcher_side = chans.take_watcher_side();
         let engine_side = chans.take_engine_side();
@@ -959,6 +1081,7 @@ mod tests {
             effect_in_tx,
             reload_tx,
             shutdown_tx,
+            config_event_tx,
         }
     }
 
@@ -1722,11 +1845,11 @@ mod tests {
     /// `read_and_parse_config` on a valid file returns
     /// `Some((Config, FileMeta))` with the parsed `[[watch]]` blocks
     /// populated and `FileMeta` matching the on-disk lstat. Pins the
-    /// helper's happy-path contract — the SIGHUP path and the
-    /// auto-reload path (landing in later phases) both rely on this
-    /// signature, and the meta-rotation discipline in `handle_reload`
-    /// depends on the captured value being lstat-equivalent in the
-    /// absence of concurrent edits.
+    /// helper's happy-path contract — both the SIGHUP and the
+    /// auto-reload settle-expiry paths rely on this signature, and the
+    /// meta-rotation discipline in `handle_reload` depends on the
+    /// captured value being lstat-equivalent in the absence of
+    /// concurrent edits.
     #[test]
     fn read_and_parse_config_returns_some_on_valid_file() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1872,7 +1995,7 @@ command   = ["true"]
         assert_eq!(
             rig.driver.loader.config_meta, expected_meta,
             "empty-diff reload rotates loader.config_meta — \
-             skipping rotation here would loop the Phase-4 settle filter",
+             skipping rotation here would loop the auto-reload settle filter",
         );
         // Confirm the empty-diff branch ran (loader state unchanged
         // semantically — same config, same ids, same SubIds).
@@ -1951,5 +2074,382 @@ command   = ["true"]
             "PromoterAttached overwrites the cleared entry by name",
         );
         assert_eq!(loader.promoter_ids.len(), 1);
+    }
+
+    // ===== Auto-reload settle pipeline =====
+    //
+    // Tests below exercise the `config_event` channel + `tick`'s drain
+    // step + the `apply_config_settle_expiry` helper end-to-end, with
+    // pulses driven by hand (no watcher backend wired yet). The helper
+    // takes an explicit `now: Instant` so tests can span the 100 ms
+    // settle window deterministically without sleeping.
+
+    /// `tick`'s config-event drain converts a pulse into an armed
+    /// settle deadline. Settle window = `now + CONFIG_SETTLE` (100 ms),
+    /// so the freshly-armed deadline lies in the future relative to
+    /// the tick's `Instant::now()`.
+    #[test]
+    fn config_event_pulse_via_tick_arms_settle_window() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        let config = Config::from_str("").expect("empty config parses");
+        let mut rig = rig_for(config, cfg_path);
+
+        let before_tick = Instant::now();
+        rig.config_event_tx.try_send(()).expect("pulse send");
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        rig.driver.tick();
+
+        let armed = rig
+            .driver
+            .config_settle_until
+            .expect("settle armed by drain");
+        // Lower bound: the tick captured `now` at-or-after `before_tick`,
+        // so the armed deadline is at-or-after `before_tick + 100ms`.
+        assert!(
+            armed >= before_tick + Duration::from_millis(100),
+            "armed deadline must be at least CONFIG_SETTLE in the future",
+        );
+        // Upper bound (sanity): the deadline isn't far in the future
+        // (allow a generous 1 s slack for slow CI).
+        assert!(
+            armed <= Instant::now() + Duration::from_secs(1),
+            "armed deadline shouldn't drift more than a second past now",
+        );
+    }
+
+    /// Settle resets per pulse. Two consecutive ticks each draining a
+    /// pulse push the deadline strictly forward — a sustained editor
+    /// burst defers the reload window until quiet.
+    #[test]
+    fn repeat_config_pulses_via_tick_defer_settle_expiry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        let config = Config::from_str("").expect("empty config parses");
+        let mut rig = rig_for(config, cfg_path);
+
+        rig.config_event_tx.try_send(()).expect("first pulse");
+        rig.driver.tick();
+        let t1 = rig.driver.config_settle_until.expect("first settle armed");
+
+        // Yield enough time for `Instant::now()` to advance — `tick()`
+        // captures `now` afresh per call, so we just need a measurable
+        // delta. Sleeping `2 ms` is well within scheduler granularity
+        // on every supported platform.
+        std::thread::sleep(Duration::from_millis(2));
+
+        rig.config_event_tx.try_send(()).expect("second pulse");
+        rig.driver.tick();
+        let t2 = rig.driver.config_settle_until.expect("second settle armed");
+
+        assert!(
+            t2 > t1,
+            "second pulse defers the deadline (t1={t1:?}, t2={t2:?})",
+        );
+    }
+
+    /// Helper short-circuits when no pulse has armed the deadline.
+    /// Pre-pulse state must remain unchanged (no spurious reload).
+    #[test]
+    fn apply_config_settle_expiry_no_op_when_unarmed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        let config = Config::from_str("").expect("empty config parses");
+        let mut rig = rig_for(config.clone(), cfg_path);
+
+        let snapshot_meta = rig.driver.loader.config_meta;
+        rig.driver.apply_config_settle_expiry(Instant::now());
+
+        assert_eq!(rig.driver.config_settle_until, None);
+        assert_eq!(
+            rig.driver.loader.config_meta, snapshot_meta,
+            "unarmed expiry must not touch loader.config_meta",
+        );
+        assert_eq!(rig.driver.loader.current_config, config);
+    }
+
+    /// Helper short-circuits when `now < deadline`. Deadline stays
+    /// armed so a future tick (after the window elapses) can fire it.
+    #[test]
+    fn apply_config_settle_expiry_no_op_within_window() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        let config = Config::from_str("").expect("empty config parses");
+        let mut rig = rig_for(config, cfg_path);
+
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(50);
+        rig.driver.config_settle_until = Some(deadline);
+
+        rig.driver.apply_config_settle_expiry(now);
+
+        assert_eq!(
+            rig.driver.config_settle_until,
+            Some(deadline),
+            "in-window call must not clear the deadline",
+        );
+    }
+
+    /// `now == deadline` is the boundary case for the `>=` test in the
+    /// helper. The deadline is consumed (cleared); the lstat filter
+    /// then runs and (against an unchanged file) silent-drops.
+    #[test]
+    fn apply_config_settle_expiry_fires_at_exact_deadline() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        // Empty config on disk so the lstat capture has a real meta to
+        // compare against.
+        std::fs::write(&cfg_path, "").unwrap();
+        let config = Config::from_str("").expect("empty config parses");
+        let real_meta = FileMeta::from_path(&cfg_path).expect("lstat ok");
+
+        let mut rig = rig_for(config, cfg_path);
+        rig.driver.loader.config_meta = real_meta;
+
+        let deadline = Instant::now();
+        rig.driver.config_settle_until = Some(deadline);
+
+        rig.driver.apply_config_settle_expiry(deadline);
+
+        assert_eq!(
+            rig.driver.config_settle_until, None,
+            "exact-deadline match clears the slot",
+        );
+        assert_eq!(
+            rig.driver.loader.config_meta, real_meta,
+            "lstat agreed with stored meta — no reload, meta unchanged",
+        );
+    }
+
+    /// Settle expiry whose lstat agrees with `loader.config_meta`
+    /// silently drops the pulse: no `handle_reload`, no parse, no log
+    /// (beyond TRACE). This is the kqueue-parent-spillover case — a
+    /// sibling write fires a pulse, settle expires, lstat shows the
+    /// config file is unchanged → skip.
+    #[test]
+    fn apply_config_settle_expiry_skips_reload_on_unchanged_meta() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        let cfg_text = format!(
+            r#"
+[[watch]]
+name      = "build"
+path      = "{}"
+command   = ["true"]
+"#,
+            tmp.path().display(),
+        );
+        std::fs::write(&cfg_path, &cfg_text).unwrap();
+        let real_meta = FileMeta::from_path(&cfg_path).expect("lstat ok");
+        let initial = Config::from_str(&cfg_text).expect("v1 parses");
+
+        let mut rig = rig_for(initial.clone(), cfg_path);
+        // Seed loader.config_meta to the real on-disk lstat so the
+        // helper's `m != self.loader.config_meta` returns false.
+        rig.driver.loader.config_meta = real_meta;
+        rig.driver.run_initial_attach();
+        let ids_snapshot: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
+
+        // Fire expiry with a `now` past the deadline — helper takes the
+        // `now >= deadline` branch.
+        let deadline = Instant::now();
+        rig.driver.config_settle_until = Some(deadline);
+        rig.driver
+            .apply_config_settle_expiry(deadline + Duration::from_millis(1));
+
+        // Settle slot consumed even on a silent drop (the deadline was
+        // serviced; future pulses arm a fresh window).
+        assert_eq!(rig.driver.config_settle_until, None);
+        // No reload ⇒ loader state untouched.
+        assert_eq!(
+            rig.driver.loader.config_meta, real_meta,
+            "silent-drop does not rotate config_meta",
+        );
+        assert_eq!(
+            rig.driver.loader.current_config, initial,
+            "silent-drop does not rotate current_config",
+        );
+        let ids_after: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
+        assert_eq!(
+            ids_snapshot, ids_after,
+            "silent-drop does not perturb attached Sub ids",
+        );
+    }
+
+    /// Settle expiry whose lstat detects drift (file was edited)
+    /// triggers `handle_reload`, which rotates `loader.config_meta`
+    /// and `loader.current_config`. The end-to-end gate for the
+    /// drift-driven auto-reload path.
+    #[test]
+    fn apply_config_settle_expiry_triggers_reload_on_meta_drift() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        let v1_text = format!(
+            r#"
+[[watch]]
+name      = "a"
+path      = "{}"
+command   = ["true"]
+"#,
+            tmp.path().display(),
+        );
+        std::fs::write(&cfg_path, &v1_text).unwrap();
+        let v1_meta = FileMeta::from_path(&cfg_path).expect("v1 lstat ok");
+        let v1_config = Config::from_str(&v1_text).expect("v1 parses");
+
+        let mut rig = rig_for(v1_config, cfg_path.clone());
+        rig.driver.loader.config_meta = v1_meta;
+        rig.driver.run_initial_attach();
+        assert_eq!(rig.driver.loader.ids.len(), 1);
+        assert!(rig.driver.loader.ids.contains_key("a"));
+
+        // Edit the file — atomic write replaces inode; mtime/ctime move.
+        let v2_text = format!(
+            r#"
+[[watch]]
+name      = "a"
+path      = "{0}"
+command   = ["true"]
+
+[[watch]]
+name      = "b"
+path      = "{0}"
+command   = ["true"]
+"#,
+            tmp.path().display(),
+        );
+        // Sleep briefly so the FS-resolved mtime/ctime tick at least
+        // one nanosecond past `v1_meta` even on coarse-resolution FSs.
+        std::thread::sleep(Duration::from_millis(10));
+        std::fs::write(&cfg_path, &v2_text).unwrap();
+        let v2_lstat = FileMeta::from_path(&cfg_path).expect("v2 lstat ok");
+        assert_ne!(
+            v1_meta, v2_lstat,
+            "v2 must lstat-differ from v1 — otherwise the helper's filter \
+             can't drive the reload",
+        );
+
+        // Force settle expiry.
+        let deadline = Instant::now();
+        rig.driver.config_settle_until = Some(deadline);
+        rig.driver
+            .apply_config_settle_expiry(deadline + Duration::from_millis(1));
+
+        // Reload happened: settle consumed, meta rotated to the
+        // post-edit identity, config now has v2's "b" watch.
+        assert_eq!(rig.driver.config_settle_until, None);
+        assert_eq!(
+            rig.driver.loader.config_meta, v2_lstat,
+            "drift-driven reload rotated config_meta to the v2 lstat",
+        );
+        assert!(
+            rig.driver.loader.ids.contains_key("a"),
+            "v2 still has watch 'a' — preserved across reload",
+        );
+        assert!(
+            rig.driver.loader.ids.contains_key("b"),
+            "v2's added watch 'b' attached during reload",
+        );
+        assert_eq!(rig.driver.loader.current_config.watches.len(), 2);
+    }
+
+    /// Lstat error (file missing, EACCES, etc.) routes through the
+    /// "treat-as-changed" branch: helper calls `handle_reload`, which
+    /// fails to read, logs, and preserves loader state. The settle
+    /// slot is consumed (no internal looping); the next pulse fires
+    /// a fresh attempt.
+    #[test]
+    fn apply_config_settle_expiry_treats_missing_path_as_changed() {
+        // Path that cannot be lstat'd: `/dev/null` is a character
+        // device, so `lstat("/dev/null/no/such")` returns ENOTDIR.
+        let cfg_path = PathBuf::from("/dev/null/no/such/file.toml");
+        let config = Config::from_str("").expect("empty config parses");
+        let mut rig = rig_for(config.clone(), cfg_path);
+        let pre_meta = rig.driver.loader.config_meta;
+
+        let deadline = Instant::now();
+        rig.driver.config_settle_until = Some(deadline);
+        rig.driver
+            .apply_config_settle_expiry(deadline + Duration::from_millis(1));
+
+        // Settle slot is consumed even when lstat fails — the helper
+        // doesn't loop on its own; the next external pulse arms a
+        // fresh window.
+        assert_eq!(rig.driver.config_settle_until, None);
+        // Parse-fail preserves loader state across the failed reload
+        // attempt — the parse-fail invariant carries through the
+        // settle-expiry path verbatim (handle_reload's failure
+        // handling is the single source of truth across SIGHUP and
+        // auto-reload alike).
+        assert_eq!(
+            rig.driver.loader.config_meta, pre_meta,
+            "parse-fail must not rotate meta — would suppress retry pulses",
+        );
+        assert_eq!(rig.driver.loader.current_config, config);
+    }
+
+    /// End-to-end gate: pulse → tick (drain arms settle) →
+    /// helper-driven expiry → reload runs against drift. Pins the
+    /// drain step's interaction with the helper without spinning
+    /// 100 ms of real time.
+    #[test]
+    fn pulse_then_helper_expiry_runs_full_pipeline_on_drift() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        let v1_text = format!(
+            r#"
+[[watch]]
+name      = "a"
+path      = "{}"
+command   = ["true"]
+"#,
+            tmp.path().display(),
+        );
+        std::fs::write(&cfg_path, &v1_text).unwrap();
+        let v1_meta = FileMeta::from_path(&cfg_path).expect("v1 lstat ok");
+        let v1_config = Config::from_str(&v1_text).expect("v1 parses");
+
+        let mut rig = rig_for(v1_config, cfg_path.clone());
+        rig.driver.loader.config_meta = v1_meta;
+        rig.driver.run_initial_attach();
+
+        // Edit the file.
+        std::thread::sleep(Duration::from_millis(10));
+        let v2_text = format!(
+            r#"
+[[watch]]
+name      = "a"
+path      = "{0}"
+command   = ["true"]
+
+[[watch]]
+name      = "b"
+path      = "{0}"
+command   = ["true"]
+"#,
+            tmp.path().display(),
+        );
+        std::fs::write(&cfg_path, &v2_text).unwrap();
+
+        // Drain arms settle.
+        rig.config_event_tx.try_send(()).expect("pulse send");
+        rig.driver.tick();
+        let armed = rig.driver.config_settle_until.expect("drain armed settle");
+
+        // Force-expire via the helper. (Skirts the 100ms wall-clock
+        // wait that an end-to-end-with-tick test would need; the
+        // helper's contract is identical regardless of who calls it.)
+        rig.driver
+            .apply_config_settle_expiry(armed + Duration::from_millis(1));
+
+        assert_eq!(rig.driver.config_settle_until, None);
+        assert!(
+            rig.driver.loader.ids.contains_key("b"),
+            "drift-driven reload attached the new watch",
+        );
+        assert_ne!(
+            rig.driver.loader.config_meta, v1_meta,
+            "post-reload meta must differ from the pre-edit identity",
+        );
     }
 }
