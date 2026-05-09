@@ -12,10 +12,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const DEFAULT_SETTLE_MS: u64 = 200;
-const SETTLE_FACTOR: u64 = 60;
-const MAX_SETTLE_FLOOR_FACTOR: u64 = 4;
-const MAX_SETTLE_CEIL_MS: u64 = 3_600_000;
+/// Default debounce window when `[[watch]] settle` is omitted.
+pub(crate) const DEFAULT_SETTLE: Duration = Duration::from_millis(200);
+/// Default forced-fire deadline when `[[watch]] max_settle` is omitted.
+/// Flat 1 hour, independent of `settle` — if the tree stays active for an
+/// hour, the user's workflow is outside Specter's scope; manual triggering
+/// is the better answer.
+pub(crate) const DEFAULT_MAX_SETTLE: Duration = Duration::from_hours(1);
+/// Lower bound on `max_settle` relative to `settle`. Catches the swap
+/// typo (`settle = "1h"`, `max_settle = "200ms"`) and the semantic
+/// nonsense of `max_settle ≤ settle` (a single settle round would
+/// already exceed it).
+const MAX_SETTLE_FLOOR_FACTOR: u32 = 4;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
@@ -526,51 +534,53 @@ fn validate_command(
     }
 }
 
-/// Validate `settle_ms` / `max_settle_ms`. Returns `(settle_ms,
-/// max_settle_ms)` always — invalid values flow through with their
-/// raw value so a downstream `Duration::from_millis` doesn't panic;
-/// the issues are collected for surfacing to the operator.
+/// Validate `settle` / `max_settle`. Returns `(settle, max_settle)`
+/// always — invalid values flow through with their raw value so the
+/// caller can carry on collecting field-level errors; the issues are
+/// surfaced to the operator on the error path.
+///
+/// - `settle` defaults to [`DEFAULT_SETTLE`] when omitted; rejected
+///   with [`IssueKind::SettleTooSmall`] when zero.
+/// - `max_settle` defaults to [`DEFAULT_MAX_SETTLE`] (a flat 1h) when
+///   omitted; rejected with [`IssueKind::MaxSettleTooSmall`] when below
+///   `4 × settle`. There is no upper bound — Instant arithmetic at the
+///   engine layer handles values up to many years; humantime input
+///   format makes magnitude typos obvious at the source.
 fn validate_settle(
     idx: usize,
-    raw_settle_ms: Option<u64>,
-    raw_max_settle_ms: Option<u64>,
+    raw_settle: Option<Duration>,
+    raw_max_settle: Option<Duration>,
     errors: &mut Vec<ValidationIssue>,
-) -> (u64, u64) {
-    let settle_ms = raw_settle_ms.unwrap_or(DEFAULT_SETTLE_MS);
-    if settle_ms == 0 {
+) -> (Duration, Duration) {
+    let settle = raw_settle.unwrap_or(DEFAULT_SETTLE);
+    if settle.is_zero() {
         errors.push(ValidationIssue::new(
             Some(idx),
-            "settle_ms",
+            "settle",
             IssueKind::SettleTooSmall,
-            "settle_ms must be ≥ 1".to_owned(),
+            "settle must be > 0".to_owned(),
         ));
     }
-    let max_settle_ms = match raw_max_settle_ms {
+    let max_settle = match raw_max_settle {
         Some(v) => {
-            let floor = MAX_SETTLE_FLOOR_FACTOR.saturating_mul(settle_ms);
+            let floor = settle.saturating_mul(MAX_SETTLE_FLOOR_FACTOR);
             if v < floor {
                 errors.push(ValidationIssue::new(
                     Some(idx),
-                    "max_settle_ms",
+                    "max_settle",
                     IssueKind::MaxSettleTooSmall,
-                    format!("max_settle_ms ({v}) must be ≥ 4 × settle_ms ({floor})"),
-                ));
-            }
-            if v > MAX_SETTLE_CEIL_MS {
-                errors.push(ValidationIssue::new(
-                    Some(idx),
-                    "max_settle_ms",
-                    IssueKind::MaxSettleTooLarge,
-                    format!("max_settle_ms ({v}) must be ≤ {MAX_SETTLE_CEIL_MS} (1 hour)"),
+                    format!(
+                        "max_settle ({}) must be ≥ 4 × settle ({})",
+                        humantime::format_duration(v),
+                        humantime::format_duration(floor),
+                    ),
                 ));
             }
             v
         }
-        None => settle_ms
-            .saturating_mul(SETTLE_FACTOR)
-            .min(MAX_SETTLE_CEIL_MS),
+        None => DEFAULT_MAX_SETTLE,
     };
-    (settle_ms, max_settle_ms)
+    (settle, max_settle)
 }
 
 /// Validate `scope`. Returns `Some(EffectScope)` on success; `None`
@@ -706,8 +716,7 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
     };
 
     let command = validate_command(idx, &raw.command, &mut errors);
-    let (settle_ms, max_settle_ms) =
-        validate_settle(idx, raw.settle_ms, raw.max_settle_ms, &mut errors);
+    let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
     let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
     // Parse `events` after scope so the default resolver can read
     // scope. If scope itself failed validation, fall back to the
@@ -731,8 +740,8 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
         path: path.expect("path validated"),
         command: command.expect("command validated"),
         scope: scope.expect("scope validated"),
-        settle: Duration::from_millis(settle_ms),
-        max_settle: Duration::from_millis(max_settle_ms),
+        settle,
+        max_settle,
         scan,
         events,
         log_output: raw.log_output.unwrap_or(false),
@@ -768,8 +777,7 @@ fn validate_dynamic_watch(
     };
 
     let command = validate_command(idx, &raw.command, &mut errors);
-    let (settle_ms, max_settle_ms) =
-        validate_settle(idx, raw.settle_ms, raw.max_settle_ms, &mut errors);
+    let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
     let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
     let events = parse_events_field(
         raw.events.as_deref(),
@@ -788,8 +796,8 @@ fn validate_dynamic_watch(
         pattern: pattern.expect("pattern validated"),
         command: command.expect("command validated"),
         scope: scope.expect("scope validated"),
-        settle: Duration::from_millis(settle_ms),
-        max_settle: Duration::from_millis(max_settle_ms),
+        settle,
+        max_settle,
         scan,
         events,
         log_output: raw.log_output.unwrap_or(false),
@@ -1015,7 +1023,7 @@ mod tests {
         assert_eq!(w.name, "build");
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
         assert_eq!(w.settle, Duration::from_millis(200));
-        assert_eq!(w.max_settle, Duration::from_secs(12));
+        assert_eq!(w.max_settle, Duration::from_hours(1));
         assert!(w.scan.recursive);
         assert!(!w.scan.hidden);
         assert!(w.scan.exclude.is_empty());
@@ -1113,31 +1121,57 @@ mod tests {
 
     #[test]
     fn settle_zero_rejected() {
-        let toml = minimal_toml("settle_ms = 0\n");
+        let toml = minimal_toml("settle = \"0ms\"\n");
         assert_only_kind(&toml, IssueKind::SettleTooSmall);
     }
 
     #[test]
     fn max_settle_below_floor_rejected() {
-        let toml = minimal_toml("settle_ms = 100\nmax_settle_ms = 200\n");
+        let toml = minimal_toml("settle = \"100ms\"\nmax_settle = \"200ms\"\n");
         assert_only_kind(&toml, IssueKind::MaxSettleTooSmall);
     }
 
     #[test]
-    fn max_settle_above_ceiling_rejected() {
-        let toml = minimal_toml("settle_ms = 100\nmax_settle_ms = 4000000\n");
-        assert_only_kind(&toml, IssueKind::MaxSettleTooLarge);
+    fn max_settle_at_floor_accepted() {
+        // Boundary: exactly 4 × settle passes. Catches off-by-one in
+        // the floor comparison.
+        let toml = minimal_toml("settle = \"100ms\"\nmax_settle = \"400ms\"\n");
+        let cfg = Config::from_str(&toml).unwrap();
+        assert_eq!(cfg.watches[0].max_settle, Duration::from_millis(400));
     }
 
     #[test]
-    fn max_settle_default_clamps_to_one_hour() {
-        let toml = minimal_toml("settle_ms = 70000\n");
+    fn default_max_settle_is_one_hour_independent_of_settle() {
+        // The 60× factor is gone — `max_settle` defaults to a flat 1h
+        // regardless of `settle`. A few representative `settle` values
+        // all observe the same default.
+        for settle in ["1ms", "200ms", "5s", "30s", "1m"] {
+            let toml = minimal_toml(&format!("settle = \"{settle}\"\n"));
+            let cfg = Config::from_str(&toml).unwrap();
+            assert_eq!(
+                cfg.watches[0].max_settle,
+                Duration::from_hours(1),
+                "settle = {settle:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn max_settle_above_one_hour_accepted() {
+        // No upper bound — operator may opt into multi-hour windows.
+        let toml = minimal_toml("settle = \"200ms\"\nmax_settle = \"6h\"\n");
         let cfg = Config::from_str(&toml).unwrap();
-        assert_eq!(
-            cfg.watches[0].max_settle,
-            Duration::from_hours(1),
-            "default formula caps at 1 hour even for large settle_ms",
-        );
+        assert_eq!(cfg.watches[0].max_settle, Duration::from_hours(6),);
+    }
+
+    #[test]
+    fn humantime_compound_settle_accepted() {
+        // humantime accepts compound forms (`"1m 30s"`); pin the
+        // semantics so a parser swap doesn't regress silently.
+        let toml = minimal_toml("settle = \"1m 30s\"\nmax_settle = \"10m\"\n");
+        let cfg = Config::from_str(&toml).unwrap();
+        assert_eq!(cfg.watches[0].settle, Duration::from_secs(90));
+        assert_eq!(cfg.watches[0].max_settle, Duration::from_mins(10));
     }
 
     #[test]
@@ -1233,7 +1267,7 @@ mod tests {
     #[test]
     fn multiple_errors_in_one_watch_collected() {
         let toml =
-            "[[watch]]\nname = \"\"\npath = \"src\"\ncommand = []\nsettle_ms = 0\nmax_depth = 0";
+            "[[watch]]\nname = \"\"\npath = \"src\"\ncommand = []\nsettle = \"0ms\"\nmax_depth = 0";
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
         let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
@@ -1439,7 +1473,7 @@ mod tests {
         let w = &cfg.watches[0];
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
         assert_eq!(w.settle, Duration::from_millis(200));
-        assert_eq!(w.max_settle, Duration::from_secs(12));
+        assert_eq!(w.max_settle, Duration::from_hours(1));
         assert!(w.scan.recursive);
     }
 
@@ -1643,7 +1677,7 @@ mod tests {
         assert_eq!(p.name, "logs");
         assert_eq!(p.scope, EffectScope::SubtreeRoot);
         assert_eq!(p.settle, Duration::from_millis(200));
-        assert_eq!(p.max_settle, Duration::from_secs(12));
+        assert_eq!(p.max_settle, Duration::from_hours(1));
         assert!(p.scan.recursive);
         assert_eq!(p.events, ClassSet::DEFAULT_SUBTREE_ROOT);
         assert!(!p.log_output);
@@ -1655,7 +1689,7 @@ mod tests {
     fn promoter_to_attach_request_threads_fields() {
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
                     command = [\"fmt\", \"$path\"]\n\
-                    settle_ms = 300\nmax_settle_ms = 1200\n\
+                    settle = \"300ms\"\nmax_settle = \"1200ms\"\n\
                     scope = \"per-stable-file\"\n\
                     events = [\"content\"]\n\
                     log_output = true\n\
@@ -1696,7 +1730,7 @@ mod tests {
     #[test]
     fn multiple_errors_in_one_dynamic_watch_accumulate() {
         let toml = "[[watch]]\nname = \"\"\npath = \"/foo/**/x\"\ncommand = []\n\
-                    settle_ms = 0\nmax_depth = 0";
+                    settle = \"0ms\"\nmax_depth = 0";
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
         let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();

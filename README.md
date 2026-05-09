@@ -82,9 +82,9 @@ path      = "/srv/repo/src"           # absolute; pending paths supported
 command   = ["cargo", "build"]        # argv-only (no shell expansion)
 
 # Optional knobs (defaults shown).
-settle_ms       = 200                 # debounce window after the last event
-# max_settle_ms = 12000               # forced fire even if events keep arriving
-# scope         = "subtree-root"      # subtree-root | per-stable-file
+settle       = "200ms"                # debounce window after the last event
+# max_settle = "1h"                   # forced fire even if events keep arriving (default 1h)
+# scope      = "subtree-root"         # subtree-root | per-stable-file
 # events        = ["structure", "content"]  # default mask depends on scope
 # pattern       = "**/*.rs"           # glob filter
 # exclude       = ["target/**", ".git/**"]

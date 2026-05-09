@@ -102,7 +102,7 @@ impl Loader {
     /// would disable deferred drain permanently and miss the next
     /// added watch's first burst.
     ///
-    /// `settle_ms ≥ 1` is enforced at config-load
+    /// `settle > 0` is enforced at config-load
     /// (`specter-config::config`) for both static and dynamic entries,
     /// so `min_settle / 4` never divides by zero.
     ///
@@ -245,9 +245,9 @@ mod tests {
     fn derive_drain_window_mixed_uses_overall_min() {
         let loader = loader_with_toml(
             "[[watch]]\nname = \"a\"\npath = \"/tmp\"\ncommand = [\"echo\"]\n\
-             settle_ms = 1000\n\
+             settle = \"1000ms\"\n\
              [[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n\
-             settle_ms = 100\n",
+             settle = \"100ms\"\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(25));
     }
@@ -258,9 +258,9 @@ mod tests {
     fn derive_drain_window_mixed_static_smaller() {
         let loader = loader_with_toml(
             "[[watch]]\nname = \"a\"\npath = \"/tmp\"\ncommand = [\"echo\"]\n\
-             settle_ms = 100\n\
+             settle = \"100ms\"\n\
              [[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n\
-             settle_ms = 1000\n",
+             settle = \"1000ms\"\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(25));
     }
@@ -271,7 +271,7 @@ mod tests {
     fn derive_drain_window_tiny_settle_clamps_to_floor() {
         let loader = loader_with_toml(
             "[[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n\
-             settle_ms = 40\nmax_settle_ms = 200\n",
+             settle = \"40ms\"\nmax_settle = \"200ms\"\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(10));
     }
@@ -281,7 +281,7 @@ mod tests {
     fn derive_drain_window_sub_floor_dynamic_settle_clamps_to_floor() {
         let loader = loader_with_toml(
             "[[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n\
-             settle_ms = 1\nmax_settle_ms = 60\n",
+             settle = \"1ms\"\nmax_settle = \"60ms\"\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(10));
     }

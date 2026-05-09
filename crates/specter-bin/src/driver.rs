@@ -1095,7 +1095,7 @@ mod tests {
     name      = "build"
     path      = "{}"
     command   = ["true"]
-    settle_ms = 50
+    settle    = "50ms"
     "#,
             path.display(),
         );
@@ -1270,7 +1270,7 @@ mod tests {
     name      = "b"
     path      = "{0}"
     command   = ["true"]
-    settle_ms = 100
+    settle    = "100ms"
     "#,
             tmp.path().display(),
         );
@@ -1471,7 +1471,7 @@ mod tests {
     name      = "logs"
     path      = "{}/{{a,b}}/access.log"
     command   = ["true"]
-    settle_ms = 50
+    settle    = "50ms"
     "#,
             path.display(),
         );
@@ -1541,13 +1541,13 @@ mod tests {
     name      = "build"
     path      = "{0}"
     command   = ["true"]
-    settle_ms = 50
+    settle    = "50ms"
 
     [[watch]]
     name      = "logs"
     path      = "{0}/{{a,b}}/access.log"
     command   = ["true"]
-    settle_ms = 50
+    settle    = "50ms"
     "#,
             tmp.path().display(),
         );
@@ -1914,7 +1914,7 @@ command   = ["true"]
 name      = "b"
 path      = "{0}"
 command   = ["true"]
-settle_ms = 100
+settle    = "100ms"
 "#,
             tmp.path().display(),
         );

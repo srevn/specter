@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,8 +32,16 @@ pub(crate) struct RawWatch {
     pub pattern: Option<String>,
     pub exclude: Option<Vec<String>>,
     pub hidden: Option<bool>,
-    pub settle_ms: Option<u64>,
-    pub max_settle_ms: Option<u64>,
+    /// Debounce window after the last event. TOML accepts humantime
+    /// strings (`"200ms"`, `"1s"`, `"1m 30s"`); omitted ⇒
+    /// [`crate::config::DEFAULT_SETTLE`].
+    #[serde(default, with = "humantime_serde")]
+    pub settle: Option<Duration>,
+    /// Forced-fire deadline after burst start. TOML accepts humantime
+    /// strings (`"1h"`, `"30m"`); omitted ⇒
+    /// [`crate::config::DEFAULT_MAX_SETTLE`].
+    #[serde(default, with = "humantime_serde")]
+    pub max_settle: Option<Duration>,
     pub scope: Option<String>,
     pub max_depth: Option<u32>,
     pub events: Option<Vec<String>>,
@@ -54,8 +63,8 @@ impl RawWatch {
             pattern: None,
             exclude: None,
             hidden: None,
-            settle_ms: None,
-            max_settle_ms: None,
+            settle: None,
+            max_settle: None,
             scope: None,
             max_depth: None,
             events: None,

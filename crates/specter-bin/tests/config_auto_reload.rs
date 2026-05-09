@@ -176,7 +176,7 @@ impl Sandbox {
     /// bin's reload-pipeline log strings, not the subprocess output.
     fn write_one_watch(&self, name: &str) {
         let toml = format!(
-            "[[watch]]\nname = \"{name}\"\npath = \"{}\"\ncommand = [\"true\"]\nsettle_ms = 50\n",
+            "[[watch]]\nname = \"{name}\"\npath = \"{}\"\ncommand = [\"true\"]\nsettle = \"50ms\"\n",
             self.watched.display(),
         );
         fs::write(&self.cfg, toml).expect("write config");
@@ -187,8 +187,8 @@ impl Sandbox {
     /// loaded at startup.
     fn write_two_watches(&self, a: &str, b: &str) {
         let toml = format!(
-            "[[watch]]\nname = \"{a}\"\npath = \"{wp}\"\ncommand = [\"true\"]\nsettle_ms = 50\n\n\
-             [[watch]]\nname = \"{b}\"\npath = \"{wp}\"\ncommand = [\"true\"]\nsettle_ms = 50\n",
+            "[[watch]]\nname = \"{a}\"\npath = \"{wp}\"\ncommand = [\"true\"]\nsettle = \"50ms\"\n\n\
+             [[watch]]\nname = \"{b}\"\npath = \"{wp}\"\ncommand = [\"true\"]\nsettle = \"50ms\"\n",
             wp = self.watched.display(),
         );
         fs::write(&self.cfg, toml).expect("write config");

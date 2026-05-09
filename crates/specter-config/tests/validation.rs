@@ -74,8 +74,9 @@ fn issue_kind_unknown_placeholder() {
 
 #[test]
 fn issue_kind_settle_too_small() {
-    let toml =
-        format!("[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nsettle_ms = 0");
+    let toml = format!(
+        "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nsettle = \"0ms\""
+    );
     assert_kinds(&toml, &[IssueKind::SettleTooSmall]);
 }
 
@@ -83,17 +84,9 @@ fn issue_kind_settle_too_small() {
 fn issue_kind_max_settle_too_small() {
     let toml = format!(
         "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
-         settle_ms = 100\nmax_settle_ms = 200"
+         settle = \"100ms\"\nmax_settle = \"200ms\""
     );
     assert_kinds(&toml, &[IssueKind::MaxSettleTooSmall]);
-}
-
-#[test]
-fn issue_kind_max_settle_too_large() {
-    let toml = format!(
-        "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nmax_settle_ms = 4000000"
-    );
-    assert_kinds(&toml, &[IssueKind::MaxSettleTooLarge]);
 }
 
 #[test]
@@ -155,7 +148,8 @@ fn issue_kind_invalid_enum_event_class() {
 
 #[test]
 fn kitchen_sink_collects_five_distinct_issues() {
-    let toml = "[[watch]]\nname = \"\"\npath = \"src\"\ncommand = []\nsettle_ms = 0\nmax_depth = 0";
+    let toml =
+        "[[watch]]\nname = \"\"\npath = \"src\"\ncommand = []\nsettle = \"0ms\"\nmax_depth = 0";
     let err = Config::from_str(toml).unwrap_err();
     let errors = validation_errors(err);
     assert_eq!(errors.len(), 5, "got {errors:?}");

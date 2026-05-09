@@ -139,7 +139,7 @@ fn all_defaults_fixture_applies_documented_defaults() {
     assert_eq!(w.scan.max_depth, None);
     assert_eq!(w.scope, EffectScope::SubtreeRoot);
     assert_eq!(w.settle, Duration::from_millis(200));
-    assert_eq!(w.max_settle, Duration::from_secs(12));
+    assert_eq!(w.max_settle, Duration::from_hours(1));
     assert_eq!(w.events, ClassSet::DEFAULT_SUBTREE_ROOT);
 }
 

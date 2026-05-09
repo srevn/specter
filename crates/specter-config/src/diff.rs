@@ -152,12 +152,13 @@ mod tests {
         format!("[[watch]]\nname = \"{name}\"\npath = \"{ROOT}\"\ncommand = [\"{command}\"]")
     }
 
-    fn block_full(name: &str, command: &str, settle_ms: u64) -> String {
+    /// Build a watch block with an explicit `settle`. `max_settle` is
+    /// left to the default (1h), which is comfortably above the floor
+    /// for any reasonable `settle`.
+    fn block_full(name: &str, command: &str, settle: &str) -> String {
         format!(
             "[[watch]]\nname = \"{name}\"\npath = \"{ROOT}\"\n\
-             command = [\"{command}\"]\nsettle_ms = {settle_ms}\n\
-             max_settle_ms = {}",
-            settle_ms.saturating_mul(60).min(3_600_000),
+             command = [\"{command}\"]\nsettle = \"{settle}\"\n",
         )
     }
 
@@ -165,12 +166,10 @@ mod tests {
         format!("[[watch]]\nname = \"{name}\"\npath = \"{pattern}\"\ncommand = [\"{command}\"]")
     }
 
-    fn dyn_block_full(name: &str, pattern: &str, command: &str, settle_ms: u64) -> String {
+    fn dyn_block_full(name: &str, pattern: &str, command: &str, settle: &str) -> String {
         format!(
             "[[watch]]\nname = \"{name}\"\npath = \"{pattern}\"\n\
-             command = [\"{command}\"]\nsettle_ms = {settle_ms}\n\
-             max_settle_ms = {}",
-            settle_ms.saturating_mul(60).min(3_600_000),
+             command = [\"{command}\"]\nsettle = \"{settle}\"\n",
         )
     }
 
@@ -329,8 +328,8 @@ mod tests {
 
     #[test]
     fn settle_change_marks_modified() {
-        let old_blocks = [block_full("a", "echo", 200)];
-        let new_blocks = [block_full("a", "echo", 500)];
+        let old_blocks = [block_full("a", "echo", "200ms")];
+        let new_blocks = [block_full("a", "echo", "500ms")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
@@ -518,8 +517,8 @@ mod tests {
     /// Settle change on a dynamic watch surfaces as modified.
     #[test]
     fn promoter_settle_change_marks_modified() {
-        let old_blocks = [dyn_block_full("logs", "/var/log/*", "echo", 200)];
-        let new_blocks = [dyn_block_full("logs", "/var/log/*", "echo", 500)];
+        let old_blocks = [dyn_block_full("logs", "/var/log/*", "echo", "200ms")];
+        let new_blocks = [dyn_block_full("logs", "/var/log/*", "echo", "500ms")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
