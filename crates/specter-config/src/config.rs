@@ -1,4 +1,5 @@
 use crate::error::{ConfigError, IssueKind, ValidationIssue};
+use crate::file_meta::FileMeta;
 use crate::path::canonicalize_lenient;
 use crate::raw::{RawConfig, RawLogConfig, RawWatch};
 use crate::template;
@@ -253,6 +254,42 @@ impl Config {
             "config loaded",
         );
         Ok(cfg)
+    }
+
+    /// Atomic content + filesystem-identity capture: opens `path`,
+    /// captures [`FileMeta`] from the bound inode, then reads the
+    /// content from the same handle. The inode is pinned by `f`, so a
+    /// concurrent `rename(2)` over `path` (atomic-save) cannot rotate
+    /// the meta out from under the bytes — the next `FileMeta::from_path`
+    /// observes the path-level rotation as a meta delta.
+    ///
+    /// `f.metadata()` is called **before** the `read_to_string` so that
+    /// any in-place mutation of the still-bound inode during the read
+    /// surfaces on the next path-level lstat as `stored != current`.
+    /// Reversing the order would absorb the mutation into the stored
+    /// meta and silently pin the loader to stale content.
+    pub fn from_path_with_meta(path: &Path) -> Result<(Self, FileMeta), ConfigError> {
+        use std::io::Read as _;
+        let mut f = std::fs::File::open(path).map_err(|e| ConfigError::Io {
+            path: path.to_owned(),
+            source: e,
+        })?;
+        let meta = FileMeta::from_metadata(&f.metadata().map_err(|e| ConfigError::Io {
+            path: path.to_owned(),
+            source: e,
+        })?);
+        let mut s = String::new();
+        f.read_to_string(&mut s).map_err(|e| ConfigError::Io {
+            path: path.to_owned(),
+            source: e,
+        })?;
+        let cfg = Self::from_str_inner(&s, Some(path))?;
+        tracing::info!(
+            path = %path.display(),
+            watches = cfg.watches.len(),
+            "config loaded",
+        );
+        Ok((cfg, meta))
     }
 
     fn from_str_inner(s: &str, path: Option<&Path>) -> Result<Self, ConfigError> {
@@ -1700,5 +1737,109 @@ mod tests {
             kinds.contains(&IssueKind::PathContainsGlobChars),
             "got {kinds:?}",
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod from_path_with_meta_tests {
+    use super::Config;
+    use crate::FileMeta;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    const MINIMAL: &str = "[[watch]]\nname = \"x\"\npath = \"/\"\ncommand = [\"echo\"]\n";
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).expect("write tempfile");
+    }
+
+    #[test]
+    fn from_path_with_meta_returns_consistent_config_and_meta() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("specter.toml");
+        write(&p, MINIMAL.as_bytes());
+
+        let (cfg, meta) = Config::from_path_with_meta(&p).unwrap();
+
+        assert_eq!(cfg.watches.len(), 1);
+        assert_eq!(cfg.watches[0].name, "x");
+
+        // Without intervening mutation, the lstat-equivalent
+        // re-capture compares bit-equal to the atomically-captured
+        // meta — this is the steady-state invariant the driver's
+        // settle-expiry filter relies on for "no change ⇒ no
+        // reload".
+        let lstat_meta = FileMeta::from_path(&p).unwrap();
+        assert_eq!(meta, lstat_meta);
+
+        assert_eq!(meta.size, MINIMAL.len() as u64);
+    }
+
+    #[test]
+    fn from_path_with_meta_matches_from_path_on_config_payload() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("specter.toml");
+        write(&p, MINIMAL.as_bytes());
+
+        let cfg_only = Config::from_path(&p).unwrap();
+        let (cfg_with_meta, _meta) = Config::from_path_with_meta(&p).unwrap();
+
+        // The two entry points must produce identical Config values —
+        // `from_path` is the portable path; `from_path_with_meta`
+        // additionally returns the inode meta. Divergence here would
+        // mean reloads (which take the meta path) parse differently
+        // from initial loads (which historically took `from_path`).
+        assert_eq!(cfg_only, cfg_with_meta);
+    }
+
+    #[test]
+    fn from_path_with_meta_propagates_io_errors() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("never-existed.toml");
+
+        let err = Config::from_path_with_meta(&missing).unwrap_err();
+        assert!(matches!(err, super::ConfigError::Io { .. }));
+    }
+
+    #[test]
+    fn from_path_with_meta_propagates_parse_errors() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("broken.toml");
+        write(&p, b"this-is-not = = valid toml\n");
+
+        let err = Config::from_path_with_meta(&p).unwrap_err();
+        assert!(matches!(err, super::ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn captured_meta_inode_pinned_against_atomic_save_during_read() {
+        // The full atomic-capture invariant: `from_path_with_meta`'s
+        // returned meta belongs to the inode opened, even when the
+        // path is renamed out from under us between `File::open` and
+        // any subsequent path-level stat. Simulates the atomic-save
+        // race by performing the rename after the call returns and
+        // confirming `meta` still reflects the original (now orphan)
+        // inode while a fresh path-level `from_path` reflects the
+        // replacement.
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("specter.toml");
+        write(&p, MINIMAL.as_bytes());
+
+        let (cfg, meta) = Config::from_path_with_meta(&p).unwrap();
+        assert_eq!(cfg.watches.len(), 1);
+
+        // Atomic-save shape: replace path with a new inode.
+        let staging = dir.path().join("specter.toml.new");
+        write(&staging, MINIMAL.as_bytes());
+        std::fs::rename(&staging, &p).unwrap();
+
+        let lstat_after_save = FileMeta::from_path(&p).unwrap();
+        assert_ne!(
+            meta.inode, lstat_after_save.inode,
+            "rename must produce a fresh inode at the path",
+        );
+        // The driver's lstat filter would detect this as `stored !=
+        // current` and fire a reload; this test asserts the precondition
+        // (meta deltas are observable across atomic-save).
     }
 }
