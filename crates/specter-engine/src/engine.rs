@@ -1645,7 +1645,7 @@ mod tests {
             .iter()
             .find_map(|op| match op {
                 specter_core::ProbeOp::Probe { request } => Some(request.correlation()),
-                _ => None,
+                specter_core::ProbeOp::Cancel { .. } => None,
             })
             .expect("attach emitted Probe");
 

@@ -95,9 +95,12 @@ pub struct Burst {
     pub probe_target: Option<ResourceId>,
     /// Non-anchor resources whose `suppress_count` was bumped 0→1 by
     /// `event_drives_batching` during this burst's pre-fire phases.
-    /// Drained at `transition_to_verifying` (`sub_suppress` per entry,
-    /// then cleared) and defensively at `finish_burst_to_idle` for
-    /// abnormal-end paths (`finalize_anchor_lost`, reap mid-burst).
+    /// Taken (via `mem::take`) at `transition_to_verifying` to drive
+    /// the symmetric `sub_suppress` drain, and defensively at
+    /// `finish_burst_to_idle` for abnormal-end paths
+    /// (`finalize_anchor_lost`, reap mid-burst). The take leaves the
+    /// field empty for the next pre-fire cycle without a follow-up
+    /// `clear()`.
     ///
     /// **Anchor explicitly excluded.** The anchor's suppress is the
     /// existing `start_*_burst → finish_burst_to_idle` lifecycle and is

@@ -34,8 +34,8 @@ use crate::Engine;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
-    Burst, BurstIntent, BurstPhase, Profile, ProfileId, ProfileState, ResourceId, ResourceKind,
-    StepOutput, TimerKind, Tree, TreeSnapshot,
+    Burst, BurstIntent, BurstPhase, ProfileId, ProfileState, ResourceId, ResourceKind, StepOutput,
+    TimerKind, Tree, TreeSnapshot,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -403,53 +403,51 @@ impl Engine {
     /// `force_walk_resources` is consumed by this emission; new events
     /// accumulate into the cleared set.
     pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        let Some(p) = self.profiles.get(profile_id) else {
-            return;
-        };
-        let ProfileState::Active(burst) = &p.state else {
+        let Some(p) = self.profiles.get_mut(profile_id) else {
             return;
         };
 
-        // Post-fire phases never reach `transition_to_verifying`. The
-        // production callers (Settle expiry, BurstDeadline expiry,
-        // ancestor reconfirm from `finish_burst_to_idle`) are gated on
-        // pre-fire phases via `is_timer_referenced` and the `Draining`
-        // hit-zero check respectively. The early return keeps a stray
-        // call from minting a fresh probe correlation while an effect
-        // wait is still in flight (which would either trip the I5
+        // Take the per-burst consumables in one mutable-borrow window. The
+        // post-fire phases (`Awaiting` / `Rebasing`) never reach this
+        // helper — production callers (Settle expiry, BurstDeadline
+        // expiry, ancestor reconfirm from `finish_burst_to_idle`) are
+        // gated on pre-fire phases via `is_timer_referenced` and the
+        // `Draining` hit-zero check respectively. The early return guards
+        // a stray call from minting a fresh probe correlation while an
+        // effect wait is still in flight (which would either trip the I5
         // debug_assert in `mint_probe_correlation` or, in release,
         // overwrite the post-fire correlation slot).
-        if matches!(
-            burst.phase,
-            BurstPhase::Awaiting { .. } | BurstPhase::Rebasing
-        ) {
-            return;
-        }
+        //
+        // `force_walk_resources` and `suppressed_resources` are
+        // single-use accumulators consumed by this transition; `mem::take`
+        // moves them out and leaves the fields empty (no follow-up
+        // `clear()` required). `dirty_resources` is preserved — it carries
+        // the LCA basis across the whole burst, so we clone it here.
+        let (intent, phase, prior_target, dirty_for_lca, force_set, suppressed_drain, forced) =
+            match &mut p.state {
+                ProfileState::Active(b) => {
+                    if matches!(b.phase, BurstPhase::Awaiting { .. } | BurstPhase::Rebasing) {
+                        return;
+                    }
+                    (
+                        b.intent,
+                        phase_kind(&b.phase),
+                        b.probe_target,
+                        b.dirty_resources.clone(),
+                        std::mem::take(&mut b.force_walk_resources),
+                        std::mem::take(&mut b.suppressed_resources),
+                        b.forced,
+                    )
+                }
+                _ => return,
+            };
 
-        let intent = burst.intent;
-        let phase = phase_kind(&burst.phase);
-        let prior_target = burst.probe_target;
-        let dirty_for_lca = burst.dirty_resources.clone();
-        let force_set = burst.force_walk_resources.clone();
-        let forced = burst.forced;
-        // Snapshot per-burst `suppressed_resources` before any mutation.
-        // The drain runs `sub_suppress` per entry against `self.tree` —
-        // collecting to a Vec releases the immutable `self.profiles`
-        // borrow before the loop reborrows `self.tree` mutably. The
-        // BTreeSet's iteration order is preserved by the
-        // `iter().copied().collect()` chain (BTreeSet sorted ⇒ Vec
-        // sorted), so emitted `Unsuppress` ops land in `ResourceId`-
-        // ascending order — coherent with `StepOutput.watch_ops`'s sort
-        // discipline. Typically tiny (0 for W_ssh; ~1–N for W_build).
-        let suppressed_drain: Vec<ResourceId> = match &p.state {
-            ProfileState::Active(b) => b.suppressed_resources.iter().copied().collect(),
-            _ => Vec::new(),
-        };
         // Cached anchor classification. `None` is a resource-based
         // attach whose Seed probe hasn't yet returned (or any case where
         // the kind hasn't propagated past the default); the typed
         // contract routes both `None` and `Some(Dir)` through Subtree
         // emission, so the value is preserved unchanged here.
+        let resource = p.resource;
         let anchor_kind = p.kind;
         let scan_config = p.config.clone();
         let captured_with = p.config_hash;
@@ -461,18 +459,18 @@ impl Engine {
         // outside the Profile's coverage). Dir / unclassified anchors
         // pick LCA / prior / anchor by phase.
         let target = match (intent, phase, anchor_kind) {
-            (_, _, Some(ResourceKind::File)) => p.resource,
-            (BurstIntent::Seed, _, _) => p.resource,
+            (_, _, Some(ResourceKind::File)) => resource,
+            (BurstIntent::Seed, _, _) => resource,
             (BurstIntent::Standard, PhaseKind::Draining, _) => {
                 // Reconfirm probe — re-use the previous target. dirty_resources
                 // is empty in Draining, so LCA would degenerate to anchor and
                 // lose the correct subtree.
-                prior_target.unwrap_or(p.resource)
+                prior_target.unwrap_or(resource)
             }
             // PostFire is unreachable courtesy of the early-return guard
             // above; routed alongside `Batching | Verifying` to keep the
             // match exhaustive without a wildcard.
-            (BurstIntent::Standard, _, _) => lca_target(p, &dirty_for_lca, &self.tree),
+            (BurstIntent::Standard, _, _) => lca_target(resource, &dirty_for_lca, &self.tree),
         };
 
         // baseline_subtree at the target. Unused by AnchorFile emission
@@ -491,13 +489,15 @@ impl Engine {
             return;
         };
 
-        // Drain the per-burst `suppressed_resources` before the phase
-        // swap. Each entry was bumped 0→1 (or N→N+1 in the multi-Profile
-        // fan-in case) by `event_drives_batching`; `sub_suppress`
-        // returns it to 0 (emitting Unsuppress) or to N (no emit).
-        // Refcount math holds across overlapping bursts; `StepOutput`
-        // sees one Suppress / Unsuppress pair per (Burst, non-anchor
-        // resource).
+        // Drain the per-burst `suppressed_resources` taken above. Each
+        // entry was bumped 0→1 (or N→N+1 in the multi-Profile fan-in
+        // case) by `event_drives_batching`; `sub_suppress` returns it
+        // to 0 (emitting Unsuppress) or to N (no emit). Refcount math
+        // holds across overlapping bursts; `StepOutput` sees one
+        // Suppress / Unsuppress pair per (Burst, non-anchor resource).
+        // BTreeSet iteration is sorted, so emitted Unsuppress ops land
+        // in `ResourceId`-ascending order — coherent with
+        // `StepOutput.watch_ops`'s sort discipline.
         for r in &suppressed_drain {
             sub_suppress(&mut self.tree, *r, out);
         }
@@ -507,8 +507,6 @@ impl Engine {
         {
             b.phase = BurstPhase::Verifying;
             b.probe_target = Some(target);
-            b.force_walk_resources.clear();
-            b.suppressed_resources.clear();
         }
 
         match anchor_kind {
@@ -641,13 +639,36 @@ impl Engine {
     /// of paths the command touched even when the parent dir's mtime
     /// didn't bump (POSIX content-edit semantics). For idempotent
     /// commands the absorbed set is empty and the walker mtime-skips
-    /// at every level — the cheap path is preserved. The field is
-    /// cleared alongside the phase swap, mirroring
-    /// `transition_to_verifying`'s post-emit hygiene.
+    /// at every level — the cheap path is preserved. `mem::take`
+    /// consumes the field in one shot, leaving it empty for the
+    /// next absorb cycle.
+    ///
+    /// **Non-Active early return.** Both production callers
+    /// (`on_effect_complete`'s `AwaitAction::Rebase` arm and
+    /// `handle_gate_deadline`) have already verified `Active(_)` with
+    /// phase `Awaiting` before reaching this helper. Defensively
+    /// early-returning on non-Active matches `transition_to_verifying`'s
+    /// strict policy and avoids the latent state-machine bug where a
+    /// stray call would mint a fresh probe correlation, emit a Probe
+    /// op, and then fail to write the phase (because the phase-write
+    /// arm requires `Active`) — leaving the probe channel open with no
+    /// matching Burst.
     pub(crate) fn transition_to_rebasing(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        let Some(p) = self.profiles.get(profile_id) else {
+        let Some(p) = self.profiles.get_mut(profile_id) else {
             return;
         };
+
+        // Take absorbed events for the rebase walker's force_walk in one
+        // mut-borrow window. `force_walk_resources` is the shared
+        // accumulator for "events since last probe" — Verifying and
+        // Rebasing are sister consumers. Non-Active state is a state-
+        // machine bug here (see rustdoc above); early-return rather than
+        // silently mint a Probe with no matching phase write.
+        let force_set = match &mut p.state {
+            ProfileState::Active(burst) => std::mem::take(&mut burst.force_walk_resources),
+            _ => return,
+        };
+
         let resource = p.resource;
         let anchor_kind = p.kind;
         let scan_config = p.config.clone();
@@ -656,15 +677,8 @@ impl Engine {
             .current
             .as_ref()
             .and_then(|s| s.subtree_at(resource, &self.tree));
-        // Snapshot absorbed events for the rebase walker's force_walk
-        // before the mutation block clears the field. force_walk_resources
-        // tracks "events since last probe" — Verifying and Rebasing are
-        // sister consumers of the same accumulator.
-        let force_set = match &p.state {
-            ProfileState::Active(burst) => burst.force_walk_resources.clone(),
-            _ => BTreeSet::new(),
-        };
         let force_walk_paths = build_force_walk(&force_set, resource, &self.tree);
+        let target_path = self.tree.path_of(resource).unwrap_or_default();
 
         let Some(correlation) = self.mint_probe_correlation(profile_id) else {
             return;
@@ -675,10 +689,8 @@ impl Engine {
         {
             burst.phase = BurstPhase::Rebasing;
             burst.probe_target = Some(resource);
-            burst.force_walk_resources.clear();
         }
 
-        let target_path = self.tree.path_of(resource).unwrap_or_default();
         match anchor_kind {
             Some(ResourceKind::File) => {
                 Self::emit_anchor_probe(profile_id, correlation, target_path, out);
@@ -718,51 +730,44 @@ impl Engine {
     /// same step after `propagate(-1)` to release watch contributions,
     /// parent edges, and Tree slot.
     pub(crate) fn finish_burst_to_idle(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        let Some(p) = self.profiles.get(profile_id) else {
+        let Some(p) = self.profiles.get_mut(profile_id) else {
             return;
         };
-        // Tightened from `!matches!(state, Idle)` to `Active(_)`: the
-        // burst-end machinery (`sub_suppress`, `propagate(-1)`) is
-        // Active-specific. Pending Profiles never bumped the anchor's
-        // suppress_count or the ancestor `dirty_descendants`; running
-        // this on Pending would underflow `sub_suppress`. The only
-        // documented caller-side guard that this defends against is
+        let resource = p.resource;
+
+        // One mut-borrow window covers two reads (intent for the
+        // propagate(-1) gate; suppressed_resources for the defensive
+        // drain) and the state→Idle write. Tightened from
+        // `!matches!(state, Idle)` to `Active(_)`: the burst-end
+        // machinery (`sub_suppress`, `propagate(-1)`) is Active-specific.
+        // Pending Profiles never bumped the anchor's suppress_count or
+        // the ancestor `dirty_descendants`; running this on Pending
+        // would underflow `sub_suppress`. The only documented caller-
+        // side guard that this defends against is
         // `finalize_anchor_lost` if a future change relaxes its Pending
         // early-return.
-        let was_active = matches!(p.state, ProfileState::Active(_));
-        let resource = p.resource;
-        if !was_active {
-            return;
-        }
-
-        // Capture the burst's intent before transitioning to Idle. Only
-        // Standard bursts call `propagate(+1)` at start (the burst-
-        // propagation row), so only Standard bursts should call
-        // `propagate(-1)` at end. Seed bursts skip propagation entirely
-        // — they never contribute to ancestor `dirty_descendants`.
-        let was_standard = matches!(
-            &p.state,
-            ProfileState::Active(burst) if matches!(burst.intent, BurstIntent::Standard),
-        );
-
-        // Defensive drain of per-burst `suppressed_resources` for any
-        // Burst that didn't pass through `transition_to_verifying`.
-        // Reachable via abnormal-end paths (`finalize_anchor_lost`
-        // mid-Batching, `reap_profile` mid-burst, config-diff reap).
-        // `sub_suppress` on a stale `ResourceId` (slot reaped between
-        // event ingestion and burst end via `discard_anchor_state`'s
-        // descendant release) is a no-op — `refcounts.rs:307-311`
-        // short-circuits on a missing slot. The snapshot is captured
-        // before the state-to-Idle write so the BTreeSet's contents
-        // outlive the Burst drop.
-        let suppressed_drain: Vec<ResourceId> = match &p.state {
-            ProfileState::Active(b) => b.suppressed_resources.iter().copied().collect(),
-            _ => Vec::new(),
+        //
+        // The defensive `suppressed_resources` drain catches abnormal-
+        // end paths that bypass `transition_to_verifying`
+        // (`finalize_anchor_lost` mid-Batching, `reap_profile` mid-burst,
+        // config-diff reap). `sub_suppress` on a stale `ResourceId`
+        // (slot reaped between event ingestion and burst end via
+        // `discard_anchor_state`'s descendant release) is a no-op —
+        // `refcounts::sub_suppress` short-circuits on a missing slot.
+        // After a normal `transition_to_verifying` drained the set, the
+        // `mem::take` here yields an empty BTreeSet — no double-drain.
+        // Only Standard bursts call `propagate(+1)` at start (the
+        // burst-propagation row), so only Standard bursts call
+        // `propagate(-1)` at end. Seed bursts never contribute to
+        // ancestor `dirty_descendants`.
+        let (was_standard, suppressed_drain) = match &mut p.state {
+            ProfileState::Active(b) => (
+                matches!(b.intent, BurstIntent::Standard),
+                std::mem::take(&mut b.suppressed_resources),
+            ),
+            _ => return,
         };
-
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.state = ProfileState::Idle;
-        }
+        p.state = ProfileState::Idle;
 
         for r in &suppressed_drain {
             sub_suppress(&mut self.tree, *r, out);
@@ -840,12 +845,12 @@ const _: fn() = || {
 /// dispatch in [`Engine::transition_to_verifying`] routes File anchors to
 /// [`Engine::emit_anchor_probe`] without consulting this helper, so a
 /// File-anchored Profile never reaches `lca_target` in production. The
-/// `live.contains(&profile.resource)` short-circuit below remains valid
-/// for the Dir-anchor case where the anchor itself is the event source
-/// (e.g., an in-place mtime bump on the anchor directory).
+/// `live.contains(&anchor)` short-circuit below remains valid for the
+/// Dir-anchor case where the anchor itself is the event source (e.g., an
+/// in-place mtime bump on the anchor directory).
 ///
 /// **Invariants.**
-/// - Returns a live `ResourceId` (always — defaults to `profile.resource`).
+/// - Returns a live `ResourceId` (always — defaults to `anchor`).
 /// - Result is `ResourceKind::Dir`: descendant LCAs that resolve to a
 ///   Leaf (or unprobed slot) are promoted to their parent Dir — probes
 ///   target Dirs because Files are observed as child entries of their
@@ -854,14 +859,14 @@ const _: fn() = || {
 ///   are filtered first — a stale `ResourceId` whose slot was vacated
 ///   mid-burst yields `None` on `tree.parent` and would skew the
 ///   reduction otherwise.
-/// - When `dirty` is empty, returns `profile.resource` (anchor): falls
-///   back to a full-walk gracefully.
+/// - When `dirty` is empty, returns `anchor`: falls back to a full-walk
+///   gracefully.
 ///
 /// **Complexity.** O(depth × n_dirty) — pairwise reduction with
 /// depth-equalisation + lockstep ancestor walk per pair. No per-pair
 /// `BTreeSet` allocation.
 pub(crate) fn lca_target(
-    profile: &Profile,
+    anchor: ResourceId,
     dirty: &BTreeSet<ResourceId>,
     tree: &Tree,
 ) -> ResourceId {
@@ -875,11 +880,11 @@ pub(crate) fn lca_target(
         .collect();
 
     if live.is_empty() {
-        return profile.resource;
+        return anchor;
     }
     // Anchor in the dirty set ⇒ can't go higher than anchor; trivially LCA.
-    if live.contains(&profile.resource) {
-        return promote_to_dir(profile.resource, profile, tree);
+    if live.contains(&anchor) {
+        return promote_to_dir(anchor, anchor, tree);
     }
 
     // 2. Pairwise LCA reduction. For each new entry, walk both candidates
@@ -888,10 +893,10 @@ pub(crate) fn lca_target(
     for &r in &live[1..] {
         match lca_pair(acc, r, tree) {
             Some(joint) => acc = joint,
-            None => return profile.resource,
+            None => return anchor,
         }
     }
-    promote_to_dir(acc, profile, tree)
+    promote_to_dir(acc, anchor, tree)
 }
 
 /// LCA of two resources via depth-equalisation + lockstep ancestor walk.
@@ -922,26 +927,26 @@ fn lca_pair(a: ResourceId, b: ResourceId, tree: &Tree) -> Option<ResourceId> {
 }
 
 /// Promote a non-Dir candidate to its parent Dir; descendant-observation
-/// probes target Dirs. Falls back to `profile.resource` if the chain
-/// crosses a reaped slot or runs out of ancestors. Unprobed slots
+/// probes target Dirs. Falls back to `anchor` if the chain crosses a
+/// reaped slot or runs out of ancestors. Unprobed slots
 /// (`kind() == None`) walk up like File-shape — we don't know what they
 /// are, the parent is the safer probe target.
 ///
 /// **Pre-condition.** The caller has filtered out File-anchored Profiles;
 /// this helper assumes a Dir anchor and may walk past a non-Dir start to
-/// reach the Profile's anchor when `start == profile.resource` is itself
-/// a File (which wouldn't happen for a Dir-anchored Profile).
-fn promote_to_dir(start: ResourceId, profile: &Profile, tree: &Tree) -> ResourceId {
+/// reach the Profile's anchor when `start == anchor` is itself a File
+/// (which wouldn't happen for a Dir-anchored Profile).
+fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> ResourceId {
     let mut current = start;
     loop {
         let Some(r) = tree.get(current) else {
-            return profile.resource;
+            return anchor;
         };
         if matches!(r.kind(), Some(ResourceKind::Dir)) {
             return current;
         }
         let Some(p) = tree.parent(current) else {
-            return profile.resource;
+            return anchor;
         };
         current = p;
     }
@@ -1432,7 +1437,7 @@ mod tests {
     fn lca_empty_dirty_returns_anchor() {
         let (e, pid, root, _a, _b) = engine_with_two_children();
         let dirty = BTreeSet::new();
-        let target = lca_target(e.profiles.get(pid).unwrap(), &dirty, &e.tree);
+        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
         assert_eq!(target, root);
     }
 
@@ -1440,7 +1445,7 @@ mod tests {
     fn lca_two_siblings_returns_parent() {
         let (e, pid, root, a, b) = engine_with_two_children();
         let dirty: BTreeSet<_> = [a, b].iter().copied().collect();
-        let target = lca_target(e.profiles.get(pid).unwrap(), &dirty, &e.tree);
+        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
         assert_eq!(target, root);
     }
 
@@ -1448,7 +1453,7 @@ mod tests {
     fn lca_single_dirty_at_anchor_returns_anchor() {
         let (e, pid, root, _a, _b) = engine_with_two_children();
         let dirty: BTreeSet<_> = std::iter::once(root).collect();
-        let target = lca_target(e.profiles.get(pid).unwrap(), &dirty, &e.tree);
+        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
         assert_eq!(target, root);
     }
 
@@ -1456,7 +1461,7 @@ mod tests {
     fn lca_single_dirty_deep_returns_self() {
         let (e, pid, _root, a, _b) = engine_with_two_children();
         let dirty: BTreeSet<_> = std::iter::once(a).collect();
-        let target = lca_target(e.profiles.get(pid).unwrap(), &dirty, &e.tree);
+        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
         assert_eq!(target, a);
     }
 
@@ -1469,7 +1474,7 @@ mod tests {
         // Stale id in the set; LCA must filter and return anchor (since the
         // remaining live entry is empty after the filter).
         let dirty: BTreeSet<_> = std::iter::once(a).collect();
-        let target = lca_target(e.profiles.get(pid).unwrap(), &dirty, &e.tree);
+        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
         assert_eq!(target, root);
     }
 
@@ -1539,7 +1544,7 @@ mod tests {
         );
 
         let dirty: BTreeSet<_> = [leaf_a, leaf_b].iter().copied().collect();
-        let target = lca_target(e.profiles.get(pid).unwrap(), &dirty, &e.tree);
+        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
         assert_eq!(
             target, l2,
             "LCA of leaves under l3a and l3b is l2 (their shared depth-2 ancestor)",
