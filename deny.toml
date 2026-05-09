@@ -32,8 +32,5 @@ deny = [
 
 [licenses]
 allow = [
-  "MIT",
-  "Apache-2.0",
-  "Unicode-3.0",
-  "Zlib",
+  "MIT", "Apache-2.0", "Unicode-3.0", "Zlib",
 ]

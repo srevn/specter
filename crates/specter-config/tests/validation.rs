@@ -146,6 +146,31 @@ fn issue_kind_invalid_enum_event_class() {
     assert_kinds(&toml, &[IssueKind::InvalidEnum]);
 }
 
+/// Disabled entries flow through every validator unchanged: a
+/// structural error in a disabled entry surfaces at load time rather
+/// than silently at re-enable time. Path is the most common typo
+/// shape; one anchoring case is enough — the validator dispatcher
+/// runs the full pipeline regardless of `enabled`.
+#[test]
+fn disabled_entry_does_not_waive_validation() {
+    let toml = "[[watch]]\nname = \"a\"\npath = \"src\"\n\
+                command = [\"echo\"]\nenabled = false";
+    assert_kinds(toml, &[IssueKind::NonAbsolute]);
+}
+
+/// Duplicate-name detection spans enabled + disabled entries: two
+/// watches with the same `name` (one enabled, one disabled) would
+/// conflict at the bin's `name → SubId` map on flip, so preventing
+/// the ambiguity at load time is the desired behavior.
+#[test]
+fn duplicate_name_across_enabled_and_disabled_rejected() {
+    let toml = format!(
+        "[[watch]]\nname = \"build\"\npath = \"{ROOT}\"\ncommand = [\"v1\"]\nenabled = false\n\
+         [[watch]]\nname = \"build\"\npath = \"{ROOT}\"\ncommand = [\"v2\"]",
+    );
+    assert_kinds(&toml, &[IssueKind::DuplicateName]);
+}
+
 #[test]
 fn kitchen_sink_collects_five_distinct_issues() {
     let toml =

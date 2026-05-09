@@ -82,6 +82,7 @@ path      = "/srv/repo/src"           # absolute; pending paths supported
 command   = ["cargo", "build"]        # argv-only (no shell expansion)
 
 # Optional knobs (defaults shown).
+# enabled    = true                   # false ⇒ inert at runtime; toggle without deleting
 settle       = "200ms"                # debounce window after the last event
 # max_settle = "1h"                   # forced fire even if events keep arriving (default 1h)
 # scope      = "subtree-root"         # subtree-root | per-stable-file

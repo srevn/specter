@@ -9,9 +9,9 @@ rust-version = "1.95"
 license      = "MIT OR Apache-2.0"
 
 [profile.release]
-lto = true
+lto           = true
+strip         = true
 codegen-units = 1
-strip = true
 
 [workspace.dependencies]
 # core

@@ -20,6 +20,7 @@ command = ["echo", "$path"]      # argv; placeholders: $path $rel $anchor
                                  # $created $deleted $modified
                                  # $renamed_from $renamed_to
 
+# enabled    = true                        # false ⇒ inert at runtime; toggle without deleting
 # scope      = "subtree-root"              # | "per-stable-file"
 # recursive  = true
 # hidden     = false

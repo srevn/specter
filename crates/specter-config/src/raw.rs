@@ -46,6 +46,7 @@ pub(crate) struct RawWatch {
     pub max_depth: Option<u32>,
     pub events: Option<Vec<String>>,
     pub log_output: Option<bool>,
+    pub enabled: Option<bool>,
 }
 
 #[cfg(test)]
@@ -69,6 +70,7 @@ impl RawWatch {
             max_depth: None,
             events: None,
             log_output: None,
+            enabled: None,
         }
     }
 }

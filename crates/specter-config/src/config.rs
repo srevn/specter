@@ -148,6 +148,21 @@ pub struct SubSpec {
     /// captures the bytes. Engine threads this through `SubAttachRequest`
     /// → `Sub.log_output` → `Effect.capture_output`.
     pub log_output: bool,
+    /// Operator-controlled suppression flag. `true` (TOML default) ⇒
+    /// the entry is effective; `false` ⇒ structurally equivalent to
+    /// "absent from the config." Disabled entries flow through parsing
+    /// and validation unchanged (so typos surface at config load, not
+    /// silently at re-enable time) but are filtered out of every
+    /// runtime view by [`Config::active_watches`]. The engine never
+    /// learns about disabled entries — every transition (initial
+    /// attach, hot-reload diff, drain-window derivation) consumes the
+    /// filtered iterator.
+    ///
+    /// Included in [`PartialEq`] so two specs differing only on this
+    /// field compare unequal. The diff layer's filter strips disabled
+    /// entries *before* the equality check, so this matters only for
+    /// future consumers that compare unfiltered specs.
+    pub enabled: bool,
 }
 
 impl SubSpec {
@@ -197,6 +212,14 @@ pub struct PromoterSpec {
     /// Threaded into each synthesized dynamic Sub. See
     /// [`SubSpec::log_output`].
     pub log_output: bool,
+    /// Operator-controlled suppression flag — see [`SubSpec::enabled`].
+    /// Disabling a Promoter is structurally equivalent to removing it:
+    /// no descent runs, no dynamic Subs are spawned, no
+    /// `watch_demand` is contributed. Re-enabling triggers a fresh
+    /// `attach_promoter_inner` (no zombie revival path exists for
+    /// Promoters in v1; dynamic Subs spawned across a disable/enable
+    /// cycle get freshly-minted `SubId`s).
+    pub enabled: bool,
 }
 
 impl PromoterSpec {
@@ -240,6 +263,31 @@ impl LogLevel {
 }
 
 impl Config {
+    /// Iterator over enabled static watches in source order.
+    ///
+    /// Sole authority for "what's effective right now": every runtime
+    /// consumer ([`crate::diff`], the bin's initial-attach pass,
+    /// [`crate::Config`] drain-window derivation, the startup /
+    /// reload load logs) goes through this helper. Iterating the raw
+    /// [`Self::watches`] field directly bypasses the per-entry
+    /// `enabled` filter and is almost always wrong outside config
+    /// introspection / round-trip serialization.
+    ///
+    /// Discipline: `enabled = false ⇔ entry absent from the effective
+    /// config`. Every Add/Remove transition the engine handles flows
+    /// from a flip in this iterator's output, so disabled entries
+    /// never reach the engine — they remain in `self.watches` for
+    /// introspection but are otherwise inert.
+    pub fn active_watches(&self) -> impl Iterator<Item = &SubSpec> + '_ {
+        self.watches.iter().filter(|s| s.enabled)
+    }
+
+    /// Iterator over enabled dynamic watches in source order — the
+    /// Promoter analogue of [`Self::active_watches`]. Same discipline.
+    pub fn active_promoters(&self) -> impl Iterator<Item = &PromoterSpec> + '_ {
+        self.promoters.iter().filter(|p| p.enabled)
+    }
+
     /// Parse a TOML string into a validated `Config`.
     ///
     /// Inherent name shadows `std::str::FromStr::from_str` (which is
@@ -256,11 +304,7 @@ impl Config {
             source: e,
         })?;
         let cfg = Self::from_str_inner(&s, Some(path))?;
-        tracing::info!(
-            path = %path.display(),
-            watches = cfg.watches.len(),
-            "config loaded",
-        );
+        log_config_loaded(&cfg, path);
         Ok(cfg)
     }
 
@@ -292,11 +336,7 @@ impl Config {
             source: e,
         })?;
         let cfg = Self::from_str_inner(&s, Some(path))?;
-        tracing::info!(
-            path = %path.display(),
-            watches = cfg.watches.len(),
-            "config loaded",
-        );
+        log_config_loaded(&cfg, path);
         Ok((cfg, meta))
     }
 
@@ -325,6 +365,38 @@ impl std::str::FromStr for Config {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::from_str_inner(s, None)
     }
+}
+
+/// Emit the `"config loaded"` info-level event with shape shared by
+/// [`Config::from_path`] and [`Config::from_path_with_meta`].
+///
+/// `disabled_watches` / `disabled_promoters` carry the names of entries
+/// the operator suppressed via `enabled = false`. The macro renders
+/// empty `Vec`s as `[]` — accept the noise for the all-enabled case
+/// rather than branching the format string. Operators triaging "why
+/// isn't watch X firing?" can grep the log for the watch's name in
+/// the disabled lists rather than re-reading the TOML.
+fn log_config_loaded(cfg: &Config, path: &Path) {
+    let disabled_watches: Vec<&str> = cfg
+        .watches
+        .iter()
+        .filter(|s| !s.enabled)
+        .map(|s| s.name.as_str())
+        .collect();
+    let disabled_promoters: Vec<&str> = cfg
+        .promoters
+        .iter()
+        .filter(|p| !p.enabled)
+        .map(|p| p.name.as_str())
+        .collect();
+    tracing::info!(
+        path = %path.display(),
+        watches = cfg.watches.len(),
+        promoters = cfg.promoters.len(),
+        ?disabled_watches,
+        ?disabled_promoters,
+        "config loaded",
+    );
 }
 
 fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError> {
@@ -745,6 +817,7 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
         scan,
         events,
         log_output: raw.log_output.unwrap_or(false),
+        enabled: raw.enabled.unwrap_or(true),
     })
 }
 
@@ -801,6 +874,7 @@ fn validate_dynamic_watch(
         scan,
         events,
         log_output: raw.log_output.unwrap_or(false),
+        enabled: raw.enabled.unwrap_or(true),
     })
 }
 
@@ -1031,6 +1105,7 @@ mod tests {
         assert_eq!(w.scan.max_depth, None);
         assert_eq!(w.command.argv.len(), 1);
         assert!(!w.log_output, "log_output defaults to false");
+        assert!(w.enabled, "enabled defaults to true (field omitted)");
     }
 
     #[test]
@@ -1053,6 +1128,49 @@ mod tests {
             req.log_output,
             "SubSpec.log_output reaches SubAttachRequest.log_output via to_attach_request",
         );
+    }
+
+    #[test]
+    fn enabled_false_round_trips() {
+        // Disabled entries still land in `Config.watches` — the filter
+        // is applied at the runtime view (`active_watches`), not at
+        // parse time.
+        let cfg = Config::from_str(&minimal_toml("enabled = false\n")).unwrap();
+        assert!(!cfg.watches[0].enabled);
+        assert_eq!(cfg.watches.len(), 1, "disabled entry kept in raw Vec");
+    }
+
+    #[test]
+    fn enabled_false_round_trips_for_dynamic_watch() {
+        // Mirror the static-side round-trip on the dynamic dispatch
+        // path (path containing `*?[{` routes to the Promoter
+        // validator).
+        let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
+                    command = [\"echo\"]\nenabled = false\n";
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.promoters.len(), 1);
+        assert!(!cfg.promoters[0].enabled);
+    }
+
+    #[test]
+    fn active_watches_and_promoters_filter_disabled_preserving_order() {
+        // Mixed config exercises both helpers: disabled `b` and `d`
+        // are stripped from the static side, disabled `e` from the
+        // dynamic side. Source order is preserved among the entries
+        // each helper yields.
+        let toml = format!(
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
+             [[watch]]\nname = \"b\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nenabled = false\n\
+             [[watch]]\nname = \"c\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
+             [[watch]]\nname = \"d\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nenabled = false\n\
+             [[watch]]\nname = \"e\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\nenabled = false\n\
+             [[watch]]\nname = \"f\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n",
+        );
+        let cfg = Config::from_str(&toml).unwrap();
+        let watches: Vec<&str> = cfg.active_watches().map(|s| s.name.as_str()).collect();
+        let promoters: Vec<&str> = cfg.active_promoters().map(|p| p.name.as_str()).collect();
+        assert_eq!(watches, vec!["a", "c"]);
+        assert_eq!(promoters, vec!["f"]);
     }
 
     #[test]

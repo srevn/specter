@@ -148,3 +148,15 @@ fn missing_file_yields_io_error() {
     let err = Config::from_path(Path::new("/nonexistent/specter-test.toml")).unwrap_err();
     assert!(matches!(err, ConfigError::Io { .. }));
 }
+
+/// `enabled` is typed as `Option<bool>` in `RawWatch`; toml's standard
+/// type-check rejects non-bool values at parse time, so the most
+/// common typo (quoting the bool by reflex) surfaces as a parse
+/// error rather than a validation issue.
+#[test]
+fn enabled_string_value_yields_parse_error() {
+    let toml = "[[watch]]\nname = \"a\"\npath = \"/\"\n\
+                command = [\"echo\"]\nenabled = \"true\"";
+    let err = Config::from_str(toml).unwrap_err();
+    assert!(matches!(err, ConfigError::Parse { .. }), "got {err:?}");
+}
