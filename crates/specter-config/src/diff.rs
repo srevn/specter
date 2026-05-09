@@ -42,17 +42,26 @@ pub fn diff(
 /// Static-Sub half of the watch-registry diff. Extracted so the two
 /// halves are independently testable; the public entry point composes
 /// both.
+///
+/// Filters both sides through [`Config::active_watches`] before the
+/// name-keyed comparison: a disabled entry on either side is
+/// structurally equivalent to "absent." Flipping `enabled = true →
+/// false` therefore surfaces as `subs.removed`; the reverse as
+/// `subs.added`. Edits to fields on a disabled entry are invisible
+/// to the diff (the entry isn't in either filtered set) — they
+/// apply on the next `false → true` transition via the fresh
+/// attach.
 fn diff_subs(old: &Config, new: &Config, ids: &BTreeMap<CompactString, SubId>) -> SubRegistryDiff {
     let old_by_name: BTreeMap<&CompactString, &SubSpec> =
-        old.watches.iter().map(|s| (&s.name, s)).collect();
+        old.active_watches().map(|s| (&s.name, s)).collect();
     let new_by_name: BTreeMap<&CompactString, &SubSpec> =
-        new.watches.iter().map(|s| (&s.name, s)).collect();
+        new.active_watches().map(|s| (&s.name, s)).collect();
 
     let mut added: Vec<SubAttachRequest> = Vec::new();
     let mut modified: Vec<(SubId, SubAttachRequest)> = Vec::new();
     let mut removed: Vec<SubId> = Vec::new();
 
-    for spec in &new.watches {
+    for spec in new.active_watches() {
         match old_by_name.get(&spec.name) {
             None => added.push(spec.to_attach_request()),
             Some(old_spec) if **old_spec != *spec => {
@@ -83,22 +92,25 @@ fn diff_subs(old: &Config, new: &Config, ids: &BTreeMap<CompactString, SubId>) -
 }
 
 /// Promoter half of the watch-registry diff. Mirrors [`diff_subs`]
-/// against [`Config::promoters`] / `promoter_ids`.
+/// against [`Config::active_promoters`] / `promoter_ids`. Same
+/// `enabled`-as-absent semantics: a disabled Promoter on either side
+/// is filtered before comparison; flipping the flag surfaces as
+/// `promoters.added` / `promoters.removed`.
 fn diff_promoters(
     old: &Config,
     new: &Config,
     ids: &BTreeMap<CompactString, PromoterId>,
 ) -> PromoterRegistryDiff {
     let old_by_name: BTreeMap<&CompactString, &PromoterSpec> =
-        old.promoters.iter().map(|p| (&p.name, p)).collect();
+        old.active_promoters().map(|p| (&p.name, p)).collect();
     let new_by_name: BTreeMap<&CompactString, &PromoterSpec> =
-        new.promoters.iter().map(|p| (&p.name, p)).collect();
+        new.active_promoters().map(|p| (&p.name, p)).collect();
 
     let mut added: Vec<PromoterAttachRequest> = Vec::new();
     let mut modified: Vec<(PromoterId, PromoterAttachRequest)> = Vec::new();
     let mut removed: Vec<PromoterId> = Vec::new();
 
-    for spec in &new.promoters {
+    for spec in new.active_promoters() {
         match old_by_name.get(&spec.name) {
             None => added.push(spec.to_attach_request()),
             Some(old_spec) if **old_spec != *spec => {
@@ -676,6 +688,81 @@ mod tests {
         assert_eq!(d.promoters.removed, vec![pid(2)]);
         assert_eq!(d.promoters.added.len(), 1);
         assert_eq!(d.promoters.added[0].name, "dyn_new");
+        assert!(d.promoters.modified.is_empty());
+    }
+
+    // ---- Enabled-toggle transitions ----
+
+    fn block_with_enabled(name: &str, command: &str, enabled: bool) -> String {
+        format!(
+            "[[watch]]\nname = \"{name}\"\npath = \"{ROOT}\"\n\
+             command = [\"{command}\"]\nenabled = {enabled}\n",
+        )
+    }
+
+    fn dyn_block_with_enabled(name: &str, pattern: &str, command: &str, enabled: bool) -> String {
+        format!(
+            "[[watch]]\nname = \"{name}\"\npath = \"{pattern}\"\n\
+             command = [\"{command}\"]\nenabled = {enabled}\n",
+        )
+    }
+
+    /// Flipping `enabled = true → false` filters the entry out of the
+    /// new effective set, surfacing as `subs.removed` — the same shape
+    /// the engine sees for an outright deletion. This is the
+    /// load-bearing case of the feature.
+    #[test]
+    fn enabled_true_to_false_yields_subs_removed() {
+        let old = cfg(&[block_with_enabled("a", "echo", true).as_str()]);
+        let new = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
+        let ids = sub_ids_of(&[("a", sid(1))]);
+        let d = diff_subs_only(&old, &new, &ids);
+        assert_eq!(d.subs.removed, vec![sid(1)]);
+        assert!(d.subs.added.is_empty());
+        assert!(d.subs.modified.is_empty());
+    }
+
+    /// Reverse: `false → true` re-introduces the entry, surfacing as
+    /// `subs.added` (the bin's `name → SubId` map has no entry on the
+    /// old side because nothing was attached).
+    #[test]
+    fn enabled_false_to_true_yields_subs_added() {
+        let old = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
+        let new = cfg(&[block_with_enabled("a", "echo", true).as_str()]);
+        let d = diff_subs_only(&old, &new, &BTreeMap::new());
+        assert_eq!(d.subs.added.len(), 1);
+        assert_eq!(d.subs.added[0].name, "a");
+        assert!(d.subs.removed.is_empty());
+        assert!(d.subs.modified.is_empty());
+    }
+
+    /// Edits to other fields while the entry is disabled produce no
+    /// diff: both sides are filtered out before the comparison, so
+    /// the engine sees nothing. The new field values apply on the
+    /// next `false → true` transition via the fresh attach.
+    #[test]
+    fn disabled_to_disabled_with_field_change_yields_empty_diff() {
+        let old = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
+        let new = cfg(&[block_with_enabled("a", "fmt", false).as_str()]);
+        let ids = sub_ids_of(&[("a", sid(1))]);
+        let d = diff_subs_only(&old, &new, &ids);
+        assert!(d.subs.added.is_empty());
+        assert!(d.subs.removed.is_empty());
+        assert!(d.subs.modified.is_empty());
+    }
+
+    /// Promoter-side enabled flip mirrors the static side. One
+    /// transition is enough — the code path is structurally identical
+    /// (`active_promoters` filter ahead of the same name-keyed
+    /// matching).
+    #[test]
+    fn promoter_enabled_true_to_false_yields_promoters_removed() {
+        let old = cfg(&[dyn_block_with_enabled("logs", "/var/log/*", "echo", true).as_str()]);
+        let new = cfg(&[dyn_block_with_enabled("logs", "/var/log/*", "echo", false).as_str()]);
+        let promoter_ids = promoter_ids_of(&[("logs", pid(1))]);
+        let d = diff(&old, &new, &BTreeMap::new(), &promoter_ids);
+        assert_eq!(d.promoters.removed, vec![pid(1)]);
+        assert!(d.promoters.added.is_empty());
         assert!(d.promoters.modified.is_empty());
     }
 }
