@@ -36,6 +36,30 @@ pub struct Cli {
     /// Worker count for the Prober pool. Omit for default (4).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub probe_concurrency: Option<u32>,
+
+    /// Disable the config-file auto-reload watcher; SIGHUP remains the
+    /// only reload trigger.
+    ///
+    /// Default-on auto-reload covers the common-case operator workflow
+    /// (edit + save the running daemon's config and have it pick up
+    /// the change). Disable when the config lives on a filesystem
+    /// where the watcher's preconditions don't hold:
+    ///
+    /// - **Network filesystems** (NFS, SMB, CIFS, FUSE-over-network) —
+    ///   fanotify / inotify / kqueue do not deliver kernel events for
+    ///   server-side mutations; the watcher would init successfully
+    ///   but never fire.
+    /// - **Symlink-leaf retargeted post-startup** — `canonicalize` runs
+    ///   once at watcher init; a later retarget at the leaf leaves the
+    ///   watcher pinned to the original inode.
+    /// - **Parent dir replaced underneath the watch** — the parent fd
+    ///   pins the original parent inode but observes nothing further
+    ///   on the new dir.
+    ///
+    /// Also useful for ops scripts that want strict SIGHUP-only
+    /// reload semantics.
+    #[arg(long, env = "SPECTER_NO_CONFIG_WATCH")]
+    pub no_config_watch: bool,
 }
 
 #[cfg(test)]
@@ -55,6 +79,7 @@ mod tests {
         assert!(cli.log_level.is_none());
         assert!(cli.concurrency.is_none());
         assert!(cli.probe_concurrency.is_none());
+        assert!(!cli.no_config_watch, "default-on auto-reload");
     }
 
     #[test]
@@ -123,6 +148,19 @@ mod tests {
         assert!(help.contains("--log-level"));
         assert!(help.contains("--concurrency"));
         assert!(help.contains("--probe-concurrency"));
+        assert!(help.contains("--no-config-watch"));
+    }
+
+    #[test]
+    fn no_config_watch_flag_sets_field() {
+        let cli = parse(&["specter", "--config", "/foo", "--no-config-watch"]).unwrap();
+        assert!(cli.no_config_watch);
+    }
+
+    #[test]
+    fn no_config_watch_unset_defaults_to_false() {
+        let cli = parse(&["specter", "--config", "/foo"]).unwrap();
+        assert!(!cli.no_config_watch);
     }
 
     #[test]
