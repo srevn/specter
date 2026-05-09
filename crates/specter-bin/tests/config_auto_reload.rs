@@ -435,7 +435,57 @@ fn startup_toctou_edit_triggers_reload() {
     assert!(status.success(), "clean exit; got {status:?}");
 }
 
-// ---------- 7. chmod fires an empty reload (mode path) ---------------
+// ---------- 7. enabled toggle round-trips via auto-reload -----------
+
+/// Round-trip the operator-control surface: a watch is born enabled,
+/// then disabled via an edit, then re-enabled. Both transitions
+/// surface through the same `handle_reload` path the diff layer
+/// drives — the disable yields `removed=1` (engine sees a deletion),
+/// the re-enable yields `added=1` (engine sees a fresh attach). This
+/// is the load-bearing claim of the feature: flipping `enabled`
+/// reduces to the add/remove shape the engine already handles, so
+/// no engine-side state machine learns about the flag.
+#[test]
+fn enabled_toggle_round_trips_via_auto_reload() {
+    let sb = Sandbox::new();
+    sb.write_one_watch("a");
+    let child = spawn_specter(&sb.cfg, &sb.log, std::iter::empty::<&str>());
+    wait_for_log(&sb.log, |s| s.contains("specter starting"), LOG_DEADLINE)
+        .expect("startup logged");
+
+    // Disable: same `name = "a"`, but `enabled = false`. From the
+    // diff's perspective the entry has departed the active set, so
+    // the reload's `removed` count is 1.
+    let toml_disabled = format!(
+        "[[watch]]\nname = \"a\"\npath = \"{}\"\n\
+         command = [\"true\"]\nsettle = \"50ms\"\nenabled = false\n",
+        sb.watched.display(),
+    );
+    fs::write(&sb.cfg, &toml_disabled).expect("write disabled config");
+    wait_for_log(
+        &sb.log,
+        |s| s.contains("config reload applied") && s.contains("removed=1"),
+        LOG_DEADLINE,
+    )
+    .expect("disable surfaces as removed=1 in the reload log");
+
+    // Re-enable: rewrite the `enabled = true` form (default). The
+    // entry re-enters the active set, so the next reload's `added`
+    // count is 1. The first reload's "added=0" disambiguates from
+    // this assertion — only the re-enable matches "added=1".
+    sb.write_one_watch("a");
+    wait_for_log(
+        &sb.log,
+        |s| s.contains("config reload applied") && s.contains("added=1"),
+        LOG_DEADLINE,
+    )
+    .expect("re-enable surfaces as added=1 in the reload log");
+
+    let status = terminate(child);
+    assert!(status.success(), "clean exit; got {status:?}");
+}
+
+// ---------- 8. chmod fires an empty reload (mode path) ---------------
 
 /// `chmod` doesn't move mtime — only mode (and ctime, which we don't
 /// fingerprint). The bin's `FileMeta` includes `mode` precisely so
