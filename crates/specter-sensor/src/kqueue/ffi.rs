@@ -4,13 +4,12 @@
 //!
 //! The `Kevent` newtype is `#[repr(transparent)]` so we can hand a
 //! `&mut [Kevent]` to `kevent(2)` as a `*mut libc::kevent`. Accessors
-//! decode the raw flags / fflags / `udata` shape into typed Rust values.
+//! return raw `flags` / `fflags` / `udata`; the `udata` token is opaque
+//! at this layer — consumers encode/decode at their own boundary.
 
 #![allow(unsafe_code)]
 
 use libc::{c_int, kevent, kqueue, timespec};
-use slotmap::{Key, KeyData};
-use specter_core::ResourceId;
 use std::io::{self, Error};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -44,14 +43,14 @@ impl Kevent {
         self.0.filter == libc::EVFILT_USER && self.0.ident == wake_ident
     }
 
-    /// Decode `udata` back to a `ResourceId`. Returns `None` if the udata
-    /// is the zero sentinel (every wake event carries `udata = 0`).
-    pub(super) fn resource_id(&self) -> Option<ResourceId> {
-        let raw = self.0.udata as u64;
-        if raw == 0 {
-            return None;
-        }
-        Some(ResourceId::from(KeyData::from_ffi(raw)))
+    /// Raw correlation token attached at registration time. The FFI
+    /// treats `udata` as opaque; consumers encode/decode it at their
+    /// own boundary. `udata == 0` is the "no payload" sentinel —
+    /// `register_user_event` leaves `udata` unset, so every wake event
+    /// round-trips to zero, and consumers should reserve zero for
+    /// non-vnode dispatch.
+    pub(super) fn udata(&self) -> u64 {
+        self.0.udata as u64
     }
 }
 
@@ -91,9 +90,11 @@ pub(super) fn trigger_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<
 }
 
 /// Register (or re-register) a vnode watch with the caller-supplied
-/// fflags mask, edge-triggered. `udata` carries the engine's
-/// `ResourceId.as_ffi()` so events round-trip the id without the watcher
-/// needing a separate fd↔id map.
+/// fflags mask, edge-triggered. `udata` is an opaque correlation
+/// token; events round-trip it via [`Kevent::udata`] so the watcher
+/// needs no fd↔id map. Callers should pick non-zero values —
+/// `udata == 0` is the "no payload" sentinel reserved for the
+/// `EVFILT_USER` wake event.
 ///
 /// `fflags` is the caller's responsibility — the kqueue translator
 /// (`super::translate::class_set_to_fflags`) is the single producer of
@@ -102,17 +103,17 @@ pub(super) fn trigger_user_event(kq: &OwnedFd, wake_ident: usize) -> io::Result<
 pub(super) fn register_vnode(
     kq: &OwnedFd,
     target: &OwnedFd,
-    r: ResourceId,
+    udata: u64,
     fflags: u32,
 ) -> io::Result<()> {
-    vnode_change(kq, target, r, libc::EV_ADD | libc::EV_CLEAR, fflags)
+    vnode_change(kq, target, udata, libc::EV_ADD | libc::EV_CLEAR, fflags)
 }
 
 #[allow(clippy::similar_names)]
 fn vnode_change(
     kq: &OwnedFd,
     target: &OwnedFd,
-    r: ResourceId,
+    udata: u64,
     flags: u16,
     fflags: u32,
 ) -> io::Result<()> {
@@ -128,7 +129,7 @@ fn vnode_change(
     ev.0.filter = libc::EVFILT_VNODE;
     ev.0.flags = flags;
     ev.0.fflags = fflags;
-    ev.0.udata = r.data().as_ffi() as *mut _;
+    ev.0.udata = udata as *mut _;
     kevent_change(kq, &ev.0)
 }
 
@@ -239,12 +240,12 @@ mod tests {
         let ev = Kevent::zeroed();
         // `EVFILT_*` constants are negative on macOS / FreeBSD; zero is
         // a valid (and unused) bit pattern that we never treat as a
-        // real filter, confirming the zero-init is "untriggered".
-        // `udata` of zero round-trips to `None` (the wake-event
-        // sentinel).
+        // real filter, confirming the zero-init is "untriggered". `udata`
+        // of zero is the "no payload" sentinel — the wake event leaves
+        // it unset; consumers skip the event on a zero round-trip.
         assert_eq!(ev.flags(), 0);
         assert_eq!(ev.fflags(), 0);
-        assert!(ev.resource_id().is_none(), "zero udata decodes to None");
+        assert_eq!(ev.udata(), 0, "zero-init udata round-trips to zero");
         // Zero `filter` is not `EVFILT_USER` (a negative value on both
         // BSDs), so an arbitrary user-ident probe rejects.
         assert!(

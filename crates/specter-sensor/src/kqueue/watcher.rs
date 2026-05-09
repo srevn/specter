@@ -33,7 +33,7 @@
 use crate::kqueue::wake::KqueueWakeHandle;
 use crate::kqueue::{fd, ffi, normalize, translate};
 use crate::{DrainWindow, FsWatcher, WakeHandle, WatchFailure, WatchFailureExt, WatcherEvent};
-use slotmap::SecondaryMap;
+use slotmap::{Key, KeyData, SecondaryMap};
 use specter_core::{ClassSet, ResourceId, ResourceKind};
 use std::io;
 use std::os::fd::OwnedFd;
@@ -168,7 +168,7 @@ impl KqueueWatcher {
                     .by_resource
                     .get(r)
                     .expect("by_resource.contains_key(r) was true");
-                ffi::register_vnode(&self.kq, fd, r, new_fflags)?;
+                ffi::register_vnode(&self.kq, fd, r.data().as_ffi(), new_fflags)?;
             }
             self.registered_fflags.insert(r, new_fflags);
             tracing::debug!(
@@ -206,7 +206,7 @@ impl KqueueWatcher {
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
         }
         let fflags = translate::class_set_to_fflags(events, observed_kind);
-        ffi::register_vnode(&self.kq, &fd, r, fflags)?;
+        ffi::register_vnode(&self.kq, &fd, r.data().as_ffi(), fflags)?;
         self.by_resource.insert(r, fd);
         self.kinds.insert(r, observed_kind);
         self.registered_fflags.insert(r, fflags);
@@ -366,10 +366,12 @@ impl FsWatcher for KqueueWatcher {
             if ev.is_user_event(WAKE_IDENT) {
                 continue;
             }
-            let Some(r) = ev.resource_id() else {
-                tracing::trace!(?ev, "kevent with unparseable udata; dropped");
+            let raw = ev.udata();
+            if raw == 0 {
+                tracing::trace!(?ev, "kevent with zero udata; dropped");
                 continue;
-            };
+            }
+            let r = ResourceId::from(KeyData::from_ffi(raw));
             // User-space suppression filter (mirror of inotify's gate at
             // its `poll_until`). The kernel registration is always
             // enabled; suppression lives entirely in `self.suppressed`,
