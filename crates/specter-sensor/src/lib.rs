@@ -414,7 +414,7 @@ pub use kqueue::{KqueueConfigWatcher, KqueueWakeHandle, KqueueWatcher};
 mod inotify;
 
 #[cfg(target_os = "linux")]
-pub use inotify::{InotifyWakeHandle, InotifyWatcher};
+pub use inotify::{InotifyConfigWatcher, InotifyWakeHandle, InotifyWatcher};
 
 #[cfg(unix)]
 mod prober;
@@ -455,11 +455,14 @@ pub fn default_watcher(drain_window: DrainWindow) -> io::Result<DefaultWatcher> 
 /// Concrete platform config-watcher type — chosen at compile time so
 /// the bin holds a typed value (no `Box<dyn>` in the auto-reload loop).
 ///
-/// One alias per backend, each `cfg`-gated to its target. Phase 5 ships
-/// the kqueue backend; the Linux variant lands in Phase 6 of the
-/// auto-reload work.
+/// One alias per backend, each `cfg`-gated to its target. Adding a
+/// backend is one block (alias + module + `ConfigWatcher` impl); the
+/// factory below already routes through this alias.
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub type DefaultConfigWatcher = KqueueConfigWatcher;
+
+#[cfg(target_os = "linux")]
+pub type DefaultConfigWatcher = InotifyConfigWatcher;
 
 /// Construct the platform's default config-watcher for the supplied
 /// path.
@@ -470,10 +473,8 @@ pub type DefaultConfigWatcher = KqueueConfigWatcher;
 /// move) is a documented restart-required limitation.
 ///
 /// On error (`canonicalize` failure / parent dir unreadable / kqueue
-/// init failure), the bin warn-logs and continues without auto-reload —
-/// SIGHUP still works. See plan §7's edge-case matrix for the full
-/// failure shape.
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+/// or inotify init failure), the bin warn-logs and continues without
+/// auto-reload — SIGHUP still works.
 pub fn default_config_watcher(path: &Path) -> io::Result<DefaultConfigWatcher> {
     DefaultConfigWatcher::new(path)
 }

@@ -20,6 +20,7 @@ compile_error!(
      pointer-width rule uniform with the kqueue branch."
 );
 
+mod config_watch;
 mod ffi;
 mod normalize;
 mod record;
@@ -27,5 +28,6 @@ mod translate;
 mod wake;
 mod watcher;
 
+pub use config_watch::InotifyConfigWatcher;
 pub use wake::InotifyWakeHandle;
 pub use watcher::InotifyWatcher;
