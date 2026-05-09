@@ -19,9 +19,12 @@
 //!   The file mask is [`FILE_MASK`]: `IN_MODIFY | IN_DELETE_SELF |
 //!   IN_MOVE_SELF | IN_ATTRIB | IN_CLOSE_WRITE`. Catches in-place
 //!   edits, terminal flags (delete / move), `chmod` / `chown`
-//!   (`IN_ATTRIB` → ctime moves; the driver's lstat filter then sees
-//!   the ctime delta), and editor close-after-write
-//!   (`IN_CLOSE_WRITE`). Dropped to `None` on `IN_IGNORED` only —
+//!   (`IN_ATTRIB`; the driver's lstat filter then sees the mode /
+//!   ownership delta), and editor close-after-write
+//!   (`IN_CLOSE_WRITE`). `IN_ATTRIB` also fires on `setxattr` and
+//!   `utimes`, but the driver's `FileMeta` fingerprints only mode /
+//!   uid / gid (not ctime), so those wakes collapse to a no-op at
+//!   the convergence point. Dropped to `None` on `IN_IGNORED` only —
 //!   intermediate flags like `IN_DELETE_SELF` / `IN_MOVE_SELF` just
 //!   signal a real-event pulse and let the kernel's subsequent
 //!   `IN_IGNORED` finalise the drop. This avoids an ordering hazard:
@@ -168,8 +171,10 @@ const PARENT_MASK: u32 =
 /// | `IN_MODIFY`       | content modification (in-place edit)                |
 /// | `IN_DELETE_SELF`  | terminal — inode unlinked                           |
 /// | `IN_MOVE_SELF`    | terminal — inode moved                              |
-/// | `IN_ATTRIB`       | `chmod` / `chown` (ctime moves) — closes the        |
-/// |                   | recovery gap for `EACCES`-after-`chmod`             |
+/// | `IN_ATTRIB`       | `chmod` / `chown` — closes the recovery gap for     |
+/// |                   | `EACCES`-after-`chmod`. Also fires on `setxattr` /  |
+/// |                   | `utimes`; the driver's lstat filter (mode +         |
+/// |                   | ownership) rejects those without a re-parse.        |
 /// | `IN_CLOSE_WRITE`  | editor close-after-write (atomic-save final beat)   |
 ///
 /// `IN_IGNORED` is kernel-emitted regardless of mask; the

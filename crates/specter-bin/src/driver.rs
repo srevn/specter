@@ -410,16 +410,25 @@ impl EngineDriver {
     ///     `copytruncate`-style rotation works without a config diff.
     ///
     /// **Meta rotation discipline.** `loader.config_meta` rotates on
-    /// **every** successful read — both the empty-diff and the
-    /// apply-diff branches — so the auto-reload settle-expiry filter
-    /// sees a freshly-stored identity after each reload. Skipping the
-    /// empty-diff rotation would loop the filter against the same
-    /// already-applied edit forever (the lstat reflects the post-edit
-    /// inode but `loader.config_meta` would still hold the pre-edit
-    /// value). Parse-fail does **not** rotate — preserving the retry
-    /// loop until the operator fixes the file.
+    /// **every** observed file state — both successful reads (empty
+    /// diff and apply diff) **and** parse / open failures (best-effort
+    /// post-failure lstat). The success branches keep the auto-reload
+    /// settle-expiry filter from looping against an already-applied
+    /// edit. The parse-fail rotation closes the chmod-EACCES recovery
+    /// hole: with mode/uid/gid as the access-side fingerprint (see
+    /// [`FileMeta`]), stored meta would freeze at the pre-tighten
+    /// value if parse-fail preserved it, and the post-loosen lstat
+    /// would compare equal — silently breaking auto-recovery. The
+    /// post-fail lstat captures the locked-out state instead, so the
+    /// recovery chmod's lstat differs and re-fires `handle_reload`.
+    /// If the post-fail lstat itself fails (parent dir gone, etc.),
+    /// preserve the existing meta — `config_meta_changed`'s
+    /// "Err = treat as changed" semantics keep the retry loop alive.
     fn handle_reload(&mut self, now: Instant) {
         let Some((new_config, new_meta)) = self.read_and_parse_config() else {
+            if let Ok(post_fail_meta) = FileMeta::from_path(&self.config_path) {
+                self.loader.config_meta = post_fail_meta;
+            }
             return;
         };
         let new_log_resolved = self.parse_and_resolve_log(&new_config);
@@ -989,21 +998,23 @@ mod tests {
     use std::sync::Arc;
 
     /// Sentinel meta used in fixtures whose config file may not exist
-    /// on disk. Inode 0 is reserved by every supported kernel; this
-    /// value never compares equal to a real `FileMeta::from_path`
-    /// capture, so tests that *do* exercise the meta-rotation path
-    /// can assert "rotated to a real value" by comparing against a
-    /// fresh `FileMeta::from_path` (which differs from this sentinel
-    /// in every field).
+    /// on disk. Inode 0 is reserved by every supported kernel and
+    /// `mode = 0` cannot occur in a real lstat (the kernel always sets
+    /// file-type bits); this value never compares equal to a real
+    /// `FileMeta::from_path` capture, so tests that *do* exercise the
+    /// meta-rotation path can assert "rotated to a real value" by
+    /// comparing against a fresh `FileMeta::from_path` (which differs
+    /// from this sentinel in every field).
     fn dummy_meta() -> FileMeta {
         FileMeta {
             inode: 0,
             device: 0,
             mtime_sec: 0,
             mtime_nsec: 0,
-            ctime_sec: 0,
-            ctime_nsec: 0,
             size: 0,
+            mode: 0,
+            uid: 0,
+            gid: 0,
         }
     }
 
@@ -1949,9 +1960,9 @@ settle    = "100ms"
     }
 
     /// SIGHUP reload whose new content differs only in metadata
-    /// (re-write of identical bytes; mtime / ctime move, content
-    /// identical) takes the empty-diff branch, but **must still
-    /// rotate `loader.config_meta`** — otherwise the auto-reload
+    /// (re-write of identical bytes; mtime moves, content identical)
+    /// takes the empty-diff branch, but **must still rotate
+    /// `loader.config_meta`** — otherwise the auto-reload
     /// settle filter would observe `lstat != stored_meta` on every
     /// subsequent pulse for the same already-applied edit and loop
     /// `handle_reload` against unchanged content. Pins the
@@ -1977,7 +1988,7 @@ command   = ["true"]
         let ids_before: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
 
         // Re-save the same content. Real `FileMeta::from_path` after
-        // this returns nonzero inode + non-placeholder mtime/ctime,
+        // this returns nonzero inode + nonzero mode (file-type bits),
         // which is enough to distinguish from `dummy_meta()` and to
         // observe rotation.
         std::fs::write(&cfg_path, &cfg_text).unwrap();
@@ -2303,7 +2314,7 @@ command   = ["true"]
         assert_eq!(rig.driver.loader.ids.len(), 1);
         assert!(rig.driver.loader.ids.contains_key("a"));
 
-        // Edit the file — atomic write replaces inode; mtime/ctime move.
+        // Edit the file — atomic write replaces inode; mtime moves.
         let v2_text = format!(
             r#"
 [[watch]]
@@ -2318,8 +2329,10 @@ command   = ["true"]
 "#,
             tmp.path().display(),
         );
-        // Sleep briefly so the FS-resolved mtime/ctime tick at least
-        // one nanosecond past `v1_meta` even on coarse-resolution FSs.
+        // Sleep briefly so the FS-resolved mtime ticks at least one
+        // nanosecond past `v1_meta` even on coarse-resolution FSs
+        // (and so that the inode allocator doesn't reuse `v1`'s slot
+        // immediately on FSs that recycle eagerly).
         std::thread::sleep(Duration::from_millis(10));
         std::fs::write(&cfg_path, &v2_text).unwrap();
         let v2_lstat = FileMeta::from_path(&cfg_path).expect("v2 lstat ok");
@@ -2353,15 +2366,24 @@ command   = ["true"]
         assert_eq!(rig.driver.loader.current_config.watches.len(), 2);
     }
 
-    /// Lstat error (file missing, EACCES, etc.) routes through the
-    /// "treat-as-changed" branch: helper calls `handle_reload`, which
-    /// fails to read, logs, and preserves loader state. The settle
-    /// slot is consumed (no internal looping); the next pulse fires
-    /// a fresh attempt.
+    /// Lstat error (file missing, EACCES on parent, etc.) routes
+    /// through the "treat-as-changed" branch: helper calls
+    /// `handle_reload`, which fails to read, logs, and preserves
+    /// loader state. The settle slot is consumed (no internal looping);
+    /// the next pulse fires a fresh attempt.
+    ///
+    /// Specifically pins the **post-fail-lstat-also-fails** sub-case
+    /// of `handle_reload`'s parse-fail rotation: when the open fails
+    /// AND the post-fail lstat fails too, there is no fresh meta to
+    /// rotate to, so the existing meta is preserved. The next pulse's
+    /// `config_meta_changed` treats lstat-Err as drift and re-fires
+    /// the retry loop.
     #[test]
     fn apply_config_settle_expiry_treats_missing_path_as_changed() {
         // Path that cannot be lstat'd: `/dev/null` is a character
         // device, so `lstat("/dev/null/no/such")` returns ENOTDIR.
+        // Both the open-for-parse and the post-fail lstat hit the
+        // same error, so the post-fail rotation is a no-op.
         let cfg_path = PathBuf::from("/dev/null/no/such/file.toml");
         let config = Config::from_str("").expect("empty config parses");
         let mut rig = rig_for(config.clone(), cfg_path);
@@ -2376,11 +2398,6 @@ command   = ["true"]
         // doesn't loop on its own; the next external pulse arms a
         // fresh window.
         assert_eq!(rig.driver.config_settle_until, None);
-        // Parse-fail preserves loader state across the failed reload
-        // attempt — the parse-fail invariant carries through the
-        // settle-expiry path verbatim (handle_reload's failure
-        // handling is the single source of truth across SIGHUP and
-        // auto-reload alike).
         assert_eq!(
             rig.driver.loader.config_meta, pre_meta,
             "parse-fail must not rotate meta — would suppress retry pulses",

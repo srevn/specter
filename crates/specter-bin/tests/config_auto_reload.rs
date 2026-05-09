@@ -435,18 +435,22 @@ fn startup_toctou_edit_triggers_reload() {
     assert!(status.success(), "clean exit; got {status:?}");
 }
 
-// ---------- 7. chmod fires an empty reload (ctime path) --------------
+// ---------- 7. chmod fires an empty reload (mode path) ---------------
 
-/// `chmod` doesn't move mtime — only ctime. The bin's `FileMeta`
-/// stores both `mtime_*` and `ctime_*` precisely so this case is
-/// observable. Behaviour: pulse → settle → lstat (ctime differs from
-/// stored meta) → handle_reload → re-parse the unchanged file → diff
-/// is empty → "config reload: no watch changes" + meta rotation.
+/// `chmod` doesn't move mtime — only mode (and ctime, which we don't
+/// fingerprint). The bin's `FileMeta` includes `mode` precisely so
+/// this case is observable. Behaviour: pulse → settle → lstat (mode
+/// differs from stored meta) → handle_reload → re-parse the unchanged
+/// file → diff is empty → "config reload: no watch changes" + meta
+/// rotation.
 ///
 /// This is the "wasted parse" the design accepts as the price of
 /// recovering from `chmod`-after-EACCES; the test's whole purpose is
-/// to confirm the ctime path is wired (a regression to mtime-only
-/// would silently break `chmod`-driven recoveries).
+/// to confirm the mode-bit path is wired. A regression to a fingerprint
+/// without `mode` would silently break `chmod`-driven recoveries; a
+/// regression that re-introduced `ctime` would reload-storm under
+/// macOS LaunchServices' `lastuseddate` xattr writes (see
+/// `xattr_write_does_not_trigger_reload`).
 #[test]
 fn chmod_triggers_empty_reload() {
     let sb = Sandbox::new();
@@ -455,8 +459,7 @@ fn chmod_triggers_empty_reload() {
     wait_for_log(&sb.log, |s| s.contains("specter starting"), LOG_DEADLINE)
         .expect("startup logged");
 
-    // chmod: 0o644 → 0o600. Same content; ctime moves; mtime
-    // unchanged.
+    // chmod: 0o644 → 0o600. Same content; mode moves; mtime unchanged.
     fs::set_permissions(&sb.cfg, fs::Permissions::from_mode(0o600)).expect("chmod test config");
 
     wait_for_log(
@@ -464,7 +467,7 @@ fn chmod_triggers_empty_reload() {
         |s| s.contains("config reload: no watch changes"),
         LOG_DEADLINE,
     )
-    .expect("empty reload via ctime delta");
+    .expect("empty reload via mode delta");
 
     let status = terminate(child);
     assert!(status.success(), "clean exit; got {status:?}");

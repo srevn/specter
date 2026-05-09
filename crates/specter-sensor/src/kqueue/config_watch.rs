@@ -17,9 +17,14 @@
 //!   with the full file mask (`NOTE_WRITE | NOTE_EXTEND | NOTE_DELETE
 //!   | NOTE_RENAME | NOTE_LINK | NOTE_REVOKE | NOTE_ATTRIB`). Catches
 //!   in-place edits, atomic-rename source side, terminal flags
-//!   (delete / move / revoke), and `chmod` / `chown` (NOTE_ATTRIB →
-//!   ctime moves; the driver's lstat filter then sees the ctime
-//!   delta). Dropped to `None` on any terminal flag.
+//!   (delete / move / revoke), and `chmod` / `chown` (NOTE_ATTRIB; the
+//!   driver's lstat filter then sees the mode / ownership delta).
+//!   `NOTE_ATTRIB` also fires on `setxattr` / `chflags` / `utimes` —
+//!   noisy on macOS where LaunchServices writes
+//!   `com.apple.lastuseddate#PS` on every Finder open / Quick Look —
+//!   but the driver's `FileMeta` fingerprints only mode / uid / gid
+//!   (not ctime), so those wakes collapse to a no-op at the
+//!   convergence point. Dropped to `None` on any terminal flag.
 //!
 //! - **Parent dir fd** — registered with bare `NOTE_WRITE`. Fires on
 //!   any dir-contents change (atomic save's rename, delete, recreate,
@@ -98,8 +103,11 @@ const PARENT_UDATA: u64 = 2;
 /// | `NOTE_RENAME`| terminal — entry renamed                             |
 /// | `NOTE_LINK`  | hardlink count change (rare for configs, cheap)      |
 /// | `NOTE_REVOKE`| terminal — fd revoked                                |
-/// | `NOTE_ATTRIB`| `chmod` / `chown` (ctime moves) — closes the         |
-/// |              | recovery gap for `EACCES`-after-`chmod`              |
+/// | `NOTE_ATTRIB`| `chmod` / `chown` — closes the recovery gap for      |
+/// |              | `EACCES`-after-`chmod`. Also fires on `setxattr` /   |
+/// |              | `chflags` / macOS LaunchServices `lastuseddate`      |
+/// |              | xattr; the driver's lstat filter (mode + ownership)  |
+/// |              | rejects those without a re-parse.                    |
 const FILE_FFLAGS: u32 = libc::NOTE_WRITE
     | libc::NOTE_EXTEND
     | libc::NOTE_DELETE

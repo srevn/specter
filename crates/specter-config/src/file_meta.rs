@@ -29,21 +29,36 @@ use std::path::Path;
 /// Inode-level identity + change-detection signal for a regular file.
 ///
 /// Equality is structural over every field; the driver's lstat filter
-/// fires a reload on any drift. `ctime_*` is load-bearing alongside
-/// `mtime_*`: `chmod` and `chown` move ctime but not mtime, so without
-/// it a config that returns to readable after a temporary EACCES
-/// (operator chmods 600 → daemon lacks read → operator chmods 644)
-/// would never recover via auto-reload — the post-recovery lstat would
-/// compare equal to the pre-EACCES stored meta.
+/// fires a reload on any drift. `mode` / `uid` / `gid` are load-bearing
+/// alongside `mtime_*`: `chmod` and `chown` move them but not `mtime`,
+/// so without them a config that returns to readable after a temporary
+/// `EACCES` (operator `chmod 600` → daemon lacks read → operator
+/// `chmod 644`) would never recover via auto-reload — the post-recovery
+/// lstat would compare equal to the pre-EACCES stored meta.
+///
+/// Why not `ctime`? `ctime` catches the same recovery case but also
+/// moves on `setxattr` / `chflags` / `utimes` — including macOS
+/// LaunchServices' `com.apple.lastuseddate#PS` xattr write on every
+/// Finder open / Quick Look — which would reload-storm the driver on a
+/// quiet config file. Mode + ownership is the precise filter for
+/// "could this affect bytes or readability"; ctime is too coarse.
+///
+/// The cycle recovery further requires `loader.config_meta` to rotate
+/// on **every** read attempt (success or failure), not just on success
+/// — see `EngineDriver::handle_reload`'s parse-fail branch. Without
+/// that, the chmod-EACCES recovery cycle is silently broken: the
+/// stored meta freezes at the pre-tighten state, and the post-loosen
+/// lstat compares equal to it because mode is bistable.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FileMeta {
     pub inode: u64,
     pub device: u64,
     pub mtime_sec: i64,
     pub mtime_nsec: i64,
-    pub ctime_sec: i64,
-    pub ctime_nsec: i64,
     pub size: u64,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 impl FileMeta {
@@ -57,9 +72,10 @@ impl FileMeta {
             device: m.dev(),
             mtime_sec: m.mtime(),
             mtime_nsec: m.mtime_nsec(),
-            ctime_sec: m.ctime(),
-            ctime_nsec: m.ctime_nsec(),
             size: m.len(),
+            mode: m.mode(),
+            uid: m.uid(),
+            gid: m.gid(),
         }
     }
 
@@ -94,11 +110,13 @@ mod tests {
 
         assert_ne!(meta.inode, 0, "inode should be non-zero on any real FS");
         assert_eq!(meta.size, 5);
-        // mtime/ctime are seconds since epoch; any test running after
-        // ~1970 is positive. nsec sub-second component depends on FS
+        // mtime is seconds since epoch; any test running after ~1970
+        // is positive. nsec sub-second component depends on FS
         // resolution (APFS/ext4 = ns-resolved; FAT-family = 0).
         assert!(meta.mtime_sec > 0, "mtime should reflect current epoch");
-        assert!(meta.ctime_sec > 0, "ctime should reflect current epoch");
+        // mode always carries file-type bits from the kernel; a real
+        // lstat on a regular file is `S_IFREG | <perm bits>`, never 0.
+        assert_ne!(meta.mode, 0, "mode should always carry file-type bits");
     }
 
     #[test]
@@ -130,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn ctime_moves_on_chmod_while_mtime_holds() {
+    fn mode_changes_on_chmod_while_mtime_holds() {
         // Closes the chmod-after-EACCES recovery hole: a permissions
         // flip that doesn't touch content must still register as a
         // FileMeta delta, otherwise the lstat-filter would never
@@ -144,12 +162,6 @@ mod tests {
 
         let before = FileMeta::from_path(&p).unwrap();
 
-        // 50 ms straddles a sub-second nanosecond tick on every Unix
-        // FS we run on (APFS, ext4, tmpfs all ns-resolved). A coarser
-        // FS (FAT, older HFS+) would need ≥ 1 s — none of those host
-        // /tmp on the supported platforms.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
         let mut perms = std::fs::metadata(&p).unwrap().permissions();
         perms.set_mode(0o600);
         std::fs::set_permissions(&p, perms).unwrap();
@@ -157,16 +169,14 @@ mod tests {
         let after = FileMeta::from_path(&p).unwrap();
 
         assert_ne!(
-            (before.ctime_sec, before.ctime_nsec),
-            (after.ctime_sec, after.ctime_nsec),
-            "ctime must move on chmod (before={:?}, after={:?})",
-            (before.ctime_sec, before.ctime_nsec),
-            (after.ctime_sec, after.ctime_nsec),
+            before.mode, after.mode,
+            "mode must move on chmod (before={:o}, after={:o})",
+            before.mode, after.mode,
         );
         assert_eq!(
             (before.mtime_sec, before.mtime_nsec),
             (after.mtime_sec, after.mtime_nsec),
-            "mtime must NOT move on chmod (the whole reason ctime carries its weight)",
+            "mtime must NOT move on chmod (the whole reason mode carries its weight)",
         );
     }
 
@@ -178,13 +188,9 @@ mod tests {
         // path-level renames. Verifies the building block
         // independently of the Config wrapper.
         //
-        // Inode + device + size + mtime are the invariant fields
-        // (the rename does not touch content). `ctime` is exempted:
-        // POSIX leaves it implementation-defined for `rename(2)`,
-        // and at least APFS and ext4 bump the renamed inode's
-        // ctime. That bump is unrelated to the atomicity claim — it
-        // happens to the orphan inode after our capture, and never
-        // to the bytes we read.
+        // Every fingerprinted field is rename-stable: rename moves the
+        // path, not the inode's bytes / mtime / mode / ownership. The
+        // full struct equality below pins the property end-to-end.
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("a.toml");
         write(&p, b"original");
@@ -200,18 +206,10 @@ mod tests {
         let m_path = FileMeta::from_path(&p).unwrap();
 
         assert_eq!(
-            m_open.inode, m_after_rename.inode,
-            "fstat on open fd must stay pinned to the original inode",
-        );
-        assert_eq!(m_open.device, m_after_rename.device);
-        assert_eq!(
-            m_open.size, m_after_rename.size,
-            "rename does not touch content; size on the orphan must hold",
-        );
-        assert_eq!(
-            (m_open.mtime_sec, m_open.mtime_nsec),
-            (m_after_rename.mtime_sec, m_after_rename.mtime_nsec),
-            "rename does not touch content; mtime on the orphan must hold",
+            m_open, m_after_rename,
+            "fstat on open fd must hold every field across rename — \
+             the orphan inode's content, mtime, mode, and ownership \
+             are inode-bound, not path-bound",
         );
         assert_ne!(
             m_open.inode, m_path.inode,

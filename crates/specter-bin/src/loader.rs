@@ -129,17 +129,19 @@ mod tests {
 
     /// Sentinel meta used in fixtures that don't exercise the
     /// auto-reload meta-comparison path. Inode 0 is reserved by every
-    /// supported kernel; this value never compares equal to a real
-    /// `FileMeta::from_path` capture.
+    /// supported kernel and `mode = 0` cannot occur in a real lstat
+    /// (the kernel always sets file-type bits); this value never
+    /// compares equal to a real `FileMeta::from_path` capture.
     fn dummy_meta() -> FileMeta {
         FileMeta {
             inode: 0,
             device: 0,
             mtime_sec: 0,
             mtime_nsec: 0,
-            ctime_sec: 0,
-            ctime_nsec: 0,
             size: 0,
+            mode: 0,
+            uid: 0,
+            gid: 0,
         }
     }
 
