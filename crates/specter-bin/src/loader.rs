@@ -89,7 +89,7 @@ impl Loader {
 
     /// Derive the watcher's deferred-drain window from `current_config`.
     ///
-    /// Formula: `min(settle for every static Sub *and* Promoter) / 4`,
+    /// Formula: `min(settle for every active Sub *and* Promoter) / 4`,
     /// clamped to the `[10ms, 50ms]` band. The floor (`10ms`) is below
     /// scheduler granularity on every supported platform — a
     /// 1ms-settle Profile pays at most ~9ms latency on the second
@@ -97,10 +97,16 @@ impl Loader {
     /// entirely for single touches in quiet periods); the ceiling
     /// (`50ms`) is the cap.
     ///
-    /// **Empty `watches` and `promoters`** returns the floor — the
-    /// watcher has no FDs so the value is moot, but `Duration::ZERO`
-    /// would disable deferred drain permanently and miss the next
-    /// added watch's first burst.
+    /// **Disabled entries don't contribute.** Iterating
+    /// [`Config::active_watches`] / [`Config::active_promoters`]
+    /// strips the suppressed entries — a disabled `[[watch]]` with
+    /// `settle = "1ms"` no longer shrinks the drain window for an
+    /// engine that has no Profile against it.
+    ///
+    /// **All entries disabled / empty config** returns the floor —
+    /// the watcher has no FDs so the value is moot, but
+    /// `Duration::ZERO` would disable deferred drain permanently
+    /// and miss the next re-enable's first burst.
     ///
     /// `settle > 0` is enforced at config-load
     /// (`specter-config::config`) for both static and dynamic entries,
@@ -110,8 +116,12 @@ impl Loader {
     /// supported toolchain. `Loader::new` stays const.
     #[must_use]
     pub fn derive_drain_window(&self) -> Duration {
-        let static_min = self.current_config.watches.iter().map(|w| w.settle).min();
-        let dynamic_min = self.current_config.promoters.iter().map(|p| p.settle).min();
+        let static_min = self.current_config.active_watches().map(|w| w.settle).min();
+        let dynamic_min = self
+            .current_config
+            .active_promoters()
+            .map(|p| p.settle)
+            .min();
         let min_settle = match (static_min, dynamic_min) {
             (Some(a), Some(b)) => a.min(b),
             (Some(a), None) | (None, Some(a)) => a,
@@ -284,6 +294,35 @@ mod tests {
         let loader = loader_with_toml(
             "[[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n\
              settle = \"1ms\"\nmax_settle = \"60ms\"\n",
+        );
+        assert_eq!(loader.derive_drain_window(), Duration::from_millis(10));
+    }
+
+    /// A disabled entry with a tiny settle is filtered out by
+    /// `active_watches`, so it does not shrink the window. Two
+    /// entries: an enabled 1000ms (1000/4 = 250 → clamped to 50ms)
+    /// and a disabled 1ms (which would otherwise force the floor).
+    /// Result: 50ms — proves the disabled entry is not in the min
+    /// computation.
+    #[test]
+    fn derive_drain_window_ignores_disabled_settle() {
+        let loader = loader_with_toml(
+            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\ncommand = [\"echo\"]\n\
+             settle = \"1000ms\"\n\
+             [[watch]]\nname = \"b\"\npath = \"/tmp\"\ncommand = [\"echo\"]\n\
+             settle = \"1ms\"\nmax_settle = \"60ms\"\nenabled = false\n",
+        );
+        assert_eq!(loader.derive_drain_window(), Duration::from_millis(50));
+    }
+
+    /// All-disabled config returns the floor (same fallback as the
+    /// empty-config case). The `(None, None)` arm of the helper
+    /// fires when both filtered iterators are empty.
+    #[test]
+    fn derive_drain_window_all_disabled_returns_floor() {
+        let loader = loader_with_toml(
+            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\ncommand = [\"echo\"]\nenabled = false\n\
+             [[watch]]\nname = \"b\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\nenabled = false\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(10));
     }

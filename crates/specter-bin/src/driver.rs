@@ -195,8 +195,14 @@ impl EngineDriver {
         }
     }
 
-    /// Attach every Sub from `loader.current_config.watches` and every
-    /// Promoter from `loader.current_config.promoters` in source order.
+    /// Attach every active Sub and Promoter from
+    /// `loader.current_config` in source order. Disabled entries are
+    /// filtered out via [`Config::active_watches`] /
+    /// [`Config::active_promoters`] — they remain in the raw `Vec`s
+    /// for introspection but never reach the engine, mirroring the
+    /// "disabled = absent" discipline the diff layer applies to
+    /// hot-reload.
+    ///
     /// Each [`StepOutput`] is forwarded as we go so the watcher /
     /// prober receive ops as the engine emits them — a single
     /// startup-sized `ConfigDiff` would batch the entire attach into
@@ -214,10 +220,21 @@ impl EngineDriver {
     /// the bin's diff layer.
     pub fn run_initial_attach(&mut self) {
         let now = Instant::now();
-        // Snapshot the spec lists — `loader.ids` / `loader.promoter_ids`
-        // mutation invalidates an iterator over `loader.current_config`.
-        let watch_specs = self.loader.current_config.watches.clone();
-        let promoter_specs = self.loader.current_config.promoters.clone();
+        // Snapshot the active spec lists — `loader.ids` /
+        // `loader.promoter_ids` mutation invalidates an iterator
+        // over `loader.current_config`.
+        let watch_specs: Vec<_> = self
+            .loader
+            .current_config
+            .active_watches()
+            .cloned()
+            .collect();
+        let promoter_specs: Vec<_> = self
+            .loader
+            .current_config
+            .active_promoters()
+            .cloned()
+            .collect();
         for spec in watch_specs {
             let req = spec.to_attach_request();
             let (_id, out) = self.engine.attach_sub(req, now);
@@ -1570,6 +1587,68 @@ mod tests {
 
         assert!(rig.driver.loader.ids.contains_key("build"));
         assert!(rig.driver.loader.promoter_ids.contains_key("logs"));
+    }
+
+    /// Disabled entries on either side are skipped: the config carries
+    /// one enabled + one disabled static watch and one enabled + one
+    /// disabled dynamic watch. After initial attach, only the
+    /// enabled names show up in the loader's id maps; the disabled
+    /// entries leave no engine residue (no `WatchOp::Watch`, no
+    /// descent probe, no diagnostic mention).
+    #[test]
+    fn run_initial_attach_skips_disabled_entries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_text = format!(
+            r#"
+    [log]
+    level = "warn"
+
+    [[watch]]
+    name      = "build"
+    path      = "{0}"
+    command   = ["true"]
+    settle    = "50ms"
+
+    [[watch]]
+    name      = "build_off"
+    path      = "{0}"
+    command   = ["true"]
+    settle    = "50ms"
+    enabled   = false
+
+    [[watch]]
+    name      = "logs"
+    path      = "{0}/{{a,b}}/access.log"
+    command   = ["true"]
+    settle    = "50ms"
+
+    [[watch]]
+    name      = "logs_off"
+    path      = "{0}/disabled/*"
+    command   = ["true"]
+    settle    = "50ms"
+    enabled   = false
+    "#,
+            tmp.path().display(),
+        );
+        let cfg_path = tmp.path().join("specter.toml");
+        let config = Config::from_str(&cfg_text).expect("disabled mix parses");
+        let mut rig = rig_for(config, cfg_path);
+
+        rig.driver.run_initial_attach();
+
+        let ids = &rig.driver.loader.ids;
+        let pids = &rig.driver.loader.promoter_ids;
+        assert!(ids.contains_key("build"), "enabled static attached");
+        assert!(!ids.contains_key("build_off"), "disabled static skipped");
+        assert!(pids.contains_key("logs"), "enabled dynamic attached");
+        assert!(!pids.contains_key("logs_off"), "disabled dynamic skipped");
+        assert_eq!(ids.len(), 1, "only the enabled static lives in loader.ids");
+        assert_eq!(
+            pids.len(),
+            1,
+            "only the enabled dynamic lives in promoter_ids"
+        );
     }
 
     /// Reload that adds a fresh dynamic [[watch]] populates
