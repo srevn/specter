@@ -50,7 +50,7 @@ use crate::loader::Loader;
 use crate::observability::{LogReloadKind, ObservabilityHandle};
 use crossbeam::channel::Select;
 use specter_config::Config;
-use specter_core::{Diagnostic, Input, ProbeOp, StepOutput, SubId, WatchRegistryDiff};
+use specter_core::{Diagnostic, Input, ProbeOp, StepOutput, SubId};
 use specter_engine::Engine;
 use specter_sensor::{DrainWindow, Prober, WakeHandle};
 use std::path::PathBuf;
@@ -284,8 +284,19 @@ impl EngineDriver {
         };
         self.apply_log_reload(&new_log_resolved);
 
-        let diff = specter_config::diff(&self.loader.current_config, &new_config, &self.loader.ids);
-        if diff.added.is_empty() && diff.removed.is_empty() && diff.modified.is_empty() {
+        let diff = specter_config::diff(
+            &self.loader.current_config,
+            &new_config,
+            &self.loader.ids,
+            &self.loader.promoter_ids,
+        );
+        let no_sub_changes = diff.subs.added.is_empty()
+            && diff.subs.removed.is_empty()
+            && diff.subs.modified.is_empty();
+        let no_promoter_changes = diff.promoters.added.is_empty()
+            && diff.promoters.removed.is_empty()
+            && diff.promoters.modified.is_empty();
+        if no_sub_changes && no_promoter_changes {
             tracing::info!("config reload: no watch changes");
             self.loader.current_config = new_config;
             self.loader.current_log = new_log_resolved;
@@ -293,26 +304,27 @@ impl EngineDriver {
         }
 
         // Pre-collect identifiers; `Input::ConfigDiff(diff)` consumes
-        // `diff` shortly. Cheap (Vecs of SubId + name strings).
-        let added_n = diff.added.len();
-        let removed_n = diff.removed.len();
-        let modified_n = diff.modified.len();
-        let added_names: Vec<String> = diff.added.iter().map(|r| r.name.clone()).collect();
-        let removed_ids: Vec<SubId> = diff.removed.clone();
+        // `diff` shortly. Cheap (Vecs of SubId + name strings). The
+        // Promoter half flows into the engine's `on_config_diff`
+        // unchanged; the bin's loader-side reconciliation for Promoters
+        // lands with the diagnostic-driven id wiring (Phase 12), so for
+        // now we only sync the Sub map.
+        let added_n = diff.subs.added.len();
+        let removed_n = diff.subs.removed.len();
+        let modified_n = diff.subs.modified.len();
+        let promoter_added_n = diff.promoters.added.len();
+        let promoter_removed_n = diff.promoters.removed.len();
+        let promoter_modified_n = diff.promoters.modified.len();
+        let added_names: Vec<String> = diff.subs.added.iter().map(|r| r.name.clone()).collect();
+        let removed_ids: Vec<SubId> = diff.subs.removed.clone();
         let modified_pairs: Vec<(SubId, String)> = diff
+            .subs
             .modified
             .iter()
             .map(|(id, r)| (*id, r.name.clone()))
             .collect();
 
-        // Wrap the Sub-only diff into a watch-registry diff. Phase 11
-        // upgrades `specter_config::diff` to return `WatchRegistryDiff`
-        // directly, after which this wrapping idiom drops out.
-        let watch_diff = WatchRegistryDiff {
-            subs: diff,
-            ..Default::default()
-        };
-        let out = self.engine.step(Input::ConfigDiff(watch_diff), now);
+        let out = self.engine.step(Input::ConfigDiff(diff), now);
 
         // Sync loader.ids: drop removed/old-modified ids; look up fresh
         // ids by name for added/modified. `find_by_name` is O(N_subs)
@@ -352,6 +364,9 @@ impl EngineDriver {
             added = added_n,
             removed = removed_n,
             modified = modified_n,
+            promoters_added = promoter_added_n,
+            promoters_removed = promoter_removed_n,
+            promoters_modified = promoter_modified_n,
             "config reload applied",
         );
         self.forward(out);

@@ -687,21 +687,35 @@ impl Engine {
 
     /// Dispatch a [`Input::ConfigDiff`].
     ///
-    /// Atomic apply of the Sub side in the order
-    /// **`removed → modified → added`**. Each `removed` decrements its
-    /// Sub's Profile refcount (reaping the Profile if it hits zero,
-    /// deferring if active); each `modified` is a remove-then-add
-    /// (`config_hash` may change ⇒ different Profile); each `added`
-    /// materializes the anchor and attaches the Sub.
+    /// Atomic apply of *both* halves of the [`WatchRegistryDiff`] in
+    /// the canonical order:
     ///
-    /// The `WatchRegistryDiff` payload also carries `promoters` for the
-    /// dynamic-watch side; that half is wired in Phase 11. Until then,
-    /// `diff.promoters` is expected to be empty (the bin's diff
-    /// function doesn't yet construct Promoter changes); the engine
-    /// silently ignores any Promoter entries because the registry,
-    /// dispatch tables, and lifecycle helpers don't exist yet. Phase 11
-    /// extends this body with the symmetric Promoter `removed →
-    /// modified → added` apply.
+    /// 1. **Sub `removed`** — `detach_sub_inner` decrements each
+    ///    Sub's Profile refcount (reaping the Profile if it hits zero,
+    ///    deferring if active).
+    /// 2. **Sub `modified`** — remove-then-add (`config_hash` may
+    ///    change ⇒ different Profile).
+    /// 3. **Sub `added`** — `attach_sub_inner` materialises the anchor
+    ///    and registers the Sub.
+    /// 4. **Promoter `removed`** — `reap_promoter_inner` cancels the
+    ///    in-flight probe, detaches every dynamic Sub, releases the
+    ///    per-Resource watch_demand contributions, and removes the
+    ///    Promoter from the registry.
+    /// 5. **Promoter `modified`** — wholesale: `reap_promoter_inner`
+    ///    then `attach_promoter_inner`. The `name` survives across
+    ///    the cycle (the diff keys on it), but the underlying
+    ///    `PromoterId` is freshly minted; the bin reconciles via the
+    ///    `PromoterAttached` / `PromoterReaped` diagnostic stream.
+    /// 6. **Promoter `added`** — `attach_promoter_inner` runs
+    ///    descent or immediate-Active per the literal-prefix
+    ///    materialisation outcome.
+    ///
+    /// Sub-side runs first so that any Promoter modification observes
+    /// a registry that already reflects the freshly-applied static
+    /// Subs — relevant for the cross-Promoter / static-Sub `Profile`
+    /// dedup in §18.5. Within each kind the order matches the audit:
+    /// removals before additions so a name-recycling rename doesn't
+    /// transiently alias against the old entry.
     ///
     /// Parent-edge recompute is **lazy**: each `detach_sub_inner` /
     /// `attach_sub_inner` calls the appropriate
@@ -713,21 +727,30 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let WatchRegistryDiff { subs, promoters: _ } = diff;
-        // 1. Removals.
+        let WatchRegistryDiff { subs, promoters } = diff;
+
+        // ---- Sub side ----
         for sub_id in subs.removed {
             self.detach_sub_inner(sub_id, now, out);
         }
-        // 2. Modifications: remove + add. The Sub being modified may
-        // share a Profile or move to a different one (different
-        // config_hash).
         for (sub_id, req) in subs.modified {
             self.detach_sub_inner(sub_id, now, out);
             let _ = self.attach_sub_inner(req, now, out);
         }
-        // 3. Additions.
         for req in subs.added {
             let _ = self.attach_sub_inner(req, now, out);
+        }
+
+        // ---- Promoter side ----
+        for pid in promoters.removed {
+            self.reap_promoter_inner(pid, now, out);
+        }
+        for (pid, req) in promoters.modified {
+            self.reap_promoter_inner(pid, now, out);
+            let _ = self.attach_promoter_inner(req, now, out);
+        }
+        for req in promoters.added {
+            let _ = self.attach_promoter_inner(req, now, out);
         }
         // The single-StepOutput sort happens at `step`'s caller.
     }

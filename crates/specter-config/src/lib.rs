@@ -13,7 +13,7 @@ mod raw;
 mod template;
 
 pub use cli::Cli;
-pub use config::{Config, LogConfig, LogDestination, LogLevel, SubSpec};
+pub use config::{Config, LogConfig, LogDestination, LogLevel, PromoterSpec, SubSpec};
 pub use diff::diff;
 pub use error::{ConfigError, IssueKind, ValidationIssue};
 pub use path::{PathError, canonicalize_lenient};

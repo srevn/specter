@@ -22,9 +22,10 @@ use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet,
     CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
-    EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, Placeholder, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
+    EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, PatternSpec, Placeholder,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileState,
+    PromoterAttachRequest, PromoterId, PromoterRegistryDiff, PromoterState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
     WatchRegistryDiff,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -2766,6 +2767,297 @@ fn config_diff_removed_then_added_atomic() {
     assert_eq!(e.subs().len(), 1);
     // Single sorted StepOutput; multiple watch_ops merged.
     assert!(!out.watch_ops.is_empty());
+}
+
+// ---- on_config_diff: promoter half (Phase 11) ----
+
+fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
+    PromoterAttachRequest {
+        name: name.to_owned(),
+        pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: ClassSet::EMPTY,
+        log_output: false,
+    }
+}
+
+/// `promoters.added` runs `attach_promoter_inner` for each request,
+/// registering the Promoter and emitting `PromoterAttached`.
+#[test]
+fn config_diff_promoter_added_attaches_promoter() {
+    let mut e = Engine::new();
+    // Pre-place the literal-prefix dir so the Promoter lands in
+    // immediate-Active mode (no descent state to inspect for this
+    // test).
+    let _var_log = {
+        let r = e
+            .tree_mut()
+            .ensure_path(&[FS_ROOT_SEG, "var", "log"], ResourceRole::User);
+        e.tree_mut().set_kind(r, ResourceKind::Dir);
+        r
+    };
+
+    let diff = WatchRegistryDiff {
+        promoters: PromoterRegistryDiff {
+            added: vec![promoter_req("logs", "/var/log/*.log")],
+            removed: Vec::new(),
+            modified: Vec::new(),
+        },
+        ..Default::default()
+    };
+
+    let out = e.step(Input::ConfigDiff(diff), Instant::now());
+
+    assert_eq!(e.promoters.len(), 1, "Promoter registered");
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::PromoterAttached { name, .. } if name == "logs"
+        )),
+        "PromoterAttached diagnostic emitted; got {:?}",
+        out.diagnostics,
+    );
+}
+
+/// `promoters.removed` runs `reap_promoter_inner` for each id.
+/// Cancels any in-flight probe, drops the registry entry, emits
+/// `PromoterReaped`.
+#[test]
+fn config_diff_promoter_removed_reaps_promoter() {
+    let mut e = Engine::new();
+    let var_log = e
+        .tree_mut()
+        .ensure_path(&[FS_ROOT_SEG, "var", "log"], ResourceRole::User);
+    e.tree_mut().set_kind(var_log, ResourceKind::Dir);
+
+    let (pid, _attach_out) =
+        e.attach_promoter(promoter_req("logs", "/var/log/*.log"), Instant::now());
+    assert_eq!(e.promoters.len(), 1);
+
+    let diff = WatchRegistryDiff {
+        promoters: PromoterRegistryDiff {
+            added: Vec::new(),
+            removed: vec![pid],
+            modified: Vec::new(),
+        },
+        ..Default::default()
+    };
+
+    let out = e.step(Input::ConfigDiff(diff), Instant::now());
+
+    assert!(e.promoters.get(pid).is_none(), "Promoter reaped");
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::PromoterReaped { promoter } if *promoter == pid
+        )),
+        "PromoterReaped diagnostic emitted; got {:?}",
+        out.diagnostics,
+    );
+}
+
+/// `promoters.modified` is wholesale: reap then attach. The new
+/// PromoterId differs from the old (the registry mints a fresh slot
+/// on attach).
+#[test]
+fn config_diff_promoter_modified_reaps_and_attaches() {
+    let mut e = Engine::new();
+    let var_log = e
+        .tree_mut()
+        .ensure_path(&[FS_ROOT_SEG, "var", "log"], ResourceRole::User);
+    e.tree_mut().set_kind(var_log, ResourceKind::Dir);
+
+    let (old_pid, _) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), Instant::now());
+
+    let diff = WatchRegistryDiff {
+        promoters: PromoterRegistryDiff {
+            added: Vec::new(),
+            removed: Vec::new(),
+            modified: vec![(old_pid, promoter_req("logs", "/var/log/*.json"))],
+        },
+        ..Default::default()
+    };
+
+    let out = e.step(Input::ConfigDiff(diff), Instant::now());
+
+    assert!(e.promoters.get(old_pid).is_none(), "old Promoter reaped");
+    assert_eq!(e.promoters.len(), 1, "fresh Promoter attached");
+    let new_pid = e
+        .promoters
+        .find_by_name("logs")
+        .expect("name re-registered");
+    assert_ne!(new_pid, old_pid, "PromoterId minted fresh on modify");
+
+    // Both diagnostics emitted in order: reap then attach.
+    let mut saw_reap = false;
+    let mut saw_attach_after_reap = false;
+    for d in &out.diagnostics {
+        match d {
+            Diagnostic::PromoterReaped { promoter } if *promoter == old_pid => {
+                saw_reap = true;
+            }
+            Diagnostic::PromoterAttached { promoter, name } if name == "logs" => {
+                assert!(saw_reap, "attach must come after reap");
+                assert_eq!(*promoter, new_pid);
+                saw_attach_after_reap = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_reap,
+        "PromoterReaped emitted; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        saw_attach_after_reap,
+        "PromoterAttached emitted after reap; got {:?}",
+        out.diagnostics,
+    );
+}
+
+/// Sub side runs before Promoter side. Confirms ordering by combining
+/// a Sub add with a Promoter add and asserting both land in one step.
+/// Also exercises that promoter and sub diagnostics merge into the
+/// same `StepOutput`.
+#[test]
+fn config_diff_applies_both_halves_in_one_step() {
+    let mut e = Engine::new();
+    // Anchor for the static Sub.
+    let r = e.tree_mut().ensure(None, "anchor", ResourceRole::User);
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
+    // Literal prefix for the Promoter.
+    let var_log = e
+        .tree_mut()
+        .ensure_path(&[FS_ROOT_SEG, "var", "log"], ResourceRole::User);
+    e.tree_mut().set_kind(var_log, ResourceKind::Dir);
+
+    let sub_req = SubAttachRequest {
+        name: "static_a".into(),
+        resource: r,
+        path: None,
+        config: ScanConfig::builder().build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        command: empty_command(),
+        scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
+        log_output: false,
+        source_promoter: None,
+    };
+
+    let mut sub_diff = specter_core::SubRegistryDiff::default();
+    sub_diff.added.push(sub_req);
+
+    let diff = WatchRegistryDiff {
+        subs: sub_diff,
+        promoters: PromoterRegistryDiff {
+            added: vec![promoter_req("dyn_a", "/var/log/*.log")],
+            removed: Vec::new(),
+            modified: Vec::new(),
+        },
+    };
+
+    let out = e.step(Input::ConfigDiff(diff), Instant::now());
+
+    assert_eq!(e.subs().len(), 1, "Sub attached");
+    assert_eq!(e.promoters.len(), 1, "Promoter attached");
+    assert!(
+        e.subs().find_by_name("static_a").is_some(),
+        "static_a registered by name",
+    );
+    let promoter_attached = out
+        .diagnostics
+        .iter()
+        .any(|d| matches!(d, Diagnostic::PromoterAttached { name, .. } if name == "dyn_a"));
+    assert!(
+        promoter_attached,
+        "PromoterAttached emitted; got {:?}",
+        out.diagnostics,
+    );
+}
+
+/// Stale `PromoterId` in `removed` is a silent no-op (mirrors
+/// `reap_promoter_inner`'s defensive idempotence). The bin can race
+/// a ConfigDiff against an in-flight reap; this test confirms the
+/// engine doesn't panic on it.
+#[test]
+fn config_diff_promoter_removed_with_stale_id_is_silent_noop() {
+    let mut e = Engine::new();
+    let stale = PromoterId::default();
+
+    let diff = WatchRegistryDiff {
+        promoters: PromoterRegistryDiff {
+            added: Vec::new(),
+            removed: vec![stale],
+            modified: Vec::new(),
+        },
+        ..Default::default()
+    };
+
+    let out = e.step(Input::ConfigDiff(diff), Instant::now());
+
+    // No PromoterReaped diagnostic — the stale id branch returns
+    // before the lifecycle emit.
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::PromoterReaped { .. })),
+        "stale id must not emit PromoterReaped; got {:?}",
+        out.diagnostics,
+    );
+}
+
+/// PrefixPending Promoter modify: v1 in PrefixPending (literal
+/// prefix doesn't exist); reload modifies. Reap unwinds the
+/// PrefixPending state, attach mints a fresh Promoter against the
+/// new pattern (which may or may not be PrefixPending depending on
+/// disk reality). Per §18.14 — the pre-flip state-branch in
+/// `reap_promoter_inner` handles the PrefixPending arm cleanly.
+#[test]
+fn config_diff_promoter_modify_during_prefix_pending() {
+    let mut e = Engine::new();
+    // Don't pre-create the literal prefix → Promoter lands in
+    // PrefixPending.
+    let (old_pid, attach_out) =
+        e.attach_promoter(promoter_req("logs", "/missing/dir/*.log"), Instant::now());
+    assert!(matches!(
+        e.promoters.get(old_pid).map(|q| &q.state),
+        Some(PromoterState::PrefixPending(_)),
+    ));
+    // Descent probe was emitted.
+    assert!(
+        attach_out
+            .probe_ops
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { .. })),
+        "attach in PrefixPending must emit a descent probe",
+    );
+
+    let diff = WatchRegistryDiff {
+        promoters: PromoterRegistryDiff {
+            added: Vec::new(),
+            removed: Vec::new(),
+            modified: vec![(old_pid, promoter_req("logs", "/different/dir/*.log"))],
+        },
+        ..Default::default()
+    };
+
+    let out = e.step(Input::ConfigDiff(diff), Instant::now());
+
+    assert!(e.promoters.get(old_pid).is_none(), "v1 reaped");
+    assert_eq!(e.promoters.len(), 1, "v2 attached");
+    // Reap of an in-flight descent emits a Cancel.
+    assert!(
+        out.probe_ops
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Cancel { .. })),
+        "PrefixPending reap must Cancel the in-flight descent probe",
+    );
 }
 
 // ---- emit_effects PerStableFile ----

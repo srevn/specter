@@ -4,8 +4,8 @@ use crate::raw::{RawConfig, RawLogConfig, RawWatch};
 use crate::template;
 use compact_str::CompactString;
 use specter_core::{
-    self as core, ArgTemplate, ClassSet, CommandTemplate, EffectScope, GlobPattern, ScanConfig,
-    SubAttachRequest,
+    self as core, ArgTemplate, ClassSet, CommandTemplate, EffectScope, GlobPattern, PatternSpec,
+    PromoterAttachRequest, ScanConfig, SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,17 @@ const MAX_SETTLE_CEIL_MS: u64 = 3_600_000;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
     pub log: LogConfig,
+    /// Static `[[watch]]` blocks — paths without glob discriminator
+    /// characters (`*?[{`). Each entry maps to one [`SubSpec`] and is
+    /// attached as a Sub by the bin's initial-attach pass.
     pub watches: Vec<SubSpec>,
+    /// Dynamic `[[watch]]` blocks — paths with glob discriminator
+    /// characters routed via [`PatternSpec::is_dynamic`]. Each entry
+    /// maps to one [`PromoterSpec`] which the engine treats as a
+    /// pattern source: matched paths become synthesized dynamic Subs
+    /// via the Promoter lifecycle. Schema is unified — there is no
+    /// `[[promoter]]` table; the dispatch happens on `path`.
+    pub promoters: Vec<PromoterSpec>,
 }
 
 /// Engine-telemetry configuration — the operator-facing diagnostic
@@ -148,6 +158,55 @@ impl SubSpec {
     }
 }
 
+/// Validated dynamic-watch entry — the config-layer mirror of the
+/// engine's [`specter_core::Promoter`].
+///
+/// Materialised by [`validate_dynamic_watch`] when the dispatcher
+/// observes a glob discriminator character (`*?[{`) in `path`. Each
+/// `PromoterSpec` translates to one [`PromoterAttachRequest`] via
+/// [`Self::to_attach_request`]; the engine assigns a `PromoterId` at
+/// attach time.
+///
+/// Field shape mirrors [`SubSpec`]: per-attachment knobs (settle,
+/// max_settle, scope, events, log_output, scan) are independent of the
+/// pattern itself, so two Promoters that share a pattern but differ on
+/// e.g. `settle` are correctly distinct. Equality is structural across
+/// every field; the diff path uses it to drive the wholesale-replace
+/// (reap + reattach) on modify.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PromoterSpec {
+    pub name: CompactString,
+    pub pattern: PatternSpec,
+    pub command: CommandTemplate,
+    pub scope: EffectScope,
+    pub settle: Duration,
+    pub max_settle: Duration,
+    pub scan: ScanConfig,
+    /// Threaded into each synthesized dynamic Sub. Same scope-conditional
+    /// default as [`SubSpec::events`].
+    pub events: ClassSet,
+    /// Threaded into each synthesized dynamic Sub. See
+    /// [`SubSpec::log_output`].
+    pub log_output: bool,
+}
+
+impl PromoterSpec {
+    #[must_use]
+    pub fn to_attach_request(&self) -> PromoterAttachRequest {
+        PromoterAttachRequest {
+            name: self.name.to_string(),
+            pattern_spec: self.pattern.clone(),
+            config: self.scan.clone(),
+            max_settle: self.max_settle,
+            settle: self.settle,
+            command: self.command.clone(),
+            scope: self.scope,
+            events: self.events,
+            log_output: self.log_output,
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default, clap::ValueEnum)]
 pub enum LogLevel {
     Trace,
@@ -228,7 +287,8 @@ fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError>
 
     let log = validate_log(raw.log.as_ref(), &mut errors);
 
-    let mut watches: Vec<SubSpec> = Vec::with_capacity(raw.watches.len());
+    let mut watches: Vec<SubSpec> = Vec::new();
+    let mut promoters: Vec<PromoterSpec> = Vec::new();
     let mut seen_names: BTreeMap<&str, usize> = BTreeMap::new();
     for (i, raw_w) in raw.watches.iter().enumerate() {
         if let Some(prev) = seen_names.get(raw_w.name.as_str()) {
@@ -241,14 +301,29 @@ fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError>
         } else {
             seen_names.insert(raw_w.name.as_str(), i);
         }
-        match validate_watch(i, raw_w) {
-            Ok(spec) => watches.push(spec),
-            Err(mut watch_errors) => errors.append(&mut watch_errors),
+
+        // Auto-detect: any of `*?[{` in `path` routes the entry to the
+        // dynamic validator. The dispatcher is the contract — neither
+        // validator second-guesses it on the well-trodden path.
+        if PatternSpec::is_dynamic(&raw_w.path) {
+            match validate_dynamic_watch(i, raw_w) {
+                Ok(spec) => promoters.push(spec),
+                Err(mut errs) => errors.append(&mut errs),
+            }
+        } else {
+            match validate_static_watch(i, raw_w) {
+                Ok(spec) => watches.push(spec),
+                Err(mut errs) => errors.append(&mut errs),
+            }
         }
     }
 
     if errors.is_empty() {
-        Ok(Config { log, watches })
+        Ok(Config {
+            log,
+            watches,
+            promoters,
+        })
     } else {
         Err(ConfigError::Validate {
             path: path.map(Path::to_owned),
@@ -330,19 +405,247 @@ fn validate_log(raw: Option<&RawLogConfig>, errors: &mut Vec<ValidationIssue>) -
     }
 }
 
-fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
+/// Validate the `name` field. Two failures are mutually exclusive:
+/// empty (rejected as [`IssueKind::Empty`]) and `@`-bearing
+/// (rejected as [`IssueKind::InvalidName`] — `@` is reserved for the
+/// engine's synthesized `<promoter_name>@<resolved_path>` shape).
+///
+/// Both static and dynamic validators call this so the rule lives in
+/// one place. Duplicate-name detection is handled at the outer
+/// dispatch loop (it spans both kinds and so cannot be a per-watch
+/// helper concern).
+fn validate_name(idx: usize, raw_name: &str, errors: &mut Vec<ValidationIssue>) {
+    if raw_name.is_empty() {
+        errors.push(ValidationIssue::new(
+            Some(idx),
+            "name",
+            IssueKind::Empty,
+            "name must not be empty".to_owned(),
+        ));
+        return;
+    }
+    if raw_name.contains('@') {
+        errors.push(ValidationIssue::new(
+            Some(idx),
+            "name",
+            IssueKind::InvalidName,
+            format!(
+                "name `{raw_name}` must not contain `@` (reserved for \
+                 synthesized dynamic Sub names of the form \
+                 `<promoter_name>@<resolved_path>`)",
+            ),
+        ));
+    }
+}
+
+/// Validate the `command` field. Each empty argv slot, parse failure,
+/// or empty top-level array yields one [`ValidationIssue`]; a single
+/// command failure short-circuits the returned `Some` (callers fall
+/// through to `expect` after `errors.is_empty()` in the success path).
+fn validate_command(
+    idx: usize,
+    raw_command: &[String],
+    errors: &mut Vec<ValidationIssue>,
+) -> Option<CommandTemplate> {
+    if raw_command.is_empty() {
+        errors.push(ValidationIssue::new(
+            Some(idx),
+            "command",
+            IssueKind::EmptyCommand,
+            "command must have at least one argv slot".to_owned(),
+        ));
+        return None;
+    }
+    let mut command_failed = false;
+    let mut argv: Vec<ArgTemplate> = Vec::with_capacity(raw_command.len());
+    for (j, slot) in raw_command.iter().enumerate() {
+        if slot.is_empty() {
+            errors.push(ValidationIssue::new(
+                Some(idx),
+                "command",
+                IssueKind::EmptyArgv,
+                format!("argv[{j}] is empty"),
+            ));
+            command_failed = true;
+            continue;
+        }
+        match template::parse_arg(slot) {
+            Ok(arg) => argv.push(arg),
+            Err(e) => {
+                errors.push(ValidationIssue::new(
+                    Some(idx),
+                    "command",
+                    IssueKind::UnknownPlaceholder,
+                    format!("argv[{j}]: {e}"),
+                ));
+                command_failed = true;
+            }
+        }
+    }
+    if command_failed {
+        None
+    } else {
+        Some(CommandTemplate::new(argv))
+    }
+}
+
+/// Validate `settle_ms` / `max_settle_ms`. Returns `(settle_ms,
+/// max_settle_ms)` always — invalid values flow through with their
+/// raw value so a downstream `Duration::from_millis` doesn't panic;
+/// the issues are collected for surfacing to the operator.
+fn validate_settle(
+    idx: usize,
+    raw_settle_ms: Option<u64>,
+    raw_max_settle_ms: Option<u64>,
+    errors: &mut Vec<ValidationIssue>,
+) -> (u64, u64) {
+    let settle_ms = raw_settle_ms.unwrap_or(DEFAULT_SETTLE_MS);
+    if settle_ms == 0 {
+        errors.push(ValidationIssue::new(
+            Some(idx),
+            "settle_ms",
+            IssueKind::SettleTooSmall,
+            "settle_ms must be ≥ 1".to_owned(),
+        ));
+    }
+    let max_settle_ms = match raw_max_settle_ms {
+        Some(v) => {
+            let floor = MAX_SETTLE_FLOOR_FACTOR.saturating_mul(settle_ms);
+            if v < floor {
+                errors.push(ValidationIssue::new(
+                    Some(idx),
+                    "max_settle_ms",
+                    IssueKind::MaxSettleTooSmall,
+                    format!("max_settle_ms ({v}) must be ≥ 4 × settle_ms ({floor})"),
+                ));
+            }
+            if v > MAX_SETTLE_CEIL_MS {
+                errors.push(ValidationIssue::new(
+                    Some(idx),
+                    "max_settle_ms",
+                    IssueKind::MaxSettleTooLarge,
+                    format!("max_settle_ms ({v}) must be ≤ {MAX_SETTLE_CEIL_MS} (1 hour)"),
+                ));
+            }
+            v
+        }
+        None => settle_ms
+            .saturating_mul(SETTLE_FACTOR)
+            .min(MAX_SETTLE_CEIL_MS),
+    };
+    (settle_ms, max_settle_ms)
+}
+
+/// Validate `scope`. Returns `Some(EffectScope)` on success; `None`
+/// on parse failure with the issue collected. The events helper
+/// gracefully degrades on `None` via `unwrap_or_default()`.
+fn validate_scope(
+    idx: usize,
+    raw_scope: Option<&str>,
+    errors: &mut Vec<ValidationIssue>,
+) -> Option<EffectScope> {
+    match raw_scope.unwrap_or("subtree-root") {
+        "subtree-root" => Some(EffectScope::SubtreeRoot),
+        "per-stable-file" => Some(EffectScope::PerStableFile),
+        other => {
+            errors.push(ValidationIssue::new(
+                Some(idx),
+                "scope",
+                IssueKind::InvalidEnum,
+                format!("unknown scope `{other}` (expected `subtree-root` or `per-stable-file`)"),
+            ));
+            None
+        }
+    }
+}
+
+/// Validate the `[[watch]]` block's scan-config knobs (`recursive`,
+/// `hidden`, `max_depth`, `pattern`, `exclude`) — orthogonal to the
+/// path-vs-pattern dispatch. Always returns a [`ScanConfig`]; invalid
+/// values are recorded in `errors` and the offending field falls back
+/// to its default so downstream consumers never see a half-built
+/// builder.
+fn validate_scan(idx: usize, raw: &RawWatch, errors: &mut Vec<ValidationIssue>) -> ScanConfig {
+    if raw.max_depth == Some(0) {
+        errors.push(ValidationIssue::new(
+            Some(idx),
+            "max_depth",
+            IssueKind::MaxDepthZero,
+            "max_depth must be ≥ 1 or omitted (None = unbounded)".to_owned(),
+        ));
+    }
+
+    let mut sb = ScanConfig::builder()
+        .recursive(raw.recursive.unwrap_or(true))
+        .hidden(raw.hidden.unwrap_or(false))
+        .max_depth(raw.max_depth);
+
+    if let Some(p) = raw.pattern.as_deref() {
+        match GlobPattern::compile(p) {
+            Ok(g) => sb = sb.pattern(g),
+            Err(core::ConfigError::InvalidGlob { message, .. }) => {
+                errors.push(ValidationIssue::new(
+                    Some(idx),
+                    "pattern",
+                    IssueKind::InvalidGlob,
+                    format!("`{p}`: {message}"),
+                ));
+            }
+        }
+    }
+    if let Some(excs) = raw.exclude.as_deref() {
+        let mut compiled = Vec::with_capacity(excs.len());
+        for ex in excs {
+            match GlobPattern::compile(ex) {
+                Ok(g) => compiled.push(g),
+                Err(core::ConfigError::InvalidGlob { message, .. }) => {
+                    errors.push(ValidationIssue::new(
+                        Some(idx),
+                        "exclude",
+                        IssueKind::InvalidGlob,
+                        format!("`{ex}`: {message}"),
+                    ));
+                }
+            }
+        }
+        sb = sb.excludes(compiled);
+    }
+
+    sb.build()
+}
+
+/// Validator for `[[watch]]` blocks whose `path` carries no glob
+/// discriminator characters (`*?[{`) — pure-literal anchors. Caller
+/// (the dispatcher in [`validate`]) gates on
+/// [`PatternSpec::is_dynamic`] before invoking this; the inner
+/// `is_dynamic` check is defense-in-depth for direct test callers
+/// that bypass the dispatcher.
+fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
     let issue = |field: &'static str, kind: IssueKind, detail: String| {
         ValidationIssue::new(Some(idx), field, kind, detail)
     };
 
-    if raw.name.is_empty() {
+    // Defense-in-depth: the dispatcher decides static vs. dynamic on
+    // `is_dynamic(path)`. Bypassing the dispatcher (test surface) and
+    // landing here with a glob-bearing path is a contract violation;
+    // surface it as a dedicated kind so the breach is observable in
+    // error output rather than masquerading as `NonAbsolute` /
+    // `NotCanonical` further down.
+    if PatternSpec::is_dynamic(&raw.path) {
         errors.push(issue(
-            "name",
-            IssueKind::Empty,
-            "name must not be empty".to_owned(),
+            "path",
+            IssueKind::PathContainsGlobChars,
+            format!(
+                "path `{}` contains a glob discriminator character \
+                 (`*?[{{`); this entry should have been routed to the \
+                 dynamic validator",
+                raw.path,
+            ),
         ));
     }
+
+    validate_name(idx, &raw.name, &mut errors);
 
     let path: Option<PathBuf> = if Path::new(&raw.path).is_absolute() {
         match canonicalize_lenient(Path::new(&raw.path)) {
@@ -365,142 +668,22 @@ fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationI
         None
     };
 
-    let mut command_failed = false;
-    let command: Option<CommandTemplate> = if raw.command.is_empty() {
-        errors.push(issue(
-            "command",
-            IssueKind::EmptyCommand,
-            "command must have at least one argv slot".to_owned(),
-        ));
-        None
-    } else {
-        let mut argv: Vec<ArgTemplate> = Vec::with_capacity(raw.command.len());
-        for (j, slot) in raw.command.iter().enumerate() {
-            if slot.is_empty() {
-                errors.push(issue(
-                    "command",
-                    IssueKind::EmptyArgv,
-                    format!("argv[{j}] is empty"),
-                ));
-                command_failed = true;
-                continue;
-            }
-            match template::parse_arg(slot) {
-                Ok(arg) => argv.push(arg),
-                Err(e) => {
-                    errors.push(issue(
-                        "command",
-                        IssueKind::UnknownPlaceholder,
-                        format!("argv[{j}]: {e}"),
-                    ));
-                    command_failed = true;
-                }
-            }
-        }
-        if command_failed {
-            None
-        } else {
-            Some(CommandTemplate::new(argv))
-        }
-    };
-
-    let settle_ms = raw.settle_ms.unwrap_or(DEFAULT_SETTLE_MS);
-    if settle_ms == 0 {
-        errors.push(issue(
-            "settle_ms",
-            IssueKind::SettleTooSmall,
-            "settle_ms must be ≥ 1".to_owned(),
-        ));
-    }
-    let max_settle_ms = match raw.max_settle_ms {
-        Some(v) => {
-            let floor = MAX_SETTLE_FLOOR_FACTOR.saturating_mul(settle_ms);
-            if v < floor {
-                errors.push(issue(
-                    "max_settle_ms",
-                    IssueKind::MaxSettleTooSmall,
-                    format!("max_settle_ms ({v}) must be ≥ 4 × settle_ms ({floor})"),
-                ));
-            }
-            if v > MAX_SETTLE_CEIL_MS {
-                errors.push(issue(
-                    "max_settle_ms",
-                    IssueKind::MaxSettleTooLarge,
-                    format!("max_settle_ms ({v}) must be ≤ {MAX_SETTLE_CEIL_MS} (1 hour)"),
-                ));
-            }
-            v
-        }
-        None => settle_ms
-            .saturating_mul(SETTLE_FACTOR)
-            .min(MAX_SETTLE_CEIL_MS),
-    };
-
-    let scope = match raw.scope.as_deref().unwrap_or("subtree-root") {
-        "subtree-root" => Some(EffectScope::SubtreeRoot),
-        "per-stable-file" => Some(EffectScope::PerStableFile),
-        other => {
-            errors.push(issue(
-                "scope",
-                IssueKind::InvalidEnum,
-                format!("unknown scope `{other}` (expected `subtree-root` or `per-stable-file`)"),
-            ));
-            None
-        }
-    };
-
-    // Parse `events` after scope so the default resolver can read scope.
-    // If scope itself failed validation, fall back to the default scope
-    // (SubtreeRoot) for the events default — this avoids a cascade of
-    // phantom errors; the scope error is already collected above.
+    let command = validate_command(idx, &raw.command, &mut errors);
+    let (settle_ms, max_settle_ms) =
+        validate_settle(idx, raw.settle_ms, raw.max_settle_ms, &mut errors);
+    let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
+    // Parse `events` after scope so the default resolver can read
+    // scope. If scope itself failed validation, fall back to the
+    // default scope (SubtreeRoot) for the events default — this
+    // avoids a cascade of phantom errors; the scope error is already
+    // collected above.
     let events = parse_events_field(
         raw.events.as_deref(),
         scope.unwrap_or_default(),
         idx,
         &mut errors,
     );
-
-    if raw.max_depth == Some(0) {
-        errors.push(issue(
-            "max_depth",
-            IssueKind::MaxDepthZero,
-            "max_depth must be ≥ 1 or omitted (None = unbounded)".to_owned(),
-        ));
-    }
-
-    let mut sb = ScanConfig::builder()
-        .recursive(raw.recursive.unwrap_or(true))
-        .hidden(raw.hidden.unwrap_or(false))
-        .max_depth(raw.max_depth);
-
-    if let Some(p) = raw.pattern.as_deref() {
-        match GlobPattern::compile(p) {
-            Ok(g) => sb = sb.pattern(g),
-            Err(core::ConfigError::InvalidGlob { message, .. }) => {
-                errors.push(issue(
-                    "pattern",
-                    IssueKind::InvalidGlob,
-                    format!("`{p}`: {message}"),
-                ));
-            }
-        }
-    }
-    if let Some(excs) = raw.exclude.as_deref() {
-        let mut compiled = Vec::with_capacity(excs.len());
-        for ex in excs {
-            match GlobPattern::compile(ex) {
-                Ok(g) => compiled.push(g),
-                Err(core::ConfigError::InvalidGlob { message, .. }) => {
-                    errors.push(issue(
-                        "exclude",
-                        IssueKind::InvalidGlob,
-                        format!("`{ex}`: {message}"),
-                    ));
-                }
-            }
-        }
-        sb = sb.excludes(compiled);
-    }
+    let scan = validate_scan(idx, raw, &mut errors);
 
     if !errors.is_empty() {
         return Err(errors);
@@ -513,7 +696,64 @@ fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationI
         scope: scope.expect("scope validated"),
         settle: Duration::from_millis(settle_ms),
         max_settle: Duration::from_millis(max_settle_ms),
-        scan: sb.build(),
+        scan,
+        events,
+        log_output: raw.log_output.unwrap_or(false),
+    })
+}
+
+/// Validator for `[[watch]]` blocks whose `path` carries at least one
+/// glob discriminator character (`*?[{`). Caller gates on
+/// [`PatternSpec::is_dynamic`]; the parser itself enforces the
+/// pattern's structural invariants (absolute, no `**`, no `.`/`..`,
+/// no empty segments, no Windows prefix).
+fn validate_dynamic_watch(
+    idx: usize,
+    raw: &RawWatch,
+) -> Result<PromoterSpec, Vec<ValidationIssue>> {
+    let mut errors: Vec<ValidationIssue> = Vec::new();
+    let issue = |field: &'static str, kind: IssueKind, detail: String| {
+        ValidationIssue::new(Some(idx), field, kind, detail)
+    };
+
+    validate_name(idx, &raw.name, &mut errors);
+
+    let pattern: Option<PatternSpec> = match PatternSpec::parse(&raw.path) {
+        Ok(spec) => Some(spec),
+        Err(e) => {
+            errors.push(issue(
+                "path",
+                IssueKind::InvalidPattern,
+                format!("`{}`: {e}", raw.path),
+            ));
+            None
+        }
+    };
+
+    let command = validate_command(idx, &raw.command, &mut errors);
+    let (settle_ms, max_settle_ms) =
+        validate_settle(idx, raw.settle_ms, raw.max_settle_ms, &mut errors);
+    let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
+    let events = parse_events_field(
+        raw.events.as_deref(),
+        scope.unwrap_or_default(),
+        idx,
+        &mut errors,
+    );
+    let scan = validate_scan(idx, raw, &mut errors);
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    Ok(PromoterSpec {
+        name: CompactString::new(&raw.name),
+        pattern: pattern.expect("pattern validated"),
+        command: command.expect("command validated"),
+        scope: scope.expect("scope validated"),
+        settle: Duration::from_millis(settle_ms),
+        max_settle: Duration::from_millis(max_settle_ms),
+        scan,
         events,
         log_output: raw.log_output.unwrap_or(false),
     })
@@ -1181,6 +1421,284 @@ mod tests {
                 .ends_with(std::path::Path::new("does-not-exist/leaf")),
             "got {}",
             cfg.watches[0].path.display(),
+        );
+    }
+
+    // ---- @-in-name rejection (audit §4.11) ----
+
+    /// `@` is reserved for the synthesized `<promoter_name>@<resolved_path>`
+    /// shape of dynamic Subs. A static [[watch]] with `@` in its name
+    /// would collide with that scheme on a Promoter sharing the
+    /// substring; reject at config-load.
+    #[test]
+    fn at_sign_in_static_name_rejected() {
+        let toml =
+            format!("[[watch]]\nname = \"foo@bar\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]");
+        assert_only_kind(&toml, IssueKind::InvalidName);
+    }
+
+    /// Same rule for dynamic [[watch]] entries — operators get a
+    /// consistent name-grammar regardless of which validator their
+    /// path routes to.
+    #[test]
+    fn at_sign_in_dynamic_name_rejected() {
+        let toml = "[[watch]]\nname = \"foo@bar\"\npath = \"/var/log/*\"\ncommand = [\"echo\"]";
+        assert_only_kind(toml, IssueKind::InvalidName);
+    }
+
+    /// Empty static name still surfaces as `Empty` (not `InvalidName`)
+    /// — the helper short-circuits empty before checking `@`.
+    #[test]
+    fn empty_static_name_emits_empty_kind_not_invalid_name() {
+        let toml = format!("[[watch]]\nname = \"\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]");
+        assert_only_kind(&toml, IssueKind::Empty);
+    }
+
+    /// Empty dynamic name surfaces as `Empty` for the same reason.
+    #[test]
+    fn empty_dynamic_name_emits_empty_kind_not_invalid_name() {
+        let toml = "[[watch]]\nname = \"\"\npath = \"/var/log/*\"\ncommand = [\"echo\"]";
+        assert_only_kind(toml, IssueKind::Empty);
+    }
+
+    // ---- Auto-detect dispatch ----
+
+    /// Pure-literal absolute path → static dispatch → `Config.watches`.
+    #[test]
+    fn pure_literal_path_dispatches_to_static() {
+        let toml = "[[watch]]\nname = \"static\"\npath = \"/var/log/myapp\"\ncommand = [\"echo\"]";
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.watches.len(), 1);
+        assert!(cfg.promoters.is_empty());
+        assert_eq!(cfg.watches[0].name, "static");
+    }
+
+    /// Path with `*` discriminator → dynamic dispatch → `Config.promoters`.
+    #[test]
+    fn glob_star_path_dispatches_to_dynamic() {
+        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/var/log/*\"\ncommand = [\"echo\"]";
+        let cfg = Config::from_str(toml).unwrap();
+        assert!(cfg.watches.is_empty());
+        assert_eq!(cfg.promoters.len(), 1);
+        assert_eq!(cfg.promoters[0].name, "dyn");
+        assert_eq!(cfg.promoters[0].pattern.source(), "/var/log/*");
+    }
+
+    /// Path with `?` → dynamic.
+    #[test]
+    fn question_mark_path_dispatches_to_dynamic() {
+        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/srv/?/data\"\ncommand = [\"echo\"]";
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.promoters.len(), 1);
+    }
+
+    /// Path with `[…]` → dynamic.
+    #[test]
+    fn bracket_path_dispatches_to_dynamic() {
+        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/srv/[a-z]/data\"\ncommand = [\"echo\"]";
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.promoters.len(), 1);
+    }
+
+    /// Path with `{a,b}` (brace expansion) → dynamic [H-1].
+    #[test]
+    fn brace_path_dispatches_to_dynamic() {
+        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/var/log/{app,system}/access.log\"\n\
+                    command = [\"echo\"]";
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.promoters.len(), 1);
+        // brace stays as a single Glob component; literal_prefix_len = 3.
+        assert_eq!(cfg.promoters[0].pattern.literal_prefix_len(), 3);
+    }
+
+    /// Mixed config — both kinds in source order, each routed to the
+    /// right slot. Source-order is preserved within each list, but
+    /// across kinds the two lists are independent.
+    #[test]
+    fn mixed_static_and_dynamic_routes_each_correctly() {
+        let toml = "\
+            [[watch]]\nname = \"a\"\npath = \"/foo\"\ncommand = [\"echo\"]\n\
+            [[watch]]\nname = \"b\"\npath = \"/bar/*\"\ncommand = [\"echo\"]\n\
+            [[watch]]\nname = \"c\"\npath = \"/baz\"\ncommand = [\"echo\"]\n\
+            [[watch]]\nname = \"d\"\npath = \"/qux/{a,b}\"\ncommand = [\"echo\"]\n\
+        ";
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.watches.len(), 2);
+        assert_eq!(cfg.promoters.len(), 2);
+        assert_eq!(cfg.watches[0].name, "a");
+        assert_eq!(cfg.watches[1].name, "c");
+        assert_eq!(cfg.promoters[0].name, "b");
+        assert_eq!(cfg.promoters[1].name, "d");
+    }
+
+    /// Cross-kind duplicate name still rejected — the duplicate-name
+    /// check runs at the dispatch loop so both lists are scanned.
+    #[test]
+    fn duplicate_name_across_static_and_dynamic_rejected() {
+        let toml = "\
+            [[watch]]\nname = \"foo\"\npath = \"/foo\"\ncommand = [\"echo\"]\n\
+            [[watch]]\nname = \"foo\"\npath = \"/foo/*\"\ncommand = [\"echo\"]\n\
+        ";
+        let err = Config::from_str(toml).unwrap_err();
+        let errors = validation_errors(err);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, IssueKind::DuplicateName);
+        assert_eq!(errors[0].watch_index, Some(1));
+    }
+
+    // ---- Dynamic pattern parse failures ----
+
+    /// Globstar (`**`) is unsupported in v1 — surfaced as
+    /// `IssueKind::InvalidPattern`.
+    #[test]
+    fn globstar_pattern_rejected_as_invalid_pattern() {
+        let toml = "[[watch]]\nname = \"d\"\npath = \"/var/log/**/x\"\ncommand = [\"echo\"]";
+        assert_only_kind(toml, IssueKind::InvalidPattern);
+    }
+
+    /// Dynamic-detected non-absolute path (e.g., `var/log/*`) routes
+    /// to the dynamic validator and the parser surfaces `NonAbsolute`
+    /// as `IssueKind::InvalidPattern` with the source rendered.
+    #[test]
+    fn relative_dynamic_path_rejected_as_invalid_pattern() {
+        let toml = "[[watch]]\nname = \"d\"\npath = \"var/log/*\"\ncommand = [\"echo\"]";
+        let err = Config::from_str(toml).unwrap_err();
+        let errors = validation_errors(err);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, IssueKind::InvalidPattern);
+        assert!(
+            errors[0].detail.contains("var/log/*"),
+            "got {}",
+            errors[0].detail
+        );
+        assert!(
+            errors[0].detail.contains("absolute"),
+            "Display message must mention `absolute`; got {}",
+            errors[0].detail,
+        );
+    }
+
+    /// Double-slash → empty segment via PatternSpec parser → InvalidPattern.
+    #[test]
+    fn double_slash_dynamic_path_rejected_as_invalid_pattern() {
+        let toml = "[[watch]]\nname = \"d\"\npath = \"//var/log/*\"\ncommand = [\"echo\"]";
+        assert_only_kind(toml, IssueKind::InvalidPattern);
+    }
+
+    /// Malformed glob segment — unbalanced `[` — surfaces via the
+    /// PatternSpec parser as `InvalidGlob`, which we re-cast to
+    /// `IssueKind::InvalidPattern`.
+    #[test]
+    fn malformed_glob_segment_rejected_as_invalid_pattern() {
+        let toml = "[[watch]]\nname = \"d\"\npath = \"/var/log/[unbalanced\"\ncommand = [\"echo\"]";
+        assert_only_kind(toml, IssueKind::InvalidPattern);
+    }
+
+    // ---- PromoterSpec materialization ----
+
+    /// Minimal dynamic watch round-trips defaults the same way as the
+    /// static validator (settle = 200ms, max_settle = 12s, etc.).
+    #[test]
+    fn minimal_dynamic_watch_round_trips_with_defaults() {
+        let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\ncommand = [\"echo\"]";
+        let cfg = Config::from_str(toml).unwrap();
+        let p = &cfg.promoters[0];
+        assert_eq!(p.name, "logs");
+        assert_eq!(p.scope, EffectScope::SubtreeRoot);
+        assert_eq!(p.settle, Duration::from_millis(200));
+        assert_eq!(p.max_settle, Duration::from_secs(12));
+        assert!(p.scan.recursive);
+        assert_eq!(p.events, ClassSet::DEFAULT_SUBTREE_ROOT);
+        assert!(!p.log_output);
+    }
+
+    /// `to_attach_request` threads every field into a
+    /// `PromoterAttachRequest` byte-equal to the spec.
+    #[test]
+    fn promoter_to_attach_request_threads_fields() {
+        let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
+                    command = [\"fmt\", \"$path\"]\n\
+                    settle_ms = 300\nmax_settle_ms = 1200\n\
+                    scope = \"per-stable-file\"\n\
+                    events = [\"content\"]\n\
+                    log_output = true\n\
+                    pattern = \"*.log\"\n\
+                    recursive = false\nhidden = true\n";
+        let cfg = Config::from_str(toml).unwrap();
+        let req = cfg.promoters[0].to_attach_request();
+        assert_eq!(req.name, "logs");
+        assert_eq!(req.pattern_spec.source(), "/var/log/*");
+        assert_eq!(req.scope, EffectScope::PerStableFile);
+        assert_eq!(req.settle, Duration::from_millis(300));
+        assert_eq!(req.max_settle, Duration::from_millis(1200));
+        assert_eq!(req.events, ClassSet::CONTENT);
+        assert!(req.log_output);
+        assert!(!req.config.recursive);
+        assert!(req.config.hidden);
+        assert!(req.config.pattern.is_some());
+    }
+
+    /// Dynamic watches accept `pattern` (per-Sub include filter) and
+    /// `exclude` (per-Sub exclude list) the same way static watches
+    /// do — they're orthogonal to the path-pattern dispatch.
+    #[test]
+    fn dynamic_watch_carries_scan_pattern_and_excludes() {
+        let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
+                    command = [\"echo\"]\n\
+                    pattern = \"*.log\"\n\
+                    exclude = [\"*.gz\"]\n";
+        let cfg = Config::from_str(toml).unwrap();
+        let p = &cfg.promoters[0];
+        assert!(p.scan.pattern.is_some());
+        assert_eq!(p.scan.exclude.len(), 1);
+    }
+
+    /// Multiple errors in one dynamic watch accumulate — pattern parse
+    /// failure does NOT short-circuit settle / scope / events
+    /// validation. The operator gets the full list at once.
+    #[test]
+    fn multiple_errors_in_one_dynamic_watch_accumulate() {
+        let toml = "[[watch]]\nname = \"\"\npath = \"/foo/**/x\"\ncommand = []\n\
+                    settle_ms = 0\nmax_depth = 0";
+        let err = Config::from_str(toml).unwrap_err();
+        let errors = validation_errors(err);
+        let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&IssueKind::Empty));
+        assert!(kinds.contains(&IssueKind::InvalidPattern));
+        assert!(kinds.contains(&IssueKind::EmptyCommand));
+        assert!(kinds.contains(&IssueKind::SettleTooSmall));
+        assert!(kinds.contains(&IssueKind::MaxDepthZero));
+        assert_eq!(errors.len(), 5, "got {errors:?}");
+    }
+
+    /// FS-root pattern `/*` parses to a one-segment glob; spec carries
+    /// `literal_prefix_len = 1`. Edge case §18.11.
+    #[test]
+    fn fs_root_glob_pattern_accepted() {
+        let toml = "[[watch]]\nname = \"root\"\npath = \"/*\"\ncommand = [\"echo\"]";
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.promoters.len(), 1);
+        assert_eq!(cfg.promoters[0].pattern.literal_prefix_len(), 1);
+    }
+
+    /// The static validator's defensive `is_dynamic` re-check fires
+    /// only for direct internal callers (tests bypass the dispatcher).
+    /// The production dispatch path never lands here. Tested via the
+    /// validator function directly, mirroring the audit's defense-in-
+    /// depth contract.
+    #[test]
+    fn static_validator_rejects_glob_path_via_defensive_check() {
+        // Construct a `RawWatch` by hand so we bypass the dispatcher.
+        let raw = crate::raw::RawWatch::for_test(
+            "name".to_owned(),
+            "/var/log/*".to_owned(),
+            vec!["echo".to_owned()],
+        );
+        let errors = super::validate_static_watch(0, &raw).unwrap_err();
+        let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
+        assert!(
+            kinds.contains(&IssueKind::PathContainsGlobChars),
+            "got {kinds:?}",
         );
     }
 }

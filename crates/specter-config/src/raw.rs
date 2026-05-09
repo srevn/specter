@@ -38,3 +38,28 @@ pub(crate) struct RawWatch {
     pub events: Option<Vec<String>>,
     pub log_output: Option<bool>,
 }
+
+#[cfg(test)]
+impl RawWatch {
+    /// Construct a `RawWatch` directly for tests that exercise the
+    /// validator helpers without routing through TOML deserialization
+    /// (e.g., the `validate_static_watch` defensive `is_dynamic`
+    /// re-check, which is unreachable through the dispatcher).
+    pub(crate) fn for_test(name: String, path: String, command: Vec<String>) -> Self {
+        Self {
+            name,
+            path,
+            command,
+            recursive: None,
+            pattern: None,
+            exclude: None,
+            hidden: None,
+            settle_ms: None,
+            max_settle_ms: None,
+            scope: None,
+            max_depth: None,
+            events: None,
+            log_output: None,
+        }
+    }
+}

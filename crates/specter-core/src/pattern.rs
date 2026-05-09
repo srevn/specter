@@ -19,6 +19,7 @@
 
 use crate::scan_config::{ConfigError, GlobPattern};
 use compact_str::CompactString;
+use std::fmt;
 
 /// Decomposed glob path pattern. `components.len() >= 2` post-parse — a
 /// synthetic `Literal("/")` at index 0 plus at least one segment.
@@ -65,6 +66,28 @@ pub enum PatternError {
     /// Windows-style prefix detected (`:` inside a segment).
     WindowsPrefix,
 }
+
+impl fmt::Display for PatternError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GlobstarUnsupported => {
+                f.write_str("`**` (recursive glob) is not supported in v1")
+            }
+            Self::InvalidGlob { source, message } => {
+                write!(f, "invalid glob segment `{source}`: {message}")
+            }
+            Self::EmptyPattern => f.write_str("pattern must not be empty"),
+            Self::NonAbsolute => f.write_str("pattern must be absolute (start with `/`)"),
+            Self::NonCanonical => f.write_str("`.` and `..` segments are not allowed"),
+            Self::EmptySegment => {
+                f.write_str("empty path segment (consecutive `/` or trailing `/`)")
+            }
+            Self::WindowsPrefix => f.write_str("Windows-style prefix (`:`) is not allowed"),
+        }
+    }
+}
+
+impl std::error::Error for PatternError {}
 
 impl PatternSpec {
     #[must_use]
@@ -366,5 +389,34 @@ mod tests {
     #[should_panic(expected = "pure-literal pattern accepted")]
     fn parse_debug_asserts_on_pure_literal_source() {
         let _ = PatternSpec::parse("/var/log/myapp");
+    }
+
+    /// `Display` produces human-readable, operator-friendly messages.
+    /// The config validator routes parse errors through `IssueKind::
+    /// InvalidPattern`; the rendered detail surfaces these strings, so a
+    /// regression in wording would silently degrade error UX.
+    #[test]
+    fn pattern_error_display_is_human_readable() {
+        for (err, needle) in [
+            (PatternError::GlobstarUnsupported, "recursive glob"),
+            (PatternError::EmptyPattern, "must not be empty"),
+            (PatternError::NonAbsolute, "absolute"),
+            (PatternError::NonCanonical, "`.` and `..`"),
+            (PatternError::EmptySegment, "empty path segment"),
+            (PatternError::WindowsPrefix, "Windows"),
+        ] {
+            let s = err.to_string();
+            assert!(
+                s.contains(needle),
+                "expected `{needle}` in display of {err:?}, got `{s}`",
+            );
+        }
+        let invalid = PatternError::InvalidGlob {
+            source: "[bad".to_owned(),
+            message: "unbalanced `[`".to_owned(),
+        };
+        let s = invalid.to_string();
+        assert!(s.contains("[bad"), "got `{s}`");
+        assert!(s.contains("unbalanced"), "got `{s}`");
     }
 }
