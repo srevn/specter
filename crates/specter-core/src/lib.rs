@@ -25,7 +25,7 @@ mod sub;
 mod time;
 mod tree;
 
-pub use diag::{ClaimKind, Diagnostic};
+pub use diag::{ClaimKind, Diagnostic, PromoterClaimKind};
 pub use diff::{Diff, EntryRef, Rename};
 pub use effect::resolve::resolve_effect;
 pub use effect::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome};

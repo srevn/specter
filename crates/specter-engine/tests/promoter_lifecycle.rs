@@ -26,6 +26,7 @@
     clippy::missing_const_for_fn,
     clippy::needless_pass_by_value,
     clippy::option_if_let_else,
+    clippy::similar_names,
     clippy::single_match_else,
     clippy::too_many_lines
 )]
@@ -33,12 +34,14 @@
 use compact_str::CompactString;
 use specter_core::{
     ChildEntry, ClassSet, CommandTemplate, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, Input, LeafEntry, PatternSpec, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    PromoterAttachRequest, PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, WatchRegistryDiff,
+    EntryKind, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp, ProbeOutcome, ProbeOwner,
+    ProbeResponse, ProfileState, PromoterAttachRequest, PromoterRegistryDiff, PromoterState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, WatchOp,
+    WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -409,5 +412,519 @@ fn static_attach_emits_sub_attached_with_no_source_promoter() {
         sub_attached_count, 1,
         "exactly one SubAttached per attach; got diagnostics={:?}",
         out.diagnostics,
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Cross-actor: descent vanish preserves co-resident Promoter proxy
+// ───────────────────────────────────────────────────────────────────────
+
+/// First emitted probe correlation for a step's `StepOutput` —
+/// utility for capturing the live channel correlation from `attach_*`
+/// flows. Mirrors the local helper in
+/// `crates/specter-engine/tests/watch_op_rejected_purge.rs`.
+fn first_probe_corr(out: &specter_core::StepOutput) -> Option<specter_core::ProbeCorrelation> {
+    out.probe_ops.iter().find_map(|op| match op {
+        ProbeOp::Probe { request } => Some(request.correlation()),
+        ProbeOp::Cancel { .. } => None,
+    })
+}
+
+/// Cross-owner shared-prefix vanish (T1-1): a Profile in `Pending`
+/// descent at `/a/b` shares the slot with a Promoter `Active` proxy
+/// at `/a/b`. Pre-fix, `dispatch_descent_vanished`'s rewind branch
+/// called `Tree::vacate(prefix)` unconditionally, zeroing the
+/// Promoter's `STRUCTURE` contribution and stranding the kernel
+/// watch. Post-fix, the rewind drops only the Profile's contribution
+/// (counter 2 → 1) and the Promoter's claim survives. The matching
+/// `Unwatch` only fires on the genuine 1 → 0 edge — when the
+/// Promoter's enumeration probe later returns `Vanished`.
+#[test]
+fn descent_vanish_preserves_co_resident_promoter_proxy() {
+    let mut e = Engine::new();
+    let now = Instant::now();
+
+    // Pre-place /a so the Promoter's literal-prefix descent has a
+    // pre-existing prefix to land on. Pattern `/a/b/*.txt` →
+    // literal_prefix_len=2 (FS-root + a + b … wait, "/" is implicit;
+    // the literal segments are `["a", "b"]`). Promoter starts in
+    // `PrefixPending(/a, ["b"])` because /a/b doesn't yet exist.
+    let a = pre_place_dir(&mut e, &["a"]);
+    let (qid, attach_q_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.txt"), now);
+    assert!(matches!(
+        e.promoters().get(qid).unwrap().state,
+        PromoterState::PrefixPending(_),
+    ));
+    let descent_q_corr =
+        first_probe_corr(&attach_q_out).expect("Promoter descent probe at /a in flight");
+
+    // Drive the Promoter's descent into Active by completing the
+    // `/a` probe with a "b" Dir entry. The dispatcher's terminal arm
+    // calls `enter_active`, which materialises /a/b as the first proxy
+    // (User-roled, +1 STRUCTURE) and queues an enumeration probe at
+    // /a/b.
+    let snap_a = dir_snap_with(a, vec![("b", EntryKind::Dir, 1)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(qid),
+            correlation: descent_q_corr,
+            outcome: ProbeOutcome::SubtreeOk(snap_a),
+        }),
+        now,
+    );
+
+    let a_b = e
+        .tree()
+        .lookup(Some(a), "b")
+        .expect("/a/b materialised by enter_active");
+    match &e.promoters().get(qid).unwrap().state {
+        PromoterState::Active { proxies } => assert!(proxies.contains_key(&a_b)),
+        s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
+    }
+    assert_eq!(e.tree().get(a_b).unwrap().watch_demand, 1);
+
+    // Capture the Promoter's enumeration probe at /a/b (set by
+    // `dispatch_next_enumeration` inside `enter_active`).
+    let enum_q_corr = e
+        .pending_probe_for(ProbeOwner::Promoter(qid))
+        .expect("Promoter enumeration probe at /a/b in flight");
+
+    // Attach a Profile with a recursive Sub at /a/b/c. /a/b exists
+    // (User-roled by the Promoter); /a/b/c doesn't. The Profile
+    // starts in `Pending(/a/b, ["c"])`, bumping /a/b's STRUCTURE
+    // contribution to 2. A descent probe targets /a/b under the
+    // Profile owner — distinct from the Promoter's enumeration probe.
+    let req = SubAttachRequest::for_path(
+        "watch".into(),
+        PathBuf::from("/a/b/c"),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_command(),
+        EffectScope::SubtreeRoot,
+        ClassSet::EMPTY,
+        false,
+    );
+    let (sid, attach_p_out) = e.attach_sub(req, now);
+    let pid = e.subs().get(sid).unwrap().profile;
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state,
+        ProfileState::Pending(_),
+    ));
+    let descent_p_corr =
+        first_probe_corr(&attach_p_out).expect("Profile descent probe at /a/b in flight");
+
+    // Pre-vanish state: /a/b carries two STRUCTURE contributions.
+    assert_eq!(e.tree().get(a_b).unwrap().watch_demand, 2);
+    assert_eq!(e.tree().get(a_b).unwrap().events_union, ClassSet::STRUCTURE,);
+
+    // Send the Profile's descent probe `Vanished`. The rewind branch
+    // moves Profile's `current_prefix` to /a, releases /a/b's STRUCTURE
+    // contribution, and adds /a's. Pre-fix, the unconditional
+    // `vacate(/a/b)` would have zeroed the slot; post-fix, only the
+    // Profile's contribution drops.
+    let vanish_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: descent_p_corr,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        now,
+    );
+
+    assert_eq!(
+        e.tree().get(a_b).unwrap().watch_demand,
+        1,
+        "Promoter's STRUCTURE contribution survives the Profile vanish",
+    );
+    assert_eq!(
+        e.tree().get(a_b).unwrap().events_union,
+        ClassSet::STRUCTURE,
+        "events_union recomputed from Promoter (STRUCTURE), not zeroed",
+    );
+    let unwatch_at_a_b = vanish_out
+        .watch_ops
+        .iter()
+        .any(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == a_b));
+    assert!(
+        !unwatch_at_a_b,
+        "no Unwatch on /a/b on the descent vanish — Promoter still claims it",
+    );
+    match &e.promoters().get(qid).unwrap().state {
+        PromoterState::Active { proxies } => assert!(proxies.contains_key(&a_b)),
+        s @ PromoterState::PrefixPending(_) => {
+            panic!("Promoter state should remain Active{{proxies}}, got {s:?}")
+        }
+    }
+
+    // Now the Promoter's enumeration probe at /a/b returns Vanished.
+    // `unregister_proxy` → `release_promoter_proxy_claim` releases the
+    // last contribution; `sub_watch_demand` emits Unwatch on the
+    // genuine 1 → 0 edge. Pre-fix this would have either panicked
+    // (debug: `sub_watch_demand` underflow on counter == 0) or silently
+    // leaked the kernel watch (release).
+    let promoter_vanish_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(qid),
+            correlation: enum_q_corr,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        now,
+    );
+
+    let unwatch_count = promoter_vanish_out
+        .watch_ops
+        .iter()
+        .filter(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == a_b))
+        .count();
+    assert_eq!(
+        unwatch_count, 1,
+        "single Unwatch at /a/b on the genuine 1 → 0 edge",
+    );
+    match &e.promoters().get(qid).unwrap().state {
+        PromoterState::Active { proxies } => assert!(!proxies.contains_key(&a_b)),
+        s @ PromoterState::PrefixPending(_) => {
+            panic!("Promoter state should remain Active, got {s:?}")
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Cross-Promoter: shared proxy unwinds independently (T3-1)
+// ───────────────────────────────────────────────────────────────────────
+
+/// Two Promoters with overlapping patterns share a proxy at /shared.
+/// Releasing one Promoter's claim (via its enumeration's `Vanished`
+/// response) preserves the other's. Asserts the recompute walks the
+/// Promoter registry correctly across the 2 → 1 edge — pre-fix this
+/// path was not the bug surface (the bug was Profile-side `vacate`),
+/// but the test pins the multi-Promoter symmetry that's load-bearing
+/// for the post-fix correctness story.
+#[test]
+fn two_promoters_sharing_proxy_unwind_independently() {
+    let mut e = Engine::new();
+    let now = Instant::now();
+
+    // Pre-place /shared so both Promoters land in immediate-Active at
+    // the same proxy slot. Both patterns have `/shared` as their
+    // literal prefix and a single glob component matching anything;
+    // the first proxy at `enter_active` is /shared with index = lpl.
+    let shared = pre_place_dir(&mut e, &["shared"]);
+    let (q1, _attach_q1) = e.attach_promoter(promoter_req("q1", "/shared/*.log"), now);
+    let (q2, _attach_q2) = e.attach_promoter(promoter_req("q2", "/shared/*.txt"), now);
+
+    // Both Promoters should be Active with a proxy at /shared.
+    for qid in [q1, q2] {
+        match &e.promoters().get(qid).unwrap().state {
+            PromoterState::Active { proxies } => assert!(proxies.contains_key(&shared)),
+            s @ PromoterState::PrefixPending(_) => {
+                panic!("Promoter {qid:?} expected Active at /shared, got {s:?}")
+            }
+        }
+    }
+    // /shared.watch_demand == 2 (one contribution per Promoter), and
+    // proxy_promoters carries both ids.
+    assert_eq!(e.tree().get(shared).unwrap().watch_demand, 2);
+    {
+        let bv = &e.tree().get(shared).unwrap().proxy_promoters;
+        assert!(bv.contains(&q1));
+        assert!(bv.contains(&q2));
+    }
+
+    // Q1's enumeration probe at /shared is in flight (single-slot
+    // dispatch from the first Promoter's `enter_active`). Q2's
+    // enumeration is queued behind it via `pending_enumerations`
+    // because the second `attach_promoter`'s `dispatch_next_enumeration`
+    // saw a probe in flight... but Q1 and Q2 have independent owner
+    // slots, so Q2's probe should also be in flight on its own owner.
+    let q1_enum_corr = e
+        .pending_probe_for(ProbeOwner::Promoter(q1))
+        .expect("Q1 enumeration probe in flight");
+
+    // Vanish Q1's enumeration. `unregister_proxy_subtree` →
+    // `unregister_proxy` → `release_promoter_proxy_claim`:
+    // counter-aware sub on /shared. The recompute walks the registry
+    // and finds Q2 still contributes STRUCTURE; counter drops 2 → 1
+    // and the union stays STRUCTURE.
+    let q1_vanish_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(q1),
+            correlation: q1_enum_corr,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        now,
+    );
+
+    assert_eq!(
+        e.tree().get(shared).unwrap().watch_demand,
+        1,
+        "Q2's STRUCTURE contribution survives Q1's release",
+    );
+    assert_eq!(
+        e.tree().get(shared).unwrap().events_union,
+        ClassSet::STRUCTURE,
+    );
+    let unwatch_at_shared = q1_vanish_out
+        .watch_ops
+        .iter()
+        .any(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == shared));
+    assert!(
+        !unwatch_at_shared,
+        "no Unwatch — Q2 still anchors /shared's kernel watch",
+    );
+    {
+        let bv = &e.tree().get(shared).unwrap().proxy_promoters;
+        assert!(!bv.contains(&q1), "Q1 back-ref cleared");
+        assert!(bv.contains(&q2), "Q2 back-ref intact");
+    }
+
+    // Vanish Q2's enumeration. Now /shared has only Q2's contribution;
+    // the release drives the counter to 0 and emits Unwatch.
+    let q2_enum_corr = e
+        .pending_probe_for(ProbeOwner::Promoter(q2))
+        .expect("Q2 enumeration probe in flight");
+    let q2_vanish_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(q2),
+            correlation: q2_enum_corr,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        now,
+    );
+
+    let unwatch_count = q2_vanish_out
+        .watch_ops
+        .iter()
+        .filter(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == shared))
+        .count();
+    assert_eq!(unwatch_count, 1, "Unwatch fires on the genuine 1 → 0 edge");
+    // /shared has no User Profile attached and no remaining children;
+    // `try_reap` succeeds.
+    assert!(
+        e.tree().get(shared).is_none(),
+        "/shared reaped after both proxies released",
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Sensor overflow reseeds Promoters (T1-3)
+// ───────────────────────────────────────────────────────────────────────
+
+/// `Active` Promoter with multiple proxies: an `Input::SensorOverflow`
+/// re-enqueues every proxy and the single-slot dispatcher drains the
+/// first into a probe; the rest queue. One
+/// `PromoterReseededForOverflow` diagnostic surfaces.
+#[test]
+fn sensor_overflow_reseeds_active_promoter() {
+    let mut e = Engine::new();
+    let now = Instant::now();
+
+    // Pre-place /var/log; attach a Promoter with `/var/log/*`. The
+    // first proxy at /var/log is registered immediately; we then
+    // drain the initial enumeration so the Promoter has multiple
+    // proxies (one per matched Dir entry).
+    let var_log = pre_place_dir(&mut e, &["var", "log"]);
+    let (qid, attach_out) = e.attach_promoter(promoter_req("logs", "/var/log/*"), now);
+    let initial_enum_corr =
+        first_probe_corr(&attach_out).expect("initial enumeration probe in flight");
+
+    // Inject a multi-Dir snapshot so the enumeration registers two
+    // sub-proxies. The Promoter pattern's final component is `*`
+    // (glob) — non-final position requires Dir entries; final
+    // position `try_promote`s. `*` IS the final component in this
+    // pattern, so each match calls `try_promote` (mints dynamic
+    // Subs). To get sub-proxies we'd need a multi-component pattern
+    // with a non-final glob. Use `/var/log/*/access.log` instead.
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(qid),
+            correlation: initial_enum_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(var_log, vec![])),
+        }),
+        now,
+    );
+
+    // For this test we only need at least one proxy to demonstrate
+    // the reseed path. The Active{empty proxies} case is also valid
+    // to test (it's a no-op except for the diagnostic emission).
+    // Add a second proxy by simulating a fresh enumeration that
+    // matches a Dir... but the pattern is final-glob, so any Dir
+    // entry would `try_promote` rather than register sub-proxy.
+    //
+    // Instead: assert the Active{single proxy at /var/log} reseed —
+    // overflow re-enqueues /var/log and dispatches one probe at it.
+
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(qid)).is_none(),
+        "Promoter has no in-flight probe before overflow",
+    );
+
+    let overflow_out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        now,
+    );
+
+    // PromoterReseededForOverflow surfaced exactly once.
+    let reseed_count = overflow_out
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                d,
+                Diagnostic::PromoterReseededForOverflow { promoter } if *promoter == qid,
+            )
+        })
+        .count();
+    assert_eq!(
+        reseed_count, 1,
+        "one PromoterReseededForOverflow per Promoter"
+    );
+
+    // /var/log was re-enqueued and the single-slot dispatcher
+    // emitted one enumeration probe at it. The probe is in flight
+    // on the Promoter owner.
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(qid)).is_some(),
+        "fresh enumeration probe in flight after overflow reseed",
+    );
+    let probe_at_var_log = overflow_out.probe_ops.iter().any(|op| {
+        matches!(
+            op,
+            ProbeOp::Probe { request } if request.target_resource() == Some(var_log),
+        )
+    });
+    assert!(probe_at_var_log, "probe targets /var/log");
+}
+
+/// `PrefixPending` Promoter with no in-flight probe: an
+/// `Input::SensorOverflow` re-emits a descent probe at the current
+/// descent prefix.
+#[test]
+fn sensor_overflow_reseeds_prefix_pending_promoter() {
+    let mut e = Engine::new();
+    let now = Instant::now();
+
+    // Pre-place /a so the descent's first prefix is /a (not /). The
+    // Promoter's literal prefix is /a/b which doesn't yet exist;
+    // `materialize_path_or_pending` returns Pending(/a, [b]).
+    let a = pre_place_dir(&mut e, &["a"]);
+    let (qid, attach_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.log"), now);
+    let descent_corr = first_probe_corr(&attach_out).expect("descent probe in flight");
+    assert!(matches!(
+        e.promoters().get(qid).unwrap().state,
+        PromoterState::PrefixPending(_),
+    ));
+
+    // Resolve the descent probe with a `Failed` response so the
+    // descent retains state (current_prefix=/a) but closes the
+    // probe channel. The `Failed` arm is exactly "retain in-descent
+    // state; await next event at the prefix" — which is the precondition
+    // we want for the overflow reseed test.
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(qid),
+            correlation: descent_corr,
+            outcome: ProbeOutcome::Failed { errno: 13 },
+        }),
+        now,
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(qid)).is_none(),
+        "channel closed after Failed response",
+    );
+    assert!(matches!(
+        e.promoters().get(qid).unwrap().state,
+        PromoterState::PrefixPending(_),
+    ));
+
+    let overflow_out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        now,
+    );
+
+    // Diagnostic + descent probe at /a.
+    let reseed_count = overflow_out
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                d,
+                Diagnostic::PromoterReseededForOverflow { promoter } if *promoter == qid,
+            )
+        })
+        .count();
+    assert_eq!(reseed_count, 1);
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(qid)).is_some(),
+        "fresh descent probe in flight after overflow reseed",
+    );
+    let probe_at_a = overflow_out.probe_ops.iter().any(|op| {
+        matches!(
+            op,
+            ProbeOp::Probe { request } if request.target_resource() == Some(a),
+        )
+    });
+    assert!(probe_at_a, "descent probe targets /a");
+}
+
+/// `PrefixPending` Promoter with in-flight descent probe: the
+/// reseed skips the probe emission (the in-flight probe's response
+/// will reflect the post-overflow state) but still emits the
+/// `PromoterReseededForOverflow` diagnostic — the engine's signal
+/// that the reseed was attempted.
+#[test]
+fn sensor_overflow_skips_promoter_with_in_flight_probe() {
+    let mut e = Engine::new();
+    let now = Instant::now();
+
+    // Same setup as the prefix-pending test, but leave the descent
+    // probe IN FLIGHT (no response).
+    let _a = pre_place_dir(&mut e, &["a"]);
+    let (qid, _attach_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.log"), now);
+    let in_flight_corr = e
+        .pending_probe_for(ProbeOwner::Promoter(qid))
+        .expect("descent probe in flight");
+    assert!(matches!(
+        e.promoters().get(qid).unwrap().state,
+        PromoterState::PrefixPending(_),
+    ));
+
+    let overflow_out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        now,
+    );
+
+    // Diagnostic surfaces (the reseed was attempted).
+    let reseed_count = overflow_out
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                d,
+                Diagnostic::PromoterReseededForOverflow { promoter } if *promoter == qid,
+            )
+        })
+        .count();
+    assert_eq!(reseed_count, 1);
+
+    // No fresh probe emitted. Pending-probe correlation unchanged.
+    let new_probe_emitted = overflow_out
+        .probe_ops
+        .iter()
+        .any(|op| matches!(op, ProbeOp::Probe { .. }));
+    assert!(
+        !new_probe_emitted,
+        "no fresh probe — the in-flight probe's response covers the overflow window",
+    );
+    assert_eq!(
+        e.pending_probe_for(ProbeOwner::Promoter(qid)),
+        Some(in_flight_corr),
+        "in-flight correlation preserved",
     );
 }

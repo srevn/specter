@@ -19,8 +19,9 @@ use smallvec::SmallVec;
 use specter_core::{
     AnchorClaim, BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic,
     Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileId, ProfileState, Resource, ResourceId, ResourceKind, StepOutput, SubId,
-    TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
+    ProbeResponse, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, Resource,
+    ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure,
+    WatchOp, WatchRegistryDiff,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -793,11 +794,11 @@ impl Engine {
             .push(Diagnostic::WatchOpRejected { resource, failure });
 
         // Snapshot every claimer BEFORE any mutation. Borrow checker
-        // (we'll mutate self.profiles in the loop) and we want a stable
-        // view of the pre-clamp world: a Profile that's `Pending(d)`
-        // with `d.current_prefix == resource` must be detected here,
-        // because the helpers we run below transition the Profile to
-        // Idle.
+        // (we'll mutate self.profiles / self.promoters in the loops)
+        // and we want a stable view of the pre-clamp world: a Profile
+        // that's `Pending(d)` with `d.current_prefix == resource` must
+        // be detected here, because the helpers we run below transition
+        // the Profile to Idle. Same for Promoter state-flips below.
         let mut anchor_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         let mut parent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         let mut descent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
@@ -812,6 +813,27 @@ impl Engine {
                 && d.current_prefix == resource
             {
                 descent_claimers.push(pid);
+            }
+        }
+
+        // Promoter-side claimers — disjoint pair: a single Promoter can
+        // claim `resource` either via its literal-prefix descent (5a)
+        // or via an `Active` proxy (5b), never both at once (state is
+        // a sum-type). Two SmallVecs keep the per-claim purge loops
+        // structurally distinct.
+        let mut promoter_descent_claimers: smallvec::SmallVec<[PromoterId; 2]> =
+            smallvec::SmallVec::new();
+        let mut promoter_proxy_claimers: smallvec::SmallVec<[PromoterId; 2]> =
+            smallvec::SmallVec::new();
+        for (qid, q) in self.promoters.iter() {
+            match &q.state {
+                PromoterState::PrefixPending(d) if d.current_prefix == resource => {
+                    promoter_descent_claimers.push(qid);
+                }
+                PromoterState::Active { proxies } if proxies.contains_key(&resource) => {
+                    promoter_proxy_claimers.push(qid);
+                }
+                PromoterState::PrefixPending(_) | PromoterState::Active { .. } => {}
             }
         }
 
@@ -862,6 +884,47 @@ impl Engine {
             out.diagnostics.push(Diagnostic::ProfileClaimPurged {
                 profile: pid,
                 claim: ClaimKind::DescentPrefix,
+                resource,
+                failure,
+            });
+        }
+
+        // Promoter descent prefix purge — mirrors the Profile descent
+        // loop. Cancel-before-release is unconditional: an in-flight
+        // descent probe targets `current_prefix == resource` by
+        // construction. Releasing transitions the Promoter to
+        // `Active{empty}`. There is no recovery channel for the
+        // literal prefix in v1; the Promoter is stranded.
+        for qid in promoter_descent_claimers {
+            self.cancel_owner_probe(ProbeOwner::Promoter(qid), out);
+            self.release_promoter_descent_prefix_claim(qid, out);
+            out.diagnostics.push(Diagnostic::PromoterClaimPurged {
+                promoter: qid,
+                claim: PromoterClaimKind::DescentPrefix,
+                resource,
+                failure,
+            });
+        }
+
+        // Promoter `Active` proxy purge — mirror with one twist:
+        // cancel only when `pending_enumeration_target == resource`.
+        // A probe targeting a SIBLING proxy of the same Promoter is
+        // unaffected by this rejection and stays in flight. The
+        // cancel-first contract on `release_promoter_proxy_claim`
+        // gates on this exact condition.
+        for qid in promoter_proxy_claimers {
+            let target_matches = self
+                .promoters
+                .get(qid)
+                .and_then(|q| q.pending_enumeration_target)
+                == Some(resource);
+            if target_matches {
+                self.cancel_owner_probe(ProbeOwner::Promoter(qid), out);
+            }
+            self.release_promoter_proxy_claim(qid, resource, out);
+            out.diagnostics.push(Diagnostic::PromoterClaimPurged {
+                promoter: qid,
+                claim: PromoterClaimKind::ActiveProxy,
                 resource,
                 failure,
             });
@@ -966,6 +1029,65 @@ impl Engine {
             }
         }
 
+        // Snapshot the Promoter set BEFORE any reseed dispatch — the
+        // dispatch loop may mutate `pending_enumerations` and emit
+        // probes, but the membership of `self.promoters` is stable
+        // across the loop (no Promoter reaps, no fresh attaches in
+        // this code path).
+        let promoters_to_reseed: smallvec::SmallVec<[PromoterId; 4]> = match scope {
+            OverflowScope::Global => self.promoters.iter().map(|(qid, _)| qid).collect(),
+            OverflowScope::Resource(r) => self.promoters_in_subtree(r),
+        };
+
+        for qid in promoters_to_reseed {
+            // Project the relevant state into a local enum so the
+            // borrow on `self.promoters.get(qid)` ends before the
+            // `&mut self` calls below (mint_owner_correlation,
+            // dispatch_next_enumeration). Stale id ⇒ skip without
+            // emitting the reseed diagnostic — the Promoter is gone.
+            let action = match self.promoters.get(qid) {
+                None => continue,
+                Some(q) => match &q.state {
+                    PromoterState::PrefixPending(d) if q.pending_probe.is_none() => {
+                        PromoterReseedAction::DescentProbe(d.current_prefix)
+                    }
+                    // PrefixPending with in-flight descent probe: the
+                    // probe's response will reflect the post-overflow
+                    // state. No double-probe.
+                    PromoterState::PrefixPending(_) => PromoterReseedAction::Skip,
+                    PromoterState::Active { proxies } => {
+                        PromoterReseedAction::Enumerate(proxies.keys().copied().collect())
+                    }
+                },
+            };
+
+            match action {
+                PromoterReseedAction::DescentProbe(prefix) => {
+                    let owner = ProbeOwner::Promoter(qid);
+                    let Some(correlation) = self.mint_owner_correlation(owner) else {
+                        continue;
+                    };
+                    let target_path = self.tree.path_of(prefix).unwrap_or_default();
+                    Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
+                }
+                PromoterReseedAction::Enumerate(proxy_keys) => {
+                    // Enqueue every proxy. Single-slot drain processes
+                    // one at a time via the `dispatch_next` chain on
+                    // each response. Empty proxies vec is a no-op.
+                    if let Some(qmut) = self.promoters.get_mut(qid) {
+                        for r in proxy_keys {
+                            qmut.pending_enumerations.insert(r);
+                        }
+                    }
+                    self.dispatch_next_enumeration(qid, now, out);
+                }
+                PromoterReseedAction::Skip => {}
+            }
+
+            out.diagnostics
+                .push(Diagnostic::PromoterReseededForOverflow { promoter: qid });
+        }
+
         out.diagnostics.push(Diagnostic::SensorOverflow { scope });
     }
 
@@ -985,6 +1107,31 @@ impl Engine {
             .iter()
             .filter(|(_, p)| p.resource == r || self.tree.ancestors(p.resource).any(|a| a == r))
             .map(|(pid, _)| pid)
+            .collect()
+    }
+
+    /// Promoter analogue of [`Self::profiles_in_subtree`]. A Promoter is
+    /// "in the subtree rooted at `r`" when its watched slot (descent
+    /// prefix in `PrefixPending`, OR any proxy in `Active`) is `r` or
+    /// has `r` on its ancestor chain.
+    ///
+    /// Symmetric handling across backends: only FSEvents-style
+    /// per-stream overflows ([`OverflowScope::Resource`]) reach here in
+    /// practice; v1 inotify always emits [`OverflowScope::Global`].
+    /// Worst-case `O(promoters × proxies × tree-depth)`. Acceptable
+    /// under healthy invariants.
+    fn promoters_in_subtree(&self, r: ResourceId) -> smallvec::SmallVec<[PromoterId; 4]> {
+        self.promoters
+            .iter()
+            .filter(|(_, q)| match &q.state {
+                PromoterState::PrefixPending(d) => {
+                    d.current_prefix == r || self.tree.ancestors(d.current_prefix).any(|a| a == r)
+                }
+                PromoterState::Active { proxies } => proxies
+                    .keys()
+                    .any(|&p| p == r || self.tree.ancestors(p).any(|a| a == r)),
+            })
+            .map(|(qid, _)| qid)
             .collect()
     }
 
@@ -2305,6 +2452,27 @@ enum AwaitAction {
     Rebase,
     Reap,
     Diagnose,
+}
+
+/// Per-Promoter dispatch projection used by [`Engine::on_sensor_overflow`].
+/// Computed under a short `&self.promoters` borrow, then dispatched
+/// under `&mut self` — splitting the borrow lifetimes is the only way
+/// to thread the post-state-read calls (`mint_owner_correlation`,
+/// `dispatch_next_enumeration`) through Rust's borrow rules without
+/// re-querying the registry per access.
+///
+/// Variants:
+/// - `DescentProbe(prefix)`: `PrefixPending` Promoter with no
+///   in-flight descent probe; emit one at `prefix`.
+/// - `Enumerate(proxies)`: `Active` Promoter; enqueue every proxy and
+///   drain the first into a probe via `dispatch_next_enumeration`.
+/// - `Skip`: `PrefixPending` Promoter with an in-flight descent probe;
+///   the probe's response will reflect the post-overflow state, so a
+///   second probe would be redundant.
+enum PromoterReseedAction {
+    DescentProbe(ResourceId),
+    Enumerate(Vec<ResourceId>),
+    Skip,
 }
 
 /// Snapshot of `on_probe_response`'s routing decision. Computed under a

@@ -10,6 +10,7 @@ mod descent;
 mod engine;
 mod probe_channel;
 mod promoter;
+mod promoter_claims;
 mod reconcile;
 mod refcounts;
 mod stability;

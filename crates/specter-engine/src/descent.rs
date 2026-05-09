@@ -51,9 +51,8 @@ use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ClassSet, DescentState, Diagnostic, DirSnapshot, EntryKind, ProbeOwner, ProfileId,
-    ProfileState, PromoterState, ResourceId, ResourceKind, ResourceRole, StepOutput,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput,
 };
-use std::collections::BTreeMap;
 use std::time::Instant;
 
 /// Result of `Engine::materialize_path_or_pending`. Either the entire
@@ -320,7 +319,7 @@ impl crate::Engine {
             // release, the prefix's counter would leak.
             out.diagnostics
                 .push(descent_invariant_diagnostic(owner, prefix));
-            self.release_owner_descent_prefix(owner, prefix, out);
+            self.release_owner_descent_prefix(owner, out);
             return;
         };
         let is_terminal = descent.remaining_components.len() == 1;
@@ -431,52 +430,37 @@ impl crate::Engine {
         Self::emit_descent_probe(owner, correlation, new_prefix, target_path, out);
     }
 
-    /// Conservative cleanup invoked from the unified
-    /// [`Self::dispatch_descent_ok`] when the structurally-unreachable
-    /// empty-remaining invariant fires. Per-owner because the cleanup
-    /// requirements diverge:
+    /// Owner-polymorphic descent-prefix release. Routes to the per-owner
+    /// claim helper, both of which read the prefix from descent state
+    /// (Profile: `Pending(d).current_prefix`; Promoter:
+    /// `PrefixPending(d).current_prefix`).
+    ///
+    /// Per-owner cleanup (parallel shape):
     ///
     /// - **Profile.** Delegates to [`Self::release_descent_prefix_claim`]:
     ///   transitions `Pending → Idle`, releases the prefix's STRUCTURE
     ///   contribution (counter-aware), and `try_reap`s the prefix slot.
-    /// - **Promoter.** Inline cleanup matching the same shape:
-    ///   transitions `PrefixPending → Active{empty}` BEFORE
-    ///   `sub_watch_demand` so the recompute drops the 5a attribution,
-    ///   counter-aware sub on the prefix's STRUCTURE, then `try_reap`.
+    /// - **Promoter.** Delegates to
+    ///   [`Self::release_promoter_descent_prefix_claim`]: transitions
+    ///   `PrefixPending → Active{empty}` BEFORE `sub_watch_demand` so the
+    ///   recompute drops the 5a attribution; counter-aware sub on the
+    ///   prefix's STRUCTURE; `try_reap`.
     ///
-    /// Counter-awareness mirrors `release_descent_prefix_claim`'s
-    /// discipline: a prior `clamp_watch_demand_to_zero` may have left
-    /// the slot at 0, in which case the state-flip alone is the
-    /// observable cleanup.
-    fn release_owner_descent_prefix(
-        &mut self,
-        owner: ProbeOwner,
-        prefix: ResourceId,
-        out: &mut StepOutput,
-    ) {
+    /// Three call sites:
+    /// - [`Self::dispatch_descent_ok`]'s structurally-unreachable
+    ///   empty-remaining arm.
+    /// - [`Self::dispatch_descent_vanished`]'s no-rewind-target arm
+    ///   (FS-root vanish, structurally unreachable on Unix).
+    /// - [`Self::on_watch_op_rejected`]'s descent-prefix purge loops
+    ///   (Profile and Promoter sides).
+    ///
+    /// Counter-awareness mirrors the per-owner helper discipline: a
+    /// prior `clamp_watch_demand_to_zero` may have left the slot at 0,
+    /// in which case the state-flip alone is the observable cleanup.
+    fn release_owner_descent_prefix(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
         match owner {
-            ProbeOwner::Profile(pid) => {
-                self.release_descent_prefix_claim(pid, out);
-            }
-            ProbeOwner::Promoter(pid) => {
-                if let Some(q) = self.promoters.get_mut(pid) {
-                    q.state = PromoterState::Active {
-                        proxies: BTreeMap::new(),
-                    };
-                }
-                if self.tree.get(prefix).is_some_and(|r| r.watch_demand > 0) {
-                    sub_watch_demand(
-                        &mut self.tree,
-                        &self.profiles,
-                        &self.promoters,
-                        prefix,
-                        ClassSet::STRUCTURE,
-                        None,
-                        out,
-                    );
-                }
-                self.tree.try_reap(prefix);
-            }
+            ProbeOwner::Profile(pid) => self.release_descent_prefix_claim(pid, out),
+            ProbeOwner::Promoter(pid) => self.release_promoter_descent_prefix_claim(pid, out),
         }
     }
 
@@ -648,7 +632,11 @@ impl crate::Engine {
                     None,
                     out,
                 );
-                self.tree.vacate(prefix);
+                // No `vacate` — `sub_watch_demand` cleared the union iff
+                // this owner was the last contributor; remaining
+                // contributors (co-resident Profile / Promoter claims)
+                // keep theirs. `try_reap` removes the slot iff
+                // `has_anchors()` returns false.
                 self.tree.try_reap(prefix);
 
                 add_watch_demand(&mut self.tree, parent_id, ClassSet::STRUCTURE, out);
@@ -657,25 +645,19 @@ impl crate::Engine {
                 Self::emit_descent_probe(owner, correlation, parent_id, target_path, out);
             }
             None => {
-                // Root prefix vanished — no rewind target. Per-owner
-                // state-flip out of the in-descent variant BEFORE
-                // `sub_watch_demand` so the recompute correctly excludes
-                // this owner's contribution. The owner is now stuck
-                // without a usable descent path — operator recovery is
-                // required (Profile: stuck Idle; Promoter: stuck
-                // Active{empty}).
-                self.flip_descent_owner_to_terminal(owner);
-                sub_watch_demand(
-                    &mut self.tree,
-                    &self.profiles,
-                    &self.promoters,
-                    prefix,
-                    ClassSet::STRUCTURE,
-                    None,
-                    out,
-                );
-                self.tree.vacate(prefix);
-                self.tree.try_reap(prefix);
+                // Root prefix vanished — no rewind target. Delegate to
+                // the per-owner release helper (state-flip terminal +
+                // counter-aware sub + try_reap), matching the
+                // empty-remaining arm in `dispatch_descent_ok`. The
+                // helper's preconditions hold here: the probe channel
+                // was closed by `on_*_probe_response` before dispatch
+                // (cancel-first contract) and descent state is
+                // unflipped at entry.
+                //
+                // The owner is left stuck without a usable descent path —
+                // operator recovery is required (Profile: stuck Idle;
+                // Promoter: stuck Active{empty}).
+                self.release_owner_descent_prefix(owner, out);
             }
         }
     }
@@ -697,29 +679,6 @@ impl crate::Engine {
         out.diagnostics
             .push(descent_failed_diagnostic(owner, prefix, errno));
         // Retain in-descent state; await next event at the prefix.
-    }
-
-    /// Owner-polymorphic Vanished helper for the no-rewind-target arm.
-    /// Profile flips `Pending → Idle`; Promoter flips
-    /// `PrefixPending → Active{empty}`. Both transitions cause
-    /// `recompute_resource_events` to drop the owner's contribution to
-    /// the prefix on the subsequent `sub_watch_demand` walk — load-
-    /// bearing for the multi-contributor case.
-    fn flip_descent_owner_to_terminal(&mut self, owner: ProbeOwner) {
-        match owner {
-            ProbeOwner::Profile(pid) => {
-                if let Some(p) = self.profiles.get_mut(pid) {
-                    p.state = ProfileState::Idle;
-                }
-            }
-            ProbeOwner::Promoter(pid) => {
-                if let Some(q) = self.promoters.get_mut(pid) {
-                    q.state = PromoterState::Active {
-                        proxies: BTreeMap::new(),
-                    };
-                }
-            }
-        }
     }
 
     /// Owner-polymorphic Handle an `FsEvent` arriving at a descent's

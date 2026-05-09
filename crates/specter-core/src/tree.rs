@@ -133,12 +133,44 @@ impl Tree {
             .find(|&r| self.nodes.get(r).is_some_and(|n| n.segment == sym))
     }
 
-    /// Clear in-memory state at `id` (kind, refcounts) without removing the
-    /// slot. Children, profiles, and role survive — those are anchors.
-    /// Vacated-but-anchored slots are recreated by `ensure` returning
-    /// the same `ResourceId`.
+    /// Reset `kind` to `Unknown` on a slot whose refcounts have already
+    /// been drained. Children, profiles, role, and back-refs survive —
+    /// those are retention anchors. Vacated-but-anchored slots are
+    /// recreated by `ensure` returning the same `ResourceId`.
+    ///
+    /// **Pre-condition.** `watch_demand == 0 && suppress_count == 0`.
+    /// The caller has already drained the slot via `sub_watch_demand`
+    /// (the standard release path) or via `clamp_watch_demand_to_zero`
+    /// followed by the per-claim burst-finish chain (the
+    /// `WatchOpRejected` recovery path). The `debug_assert!`s below
+    /// pin the contract loudly in dev/CI; in release the field writes
+    /// still execute as defense-in-depth, so a precondition violation
+    /// degrades silently rather than corrupting kernel-engine state.
+    ///
+    /// `watch_demand` is the load-bearing precondition: zeroing a
+    /// non-zero counter would destroy cross-owner contributions in the
+    /// engine's view while the kernel watch is still live, and the
+    /// next `sub_watch_demand` from a co-resident contributor would
+    /// underflow. `suppress_count` is the symmetric in-engine
+    /// bookkeeping for in-flight burst phases; force-zeroing it would
+    /// break the `start_*_burst ↔ finish_burst_to_idle` symmetry on
+    /// the anchor.
     pub fn vacate(&mut self, id: ResourceId) {
         if let Some(r) = self.nodes.get_mut(id) {
+            debug_assert!(
+                r.watch_demand == 0,
+                "vacate: precondition violated — slot {id:?} still has \
+                 watch_demand={}; caller must drain via sub_watch_demand or \
+                 clamp_watch_demand_to_zero before vacate",
+                r.watch_demand,
+            );
+            debug_assert!(
+                r.suppress_count == 0,
+                "vacate: precondition violated — slot {id:?} still has \
+                 suppress_count={}; caller must drain via the burst-finish \
+                 machinery before vacate",
+                r.suppress_count,
+            );
             r.kind = ResourceKind::Unknown;
             r.watch_demand = 0;
             r.suppress_count = 0;
@@ -371,13 +403,16 @@ mod tests {
     }
 
     #[test]
-    fn vacate_clears_kind_and_refcounts_keeps_children() {
+    fn vacate_clears_kind_keeps_children_on_drained_slot() {
+        // Drained slot (refcounts == 0): vacate's contract is "reset
+        // `kind` to Unknown on a slot whose refcounts have already
+        // been drained". Children, role, and back-refs survive.
         let mut tree = Tree::new();
         let parent = tree.ensure(None, "p", ResourceRole::User);
         let _child = tree.ensure(Some(parent), "c", ResourceRole::User);
         tree.set_kind(parent, crate::resource::ResourceKind::Dir);
-        tree.get_mut(parent).unwrap().watch_demand = 3;
-        tree.get_mut(parent).unwrap().suppress_count = 2;
+        // wd == 0 and suppress == 0 by construction (no refcount edges
+        // emitted) — vacate's precondition holds.
 
         tree.vacate(parent);
 
@@ -386,6 +421,33 @@ mod tests {
         assert_eq!(r.watch_demand, 0);
         assert_eq!(r.suppress_count, 0);
         assert_eq!(r.children().len(), 1, "children survive vacate");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "vacate: precondition violated")]
+    fn vacate_panics_in_debug_when_watch_demand_nonzero() {
+        // Counter > 0 ⇒ caller skipped the drain; vacate would destroy
+        // cross-owner contributions in the engine's view while the
+        // kernel watch is still live. Debug assertion makes the misuse
+        // loud in CI / dev.
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "x", ResourceRole::User);
+        tree.get_mut(r).unwrap().watch_demand = 1;
+        tree.vacate(r);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "vacate: precondition violated")]
+    fn vacate_panics_in_debug_when_suppress_count_nonzero() {
+        // Suppress count > 0 ⇒ caller skipped the burst-finish chain;
+        // force-zeroing would underflow the next `sub_suppress`. Debug
+        // assertion catches the misuse early.
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "x", ResourceRole::User);
+        tree.get_mut(r).unwrap().suppress_count = 1;
+        tree.vacate(r);
     }
 
     #[test]

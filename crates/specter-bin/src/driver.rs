@@ -637,6 +637,19 @@ pub fn log_diagnostic(d: &Diagnostic) {
             errno = failure.errno(),
             "profile claim purged (WatchOpRejected at claimed resource)",
         ),
+        Diagnostic::PromoterClaimPurged {
+            promoter,
+            claim,
+            resource,
+            failure,
+        } => tracing::warn!(
+            ?promoter,
+            ?claim,
+            ?resource,
+            ?failure,
+            errno = failure.errno(),
+            "promoter claim purged (WatchOpRejected at claimed resource)",
+        ),
         Diagnostic::AttachPathInvalid { path, hint } => {
             tracing::error!(
                 path = %path.display(),
@@ -676,6 +689,10 @@ pub fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::SensorOverflow { scope } => tracing::warn!(
             ?scope,
             "sensor reported overflow (kernel queue dropped events); reseeding in-scope Profiles",
+        ),
+        Diagnostic::PromoterReseededForOverflow { promoter } => tracing::debug!(
+            ?promoter,
+            "promoter reseeded after sensor overflow (descent re-probed or proxies re-enumerated)",
         ),
         Diagnostic::SubAttached {
             sub,

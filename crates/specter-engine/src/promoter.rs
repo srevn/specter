@@ -374,56 +374,37 @@ impl Engine {
         }
     }
 
-    /// Unregister a single proxy at `resource` for `promoter_id`.
+    /// Unregister a single proxy at `resource` for `promoter_id`. Thin
+    /// wrapper over [`Self::release_promoter_proxy_claim`] preserved for
+    /// the existing call-site shape.
     ///
     /// Inverse of [`Self::register_proxy`]: clears the proxies map
     /// entry FIRST (I-Promoter-Proxy-Reap), drops the +1 STRUCTURE
-    /// contribution, clears the back-ref, and try_reaps the slot.
-    /// `pending_enumerations.remove(&r)` is also cleared so a queued
-    /// enumeration for this proxy doesn't resurrect after reap.
+    /// contribution (counter-aware), clears the back-ref, and
+    /// `try_reap`s the slot. `pending_enumerations.remove(&r)` is also
+    /// cleared so a queued enumeration for this proxy doesn't resurrect
+    /// after reap.
     ///
-    /// With [S-8] (User role) and the back-ref cleared, `has_anchors`
-    /// returns false for promoter-only slots — they reap. Slots
-    /// shared with a Profile descent / anchor or another Promoter's
-    /// proxy stay.
+    /// With [S-8] (`User` role) and the back-ref cleared, `has_anchors`
+    /// returns false for promoter-only slots — they reap. Slots shared
+    /// with a Profile descent / anchor or another Promoter's proxy
+    /// stay.
+    ///
+    /// **Cancel-first contract.** Inherited from
+    /// [`Self::release_promoter_proxy_claim`]: callers with an
+    /// in-flight enumeration probe targeting `resource` MUST invoke
+    /// [`Self::cancel_owner_probe`] first. Existing call sites
+    /// ([`Self::unregister_proxy_subtree`] from
+    /// `dispatch_promoter_enumeration_*` and
+    /// [`Self::reap_promoter_inner`]) all reach the helper with the
+    /// channel closed.
     pub(crate) fn unregister_proxy(
         &mut self,
         promoter_id: PromoterId,
         resource: ResourceId,
         out: &mut StepOutput,
     ) {
-        // 1. Clear map + queue entry FIRST. The recompute walk on the
-        // sub_watch_demand below reads `proxies.contains_key(&r)`; we
-        // need it post-clear so the walk drops 5b on this resource.
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            if let PromoterState::Active { proxies } = &mut q.state {
-                proxies.remove(&resource);
-            }
-            q.pending_enumerations.remove(&resource);
-        }
-
-        // 2. Sub the +1 STRUCTURE contribution.
-        sub_watch_demand(
-            &mut self.tree,
-            &self.profiles,
-            &self.promoters,
-            resource,
-            ClassSet::STRUCTURE,
-            None,
-            out,
-        );
-
-        // 3. Clear back-ref. retain in place to avoid disturbing
-        // co-resident Promoters' entries. SmallVec::retain hands the
-        // closure `&mut T`; deref read is sufficient.
-        if let Some(res) = self.tree.get_mut(resource) {
-            res.proxy_promoters.retain(|id| *id != promoter_id);
-        }
-
-        // 4. try_reap. With [S-8] (User role) + cleared back-ref,
-        // has_anchors returns false for promoter-only slots — they
-        // reap. Slots shared with a Profile descent / anchor stay.
-        self.tree.try_reap(resource);
+        self.release_promoter_proxy_claim(promoter_id, resource, out);
     }
 
     /// Unregister `r` and any descendant proxies of this Promoter

@@ -25,6 +25,23 @@ pub enum ClaimKind {
     DescentPrefix,
 }
 
+/// Subject of a [`Diagnostic::PromoterClaimPurged`] emission.
+///
+/// Promoter claims are a disjoint set from Profile claims; the
+/// dedicated enum lets operators distinguish the source without
+/// parsing the embedded id type. Each claim type has a dedicated
+/// bookkeeping field on [`crate::promoter::Promoter`]:
+/// - [`Self::DescentPrefix`] ⇔ `Promoter.state == PrefixPending(_)`
+///   (the literal-prefix descent watch).
+/// - [`Self::ActiveProxy`] ⇔ `Promoter.state == Active { proxies }` and
+///   `proxies.contains_key(&resource)` (one of the per-pattern proxy
+///   watches).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromoterClaimKind {
+    DescentPrefix,
+    ActiveProxy,
+}
+
 /// Engine-emitted diagnostic. Equality is structural so tests can pin the
 /// exact variant + fields produced by a given dropped Input.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -179,6 +196,30 @@ pub enum Diagnostic {
         resource: ResourceId,
         failure: WatchFailure,
     },
+    /// A Promoter's claim on `resource` was purged because the kernel
+    /// rejected the watch on it (`Input::WatchOpRejected` arrived,
+    /// clamping `watch_demand := 0`). One emission per affected
+    /// (Promoter, claim_kind) pair — a single rejection at a resource
+    /// claimed by both a Profile (via anchor / watch-root-parent /
+    /// descent-prefix) AND one or more Promoters (via descent-prefix
+    /// or proxy) emits one [`Self::ProfileClaimPurged`] per Profile
+    /// claim and one [`Self::PromoterClaimPurged`] per Promoter claim.
+    ///
+    /// - [`PromoterClaimKind::DescentPrefix`]: the literal-prefix
+    ///   descent is abandoned. The engine cancels any in-flight
+    ///   descent probe and transitions the Promoter to `Active{empty}`.
+    ///   The Promoter is stranded — there is no v1 recovery channel
+    ///   for the literal prefix; operator restart is required.
+    /// - [`PromoterClaimKind::ActiveProxy`]: the proxy is unregistered
+    ///   and any in-flight enumeration probe targeting it is cancelled.
+    ///   The proxy will not re-register until a fresh enumeration of
+    ///   its parent re-discovers the entry.
+    PromoterClaimPurged {
+        promoter: PromoterId,
+        claim: PromoterClaimKind,
+        resource: ResourceId,
+        failure: WatchFailure,
+    },
     /// A path-based attach request carried a malformed `PathBuf` —
     /// empty, containing `.` / `..` (caller should canonicalize), or
     /// carrying a Windows path prefix (unsupported on Unix v1). The
@@ -263,6 +304,22 @@ pub enum Diagnostic {
     /// reseed schedules carry no per-Profile annotation that they were
     /// triggered by overflow rather than a normal `FsEvent`.
     SensorOverflow { scope: OverflowScope },
+    /// `Input::SensorOverflow` arrived from the Sensor; the engine
+    /// reseeded `promoter` (alongside any in-scope Profiles surfaced by
+    /// [`Self::SensorOverflow`]'s peer reseed loop). Per-Promoter
+    /// dispatch is state-keyed:
+    /// - `PrefixPending(_)` ⇒ a fresh descent probe is emitted at
+    ///   `current_prefix` (gated on `pending_probe.is_none()`; an
+    ///   in-flight descent probe's response will reflect the
+    ///   post-overflow state).
+    /// - `Active { proxies }` ⇒ every proxy is enqueued into
+    ///   `pending_enumerations`; the dispatcher drains one immediately
+    ///   into a probe, with the rest queued behind the single-slot.
+    ///
+    /// One emission per affected Promoter. The bursts the reseed
+    /// schedules carry no per-Promoter annotation that they were
+    /// triggered by overflow rather than a normal `FsEvent`.
+    PromoterReseededForOverflow { promoter: PromoterId },
     /// A Sub has been registered with the engine and assigned `sub`.
     /// Emitted by `attach_sub_inner` on every successful insert —
     /// static (operator-declared) attaches and dynamic Promoter-spawned
