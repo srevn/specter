@@ -50,7 +50,7 @@
 use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, ClassSet, DescentState, Diagnostic, DirSnapshot, EntryKind, ProfileId,
+    AnchorClaim, ClassSet, DescentState, Diagnostic, DirSnapshot, EntryKind, ProbeOwner, ProfileId,
     ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput,
 };
 use std::time::Instant;
@@ -237,13 +237,14 @@ impl crate::Engine {
                 matches!(p.state, ProfileState::Idle) && p.pending_probe.is_none()
             }),
             "enter_pending_descent: Profile must be Idle with closed probe channel; \
-             caller must invoke cancel_pending_probe (or take the response-dispatch path) \
+             caller must invoke cancel_owner_probe (or take the response-dispatch path) \
              and release prior state before re-entering descent (profile = {profile_id:?})",
         );
 
         add_watch_demand(&mut self.tree, prefix, ClassSet::STRUCTURE, out);
 
-        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+        let owner = ProbeOwner::Profile(profile_id);
+        let Some(correlation) = self.mint_owner_correlation(owner) else {
             return;
         };
 
@@ -255,7 +256,7 @@ impl crate::Engine {
         }
 
         let target_path = self.tree.path_of(prefix).unwrap_or_default();
-        Self::emit_descent_probe(profile_id, correlation, target_path, out);
+        Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
     }
 
     /// Dispatch a successful descent response. The walker honoured the
@@ -266,7 +267,7 @@ impl crate::Engine {
     ///
     /// **Caller (`on_probe_response`).** The probe channel
     /// (`Profile.pending_probe`) was closed before dispatch; this function
-    /// may re-open it via `mint_probe_correlation` in the advance branch.
+    /// may re-open it via `mint_owner_correlation` in the advance branch.
     pub(crate) fn dispatch_descent_ok(
         &mut self,
         profile_id: ProfileId,
@@ -282,6 +283,27 @@ impl crate::Engine {
             return;
         };
         let prefix = descent.current_prefix;
+
+        // Defense-in-depth: the walker stamps `DirSnapshot.root_resource`
+        // with the `target_resource` we placed on the `Descent` request,
+        // which the engine sets to `descent.current_prefix` at every
+        // `emit_descent_probe` site. Profile descent dispatch reads the
+        // `prefix` from `descent.current_prefix` (this function), so the
+        // assertion is purely a walker-contract guard — divergence
+        // signals a walker bug or a wire-side regression.
+        //
+        // Test fixtures that synthesise responses without populating
+        // `root_resource` (`ResourceId::default()`) are tolerated; the
+        // assertion only fires when both sides hold non-default ids.
+        debug_assert!(
+            snapshot.root_resource == prefix
+                || snapshot.root_resource == ResourceId::default()
+                || prefix == ResourceId::default(),
+            "walker stamp diverges from emitted target_resource (Profile descent): \
+             snapshot.root_resource = {:?}, descent.current_prefix = {:?}",
+            snapshot.root_resource,
+            prefix,
+        );
         let Some(next_segment) = descent.remaining_components.first().cloned() else {
             // The DescentState invariant (core/profile.rs) says
             // `remaining_components` is non-empty: the anchor itself is
@@ -410,7 +432,8 @@ impl crate::Engine {
             // In-place mutation: drop the head segment from
             // `remaining_components` rather than rebuilding the tail —
             // saves the per-step `Vec::to_vec` allocation.
-            let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+            let owner = ProbeOwner::Profile(profile_id);
+            let Some(correlation) = self.mint_owner_correlation(owner) else {
                 return;
             };
             if let Some(d) = self.descent_state_mut(profile_id) {
@@ -429,7 +452,7 @@ impl crate::Engine {
             add_watch_demand(&mut self.tree, new_resource, ClassSet::STRUCTURE, out);
 
             let target_path = self.tree.path_of(new_resource).unwrap_or_default();
-            Self::emit_descent_probe(profile_id, correlation, target_path, out);
+            Self::emit_descent_probe(owner, correlation, new_resource, target_path, out);
         }
     }
 
@@ -499,7 +522,8 @@ impl crate::Engine {
                 // `remaining_components` rather than cloning + rebuilding
                 // a fresh DescentState — saves both the whole-vec clone
                 // and the per-element CompactString clone.
-                let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+                let owner = ProbeOwner::Profile(profile_id);
+                let Some(correlation) = self.mint_owner_correlation(owner) else {
                     return;
                 };
                 if let Some(d) = self.descent_state_mut(profile_id) {
@@ -523,7 +547,7 @@ impl crate::Engine {
                 add_watch_demand(&mut self.tree, parent_id, ClassSet::STRUCTURE, out);
 
                 let target_path = self.tree.path_of(parent_id).unwrap_or_default();
-                Self::emit_descent_probe(profile_id, correlation, target_path, out);
+                Self::emit_descent_probe(owner, correlation, parent_id, target_path, out);
             }
             None => {
                 // Root prefix vanished — no rewind target. Clear the
@@ -578,7 +602,8 @@ impl crate::Engine {
         _now: Instant,
         out: &mut StepOutput,
     ) {
-        if self.pending_probe(profile_id).is_some() {
+        let owner = ProbeOwner::Profile(profile_id);
+        if self.pending_probe_for(owner).is_some() {
             return;
         }
         let prefix = match self.descent_state(profile_id) {
@@ -586,11 +611,11 @@ impl crate::Engine {
             None => return,
         };
 
-        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+        let Some(correlation) = self.mint_owner_correlation(owner) else {
             return;
         };
         let target_path = self.tree.path_of(prefix).unwrap_or_default();
-        Self::emit_descent_probe(profile_id, correlation, target_path, out);
+        Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
     }
 }
 

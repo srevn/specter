@@ -23,7 +23,7 @@ pub struct StepOutput {
 impl StepOutput {
     /// Sort the three slices to the engine's determinism contract:
     /// `watch_ops` by [`WatchOp::resource`]; `probe_ops` by
-    /// [`ProbeOp::profile`]; `effects` by `(key.sub(), target)`.
+    /// [`ProbeOp::owner`]; `effects` by `(key.sub(), target)`.
     /// `diagnostics` follow insertion order — they are not part of the
     /// user-visible sort guarantee.
     ///
@@ -31,7 +31,7 @@ impl StepOutput {
     /// time, so this method needs no engine state.
     pub fn sort_for_emission(&mut self) {
         self.watch_ops.sort_by_key(WatchOp::resource);
-        self.probe_ops.sort_by_key(ProbeOp::profile);
+        self.probe_ops.sort_by_key(ProbeOp::owner);
         self.effects.sort_by_key(|e| (e.key.sub(), e.target));
     }
 }
@@ -99,14 +99,17 @@ mod tests {
     }
 
     #[test]
-    fn sort_for_emission_orders_probe_ops_by_profile_id() {
+    fn sort_for_emission_orders_probe_ops_by_owner() {
+        use crate::op::ProbeOwner;
         let p1 = pidn(1);
         let p2 = pidn(2);
         let mut out = StepOutput::default();
-        out.probe_ops.push(ProbeOp::Cancel { profile: p2 });
+        out.probe_ops.push(ProbeOp::Cancel {
+            owner: ProbeOwner::Profile(p2),
+        });
         out.probe_ops.push(ProbeOp::Probe {
             request: ProbeRequest::AnchorFile {
-                profile: p1,
+                owner: ProbeOwner::Profile(p1),
                 correlation: crate::op::ProbeCorrelation(7),
                 target_path: PathBuf::from("/y"),
             },
@@ -114,8 +117,11 @@ mod tests {
 
         out.sort_for_emission();
 
-        let profiles: Vec<ProfileId> = out.probe_ops.iter().map(ProbeOp::profile).collect();
-        assert_eq!(profiles, vec![p1, p2]);
+        let owners: Vec<ProbeOwner> = out.probe_ops.iter().map(ProbeOp::owner).collect();
+        assert_eq!(
+            owners,
+            vec![ProbeOwner::Profile(p1), ProbeOwner::Profile(p2)]
+        );
     }
 
     /// `sort_for_emission` orders mixed-arm effects by `(sub, target)`.

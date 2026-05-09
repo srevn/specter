@@ -18,13 +18,15 @@
 //!
 //! # Cancellation discipline
 //!
-//! The `expected: Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>`
-//! map records the *latest* expected correlation per Profile.
+//! The `expected: Arc<Mutex<BTreeMap<ProbeOwner, ProbeCorrelation>>>`
+//! map records the *latest* expected correlation per probe-channel
+//! owner (Profile in v1; future owner kinds plug in via the
+//! [`ProbeOwner`] enum).
 //!
-//! - `submit(req)`: insert `(req.profile, req.correlation)`, then
+//! - `submit(req)`: insert `(req.owner(), req.correlation())`, then
 //!   channel-send. The lock-then-send order guarantees the worker that
 //!   races to `recv()` already sees the expectation.
-//! - `cancel(profile)`: remove the entry. Queued requests with the
+//! - `cancel(owner)`: remove the entry. Queued requests with the
 //!   stale correlation get skipped at worker-side check time.
 //! - `submit` again with a fresh correlation: overwrites the entry.
 //!   The prior request's worker-side check fails on its own
@@ -56,7 +58,9 @@
 use crate::Prober;
 use crate::prober::walk::{probe_anchor_file, probe_descent, probe_subtree};
 use crossbeam::channel::{Receiver, Sender};
-use specter_core::{Input, ProbeCorrelation, ProbeOutcome, ProbeRequest, ProbeResponse, ProfileId};
+use specter_core::{
+    Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse,
+};
 use std::collections::BTreeMap;
 use std::io;
 use std::panic::AssertUnwindSafe;
@@ -67,13 +71,13 @@ use std::thread::{self, JoinHandle};
 /// overrides; this constant is the fallback.
 pub const DEFAULT_CONCURRENCY: usize = 4;
 
-/// Per-Profile correlation expectation map. `Arc<Mutex<...>>` is
-/// shared across the [`WorkerProber`] and every worker thread; the
-/// `Mutex` body holds for ~10ns (`BTreeMap` lookup + insert/remove on a
-/// short map), so contention is negligible at v1's expected probe
-/// rates. Visible to sibling tests so they can drive `run_worker`
-/// directly with a hand-seeded map.
-pub(super) type ExpectedMap = Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>;
+/// Per-owner correlation expectation map. `Arc<Mutex<...>>` is shared
+/// across the [`WorkerProber`] and every worker thread; the `Mutex`
+/// body holds for ~10ns (`BTreeMap` lookup + insert/remove on a short
+/// map), so contention is negligible at v1's expected probe rates.
+/// Visible to sibling tests so they can drive `run_worker` directly
+/// with a hand-seeded map.
+pub(super) type ExpectedMap = Arc<Mutex<BTreeMap<ProbeOwner, ProbeCorrelation>>>;
 
 /// Lock the expectation map, recovering from `Mutex` poisoning by
 /// extracting the inner state via `PoisonError::into_inner`.
@@ -95,7 +99,7 @@ pub(super) type ExpectedMap = Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>;
 /// any future allocation we add inside the lock.
 pub(super) fn lock_expected(
     expected: &ExpectedMap,
-) -> std::sync::MutexGuard<'_, BTreeMap<ProfileId, ProbeCorrelation>> {
+) -> std::sync::MutexGuard<'_, BTreeMap<ProbeOwner, ProbeCorrelation>> {
     expected
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -207,20 +211,20 @@ impl Prober for WorkerProber {
         // across the lock release.
         {
             let mut e = lock_expected(&self.expected);
-            e.insert(req.profile(), req.correlation());
+            e.insert(req.owner(), req.correlation());
         }
         if let Err(crossbeam::channel::SendError(req)) = self.queue_tx.send(req) {
             tracing::error!(
-                profile = ?req.profile(),
+                owner = ?req.owner(),
                 correlation = ?req.correlation(),
                 "prober queue closed; submit dropped",
             );
         }
     }
 
-    fn cancel(&self, profile: ProfileId) {
-        lock_expected(&self.expected).remove(&profile);
-        tracing::trace!(?profile, "prober cancel");
+    fn cancel(&self, owner: ProbeOwner) {
+        lock_expected(&self.expected).remove(&owner);
+        tracing::trace!(?owner, "prober cancel");
     }
 }
 
@@ -247,7 +251,11 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
             force_walk,
             *forced,
         ),
-        ProbeRequest::Descent { target_path, .. } => probe_descent(target_path),
+        ProbeRequest::Descent {
+            target_path,
+            target_resource,
+            ..
+        } => probe_descent(target_path, *target_resource),
     }
 }
 
@@ -269,25 +277,25 @@ pub(super) fn run_worker<F>(
     F: Fn(&ProbeRequest) -> ProbeOutcome,
 {
     while let Ok(req) = rx.recv() {
-        let profile = req.profile();
+        let owner = req.owner();
         let correlation = req.correlation();
         // Pre-run cancel check: the request was queued at submit time;
         // a `cancel` since then (or a fresh `submit` with a new
-        // correlation) means our `(profile, correlation)` no longer
+        // correlation) means our `(owner, correlation)` no longer
         // matches the latest expectation. Skip the syscall *and* the
-        // response — the engine has structurally closed the per-Profile
+        // response — the engine has structurally closed the per-owner
         // probe channel on cancel-emit, so a missing response is
         // harmless.
-        let still_wanted = lock_expected(expected).get(&profile).copied() == Some(correlation);
+        let still_wanted = lock_expected(expected).get(&owner).copied() == Some(correlation);
         if !still_wanted {
-            tracing::debug!(?profile, ?correlation, "probe cancelled before dispatch",);
+            tracing::debug!(?owner, ?correlation, "probe cancelled before dispatch",);
             continue;
         }
 
         let outcome =
             std::panic::catch_unwind(AssertUnwindSafe(|| probe(&req))).unwrap_or_else(|_| {
                 tracing::error!(
-                    ?profile,
+                    ?owner,
                     ?correlation,
                     "prober worker panicked; emitting Failed(EIO)",
                 );
@@ -299,13 +307,13 @@ pub(super) fn run_worker<F>(
         // and now; clobbering would spuriously skip the new request.
         {
             let mut e = lock_expected(expected);
-            if e.get(&profile).copied() == Some(correlation) {
-                e.remove(&profile);
+            if e.get(&owner).copied() == Some(correlation) {
+                e.remove(&owner);
             }
         }
 
         let response = ProbeResponse {
-            profile,
+            owner,
             correlation,
             outcome,
         };

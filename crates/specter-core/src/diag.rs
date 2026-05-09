@@ -6,7 +6,7 @@
 
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::input::{FsEvent, OverflowScope};
-use crate::op::{ProbeCorrelation, WatchFailure};
+use crate::op::{ProbeCorrelation, ProbeOwner, WatchFailure};
 use crate::profile::BurstIntent;
 use std::path::PathBuf;
 
@@ -27,10 +27,14 @@ pub enum ClaimKind {
 /// exact variant + fields produced by a given dropped Input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Diagnostic {
-    /// `ProbeResponse` for a Profile not in `BurstPhase::Verifying`, or for a
-    /// `Verifying` whose `correlation` doesn't match the response.
+    /// `ProbeResponse` whose `(owner, correlation)` doesn't match the
+    /// owner's live probe channel. Catches stale-id (post-detach),
+    /// post-cancel arrivals, and out-of-order responses across all
+    /// owner kinds. The `owner` field carries the [`ProbeOwner`] so
+    /// operators can demux which entity (Profile in v1) saw the stale
+    /// response.
     StaleProbeResponse {
-        profile: ProfileId,
+        owner: ProbeOwner,
         correlation: ProbeCorrelation,
     },
     /// `TimerExpired(id)` whose `TimerId` is not referenced by any Profile's

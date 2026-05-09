@@ -167,13 +167,21 @@ pub(super) fn probe_subtree(
 /// `exclude`, no `pattern`, no `max_depth`. The walker owns the override
 /// config because the engine's user-facing filters would mask the very
 /// segment descent is searching for; descent dispatch reads
-/// `arc.entries.get(name)` directly and discards the snapshot.
+/// `arc.entries.get(name)` directly and (for Profile descent) discards
+/// the snapshot.
+///
+/// `target_resource` is stamped onto the response's
+/// `DirSnapshot.root_resource` so consumers reading the snapshot
+/// directly (engine dispatch arms with no per-state target field) can
+/// identify the prefix without an extra channel field. Profile descent
+/// dispatch reads `descent.current_prefix` as the source of truth and
+/// `debug_assert!`s the stamp matches.
 ///
 /// `captured_with` is stamped as `0` — descent dispatch never reads the
 /// field (the snapshot is consumed by the engine and dropped before any
 /// consumer compares hashes), so the value is observationally
 /// irrelevant. Callers should not rely on a particular sentinel.
-pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
+pub(super) fn probe_descent(target_path: &Path, target_resource: ResourceId) -> ProbeOutcome {
     let cfg = ScanConfig::builder()
         .recursive(false)
         .hidden(true)
@@ -181,7 +189,7 @@ pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
         .build();
     probe_subtree(
         target_path,
-        ResourceId::default(),
+        target_resource,
         &cfg,
         0,
         None,

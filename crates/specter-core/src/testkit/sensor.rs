@@ -162,7 +162,7 @@ mod tests {
             events: ClassSet::EMPTY,
         });
         step_one.probe_ops.push(ProbeOp::Cancel {
-            profile: crate::ProfileId::default(),
+            owner: crate::ProbeOwner::Profile(crate::ProfileId::default()),
         });
 
         let mut step_two = StepOutput::default();

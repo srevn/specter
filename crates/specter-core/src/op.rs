@@ -14,6 +14,30 @@ use std::sync::Arc;
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProbeCorrelation(pub u64);
 
+/// Probe-channel owner — the engine-resident entity that minted a probe.
+///
+/// Echoed verbatim through [`ProbeRequest`] / [`ProbeResponse`] /
+/// [`ProbeOp::Cancel`] so the engine can demux each response to the
+/// entity that's awaiting it.
+///
+/// **One variant in v1.** [`Self::Profile`] wraps the per-Profile
+/// probe-channel slot ([`crate::Profile::pending_probe`]). The enum is
+/// the wire generalisation that future entities (e.g. Promoter, the
+/// dynamic-path-glob carrier landing in a later phase) will plug into
+/// without disturbing the slot-discipline contract.
+///
+/// **Determinism.** Derived `Ord` produces variant-declaration-order
+/// then per-payload [`ProfileId`] order. With one variant this collapses
+/// to `ProfileId::cmp`, preserving the existing
+/// [`crate::StepOutput::probe_ops`] sort.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum ProbeOwner {
+    /// Per-Profile slot — the only owner kind in v1. The wrapped
+    /// [`ProfileId`] keys [`crate::Profile::pending_probe`] via the
+    /// engine's slot accessor.
+    Profile(ProfileId),
+}
+
 /// Engine→walker probe request.
 ///
 /// The variant is the contract: the walker dispatches on it; the engine
@@ -35,9 +59,9 @@ pub enum ProbeRequest {
     /// (the path is one syscall), no `forced` (mtime-skip is not a
     /// concept for `lstat`).
     AnchorFile {
-        /// Profile this probe addresses. Echoed back on `ProbeResponse`
+        /// Owner of the probe channel. Echoed back on `ProbeResponse`
         /// and used by the Sensor's expectation-map insertion.
-        profile: ProfileId,
+        owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
         /// Filesystem path of the anchor at probe-emission time. Engine
@@ -49,9 +73,9 @@ pub enum ProbeRequest {
     /// `ProbeOutcome::SubtreeOk(Arc<DirSnapshot>)` rooted at
     /// `target_resource` (or `Vanished` / `Failed`).
     Subtree {
-        /// Profile this probe addresses. Echoed back on `ProbeResponse`
+        /// Owner of the probe channel. Echoed back on `ProbeResponse`
         /// and used by the Sensor's expectation-map insertion.
-        profile: ProfileId,
+        owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
         /// Resource the prober walks. Often `Profile.resource` (Seed
@@ -115,25 +139,51 @@ pub enum ProbeRequest {
     /// and discards the snapshot (it is never spliced into
     /// `Profile.current`).
     Descent {
-        /// Profile this probe addresses. Echoed back on `ProbeResponse`
+        /// Owner of the probe channel. Echoed back on `ProbeResponse`
         /// and used by the Sensor's expectation-map insertion.
-        profile: ProfileId,
+        owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
+        /// Resource the prober walks (the descent prefix at emission
+        /// time). The walker stamps this onto the response's
+        /// `DirSnapshot.root_resource` so consumers reading the snapshot
+        /// directly can identify the proxy / prefix without consulting
+        /// engine-side per-state fields. Profile descent dispatch reads
+        /// `descent.current_prefix` as the source of truth and
+        /// `debug_assert!`s the stamp matches.
+        target_resource: ResourceId,
         /// Filesystem path of the descent prefix at probe-emission time.
         target_path: PathBuf,
     },
 }
 
 impl ProbeRequest {
-    /// Profile this probe addresses. Determinism-sort key for
-    /// [`crate::StepOutput::probe_ops`] (via [`ProbeOp::profile`]).
+    /// Owner of the probe channel. Determinism-sort key for
+    /// [`crate::StepOutput::probe_ops`] (via [`ProbeOp::owner`]).
     #[must_use]
-    pub const fn profile(&self) -> ProfileId {
+    pub const fn owner(&self) -> ProbeOwner {
         match self {
-            Self::AnchorFile { profile, .. }
-            | Self::Subtree { profile, .. }
-            | Self::Descent { profile, .. } => *profile,
+            Self::AnchorFile { owner, .. }
+            | Self::Subtree { owner, .. }
+            | Self::Descent { owner, .. } => *owner,
+        }
+    }
+
+    /// Resource the walker should stamp onto the response's
+    /// `DirSnapshot.root_resource`. `None` for [`Self::AnchorFile`] —
+    /// the wire carries `target_path`; the engine's burst state holds
+    /// the anchor's [`ResourceId`] separately. `Some(_)` for
+    /// [`Self::Subtree`] and [`Self::Descent`].
+    #[must_use]
+    pub const fn target_resource(&self) -> Option<ResourceId> {
+        match self {
+            Self::AnchorFile { .. } => None,
+            Self::Subtree {
+                target_resource, ..
+            }
+            | Self::Descent {
+                target_resource, ..
+            } => Some(*target_resource),
         }
     }
 
@@ -150,11 +200,11 @@ impl ProbeRequest {
     }
 }
 
-/// Walker→engine probe response. Flat — `(profile, correlation)` is the
+/// Walker→engine probe response. Flat — `(owner, correlation)` is the
 /// I5 invariant key; `outcome` carries the per-variant payload.
 #[derive(Debug, Clone)]
 pub struct ProbeResponse {
-    pub profile: ProfileId,
+    pub owner: ProbeOwner,
     pub correlation: ProbeCorrelation,
     pub outcome: ProbeOutcome,
 }
@@ -314,25 +364,25 @@ impl WatchFailure {
 // `ProbeRequest::Subtree` carries baseline_subtree / force_walk / forced
 // etc. `Probe` is the dominant variant — every burst emits one — and
 // boxing it would add an allocation per probe with no observable benefit
-// since `Cancel` is sparse (per Profile reap, not per burst). The size
+// since `Cancel` is sparse (per owner reap, not per burst). The size
 // delta rides on `SmallVec` inline slots, which is why we accept it
 // explicitly.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProbeOp {
     Probe { request: ProbeRequest },
-    Cancel { profile: ProfileId },
+    Cancel { owner: ProbeOwner },
 }
 
 impl ProbeOp {
-    /// The Profile this op addresses. Both variants carry one (the
+    /// The owner this op addresses. Both variants carry one (the
     /// `Probe` variant via its nested [`ProbeRequest`]). This is the
     /// determinism-sort key for [`crate::StepOutput::probe_ops`].
     #[must_use]
-    pub const fn profile(&self) -> ProfileId {
+    pub const fn owner(&self) -> ProbeOwner {
         match self {
-            Self::Probe { request } => request.profile(),
-            Self::Cancel { profile } => *profile,
+            Self::Probe { request } => request.owner(),
+            Self::Cancel { owner } => *owner,
         }
     }
 }

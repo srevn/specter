@@ -21,8 +21,8 @@ use compact_str::CompactString;
 use specter_core::{
     BurstPhase, ChildEntry, ClassSet, CommandTemplate, Diff, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome,
-    ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachRequest, WatchOp,
+    ProbeOwner, ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -163,7 +163,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
     let parent_seed = first_probe_correlation(&out_p).unwrap();
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_parent,
+            owner: ProbeOwner::Profile(pid_parent),
             correlation: parent_seed,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(src, vec![])),
         }),
@@ -197,7 +197,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
     // Drive child through Seed → Idle.
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_child,
+            owner: ProbeOwner::Profile(pid_child),
             correlation: child_seed,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(foo, vec![])),
         }),
@@ -257,7 +257,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     let parent_seed = first_probe_correlation(&out_p).unwrap();
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_parent,
+            owner: ProbeOwner::Profile(pid_parent),
             correlation: parent_seed,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(src, vec![])),
         }),
@@ -282,7 +282,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     let child_seed = first_probe_correlation(&out_c).unwrap();
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_child,
+            owner: ProbeOwner::Profile(pid_child),
             correlation: child_seed,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(foo, vec![])),
         }),
@@ -324,7 +324,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     }
 
     let parent_probe_corr = e
-        .pending_probe(pid_parent)
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
         .expect("Verifying probe in flight");
     assert!(
         e.profiles().get(pid_parent).unwrap().dirty_descendants >= 1,
@@ -334,7 +334,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     // Inject parent's stable response while dirty>0 → Draining.
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_parent,
+            owner: ProbeOwner::Profile(pid_parent),
             correlation: parent_probe_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(src, vec![])),
         }),
@@ -355,11 +355,11 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     // parent from reconfirming while the child's Effect is still
     // mutating the disk.
     let child_probe_corr = e
-        .pending_probe(pid_child)
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
         .expect("Verifying probe in flight");
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_child,
+            owner: ProbeOwner::Profile(pid_child),
             correlation: child_probe_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(foo, vec![])),
         }),
@@ -377,7 +377,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         !stable_out
             .probe_ops
             .iter()
-            .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid_parent),),
+            .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_parent)),),
         "parent does NOT reconfirm at child stable — child's Effect still in flight",
     );
     let child_effect = stable_out
@@ -403,14 +403,14 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         t2,
     );
     let rebase_corr = e
-        .pending_probe(pid_child)
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
         .expect("rebase probe in flight after EffectComplete");
     // The rebase probe is on the child; parent still hasn't reconfirmed.
     assert!(
         !rebase_out
             .probe_ops
             .iter()
-            .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid_parent),),
+            .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_parent)),),
         "parent does NOT reconfirm during child Rebasing — burst not yet finished",
     );
 
@@ -418,7 +418,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     // propagate(-1) → parent's reconfirm transition_to_verifying.
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_child,
+            owner: ProbeOwner::Profile(pid_child),
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(foo, vec![])),
         }),
@@ -429,7 +429,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     let reconfirm_emitted = out
         .probe_ops
         .iter()
-        .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid_parent));
+        .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_parent)));
     assert!(
         reconfirm_emitted,
         "parent's reconfirm probe fires in the same step as child finish_burst_to_idle",
@@ -494,13 +494,17 @@ fn co_located_profiles_share_suppress_count() {
     assert_eq!(e.tree().get(r).unwrap().suppress_count, 2);
 
     // Drive both Seeds.
-    let corr_a = e.pending_probe(pid_a).expect("Verifying probe in flight");
-    let corr_b = e.pending_probe(pid_b).expect("Verifying probe in flight");
+    let corr_a = e
+        .pending_probe_for(ProbeOwner::Profile(pid_a))
+        .expect("Verifying probe in flight");
+    let corr_b = e
+        .pending_probe_for(ProbeOwner::Profile(pid_b))
+        .expect("Verifying probe in flight");
 
     // Finish A's Seed first; suppress goes 2→1, no Unsuppress.
     let out_a = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_a,
+            owner: ProbeOwner::Profile(pid_a),
             correlation: corr_a,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -517,7 +521,7 @@ fn co_located_profiles_share_suppress_count() {
     // Finish B's Seed; suppress goes 1→0, Unsuppress emitted.
     let out_b = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_b,
+            owner: ProbeOwner::Profile(pid_b),
             correlation: corr_b,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),

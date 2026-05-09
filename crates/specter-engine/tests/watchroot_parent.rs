@@ -16,7 +16,8 @@
 
 use specter_core::{
     ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope, Input, ProbeOp, ProbeOutcome,
-    ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, WatchOp,
+    ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -142,7 +143,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         .unwrap();
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(src)),
         }),

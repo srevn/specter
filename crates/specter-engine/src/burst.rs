@@ -34,8 +34,8 @@ use crate::Engine;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
-    Burst, BurstIntent, BurstPhase, ProfileId, ProfileState, ResourceId, ResourceKind, StepOutput,
-    TimerKind, Tree, TreeSnapshot,
+    Burst, BurstIntent, BurstPhase, ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind,
+    StepOutput, TimerKind, Tree, TreeSnapshot,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -90,7 +90,7 @@ impl Engine {
         let burst_deadline =
             self.timers
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
-        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
             return;
         };
 
@@ -115,7 +115,12 @@ impl Engine {
         let target_path = self.tree.path_of(resource).unwrap_or_default();
         match anchor_kind {
             Some(ResourceKind::File) => {
-                Self::emit_anchor_probe(profile_id, correlation, target_path, out);
+                Self::emit_anchor_probe(
+                    ProbeOwner::Profile(profile_id),
+                    correlation,
+                    target_path,
+                    out,
+                );
             }
             // Dir or unclassified ⇒ unified Subtree fallback. An Unknown
             // anchor (resource-based attach whose first probe hasn't yet
@@ -125,7 +130,7 @@ impl Engine {
             // `dispatch_seed_vanished` to recover via descent.
             Some(ResourceKind::Dir | ResourceKind::Unknown) | None => {
                 Self::emit_subtree_probe(
-                    profile_id,
+                    ProbeOwner::Profile(profile_id),
                     correlation,
                     resource,
                     target_path,
@@ -273,7 +278,7 @@ impl Engine {
         // (Verifying ⇒ pending_probe = Some(_)). For Batching / Draining
         // entries, no probe is in flight and the helper is a no-op —
         // matching the prior `was_verifying` snapshot's role.
-        self.cancel_pending_probe(profile_id, out);
+        self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
 
         let new_settle_timer = if needs_fresh_timer {
             Some(
@@ -485,7 +490,7 @@ impl Engine {
         let force_walk_paths = build_force_walk(&force_set, target, &self.tree);
         let target_path = self.tree.path_of(target).unwrap_or_default();
 
-        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
             return;
         };
 
@@ -511,7 +516,12 @@ impl Engine {
 
         match anchor_kind {
             Some(ResourceKind::File) => {
-                Self::emit_anchor_probe(profile_id, correlation, target_path, out);
+                Self::emit_anchor_probe(
+                    ProbeOwner::Profile(profile_id),
+                    correlation,
+                    target_path,
+                    out,
+                );
             }
             // Dir or unclassified ⇒ Subtree probe at the chosen target.
             // See `start_seed_burst` for the unified-fallback rationale
@@ -519,7 +529,7 @@ impl Engine {
             // as a `Vanished` Subtree response and recovers via descent).
             Some(ResourceKind::Dir | ResourceKind::Unknown) | None => {
                 Self::emit_subtree_probe(
-                    profile_id,
+                    ProbeOwner::Profile(profile_id),
                     correlation,
                     target,
                     target_path,
@@ -680,7 +690,7 @@ impl Engine {
         let force_walk_paths = build_force_walk(&force_set, resource, &self.tree);
         let target_path = self.tree.path_of(resource).unwrap_or_default();
 
-        let Some(correlation) = self.mint_probe_correlation(profile_id) else {
+        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
             return;
         };
 
@@ -693,11 +703,16 @@ impl Engine {
 
         match anchor_kind {
             Some(ResourceKind::File) => {
-                Self::emit_anchor_probe(profile_id, correlation, target_path, out);
+                Self::emit_anchor_probe(
+                    ProbeOwner::Profile(profile_id),
+                    correlation,
+                    target_path,
+                    out,
+                );
             }
             Some(ResourceKind::Dir | ResourceKind::Unknown) | None => {
                 Self::emit_subtree_probe(
-                    profile_id,
+                    ProbeOwner::Profile(profile_id),
                     correlation,
                     resource,
                     target_path,
@@ -999,8 +1014,8 @@ mod tests {
 
     use crate::Engine;
     use specter_core::{
-        BurstIntent, BurstPhase, ClassSet, Input, ProbeOp, ProbeRequest, Profile, ProfileState,
-        ResourceKind, ResourceRole, ScanConfig, StepOutput, TimerKind, WatchOp,
+        BurstIntent, BurstPhase, ClassSet, Input, ProbeOp, ProbeOwner, ProbeRequest, Profile,
+        ProfileState, ResourceKind, ResourceRole, ScanConfig, StepOutput, TimerKind, WatchOp,
     };
     use std::time::{Duration, Instant};
 
@@ -1112,7 +1127,7 @@ mod tests {
             _ => panic!("expected Active"),
         }
         let correlation = e
-            .pending_probe(pid)
+            .pending_probe_for(ProbeOwner::Profile(pid))
             .expect("Verifying probe in flight on probe channel");
 
         // Output: one Probe whose correlation matches.

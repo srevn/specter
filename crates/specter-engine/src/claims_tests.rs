@@ -22,8 +22,8 @@ use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DedupKey, DirChild,
     DirMeta, DirSnapshot, EffectScope, EntryKind, Input, LeafEntry, ProbeCorrelation, ProbeOp,
-    ProbeOutcome, ProbeResponse, ProfileId, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubAttachRequest, SubId, WatchOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, StepOutput, SubAttachRequest, SubId, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -99,7 +99,7 @@ fn engine_with_materialised_profile(
     let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(anchor, vec![])),
         }),
@@ -383,7 +383,7 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
     let snap = dir_snap(anchor, vec![("nested", EntryKind::Dir, 1)]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),

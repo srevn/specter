@@ -30,7 +30,8 @@ pub use effect::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome
 pub use ids::{ProfileId, ResourceId, SubId, TimerId};
 pub use input::{FsEvent, Input, OverflowScope};
 pub use op::{
-    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeRequest, ProbeResponse, WatchFailure, WatchOp,
+    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, WatchFailure,
+    WatchOp,
 };
 pub use output::StepOutput;
 pub use profile::{

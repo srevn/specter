@@ -17,8 +17,8 @@ use compact_str::CompactString;
 use specter_core::{
     ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp, ProbeOutcome,
-    ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
-    SubRegistryDiff, WatchOp,
+    ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    SubAttachRequest, SubRegistryDiff, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -156,7 +156,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         .unwrap();
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -215,7 +215,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         .unwrap();
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -253,12 +253,14 @@ fn config_diff_mid_burst_remove_defers_reap() {
             t2,
         );
     }
-    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let std_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
 
     // Inject stable response. Profile reaps; no Effect.
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: std_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -309,7 +311,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
         .unwrap();
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -410,7 +412,7 @@ fn effect_complete_after_detach_drops_silently() {
         .unwrap();
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -484,7 +486,7 @@ fn config_diff_modified_remove_then_add() {
         .unwrap();
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_a,
+            owner: ProbeOwner::Profile(pid_a),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),

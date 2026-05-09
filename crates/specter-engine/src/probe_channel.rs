@@ -1,22 +1,22 @@
 //! Probe channel — engine↔Prober communication primitive.
 //!
-//! At most one outstanding probe per Profile. The channel is **opened**
-//! when the engine emits `ProbeOp::Probe` (after `mint_probe_correlation`
-//! writes the correlation to `Profile.pending_probe`). The channel is
-//! **closed** when either:
+//! At most one outstanding probe per [`ProbeOwner`]. The channel is
+//! **opened** when the engine emits `ProbeOp::Probe` (after
+//! `mint_owner_correlation` writes the correlation to the owner's slot).
+//! The channel is **closed** when either:
 //! - the matching `ProbeResponse` arrives (top of `on_probe_response`
 //!   clears the slot before dispatch), or
-//! - the engine emits `ProbeOp::Cancel` (`cancel_pending_probe` clears
+//! - the engine emits `ProbeOp::Cancel` (`cancel_owner_probe` clears
 //!   the slot and emits Cancel atomically).
 //!
 //! This module is the single source of three disciplines:
-//! 1. Counter monotonicity for the probe side — `mint_probe_correlation`
+//! 1. Counter monotonicity for the probe side — `mint_owner_correlation`
 //!    is the only path that bumps `Engine.next_correlation` for a probe
 //!    token. The effect side (`next_effect_correlation` in
 //!    `transitions.rs`) shares the underlying counter; the typed wrappers
 //!    (`ProbeCorrelation` vs `CorrelationId`) keep the spaces disjoint.
-//! 2. Channel-state slot — only `mint_probe_correlation` writes
-//!    `pending_probe = Some(_)`; only `cancel_pending_probe` and the
+//! 2. Channel-state slot — only `mint_owner_correlation` writes
+//!    `pending_probe = Some(_)`; only `cancel_owner_probe` and the
 //!    `on_probe_response` pre-dispatch clear write `pending_probe = None`.
 //! 3. `ProbeOp::Probe` construction — the three typed helpers
 //!    (`emit_anchor_probe`, `emit_subtree_probe`, `emit_descent_probe`)
@@ -25,12 +25,15 @@
 //!    request to a File-anchored Profile, or attach a baseline to a
 //!    descent prefix.
 //!
-//! The data-model slot (`Profile.pending_probe`) lives on the Profile;
-//! this module owns the discipline that mutates it.
+//! Per-owner slot lookup goes through [`Engine::pending_slot_mut`] /
+//! [`Engine::pending_slot`] — a single match on [`ProbeOwner`] keeps the
+//! `mint`/`cancel`/read trio symmetric. The match is exhaustive over
+//! every owner kind today; extending the enum requires adding one arm
+//! here and one in the dispatcher (`on_probe_response`).
 
 use crate::Engine;
 use specter_core::{
-    DirSnapshot, ProbeCorrelation, ProbeOp, ProbeRequest, ProfileId, ResourceId, ScanConfig,
+    DirSnapshot, ProbeCorrelation, ProbeOp, ProbeOwner, ProbeRequest, ResourceId, ScanConfig,
     StepOutput,
 };
 use std::collections::BTreeSet;
@@ -38,32 +41,58 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 impl Engine {
+    /// Mutable accessor for the per-owner pending-probe slot. Returns
+    /// `None` for a stale owner (slotmap key whose entity has been
+    /// reaped); otherwise threads through to the owner's
+    /// `pending_probe: Option<ProbeCorrelation>` field.
+    ///
+    /// This is the single source of truth that
+    /// `mint_owner_correlation` / `cancel_owner_probe` /
+    /// `pending_slot` route through — adding a new
+    /// [`ProbeOwner`] variant means extending exactly one match here
+    /// (and one in `on_probe_response`).
+    fn pending_slot_mut(&mut self, owner: ProbeOwner) -> Option<&mut Option<ProbeCorrelation>> {
+        match owner {
+            ProbeOwner::Profile(pid) => self.profiles.get_mut(pid).map(|p| &mut p.pending_probe),
+        }
+    }
+
+    /// Read counterpart of [`Self::pending_slot_mut`]. Returns `None`
+    /// for a stale owner or a closed channel.
+    fn pending_slot(&self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
+        match owner {
+            ProbeOwner::Profile(pid) => self.profiles.get(pid).and_then(|p| p.pending_probe),
+        }
+    }
+
     /// Open the probe channel: bump the engine-monotonic correlation
-    /// counter, mint a fresh `ProbeCorrelation`, and write it to
-    /// `Profile.pending_probe`.
+    /// counter, mint a fresh `ProbeCorrelation`, and write it to the
+    /// owner's pending-probe slot.
     ///
-    /// Returns `None` only on stale `pid` (defense-in-depth; production
-    /// paths look up the Profile within the same `&mut self` window
-    /// immediately before this call). On success the slot is `Some(c)`
-    /// and the returned `ProbeCorrelation` matches.
+    /// Returns `None` only on a stale owner (defense-in-depth;
+    /// production paths look up the owner within the same `&mut self`
+    /// window immediately before this call). On success the slot is
+    /// `Some(c)` and the returned `ProbeCorrelation` matches.
     ///
-    /// **I5 enforcement.** A `debug_assert!` fires on double-open. Release
-    /// builds silently overwrite — benign because the now-orphaned
-    /// outstanding probe's response will fail the
+    /// **I5 enforcement.** A `debug_assert!` fires on double-open.
+    /// Release builds silently overwrite — benign because the
+    /// now-orphaned outstanding probe's response will fail the
     /// `pending_probe == Some(received)` check at the top of
     /// `on_probe_response` and emit `StaleProbeResponse`. The assertion
     /// is the early-warning signal in CI/dev.
     #[must_use]
-    pub(crate) fn mint_probe_correlation(&mut self, pid: ProfileId) -> Option<ProbeCorrelation> {
-        let p = self.profiles.get_mut(pid)?;
+    pub(crate) fn mint_owner_correlation(&mut self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
+        // I5 staleness check. Read-only; the &mut downgrade window for
+        // the slot write happens below.
         debug_assert!(
-            p.pending_probe.is_none(),
+            self.pending_slot(owner).is_none(),
             "I5 violated: minting probe correlation while channel is open \
-             (existing = {:?}, profile = {pid:?})",
-            p.pending_probe,
+             (existing = {:?}, owner = {owner:?})",
+            self.pending_slot(owner),
         );
-        // The borrow on `p` ends here (NLL); `&mut self.next_correlation`
-        // and the re-borrow of `self.profiles` below are disjoint.
+        // Stale owner — defensive bail before consuming a counter tick.
+        self.pending_slot_mut(owner)?;
+
         debug_assert!(
             self.next_correlation < u64::MAX,
             "Engine.next_correlation saturated at u64::MAX; subsequent probe \
@@ -72,60 +101,59 @@ impl Engine {
         );
         self.next_correlation = self.next_correlation.saturating_add(1);
         let correlation = ProbeCorrelation(self.next_correlation);
-        if let Some(p) = self.profiles.get_mut(pid) {
-            p.pending_probe = Some(correlation);
+        if let Some(slot) = self.pending_slot_mut(owner) {
+            *slot = Some(correlation);
         }
         Some(correlation)
     }
 
     /// Close the probe channel and emit `ProbeOp::Cancel` iff the channel
     /// was open. Idempotent — silently no-ops on a closed channel or stale
-    /// `pid`.
+    /// owner.
     ///
-    /// Sole caller surface for the four cancel-emission paths:
+    /// Sole caller surface for the Profile-side cancel-emission paths:
     /// `event_drives_batching`, `finalize_anchor_lost`,
-    /// `on_watch_op_rejected` descent purge, `reap_profile`.
-    pub(crate) fn cancel_pending_probe(&mut self, pid: ProfileId, out: &mut StepOutput) {
-        if let Some(p) = self.profiles.get_mut(pid)
-            && p.pending_probe.take().is_some()
-        {
-            out.probe_ops.push(ProbeOp::Cancel { profile: pid });
+    /// `on_watch_op_rejected` descent purge, `reap_profile`. Future
+    /// owner kinds plug their own cancel sites into the same helper.
+    pub(crate) fn cancel_owner_probe(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
+        let was_open = self
+            .pending_slot_mut(owner)
+            .is_some_and(|slot| slot.take().is_some());
+        if was_open {
+            out.probe_ops.push(ProbeOp::Cancel { owner });
         }
     }
 
-    /// Read accessor for `Profile.pending_probe`. Returns `None` for a
-    /// stale `pid` or a closed channel. Mirrors the read API previously
-    /// served by `DescentState::probe_correlation()` and the
-    /// `BurstPhase::Verifying { correlation }` destructure — both deleted
-    /// in favour of this single Profile-level slot. `pub` so integration
+    /// Read accessor for the owner's pending-probe slot. Returns `None`
+    /// for a stale owner or a closed channel. `pub` so integration
     /// tests in the engine crate's `tests/` directory can query the
     /// channel state via the engine's public surface.
     #[must_use]
-    pub fn pending_probe(&self, pid: ProfileId) -> Option<ProbeCorrelation> {
-        self.profiles.get(pid)?.pending_probe
+    pub fn pending_probe_for(&self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
+        self.pending_slot(owner)
     }
 
     /// Emit `ProbeRequest::AnchorFile`. The walker runs a single `lstat`
     /// against `target_path` and returns `ProbeOutcome::AnchorOk` (or
     /// `Vanished` / `Failed`).
     ///
-    /// `correlation` must already be on `Profile.pending_probe` (the
-    /// caller minted it via `mint_probe_correlation` immediately prior).
-    /// `target_path` is captured at the call site so this helper avoids
-    /// borrowing `&self.tree` during the emit.
+    /// `correlation` must already be on the owner's pending-probe slot
+    /// (the caller minted it via `mint_owner_correlation` immediately
+    /// prior). `target_path` is captured at the call site so this
+    /// helper avoids borrowing `&self.tree` during the emit.
     ///
     /// Associated function (no `self`): the helper is a thin variant
     /// constructor with no Engine-state dependency. Callers reach it as
     /// `Self::emit_anchor_probe(...)`.
     pub(crate) fn emit_anchor_probe(
-        profile_id: ProfileId,
+        owner: ProbeOwner,
         correlation: ProbeCorrelation,
         target_path: PathBuf,
         out: &mut StepOutput,
     ) {
         out.probe_ops.push(ProbeOp::Probe {
             request: ProbeRequest::AnchorFile {
-                profile: profile_id,
+                owner,
                 correlation,
                 target_path,
             },
@@ -146,8 +174,9 @@ impl Engine {
     ///
     /// Associated function (no `self`): same rationale as
     /// [`Self::emit_anchor_probe`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_subtree_probe(
-        profile_id: ProfileId,
+        owner: ProbeOwner,
         correlation: ProbeCorrelation,
         target_resource: ResourceId,
         target_path: PathBuf,
@@ -160,7 +189,7 @@ impl Engine {
     ) {
         out.probe_ops.push(ProbeOp::Probe {
             request: ProbeRequest::Subtree {
-                profile: profile_id,
+                owner,
                 correlation,
                 target_resource,
                 target_path,
@@ -181,20 +210,28 @@ impl Engine {
     ///
     /// Walker still returns `ProbeOutcome::SubtreeOk(arc)` carrying the
     /// prefix's direct children; descent dispatch reads
-    /// `arc.entries.get(name)` and discards the snapshot.
+    /// `arc.entries.get(name)` and (for Profile descent) discards the
+    /// snapshot.
+    ///
+    /// `target_resource` is the prefix the engine is enumerating. The
+    /// walker stamps it onto `DirSnapshot.root_resource` so consumers
+    /// reading the snapshot directly can identify the prefix without
+    /// consulting per-state engine fields.
     ///
     /// Associated function (no `self`): same rationale as
     /// [`Self::emit_anchor_probe`].
     pub(crate) fn emit_descent_probe(
-        profile_id: ProfileId,
+        owner: ProbeOwner,
         correlation: ProbeCorrelation,
+        target_resource: ResourceId,
         target_path: PathBuf,
         out: &mut StepOutput,
     ) {
         out.probe_ops.push(ProbeOp::Probe {
             request: ProbeRequest::Descent {
-                profile: profile_id,
+                owner,
                 correlation,
+                target_resource,
                 target_path,
             },
         });
@@ -204,17 +241,19 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use crate::Engine;
-    use specter_core::{ClassSet, Profile, ResourceRole, ScanConfig, StepOutput};
+    use specter_core::{
+        ClassSet, ProbeOp, ProbeOwner, Profile, ResourceRole, ScanConfig, StepOutput,
+    };
     use std::time::Duration;
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
 
     /// Attach a fresh `Idle` Profile at a synthetic anchor, returning the
-    /// engine and the new `ProfileId`. The Profile carries no Subs and no
-    /// claims — purely a vehicle for exercising the probe-channel slot in
-    /// isolation.
-    fn fresh_engine_with_idle_profile() -> (Engine, specter_core::ProfileId) {
+    /// engine and the new [`ProbeOwner`]. The Profile carries no Subs and
+    /// no claims — purely a vehicle for exercising the probe-channel slot
+    /// in isolation.
+    fn fresh_engine_with_idle_profile() -> (Engine, ProbeOwner) {
         let mut e = Engine::new();
         let r = e.tree.ensure(None, "anchor", ResourceRole::User);
         let pid = e.profiles.attach(
@@ -227,11 +266,11 @@ mod tests {
                 ClassSet::EMPTY,
             ),
         );
-        (e, pid)
+        (e, ProbeOwner::Profile(pid))
     }
 
     /// Double-open is a state-machine bug (I5 violation). Debug builds fire
-    /// the assertion in `mint_probe_correlation`; release builds silently
+    /// the assertion in `mint_owner_correlation`; release builds silently
     /// overwrite (the now-orphaned probe's response staless against the
     /// new correlation).
     #[test]
@@ -240,54 +279,64 @@ mod tests {
         ignore = "debug_assert! is compiled out in release"
     )]
     #[should_panic(expected = "I5 violated")]
-    fn mint_probe_correlation_panics_on_double_open() {
-        let (mut e, pid) = fresh_engine_with_idle_profile();
-        let _ = e.mint_probe_correlation(pid).expect("first mint succeeds");
-        let _ = e.mint_probe_correlation(pid); // panics: I5 violated
+    fn mint_owner_correlation_panics_on_double_open() {
+        let (mut e, owner) = fresh_engine_with_idle_profile();
+        let _ = e
+            .mint_owner_correlation(owner)
+            .expect("first mint succeeds");
+        let _ = e.mint_owner_correlation(owner); // panics: I5 violated
     }
 
     /// Closed channel + cancel = no-op. The helper's idempotence is
     /// load-bearing — `event_drives_batching` invokes it on every event,
     /// regardless of whether a probe is in flight.
     #[test]
-    fn cancel_pending_probe_idempotent_on_closed_channel() {
-        let (mut e, pid) = fresh_engine_with_idle_profile();
-        assert!(e.pending_probe(pid).is_none(), "channel starts closed");
+    fn cancel_owner_probe_idempotent_on_closed_channel() {
+        let (mut e, owner) = fresh_engine_with_idle_profile();
+        assert!(
+            e.pending_probe_for(owner).is_none(),
+            "channel starts closed",
+        );
         let mut out = StepOutput::default();
-        e.cancel_pending_probe(pid, &mut out);
+        e.cancel_owner_probe(owner, &mut out);
         assert!(
             out.probe_ops.is_empty(),
             "no Cancel emitted on closed channel",
         );
-        assert!(e.pending_probe(pid).is_none(), "channel remains closed");
+        assert!(
+            e.pending_probe_for(owner).is_none(),
+            "channel remains closed",
+        );
     }
 
     /// Open channel + cancel = single Cancel emission + slot cleared. Pairs
     /// with the idempotence test above to fully spec the helper's contract.
     #[test]
-    fn cancel_pending_probe_emits_and_clears_on_open_channel() {
-        use specter_core::ProbeOp;
-        let (mut e, pid) = fresh_engine_with_idle_profile();
-        let corr = e.mint_probe_correlation(pid).expect("mint succeeds");
-        assert_eq!(e.pending_probe(pid), Some(corr));
+    fn cancel_owner_probe_emits_and_clears_on_open_channel() {
+        let (mut e, owner) = fresh_engine_with_idle_profile();
+        let corr = e.mint_owner_correlation(owner).expect("mint succeeds");
+        assert_eq!(e.pending_probe_for(owner), Some(corr));
 
         let mut out = StepOutput::default();
-        e.cancel_pending_probe(pid, &mut out);
+        e.cancel_owner_probe(owner, &mut out);
 
         assert_eq!(out.probe_ops.len(), 1, "exactly one Cancel emitted");
         assert!(
-            matches!(out.probe_ops[0], ProbeOp::Cancel { profile } if profile == pid),
-            "Cancel targets the same Profile",
+            matches!(out.probe_ops[0], ProbeOp::Cancel { owner: o } if o == owner),
+            "Cancel targets the same owner",
         );
-        assert!(e.pending_probe(pid).is_none(), "channel closed post-cancel");
+        assert!(
+            e.pending_probe_for(owner).is_none(),
+            "channel closed post-cancel",
+        );
     }
 
-    /// Cancel is per-Profile: closing one Profile's channel doesn't touch
-    /// another's. Cross-Profile concurrency is necessary for descent fan-out
+    /// Cancel is per-owner: closing one owner's channel doesn't touch
+    /// another's. Cross-owner concurrency is necessary for descent fan-out
     /// at `on_descent_event` (multiple Pending Profiles awaiting siblings
     /// under one prefix).
     #[test]
-    fn cancel_pending_probe_is_per_profile() {
+    fn cancel_owner_probe_is_per_owner() {
         let mut e = Engine::new();
         let r1 = e.tree.ensure(None, "a", ResourceRole::User);
         let r2 = e.tree.ensure(None, "b", ResourceRole::User);
@@ -300,37 +349,46 @@ mod tests {
             &mut e.tree,
             Profile::new(r2, cfg, MAX_SETTLE, SETTLE, ClassSet::EMPTY),
         );
-        let c1 = e.mint_probe_correlation(pid1).unwrap();
-        let c2 = e.mint_probe_correlation(pid2).unwrap();
+        let owner1 = ProbeOwner::Profile(pid1);
+        let owner2 = ProbeOwner::Profile(pid2);
+        let c1 = e.mint_owner_correlation(owner1).unwrap();
+        let c2 = e.mint_owner_correlation(owner2).unwrap();
 
         let mut out = StepOutput::default();
-        e.cancel_pending_probe(pid1, &mut out);
+        e.cancel_owner_probe(owner1, &mut out);
 
-        assert!(e.pending_probe(pid1).is_none());
+        assert!(e.pending_probe_for(owner1).is_none());
         assert_eq!(
-            e.pending_probe(pid2),
+            e.pending_probe_for(owner2),
             Some(c2),
-            "pid2's channel untouched by pid1's cancel",
+            "owner2's channel untouched by owner1's cancel",
         );
-        assert_ne!(c1, c2, "correlations are distinct across Profiles");
+        assert_ne!(c1, c2, "correlations are distinct across owners");
     }
 
-    /// Stale `pid` (post-detach) — both helpers no-op without panic.
-    /// `cancel_pending_probe` defends against late `WatchOpRejected`
+    /// Stale owner (post-detach) — both helpers no-op without panic.
+    /// `cancel_owner_probe` defends against late `WatchOpRejected`
     /// purges arriving after `reap_profile` already detached.
     #[test]
-    fn helpers_noop_on_stale_pid() {
-        let (mut e, pid) = fresh_engine_with_idle_profile();
-        let _ = e.profiles.detach(&mut e.tree, pid);
+    fn helpers_noop_on_stale_owner() {
+        let (mut e, owner) = fresh_engine_with_idle_profile();
+        match owner {
+            ProbeOwner::Profile(pid) => {
+                let _ = e.profiles.detach(&mut e.tree, pid);
+            }
+        }
 
         assert!(
-            e.mint_probe_correlation(pid).is_none(),
-            "mint returns None for stale pid",
+            e.mint_owner_correlation(owner).is_none(),
+            "mint returns None for stale owner",
         );
 
         let mut out = StepOutput::default();
-        e.cancel_pending_probe(pid, &mut out);
-        assert!(out.probe_ops.is_empty(), "cancel no-ops on stale pid");
-        assert!(e.pending_probe(pid).is_none(), "accessor returns None");
+        e.cancel_owner_probe(owner, &mut out);
+        assert!(out.probe_ops.is_empty(), "cancel no-ops on stale owner");
+        assert!(
+            e.pending_probe_for(owner).is_none(),
+            "accessor returns None",
+        );
     }
 }

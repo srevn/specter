@@ -33,9 +33,9 @@ use compact_str::CompactString;
 use specter_core::{
     ArgPart, ArgTemplate, BurstPhase, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic,
     DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input,
-    LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
-    TimerKind, TreeSnapshot,
+    LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
+    SubId, TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -140,7 +140,7 @@ fn attach_and_complete_seed_with(
     let seed_corr = first_probe_correlation(&out).expect("Seed probe");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -166,7 +166,7 @@ fn attach_and_complete_seed(
     let seed_corr = first_probe_correlation(&out).expect("Seed probe");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -226,7 +226,7 @@ fn drive_to_awaiting(
         if let Some(c) = probe_corr {
             let out = e.step(
                 Input::ProbeResponse(ProbeResponse {
-                    profile: pid,
+                    owner: ProbeOwner::Profile(pid),
                     correlation: c,
                     outcome: ProbeOutcome::SubtreeOk(snap.clone()),
                 }),
@@ -299,7 +299,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     // ProbeResponse Ok (idempotent — same snap) → Idle, baseline rebased.
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeOk(snap.clone()),
         }),
@@ -435,7 +435,9 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         },
         now + Duration::from_millis(20),
     );
-    let rebase_corr = e.pending_probe(pid).expect("rebase probe correlation");
+    let rebase_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("rebase probe correlation");
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
         ProfileState::Active(specter_core::Burst {
@@ -464,7 +466,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
     // Rebase response → Idle.
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -526,7 +528,7 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     let rebase_emitted = combined
         .probe_ops
         .iter()
-        .any(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid));
+        .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)));
     assert!(
         rebase_emitted,
         "rebase probe emitted on gate-deadline force-transition"
@@ -690,7 +692,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     let cancels = lost_out
         .probe_ops
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Cancel { profile } if *profile == pid))
+        .filter(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid))
         .count();
     assert_eq!(cancels, 1, "Rebasing probe cancelled on anchor loss");
     assert!(matches!(
@@ -713,7 +715,7 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
 
     let resp_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -765,7 +767,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
     let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeOk(snap.clone()),
         }),
@@ -824,7 +826,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
     let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -1013,7 +1015,7 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
     let snap = dir_snap(r, vec![]);
     let (_sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let _ = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
-    let pending_probe_before = e.pending_probe(pid);
+    let pending_probe_before = e.pending_probe_for(ProbeOwner::Profile(pid));
 
     // Advance well past max_settle (the BurstDeadline) but stop short
     // of the gate_deadline (4 * max_settle).
@@ -1045,7 +1047,7 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
     };
     assert!(matches!(phase, BurstPhase::Awaiting { .. }));
     assert_eq!(
-        e.pending_probe(pid),
+        e.pending_probe_for(ProbeOwner::Profile(pid)),
         pending_probe_before,
         "no probe minted"
     );
@@ -1101,7 +1103,9 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
         },
         now + Duration::from_millis(20),
     );
-    let rebase_corr = e.pending_probe(pid).expect("rebase probe");
+    let rebase_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("rebase probe");
 
     // Rebase probe response carries a DIFFERENT snapshot (the user's
     // edit changed the directory). The post-rebase baseline reflects
@@ -1115,7 +1119,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     );
     let final_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeOk(snap_after_edit),
         }),
@@ -1200,7 +1204,7 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
     // then refreshes recorded[Subtree] to post_effect.dir_hash().
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeOk(post_effect.clone()),
         }),
@@ -1305,7 +1309,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -1347,7 +1351,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     let post_effect = dir_snap_one_file(r, "foo.rs", EntryKind::File, 42, 1);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeOk(post_effect.clone()),
         }),

@@ -18,8 +18,8 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     AnchorClaim, BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic,
-    Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeOutcome, ProbeResponse,
-    ProfileId, ProfileState, Resource, ResourceId, ResourceKind, StepOutput, SubId,
+    Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeOutcome, ProbeOwner,
+    ProbeResponse, ProfileId, ProfileState, Resource, ResourceId, ResourceKind, StepOutput, SubId,
     SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp,
 };
 use std::path::{Path, PathBuf};
@@ -219,20 +219,37 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let profile_id = response.profile;
+        match response.owner {
+            ProbeOwner::Profile(pid) => self.on_profile_probe_response(pid, response, now, out),
+        }
+    }
+
+    /// Profile-side probe response handler. Closed under the Profile
+    /// owner kind: I5 staleness check, channel close, and dispatch by
+    /// `(state, phase)`. Sibling owner kinds (added in later phases)
+    /// will route through their own `on_*_probe_response` from
+    /// [`Self::on_probe_response`].
+    fn on_profile_probe_response(
+        &mut self,
+        profile_id: ProfileId,
+        response: ProbeResponse,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        let owner = response.owner;
         let received = response.correlation;
 
         // Single I5 stale-detection check, anchored to the Profile-level
         // probe channel. Catches every stale path: stale ProfileId, response
         // after Cancel, response after a fresh mint (release-build I5
-        // overwrite — see `mint_probe_correlation`), out-of-order response.
+        // overwrite — see `mint_owner_correlation`), out-of-order response.
         let is_live = self
             .profiles
             .get(profile_id)
             .is_some_and(|p| p.pending_probe == Some(received));
         if !is_live {
             out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                profile: profile_id,
+                owner,
                 correlation: received,
             });
             return;
@@ -242,7 +259,7 @@ impl Engine {
         // fresh channel (descent advance / rewind, anchor-materialization
         // → Seed, Draining → Verifying reconfirm); they MUST see a closed
         // channel on entry, otherwise the I5 debug_assert in
-        // `mint_probe_correlation` fires.
+        // `mint_owner_correlation` fires.
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.pending_probe = None;
         }
@@ -251,7 +268,7 @@ impl Engine {
         // Pending mint into the probe channel; observing pending_probe =
         // Some(received) in any other shape is an I5 invariant breach —
         // the slot was minted, then the phase changed without a matching
-        // cancel_pending_probe. The debug_assert! arms surface those as
+        // cancel_owner_probe. The debug_assert! arms surface those as
         // panics in dev/CI; release builds fall through to
         // DispatchTarget::Stale so the engine never dispatches a
         // misclassified response (which would, e.g., drive
@@ -311,7 +328,7 @@ impl Engine {
                      (profile = {profile_id:?})",
                 );
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    profile: profile_id,
+                    owner,
                     correlation: received,
                 });
             }
@@ -337,7 +354,7 @@ impl Engine {
 
             (DispatchTarget::Stale, _) => {
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    profile: profile_id,
+                    owner,
                     correlation: received,
                 });
             }
@@ -779,7 +796,7 @@ impl Engine {
         // after the Profile transitions out of Pending and drop with
         // `StaleProbeResponse` — wasted I/O.
         for pid in descent_claimers {
-            self.cancel_pending_probe(pid, out);
+            self.cancel_owner_probe(ProbeOwner::Profile(pid), out);
             self.release_descent_prefix_claim(pid, out);
             out.diagnostics.push(Diagnostic::ProfileClaimPurged {
                 profile: pid,
@@ -1046,7 +1063,7 @@ impl Engine {
         // is a no-op — replaces the prior `was_verifying` snapshot's
         // role with field-discipline equivalence. Required by
         // discard_anchor_state's cancel-first contract.
-        self.cancel_pending_probe(profile_id, out);
+        self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
 
         // Discard runs BEFORE finish_burst_to_idle. The release-helpers
         // inside emit `AnchorClaim::None` and clear `Profile.kind`

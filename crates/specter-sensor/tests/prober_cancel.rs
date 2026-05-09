@@ -9,7 +9,7 @@
 
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
-use specter_core::{Input, ProbeCorrelation, ProbeOutcome, ProbeRequest, ProfileId};
+use specter_core::{Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId};
 use specter_sensor::{Prober, WorkerProber};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,7 +22,7 @@ fn fresh_profile_id() -> ProfileId {
 
 const fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
-        profile,
+        owner: ProbeOwner::Profile(profile),
         correlation: ProbeCorrelation(correlation),
         target_path,
     }
@@ -35,7 +35,7 @@ fn cancel_without_prior_submit_is_noop() {
     let p = fresh_profile_id();
 
     // No panic; subsequent submits unaffected.
-    prober.cancel(p);
+    prober.cancel(ProbeOwner::Profile(p));
 
     let _ = prober.shutdown();
 }
@@ -58,7 +58,7 @@ fn cancel_after_completion_is_noop() {
     assert!(matches!(resp.outcome, ProbeOutcome::AnchorOk(_)));
 
     // Cancel after completion: no panic; no spurious second response.
-    prober.cancel(p);
+    prober.cancel(ProbeOwner::Profile(p));
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 
     let _ = prober.shutdown();
@@ -75,7 +75,7 @@ fn resubmit_after_cancel_runs_with_new_correlation() {
     let p = fresh_profile_id();
 
     prober.submit(mk_request(p, path.clone(), 1));
-    prober.cancel(p);
+    prober.cancel(ProbeOwner::Profile(p));
     prober.submit(mk_request(p, path, 2));
 
     // c1 may or may not arrive (race). c2 must arrive.

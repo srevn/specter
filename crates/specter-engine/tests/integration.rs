@@ -27,8 +27,8 @@ use compact_str::CompactString;
 use specter_core::{
     ArgPart, ArgTemplate, BurstIntent, ChildEntry, ClassSet, CommandTemplate, Diagnostic, DirChild,
     DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
-    Placeholder, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, Profile, ProfileMap,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, WatchOp,
+    Placeholder, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, Profile,
+    ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, WatchOp,
 };
 use specter_engine::{Engine, SubAttachRequest, covers, nearest_covering_ancestor};
 use std::collections::BTreeMap;
@@ -226,7 +226,7 @@ fn drive_standard_burst_to_stable(
         if let Some(c) = correlation {
             let out = e.step(
                 Input::ProbeResponse(ProbeResponse {
-                    profile: pid,
+                    owner: ProbeOwner::Profile(pid),
                     correlation: c,
                     outcome: ProbeOutcome::SubtreeOk(snap.clone()),
                 }),
@@ -303,7 +303,7 @@ fn golden_path_full_lifecycle() {
     let snap_seed = dir_snap(r, vec![]);
     let seed_resp = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_of(&e, sid),
+            owner: ProbeOwner::Profile(pid_of(&e, sid)),
             correlation: seed_correlation,
             outcome: ProbeOutcome::SubtreeOk(snap_seed.clone()),
         }),
@@ -360,7 +360,7 @@ fn golden_path_full_lifecycle() {
     // (the post-command tree).
     let _final_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: rebase_correlation,
             outcome: ProbeOutcome::SubtreeOk(snap_seed),
         }),
@@ -391,7 +391,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
 
     let resp_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -440,7 +440,7 @@ fn pending_event_race_late_probe_response_discarded() {
     // Late ProbeResponse with the now-stale correlation arrives.
     let late_resp = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: stale_correlation,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -481,7 +481,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
     );
     let resp_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -522,7 +522,7 @@ fn force_fire_emits_effect_with_forced_true() {
     // Complete the Seed burst with empty baseline.
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
         }),
@@ -548,7 +548,7 @@ fn force_fire_emits_effect_with_forced_true() {
         let snap = dir_snap(r, vec![("x", EntryKind::File, 99)]);
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                profile: pid,
+                owner: ProbeOwner::Profile(pid),
                 correlation: corr,
                 outcome: ProbeOutcome::SubtreeOk(snap),
             }),
@@ -597,7 +597,7 @@ fn step_output_is_sorted() {
     );
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),

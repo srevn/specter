@@ -7,7 +7,7 @@
 
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
-use specter_core::{Input, ProbeCorrelation, ProbeRequest, ProfileId};
+use specter_core::{Input, ProbeCorrelation, ProbeOwner, ProbeRequest, ProfileId};
 use specter_sensor::{Prober, WorkerProber};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -24,7 +24,7 @@ const fn anchor_request(
     correlation: u64,
 ) -> ProbeRequest {
     ProbeRequest::AnchorFile {
-        profile,
+        owner: ProbeOwner::Profile(profile),
         correlation: ProbeCorrelation(correlation),
         target_path,
     }

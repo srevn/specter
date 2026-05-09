@@ -16,9 +16,9 @@
 use crate::refcounts::add_watch_demand;
 use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
-    AnchorClaim, BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Input, Profile,
-    ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest, SubId,
-    SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
+    AnchorClaim, BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Input, ProbeOwner,
+    Profile, ProfileId, ProfileMap, ProfileState, ResourceId, StepOutput, Sub, SubAttachRequest,
+    SubId, SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -648,7 +648,7 @@ impl Engine {
         // `reap_profile` only after the burst response cleared the
         // channel). Mirrors `on_watch_op_rejected`'s descent-purge
         // pattern.
-        self.cancel_pending_probe(profile_id, out);
+        self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
 
         // Release every claim this Profile may hold. Helpers are
         // idempotent — no-op when the corresponding flag / snapshot is
@@ -979,7 +979,7 @@ mod tests {
     fn step_probe_response_unknown_profile_diagnoses() {
         let mut e = Engine::new();
         let resp = ProbeResponse {
-            profile: ProfileId::default(),
+            owner: ProbeOwner::Profile(ProfileId::default()),
             correlation: ProbeCorrelation(0),
             outcome: ProbeOutcome::Vanished,
         };
@@ -1186,9 +1186,15 @@ mod tests {
             ),
         );
 
-        let a = e.mint_probe_correlation(pid1).expect("pid1 is live");
-        let b = e.mint_probe_correlation(pid2).expect("pid2 is live");
-        let c = e.mint_probe_correlation(pid3).expect("pid3 is live");
+        let a = e
+            .mint_owner_correlation(ProbeOwner::Profile(pid1))
+            .expect("pid1 is live");
+        let b = e
+            .mint_owner_correlation(ProbeOwner::Profile(pid2))
+            .expect("pid2 is live");
+        let c = e
+            .mint_owner_correlation(ProbeOwner::Profile(pid3))
+            .expect("pid3 is live");
         assert!(a < b);
         assert!(b < c);
         assert_eq!(a, ProbeCorrelation(1));
@@ -1196,9 +1202,9 @@ mod tests {
         assert_eq!(c, ProbeCorrelation(3));
 
         // Slots populated symmetrically.
-        assert_eq!(e.pending_probe(pid1), Some(a));
-        assert_eq!(e.pending_probe(pid2), Some(b));
-        assert_eq!(e.pending_probe(pid3), Some(c));
+        assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid1)), Some(a));
+        assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid2)), Some(b));
+        assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid3)), Some(c));
     }
 
     #[test]
@@ -1658,7 +1664,7 @@ mod tests {
         // it, so the Profile transitions to Idle (anchor lost) and stays.
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                profile: pid,
+                owner: ProbeOwner::Profile(pid),
                 correlation: seed_corr,
                 outcome: ProbeOutcome::Vanished,
             }),

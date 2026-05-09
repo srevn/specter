@@ -25,8 +25,8 @@ use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DirChild, DirMeta,
     DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp,
-    ProbeOutcome, ProbeRequest, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
+    ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProfileState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -141,7 +141,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     let q_corr = first_probe_corr(&out_q).expect("Q's Seed probe at attach");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_q,
+            owner: ProbeOwner::Profile(pid_q),
             correlation: q_corr,
             outcome: ProbeOutcome::AnchorOk(file_leaf()),
         }),
@@ -166,7 +166,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     // P.kind, P.current, P.baseline, P.anchor_claim.
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_p,
+            owner: ProbeOwner::Profile(pid_p),
             correlation: p_corr,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -200,7 +200,9 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         .probe_ops
         .iter()
         .find_map(|op| match op {
-            ProbeOp::Probe { request } if request.profile() == pid_p => Some(request),
+            ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_p) => {
+                Some(request)
+            }
             _ => None,
         })
         .expect("P emits a recovery Seed probe");
@@ -237,7 +239,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     let q_corr = first_probe_corr(&out_q).expect("Q's Seed probe");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_q,
+            owner: ProbeOwner::Profile(pid_q),
             correlation: q_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(anchor, vec![])),
         }),
@@ -252,7 +254,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
 
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_p,
+            owner: ProbeOwner::Profile(pid_p),
             correlation: p_corr,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -271,7 +273,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     let p_probe_count = recovery_out
         .probe_ops
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.profile() == pid_p))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_p)))
         .count();
     assert!(
         p_probe_count <= 1,
@@ -305,7 +307,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     let q_corr = first_probe_corr(&out_q).expect("Q's Seed probe");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_q,
+            owner: ProbeOwner::Profile(pid_q),
             correlation: q_corr,
             outcome: ProbeOutcome::AnchorOk(file_leaf()),
         }),
@@ -316,7 +318,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     let p_corr = first_probe_corr(&out_p).expect("P's Seed probe");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_p,
+            owner: ProbeOwner::Profile(pid_p),
             correlation: p_corr,
             outcome: ProbeOutcome::Failed { errno: 5 },
         }),
@@ -335,7 +337,9 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         .probe_ops
         .iter()
         .find_map(|op| match op {
-            ProbeOp::Probe { request } if request.profile() == pid_p => Some(request),
+            ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_p) => {
+                Some(request)
+            }
             _ => None,
         })
         .expect("P emits a recovery Seed probe");

@@ -7,8 +7,8 @@
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
 use specter_core::{
-    ChildEntry, DirSnapshot, GlobPattern, Input, ProbeCorrelation, ProbeOutcome, ProbeRequest,
-    ProfileId, ResourceId, ScanConfig,
+    ChildEntry, DirSnapshot, GlobPattern, Input, ProbeCorrelation, ProbeOutcome, ProbeOwner,
+    ProbeRequest, ProfileId, ResourceId, ScanConfig,
 };
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
@@ -29,7 +29,7 @@ fn segments(
 ) -> BTreeSet<String> {
     let p = fresh_profile_id();
     prober.submit(ProbeRequest::Subtree {
-        profile: p,
+        owner: ProbeOwner::Profile(p),
         correlation: ProbeCorrelation(1),
         target_resource: ResourceId::default(),
         target_path: anchor,

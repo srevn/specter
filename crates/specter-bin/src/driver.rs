@@ -428,7 +428,7 @@ impl EngineDriver {
         for op in out.probe_ops {
             match op {
                 ProbeOp::Probe { request } => self.prober.submit(request),
-                ProbeOp::Cancel { profile } => self.prober.cancel(profile),
+                ProbeOp::Cancel { owner } => self.prober.cancel(owner),
             }
         }
 
@@ -455,11 +455,8 @@ impl EngineDriver {
 /// revival).
 pub fn log_diagnostic(d: &Diagnostic) {
     match d {
-        Diagnostic::StaleProbeResponse {
-            profile,
-            correlation,
-        } => tracing::warn!(
-            ?profile,
+        Diagnostic::StaleProbeResponse { owner, correlation } => tracing::warn!(
+            ?owner,
             ?correlation,
             "stale probe response (state mismatch)"
         ),

@@ -19,7 +19,7 @@
 use compact_str::CompactString;
 use specter_core::{
     ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope,
-    FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ResourceId,
+    FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId,
     ResourceKind, ResourceRole, ScanConfig, StepOutput,
 };
 use specter_engine::{Engine, SubAttachRequest};
@@ -65,7 +65,7 @@ fn complete_seed(
 ) {
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -145,7 +145,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     let resp_t = probe_emit + Duration::from_millis(1);
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: probe_correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -259,7 +259,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
         ));
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
-                profile: pid,
+                owner: ProbeOwner::Profile(pid),
                 correlation: probe_correlation,
                 outcome: ProbeOutcome::SubtreeOk(unstable_snap),
             }),

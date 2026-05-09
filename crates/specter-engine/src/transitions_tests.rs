@@ -23,7 +23,7 @@ use specter_core::{
     AnchorClaim, ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet,
     CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
     EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, Placeholder, ProbeOp,
-    ProbeOutcome, ProbeRequest, ProbeResponse, ProfileState, ResourceId, ResourceKind,
+    ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileState, ResourceId, ResourceKind,
     ResourceRole, ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -124,11 +124,13 @@ fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> 
 /// state). Returns the response correlation. After this, Profile.current
 /// and Profile.baseline are set.
 fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId, root: ResourceId) {
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let snap = dir_tree_snap(root, vec![]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -215,11 +217,13 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
 
     // Drive the Seed-Ok with a Dir-shaped response. The fallback in
     // `dispatch_seed_ok` should pick the kind off the response shape.
-    let correlation = e.pending_probe(pid).expect("Seed verify probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed verify probe in flight");
     let snap = dir_tree_snap(r, vec![]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -266,11 +270,13 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
         "unprobed anchor → Profile.kind starts as None",
     );
 
-    let correlation = e.pending_probe(pid).expect("Seed verify probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed verify probe in flight");
     let snap = dir_tree_snap(r, vec![]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -322,11 +328,13 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
         "unprobed anchor → Profile.kind starts as None",
     );
 
-    let correlation = e.pending_probe(pid).expect("Seed verify probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed verify probe in flight");
     let leaf = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::AnchorOk(leaf),
         }),
@@ -383,7 +391,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
         "path-based attach against an absent leaf goes Pending",
     );
     let correlation = e
-        .pending_probe(pid)
+        .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("descent probe in flight at the prefix");
 
     // `AnchorOk` from a Descent probe is structurally impossible from the
@@ -394,7 +402,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     let leaf = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::AnchorOk(leaf),
         }),
@@ -498,12 +506,14 @@ fn attach_sub_existing_profile_bumps_refcount() {
 #[test]
 fn engine_dispatch_through_shim_matches_v4_behaviour() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     // One-Leaf TreeSnapshot — the shim flattens to one V4 Entry.
     let snap = dir_tree_snap(root, vec![("main.rs", EntryKind::File, 100)]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -518,11 +528,13 @@ fn engine_dispatch_through_shim_matches_v4_behaviour() {
 #[test]
 fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let snap = dir_tree_snap(root, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -545,10 +557,12 @@ fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
 #[test]
 fn probe_response_seed_vanished_clears_baseline_and_diagnoses() {
     let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -573,10 +587,12 @@ fn probe_response_seed_vanished_clears_baseline_and_diagnoses() {
 #[test]
 fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
     let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Failed { errno: 13 },
         }),
@@ -603,7 +619,7 @@ fn probe_response_correlation_mismatch_drops_with_diagnostic() {
     let snap = dir_tree_snap(root, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: bogus,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -629,7 +645,7 @@ fn probe_response_for_idle_profile_drops_with_diagnostic() {
     let snap = dir_tree_snap(root, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: specter_core::ProbeCorrelation(1),
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -682,7 +698,7 @@ fn probe_response_in_batching_phase_panics_on_invariant_breach() {
 
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: bogus,
             outcome: ProbeOutcome::AnchorOk(file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1)),
         }),
@@ -707,7 +723,7 @@ fn probe_response_in_batching_phase_drops_in_release() {
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: bogus,
             outcome: ProbeOutcome::AnchorOk(file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1)),
         }),
@@ -716,7 +732,7 @@ fn probe_response_in_batching_phase_drops_in_release() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::StaleProbeResponse { profile, correlation }
+            Diagnostic::StaleProbeResponse { owner: ProbeOwner::Profile(profile), correlation }
             if *profile == pid && *correlation == bogus
         )),
         "expected StaleProbeResponse for the I5 breach (got {:?})",
@@ -748,7 +764,7 @@ fn probe_response_on_idle_state_panics_on_invariant_breach() {
 
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: bogus,
             outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(root, vec![])),
         }),
@@ -773,7 +789,7 @@ fn probe_response_on_idle_state_drops_in_release() {
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: bogus,
             outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(root, vec![])),
         }),
@@ -782,7 +798,7 @@ fn probe_response_on_idle_state_drops_in_release() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::StaleProbeResponse { profile, correlation }
+            Diagnostic::StaleProbeResponse { owner: ProbeOwner::Profile(profile), correlation }
             if *profile == pid && *correlation == bogus
         )),
         "expected StaleProbeResponse for the I5 breach (got {:?})",
@@ -821,13 +837,15 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         );
     }
     // We're in Verifying; pick up the correlation.
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     // Reproduce the seed-burst's empty snapshot — both shim to the same
     // V4 content_hash (entries.len() == 0), so `stable_against` holds.
     let snap = dir_tree_snap(root, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -919,7 +937,9 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
             now + SETTLE,
         );
     }
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let phantom_snap = dir_tree_snap(root, vec![]);
     assert_eq!(
         phantom_snap.dir_hash(),
@@ -928,7 +948,7 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
     );
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(phantom_snap),
         }),
@@ -979,11 +999,13 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     let (sid, _) = e.attach_sub(req, now);
     let pid = e.subs.get(sid).unwrap().profile;
     // Seed → Idle.
-    let seed_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let seed_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let snap = file_tree_snap(EntryKind::File, 0, std::time::UNIX_EPOCH, 1);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::AnchorOk(snap.clone()),
         }),
@@ -1009,10 +1031,12 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
             t2,
         );
     }
-    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let std_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: std_corr,
             outcome: ProbeOutcome::AnchorOk(snap),
         }),
@@ -1070,10 +1094,12 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     // Seed → leaf v1; Standard injects the same leaf so the verdict
     // is stable (matching the conventional pattern across this file).
     let snap = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
-    let seed_corr = e.pending_probe(pid).expect("Seed verify probe in flight");
+    let seed_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed verify probe in flight");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::AnchorOk(snap.clone()),
         }),
@@ -1130,11 +1156,11 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     // (2) Inject a realistic File response (kqueue per-file FD path).
     // After dispatch, Profile.current must remain File-shaped.
     let std_corr = e
-        .pending_probe(pid)
+        .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Standard verify probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: std_corr,
             outcome: ProbeOutcome::AnchorOk(snap),
         }),
@@ -1193,12 +1219,12 @@ fn standard_burst_force_fires_on_max_settle() {
     // After force-fire, we're either in Verifying (forced=true) or already
     // Awaiting if the deadline race resolved both timers. Drive the
     // response back if needed.
-    if let Some(correlation) = e.pending_probe(pid) {
+    if let Some(correlation) = e.pending_probe_for(ProbeOwner::Profile(pid)) {
         // Inject a not-stable response to test the forced effect emission.
         let snap = dir_tree_snap(root, vec![("new.rs", EntryKind::File, 99)]);
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                profile: pid,
+                owner: ProbeOwner::Profile(pid),
                 correlation,
                 outcome: ProbeOutcome::SubtreeOk(snap),
             }),
@@ -1262,7 +1288,7 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
 fn event_drives_batching_clears_pending_probe() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     assert!(
-        e.pending_probe(pid).is_some(),
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
         "Seed probe in flight after attach",
     );
 
@@ -1275,7 +1301,7 @@ fn event_drives_batching_clears_pending_probe() {
     );
 
     assert!(
-        e.pending_probe(pid).is_none(),
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
         "channel closed atomically with Verifying → Batching transition",
     );
 }
@@ -1287,7 +1313,7 @@ fn event_drives_batching_clears_pending_probe() {
 fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     assert!(
-        e.pending_probe(pid).is_some(),
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
         "Seed probe in flight after attach",
     );
 
@@ -1300,13 +1326,13 @@ fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
     );
 
     assert!(
-        e.pending_probe(pid).is_none(),
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
         "anchor terminal during Verifying closes the channel",
     );
     let cancels = out
         .probe_ops
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Cancel { profile } if *profile == pid))
+        .filter(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid))
         .count();
     assert_eq!(
         cancels, 1,
@@ -1328,7 +1354,7 @@ fn stale_probe_response_emits_exactly_one_diagnostic() {
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: bogus,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -1338,7 +1364,7 @@ fn stale_probe_response_emits_exactly_one_diagnostic() {
     let stale_count = out
         .diagnostics
         .iter()
-        .filter(|d| matches!(d, Diagnostic::StaleProbeResponse { profile, .. } if *profile == pid))
+        .filter(|d| matches!(d, Diagnostic::StaleProbeResponse { owner: ProbeOwner::Profile(profile), .. } if *profile == pid))
         .count();
     assert_eq!(
         stale_count, 1,
@@ -1347,7 +1373,7 @@ fn stale_probe_response_emits_exactly_one_diagnostic() {
     );
     // Live channel untouched: the legitimate Seed probe is still in flight.
     assert!(
-        e.pending_probe(pid).is_some(),
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
         "live channel untouched by stale response",
     );
 }
@@ -1858,10 +1884,12 @@ fn effect_emission_carries_diff_when_needs_diff() {
                 t,
             );
         }
-        let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+        let correlation = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Verifying probe in flight");
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                profile: pid,
+                owner: ProbeOwner::Profile(pid),
                 correlation,
                 outcome: ProbeOutcome::SubtreeOk(snap_with_entry.clone()),
             }),
@@ -1886,7 +1914,9 @@ fn effect_emission_carries_diff_when_needs_diff() {
 #[test]
 fn seed_burst_descendants_watched_via_first_probe() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     // First-probe response with one File and one Dir descendant.
     // Only the Dir gets a Watch op; the File materializes without an FD
     // contribution.
@@ -1896,7 +1926,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
     );
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -2035,7 +2065,9 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         iter.next().expect("profile exists").0
     };
     assert!(e.descent_state(pid).is_some());
-    let initial_corr = e.pending_probe(pid).expect("first probe in flight");
+    let initial_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("first probe in flight");
     let initial_demand = e.tree.get(foo).unwrap().watch_demand;
     assert_eq!(initial_demand, 1);
 
@@ -2066,7 +2098,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         result
             .probe_ops
             .iter()
-            .any(|op| matches!(op, ProbeOp::Cancel { profile } if *profile == pid)),
+            .any(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid)),
         "ProbeOp::Cancel emitted for the in-flight descent probe",
     );
 
@@ -2089,7 +2121,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     // matches anything).
     let late = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: initial_corr,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -2247,7 +2279,7 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
     assert_eq!(burst.intent, BurstIntent::Seed);
     assert!(matches!(burst.phase, BurstPhase::Verifying));
     assert!(
-        e.pending_probe(pid).is_some(),
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
         "seed burst armed a fresh verify probe",
     );
     assert!(
@@ -2446,10 +2478,12 @@ fn seed_vanished_then_reap_releases_anchor_via_claim() {
     assert!(e.profiles.get(pid).unwrap().reap_pending);
 
     // Drive Seed Vanished to fire the reap.
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -2566,13 +2600,15 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
             t2,
         );
     }
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
 
     // Inject stable response. Profile should reap; no Effect emitted.
     let snap = dir_tree_snap(root, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -2731,10 +2767,12 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     let pid = e.subs.get(sid).unwrap().profile;
 
     // Complete Seed with empty baseline.
-    let seed_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let seed_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
         }),
@@ -2763,7 +2801,9 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
             t2,
         );
     }
-    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let std_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
 
     // Inject stable response with 2 file entries.
     let snap = dir_tree_snap(
@@ -2777,7 +2817,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     // snap1 again (stable).
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: std_corr,
             outcome: ProbeOutcome::SubtreeOk(snap.clone()),
         }),
@@ -2795,10 +2835,12 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
             t3,
         );
     }
-    let std_corr2 = e.pending_probe(pid).expect("Verifying probe in flight");
+    let std_corr2 = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: std_corr2,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -2867,11 +2909,13 @@ fn per_stable_file_skips_dir_entries() {
     // Seed completes against a snapshot already containing one Dir
     // (`subdir`). After Seed, `subdir` is in the baseline and won't
     // re-appear as `created` later.
-    let seed_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let seed_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let seed_snap = dir_tree_snap(r, vec![("subdir", EntryKind::Dir, 10)]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(seed_snap),
         }),
@@ -2898,7 +2942,9 @@ fn per_stable_file_skips_dir_entries() {
             t2,
         );
     }
-    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let std_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
 
     // Mixed snapshot: subdir (modified — different mtime), newdir (new
     // Dir), main.rs (new File). Diff = created=[newdir, main.rs],
@@ -2914,7 +2960,7 @@ fn per_stable_file_skips_dir_entries() {
     );
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: std_corr,
             outcome: ProbeOutcome::SubtreeOk(mixed_snap.clone()),
         }),
@@ -2931,10 +2977,12 @@ fn per_stable_file_skips_dir_entries() {
             t3,
         );
     }
-    let std_corr2 = e.pending_probe(pid).expect("Verifying probe in flight");
+    let std_corr2 = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: std_corr2,
             outcome: ProbeOutcome::SubtreeOk(mixed_snap),
         }),
@@ -3003,13 +3051,15 @@ fn drive_to_first_effect(
         },
         now + SETTLE,
     );
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     // First probe — response differs from Seed baseline ⇒ not-stable ⇒
     // Batching.
     let snap1 = dir_tree_snap(root, vec![("a.rs", EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap1),
         }),
@@ -3031,12 +3081,14 @@ fn drive_to_first_effect(
         },
         now + SETTLE + SETTLE,
     );
-    let correlation2 = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation2 = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     // Second probe — same content ⇒ stable ⇒ Effect.
     let snap2 = dir_tree_snap(root, vec![("a.rs", EntryKind::File, 1)]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: correlation2,
             outcome: ProbeOutcome::SubtreeOk(snap2),
         }),
@@ -3120,10 +3172,12 @@ fn per_file_effect_target_matches_dedup_key_resource() {
     let pid = e.subs.get(sid).unwrap().profile;
 
     // Complete Seed with empty baseline.
-    let seed_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let seed_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
         }),
@@ -3153,14 +3207,16 @@ fn per_file_effect_target_matches_dedup_key_resource() {
         );
     }
 
-    let std_corr = e.pending_probe(pid).expect("Verifying probe in flight");
+    let std_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let snap = dir_tree_snap(
         r,
         vec![("a.rs", EntryKind::File, 1), ("b.rs", EntryKind::File, 2)],
     );
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: std_corr,
             outcome: ProbeOutcome::SubtreeOk(snap.clone()),
         }),
@@ -3179,10 +3235,12 @@ fn per_file_effect_target_matches_dedup_key_resource() {
             t3,
         );
     }
-    let std_corr2 = e.pending_probe(pid).expect("Verifying probe in flight");
+    let std_corr2 = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: std_corr2,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -3245,11 +3303,13 @@ fn recovery_seed_no_prior_emit_does_not_fire() {
     // seed_drift_observed returns an empty key set ⇒ no Effect
     // (preserves "fresh Seed never fires Effect").
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
     let snap = dir_tree_snap(root, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -3284,10 +3344,12 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
     let (_sid, _) = e.attach_sub(req, now);
     let pid = e.profiles.iter().next().unwrap().0;
     // Seed → Idle.
-    let seed_corr = e.pending_probe(pid).expect("Seed probe in flight");
+    let seed_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed probe in flight");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
         }),
@@ -3317,10 +3379,12 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
                 t,
             );
         }
-        let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+        let correlation = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Verifying probe in flight");
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                profile: pid,
+                owner: ProbeOwner::Profile(pid),
                 correlation,
                 outcome: ProbeOutcome::SubtreeOk(snap_with_file.clone()),
             }),
@@ -3461,7 +3525,8 @@ fn drive_to_standard_verifying(
         },
         now + SETTLE,
     );
-    e.pending_probe(pid).expect("Verifying probe in flight")
+    e.pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight")
 }
 
 /// Drive into `Active(_, Rebasing)` by completing a Standard burst's
@@ -3508,10 +3573,12 @@ fn dispatch_seed_vanished_clears_profile_kind() {
         Some(ResourceKind::Dir),
         "fresh attach caches anchor's classified kind",
     );
-    let correlation = e.pending_probe(pid).expect("Seed Verifying probe");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed Verifying probe");
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -3526,10 +3593,12 @@ fn dispatch_seed_vanished_clears_profile_kind() {
 #[test]
 fn dispatch_seed_failed_clears_profile_kind() {
     let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
-    let correlation = e.pending_probe(pid).expect("Seed Verifying probe");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed Verifying probe");
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Failed { errno: 5 },
         }),
@@ -3552,7 +3621,7 @@ fn dispatch_standard_vanished_clears_profile_kind() {
     );
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -3570,7 +3639,7 @@ fn dispatch_standard_failed_clears_profile_kind() {
     let correlation = drive_to_standard_verifying(&mut e, pid, root, now);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Failed { errno: 13 },
         }),
@@ -3593,7 +3662,7 @@ fn dispatch_rebase_vanished_clears_profile_kind() {
     );
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -3611,7 +3680,7 @@ fn dispatch_rebase_failed_clears_profile_kind() {
     let correlation = drive_to_rebasing(&mut e, pid, sid, root, now);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Failed { errno: 5 },
         }),
@@ -4222,7 +4291,7 @@ mod props {
                 let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation(0));
                 e.step(
                     Input::ProbeResponse(ProbeResponse {
-                        profile: pid,
+                        owner: ProbeOwner::Profile(pid),
                         correlation: corr,
                         outcome: ProbeOutcome::SubtreeOk(snap),
                     }),
@@ -4233,7 +4302,7 @@ mod props {
                 let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation(0));
                 e.step(
                     Input::ProbeResponse(ProbeResponse {
-                        profile: pid,
+                        owner: ProbeOwner::Profile(pid),
                         correlation: corr,
                         outcome: ProbeOutcome::Vanished,
                     }),
@@ -4244,7 +4313,7 @@ mod props {
                 let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation(0));
                 e.step(
                     Input::ProbeResponse(ProbeResponse {
-                        profile: pid,
+                        owner: ProbeOwner::Profile(pid),
                         correlation: corr,
                         outcome: ProbeOutcome::Failed { errno },
                     }),
@@ -4349,11 +4418,11 @@ mod props {
                 sorted.sort();
                 prop_assert_eq!(watch_keys, sorted);
 
-                // probe_ops sorted by ProfileId.
+                // probe_ops sorted by ProbeOwner.
                 let probe_keys: Vec<_> = out
                     .probe_ops
                     .iter()
-                    .map(ProbeOp::profile)
+                    .map(ProbeOp::owner)
                     .collect();
                 let mut sorted_p = probe_keys.clone();
                 sorted_p.sort();
@@ -4454,8 +4523,7 @@ mod props {
             };
             let _ = now;
             let out = e.step(
-                Input::ProbeResponse(ProbeResponse {
-                    profile: pid,
+                Input::ProbeResponse(ProbeResponse { owner: ProbeOwner::Profile(pid),
                     correlation: corr,
                     outcome,
                 }),

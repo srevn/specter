@@ -8,7 +8,7 @@
 // surface narrow.
 #![warn(unsafe_code)]
 
-use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, ResourceKind};
+use specter_core::{ClassSet, FsEvent, ProbeOwner, ProbeRequest, ResourceId, ResourceKind};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -316,11 +316,11 @@ impl Clone for Box<dyn WakeHandle> {
 ///
 /// `submit` is fire-and-forget; the response lands on the bin's
 /// `engine_inbound` channel as `Input::ProbeResponse(...)`. `cancel` is
-/// best-effort: queued probes whose `(profile, correlation)` pair
-/// no longer matches the prober's per-Profile expectation are skipped
+/// best-effort: queued probes whose `(owner, correlation)` pair no
+/// longer matches the prober's per-owner expectation are skipped
 /// silently at worker-recv time. In-flight probes complete to
-/// completion; the engine discards their responses via stale-correlation
-/// discipline.
+/// completion; the engine discards their responses via
+/// stale-correlation discipline.
 ///
 /// `Send + Sync` so the bin can hold an `Arc<dyn Prober>` (or
 /// `Arc<WorkerProber>`) and share it across threads — the engine driver
@@ -331,12 +331,12 @@ pub trait Prober: Send + Sync {
     /// `Sender<Input>` captured at constructor time.
     fn submit(&self, req: ProbeRequest);
 
-    /// Best-effort cancel of any *queued* probe for `profile`. In-flight
+    /// Best-effort cancel of any *queued* probe for `owner`. In-flight
     /// probes are not interrupted; the engine drops their responses via
-    /// stale-correlation discipline. After `cancel`, a fresh `submit` for
-    /// the same profile runs normally — cancellation is per-correlation,
-    /// not per-profile.
-    fn cancel(&self, profile: ProfileId);
+    /// stale-correlation discipline. After `cancel`, a fresh `submit`
+    /// for the same owner runs normally — cancellation is
+    /// per-correlation, not per-owner.
+    fn cancel(&self, owner: ProbeOwner);
 }
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]

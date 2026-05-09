@@ -25,8 +25,8 @@ use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic,
     DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
-    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, WatchOp,
+    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -91,7 +91,7 @@ fn complete_seed_burst(
     let corr = first_probe_corr(attach_out).expect("Seed probe fires at attach");
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::SubtreeOk(seed_snap),
         }),
@@ -173,7 +173,7 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
     let snap = dir_snap(root, vec![("file.txt", EntryKind::File, 1)]);
     let seed_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -224,7 +224,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
     let snap = dir_snap(root, vec![("file.txt", EntryKind::File, 1)]);
     let seed_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
@@ -785,7 +785,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
     let corr = first_probe_corr(&attach_out).expect("Seed probe");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -841,7 +841,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
     let corr = first_probe_corr(&attach_out).expect("Seed probe");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -907,7 +907,7 @@ fn seed_failed_releases_anchor_claim() {
     let corr = first_probe_corr(&attach_out).expect("Seed probe");
     let _out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::Failed { errno: 13 },
         }),
@@ -1005,12 +1005,14 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
             t2,
         );
     }
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
 
     // Inject Vanished
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -1060,11 +1062,13 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
             t2,
         );
     }
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Failed { errno: 13 },
         }),
@@ -1416,11 +1420,13 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
             t2,
         );
     }
-    let correlation = e.pending_probe(pid).expect("Verifying probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -1519,7 +1525,9 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
             t2,
         );
     }
-    let verify_corr = e.pending_probe(pid).expect("Verify probe in flight");
+    let verify_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verify probe in flight");
 
     // Stable verdict — same snapshot as seed. dispatch_standard_ok's
     // pre-graft hash captures the prior, post-graft comparison is stable
@@ -1527,7 +1535,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     // the SubtreeRoot Sub → transition_to_awaiting.
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: verify_corr,
             outcome: ProbeOutcome::SubtreeOk(dir_snap(root, vec![("subdir", EntryKind::Dir, 99)])),
         }),
@@ -1556,7 +1564,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         t2,
     );
     let rebase_corr = e
-        .pending_probe(pid)
+        .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Rebase probe in flight after EffectComplete");
 
     // Pre-condition: descendant claim still intact going into Rebasing.
@@ -1568,7 +1576,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     // Inject Rebase Vanished.
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: rebase_corr,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -1683,11 +1691,13 @@ fn release_descendant_claim_multi_profile_preserves_others() {
             t2,
         );
     }
-    let correlation = e.pending_probe(pid_p).expect("P probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid_p))
+        .expect("P probe in flight");
 
     let _out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_p,
+            owner: ProbeOwner::Profile(pid_p),
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -1803,7 +1813,9 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
             t2,
         );
     }
-    let correlation = e.pending_probe(pid_p).expect("P probe in flight");
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid_p))
+        .expect("P probe in flight");
 
     // Probe response: subdir is GONE (P sees a tree where it's been
     // deleted). dispatch_standard_ok → graft → walk_pair → delete_child
@@ -1820,7 +1832,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     ));
     let _out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid_p,
+            owner: ProbeOwner::Profile(pid_p),
             correlation,
             outcome: ProbeOutcome::SubtreeOk(response),
         }),

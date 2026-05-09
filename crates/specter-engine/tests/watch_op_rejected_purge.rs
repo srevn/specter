@@ -10,9 +10,9 @@ use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClaimKind, ClassSet, CommandTemplate,
     Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
-    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, WatchFailure,
-    WatchOp,
+    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
+    WatchFailure, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -75,7 +75,7 @@ fn complete_seed_burst(
     let corr = first_probe_corr(attach_out).expect("Seed probe fires at attach");
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::SubtreeOk(seed_snap),
         }),
@@ -420,7 +420,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         purge_out
             .probe_ops
             .iter()
-            .any(|op| matches!(op, ProbeOp::Cancel { profile } if *profile == pid)),
+            .any(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid)),
         "in-flight descent probe cancelled",
     );
     assert!(
@@ -438,7 +438,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     // Late ProbeResponse for the cancelled correlation drops cleanly.
     let late = e.step(
         Input::ProbeResponse(ProbeResponse {
-            profile: pid,
+            owner: ProbeOwner::Profile(pid),
             correlation: initial_corr,
             outcome: ProbeOutcome::Vanished,
         }),
