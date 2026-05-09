@@ -17,8 +17,9 @@ use crate::refcounts::add_watch_demand;
 use crate::timer::{TimerEntry, TimerHeap};
 use specter_core::{
     AnchorClaim, BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Input, ProbeOwner,
-    Profile, ProfileId, ProfileMap, ProfileState, PromoterRegistry, ResourceId, StepOutput, Sub,
-    SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
+    Profile, ProfileId, ProfileMap, ProfileState, PromoterRegistry, PromoterState, ResourceId,
+    StepOutput, Sub, SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree,
+    compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -35,10 +36,11 @@ pub(crate) const FS_ROOT_SEG: &str = "/";
 /// `pub(crate)` field visibility lets sibling modules read/write engine
 /// state directly. External consumers go through the public methods.
 ///
-/// Per-Profile pending-path descent state lives inline on
-/// `ProfileState::Pending(DescentState)`. Read through
-/// `Engine::descent_state` / `Engine::descent_state_mut` (both
-/// `pub(crate)`); per-event fan-out lives next to its sole consumer
+/// Per-owner descent state lives inline on the owner's state enum
+/// (`ProfileState::Pending(DescentState)` for Profiles,
+/// `PromoterState::PrefixPending(DescentState)` for Promoters). Read through
+/// the owner-polymorphic `Engine::descent_state` / `Engine::descent_state_mut`
+/// (both `pub(crate)`); per-event fan-out lives next to its sole consumer
 /// (`Engine::classify_event_carriers` in `transitions.rs`).
 #[derive(Debug, Default)]
 pub struct Engine {
@@ -61,23 +63,42 @@ impl Engine {
         Self::default()
     }
 
-    /// The Profile's descent state, if it is `Pending`. Returns `None`
-    /// for `Idle` and `Active` Profiles. Sole reader API for the
-    /// `ProfileState::Pending(DescentState)` payload outside the
-    /// routing/trichotomy match sites.
+    /// Owner-polymorphic descent state accessor. Returns the `DescentState`
+    /// payload of the owner's "in-descent" state variant
+    /// (`ProfileState::Pending` for Profiles, `PromoterState::PrefixPending`
+    /// for Promoters). Returns `None` for owners not currently descending,
+    /// stale ids, or any other state.
+    ///
+    /// Sole reader API for the descent-state payload outside the routing
+    /// match sites in `on_*_probe_response`. The exhaustive `ProbeOwner`
+    /// match enforces that adding a new owner kind requires extending
+    /// this accessor — the same discipline `pending_slot` enforces in
+    /// `probe_channel.rs`.
     #[must_use]
-    pub(crate) fn descent_state(&self, pid: ProfileId) -> Option<&DescentState> {
-        match &self.profiles.get(pid)?.state {
-            ProfileState::Pending(d) => Some(d),
-            ProfileState::Idle | ProfileState::Active(_) => None,
+    pub(crate) fn descent_state(&self, owner: ProbeOwner) -> Option<&DescentState> {
+        match owner {
+            ProbeOwner::Profile(pid) => match &self.profiles.get(pid)?.state {
+                ProfileState::Pending(d) => Some(d),
+                ProfileState::Idle | ProfileState::Active(_) => None,
+            },
+            ProbeOwner::Promoter(pid) => match &self.promoters.get(pid)?.state {
+                PromoterState::PrefixPending(d) => Some(d),
+                PromoterState::Active { .. } => None,
+            },
         }
     }
 
     /// Mutable counterpart to [`Engine::descent_state`].
-    pub(crate) fn descent_state_mut(&mut self, pid: ProfileId) -> Option<&mut DescentState> {
-        match &mut self.profiles.get_mut(pid)?.state {
-            ProfileState::Pending(d) => Some(d),
-            ProfileState::Idle | ProfileState::Active(_) => None,
+    pub(crate) fn descent_state_mut(&mut self, owner: ProbeOwner) -> Option<&mut DescentState> {
+        match owner {
+            ProbeOwner::Profile(pid) => match &mut self.profiles.get_mut(pid)?.state {
+                ProfileState::Pending(d) => Some(d),
+                ProfileState::Idle | ProfileState::Active(_) => None,
+            },
+            ProbeOwner::Promoter(pid) => match &mut self.promoters.get_mut(pid)?.state {
+                PromoterState::PrefixPending(d) => Some(d),
+                PromoterState::Active { .. } => None,
+            },
         }
     }
 

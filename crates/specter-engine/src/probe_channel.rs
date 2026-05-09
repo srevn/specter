@@ -120,22 +120,26 @@ impl Engine {
     ///
     /// **Per-owner sibling-state cleanup.** Promoter owners carry a
     /// second slot (`pending_enumeration_target`) that pairs with
-    /// `pending_probe` for enumeration probes. The sibling clears
-    /// here unconditionally — it tracks the lifecycle of the
-    /// correlation slot and is None whenever the channel is closed.
+    /// `pending_probe` for enumeration probes; the lockstep is owned
+    /// by [`specter_core::Promoter::close_probe_channel`] (the canonical
+    /// "close both fields together" entry point on the Promoter type).
     /// Profile owners have no equivalent (descent target lives on
-    /// `Profile.state` directly).
+    /// `Profile.state` directly), so this helper short-circuits to a
+    /// plain take on the slot.
     pub(crate) fn cancel_owner_probe(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
-        let was_open = self
-            .pending_slot_mut(owner)
-            .is_some_and(|slot| slot.take().is_some());
+        let was_open = match owner {
+            ProbeOwner::Profile(pid) => self
+                .profiles
+                .get_mut(pid)
+                .is_some_and(|p| p.pending_probe.take().is_some()),
+            ProbeOwner::Promoter(pid) => self.promoters.get_mut(pid).is_some_and(|q| {
+                let was_open = q.pending_probe.is_some();
+                q.close_probe_channel();
+                was_open
+            }),
+        };
         if was_open {
             out.probe_ops.push(ProbeOp::Cancel { owner });
-        }
-        if let ProbeOwner::Promoter(pid) = owner
-            && let Some(q) = self.promoters.get_mut(pid)
-        {
-            q.pending_enumeration_target = None;
         }
     }
 

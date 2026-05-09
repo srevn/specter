@@ -2075,7 +2075,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         let mut iter = e.profiles.iter();
         iter.next().expect("profile exists").0
     };
-    assert!(e.descent_state(pid).is_some());
+    assert!(e.descent_state(ProbeOwner::Profile(pid)).is_some());
     let initial_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("first probe in flight");
@@ -2100,7 +2100,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     // The clamp zeroed watch_demand; the descent has been purged.
     assert_eq!(e.tree.get(foo).unwrap().watch_demand, 0);
     assert!(
-        e.descent_state(pid).is_none(),
+        e.descent_state(ProbeOwner::Profile(pid)).is_none(),
         "descent purged on rejection",
     );
 
@@ -2223,8 +2223,8 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     let pid_a = e.subs.get(sid_a).unwrap().profile;
     let pid_b = e.subs.get(sid_b).unwrap().profile;
     // Both descents at /foo (different anchors).
-    assert!(e.descent_state(pid_a).is_some());
-    assert!(e.descent_state(pid_b).is_some());
+    assert!(e.descent_state(ProbeOwner::Profile(pid_a)).is_some());
+    assert!(e.descent_state(ProbeOwner::Profile(pid_b)).is_some());
     assert_eq!(e.tree.get(foo).unwrap().watch_demand, 2);
 
     let result = e.step(
@@ -2241,8 +2241,8 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         Instant::now(),
     );
 
-    assert!(e.descent_state(pid_a).is_none());
-    assert!(e.descent_state(pid_b).is_none());
+    assert!(e.descent_state(ProbeOwner::Profile(pid_a)).is_none());
+    assert!(e.descent_state(ProbeOwner::Profile(pid_b)).is_none());
     let purged_count = result
         .diagnostics
         .iter()
@@ -2379,7 +2379,7 @@ fn sensor_overflow_pending_profile_is_skipped() {
         iter.next().expect("profile exists").0
     };
     assert!(
-        e.descent_state(pid).is_some(),
+        e.descent_state(ProbeOwner::Profile(pid)).is_some(),
         "fixture: profile is in Pending(_)",
     );
 
@@ -2397,7 +2397,7 @@ fn sensor_overflow_pending_profile_is_skipped() {
         "Pending Profile state preserved across overflow",
     );
     assert!(
-        e.descent_state(pid).is_some(),
+        e.descent_state(ProbeOwner::Profile(pid)).is_some(),
         "descent still in flight after overflow",
     );
     assert!(

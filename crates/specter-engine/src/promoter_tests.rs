@@ -8,13 +8,13 @@
 //!   `Active` vs `PrefixPending`).
 //! - `enter_active`'s 5a → 5b carrier-preservation walkthrough.
 //! - `register_proxy` idempotence ([H-5]).
-//! - `dispatch_promoter_descent_ok` advance + materialise.
+//! - `dispatch_descent_ok` advance + materialise (Promoter owner).
 //! - `dispatch_promoter_enumeration_ok` forward pass (sub-proxy
 //!   registration + final-position promotion).
 //! - `try_promote` dedup ([I-Promoter-5]).
 //! - Event routing: `on_promoter_proxy_event` enqueue + dispatch +
 //!   stale-event diagnostic.
-//! - `dispatch_promoter_descent_vanished` rewind.
+//! - `dispatch_descent_vanished` rewind (Promoter owner).
 
 #![allow(
     clippy::items_after_statements,
@@ -568,6 +568,222 @@ fn descent_vanished_rewinds_to_parent() {
         e.tree().get(var).unwrap().watch_demand,
         0,
         "vanished prefix had its watch_demand zeroed (vacate)",
+    );
+}
+
+// ---- §A regression: PrefixPending events at the prefix re-trigger descent.
+//
+// Pre-unification, `classify_event_carriers` only walked Profiles —
+// Promoter `PrefixPending` descents were invisible to event dispatch, so
+// any FsEvent at the prefix routed to `EventNoConsumer` and the Promoter
+// could be permanently stuck waiting for a segment it never re-probed.
+// These four tests pin the post-unification dispatch — `on_descent_event`
+// is now owner-polymorphic and `EventCarriers.descents` carries
+// `ProbeOwner::Promoter(_)`s alongside Profiles.
+
+/// Drained-probe + StructureChanged at the prefix → fresh descent probe.
+/// Mirror of `descent_tests.rs::descent_event_at_prefix_emits_fresh_probe`
+/// for the Promoter side. The §A surface — without this dispatch the
+/// Promoter would never re-probe after the next segment first appeared.
+#[test]
+fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
+    let mut e = Engine::new();
+    let var = ensure_dir(&mut e, &["var"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    // Sanity: descent at /var with remaining=["log"], probe in flight.
+    let corr = e
+        .pending_probe_for(ProbeOwner::Promoter(pid))
+        .expect("descent probe in flight after attach");
+
+    // Drain the in-flight probe with an empty response (segment not
+    // yet present; descent stays PrefixPending awaiting the next event).
+    let snap = dir_snap_at(var, &[]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
+        "channel closed after empty response",
+    );
+    assert!(
+        matches!(
+            e.promoters.get(pid).map(|q| &q.state),
+            Some(PromoterState::PrefixPending(_)),
+        ),
+        "still PrefixPending — segment not yet present",
+    );
+
+    // FsEvent at /var (the prefix) → fresh descent probe via
+    // `on_descent_event(ProbeOwner::Promoter(pid))`.
+    let out = e.step(
+        Input::FsEvent {
+            resource: var,
+            event: FsEvent::StructureChanged,
+        },
+        Instant::now(),
+    );
+
+    let probe_for_pid = out.probe_ops.iter().any(|op| {
+        matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Promoter(pid))
+    });
+    assert!(probe_for_pid, "fresh descent probe minted for Promoter");
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
+        "probe channel re-opened",
+    );
+    // No EventNoConsumer diagnostic — the §A bug surface.
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::EventNoConsumer { .. })),
+        "Promoter PrefixPending consumed the event (no EventNoConsumer): {:?}",
+        out.diagnostics,
+    );
+}
+
+/// I5 guard: while a descent probe is in flight, an FsEvent at the
+/// prefix drops without minting a second probe (the in-flight probe
+/// will pick up the new segment in its response). Mirror of
+/// `descent_tests.rs::descent_event_during_in_flight_probe_drops`.
+#[test]
+fn prefix_pending_event_during_in_flight_probe_drops() {
+    let mut e = Engine::new();
+    let var = ensure_dir(&mut e, &["var"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    // Probe in flight from setup.
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
+        "descent probe in flight (precondition for I5 guard)",
+    );
+
+    let out = e.step(
+        Input::FsEvent {
+            resource: var,
+            event: FsEvent::StructureChanged,
+        },
+        Instant::now(),
+    );
+
+    let descent_probes = out
+        .probe_ops
+        .iter()
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Promoter(pid)))
+        .count();
+    assert_eq!(
+        descent_probes, 0,
+        "I5: no second probe minted while one is in flight",
+    );
+}
+
+/// Terminal events at the prefix (Removed / Renamed / Revoked) must
+/// also re-trigger descent — the §A bug surface is broader than the
+/// non-terminal `StructureChanged` case the original report focused
+/// on. Without dispatch, a `mv /var /var.old` mid-descent would
+/// strand the Promoter with a dangling watch on a non-existent path
+/// (the next probe response would clean up via `Vanished` rewind, but
+/// only if the dispatch fires).
+#[test]
+fn prefix_pending_terminal_event_at_prefix_emits_fresh_descent_probe() {
+    let mut e = Engine::new();
+    let var = ensure_dir(&mut e, &["var"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    // Drain the in-flight probe.
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+    let snap = dir_snap_at(var, &[]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+
+    // Inject a terminal event at the prefix — `Removed` (e.g.,
+    // `mv /var /var.old`).
+    let out = e.step(
+        Input::FsEvent {
+            resource: var,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+
+    let probe_for_pid = out.probe_ops.iter().any(|op| {
+        matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Promoter(pid))
+    });
+    assert!(
+        probe_for_pid,
+        "fresh descent probe minted for terminal event at prefix",
+    );
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::EventNoConsumer { .. })),
+        "terminal event consumed by descent dispatch (no EventNoConsumer)",
+    );
+}
+
+/// Failed descent + event-driven retry: after a `Failed { errno }`
+/// response retains `PrefixPending` state, the next event at the
+/// prefix must re-trigger descent. Without unified dispatch this
+/// retry path was unreachable — `Failed` is documented as "await
+/// next event at prefix" (Promoter-side `dispatch_descent_failed`
+/// arm) but no event dispatch existed for the Promoter side
+/// pre-unification, so failed Promoter descents would stall
+/// permanently.
+#[test]
+fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
+    let mut e = Engine::new();
+    let var = ensure_dir(&mut e, &["var"]);
+    let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+
+    // Inject Failed (e.g. transient EACCES).
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::Failed { errno: 13 },
+        }),
+        Instant::now(),
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
+        "channel closed after Failed",
+    );
+    assert!(
+        matches!(
+            e.promoters.get(pid).map(|q| &q.state),
+            Some(PromoterState::PrefixPending(_)),
+        ),
+        "PrefixPending retained after Failed",
+    );
+
+    // Event at the prefix → retry descent.
+    let out = e.step(
+        Input::FsEvent {
+            resource: var,
+            event: FsEvent::StructureChanged,
+        },
+        Instant::now(),
+    );
+
+    let probe_for_pid = out.probe_ops.iter().any(|op| {
+        matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Promoter(pid))
+    });
+    assert!(
+        probe_for_pid,
+        "fresh descent probe minted post-Failed via event dispatch",
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
+        "probe channel re-opened",
     );
 }
 

@@ -22,9 +22,13 @@
 //! pops one target at a time.
 //!
 //! Two response dispatchers route on state:
-//! - `PrefixPending` → descent (`dispatch_promoter_descent_*`); on
-//!   completion of the last literal segment, `enter_active` flips the
-//!   state and registers the first proxy.
+//! - `PrefixPending` → descent. The dispatcher arms route to the
+//!   owner-polymorphic [`Engine::dispatch_descent_ok`] /
+//!   [`Engine::dispatch_descent_vanished`] /
+//!   [`Engine::dispatch_descent_failed`] in `descent.rs`; on completion
+//!   of the last literal segment, [`Engine::enter_active`] (the
+//!   Promoter-side terminal-arm helper) flips the state and registers
+//!   the first proxy.
 //! - `Active` → enumeration (`dispatch_promoter_enumeration_*`); each
 //!   response either registers sub-proxies (intermediate components),
 //!   mints dynamic Subs (final component), or unregisters proxies that
@@ -209,9 +213,9 @@ impl Engine {
     ///   prior prefix to release; first proxy installed at the prefix
     ///   slot.
     /// - **`PrefixPending → Active`** (from
-    ///   `dispatch_promoter_descent_ok`'s last-literal arm): prior
-    ///   prefix's STRUCTURE contribution releases; new proxy installed
-    ///   at the freshly-materialised slot.
+    ///   [`Engine::dispatch_descent_ok`]'s last-literal arm for the
+    ///   Promoter owner): prior prefix's STRUCTURE contribution
+    ///   releases; new proxy installed at the freshly-materialised slot.
     ///
     /// Pre-conditions:
     /// - `promoter_id` exists in the registry (caller just inserted it
@@ -303,9 +307,11 @@ impl Engine {
 
     /// Register a proxy at `resource` for `promoter_id`.
     ///
-    /// Pre-condition: state is `Active { .. }` (caller has flipped
-    /// from `PrefixPending` if applicable). The debug_assert below
-    /// catches caller bugs.
+    /// Pre-condition: state is `Active { .. }`. Sole production callers
+    /// (`enter_active`, `dispatch_promoter_enumeration_ok`'s forward
+    /// pass) guarantee `Active` by construction. The `PrefixPending`
+    /// arms below are `unreachable!()` to surface caller bugs loudly
+    /// in both dev and release rather than silently no-op.
     ///
     /// [H-5] `pending_enumerations.insert(R)` is gated on
     /// `!already_carries`. Re-registration of a proxy already in the
@@ -324,10 +330,11 @@ impl Engine {
             .get(promoter_id)
             .is_some_and(|q| match &q.state {
                 PromoterState::Active { proxies } => proxies.contains_key(&resource),
-                PromoterState::PrefixPending(_) => {
-                    debug_assert!(false, "register_proxy: state must be Active");
-                    false
-                }
+                PromoterState::PrefixPending(_) => unreachable!(
+                    "register_proxy: state must be Active (promoter = {promoter_id:?}); \
+                     enter_active and dispatch_promoter_enumeration_ok are the sole callers \
+                     and both ensure Active before invocation"
+                ),
             });
 
         if let Some(q) = self.promoters.get_mut(promoter_id) {
@@ -340,7 +347,9 @@ impl Engine {
                         },
                     );
                 }
-                PromoterState::PrefixPending(_) => return,
+                PromoterState::PrefixPending(_) => unreachable!(
+                    "register_proxy: state must be Active (promoter = {promoter_id:?})"
+                ),
             }
             // [H-5] Only enqueue when NEWLY registered. Re-registration
             // is structurally idempotent — both on the counter
@@ -497,11 +506,12 @@ impl Engine {
         // re-open a fresh channel (descent advance, post-enumeration
         // drain); they MUST see a closed channel on entry, otherwise
         // the I5 debug_assert in `mint_owner_correlation` fires.
-        // `pending_enumeration_target` clears in lockstep with
-        // `pending_probe`.
+        // `close_probe_channel` clears `pending_probe` and
+        // `pending_enumeration_target` in lockstep — the lockstep
+        // contract lives on the Promoter type so two separate writes
+        // can't quietly drift.
         if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.pending_probe = None;
-            q.pending_enumeration_target = None;
+            q.close_probe_channel();
         }
 
         // Route on state. PrefixPending → descent; Active → enumerate.
@@ -512,13 +522,13 @@ impl Engine {
 
         match (dispatch, response.outcome) {
             (Some(PromoterDispatch::Descent), ProbeOutcome::SubtreeOk(arc)) => {
-                self.dispatch_promoter_descent_ok(promoter_id, &arc, now, out);
+                self.dispatch_descent_ok(ProbeOwner::Promoter(promoter_id), &arc, now, out);
             }
             (Some(PromoterDispatch::Descent), ProbeOutcome::Vanished) => {
-                self.dispatch_promoter_descent_vanished(promoter_id, out);
+                self.dispatch_descent_vanished(ProbeOwner::Promoter(promoter_id), now, out);
             }
             (Some(PromoterDispatch::Descent), ProbeOutcome::Failed { errno }) => {
-                self.dispatch_promoter_descent_failed(promoter_id, errno, out);
+                self.dispatch_descent_failed(ProbeOwner::Promoter(promoter_id), errno, out);
             }
             (Some(PromoterDispatch::Descent), ProbeOutcome::AnchorOk(_)) => {
                 // Walker-contract violation: descent always probes a
@@ -570,234 +580,6 @@ impl Engine {
         // is in flight (descent advance reopened the slot) or the
         // queue is empty.
         self.dispatch_next_enumeration(promoter_id, now, out);
-    }
-
-    /// Successful descent response — the walker enumerated one level
-    /// of `current_prefix` and returned a single-level
-    /// [`Arc<DirSnapshot>`]. Look up the next remaining literal
-    /// segment by name; if found, materialise it as a Tree slot, then
-    /// either advance descent one segment or transition to Active via
-    /// [`Self::enter_active`].
-    pub(crate) fn dispatch_promoter_descent_ok(
-        &mut self,
-        promoter_id: PromoterId,
-        snapshot: &DirSnapshot,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
-        let Some(q) = self.promoters.get(promoter_id) else {
-            return;
-        };
-        let PromoterState::PrefixPending(d) = &q.state else {
-            return;
-        };
-        let prefix = d.current_prefix;
-        let lpl = q.pattern.literal_prefix_len();
-
-        // [C-1] Defense-in-depth: walker stamp must match the prefix
-        // we requested. Tolerate ResourceId::default() for legacy
-        // test fixtures that don't populate root_resource.
-        debug_assert!(
-            snapshot.root_resource == prefix
-                || snapshot.root_resource == ResourceId::default()
-                || prefix == ResourceId::default(),
-            "walker stamp diverges from emitted target_resource (Promoter descent): \
-             snapshot.root_resource = {:?}, descent.current_prefix = {:?}",
-            snapshot.root_resource,
-            prefix,
-        );
-
-        let Some(next_segment) = d.remaining_components.first().cloned() else {
-            // Invariant breach: PrefixPending requires non-empty
-            // remaining_components (the last literal of
-            // `pattern.components[0..lpl]` is the segment that
-            // triggers `enter_active`). Fall through to a defensive
-            // recovery: emit the breach and rewind state to Active.
-            // We can't unwind the prefix watch cleanly without state
-            // visibility — the diagnostic is the operator-facing
-            // signal.
-            out.diagnostics
-                .push(Diagnostic::PromoterDescentInvariantViolation {
-                    promoter: promoter_id,
-                    prefix,
-                });
-            return;
-        };
-        let is_last_literal = d.remaining_components.len() == 1;
-
-        // Look up the next segment in the snapshot's children.
-        let entry_kind = match snapshot.entries.get(next_segment.as_str()) {
-            Some(child) => child.kind(),
-            None => return, // Not yet present; await next event.
-        };
-
-        // Materialise the next slot. Intermediate descent slots use
-        // DescentScaffold; the last-literal proxy slot demotes to User
-        // inside `enter_active` per [S-8].
-        let new_resource = match self.tree.lookup(Some(prefix), &next_segment) {
-            Some(r) => r,
-            None => self
-                .tree
-                .ensure(Some(prefix), &next_segment, ResourceRole::DescentScaffold),
-        };
-        self.tree
-            .set_kind(new_resource, kind_from_entry(entry_kind));
-
-        if is_last_literal {
-            // [M-2] Single helper: enter_active releases the prior
-            // prefix's STRUCTURE contribution, flips state, registers
-            // the first proxy, and dispatches the initial enumeration.
-            self.enter_active(
-                promoter_id,
-                /* prior_prefix_to_release */ Some(prefix),
-                /* new_proxy_resource */ new_resource,
-                /* pattern_component_index */ lpl,
-                now,
-                out,
-            );
-        } else {
-            // Advance one literal segment. State stays PrefixPending.
-            // Update descent state in place (saves a vec rebuild).
-            // Sequencing matches the Profile-side advance: state-flip
-            // BEFORE sub_watch_demand so the recompute attributes the
-            // STRUCTURE contribution to the new prefix.
-            let owner = ProbeOwner::Promoter(promoter_id);
-            let Some(correlation) = self.mint_owner_correlation(owner) else {
-                return;
-            };
-
-            if let Some(q) = self.promoters.get_mut(promoter_id)
-                && let PromoterState::PrefixPending(d) = &mut q.state
-            {
-                d.current_prefix = new_resource;
-                d.remaining_components.remove(0);
-            }
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                &self.promoters,
-                prefix,
-                ClassSet::STRUCTURE,
-                None,
-                out,
-            );
-            add_watch_demand(&mut self.tree, new_resource, ClassSet::STRUCTURE, out);
-            // The OLD prefix retains DescentScaffold role (set on its
-            // own `Tree::ensure` at descent's start) so it survives the
-            // sub_watch_demand. No try_reap here.
-
-            let target_path = self.tree.path_of(new_resource).unwrap_or_default();
-            Self::emit_descent_probe(owner, correlation, new_resource, target_path, out);
-        }
-    }
-
-    /// Vanished response on the descent prefix. Rewind to the
-    /// next-existing ancestor of `prefix`. Mirrors Profile descent's
-    /// rewind path.
-    ///
-    /// **Bounded chain depth.** The chain auto-extends watches up the
-    /// ancestor chain until it reaches a still-present ancestor (whose
-    /// probe returns `Ok` and routes to the await-event arm). With
-    /// FS-root bootstrap (`materialize_path_or_pending`'s
-    /// unconditional ensure), every Promoter's rewind chain
-    /// terminates at the FS-root slot `/` — the kernel always lstats
-    /// `/` successfully on Unix, so `Vanished` from `/` is impossible
-    /// in production.
-    pub(crate) fn dispatch_promoter_descent_vanished(
-        &mut self,
-        promoter_id: PromoterId,
-        out: &mut StepOutput,
-    ) {
-        let Some(q) = self.promoters.get(promoter_id) else {
-            return;
-        };
-        let PromoterState::PrefixPending(d) = &q.state else {
-            return;
-        };
-        let prefix = d.current_prefix;
-
-        out.diagnostics.push(Diagnostic::PromoterDescentVanished {
-            promoter: promoter_id,
-            prefix,
-        });
-
-        let parent = self.tree.parent(prefix);
-        let prefix_name = self.tree.name(prefix).map(CompactString::from);
-
-        match parent {
-            Some(parent_id) => {
-                // Rewind. The vanished prefix's segment becomes the
-                // *first* remaining component (we're descending into
-                // it from the parent again). State-flip BEFORE
-                // sub_watch_demand so the recompute attributes the
-                // STRUCTURE contribution to the new prefix.
-                let owner = ProbeOwner::Promoter(promoter_id);
-                let Some(correlation) = self.mint_owner_correlation(owner) else {
-                    return;
-                };
-
-                if let Some(q) = self.promoters.get_mut(promoter_id)
-                    && let PromoterState::PrefixPending(d) = &mut q.state
-                {
-                    d.current_prefix = parent_id;
-                    if let Some(name) = prefix_name {
-                        d.remaining_components.insert(0, name);
-                    }
-                }
-                sub_watch_demand(
-                    &mut self.tree,
-                    &self.profiles,
-                    &self.promoters,
-                    prefix,
-                    ClassSet::STRUCTURE,
-                    None,
-                    out,
-                );
-                self.tree.vacate(prefix);
-                self.tree.try_reap(prefix);
-                add_watch_demand(&mut self.tree, parent_id, ClassSet::STRUCTURE, out);
-
-                let target_path = self.tree.path_of(parent_id).unwrap_or_default();
-                Self::emit_descent_probe(owner, correlation, parent_id, target_path, out);
-            }
-            None => {
-                // Root prefix vanished — no rewind target. Promoter
-                // stuck PrefixPending with the prefix's STRUCTURE
-                // contribution dropped. Operator recovery is required
-                // to re-attach.
-                sub_watch_demand(
-                    &mut self.tree,
-                    &self.profiles,
-                    &self.promoters,
-                    prefix,
-                    ClassSet::STRUCTURE,
-                    None,
-                    out,
-                );
-                self.tree.vacate(prefix);
-                self.tree.try_reap(prefix);
-            }
-        }
-    }
-
-    /// Failed response on the descent prefix. Retain `PrefixPending`
-    /// state; await next event at the prefix.
-    pub(crate) fn dispatch_promoter_descent_failed(
-        &self,
-        promoter_id: PromoterId,
-        errno: i32,
-        out: &mut StepOutput,
-    ) {
-        let prefix = match self.promoters.get(promoter_id).map(|q| &q.state) {
-            Some(PromoterState::PrefixPending(d)) => d.current_prefix,
-            _ => return,
-        };
-        out.diagnostics.push(Diagnostic::PromoterDescentFailed {
-            promoter: promoter_id,
-            prefix,
-            errno,
-        });
-        // Retain PrefixPending; await next event.
     }
 
     /// Drain one queued enumeration target into a probe. No-op if a

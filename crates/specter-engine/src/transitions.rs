@@ -89,8 +89,8 @@ impl Engine {
         let carriers = self.classify_event_carriers(resource);
         let descent_count = carriers.descents.len();
         let recovery_count = carriers.recoveries.len();
-        for pid in carriers.descents.iter().copied() {
-            self.on_descent_event(pid, now, out);
+        for owner in carriers.descents.iter().copied() {
+            self.on_descent_event(owner, now, out);
         }
         for pid in carriers.recoveries.iter().copied() {
             self.start_pending_recovery(pid, resource, out);
@@ -334,13 +334,13 @@ impl Engine {
         match (dispatch, response.outcome) {
             // ----- Pending (descent) -----
             (DispatchTarget::Descent, ProbeOutcome::SubtreeOk(arc)) => {
-                self.dispatch_descent_ok(profile_id, &arc, now, out);
+                self.dispatch_descent_ok(ProbeOwner::Profile(profile_id), &arc, now, out);
             }
             (DispatchTarget::Descent, ProbeOutcome::Vanished) => {
-                self.dispatch_descent_vanished(profile_id, now, out);
+                self.dispatch_descent_vanished(ProbeOwner::Profile(profile_id), now, out);
             }
             (DispatchTarget::Descent, ProbeOutcome::Failed { errno }) => {
-                self.dispatch_descent_failed(profile_id, errno, out);
+                self.dispatch_descent_failed(ProbeOwner::Profile(profile_id), errno, out);
             }
             (DispatchTarget::Descent, ProbeOutcome::AnchorOk(_)) => {
                 // Walker-contract violation: descent always probes a Dir
@@ -2126,23 +2126,31 @@ impl Engine {
         CorrelationId(self.next_correlation)
     }
 
-    /// Single-pass classification of Profiles that carry a dispatch
+    /// Single-pass classification of owners that carry a dispatch
     /// responsibility for an [`crate::Input::FsEvent`] at `resource`.
     /// Sole consumer is [`Engine::on_fs_event`].
     ///
-    /// Two carrier classes, mutually exclusive at the
-    /// [`ProfileState`] sum-type level:
+    /// Two carrier classes:
     ///
-    /// - **Descent**: `Pending(d)` Profiles whose `d.current_prefix ==
-    ///   resource`. `on_descent_event` advances descent.
-    /// - **Recovery**: `Idle` Profiles whose `watch_root_parent ==
-    ///   Some(resource)` and whose anchor is currently absent
-    ///   (`current.is_none()`). `start_pending_recovery` re-enters
-    ///   pending descent — auto-recapture on anchor reappearance.
+    /// - **Descent** ([`ProbeOwner`]): owners currently descending whose
+    ///   `DescentState.current_prefix == resource`. Both Profile
+    ///   (`ProfileState::Pending(d)`) and Promoter
+    ///   (`PromoterState::PrefixPending(d)`) descents qualify; the
+    ///   Promoter arm closes the bug where a Promoter waiting on a
+    ///   missing literal-prefix segment dropped events at the prefix on
+    ///   the floor (no consumer matched, so `EventNoConsumer` fired and
+    ///   the Promoter could be permanently stuck without a way to
+    ///   re-trigger descent). Each descent owner gets a fresh probe via
+    ///   [`Engine::on_descent_event`].
+    /// - **Recovery** ([`ProfileId`]): `Idle` Profiles whose
+    ///   `watch_root_parent == Some(resource)` and whose anchor is
+    ///   currently absent (`current.is_none()`). Profile-only —
+    ///   Promoters have no analogous recovery channel.
+    ///   [`Engine::start_pending_recovery`] re-enters pending descent.
     ///
-    /// O(profiles). A per-resource index keyed by `current_prefix` and
-    /// `watch_root_parent` would convert this to O(matched); not in
-    /// scope for v1.
+    /// O(profiles + promoters). A per-resource index keyed by
+    /// `current_prefix` and `watch_root_parent` would convert this to
+    /// O(matched); not in scope for v1.
     fn classify_event_carriers(&self, resource: ResourceId) -> EventCarriers {
         let mut out = EventCarriers {
             descents: SmallVec::new(),
@@ -2151,7 +2159,7 @@ impl Engine {
         for (pid, p) in self.profiles.iter() {
             match &p.state {
                 ProfileState::Pending(d) if d.current_prefix == resource => {
-                    out.descents.push(pid);
+                    out.descents.push(ProbeOwner::Profile(pid));
                 }
                 ProfileState::Idle
                     if p.watch_root_parent == Some(resource) && p.current.is_none() =>
@@ -2161,6 +2169,13 @@ impl Engine {
                 ProfileState::Pending(_) | ProfileState::Idle | ProfileState::Active(_) => {}
             }
         }
+        for (qid, q) in self.promoters.iter() {
+            if let specter_core::PromoterState::PrefixPending(d) = &q.state
+                && d.current_prefix == resource
+            {
+                out.descents.push(ProbeOwner::Promoter(qid));
+            }
+        }
         out
     }
 }
@@ -2168,9 +2183,15 @@ impl Engine {
 /// Per-resource dispatch fan-out collected by
 /// [`Engine::classify_event_carriers`]. The two SmallVec inline caps of
 /// 2 cover the typical "shared scaffold" case (two Subs anchored at
-/// sibling children of one parent) without a heap allocation.
+/// sibling children of one parent, or one Profile sharing a prefix with
+/// one Promoter) without a heap allocation.
+///
+/// `descents` is keyed by [`ProbeOwner`] (Profile or Promoter) — the
+/// dispatcher [`Engine::on_descent_event`] is owner-polymorphic.
+/// `recoveries` is Profile-only — Promoters have no parent-edge
+/// reattach channel.
 struct EventCarriers {
-    descents: SmallVec<[ProfileId; 2]>,
+    descents: SmallVec<[ProbeOwner; 2]>,
     recoveries: SmallVec<[ProfileId; 2]>,
 }
 

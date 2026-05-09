@@ -51,8 +51,9 @@ use crate::refcounts::{add_watch_demand, sub_watch_demand};
 use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ClassSet, DescentState, Diagnostic, DirSnapshot, EntryKind, ProbeOwner, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput,
+    ProfileState, PromoterState, ResourceId, ResourceKind, ResourceRole, StepOutput,
 };
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 /// Result of `Engine::materialize_path_or_pending`. Either the entire
@@ -263,14 +264,26 @@ impl crate::Engine {
     /// `Descent` request shape and returned a single-level
     /// `Arc<DirSnapshot>` for the prefix; this routine looks up the next
     /// remaining segment by name and either advances descent one level,
-    /// materializes the anchor, or awaits the next event.
+    /// materializes the descent target (Profile anchor or Promoter active
+    /// proxy), or awaits the next event.
     ///
-    /// **Caller (`on_probe_response`).** The probe channel
-    /// (`Profile.pending_probe`) was closed before dispatch; this function
-    /// may re-open it via `mint_owner_correlation` in the advance branch.
+    /// **Owner-polymorphic.** The dispatch body is shared between
+    /// `ProbeOwner::Profile` (Profile pending-path descent ending in
+    /// anchor materialisation) and `ProbeOwner::Promoter` (Promoter
+    /// literal-prefix descent ending in `enter_active`). The two diverge
+    /// only at the terminal arm and the per-owner diagnostic / cleanup
+    /// for the (structurally unreachable) empty-remaining invariant
+    /// breach. All other branches — walker-stamp guard, segment lookup,
+    /// snapshot-not-present early-return, slot materialisation, and the
+    /// non-terminal advance — are identical and operate via the
+    /// owner-polymorphic descent state accessors.
+    ///
+    /// **Caller (`on_*_probe_response`).** The probe channel was closed
+    /// before dispatch; this function may re-open it via
+    /// `mint_owner_correlation` in the advance branch.
     pub(crate) fn dispatch_descent_ok(
         &mut self,
-        profile_id: ProfileId,
+        owner: ProbeOwner,
         snapshot: &DirSnapshot,
         now: Instant,
         out: &mut StepOutput,
@@ -279,7 +292,7 @@ impl crate::Engine {
         // the borrow. We clone only the head (cheap when CompactString
         // stays inline); the tail mutation runs in place via
         // `descent_state_mut` later, no whole-vec rebuild.
-        let Some(descent) = self.descent_state(profile_id) else {
+        let Some(descent) = self.descent_state(owner) else {
             return;
         };
         let prefix = descent.current_prefix;
@@ -287,43 +300,30 @@ impl crate::Engine {
         // Defense-in-depth: the walker stamps `DirSnapshot.root_resource`
         // with the `target_resource` we placed on the `Descent` request,
         // which the engine sets to `descent.current_prefix` at every
-        // `emit_descent_probe` site. Profile descent dispatch reads the
-        // `prefix` from `descent.current_prefix` (this function), so the
-        // assertion is purely a walker-contract guard — divergence
-        // signals a walker bug or a wire-side regression.
-        //
-        // Test fixtures that synthesise responses without populating
-        // `root_resource` (`ResourceId::default()`) are tolerated; the
-        // assertion only fires when both sides hold non-default ids.
-        debug_assert!(
-            snapshot.root_resource == prefix
-                || snapshot.root_resource == ResourceId::default()
-                || prefix == ResourceId::default(),
-            "walker stamp diverges from emitted target_resource (Profile descent): \
-             snapshot.root_resource = {:?}, descent.current_prefix = {:?}",
-            snapshot.root_resource,
-            prefix,
+        // `emit_descent_probe` site. Divergence signals a walker bug or
+        // a wire-side regression.
+        debug_assert_eq!(
+            snapshot.root_resource, prefix,
+            "walker stamp diverges from emitted target_resource (owner = {owner:?})",
         );
         let Some(next_segment) = descent.remaining_components.first().cloned() else {
             // The DescentState invariant (core/profile.rs) says
-            // `remaining_components` is non-empty: the anchor itself is
-            // the last component, and descent transitions Pending → Idle
+            // `remaining_components` is non-empty: the descent target is
+            // the last component, and descent leaves the in-descent state
             // on materialization rather than emptying the vec. If we
             // ever reach this arm, it's a state-machine bug. Take the
             // conservative recovery path: surface the breach via a
-            // Diagnostic and release the prefix claim symmetrically
-            // (clears state to Idle AND releases the +1 watch_demand
-            // contribution, matching `dispatch_descent_vanished`'s
-            // root branch). Without the release, the prefix's counter
-            // would leak.
-            out.diagnostics.push(Diagnostic::DescentInvariantViolation {
-                profile: profile_id,
-                prefix,
-            });
-            self.release_descent_prefix_claim(profile_id, out);
+            // per-owner Diagnostic and release the prefix claim
+            // symmetrically (clears descent state AND releases the +1
+            // watch_demand contribution, matching
+            // `dispatch_descent_vanished`'s root branch). Without the
+            // release, the prefix's counter would leak.
+            out.diagnostics
+                .push(descent_invariant_diagnostic(owner, prefix));
+            self.release_owner_descent_prefix(owner, prefix, out);
             return;
         };
-        let is_anchor = descent.remaining_components.len() == 1;
+        let is_terminal = descent.remaining_components.len() == 1;
 
         // Descent probes ship `recursive=false`, so the response is a
         // single-level Dir snapshot — look up the next segment by name in
@@ -340,7 +340,8 @@ impl crate::Engine {
         };
 
         // Materialize the next segment as a Tree slot. Look it up first;
-        // if absent, ensure as DescentScaffold (the role flips below).
+        // if absent, ensure as DescentScaffold (the terminal arms may
+        // promote to User via `set_role`).
         let new_resource = match self.tree.lookup(Some(prefix), &next_segment) {
             Some(r) => r,
             None => self
@@ -350,112 +351,200 @@ impl crate::Engine {
         self.tree
             .set_kind(new_resource, kind_from_entry(entry_kind));
 
-        if is_anchor {
-            // Materialize: flip role to User; swap watch_demand from
-            // prefix to anchor; set up the watch-root-parent
-            // contribution (deferred from `attach_sub_inner` because the
-            // anchor's parent didn't exist on disk during pending);
-            // transition Pending → Idle; start Seed burst.
-            //
-            // Sub the prefix's STRUCTURE contribution BEFORE clearing
-            // the descent state's Pending status: the recompute (multi-
-            // contributor case) reads `Profile.state == Pending(d) &&
-            // d.current_prefix == prefix` to attribute this Profile's
-            // STRUCTURE contribution. Cleanest sequencing: transition
-            // state to Idle FIRST, then sub_watch_demand sees a clean
-            // post-release world. The anchor materialization writes are
-            // also moved up so the Profile is in a consistent state for
-            // the upcoming refcount ops on the anchor.
-            self.tree.set_role(new_resource, ResourceRole::User);
-
-            // Capture the Profile's user mask now; used as the anchor's
-            // contribution. The Profile's events_union is invariant, so
-            // this is a one-time read.
-            let events_union = self
-                .profiles
-                .get(profile_id)
-                .map_or(ClassSet::EMPTY, |p| p.events_union);
-
-            // Transition Pending → Idle and set anchor_claim = Held BEFORE
-            // the refcount ops so the recompute sees the post-transition
-            // contribution attribution: the prefix's STRUCTURE contribution
-            // is gone (state no longer Pending), the anchor's mask
-            // contribution is owed (`anchor_claim == AnchorClaim::Held`).
-            //
-            // The anchor's kind is now known — the parent's directory
-            // listing (`entry_kind` derived above) classifies it. Cache it
-            // on the Profile so subsequent dispatch sites
-            // (`transition_to_verifying`, `compute_cwd`) read the
-            // invariant directly rather than re-deriving it from the
-            // Tree slot every time.
-            let anchor_kind = kind_from_entry(entry_kind);
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.anchor_claim = AnchorClaim::Held;
-                p.state = ProfileState::Idle;
-                p.kind = Some(anchor_kind);
+        if is_terminal {
+            // Per-owner terminal action. Profile materialises its anchor
+            // and starts a Seed burst; Promoter enters Active and queues
+            // its first proxy enumeration. Both helpers release the
+            // prefix's STRUCTURE contribution and install the new slot's
+            // contribution as part of their own state-flip sequence.
+            match owner {
+                ProbeOwner::Profile(pid) => {
+                    self.materialize_profile_anchor(
+                        pid,
+                        prefix,
+                        new_resource,
+                        entry_kind,
+                        now,
+                        out,
+                    );
+                }
+                ProbeOwner::Promoter(pid) => {
+                    let lpl = self
+                        .promoters
+                        .get(pid)
+                        .map_or(0, |q| q.pattern.literal_prefix_len());
+                    self.enter_active(pid, Some(prefix), new_resource, lpl, now, out);
+                }
             }
-
-            // Profile.resource was assigned to the anchor's slot at
-            // attach_sub time; the anchor's id should match.
-            debug_assert!(
-                self.profiles
-                    .get(profile_id)
-                    .is_some_and(|p| p.resource == new_resource),
-                "descent anchor materialization: Profile.resource diverges from descent anchor",
-            );
-
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                &self.promoters,
-                prefix,
-                ClassSet::STRUCTURE,
-                None,
-                out,
-            );
-            add_watch_demand(&mut self.tree, new_resource, events_union, out);
-
-            // Watch-root-parent contribution. The anchor's parent now exists
-            // on disk; install the contribution and cache the parent id.
-            self.set_watch_root_parent(profile_id, new_resource, out);
-
-            // Start the Seed burst against the anchor.
-            self.start_seed_burst(profile_id, now, out);
         } else {
-            // Advance one level. Sub the old prefix's contribution; add
-            // the new prefix's. Refresh the descent state and emit a
-            // fresh probe.
-            //
-            // Update descent state BEFORE sub_watch_demand so the recompute
-            // (multi-contributor case) attributes the prefix's STRUCTURE
-            // contribution to the new prefix, not the old one.
-            //
-            // In-place mutation: drop the head segment from
-            // `remaining_components` rather than rebuilding the tail —
-            // saves the per-step `Vec::to_vec` allocation.
-            let owner = ProbeOwner::Profile(profile_id);
-            let Some(correlation) = self.mint_owner_correlation(owner) else {
-                return;
-            };
-            if let Some(d) = self.descent_state_mut(profile_id) {
-                d.current_prefix = new_resource;
-                d.remaining_components.remove(0);
-            }
-
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                &self.promoters,
-                prefix,
-                ClassSet::STRUCTURE,
-                None,
-                out,
-            );
-            add_watch_demand(&mut self.tree, new_resource, ClassSet::STRUCTURE, out);
-
-            let target_path = self.tree.path_of(new_resource).unwrap_or_default();
-            Self::emit_descent_probe(owner, correlation, new_resource, target_path, out);
+            self.advance_descent(owner, prefix, new_resource, out);
         }
+    }
+
+    /// Advance descent one literal segment. Shared body between the
+    /// Profile and Promoter dispatch — the only divergence is which
+    /// state's `DescentState` payload gets mutated, which the
+    /// owner-polymorphic `descent_state_mut` already routes.
+    ///
+    /// Sequence:
+    /// 1. Mint a fresh probe correlation for `owner` (opens channel).
+    /// 2. Mutate descent state in place: advance `current_prefix` to
+    ///    the new resource and drop the consumed head segment from
+    ///    `remaining_components`. State-flip BEFORE `sub_watch_demand`
+    ///    so the recompute attributes the contribution to the new
+    ///    prefix, not the old one.
+    /// 3. Release the old prefix's STRUCTURE contribution; install the
+    ///    new prefix's.
+    /// 4. Emit the fresh descent probe at the new prefix.
+    ///
+    /// The old prefix retains its `DescentScaffold` role (set on its
+    /// own `Tree::ensure` at descent's start) — the role survives
+    /// `sub_watch_demand`; reaping is deferred to a future state
+    /// transition. No `try_reap` here.
+    fn advance_descent(
+        &mut self,
+        owner: ProbeOwner,
+        old_prefix: ResourceId,
+        new_prefix: ResourceId,
+        out: &mut StepOutput,
+    ) {
+        let Some(correlation) = self.mint_owner_correlation(owner) else {
+            return;
+        };
+        if let Some(d) = self.descent_state_mut(owner) {
+            d.current_prefix = new_prefix;
+            d.remaining_components.remove(0);
+        }
+
+        sub_watch_demand(
+            &mut self.tree,
+            &self.profiles,
+            &self.promoters,
+            old_prefix,
+            ClassSet::STRUCTURE,
+            None,
+            out,
+        );
+        add_watch_demand(&mut self.tree, new_prefix, ClassSet::STRUCTURE, out);
+
+        let target_path = self.tree.path_of(new_prefix).unwrap_or_default();
+        Self::emit_descent_probe(owner, correlation, new_prefix, target_path, out);
+    }
+
+    /// Conservative cleanup invoked from the unified
+    /// [`Self::dispatch_descent_ok`] when the structurally-unreachable
+    /// empty-remaining invariant fires. Per-owner because the cleanup
+    /// requirements diverge:
+    ///
+    /// - **Profile.** Delegates to [`Self::release_descent_prefix_claim`]:
+    ///   transitions `Pending → Idle`, releases the prefix's STRUCTURE
+    ///   contribution (counter-aware), and `try_reap`s the prefix slot.
+    /// - **Promoter.** Inline cleanup matching the same shape:
+    ///   transitions `PrefixPending → Active{empty}` BEFORE
+    ///   `sub_watch_demand` so the recompute drops the 5a attribution,
+    ///   counter-aware sub on the prefix's STRUCTURE, then `try_reap`.
+    ///
+    /// Counter-awareness mirrors `release_descent_prefix_claim`'s
+    /// discipline: a prior `clamp_watch_demand_to_zero` may have left
+    /// the slot at 0, in which case the state-flip alone is the
+    /// observable cleanup.
+    fn release_owner_descent_prefix(
+        &mut self,
+        owner: ProbeOwner,
+        prefix: ResourceId,
+        out: &mut StepOutput,
+    ) {
+        match owner {
+            ProbeOwner::Profile(pid) => {
+                self.release_descent_prefix_claim(pid, out);
+            }
+            ProbeOwner::Promoter(pid) => {
+                if let Some(q) = self.promoters.get_mut(pid) {
+                    q.state = PromoterState::Active {
+                        proxies: BTreeMap::new(),
+                    };
+                }
+                if self.tree.get(prefix).is_some_and(|r| r.watch_demand > 0) {
+                    sub_watch_demand(
+                        &mut self.tree,
+                        &self.profiles,
+                        &self.promoters,
+                        prefix,
+                        ClassSet::STRUCTURE,
+                        None,
+                        out,
+                    );
+                }
+                self.tree.try_reap(prefix);
+            }
+        }
+    }
+
+    /// Promote `new_resource` to the Profile's anchor slot. Sole call site
+    /// is [`Self::dispatch_descent_ok`]'s terminal arm — the descent has
+    /// just resolved its last remaining segment and the Profile is about
+    /// to leave `Pending` for `Idle → Active(Seed)`.
+    ///
+    /// Sequence (load-bearing):
+    /// 1. Flip the slot's role to `User` (was `DescentScaffold` from the
+    ///    descent walk).
+    /// 2. Capture `Profile.events_union` for the anchor's contribution.
+    /// 3. Transition the Profile **before** any refcount op:
+    ///    `anchor_claim = Held`, `state = Idle`, `kind = Some(anchor_kind)`.
+    ///    The recompute (multi-contributor case) reads `Profile.state` and
+    ///    `Profile.anchor_claim` to attribute contributions; the post-flip
+    ///    world has the prefix's STRUCTURE source gone (state no longer
+    ///    Pending) and the anchor's mask source owed.
+    /// 4. Sub the prefix's STRUCTURE; add the anchor's mask.
+    /// 5. Install the watch-root-parent contribution (deferred from
+    ///    `attach_sub_inner` because the parent didn't exist on disk
+    ///    when the Profile attached).
+    /// 6. Start the Seed burst.
+    fn materialize_profile_anchor(
+        &mut self,
+        profile_id: ProfileId,
+        prefix: ResourceId,
+        new_resource: ResourceId,
+        entry_kind: EntryKind,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        self.tree.set_role(new_resource, ResourceRole::User);
+
+        let events_union = self
+            .profiles
+            .get(profile_id)
+            .map_or(ClassSet::EMPTY, |p| p.events_union);
+
+        let anchor_kind = kind_from_entry(entry_kind);
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.anchor_claim = AnchorClaim::Held;
+            p.state = ProfileState::Idle;
+            p.kind = Some(anchor_kind);
+        }
+
+        // Profile.resource was assigned to the anchor's slot at attach
+        // time; the materialised slot's id should match by construction.
+        debug_assert!(
+            self.profiles
+                .get(profile_id)
+                .is_some_and(|p| p.resource == new_resource),
+            "descent anchor materialization: Profile.resource diverges from descent anchor",
+        );
+
+        sub_watch_demand(
+            &mut self.tree,
+            &self.profiles,
+            &self.promoters,
+            prefix,
+            ClassSet::STRUCTURE,
+            None,
+            out,
+        );
+        add_watch_demand(&mut self.tree, new_resource, events_union, out);
+
+        self.set_watch_root_parent(profile_id, new_resource, out);
+        self.start_seed_burst(profile_id, now, out);
     }
 
     /// **Rewind chain depth.** A `Vanished` response on a rewound prefix
@@ -487,21 +576,37 @@ impl crate::Engine {
     /// For an `N`-level cascade with a Profile anchored at the leaf,
     /// the engine emits up to `N` rewind cycles per Pending Profile
     /// (one Watch + one descent probe per cycle). Acceptable in v1.
+    /// Owner-polymorphic Vanished response handler. Rewinds descent to
+    /// the next-existing ancestor of `prefix`. Mirrors Profile and
+    /// Promoter descents through the same body — the only divergence is
+    /// the per-owner diagnostic and, in the structurally-unreachable
+    /// "no rewind target" arm, the per-owner state-flip out of descent.
+    ///
+    /// **Bounded chain depth.** Each rewind step adds a `+1 STRUCTURE`
+    /// `watch_demand` on the new prefix; the chain auto-extends watches
+    /// up the ancestor chain until it reaches a still-present ancestor
+    /// (whose probe returns `Ok` and routes to `dispatch_descent_ok`'s
+    /// "next segment not yet present; await next event" branch). With
+    /// FS-root bootstrap (`materialize_path_or_pending`'s unconditional
+    /// ensure), every owner's rewind chain terminates at the FS-root
+    /// slot `/` — the kernel always lstats `/` successfully on Unix, so
+    /// `Vanished` from `/` is impossible in production. The `None` arm
+    /// is retained as defense-in-depth and to keep the recursion
+    /// well-typed; tests must construct the state directly to exercise
+    /// it.
     pub(crate) fn dispatch_descent_vanished(
         &mut self,
-        profile_id: ProfileId,
+        owner: ProbeOwner,
         _now: Instant,
         out: &mut StepOutput,
     ) {
-        let Some(descent) = self.descent_state(profile_id) else {
+        let Some(descent) = self.descent_state(owner) else {
             return;
         };
         let prefix = descent.current_prefix;
 
-        out.diagnostics.push(Diagnostic::PendingPathProbeVanished {
-            profile: profile_id,
-            prefix,
-        });
+        out.diagnostics
+            .push(descent_vanished_diagnostic(owner, prefix));
 
         // Capture the parent + the prefix's segment name BEFORE we mutate
         // descent state. `parent` selects the rewind branch; `prefix_name`
@@ -516,7 +621,7 @@ impl crate::Engine {
                 // from the parent again).
                 //
                 // Update descent state BEFORE sub_watch_demand so the
-                // recompute attributes this Profile's STRUCTURE
+                // recompute attributes this owner's STRUCTURE
                 // contribution to the new prefix (parent_id), not the
                 // vanished one.
                 //
@@ -524,11 +629,10 @@ impl crate::Engine {
                 // `remaining_components` rather than cloning + rebuilding
                 // a fresh DescentState — saves both the whole-vec clone
                 // and the per-element CompactString clone.
-                let owner = ProbeOwner::Profile(profile_id);
                 let Some(correlation) = self.mint_owner_correlation(owner) else {
                     return;
                 };
-                if let Some(d) = self.descent_state_mut(profile_id) {
+                if let Some(d) = self.descent_state_mut(owner) {
                     d.current_prefix = parent_id;
                     if let Some(name) = prefix_name {
                         d.remaining_components.insert(0, name);
@@ -553,14 +657,14 @@ impl crate::Engine {
                 Self::emit_descent_probe(owner, correlation, parent_id, target_path, out);
             }
             None => {
-                // Root prefix vanished — no rewind target. Clear the
-                // descent state to Idle BEFORE sub_watch_demand so the
-                // recompute correctly excludes this Profile's
-                // contribution. The Profile is now stuck Idle without
-                // an anchor — operator recovery is required.
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.state = ProfileState::Idle;
-                }
+                // Root prefix vanished — no rewind target. Per-owner
+                // state-flip out of the in-descent variant BEFORE
+                // `sub_watch_demand` so the recompute correctly excludes
+                // this owner's contribution. The owner is now stuck
+                // without a usable descent path — operator recovery is
+                // required (Profile: stuck Idle; Promoter: stuck
+                // Active{empty}).
+                self.flip_descent_owner_to_terminal(owner);
                 sub_watch_demand(
                     &mut self.tree,
                     &self.profiles,
@@ -576,41 +680,64 @@ impl crate::Engine {
         }
     }
 
+    /// Owner-polymorphic Failed response handler. Both Profile and
+    /// Promoter descents retain in-descent state and emit a per-owner
+    /// diagnostic; the next event at the prefix re-triggers via
+    /// [`Self::on_descent_event`].
     pub(crate) fn dispatch_descent_failed(
         &self,
-        profile_id: ProfileId,
+        owner: ProbeOwner,
         errno: i32,
         out: &mut StepOutput,
     ) {
-        let prefix = match self.descent_state(profile_id) {
+        let prefix = match self.descent_state(owner) {
             Some(d) => d.current_prefix,
             None => return,
         };
-        out.diagnostics.push(Diagnostic::PendingPathProbeFailed {
-            profile: profile_id,
-            prefix,
-            errno,
-        });
-        // Retain pending state; await next event at the prefix.
+        out.diagnostics
+            .push(descent_failed_diagnostic(owner, prefix, errno));
+        // Retain in-descent state; await next event at the prefix.
     }
 
-    /// Handle an `FsEvent` arriving at a descent's `current_prefix`.
-    /// Triggers a fresh probe (no settle wait — descent is event-driven).
-    /// I5: drops the event if a probe is already in flight (the in-flight
-    /// probe will pick up the change in its response). The "in flight"
-    /// signal is the per-Profile probe-channel slot
-    /// ([`crate::Engine::pending_probe`] reads `Profile.pending_probe`).
+    /// Owner-polymorphic Vanished helper for the no-rewind-target arm.
+    /// Profile flips `Pending → Idle`; Promoter flips
+    /// `PrefixPending → Active{empty}`. Both transitions cause
+    /// `recompute_resource_events` to drop the owner's contribution to
+    /// the prefix on the subsequent `sub_watch_demand` walk — load-
+    /// bearing for the multi-contributor case.
+    fn flip_descent_owner_to_terminal(&mut self, owner: ProbeOwner) {
+        match owner {
+            ProbeOwner::Profile(pid) => {
+                if let Some(p) = self.profiles.get_mut(pid) {
+                    p.state = ProfileState::Idle;
+                }
+            }
+            ProbeOwner::Promoter(pid) => {
+                if let Some(q) = self.promoters.get_mut(pid) {
+                    q.state = PromoterState::Active {
+                        proxies: BTreeMap::new(),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Owner-polymorphic Handle an `FsEvent` arriving at a descent's
+    /// `current_prefix`. Triggers a fresh probe (no settle wait —
+    /// descent is event-driven). I5: drops the event if a probe is
+    /// already in flight (the in-flight probe will pick up the change
+    /// in its response). The "in flight" signal is the per-owner
+    /// probe-channel slot, read via [`Engine::pending_probe_for`].
     pub(crate) fn on_descent_event(
         &mut self,
-        profile_id: ProfileId,
+        owner: ProbeOwner,
         _now: Instant,
         out: &mut StepOutput,
     ) {
-        let owner = ProbeOwner::Profile(profile_id);
         if self.pending_probe_for(owner).is_some() {
             return;
         }
-        let prefix = match self.descent_state(profile_id) {
+        let prefix = match self.descent_state(owner) {
             Some(d) => d.current_prefix,
             None => return,
         };
@@ -627,6 +754,55 @@ pub(crate) const fn kind_from_entry(k: EntryKind) -> ResourceKind {
     match k {
         EntryKind::File | EntryKind::Symlink | EntryKind::Other => ResourceKind::File,
         EntryKind::Dir => ResourceKind::Dir,
+    }
+}
+
+/// Per-owner diagnostic emitted when the descent dispatcher observes
+/// `DescentState.remaining_components.is_empty()` — a state-machine
+/// invariant breach. Profile and Promoter ship distinct variants
+/// (`DescentInvariantViolation` vs `PromoterDescentInvariantViolation`)
+/// so operator logs disambiguate the source without parsing the carried
+/// id type.
+const fn descent_invariant_diagnostic(owner: ProbeOwner, prefix: ResourceId) -> Diagnostic {
+    match owner {
+        ProbeOwner::Profile(profile) => Diagnostic::DescentInvariantViolation { profile, prefix },
+        ProbeOwner::Promoter(promoter) => {
+            Diagnostic::PromoterDescentInvariantViolation { promoter, prefix }
+        }
+    }
+}
+
+/// Per-owner diagnostic emitted when a descent probe returns
+/// `Vanished`. Profile ships [`Diagnostic::PendingPathProbeVanished`];
+/// Promoter ships [`Diagnostic::PromoterDescentVanished`]. Sole caller
+/// is [`Engine::dispatch_descent_vanished`].
+const fn descent_vanished_diagnostic(owner: ProbeOwner, prefix: ResourceId) -> Diagnostic {
+    match owner {
+        ProbeOwner::Profile(profile) => Diagnostic::PendingPathProbeVanished { profile, prefix },
+        ProbeOwner::Promoter(promoter) => Diagnostic::PromoterDescentVanished { promoter, prefix },
+    }
+}
+
+/// Per-owner diagnostic emitted when a descent probe returns
+/// `Failed { errno }`. Profile ships [`Diagnostic::PendingPathProbeFailed`];
+/// Promoter ships [`Diagnostic::PromoterDescentFailed`]. Sole caller is
+/// [`Engine::dispatch_descent_failed`].
+const fn descent_failed_diagnostic(
+    owner: ProbeOwner,
+    prefix: ResourceId,
+    errno: i32,
+) -> Diagnostic {
+    match owner {
+        ProbeOwner::Profile(profile) => Diagnostic::PendingPathProbeFailed {
+            profile,
+            prefix,
+            errno,
+        },
+        ProbeOwner::Promoter(promoter) => Diagnostic::PromoterDescentFailed {
+            promoter,
+            prefix,
+            errno,
+        },
     }
 }
 

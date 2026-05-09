@@ -31,7 +31,9 @@
 use crate::Engine;
 use crate::reconcile::{delete_child, purge_per_file_fired_subs_for_reaped_slots};
 use crate::refcounts::sub_watch_demand;
-use specter_core::{AnchorClaim, ClassSet, ProfileId, ProfileState, StepOutput, TreeSnapshot};
+use specter_core::{
+    AnchorClaim, ClassSet, ProbeOwner, ProfileId, ProfileState, StepOutput, TreeSnapshot,
+};
 
 impl Engine {
     /// Release the Profile's anchor `watch_demand` contribution if held.
@@ -114,7 +116,10 @@ impl Engine {
     /// prober's eventual response is dropped as `StaleProbeResponse` —
     /// benign degradation, but worth surfacing loudly in dev / CI.
     pub(crate) fn release_descent_prefix_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
-        let Some(prefix) = self.descent_state(pid).map(|d| d.current_prefix) else {
+        let Some(prefix) = self
+            .descent_state(ProbeOwner::Profile(pid))
+            .map(|d| d.current_prefix)
+        else {
             return;
         };
 

@@ -129,6 +129,25 @@ pub struct Promoter {
     pub warned_at_threshold: bool,
 }
 
+impl Promoter {
+    /// Close the probe channel for this Promoter and clear the sibling
+    /// `pending_enumeration_target` slot in lockstep. Sole sites that
+    /// touch the per-Promoter probe-channel state directly should use
+    /// this helper rather than mutating the two fields independently —
+    /// the lockstep semantic (target tracks the channel's lifetime) is
+    /// the contract that two separate writes can quietly break.
+    ///
+    /// Counterpart to `engine::probe_channel::cancel_owner_probe` for
+    /// the Promoter owner kind: the engine helper invokes this method
+    /// on the cancel path; the response handler invokes it on the
+    /// pre-dispatch close path. Profile owners have no analogous
+    /// helper because they carry no sibling slot.
+    pub const fn close_probe_channel(&mut self) {
+        self.pending_probe = None;
+        self.pending_enumeration_target = None;
+    }
+}
+
 /// Mutually-exclusive Promoter state. `PrefixPending` covers the
 /// pre-materialised case; `Active` covers the operating case.
 ///

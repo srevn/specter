@@ -41,13 +41,17 @@ fn empty_command() -> specter_core::CommandTemplate {
 }
 
 /// Build an `Arc<DirSnapshot>` carrying the supplied single-component
-/// children. Descent probes ship `recursive=false`, so every descent test
-/// response is a single-level `DirSnapshot`; this helper matches that shape
-/// exactly. Recursive uses are out of scope for the descent test surface
-/// (recursive walks live in burst tests). The typed `ProbeOutcome::SubtreeOk`
-/// variant takes `Arc<DirSnapshot>` directly — no `TreeSnapshot::Dir`
-/// wrap is needed at the wire boundary.
-fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
+/// children. `target` is the descent prefix (or burst probe target) the
+/// snapshot is responding to — the walker stamps this onto
+/// `DirSnapshot.root_resource`, and `dispatch_descent_ok`'s walker-stamp
+/// debug_assert pins it equal to `descent.current_prefix`. Descent probes
+/// ship `recursive=false`, so every descent test response is a
+/// single-level `DirSnapshot`; this helper matches that shape exactly.
+/// Recursive uses are out of scope for the descent test surface
+/// (recursive walks live in burst tests). The typed
+/// `ProbeOutcome::SubtreeOk` variant takes `Arc<DirSnapshot>` directly —
+/// no `TreeSnapshot::Dir` wrap is needed at the wire boundary.
+fn dir_snap_with(target: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -61,7 +65,7 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        ResourceId::default(),
+        target,
         DirMeta {
             mtime: UNIX_EPOCH,
             inode: 0,
@@ -113,8 +117,8 @@ fn lookup_foo(e: &Engine) -> ResourceId {
 #[test]
 fn descent_one_level_advances_on_created_entry() {
     let (mut e, _sid, pid) = setup_pending_one_level();
-    assert!(e.descent_state(pid).is_some());
-    let descent = e.descent_state(pid).unwrap();
+    assert!(e.descent_state(ProbeOwner::Profile(pid)).is_some());
+    let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("first probe in flight");
@@ -124,7 +128,8 @@ fn descent_one_level_advances_on_created_entry() {
     );
 
     // Inject a probe response showing `bar` now exists.
-    let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
+    let foo = lookup_foo(&e);
+    let snap = dir_snap_with(foo, vec![("bar", EntryKind::Dir, 99)]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -135,7 +140,7 @@ fn descent_one_level_advances_on_created_entry() {
     );
 
     // Anchor materialized: descent state cleared; Seed burst started.
-    assert!(e.descent_state(pid).is_none());
+    assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
     let probes: Vec<_> = out
         .probe_ops
         .iter()
@@ -174,14 +179,14 @@ fn descent_two_levels_advances_progressively() {
     let pid = e.subs().get(sid).unwrap().profile;
 
     // First probe at /foo. Inject "bar" appears.
-    let descent = e.descent_state(pid).unwrap();
+    let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     let corr1 = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
         descent.remaining_components,
         vec![CompactString::from("bar"), CompactString::from("baz")]
     );
 
-    let snap1 = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
+    let snap1 = dir_snap_with(foo, vec![("bar", EntryKind::Dir, 1)]);
     let _out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -192,18 +197,21 @@ fn descent_two_levels_advances_progressively() {
     );
 
     // Now descent should be at /foo/bar with remaining=[baz].
-    let descent = e.descent_state(pid).expect("still pending");
+    let descent = e
+        .descent_state(ProbeOwner::Profile(pid))
+        .expect("still pending");
     assert_eq!(
         descent.remaining_components,
         vec![CompactString::from("baz")]
     );
+    let bar = e.tree().lookup(Some(foo), "bar").expect("bar materialized");
     let corr2 = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("fresh probe");
     assert_ne!(corr1, corr2, "fresh correlation per descent step");
 
     // Inject "baz" appears.
-    let snap2 = dir_snap_with(vec![("baz", EntryKind::Dir, 2)]);
+    let snap2 = dir_snap_with(bar, vec![("baz", EntryKind::Dir, 2)]);
     let _out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -214,7 +222,7 @@ fn descent_two_levels_advances_progressively() {
     );
 
     // Anchor materialized.
-    assert!(e.descent_state(pid).is_none());
+    assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
 }
 
 #[test]
@@ -223,7 +231,8 @@ fn descent_no_progress_keeps_pending() {
     let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
 
     // Snapshot with unrelated entries (no "bar").
-    let snap = dir_snap_with(vec![("other.c", EntryKind::File, 1)]);
+    let foo = lookup_foo(&e);
+    let snap = dir_snap_with(foo, vec![("other.c", EntryKind::File, 1)]);
     let _out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -234,7 +243,7 @@ fn descent_no_progress_keeps_pending() {
     );
 
     // Still pending; no new probe.
-    let descent = e.descent_state(pid).unwrap();
+    let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
         descent.remaining_components,
         vec![CompactString::from("bar")]
@@ -250,7 +259,8 @@ fn descent_event_at_prefix_emits_fresh_probe() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     // Drain the in-flight probe.
     let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
-    let snap = dir_snap_with(vec![("other.c", EntryKind::File, 1)]);
+    let foo = lookup_foo(&e);
+    let snap = dir_snap_with(foo, vec![("other.c", EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -263,7 +273,6 @@ fn descent_event_at_prefix_emits_fresh_probe() {
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_none());
 
     // Inject a StructureChanged at /foo (the prefix).
-    let foo = lookup_foo(&e);
     let out = e.step(
         Input::FsEvent {
             resource: foo,
@@ -325,7 +334,7 @@ fn descent_failed_retains_state() {
         .any(|d| matches!(d, Diagnostic::PendingPathProbeFailed { errno: 13, .. }));
     assert!(has_diag);
     // Still pending; no probe in flight.
-    let descent = e.descent_state(pid).unwrap();
+    let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
         descent.remaining_components,
         vec![CompactString::from("bar")]
@@ -341,7 +350,7 @@ fn descent_anchor_kind_set_from_entry() {
     let bar = e.tree().lookup(Some(foo), "bar").expect("scaffold exists");
 
     // Inject as a Dir.
-    let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
+    let snap = dir_snap_with(foo, vec![("bar", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -377,7 +386,8 @@ fn descent_materialization_caches_profile_kind() {
     // File-anchored materialisation can never re-introduce the
     // descendant-observation dispatch path by an unprobed-anchor
     // accident.
-    let snap = dir_snap_with(vec![("bar", EntryKind::File, 1)]);
+    let foo = lookup_foo(&e);
+    let snap = dir_snap_with(foo, vec![("bar", EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -426,7 +436,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
 
     // Profile registered; descent in flight at the FS-root.
     let descent = e
-        .descent_state(pid)
+        .descent_state(ProbeOwner::Profile(pid))
         .expect("absolute attach against empty Tree is pending");
     assert_eq!(descent.current_prefix, root);
     assert_eq!(
@@ -527,7 +537,7 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
     let pid = e.subs().get(sid).unwrap().profile;
 
     let root = e.tree().lookup(None, "/").unwrap();
-    let descent = e.descent_state(pid).unwrap();
+    let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(descent.current_prefix, root);
     assert_eq!(
         descent.remaining_components,
@@ -593,7 +603,8 @@ fn descent_probe_uses_descent_variant() {
 fn descent_materialization_sets_anchor_claim_held() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
-    let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
+    let foo = lookup_foo(&e);
+    let snap = dir_snap_with(foo, vec![("bar", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -700,7 +711,7 @@ fn descent_state_helper_returns_none_for_idle() {
         )
         .diagnostics;
     let _ = probe; // not asserted; the Vanished response drains the Seed burst to Idle
-    assert!(e.descent_state(pid).is_none());
+    assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
 }
 
 /// `Engine::descent_state` returns `None` for an Active Profile
@@ -728,7 +739,7 @@ fn descent_state_helper_returns_none_for_active() {
         e.profiles().get(pid).unwrap().state,
         specter_core::ProfileState::Active(_)
     ));
-    assert!(e.descent_state(pid).is_none());
+    assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
 }
 
 /// `Engine::descent_state` returns `Some(d)` for a Pending Profile,
@@ -736,7 +747,9 @@ fn descent_state_helper_returns_none_for_active() {
 #[test]
 fn descent_state_helper_returns_some_for_pending() {
     let (e, _sid, pid) = setup_pending_one_level();
-    let descent = e.descent_state(pid).expect("Pending state populated");
+    let descent = e
+        .descent_state(ProbeOwner::Profile(pid))
+        .expect("Pending state populated");
     assert_eq!(
         descent.remaining_components,
         vec![CompactString::from("bar")]
@@ -750,7 +763,7 @@ fn descent_state_helper_returns_some_for_pending() {
 fn descent_state_helper_handles_unknown_profile() {
     let e = Engine::new();
     let bogus = specter_core::ProfileId::default();
-    assert!(e.descent_state(bogus).is_none());
+    assert!(e.descent_state(ProbeOwner::Profile(bogus)).is_none());
 }
 
 /// `ProfileState::Pending` and `ProfileState::Active` are mutually
@@ -769,7 +782,8 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
         ProfileState::Pending(_)
     ));
     let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
-    let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
+    let foo = lookup_foo(&e);
+    let snap = dir_snap_with(foo, vec![("bar", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -785,7 +799,7 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
         ProfileState::Active(_)
     ));
     // descent_state agrees: no descent.
-    assert!(e.descent_state(pid).is_none());
+    assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
 }
 
 /// `reap_profile`'s trichotomy `debug_assert!` is reachable from the
@@ -856,7 +870,7 @@ fn detach_sub_pending_profile_reaps_immediately() {
     let (mut e, sid, pid) = setup_pending_one_level();
     let foo = lookup_foo(&e);
     // Pre-condition: Pending; descent contributes +1 to /foo.
-    assert!(e.descent_state(pid).is_some());
+    assert!(e.descent_state(ProbeOwner::Profile(pid)).is_some());
     assert_eq!(e.tree().get(foo).unwrap().watch_demand, 1);
 
     let out = e.detach_sub(sid, Instant::now());
@@ -885,7 +899,8 @@ fn detach_sub_pending_profile_reaps_immediately() {
 fn on_probe_response_routes_descent_via_state_match() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
-    let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
+    let foo = lookup_foo(&e);
+    let snap = dir_snap_with(foo, vec![("bar", EntryKind::Dir, 99)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -896,7 +911,10 @@ fn on_probe_response_routes_descent_via_state_match() {
     );
     // Descent route fired: Pending → Idle → Active(Seed). The Profile
     // is no longer Pending.
-    assert!(e.descent_state(pid).is_none(), "descent route ran");
+    assert!(
+        e.descent_state(ProbeOwner::Profile(pid)).is_none(),
+        "descent route ran"
+    );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
         specter_core::ProfileState::Active(_)
@@ -933,7 +951,7 @@ fn on_watch_op_rejected_clears_pending_state() {
         e.profiles().get(pid).unwrap().state,
         ProfileState::Idle
     ));
-    assert!(e.descent_state(pid).is_none());
+    assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
 }
 
 // Descent empty-remaining defensive arm
@@ -953,7 +971,10 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
     let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
 
     // Snapshot pre-state.
-    let prefix = e.descent_state(pid).unwrap().current_prefix;
+    let prefix = e
+        .descent_state(ProbeOwner::Profile(pid))
+        .unwrap()
+        .current_prefix;
     assert_eq!(prefix, foo);
     assert_eq!(
         e.tree().get(foo).unwrap().watch_demand,
@@ -973,7 +994,7 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
     });
 
     // Dispatch the probe response — descent_ok hits the defensive arm.
-    let snap = dir_snap_with(vec![]);
+    let snap = dir_snap_with(prefix, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -1092,7 +1113,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     let corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("descent probe in flight");
-    let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
+    let snap = dir_snap_with(foo, vec![("bar", EntryKind::Dir, 99)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
