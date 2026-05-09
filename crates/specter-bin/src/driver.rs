@@ -450,8 +450,9 @@ impl EngineDriver {
 /// errors). `EffectCompleteForUnknownSub` is `error` (variant docstring
 /// marks it as a bug or hot-reload race the operator should see);
 /// `DetachUnknownSub` is `warn` — a benign hot-reload race rather than a
-/// bug. `ReapPendingResolved` is `info` (informational; the late reap
-/// completed).
+/// bug. `ReapPendingResolved` and `ReapPendingCancelled` are `info`
+/// (informational; the late reap completed or was pre-empted by a
+/// revival).
 pub fn log_diagnostic(d: &Diagnostic) {
     match d {
         Diagnostic::StaleProbeResponse {
@@ -526,6 +527,10 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?prefix,
             errno,
             "pending-path descent probe Failed",
+        ),
+        Diagnostic::ReapPendingCancelled { profile } => tracing::info!(
+            ?profile,
+            "reap-pending Profile revived (fresh attach pre-empted deferred reap)",
         ),
         Diagnostic::ReapPendingResolved { profile } => tracing::info!(
             ?profile,

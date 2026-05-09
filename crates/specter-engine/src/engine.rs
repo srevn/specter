@@ -119,6 +119,14 @@ impl Engine {
     /// anchor, and starts a `Burst { intent: Seed, phase: Verifying }`
     /// to establish the initial baseline.
     ///
+    /// **Zombie revival.** When the matched Profile is in deferred-reap
+    /// state (`reap_pending == true`, set by `detach_sub_inner` when the
+    /// last Sub detached during an Active burst), the attach revives it:
+    /// the flag clears, [`Diagnostic::ReapPendingCancelled`] emits, and
+    /// the cleanup the deferred detach skipped
+    /// (`recompute_profile_settle`, dead-id `fired_subs` purge) runs. The
+    /// in-flight burst continues to completion under the new Sub set.
+    ///
     /// Returns the minted [`SubId`] and a sorted [`StepOutput`]. On a
     /// path-rejection short-circuit (see invariants below), returns
     /// `SubId::default()` plus a sorted [`StepOutput`] carrying a
@@ -202,8 +210,17 @@ impl Engine {
         }
 
         let cfg_hash = compute_config_hash(&req.config, req.max_settle, req.events);
-        let profile_id = if let Some(pid) = self.profiles.find(anchor, cfg_hash) {
-            pid
+        // Find-or-create. The branch decision is the structural source of
+        // truth for "is this Profile newly minted in this attach call?" —
+        // every derived predicate (`sub_refcount == 0`,
+        // `anchor_claim == None`) is ambiguous against a zombie Profile
+        // awaiting deferred reap (`reap_pending == true`, `anchor_claim`
+        // still `Held`). Capturing the decision here makes the
+        // fresh-Profile branch structurally unreachable for any existing
+        // Profile.
+        let (profile_id, is_fresh_profile) = if let Some(pid) = self.profiles.find(anchor, cfg_hash)
+        {
+            (pid, false)
         } else {
             let p = Profile::new(
                 anchor,
@@ -225,13 +242,8 @@ impl Engine {
             if let Some(p) = self.profiles.get_mut(pid) {
                 p.kind = anchor_kind;
             }
-            pid
+            (pid, true)
         };
-
-        let is_fresh_profile = self
-            .profiles
-            .get(profile_id)
-            .is_some_and(|p| p.sub_refcount == 0);
 
         // Insert the Sub.
         let sub_id = self.subs.insert(|sid| {
@@ -253,17 +265,47 @@ impl Engine {
         }
 
         if !is_fresh_profile {
-            // Existing Profile: recompute settle. `min(existing,
-            // new_sub.settle)` is the cheapest correct update — the Sub
-            // joins an existing burst lifecycle (or shares the Idle
-            // baseline). No fresh Watch / Probe / parent-edge work.
+            // Existing-Profile branch. Two semantic sub-cases:
+            //
+            //   (a) Normal join: the Profile holds live Subs; `Profile.settle`
+            //       already aggregates min over them. O(1) min-update.
+            //   (b) Zombie revival: the Profile lost its last Sub during an
+            //       Active burst, and `detach_sub_inner` set
+            //       `reap_pending = true` to defer reap to
+            //       `finish_burst_to_idle`. The deferred-reap branch
+            //       deliberately skipped the cleanup the refcount>0 path
+            //       performs (`fired_subs` purge,
+            //       `recompute_profile_settle`). The fresh attach revives
+            //       the Profile; we now run that cleanup symmetrically and
+            //       clear `reap_pending` so the burst doesn't reap a
+            //       Profile that now holds a live Sub.
             //
             // The events mask folds into `config_hash`, so a Sub joining
             // an existing Profile shares its mask by construction —
             // `events_union` and `has_per_file_fds` are invariant for the
             // Profile's lifetime. No retroactive per-leaf `watch_demand`
             // bump is needed.
-            if let Some(p) = self.profiles.get_mut(profile_id)
+            let was_zombie = self
+                .profiles
+                .get(profile_id)
+                .is_some_and(|p| p.reap_pending);
+            if was_zombie {
+                if let Some(p) = self.profiles.get_mut(profile_id) {
+                    p.reap_pending = false;
+                }
+                out.diagnostics.push(Diagnostic::ReapPendingCancelled {
+                    profile: profile_id,
+                });
+                // Recompute over the live Sub set (just the attaching Sub
+                // on first revival; further attaches in the same step
+                // take the normal-join arm because `reap_pending` is
+                // already cleared).
+                self.recompute_profile_settle(profile_id);
+                // Drop dead-id `fired_subs` entries the deferred-reap
+                // detach skipped. Functionally inert (`emit_effects`
+                // iterates live SubIds), but a memory hygiene call.
+                self.purge_dead_fired_subs(profile_id);
+            } else if let Some(p) = self.profiles.get_mut(profile_id)
                 && req.settle < p.settle
             {
                 p.settle = req.settle;
@@ -510,6 +552,11 @@ impl Engine {
                 self.reap_profile(profile_id, out);
             }
             Some(DetachLifecycle::DeferToBurstEnd) => {
+                // `fired_subs` purge and `recompute_profile_settle` are
+                // deliberately skipped — the Profile is about to drop on
+                // burst end, so the cleanup would be wasted. A revival
+                // via fresh `attach_sub_inner` (zombie-revival branch)
+                // un-defers the reap and runs the cleanup symmetrically.
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.reap_pending = true;
                 }
@@ -652,6 +699,21 @@ impl Engine {
             .min();
         if let (Some(s), Some(p)) = (new_min, self.profiles.get_mut(profile_id)) {
             p.settle = s;
+        }
+    }
+
+    /// Drop `Profile.fired_subs` entries keyed by `SubId`s no longer in
+    /// the registry. Called from `attach_sub_inner`'s zombie-revival
+    /// branch — `detach_sub_inner`'s deferred-reap path skips per-Sub
+    /// purges (the Profile was about to drop), but a revival un-defers
+    /// the reap and the leftover keys become stale-id residue.
+    /// O(fired_subs × live_subs); both terms are small in v1.
+    fn purge_dead_fired_subs(&mut self, profile_id: ProfileId) {
+        let live: Vec<SubId> = self.subs.at(profile_id).to_vec();
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.fired_subs.retain(|k| match k {
+                DedupKey::Subtree { sub, .. } | DedupKey::PerFile { sub, .. } => live.contains(sub),
+            });
         }
     }
 
@@ -1454,6 +1516,166 @@ mod tests {
         assert!(
             out2.watch_ops.is_empty(),
             "no Watch op emitted on second call"
+        );
+    }
+
+    // ===== Zombie revival =====
+
+    fn revival_attach_req(anchor: ResourceId, name: &str, settle: Duration) -> SubAttachRequest {
+        SubAttachRequest::for_resource(
+            name.into(),
+            anchor,
+            ScanConfig::builder().build(),
+            Duration::from_secs(6),
+            settle,
+            specter_core::CommandTemplate::new(std::iter::empty()),
+            specter_core::EffectScope::SubtreeRoot,
+            ClassSet::EMPTY,
+            false,
+        )
+    }
+
+    #[test]
+    fn attach_revives_reap_pending_profile() {
+        // Detach A's Sub mid-Active to set `reap_pending = true`, then
+        // re-attach B at the same `(anchor, config_hash)`. The revival
+        // path must:
+        //   - reuse A's Profile (same ProfileId),
+        //   - leave the anchor's watch_demand at 1 (no double-bump),
+        //   - emit no spurious Watch op for the anchor,
+        //   - clear `reap_pending`,
+        //   - keep `anchor_claim` Held,
+        //   - recompute `Profile.settle` to B's settle (NOT min-update —
+        //     A is gone, B is the only live Sub),
+        //   - drop A's stale-id `fired_subs` entry,
+        //   - emit `Diagnostic::ReapPendingCancelled`.
+        let mut e = Engine::new();
+        let r = e
+            .tree
+            .ensure(None, "anchor", specter_core::ResourceRole::User);
+        e.tree.set_kind(r, specter_core::ResourceKind::Dir);
+        let now = Instant::now();
+
+        let (sid_a, _) = e.attach_sub(revival_attach_req(r, "A", Duration::from_millis(50)), now);
+        let pid = e.subs().get(sid_a).unwrap().profile;
+        let watch_demand_after_attach = e.tree.get(r).unwrap().watch_demand;
+        assert_eq!(watch_demand_after_attach, 1, "anchor watch_demand from A");
+
+        // Pre-populate a `fired_subs` entry keyed by A so we can verify
+        // the revival's dead-id purge.
+        e.profiles
+            .get_mut(pid)
+            .unwrap()
+            .fired_subs
+            .insert(DedupKey::Subtree {
+                sub: sid_a,
+                profile: pid,
+            });
+
+        // Detach A. Profile is Active → reap_pending=true; anchor watch
+        // unchanged; `fired_subs` survives the deferred-reap branch.
+        let _ = e.detach_sub(sid_a, now);
+        assert!(e.profiles().get(pid).unwrap().reap_pending);
+        assert_eq!(e.tree.get(r).unwrap().watch_demand, 1);
+        assert_eq!(e.profiles().get(pid).unwrap().fired_subs.len(), 1);
+
+        // Revive with B (settle=200ms; deliberately larger than A's stale
+        // 50ms so the min-update would be visibly wrong).
+        let (sid_b, attach_out) =
+            e.attach_sub(revival_attach_req(r, "B", Duration::from_millis(200)), now);
+        let pid_b = e.subs().get(sid_b).unwrap().profile;
+
+        assert_eq!(pid_b, pid, "B reuses A's Profile");
+        assert_eq!(
+            e.tree.get(r).unwrap().watch_demand,
+            1,
+            "anchor watch_demand unchanged on revival (no double-bump)",
+        );
+        let p = e.profiles().get(pid).unwrap();
+        assert!(!p.reap_pending, "reap_pending cleared");
+        assert_eq!(p.anchor_claim, AnchorClaim::Held, "anchor_claim stays Held");
+        assert_eq!(
+            p.settle,
+            Duration::from_millis(200),
+            "settle recomputed to B's (only live Sub) — min-update would yield 50ms",
+        );
+        assert!(
+            !p.fired_subs.iter().any(|k| matches!(
+                k,
+                DedupKey::Subtree { sub, .. } | DedupKey::PerFile { sub, .. } if *sub == sid_a,
+            )),
+            "A's dead-id fired_subs entry purged on revival",
+        );
+        let anchor_watch_ops: Vec<_> = attach_out
+            .watch_ops
+            .iter()
+            .filter(|op| matches!(op, WatchOp::Watch { resource, .. } if *resource == r))
+            .collect();
+        assert!(
+            anchor_watch_ops.is_empty(),
+            "no spurious Watch op for the anchor on revival; got {anchor_watch_ops:?}",
+        );
+        assert!(
+            attach_out.diagnostics.iter().any(|d| matches!(
+                d,
+                Diagnostic::ReapPendingCancelled { profile } if *profile == pid,
+            )),
+            "ReapPendingCancelled emitted on revival",
+        );
+    }
+
+    #[test]
+    fn finish_burst_to_idle_does_not_reap_revived_profile() {
+        // After revival, the in-flight burst's lifecycle continues under
+        // the new Sub set. When the probe responds and the burst ends,
+        // `finish_burst_to_idle` must NOT call `reap_profile` (the
+        // revival cleared `reap_pending`).
+        let mut e = Engine::new();
+        let r = e
+            .tree
+            .ensure(None, "anchor", specter_core::ResourceRole::User);
+        e.tree.set_kind(r, specter_core::ResourceKind::Dir);
+        let now = Instant::now();
+
+        let (sid_a, attach_out) =
+            e.attach_sub(revival_attach_req(r, "A", Duration::from_millis(50)), now);
+        let pid = e.subs().get(sid_a).unwrap().profile;
+        let seed_corr = attach_out
+            .probe_ops
+            .iter()
+            .find_map(|op| match op {
+                specter_core::ProbeOp::Probe { request } => Some(request.correlation()),
+                _ => None,
+            })
+            .expect("attach emitted Probe");
+
+        e.detach_sub(sid_a, now);
+        let (sid_b, _) = e.attach_sub(revival_attach_req(r, "B", Duration::from_millis(50)), now);
+
+        // Drive the in-flight Seed-Verifying burst to a terminal Vanished.
+        // `dispatch_seed_vanished → finalize_anchor_lost → finish_burst_to_idle`
+        // would reap if `reap_pending` were still set; the revival cleared
+        // it, so the Profile transitions to Idle (anchor lost) and stays.
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                profile: pid,
+                correlation: seed_corr,
+                outcome: ProbeOutcome::Vanished,
+            }),
+            now,
+        );
+
+        assert!(
+            e.profiles().get(pid).is_some(),
+            "Profile alive (revival pre-empted reap)",
+        );
+        assert!(e.subs().get(sid_b).is_some(), "B still attached");
+        assert!(
+            !out.diagnostics.iter().any(|d| matches!(
+                d,
+                Diagnostic::ReapPendingResolved { profile } if *profile == pid,
+            )),
+            "ReapPendingResolved must NOT emit for a revived Profile",
         );
     }
 }

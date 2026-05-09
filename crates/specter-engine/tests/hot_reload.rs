@@ -272,6 +272,110 @@ fn config_diff_mid_burst_remove_defers_reap() {
 }
 
 #[test]
+fn config_diff_mid_burst_modify_revives_profile() {
+    // Engine has Sub A; Standard burst in flight; ConfigDiff modifies A
+    // to B with the SAME `config_hash` (different command, same anchor /
+    // max_settle / events). The internal `detach_sub_inner` →
+    // `attach_sub_inner` sequence triggers the zombie-revival branch.
+    // Production path that the user-API tests in `engine.rs` cannot
+    // exercise on their own.
+    let mut e = Engine::new();
+    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    e.tree_mut().set_kind(r, ResourceKind::Dir);
+    let now = Instant::now();
+    let cfg = ScanConfig::builder().build();
+    let (sid_a, attach_out) = e.attach_sub(
+        SubAttachRequest::for_resource(
+            "A".into(),
+            r,
+            cfg.clone(),
+            MAX_SETTLE,
+            SETTLE,
+            empty_command(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        ),
+        now,
+    );
+    let pid = e.subs().get(sid_a).unwrap().profile;
+    let seed_corr = attach_out
+        .probe_ops
+        .iter()
+        .find_map(|op| match op {
+            ProbeOp::Probe { request } => Some(request.correlation()),
+            _ => None,
+        })
+        .unwrap();
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            profile: pid,
+            correlation: seed_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+        }),
+        now,
+    );
+
+    // Drive a Standard burst.
+    let t1 = now + Duration::from_millis(10);
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    let watch_demand_before = e.tree().get(r).unwrap().watch_demand;
+
+    // Mid-burst ConfigDiff: modify A → B (same config_hash; different
+    // name + command). Internally: detach A (refcount→0, reap_pending),
+    // then attach B (zombie revival).
+    let mut diff = SubRegistryDiff::default();
+    diff.modified.push((
+        sid_a,
+        SubAttachRequest::for_resource(
+            "B".into(),
+            r,
+            cfg,
+            MAX_SETTLE,
+            SETTLE,
+            empty_command(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        ),
+    ));
+    let out = e.step(Input::ConfigDiff(diff), t1);
+
+    let sid_b = e.subs().find_by_name("B").expect("B attached");
+    let pid_b = e.subs().get(sid_b).unwrap().profile;
+    assert_eq!(pid_b, pid, "B revives A's Profile (same config_hash)");
+    let p = e.profiles().get(pid).unwrap();
+    assert!(!p.reap_pending, "reap_pending cleared by revival");
+    assert_eq!(p.sub_refcount, 1, "exactly one live Sub (B)");
+    assert_eq!(
+        e.tree().get(r).unwrap().watch_demand,
+        watch_demand_before,
+        "anchor watch_demand unchanged on hot-reload modify (no double-bump)",
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::ReapPendingCancelled { profile } if *profile == pid)),
+        "ReapPendingCancelled emitted",
+    );
+    let new_probes = out
+        .probe_ops
+        .iter()
+        .filter(|op| matches!(op, ProbeOp::Probe { .. }))
+        .count();
+    assert_eq!(
+        new_probes, 0,
+        "no fresh Probe — existing Standard burst's settle timer still owns the lifecycle",
+    );
+}
+
+#[test]
 fn effect_complete_after_detach_drops_silently() {
     // Engine has Sub on Idle Profile; an Effect was previously emitted
     // (we mock the EffectComplete path manually). Detach the Sub; then

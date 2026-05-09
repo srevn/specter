@@ -138,6 +138,12 @@ pub enum Diagnostic {
         prefix: ResourceId,
         errno: i32,
     },
+    /// `Profile.reap_pending` was set, then a fresh `attach_sub` arrived
+    /// at the same `(resource, config_hash)` before the burst completed —
+    /// the deferred reap is cancelled and the Profile remains alive under
+    /// the new Sub set. Informational — not an error. Pairs with
+    /// [`Self::ReapPendingResolved`] (the reap actually ran).
+    ReapPendingCancelled { profile: ProfileId },
     /// `Profile.reap_pending` was set; the burst completed and the Profile
     /// has been reaped. Informational — not an error.
     ReapPendingResolved { profile: ProfileId },
