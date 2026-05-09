@@ -312,6 +312,71 @@ impl Clone for Box<dyn WakeHandle> {
     }
 }
 
+/// Single-threaded watcher for the daemon's own config file.
+///
+/// Distinct from [`FsWatcher`]: that trait is the engine's per-Resource
+/// surface, with `watch` / `unwatch` / `suppress` mutators and a vector
+/// drain. The config watcher has exactly one watch target (the running
+/// process's config path) and no engine vocabulary at the boundary —
+/// just "kernel said something happened" or "wake / deadline arrived."
+///
+/// One thread owns the watcher and calls [`wait`](Self::wait) in a loop;
+/// the bin's wrapper thread translates `Ok(true)` into a pulse on the
+/// `config_event` channel, leaving the lstat-vs-meta filter and settle
+/// debounce to the engine driver. The wake handle ([`WakeHandle`]) is
+/// the only cross-thread surface — same discipline as [`FsWatcher`].
+///
+/// **Why no engine vocabulary?** The kqueue parent-dir filter cannot
+/// see basename, so every dir-contents change in the config's parent
+/// becomes a pulse — the watcher cannot pre-classify "this was about
+/// the config file" without a syscall. The driver's lstat-vs-`FileMeta`
+/// filter is the natural place to suppress noise *and* the place that
+/// owns the prior-meta-known state, so the watcher stays a minimal
+/// kernel-event pump.
+///
+/// # Bin loop pattern
+///
+/// ```ignore
+/// loop {
+///     if shutdown_flag.load(SeqCst) { return; }
+///     match watcher.wait(None) {
+///         Ok(true)  => { let _ = config_event_tx.try_send(()); }
+///         Ok(false) => { /* wake; loop and re-check shutdown */ }
+///         Err(e)    => { tracing::error!(?e, "config-watcher exit"); return; }
+///     }
+/// }
+/// ```
+pub trait ConfigWatcher: Send {
+    /// Block until: (a) a kernel event fires on the config file or its
+    /// parent directory (returns `Ok(true)`), (b) `deadline` elapses
+    /// (returns `Ok(false)`), (c) a wake fires (returns `Ok(false)`),
+    /// or (d) a syscall error occurs (returns `Err`).
+    ///
+    /// Production passes `None` — block forever; the watcher has no
+    /// timers of its own. The deadline is a kernel-level pass-through
+    /// (`kevent` / `epoll_wait` already accept the timespec); tests use
+    /// `Some(deadline)` as a watchdog without spawning a wake-thread.
+    /// Settle and lstat-vs-meta filtering are driver-side concerns
+    /// regardless.
+    ///
+    /// `Ok(true)` is a *raw* pulse — the watcher doesn't decide whether
+    /// the change was substantive. Drivers debounce and lstat-filter.
+    ///
+    /// `EINTR` is retried internally. Other syscall errors propagate;
+    /// the bin's wrapper logs at `error!` and exits the watcher thread.
+    /// SIGHUP-only operation continues to work.
+    fn wait(&mut self, deadline: Option<Instant>) -> io::Result<bool>;
+
+    /// Capture a wake handle for cross-thread interruption of an
+    /// in-flight `wait`. Cloneable via [`WakeHandle::clone_box`];
+    /// concurrent wakes coalesce in the kernel. Idempotent.
+    ///
+    /// Reuses [`WakeHandle`] so the bin's shutdown path can wake either
+    /// the engine watcher or the config watcher through one trait
+    /// object — uniform discipline.
+    fn wake_handle(&self) -> Box<dyn WakeHandle>;
+}
+
 /// Multi-threaded probe worker pool.
 ///
 /// `submit` is fire-and-forget; the response lands on the bin's
@@ -343,7 +408,7 @@ pub trait Prober: Send + Sync {
 mod kqueue;
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-pub use kqueue::{KqueueWakeHandle, KqueueWatcher};
+pub use kqueue::{KqueueConfigWatcher, KqueueWakeHandle, KqueueWatcher};
 
 #[cfg(target_os = "linux")]
 mod inotify;
@@ -385,4 +450,30 @@ pub type DefaultWatcher = InotifyWatcher;
 /// the bin keeps its own clone for hot-reload writes.
 pub fn default_watcher(drain_window: DrainWindow) -> io::Result<DefaultWatcher> {
     DefaultWatcher::new(drain_window)
+}
+
+/// Concrete platform config-watcher type — chosen at compile time so
+/// the bin holds a typed value (no `Box<dyn>` in the auto-reload loop).
+///
+/// One alias per backend, each `cfg`-gated to its target. Phase 5 ships
+/// the kqueue backend; the Linux variant lands in Phase 6 of the
+/// auto-reload work.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub type DefaultConfigWatcher = KqueueConfigWatcher;
+
+/// Construct the platform's default config-watcher for the supplied
+/// path.
+///
+/// Returns the same concrete type as [`DefaultConfigWatcher`] — no
+/// trait-object overhead. The watcher canonicalises `path` once at
+/// construction; symlink retarget at the leaf (or any path-component
+/// move) is a documented restart-required limitation.
+///
+/// On error (`canonicalize` failure / parent dir unreadable / kqueue
+/// init failure), the bin warn-logs and continues without auto-reload —
+/// SIGHUP still works. See plan §7's edge-case matrix for the full
+/// failure shape.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub fn default_config_watcher(path: &Path) -> io::Result<DefaultConfigWatcher> {
+    DefaultConfigWatcher::new(path)
 }

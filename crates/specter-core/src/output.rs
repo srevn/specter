@@ -1,7 +1,6 @@
 //! `StepOutput` and its determinism contract.
 //!
-//! Field order and `SmallVec` inline capacities mirror the spec. The
-//! sort guarantee is owned by the type itself: every consumer that
+//! The sort guarantee is owned by the type itself: every consumer that
 //! returns `StepOutput` calls [`StepOutput::sort_for_emission`] before
 //! handing it back, so callers always see sorted slices. `SmallVec`
 //! tracks inline-slot validity via `MaybeUninit` — uninitialized slots

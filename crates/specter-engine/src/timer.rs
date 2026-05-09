@@ -45,7 +45,7 @@ impl PartialOrd for TimerEntry {
 /// [`pop_top`](Self::pop_top) returns it; the engine then validates
 /// against the owning Profile's burst and silently drops stale entries.
 /// `O(log n)` removal would force a slot map alongside the heap; the
-/// spec's lazy form is cheaper for the typical "schedule, fire,
+/// lazy form is cheaper for the typical "schedule, fire,
 /// occasionally cancel" workload.
 ///
 /// Sizing: live count is at most two per Active Profile —

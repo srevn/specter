@@ -9,7 +9,7 @@
 //! suppress edges from the burst lifecycle.
 //!
 //! **Empty-prior synthesis.** When neither `current` nor `baseline` is set —
-//! the Seed burst's first probe — the spec's pseudocode would skip the loop
+//! the Seed burst's first probe — a naive diff loop would skip the body
 //! and leave descendants Unwatched. We synthesize a `Diff` whose `created`
 //! list is the entire `snapshot.entries`; the same code path then runs
 //! uniformly. Equivalent to diffing against an empty `TreeSnapshot`, no extra

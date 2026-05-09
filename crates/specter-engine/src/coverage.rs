@@ -118,9 +118,9 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
 /// deterministic tie-break. Returns `None` for root Profiles whose
 /// ancestor chain holds no covering Profile.
 ///
-/// "Nearest ancestor *Profile*, not Resource" is the easy mistake
-/// from the spec: a Resource ancestor with no Profile is skipped; the
-/// walk continues to the next Resource ancestor.
+/// "Nearest ancestor *Profile*, not Resource" is the easy mistake:
+/// a Resource ancestor with no Profile is skipped; the walk
+/// continues to the next Resource ancestor.
 ///
 /// Coverage-domain by nature: the derivation is purely a `(tree,
 /// profiles, child)` function of the `covers` predicate, with no
