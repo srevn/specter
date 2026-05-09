@@ -271,46 +271,13 @@ impl EngineDriver {
     ///   - `obs_handle.reopen_file()` fires unconditionally so logrotate
     ///     `copytruncate`-style rotation works without a config diff.
     fn handle_reload(&mut self, now: Instant) {
-        let new_config = match Config::from_path(&self.config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    path = %self.config_path.display(),
-                    "config reload failed; keeping running config",
-                );
-                return;
-            }
+        let Some(new_config) = self.read_and_parse_config() else {
+            return;
         };
-
-        // Resolve the new [log] block with CLI overrides (CLI wins,
-        // matching startup precedence). Validation may fail (e.g., a
-        // freshly-edited config now says destination = "file" without a
-        // path); on failure we log and keep the old log state.
-        let new_log_resolved = match new_config.log.clone().merge_cli(
-            self.cli_log_overrides.level,
-            self.cli_log_overrides.destination,
-            self.cli_log_overrides.path.clone(),
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "log reload failed; keeping running log config",
-                );
-                // Don't abandon the watch reload below — the [log]
-                // failure is independent.
-                self.loader.current_log.clone()
-            }
-        };
+        let new_log_resolved = self.parse_and_resolve_log(&new_config);
         self.apply_log_reload(&new_log_resolved);
 
-        let diff = specter_config::diff(
-            &self.loader.current_config,
-            &new_config,
-            &self.loader.ids,
-            &self.loader.promoter_ids,
-        );
+        let diff = self.compute_watch_diff(&new_config);
         let no_sub_changes = diff.subs.added.is_empty()
             && diff.subs.removed.is_empty()
             && diff.subs.modified.is_empty();
@@ -351,20 +318,7 @@ impl EngineDriver {
 
         self.loader.current_config = new_config;
         self.loader.current_log = new_log_resolved;
-        // Recompute the watcher's deferred-drain window from the
-        // freshly-applied config and rotate atomically. The watcher
-        // thread reads the new value on its next `poll_until`
-        // iteration; at most one drain straddles the rotation.
-        let new_window = self.loader.derive_drain_window();
-        let old_window = self.drain_window.get();
-        if new_window != old_window {
-            self.drain_window.set(new_window);
-            tracing::info!(
-                old_ms = old_window.as_millis(),
-                new_ms = new_window.as_millis(),
-                "drain_window updated via SIGHUP",
-            );
-        }
+        self.apply_drain_window_rotation();
         tracing::info!(
             added = added_n,
             removed = removed_n,
@@ -375,6 +329,82 @@ impl EngineDriver {
             "config reload applied",
         );
         self.forward(out);
+    }
+
+    /// Read + parse the on-disk config. Returns `None` on I/O / parse
+    /// failure (with an `error!` log); the caller keeps the running
+    /// config rather than aborting.
+    ///
+    /// Sole I/O surface for the reload pipeline — both the SIGHUP path
+    /// and the file-watch path (landing in later phases) call here so
+    /// the failure-handling discipline lives in one place.
+    pub(crate) fn read_and_parse_config(&self) -> Option<Config> {
+        match Config::from_path(&self.config_path) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    path = %self.config_path.display(),
+                    "config reload failed; keeping running config",
+                );
+                None
+            }
+        }
+    }
+
+    /// Resolve `new_config.log` with CLI overrides re-applied (CLI
+    /// wins, matching startup precedence). On validation failure
+    /// (e.g., a freshly-edited config sets `destination = "file"`
+    /// without a `path`), log the error and return the running log
+    /// snapshot so the watch-side reload can still proceed
+    /// independently.
+    pub(crate) fn parse_and_resolve_log(&self, new_config: &Config) -> specter_config::LogConfig {
+        match new_config.log.clone().merge_cli(
+            self.cli_log_overrides.level,
+            self.cli_log_overrides.destination,
+            self.cli_log_overrides.path.clone(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "log reload failed; keeping running log config",
+                );
+                self.loader.current_log.clone()
+            }
+        }
+    }
+
+    /// Compute the diff between the running and freshly-parsed config.
+    /// Pure delegation to [`specter_config::diff`] threaded through
+    /// the loader's live id maps.
+    pub(crate) fn compute_watch_diff(
+        &self,
+        new_config: &Config,
+    ) -> specter_core::WatchRegistryDiff {
+        specter_config::diff(
+            &self.loader.current_config,
+            new_config,
+            &self.loader.ids,
+            &self.loader.promoter_ids,
+        )
+    }
+
+    /// Recompute the watcher's deferred-drain window from the loader's
+    /// (already-rotated) `current_config` and rotate the cross-thread
+    /// handle if the value changed. The watcher thread observes the
+    /// new value on its next `poll_until` iteration.
+    pub(crate) fn apply_drain_window_rotation(&self) {
+        let new_window = self.loader.derive_drain_window();
+        let old_window = self.drain_window.get();
+        if new_window != old_window {
+            self.drain_window.set(new_window);
+            tracing::info!(
+                old_ms = old_window.as_millis(),
+                new_ms = new_window.as_millis(),
+                "drain_window updated",
+            );
+        }
     }
 
     /// Apply lifecycle diagnostics emitted by an `Input::ConfigDiff`
@@ -537,11 +567,11 @@ impl EngineDriver {
 
 /// Map a [`Diagnostic`] to a tracing event.
 ///
-/// Most variants are `warn` (drops + race conditions are warnings, not
-/// errors). `EffectCompleteForUnknownSub` is `error` (variant docstring
-/// marks it as a bug or hot-reload race the operator should see);
-/// `DetachUnknownSub` is `warn` — a benign hot-reload race rather than a
-/// bug. `ReapPendingResolved` and `ReapPendingCancelled` are `info`
+/// Most variants are `warn` (drops + race conditions). With auto-reload
+/// landed, `EffectCompleteForUnknownSub` is `warn` too — the auto-reload
+/// path makes the detach-during-effect race routine; engine bugs surface
+/// via test assertions on the `Diagnostic::` variant rather than via log
+/// severity. `ReapPendingResolved` and `ReapPendingCancelled` are `info`
 /// (informational; the late reap completed or was pre-empted by a
 /// revival).
 pub fn log_diagnostic(d: &Diagnostic) {
@@ -557,9 +587,9 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?profile,
             "effect_complete arrived outside Awaiting (gate-deadline force-transition or anchor-loss); dropped",
         ),
-        Diagnostic::EffectCompleteForUnknownSub { sub } => tracing::error!(
+        Diagnostic::EffectCompleteForUnknownSub { sub } => tracing::warn!(
             ?sub,
-            "effect_complete for unknown Sub — engine bug or hot-reload race",
+            "effect_complete for unknown Sub (hot-reload race or engine bug; dropped)",
         ),
         Diagnostic::DetachUnknownSub { sub } => tracing::warn!(
             ?sub,
@@ -1624,6 +1654,35 @@ mod tests {
             loader.promoter_ids.is_empty(),
             "no PromoterAttached emitted; promoter_ids untouched",
         );
+    }
+
+    /// `read_and_parse_config` on a valid file returns `Some(Config)`
+    /// with the parsed `[[watch]]` blocks populated. Pins the helper's
+    /// happy-path contract — the SIGHUP path and the auto-reload path
+    /// (landing in later phases) both rely on this signature.
+    #[test]
+    fn read_and_parse_config_returns_some_on_valid_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("specter.toml");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                r#"
+[[watch]]
+name    = "build"
+path    = "{}"
+command = ["true"]
+"#,
+                tmp.path().display(),
+            ),
+        )
+        .unwrap();
+        let config = Config::from_str("").expect("empty config parses");
+        let rig = rig_for(config, cfg_path);
+        let parsed = rig.driver.read_and_parse_config();
+        let parsed = parsed.expect("valid file parses to Some");
+        assert_eq!(parsed.watches.len(), 1);
+        assert_eq!(parsed.watches[0].name, "build");
     }
 
     /// `PromoterReaped` clears the matching id from
