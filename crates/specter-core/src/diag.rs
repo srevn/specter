@@ -4,10 +4,12 @@
 //! grows phase-by-phase as new drop paths land. Each variant is light-weight
 //! (a few small fields) and carries enough context to log meaningfully.
 
-use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
+use crate::ids::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
 use crate::input::{FsEvent, OverflowScope};
 use crate::op::{ProbeCorrelation, ProbeOwner, WatchFailure};
 use crate::profile::BurstIntent;
+use crate::resource::ResourceKind;
+use compact_str::CompactString;
 use std::path::PathBuf;
 
 /// Which Profile-side claim was the subject of a [`Diagnostic::ProfileClaimPurged`]
@@ -261,4 +263,71 @@ pub enum Diagnostic {
     /// reseed schedules carry no per-Profile annotation that they were
     /// triggered by overflow rather than a normal `FsEvent`.
     SensorOverflow { scope: OverflowScope },
+    /// A Promoter has been registered with the engine and assigned
+    /// `promoter`. Emitted by `attach_promoter`. The bin layer reads
+    /// the variant from `StepOutput.diagnostics` to reconcile its
+    /// `name → PromoterId` mapping after a hot-reload diff applies.
+    /// `name` carries the Promoter's user-facing name verbatim so the
+    /// reload path can update its lookup table without re-reading the
+    /// engine's registry.
+    PromoterAttached {
+        promoter: PromoterId,
+        name: CompactString,
+    },
+    /// A Promoter has been removed from the engine. Pairs with
+    /// [`Self::PromoterAttached`]; the bin removes the entry from its
+    /// `name → PromoterId` map on receipt.
+    PromoterReaped { promoter: PromoterId },
+    /// A Promoter's literal-prefix descent ran with
+    /// `DescentState.remaining_components` empty — analogue of
+    /// [`Self::DescentInvariantViolation`] for the Promoter side.
+    /// Should be unreachable per the invariant on `DescentState`; the
+    /// engine surfaces the breach + retains state without leaking the
+    /// prefix watch.
+    PromoterDescentInvariantViolation {
+        promoter: PromoterId,
+        prefix: ResourceId,
+    },
+    /// Promoter literal-prefix descent probe returned `Vanished` for
+    /// `prefix`. The engine rewinds descent to the next-existing
+    /// ancestor of `prefix`. Repeated occurrences during scaffold
+    /// tear-down are normal.
+    PromoterDescentVanished {
+        promoter: PromoterId,
+        prefix: ResourceId,
+    },
+    /// Promoter literal-prefix descent probe returned `Failed { errno }`
+    /// for `prefix`. The engine retains the `PrefixPending` state and
+    /// awaits the next event at `prefix` before retrying.
+    PromoterDescentFailed {
+        promoter: PromoterId,
+        prefix: ResourceId,
+        errno: i32,
+    },
+    /// Promoter enumeration matched `path` and the engine has minted a
+    /// dynamic Sub for it. `kind` is the kind the snapshot reports for
+    /// the matched entry. The bin uses this for operator-visible
+    /// "promotion observed" logs; the engine's own bookkeeping is in
+    /// `Promoter.dynamic_subs`.
+    PromotionKindObserved {
+        promoter: PromoterId,
+        path: PathBuf,
+        kind: ResourceKind,
+    },
+    /// Promoter's `dynamic_subs.len()` crossed a threshold for the
+    /// first time. Operator signal that the pattern is matching more
+    /// targets than typical — likely a too-broad pattern (e.g. `/*`
+    /// without further constraint). One-shot per Promoter lifetime;
+    /// the latch on `Promoter.warned_at_threshold` suppresses repeats.
+    PromoterFanoutThreshold { promoter: PromoterId, count: usize },
+    /// `FsEvent` arrived for a Resource that previously held a
+    /// `proxy_promoters` back-ref to `promoter`, but the Promoter has
+    /// either reaped the proxy or fully reaped during the same step.
+    /// Engine drops the event; operators can ignore. Pairs with
+    /// [`Self::EventNoConsumer`] — the proxy back-ref was the
+    /// supposed consumer; the back-ref is now stale.
+    PromoterProxyStaleEvent {
+        promoter: PromoterId,
+        resource: ResourceId,
+    },
 }

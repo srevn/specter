@@ -65,6 +65,19 @@ impl Engine {
             return;
         }
 
+        // Snapshot the proxy back-ref BEFORE any dispatch — each
+        // `on_promoter_proxy_event` mutates Promoter state, and a
+        // cascading `unregister_proxy_subtree` (parent enumeration's
+        // reverse pass) could clear the back-ref mid-loop. The
+        // snapshot keeps the dispatch list stable across the loop.
+        // SmallVec inline cap of 1 covers the typical case (one
+        // proxy back-ref) without allocation.
+        let proxies: SmallVec<[specter_core::PromoterId; 1]> = self
+            .tree
+            .get(resource)
+            .map(|r| r.proxy_promoters.iter().copied().collect())
+            .unwrap_or_default();
+
         // Single-pass classification of the event's carriers: Profiles
         // that "carry" a dispatch responsibility for this resource.
         // Descent prefix and watch-root-parent watches both register
@@ -86,16 +99,27 @@ impl Engine {
         // P4 single-Profile this resolves to 0 or 1; P5 multi-Profile
         // dispatches to each in encounter order.
         let covering = self.covering_profiles(resource);
-        if covering.is_empty() && descent_count == 0 && recovery_count == 0 {
+        if covering.is_empty() && descent_count == 0 && recovery_count == 0 && proxies.is_empty() {
             // No consumer: covered by no Profile, no in-flight descent,
-            // and no recovery kicked off. Emit `EventNoConsumer` (a
-            // benign "watched but no listener" signal — typically a
-            // `WatchRootParent` event for something we don't track) and
-            // drop. Distinct from `EventOnUnwatchedResource` (the
-            // `watch_demand == 0` race earlier) so log levels can diverge.
+            // no recovery kicked off, and no proxy back-ref. Emit
+            // `EventNoConsumer` (a benign "watched but no listener"
+            // signal — typically a `WatchRootParent` event for
+            // something we don't track) and drop. Distinct from
+            // `EventOnUnwatchedResource` (the `watch_demand == 0`
+            // race earlier) so log levels can diverge.
             out.diagnostics
                 .push(Diagnostic::EventNoConsumer { resource });
             return;
+        }
+
+        // Promoter dispatch. Order within the step doesn't affect
+        // correctness — proxy events drive enumeration, independent
+        // of Profile burst lifecycle. Dispatch BEFORE Profile
+        // covering-Profile dispatch for testability: assertions on
+        // proxy effects are unaffected by burst ops emitted later in
+        // the same step.
+        for promoter_id in proxies.iter().copied() {
+            self.on_promoter_proxy_event(promoter_id, resource, now, out);
         }
 
         // Class-aware routing. Compute the event's class once from the
@@ -221,6 +245,7 @@ impl Engine {
     ) {
         match response.owner {
             ProbeOwner::Profile(pid) => self.on_profile_probe_response(pid, response, now, out),
+            ProbeOwner::Promoter(pid) => self.on_promoter_probe_response(pid, response, now, out),
         }
     }
 

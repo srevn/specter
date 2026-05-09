@@ -54,6 +54,7 @@ impl Engine {
     fn pending_slot_mut(&mut self, owner: ProbeOwner) -> Option<&mut Option<ProbeCorrelation>> {
         match owner {
             ProbeOwner::Profile(pid) => self.profiles.get_mut(pid).map(|p| &mut p.pending_probe),
+            ProbeOwner::Promoter(pid) => self.promoters.get_mut(pid).map(|q| &mut q.pending_probe),
         }
     }
 
@@ -62,6 +63,7 @@ impl Engine {
     fn pending_slot(&self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
         match owner {
             ProbeOwner::Profile(pid) => self.profiles.get(pid).and_then(|p| p.pending_probe),
+            ProbeOwner::Promoter(pid) => self.promoters.get(pid).and_then(|q| q.pending_probe),
         }
     }
 
@@ -375,6 +377,9 @@ mod tests {
         match owner {
             ProbeOwner::Profile(pid) => {
                 let _ = e.profiles.detach(&mut e.tree, pid);
+            }
+            ProbeOwner::Promoter(_) => {
+                unreachable!("fresh_engine_with_idle_profile only produces Profile owners");
             }
         }
 

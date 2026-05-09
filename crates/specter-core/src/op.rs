@@ -1,6 +1,6 @@
 //! Watch and Probe ops, plus their request/response payloads.
 
-use crate::ids::{ProfileId, ResourceId};
+use crate::ids::{ProfileId, PromoterId, ResourceId};
 use crate::resource::ResourceKind;
 use crate::scan_config::ScanConfig;
 use crate::snapshot::tree::{DirSnapshot, LeafEntry};
@@ -20,22 +20,28 @@ pub struct ProbeCorrelation(pub u64);
 /// [`ProbeOp::Cancel`] so the engine can demux each response to the
 /// entity that's awaiting it.
 ///
-/// **One variant in v1.** [`Self::Profile`] wraps the per-Profile
-/// probe-channel slot ([`crate::Profile::pending_probe`]). The enum is
-/// the wire generalisation that future entities (e.g. Promoter, the
-/// dynamic-path-glob carrier landing in a later phase) will plug into
-/// without disturbing the slot-discipline contract.
+/// Two owner kinds. [`Self::Profile`] wraps the per-Profile
+/// probe-channel slot ([`crate::Profile::pending_probe`]) for the
+/// burst / descent / rebase lifecycle. [`Self::Promoter`] wraps the
+/// per-Promoter slot ([`crate::Promoter::pending_probe`]) for the
+/// literal-prefix descent and proxy-enumeration lifecycle. The two
+/// counters are isolated by owner: one Profile and one Promoter can
+/// each carry an outstanding probe simultaneously without collision.
 ///
 /// **Determinism.** Derived `Ord` produces variant-declaration-order
-/// then per-payload [`ProfileId`] order. With one variant this collapses
-/// to `ProfileId::cmp`, preserving the existing
-/// [`crate::StepOutput::probe_ops`] sort.
+/// (Profile < Promoter), then per-payload [`ProfileId`] /
+/// [`PromoterId`] order. Profile-only [`crate::StepOutput::probe_ops`]
+/// sequences keep the prior byte-stable sort.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ProbeOwner {
-    /// Per-Profile slot — the only owner kind in v1. The wrapped
-    /// [`ProfileId`] keys [`crate::Profile::pending_probe`] via the
-    /// engine's slot accessor.
+    /// Per-Profile slot. The wrapped [`ProfileId`] keys
+    /// [`crate::Profile::pending_probe`] via the engine's slot
+    /// accessor.
     Profile(ProfileId),
+    /// Per-Promoter slot. The wrapped [`PromoterId`] keys
+    /// [`crate::Promoter::pending_probe`] via the engine's slot
+    /// accessor.
+    Promoter(PromoterId),
 }
 
 /// Engine→walker probe request.

@@ -9,6 +9,7 @@ mod coverage;
 mod descent;
 mod engine;
 mod probe_channel;
+mod promoter;
 mod reconcile;
 mod refcounts;
 mod stability;

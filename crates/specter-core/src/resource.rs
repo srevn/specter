@@ -31,10 +31,15 @@ pub struct Resource {
     pub(crate) profiles: TinyVec<[(u64, ProfileId); 1]>,
     /// Promoter back-ref. Maintained in lockstep with
     /// `Promoter.proxies` by the engine's promoter-side helpers
-    /// (Phase 5+); empty until then. Inline cap 1 covers the typical
-    /// case: most Resources have zero proxies, and cross-Promoter
-    /// sharing on the same slot is rare.
-    pub(crate) proxy_promoters: SmallVec<[PromoterId; 1]>,
+    /// (`register_proxy` / `unregister_proxy`). Inline cap 1 covers
+    /// the typical case: most Resources have zero proxies, and
+    /// cross-Promoter sharing on the same slot is rare.
+    ///
+    /// `pub` (joining `watch_demand`, `suppress_count`,
+    /// `events_union`, `role`) — the engine mutates the back-ref
+    /// directly via the helpers above; the typed accessor
+    /// [`Resource::proxy_promoters`] is the public read surface.
+    pub proxy_promoters: SmallVec<[PromoterId; 1]>,
     /// Probed kind of this slot. `ResourceKind::Unknown` is the
     /// pre-classification placeholder — fresh slots created by
     /// `Tree::ensure`, `Tree::vacate`-reset slots, and descent

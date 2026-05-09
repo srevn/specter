@@ -623,7 +623,7 @@ impl crate::Engine {
     }
 }
 
-const fn kind_from_entry(k: EntryKind) -> ResourceKind {
+pub(crate) const fn kind_from_entry(k: EntryKind) -> ResourceKind {
     match k {
         EntryKind::File | EntryKind::Symlink | EntryKind::Other => ResourceKind::File,
         EntryKind::Dir => ResourceKind::Dir,

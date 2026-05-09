@@ -593,6 +593,52 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?scope,
             "sensor reported overflow (kernel queue dropped events); reseeding in-scope Profiles",
         ),
+        Diagnostic::PromoterAttached { promoter, name } => tracing::info!(
+            ?promoter,
+            %name,
+            "promoter attached",
+        ),
+        Diagnostic::PromoterReaped { promoter } => tracing::info!(?promoter, "promoter reaped",),
+        Diagnostic::PromoterDescentInvariantViolation { promoter, prefix } => tracing::error!(
+            ?promoter,
+            ?prefix,
+            "promoter descent invariant violation: remaining_components empty",
+        ),
+        Diagnostic::PromoterDescentVanished { promoter, prefix } => tracing::warn!(
+            ?promoter,
+            ?prefix,
+            "promoter descent / enumeration probe Vanished",
+        ),
+        Diagnostic::PromoterDescentFailed {
+            promoter,
+            prefix,
+            errno,
+        } => tracing::warn!(
+            ?promoter,
+            ?prefix,
+            errno,
+            "promoter descent / enumeration probe Failed",
+        ),
+        Diagnostic::PromotionKindObserved {
+            promoter,
+            path,
+            kind,
+        } => tracing::info!(
+            ?promoter,
+            path = %path.display(),
+            ?kind,
+            "promoter promotion observed (dynamic Sub minted)",
+        ),
+        Diagnostic::PromoterFanoutThreshold { promoter, count } => tracing::warn!(
+            ?promoter,
+            count,
+            "promoter fanout exceeded warning threshold (consider tightening pattern)",
+        ),
+        Diagnostic::PromoterProxyStaleEvent { promoter, resource } => tracing::trace!(
+            ?promoter,
+            ?resource,
+            "fs event for promoter proxy that was unregistered earlier in step (stale; dropped)",
+        ),
     }
 }
 

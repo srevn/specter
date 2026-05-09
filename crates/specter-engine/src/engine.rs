@@ -880,7 +880,7 @@ enum DetachLifecycle {
 /// every `comps[i]` is a non-empty UTF-8 string. `materialize_path_or_pending`
 /// relies on this to skip the FS-root pre-existence check and bootstrap
 /// the slot unconditionally.
-fn decompose_attach_path<'a>(
+pub(crate) fn decompose_attach_path<'a>(
     path: &'a std::path::Path,
     out: &mut StepOutput,
 ) -> Option<Vec<&'a str>> {
