@@ -556,11 +556,7 @@ fn validate_name(idx: usize, raw_name: &str, errors: &mut Vec<ValidationIssue>) 
 }
 
 /// Validate the `actions` array. Returns `Some(ActionPlan)` when every
-/// action lexes cleanly and the PR 1 single-step guard passes.
-///
-/// PR 1 contract: `actions.len() == 1`. PR 2 lifts this to "any positive
-/// number of steps, sequentially with stop-on-failure." The guard is
-/// concentrated in this one helper so PR 2's diff is a single deletion.
+/// action lexes cleanly.
 ///
 /// Errors accumulate into `errors`; one issue per offending action /
 /// argv slot. The function returns `None` when *any* part of the plan
@@ -579,21 +575,6 @@ fn validate_actions(
             "actions",
             IssueKind::EmptyActions,
             "actions must have at least one entry".to_owned(),
-        ));
-        return None;
-    }
-
-    if raw_actions.len() > 1 {
-        errors.push(ValidationIssue::new(
-            Some(idx),
-            "actions",
-            IssueKind::MultiStepNotYetSupported,
-            format!(
-                "actions has {} entries; only single-action plans are \
-                 supported in this build (multi-step execution lands in a \
-                 follow-up)",
-                raw_actions.len(),
-            ),
         ));
         return None;
     }
@@ -633,7 +614,7 @@ fn validate_one_action(
             Some(watch_idx),
             "actions",
             IssueKind::ActionMissingVariant,
-            format!("actions[{action_idx}]: must specify a variant (`exec`)",),
+            format!("actions[{action_idx}]: must specify a variant (`exec`)"),
         ));
         return None;
     }
@@ -642,7 +623,7 @@ fn validate_one_action(
             Some(watch_idx),
             "actions",
             IssueKind::ActionAmbiguousVariant,
-            format!("actions[{action_idx}]: must specify exactly one variant",),
+            format!("actions[{action_idx}]: must specify exactly one variant"),
         ));
         return None;
     }

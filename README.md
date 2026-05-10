@@ -85,8 +85,11 @@ destination = "stderr"                # stderr | file
 # path      = "/var/log/specter.log"  # required when destination = "file"
 
 # One [[watch]] block per reaction. Names must be unique. The `actions`
-# array names what should run when the watch settles; v1 carries one
-# entry per watch (multi-step plans land in a follow-up).
+# array names what should run when the watch settles. Each entry runs
+# in sequence, stop-on-failure: if step N fails, steps N+1..M don't run
+# and the plan reports `Failed`. The engine's outstanding-effect
+# accounting is per-plan (one EffectComplete per plan, regardless of
+# step count).
 [[watch]]
 name      = "rebuild"                 # identifies this watch in logs
 path      = "/srv/repo/src"           # absolute; pending paths supported

@@ -28,8 +28,9 @@ pub(crate) struct RawWatch {
     pub name: String,
     pub path: String,
     /// Reaction body — sequence of [`RawAction`]s. Replaces the v0
-    /// `command: Vec<String>` field. PR 1 validation requires
-    /// `actions.len() == 1`; PR 2 unlocks multi-step.
+    /// `command: Vec<String>` field. Validation requires at least one
+    /// entry; the actuator runs the steps sequentially with
+    /// stop-on-failure.
     pub actions: Vec<RawAction>,
     pub recursive: Option<bool>,
     pub pattern: Option<String>,

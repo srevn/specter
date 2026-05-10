@@ -127,10 +127,16 @@ impl SubprocessActuator {
                 recv(hard_shutdown_rx) -> _ => { hard = true; break; }
             }
         }
-        self.shutdown(&engine_in, hard, &hard_shutdown_rx);
+        self.shutdown(&engine_in, hard, &hard_shutdown_rx, spawner);
     }
 
-    fn shutdown(&mut self, engine_in: &Sender<Input>, hard: bool, hard_shutdown_rx: &Receiver<()>) {
+    fn shutdown(
+        &mut self,
+        engine_in: &Sender<Input>,
+        hard: bool,
+        hard_shutdown_rx: &Receiver<()>,
+        spawner: &dyn Spawner,
+    ) {
         // Phase 1: SIGTERM all running.
         tracing::info!("shutdown phase 1: SIGTERM running children");
         for slot in self.state.slots.values() {
@@ -154,7 +160,7 @@ impl SubprocessActuator {
             }
             crossbeam::select! {
                 recv(self.reap_rx) -> r => match r {
-                    Ok(r) => self.state.handle_reap_no_pump(r, engine_in),
+                    Ok(r) => self.state.handle_reap_no_pump(r, engine_in, spawner, &self.reap_tx),
                     Err(crossbeam::channel::RecvError) => break,
                 },
                 recv(hard_shutdown_rx) -> _ => { grace = false; }
@@ -185,7 +191,9 @@ impl SubprocessActuator {
                 break;
             }
             match self.reap_rx.recv_timeout(final_deadline - now) {
-                Ok(r) => self.state.handle_reap_no_pump(r, engine_in),
+                Ok(r) => self
+                    .state
+                    .handle_reap_no_pump(r, engine_in, spawner, &self.reap_tx),
                 Err(
                     crossbeam::channel::RecvTimeoutError::Timeout
                     | crossbeam::channel::RecvTimeoutError::Disconnected,
@@ -239,11 +247,34 @@ mod tests {
     }
 
     fn literal_plan() -> Arc<ActionPlan> {
-        let exec = ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])]);
-        Arc::new(ActionPlan::new([Action::Exec(exec)]))
+        n_step_plan(1)
+    }
+
+    /// Build an `n`-step plan whose every step is a literal
+    /// `/bin/true`. Used by multi-step tests to drive the actuator's
+    /// advance / terminate path without caring about argv shape.
+    fn n_step_plan(n: usize) -> Arc<ActionPlan> {
+        let steps: Vec<Action> = (0..n)
+            .map(|_| {
+                Action::Exec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                    "/bin/true",
+                )])]))
+            })
+            .collect();
+        Arc::new(ActionPlan::new(steps))
     }
 
     fn make_effect_perfile(sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64) -> Effect {
+        make_effect_perfile_with_plan(sub_seed, profile_seed, res_seed, corr, literal_plan())
+    }
+
+    fn make_effect_perfile_with_plan(
+        sub_seed: u64,
+        profile_seed: u64,
+        res_seed: u64,
+        corr: u64,
+        plan: Arc<ActionPlan>,
+    ) -> Effect {
         let resource = unique_resource_id(res_seed);
         Effect {
             key: DedupKey::PerFile {
@@ -257,7 +288,7 @@ mod tests {
             diff: None,
             capture_output: false,
             sub_name: CompactString::new(""),
-            plan: literal_plan(),
+            plan,
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
             target_relative: CompactString::new(""),
@@ -872,5 +903,296 @@ mod tests {
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(1));
         h.shutdown();
+    }
+
+    // ---------- multi-step plans ----------
+
+    /// Multi-step happy path: a 3-step plan reaps each step Ok, the
+    /// actuator advances through steps 0 → 1 → 2 in sequence, and
+    /// emits exactly one `EffectComplete::Ok` after the last step.
+    #[test]
+    fn three_step_plan_runs_steps_sequentially_and_emits_one_complete() {
+        let mut h = Harness::new(4);
+        let plan = n_step_plan(3);
+        h.submit(make_effect_perfile_with_plan(1, 1, 1, 1, plan));
+
+        // Step 0 spawns, reaps Ok → step 1 spawns, reaps Ok → step 2
+        // spawns, reaps Ok → terminal EffectComplete.
+        let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+        h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
+        let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
+        h.spawner.complete(s1[1].pid, EffectOutcome::Ok).unwrap();
+        let s2 = h.wait_for_spawns(3, Duration::from_secs(1));
+        h.spawner.complete(s2[2].pid, EffectOutcome::Ok).unwrap();
+
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        assert_eq!(
+            completions.len(),
+            1,
+            "exactly one EffectComplete per Effect"
+        );
+        match &completions[0] {
+            Input::EffectComplete { result, .. } => {
+                assert!(matches!(result, EffectOutcome::Ok));
+            }
+            other => panic!("expected EffectComplete::Ok; got {other:?}"),
+        }
+        // Verify no extra EffectCompletes are queued.
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            h.engine_in.try_recv().is_err(),
+            "no extra EffectComplete after terminal",
+        );
+        h.shutdown();
+    }
+
+    /// Stop-on-fail: a 3-step plan whose step 1 fails terminates the
+    /// plan immediately. Step 2 is never spawned. Engine sees one
+    /// `EffectComplete::Failed`.
+    #[test]
+    fn three_step_plan_stops_on_first_failure() {
+        let mut h = Harness::new(4);
+        let plan = n_step_plan(3);
+        h.submit(make_effect_perfile_with_plan(2, 2, 2, 1, plan));
+
+        let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+        h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
+        let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
+        h.spawner
+            .complete(
+                s1[1].pid,
+                EffectOutcome::Failed {
+                    exit_code: Some(7),
+                    signal: None,
+                },
+            )
+            .unwrap();
+
+        // No third spawn — the plan halted on step 1's failure.
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(h.spawner.spawns().len(), 2, "step 2 was not spawned");
+
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        match &completions[0] {
+            Input::EffectComplete { result, .. } => assert!(matches!(
+                result,
+                EffectOutcome::Failed {
+                    exit_code: Some(7),
+                    signal: None,
+                }
+            )),
+            other => panic!("expected EffectComplete::Failed; got {other:?}"),
+        }
+        h.shutdown();
+    }
+
+    /// Multi-step plan with diff: tmp file is materialised once at
+    /// plan start, every step's env has the same `SPECTER_DIFF_PATH`,
+    /// the file is cleaned exactly once after the terminal step.
+    #[test]
+    fn multi_step_plan_shares_tmp_diff_path_and_cleans_at_terminus() {
+        use compact_str::CompactString;
+        use smallvec::smallvec;
+        use specter_core::{Diff, EntryKind, EntryRef};
+
+        let mut h = Harness::new(4);
+        let diff = Arc::new(Diff {
+            created: smallvec![EntryRef {
+                segment: CompactString::from("a.rs"),
+                kind: EntryKind::File,
+                inode: 1,
+            }],
+            ..Default::default()
+        });
+        let plan = n_step_plan(2);
+        let mut e = make_effect_perfile_with_plan(3, 3, 3, 7, plan);
+        e.diff = Some(Arc::clone(&diff));
+        h.submit(e);
+
+        let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+        let path0 = s0[0]
+            .env
+            .iter()
+            .find(|(k, _)| k == "SPECTER_DIFF_PATH")
+            .expect("SPECTER_DIFF_PATH set on step 0")
+            .1
+            .clone();
+        assert!(
+            std::path::Path::new(&path0).exists(),
+            "tmp file exists during step 0",
+        );
+        h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
+
+        let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
+        let path1 = s1[1]
+            .env
+            .iter()
+            .find(|(k, _)| k == "SPECTER_DIFF_PATH")
+            .expect("SPECTER_DIFF_PATH set on step 1")
+            .1
+            .clone();
+        assert_eq!(path0, path1, "step 1 sees the same tmp path as step 0");
+        // Mid-plan: the file MUST still exist (cleanup is at terminal).
+        assert!(
+            std::path::Path::new(&path0).exists(),
+            "tmp file persists across steps",
+        );
+        h.spawner.complete(s1[1].pid, EffectOutcome::Ok).unwrap();
+        h.wait_for_effect_completes(1, Duration::from_secs(1));
+
+        // After the terminal step, the file is cleaned (poll briefly
+        // since cleanup happens on the controller thread post-reap).
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while std::path::Path::new(&path0).exists() {
+            assert!(
+                Instant::now() < deadline,
+                "tmp file not cleaned up: {path0}",
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        h.shutdown();
+    }
+
+    /// Mid-plan submit-coalesce: a fresh same-key submit during a
+    /// running plan replaces `pending` only. The current plan runs to
+    /// terminus before pending fires (plan-atomicity invariant).
+    #[test]
+    fn submit_during_running_plan_replaces_pending_runs_after_terminal() {
+        let mut h = Harness::new(4);
+        let plan_a = n_step_plan(2);
+        let effect_a = make_effect_perfile_with_plan(4, 4, 4, 100, plan_a);
+        h.submit(effect_a);
+
+        let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+        // While step 0 is running, submit a fresh effect for the same
+        // key. Latest-coalesce stores it as pending; plan_a continues.
+        let plan_b = n_step_plan(1);
+        let effect_b = make_effect_perfile_with_plan(4, 4, 4, 200, plan_b);
+        h.submit(effect_b);
+        // Also submit a third same-key effect — should replace pending.
+        let plan_c = n_step_plan(1);
+        let effect_c = make_effect_perfile_with_plan(4, 4, 4, 300, plan_c);
+        h.submit(effect_c);
+
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            h.spawner.spawns().len(),
+            1,
+            "no second spawn while plan_a's step 0 is running",
+        );
+
+        // Reap step 0. plan_a advances to step 1.
+        h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
+        let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
+        h.spawner.complete(s1[1].pid, EffectOutcome::Ok).unwrap();
+
+        // plan_a's terminal EffectComplete arrives, then pending
+        // (effect_c, latest) spawns — its single step runs.
+        let s2 = h.wait_for_spawns(3, Duration::from_secs(1));
+        h.spawner.complete(s2[2].pid, EffectOutcome::Ok).unwrap();
+
+        // Two EffectCompletes total: one for plan_a, one for plan_c.
+        // plan_b was dropped by Latest-coalesce (replaced by plan_c).
+        h.wait_for_effect_completes(2, Duration::from_secs(1));
+        h.shutdown();
+    }
+
+    /// Multi-step plan + cap=1 + concurrent fresh Sub: the plan's
+    /// advance-step branch picks up the freshly-released permit
+    /// (reap-side path is on-stack in the controller, so it always
+    /// wins over pump's queue scan for the same permit). The
+    /// concurrent Sub's plan starts only after the multi-step plan
+    /// terminates.
+    ///
+    /// This is the deterministic shape of "multi-step plan-atomicity
+    /// under contention": all steps of plan A run before plan B
+    /// starts. The race-on-select shape (where pump's submit-handler
+    /// for B beats handle_reap's advance, forcing plan_continue) is
+    /// covered deterministically in the unit-level
+    /// `step_ok_not_last_with_no_permit_defers_via_plan_continue`
+    /// test in `pool/state.rs`.
+    #[test]
+    fn multi_step_plan_runs_to_terminus_before_concurrent_sub_starts() {
+        let mut h = Harness::new(1); // cap=1: one global permit
+        // Sub A: 2-step plan. Step 0 spawns, holding the only permit.
+        let plan = n_step_plan(2);
+        h.submit(make_effect_perfile_with_plan(5, 5, 5, 1, plan));
+        let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+
+        // Sub B: 1-step plan submitted concurrently. Has to wait for
+        // the permit.
+        h.submit(make_effect_perfile(6, 6, 6, 2));
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            h.spawner.spawns().len(),
+            1,
+            "B is blocked on the only permit",
+        );
+
+        // Reap A's step 0. The wait thread releases the permit, then
+        // sends Reaped. The controller's reap handler is already on
+        // the call stack and re-acquires the permit before pump runs
+        // — so step 1 of A spawns next, B still blocked.
+        h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
+        let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            h.spawner.spawns().len(),
+            2,
+            "A step 1 took the freed permit; B still blocked",
+        );
+
+        // Reap A's step 1. Plan A terminates; permit released; pump
+        // runs B's step 0.
+        h.spawner.complete(s1[1].pid, EffectOutcome::Ok).unwrap();
+        let s2 = h.wait_for_spawns(3, Duration::from_secs(1));
+        h.spawner.complete(s2[2].pid, EffectOutcome::Ok).unwrap();
+
+        // Two EffectCompletes total: one for A's 2-step plan, one for B's.
+        h.wait_for_effect_completes(2, Duration::from_secs(1));
+        h.shutdown();
+    }
+
+    /// Multi-step plan under shutdown drop policy: step 0 reaps under
+    /// `Drop` policy, no advance, terminal arm emits the reaped
+    /// outcome. Subsequent steps are abandoned.
+    #[test]
+    fn shutdown_mid_plan_abandons_remaining_steps() {
+        let mut h = Harness::new(4);
+        let plan = n_step_plan(3);
+        h.submit(make_effect_perfile_with_plan(7, 7, 7, 1, plan));
+        let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+
+        // Trigger shutdown; complete step 0 mid-shutdown.
+        let shutdown_tx = h.shutdown_tx.clone();
+        let spawner = Arc::clone(&h.spawner);
+        let pid = s0[0].pid;
+        let waiter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            spawner.complete(pid, EffectOutcome::Ok).unwrap();
+        });
+        shutdown_tx.send(()).unwrap();
+        h.join.take().unwrap().join().expect("controller join");
+        waiter.join().unwrap();
+
+        // The shutdown reap path uses Drop policy: step 0's reap
+        // emits EffectComplete with Ok, no step 1 spawn.
+        let mut received = Vec::new();
+        while let Ok(i) = h.engine_in.try_recv() {
+            received.push(i);
+        }
+        assert_eq!(
+            received.len(),
+            1,
+            "exactly one EffectComplete from drained step 0"
+        );
+        match &received[0] {
+            Input::EffectComplete { result, .. } => {
+                assert!(matches!(result, EffectOutcome::Ok));
+            }
+            other => panic!("expected EffectComplete::Ok; got {other:?}"),
+        }
+        // Total spawns: 1 (only step 0 — no step 1 under Drop).
+        assert_eq!(h.spawner.spawns().len(), 1);
     }
 }

@@ -9,68 +9,154 @@
 //! `ready_queue` orders slots that want to spawn — submit-FIFO. The
 //! `in_ready_queue` flag dedups: a key already queued (e.g., a slot
 //! whose pending was just replaced) doesn't get pushed twice.
+//!
+//! # Plans, steps, and accounting
+//!
+//! An [`Effect`] carries an [`specter_core::ActionPlan`] of one or more
+//! steps. The actuator walks the plan sequentially with stop-on-failure
+//! semantics:
+//!
+//! - **Per-Effect-stable** state (per-Sub counter bump, diff tmp file)
+//!   is owned by [`ActuatorState::start_plan`]: bump on plan start,
+//!   release on plan terminus.
+//! - **Per-step** state (permit, OS process, wait thread) is owned by
+//!   [`ActuatorState::spawn_step_with_permit`]: each step acquires a
+//!   fresh permit, the wait thread releases it on reap.
+//! - **One [`Input::EffectComplete`] per Effect**: emitted exactly once
+//!   at plan terminus (last step Ok, any step Failed under stop-on-fail,
+//!   or shutdown's Drop policy). The engine's `outstanding` accounting
+//!   is unchanged under multi-step — the engine doesn't know plans have
+//!   steps.
+//!
+//! Between two adjacent steps the slot may be in an intermediate state
+//! ([`Slot::plan_continue`]) when the wait-thread has reaped step N but
+//! no permit is available for step N+1. The pump's plan-continue arm
+//! has priority over fresh `pending`: continuation work bypasses the
+//! per-Sub gate (it's the same plan, already admitted) but still
+//! respects the global permit cap.
 
 use crate::permits::{Permit, Permits};
 use crate::resolve;
 use crate::spawner::{ChildSignaler, ChildWaiter, Spawner};
 use crossbeam::channel::Sender;
-use specter_core::{
-    Action, CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId,
-};
+use specter_core::{Action, CommandResolved, DedupKey, Effect, EffectOutcome, Input, SubId};
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Policy for [`ActuatorState::handle_reap_inner`]: during normal
 /// operation we re-queue pending and let the pump dispatch the next
 /// spawn; during shutdown we drop pending and clean up the slot.
+///
+/// `Pump` also gates the mid-plan advance branch: under shutdown
+/// (`Drop`) the reap of step N reports the reaped outcome via the
+/// terminal arm and skips spawning step N+1, so partial plans drain
+/// cleanly without leaking "step N+1 must run" intent past shutdown.
 #[derive(Copy, Clone)]
 enum ReapPolicy {
     Pump,
     Drop,
 }
 
-/// Per-`DedupKey` actuator slot: at most one in-flight child plus a
-/// single Latest-coalesce pending Effect.
+/// Outcome of an attempted step spawn. Returned by
+/// [`ActuatorState::try_spawn_step`] (which acquires a permit) and
+/// [`ActuatorState::spawn_step_with_permit`] (which receives a
+/// pre-acquired permit).
+///
+/// Both failure variants carry no detail: a deferred attempt has no
+/// outcome to report (nothing happened), and an OS-level spawn / wait-
+/// thread spawn failure is uniformly surfaced as
+/// `EffectOutcome::Failed { exit_code: None, signal: None }`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SpawnError {
+    /// Permit semaphore at capacity. The caller defers the step into
+    /// [`Slot::plan_continue`] and re-queues the slot.
+    Deferred,
+    /// OS-level process spawn or wait-thread spawn failed. The caller
+    /// terminates the plan with `EffectOutcome::Failed` via
+    /// [`ActuatorState::terminate_plan`].
+    Failed,
+}
+
+/// Per-`DedupKey` actuator slot.
+///
+/// At most one in-flight child ([`running`]) plus a single
+/// Latest-coalesce next-plan slot ([`pending`]) plus, between adjacent
+/// steps of an in-flight plan when the global permit cap is exhausted,
+/// a [`plan_continue`] hand-off.
+///
+/// **Three slots, three roles:**
+///
+/// - [`running`] is the currently-spawned step's bookkeeping (pid,
+///   signaler for shutdown SIGTERM/SIGKILL, plus the per-plan snapshot
+///   needed to advance to the next step).
+/// - [`plan_continue`] is "this plan's next step, deferred on permit."
+///   Bypasses the per-Sub gate (same plan, already admitted by
+///   `start_plan`) but respects the global permit cap.
+/// - [`pending`] is the user's next intent. Latest-coalesced on submit;
+///   never replaces a running step or a `plan_continue`.
+///
+/// **Plan-atomicity invariant.** A new submit during a running plan
+/// replaces `pending` only; `plan_continue` is never touched by
+/// coalesce. Once started, a plan runs all its steps before `pending`
+/// fires.
 ///
 /// **Engine-side twin.** Every `Effect` the actuator runs corresponds
 /// to a `+1` on the engine's `BurstPhase::Awaiting { outstanding }`
-/// counter for the owning Profile. The slot retires the running job
-/// (or drops the pending Effect on shutdown) and emits
-/// `Input::EffectComplete`; the engine then decrements `outstanding`
-/// and either stays in `Awaiting` or transitions to `Rebasing` when
-/// the count hits zero. The two bookkeepings are intentionally
-/// disjoint: this slot is per-(Sub, DedupKey) and lives on the
-/// actuator thread; the Awaiting counter is per-Profile and lives on
-/// the engine thread. Neither side sees the other's bookkeeping
-/// directly — the `EffectComplete` message is the sole synchronisation
-/// point.
+/// counter for the owning Profile. The slot retires the plan
+/// (or drops the pending Effect on shutdown) and emits exactly one
+/// `Input::EffectComplete` per Effect — multi-step plans don't change
+/// the engine's accounting.
 #[derive(Debug, Default)]
 pub(crate) struct Slot {
     pub running: Option<RunningJob>,
+    pub plan_continue: Option<PlanContinuation>,
     pub pending: Option<Effect>,
     pub in_ready_queue: bool,
 }
 
+/// Bookkeeping for one in-flight step of a plan.
+///
+/// `effect` is `Arc`-shared so the next-step advance branch in
+/// [`ActuatorState::handle_reap_inner`] can re-resolve step `N+1`'s
+/// argv + env without re-fetching the Effect: the same snapshot drives
+/// every step. `step_idx` is 0-indexed into `effect.plan.steps`.
+///
+/// `diff_tmp_path` is `Some` iff `start_plan` materialised a diff tmp
+/// file for this Effect; shared across all steps so the user's command
+/// reads the same `SPECTER_DIFF_PATH` from step 1 to step N. Cleaned
+/// at the terminal arm in [`ActuatorState::terminate_plan`] — not by
+/// the wait thread, which can't see "is this the last step".
 pub(crate) struct RunningJob {
     pub pid: u32,
-    // `sub` and `correlation` are debug-only — read by the manual
-    // [`Debug`] impl below to surface job context in tracing dumps;
-    // not consulted by reap or shutdown paths.
-    pub sub: SubId,
-    pub correlation: CorrelationId,
     pub signaler: Box<dyn ChildSignaler>,
+    pub effect: Arc<Effect>,
+    pub step_idx: u32,
+    pub diff_tmp_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for RunningJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RunningJob")
             .field("pid", &self.pid)
-            .field("sub", &self.sub)
-            .field("correlation", &self.correlation)
+            .field("step_idx", &self.step_idx)
+            .field("sub", &self.effect.key.sub())
+            .field("correlation", &self.effect.correlation)
             .finish_non_exhaustive()
     }
+}
+
+/// Hand-off slot between two adjacent steps when no permit is
+/// available at advance time. The pump's plan-continue arm consumes
+/// this in priority over [`Slot::pending`] — same plan, already
+/// admitted, just waiting on the global cap.
+#[derive(Debug)]
+pub(crate) struct PlanContinuation {
+    pub effect: Arc<Effect>,
+    pub step_idx: u32,
+    pub diff_tmp_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -92,6 +178,11 @@ impl ActuatorState {
     }
 
     /// Submit handler — enqueue or coalesce. Always end with `pump`.
+    ///
+    /// Plan-atomicity: a fresh submit during a running plan replaces
+    /// `pending` only. Both `running` and `plan_continue` (an in-flight
+    /// plan deferred between steps) keep the slot in "plan in flight"
+    /// state from the coalesce point of view.
     pub fn handle_submit(
         &mut self,
         effect: Effect,
@@ -102,8 +193,10 @@ impl ActuatorState {
         let key = effect.key.clone();
         tracing::trace!(?key, "submit");
         let slot = self.slots.entry(key.clone()).or_default();
-        if slot.running.is_some() {
-            // Latest coalesce — drop old pending if present.
+        if slot.running.is_some() || slot.plan_continue.is_some() {
+            // Plan in flight; Latest-coalesce — drop old pending if
+            // present. Never touches `running` or `plan_continue`: the
+            // current plan runs to terminus before pending fires.
             slot.pending = Some(effect);
         } else {
             slot.pending = Some(effect);
@@ -115,8 +208,8 @@ impl ActuatorState {
         self.pump(spawner, reap_tx, engine_in);
     }
 
-    /// Reap handler — emit [`Input::EffectComplete`], clear running,
-    /// decrement per-Sub counter, optionally re-queue pending and pump.
+    /// Reap handler — advance to next step or terminate the plan.
+    /// Followed by `pump` to dispatch any newly-ready work.
     pub fn handle_reap(
         &mut self,
         reaped: super::Reaped,
@@ -124,60 +217,222 @@ impl ActuatorState {
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
     ) {
-        self.handle_reap_inner(reaped, engine_in, ReapPolicy::Pump);
+        self.handle_reap_inner(reaped, engine_in, spawner, reap_tx, ReapPolicy::Pump);
         self.pump(spawner, reap_tx, engine_in);
     }
 
-    /// Shutdown-phase reap handler — emit [`Input::EffectComplete`] and
-    /// clear running, but **do not** re-queue pending or pump.
-    /// Pending effects are dropped on shutdown.
-    pub fn handle_reap_no_pump(&mut self, reaped: super::Reaped, engine_in: &Sender<Input>) {
-        self.handle_reap_inner(reaped, engine_in, ReapPolicy::Drop);
+    /// Shutdown-phase reap handler. Forces the plan to terminus on
+    /// the reaped step's outcome — no advance, no pending re-queue.
+    /// Subsequent steps are abandoned.
+    ///
+    /// `spawner` and `reap_tx` are unused under `Drop` policy (the
+    /// advance branch is gated on `Pump`); they're threaded through
+    /// for signature-symmetry with [`Self::handle_reap`].
+    pub fn handle_reap_no_pump(
+        &mut self,
+        reaped: super::Reaped,
+        engine_in: &Sender<Input>,
+        spawner: &dyn Spawner,
+        reap_tx: &Sender<super::Reaped>,
+    ) {
+        self.handle_reap_inner(reaped, engine_in, spawner, reap_tx, ReapPolicy::Drop);
     }
 
+    /// The reap pipeline. Three exits:
+    ///
+    /// 1. **Advance**: step N reaped Ok, more steps remain (Pump only).
+    ///    Try-acquire a fresh permit; on Ok, spawn step N+1 and return —
+    ///    the wait thread will reap it. On `Deferred`, defer via
+    ///    [`Slot::plan_continue`] and re-queue the slot. On `Failed`,
+    ///    the step's spawn raced into an OS error; route to terminate
+    ///    with a synthesised `Failed` outcome.
+    /// 2. **Terminate**: last step (or any failure, or shutdown) — emit
+    ///    `EffectComplete`, decrement per-Sub counter, clean tmp,
+    ///    re-queue pending or remove slot per policy.
+    /// 3. **Defensive no-job**: stale Reaped after slot removal — fall
+    ///    through to terminate with no diff cleanup. Preserves the
+    ///    "always emit EffectComplete" invariant for the engine.
     fn handle_reap_inner(
         &mut self,
         reaped: super::Reaped,
         engine_in: &Sender<Input>,
+        spawner: &dyn Spawner,
+        reap_tx: &Sender<super::Reaped>,
         policy: ReapPolicy,
     ) {
         tracing::trace!(?reaped.key, ?reaped.outcome, "reap");
-        // 1. Emit EffectComplete to the engine.
-        let _ = engine_in.send(Input::EffectComplete {
-            sub: reaped.sub,
-            key: reaped.key.clone(),
-            result: reaped.outcome,
-        });
+        let super::Reaped {
+            key, sub, outcome, ..
+        } = reaped;
 
-        // 2. Clear running; decrement per-Sub counter.
-        let Some(slot) = self.slots.get_mut(&reaped.key) else {
+        // Take the running job from its slot. A missing slot or absent
+        // running is the "stale Reaped" defensive case.
+        let job = match self.slots.get_mut(&key) {
+            Some(slot) => slot.running.take(),
+            None => None,
+        };
+        let Some(job) = job else {
+            self.terminate_plan(key, sub, None, outcome, policy, engine_in);
             return;
         };
-        slot.running = None;
-        if let Some(c) = self.running_per_sub.get_mut(&reaped.sub) {
-            *c = c.saturating_sub(1);
-            if *c == 0 {
-                self.running_per_sub.remove(&reaped.sub);
+
+        let plan_steps_len = job.effect.plan.steps.len();
+        let last_step = (job.step_idx as usize) + 1 >= plan_steps_len;
+        let try_advance = matches!(policy, ReapPolicy::Pump)
+            && matches!(outcome, EffectOutcome::Ok)
+            && !last_step;
+
+        if try_advance {
+            let next_idx = job.step_idx + 1;
+            // try_spawn_step takes references; on Ok it consumes the
+            // Arc/PathBuf clones into a fresh RunningJob installed in
+            // slot.running. On Err the originals stay on `job` so we
+            // can route them to plan_continue / terminate_plan without
+            // re-cloning.
+            match self.try_spawn_step(
+                &key,
+                sub,
+                &job.effect,
+                next_idx,
+                job.diff_tmp_path.as_deref(),
+                spawner,
+                reap_tx,
+            ) {
+                Ok(()) => return, // wait thread now drives the next reap.
+                Err(SpawnError::Deferred) => {
+                    self.queue_plan_continue(
+                        key,
+                        PlanContinuation {
+                            effect: job.effect,
+                            step_idx: next_idx,
+                            diff_tmp_path: job.diff_tmp_path,
+                        },
+                    );
+                    return;
+                }
+                Err(SpawnError::Failed) => {
+                    // Step N+1 spawn failed mid-plan. Terminate the plan
+                    // with synthesised Failed; tmp cleanup happens here
+                    // (the failure path consumed nothing from job).
+                    self.terminate_plan(
+                        key,
+                        sub,
+                        job.diff_tmp_path.as_deref(),
+                        EffectOutcome::Failed {
+                            exit_code: None,
+                            signal: None,
+                        },
+                        policy,
+                        engine_in,
+                    );
+                    return;
+                }
             }
         }
 
-        // 3. Re-queue if pending and policy permits; otherwise drop.
-        match policy {
-            ReapPolicy::Pump if slot.pending.is_some() => {
-                if !slot.in_ready_queue {
-                    slot.in_ready_queue = true;
-                    self.ready_queue.push_back(reaped.key);
-                }
-            }
-            _ => {
-                self.slots.remove(&reaped.key);
+        // Terminal: last step, any failure, or shutdown.
+        self.terminate_plan(
+            key,
+            sub,
+            job.diff_tmp_path.as_deref(),
+            outcome,
+            policy,
+            engine_in,
+        );
+    }
+
+    /// Park a plan's next step into [`Slot::plan_continue`] and queue
+    /// the slot for the next pump cycle. Called from the advance branch
+    /// when no permit was available at reap time.
+    fn queue_plan_continue(&mut self, key: DedupKey, cont: PlanContinuation) {
+        if let Some(slot) = self.slots.get_mut(&key) {
+            slot.plan_continue = Some(cont);
+            if !slot.in_ready_queue {
+                slot.in_ready_queue = true;
+                self.ready_queue.push_back(key);
             }
         }
     }
 
-    /// Spawn ready slots while permits + per-Sub gates allow. Items
-    /// blocked by either gate are deferred to a transient buffer and
-    /// restored at end so FIFO is preserved across pump invocations.
+    /// Terminal arm of a plan: emit one `EffectComplete`, decrement
+    /// the per-Sub counter, clean the diff tmp file, and either re-queue
+    /// pending (Pump policy + non-empty pending) or remove the slot.
+    ///
+    /// Called from three sites:
+    ///
+    /// 1. [`Self::handle_reap_inner`] when no advance is possible.
+    /// 2. [`Self::start_plan`] / [`Self::spawn_continuation`] on spawn
+    ///    failure — slot.running was never installed (or was rolled
+    ///    back), so the take-then-terminate dance handle_reap_inner
+    ///    does isn't needed; the caller hands us its locally-scoped
+    ///    `diff_tmp_path` directly.
+    /// 3. [`Self::handle_reap_inner`] advance branch when
+    ///    [`Self::try_spawn_step`] returned `SpawnError::Failed`.
+    ///
+    /// `diff_tmp_path` is taken by `Option<&Path>` because all callers
+    /// retain ownership; cleanup just borrows for the unlink syscall.
+    /// The per-Sub counter decrement is `saturating_sub` against an
+    /// `Option<&mut u32>` so spawn-failure-before-counter-bump paths
+    /// (fresh plan whose step 0 spawn failed) are no-ops as desired.
+    fn terminate_plan(
+        &mut self,
+        key: DedupKey,
+        sub: SubId,
+        diff_tmp_path: Option<&Path>,
+        outcome: EffectOutcome,
+        policy: ReapPolicy,
+        engine_in: &Sender<Input>,
+    ) {
+        let _ = engine_in.send(Input::EffectComplete {
+            sub,
+            key: key.clone(),
+            result: outcome,
+        });
+        if let Some(c) = self.running_per_sub.get_mut(&sub) {
+            *c = c.saturating_sub(1);
+            if *c == 0 {
+                self.running_per_sub.remove(&sub);
+            }
+        }
+        if let Some(p) = diff_tmp_path {
+            crate::tmp::cleanup(p);
+        }
+        // The slot may still exist (handle_reap_inner already took
+        // running; spawn-failure paths never installed it). Decide:
+        // re-queue if pending under Pump, otherwise remove.
+        let Some(slot) = self.slots.get_mut(&key) else {
+            return;
+        };
+        match policy {
+            ReapPolicy::Pump if slot.pending.is_some() => {
+                if !slot.in_ready_queue {
+                    slot.in_ready_queue = true;
+                    self.ready_queue.push_back(key);
+                }
+            }
+            _ => {
+                self.slots.remove(&key);
+            }
+        }
+    }
+
+    /// Spawn ready slots while permits + per-Sub gates allow.
+    ///
+    /// Two arms per slot:
+    ///
+    /// - **Plan-continue** (`slot.plan_continue.is_some()`): the slot
+    ///   holds an in-flight plan's next step, deferred at reap time on
+    ///   permit unavailability. Bypasses the per-Sub gate (continuation
+    ///   of an admitted plan; never racing another plan for the Sub by
+    ///   construction). Permit gate still applies.
+    /// - **Fresh plan** (`slot.pending.is_some()`, `plan_continue` empty):
+    ///   per-Sub gate, then permit gate, then [`Self::start_plan`].
+    ///
+    /// Items blocked by either gate are deferred to a transient buffer
+    /// and restored at end so FIFO is preserved across pump invocations.
+    /// The blocked-buffer logic is per-arm: a permit-blocked plan-continue
+    /// short-circuits the loop the same way a permit-blocked fresh plan
+    /// does, since both contend for the same global semaphore.
     pub fn pump(
         &mut self,
         spawner: &dyn Spawner,
@@ -186,8 +441,30 @@ impl ActuatorState {
     ) {
         let mut blocked: VecDeque<DedupKey> = VecDeque::new();
         while let Some(key) = self.ready_queue.pop_front() {
-            // Per-Sub gate.
             let sub = sub_of_key(&key);
+            let Some(slot) = self.slots.get_mut(&key) else {
+                continue;
+            };
+
+            // Plan-continue: bypass per-Sub gate.
+            if slot.plan_continue.is_some() {
+                let Some(permit) = self.permits.try_acquire() else {
+                    blocked.push_back(key);
+                    while let Some(k) = self.ready_queue.pop_front() {
+                        blocked.push_back(k);
+                    }
+                    break;
+                };
+                slot.in_ready_queue = false;
+                let cont = slot
+                    .plan_continue
+                    .take()
+                    .expect("plan_continue checked Some directly above");
+                self.spawn_continuation(key, sub, cont, permit, spawner, reap_tx, engine_in);
+                continue;
+            }
+
+            // Fresh plan: per-Sub gate.
             if self.running_per_sub.get(&sub).copied().unwrap_or(0) > 0 {
                 blocked.push_back(key);
                 continue;
@@ -202,17 +479,20 @@ impl ActuatorState {
                 }
                 break;
             };
-            // Acquired — flag the slot, take pending, spawn.
-            let Some(slot) = self.slots.get_mut(&key) else {
-                drop(permit);
-                continue;
-            };
             slot.in_ready_queue = false;
             let Some(effect) = slot.pending.take() else {
                 drop(permit);
                 continue;
             };
-            self.spawn_effect(key, sub, &effect, permit, spawner, reap_tx, engine_in);
+            self.start_plan(
+                key,
+                sub,
+                Arc::new(effect),
+                permit,
+                spawner,
+                reap_tx,
+                engine_in,
+            );
         }
         for k in blocked {
             // The flag is already true (we set it when we pushed and only
@@ -224,41 +504,44 @@ impl ActuatorState {
         }
     }
 
-    fn spawn_effect(
+    /// Start a plan: materialise the diff tmp file (if needed), spawn
+    /// step 0 with the given permit, bump the per-Sub counter on
+    /// success.
+    ///
+    /// On spawn failure, calls [`Self::terminate_plan`] with synthesised
+    /// `EffectOutcome::Failed`; the per-Sub counter never bumped (so
+    /// the saturating_sub there is a no-op against the absent entry —
+    /// counter stays consistent).
+    ///
+    /// The counter bump is sequenced **after** spawn success so the
+    /// failure path's terminate doesn't need a counter rollback. The
+    /// controller is single-threaded, so no Reaped can race in between.
+    ///
+    /// `effect` is taken by value so the caller (pump) hands off the
+    /// freshly-constructed `Arc<Effect>` and forgets about it; on
+    /// success the Arc is cloned into [`Slot::running`], on failure it
+    /// drops at end of scope. Passing by reference would work but
+    /// would force pump to keep the Arc alive past the call for no
+    /// reason.
+    #[allow(clippy::needless_pass_by_value)]
+    fn start_plan(
         &mut self,
         key: DedupKey,
         sub: SubId,
-        effect: &Effect,
+        effect: Arc<Effect>,
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
         engine_in: &Sender<Input>,
     ) {
-        // Resolution at the spawn boundary preserves "render late" as
-        // an architectural invariant: a same-key Effect that raced into
-        // `pending` and was replaced by `handle_submit`'s Latest-coalesce
-        // path never reaches this point, so the bytes the resolver
-        // allocates are guaranteed to back a real syscall.
-        //
-        // `SystemTime::now()` is sampled here — once per spawn — and
-        // threaded through to both the `$time` argv slot and the
-        // `SPECTER_TIME` env value so they agree on the wall-clock
-        // instant immediately before the kernel runs the user's command.
-        let now = std::time::SystemTime::now();
-        let cwd: &Path = resolve::compute_cwd(&effect.anchor_path, effect.anchor_kind);
-        let correlation = effect.correlation;
-        let capture_output = effect.capture_output;
-
-        // Materialise the diff tmp file before resolving so the resolver
-        // can slot `SPECTER_DIFF_PATH` into its alphabetical position
-        // (between SPECTER_CORRELATION and SPECTER_EVENT_KIND). Best-
-        // effort: on write failure we proceed with `diff_path = None`,
-        // which the resolver translates to "omit the env var entirely";
-        // the user's command sees no diff file and reports a missing-var
-        // error on its own if it requires one. The tmp_path is retained
-        // for cleanup on the spawn-failure / wait-thread-failure paths.
-        let tmp_path = effect.diff.as_ref().and_then(|diff| {
-            let path = crate::tmp::tmp_path(correlation);
+        // Materialise the diff tmp file before the first step's spawn
+        // so the resolver can slot SPECTER_DIFF_PATH into its
+        // alphabetical position. Best-effort: on write failure proceed
+        // with `None`, the resolver omits the env var. The path lives
+        // for the whole plan's lifetime — every step shares it; cleaned
+        // exactly once at terminate_plan.
+        let diff_tmp_path = effect.diff.as_ref().and_then(|diff| {
+            let path = crate::tmp::tmp_path(effect.correlation);
             match crate::tmp::write_diff_file(&path, diff) {
                 Ok(()) => Some(path),
                 Err(e) => {
@@ -272,77 +555,188 @@ impl ActuatorState {
             }
         });
 
-        // v1 invariant: validation guarantees `plan.steps.len() == 1`
-        // and the single step is `Action::Exec`. Multi-step plans are
-        // rejected at the config layer until the step cursor lands.
-        // `let` binding works because `Action::Exec` is the only
-        // variant today; introducing `Action::Parallel` etc. will turn
-        // this into a refutable pattern that the compiler will demand
-        // gets handled.
-        let Action::Exec(exec) = &effect.plan.steps[0];
+        match self.spawn_step_with_permit(
+            &key,
+            sub,
+            &effect,
+            0,
+            diff_tmp_path.as_deref(),
+            permit,
+            spawner,
+            reap_tx,
+        ) {
+            Ok(()) => {
+                // Spawn succeeded: bump per-Sub counter (one bump per
+                // plan, mirrored by terminate_plan's decrement).
+                *self.running_per_sub.entry(sub).or_insert(0) += 1;
+            }
+            Err(_) => {
+                // OS spawn or wait-thread spawn failed at step 0. The
+                // counter was never bumped; terminate_plan's
+                // saturating_sub no-ops against the absent entry.
+                self.terminate_plan(
+                    key,
+                    sub,
+                    diff_tmp_path.as_deref(),
+                    EffectOutcome::Failed {
+                        exit_code: None,
+                        signal: None,
+                    },
+                    ReapPolicy::Pump,
+                    engine_in,
+                );
+            }
+        }
+    }
 
-        let (CommandResolved { argv }, env) =
-            resolve::resolve_step(effect, exec, now, tmp_path.as_deref());
+    /// Spawn the next step of a plan that was deferred via
+    /// [`Slot::plan_continue`]. Distinct from [`Self::start_plan`]:
+    /// no per-Sub counter bump (already bumped at the original
+    /// `start_plan`), no tmp materialisation (path inherited from the
+    /// `PlanContinuation`).
+    ///
+    /// On spawn failure, [`Self::terminate_plan`] decrements the
+    /// per-Sub counter (which is at +1 from the original start_plan),
+    /// cleans the inherited tmp, and removes the slot.
+    fn spawn_continuation(
+        &mut self,
+        key: DedupKey,
+        sub: SubId,
+        cont: PlanContinuation,
+        permit: Permit,
+        spawner: &dyn Spawner,
+        reap_tx: &Sender<super::Reaped>,
+        engine_in: &Sender<Input>,
+    ) {
+        let PlanContinuation {
+            effect,
+            step_idx,
+            diff_tmp_path,
+        } = cont;
+        match self.spawn_step_with_permit(
+            &key,
+            sub,
+            &effect,
+            step_idx,
+            diff_tmp_path.as_deref(),
+            permit,
+            spawner,
+            reap_tx,
+        ) {
+            Ok(()) => {}
+            Err(_) => {
+                self.terminate_plan(
+                    key,
+                    sub,
+                    diff_tmp_path.as_deref(),
+                    EffectOutcome::Failed {
+                        exit_code: None,
+                        signal: None,
+                    },
+                    ReapPolicy::Pump,
+                    engine_in,
+                );
+            }
+        }
+    }
+
+    /// Acquire-and-spawn helper used by the reap-time advance branch.
+    ///
+    /// Returns:
+    /// - `Ok(())` — step is in flight (slot.running installed, wait
+    ///   thread alive).
+    /// - `Err(SpawnError::Deferred)` — permit semaphore was at capacity;
+    ///   caller defers via [`Slot::plan_continue`].
+    /// - `Err(SpawnError::Failed)` — OS-level spawn or wait-thread
+    ///   startup failed; caller terminates the plan with synthesised
+    ///   `EffectOutcome::Failed`.
+    ///
+    /// The Deferred branch returns before consuming any of the borrowed
+    /// inputs — caller-owned values stay live for the
+    /// `PlanContinuation` hand-off.
+    fn try_spawn_step(
+        &mut self,
+        key: &DedupKey,
+        sub: SubId,
+        effect: &Arc<Effect>,
+        step_idx: u32,
+        diff_path: Option<&Path>,
+        spawner: &dyn Spawner,
+        reap_tx: &Sender<super::Reaped>,
+    ) -> Result<(), SpawnError> {
+        let Some(permit) = self.permits.try_acquire() else {
+            return Err(SpawnError::Deferred);
+        };
+        self.spawn_step_with_permit(
+            key, sub, effect, step_idx, diff_path, permit, spawner, reap_tx,
+        )
+    }
+
+    /// Spawn one step of a plan with a pre-acquired permit. Installs
+    /// [`Slot::running`] on success.
+    ///
+    /// Sequencing pinned: slot.running is installed **before** the wait
+    /// thread is spawned, so a fast-completing wait thread (mock under
+    /// test, or a child that exits between fork and wait) can't send
+    /// `Reaped` before the controller knows about it.
+    ///
+    /// `now: SystemTime` is sampled here per step — the contract on
+    /// `${specter.time}` / `SPECTER_TIME` is "the wall-clock instant
+    /// immediately before the kernel runs the user's command", which
+    /// must hold per step in a multi-step plan.
+    ///
+    /// On wait-thread spawn failure: SIGKILL the orphan child, clear
+    /// the half-installed `slot.running`, return `SpawnError::Failed`.
+    /// The closure (and its captured `permit`) drops on
+    /// `thread::Builder::spawn` error so the permit is released.
+    fn spawn_step_with_permit(
+        &mut self,
+        key: &DedupKey,
+        sub: SubId,
+        effect: &Arc<Effect>,
+        step_idx: u32,
+        diff_path: Option<&Path>,
+        permit: Permit,
+        spawner: &dyn Spawner,
+        reap_tx: &Sender<super::Reaped>,
+    ) -> Result<(), SpawnError> {
+        let now = std::time::SystemTime::now();
+        let cwd: &Path = resolve::compute_cwd(&effect.anchor_path, effect.anchor_kind);
+        let correlation = effect.correlation;
+        let capture_output = effect.capture_output;
+
+        let Action::Exec(exec) = &effect.plan.steps[step_idx as usize];
+        let (CommandResolved { argv }, env) = resolve::resolve_step(effect, exec, now, diff_path);
 
         let handles = match spawner.spawn(&argv, &env, cwd, capture_output) {
             Ok(h) => h,
             Err(e) => {
-                tracing::error!(?key, ?cwd, ?e, "spawn failed");
-                if let Some(p) = tmp_path.as_ref() {
-                    crate::tmp::cleanup(p);
-                }
+                tracing::error!(?key, step_idx, ?cwd, ?e, "spawn failed");
                 drop(permit);
-                // Inline teardown rather than `reap_tx.send`. A channel
-                // round-trip would let a same-key submit drain off
-                // `effects_rx` before this synth Reap drains off
-                // `reap_rx`, repopulating `slot.running` with a fresh
-                // job; the picked-up Reap would then clobber that
-                // job's signaler and `slots.remove` it, leaking the
-                // SIGTERM target on shutdown and double-allowing
-                // same-Sub spawns past the per-Sub gate. Direct call
-                // collapses the window. `running_per_sub` was not
-                // bumped on this branch (saturating_sub no-ops on the
-                // absent entry); pending was taken in pump, so Pump
-                // policy removes the slot.
-                self.handle_reap_inner(
-                    super::Reaped {
-                        key,
-                        sub,
-                        correlation,
-                        outcome: EffectOutcome::Failed {
-                            exit_code: None,
-                            signal: None,
-                        },
-                    },
-                    engine_in,
-                    ReapPolicy::Pump,
-                );
-                return;
+                return Err(SpawnError::Failed);
             }
         };
+        let crate::spawner::SpawnHandles {
+            pid,
+            waiter,
+            signaler,
+        } = handles;
 
-        let pid = handles.pid;
-        let waiter = handles.waiter;
-        let signaler = handles.signaler;
-
-        // Increment per-Sub counter and stash the signaler.
-        *self.running_per_sub.entry(sub).or_insert(0) += 1;
-        if let Some(slot) = self.slots.get_mut(&key) {
+        // Install RunningJob BEFORE spawning the wait thread to close
+        // the race where a fast-completing waiter could send Reaped
+        // before the controller knows about it. PathBuf is allocated
+        // here (one per step transition); `effect` is Arc-cloned (cheap).
+        let diff_tmp_path: Option<PathBuf> = diff_path.map(Path::to_path_buf);
+        if let Some(slot) = self.slots.get_mut(key) {
             slot.running = Some(RunningJob {
                 pid,
-                sub,
-                correlation,
                 signaler,
+                effect: Arc::clone(effect),
+                step_idx,
+                diff_tmp_path,
             });
         }
 
-        tracing::debug!(?key, pid, "spawned");
-
-        // Pre-clone what the wait_loop closure consumes; `Builder::spawn`
-        // drops the closure (and its captures) on failure, but the
-        // failure branch below still needs `tmp_path` for cleanup and
-        // `key` for the synth Reap.
-        let tmp_path_for_thread = tmp_path.clone();
         let reap_tx_for_thread = reap_tx.clone();
         let wait_key = key.clone();
         if let Err(e) = std::thread::Builder::new()
@@ -356,7 +750,6 @@ impl ActuatorState {
                     wait_key,
                     sub,
                     correlation,
-                    tmp_path_for_thread,
                     permit,
                     reap_tx_for_thread,
                 );
@@ -364,45 +757,36 @@ impl ActuatorState {
         {
             tracing::error!(
                 ?key,
+                step_idx,
                 pid,
                 ?e,
                 "wait thread spawn failed; SIGKILL orphan + synth Failed",
             );
-            // The child is alive but has no waiter. Without SIGKILL its
-            // user command runs unmonitored to completion (writing to
-            // the watched tree), then sits as an unreaped zombie until
-            // the actuator exits. The signaler lives in `slot.running`
-            // until `handle_reap_inner` clears the slot, so SIGKILL
-            // must precede teardown.
-            if let Some(slot) = self.slots.get(&key)
+            // Child is alive but has no waiter. SIGKILL via the freshly
+            // installed signaler before we clear slot.running (which
+            // owns it).
+            if let Some(slot) = self.slots.get(key)
                 && let Some(job) = slot.running.as_ref()
                 && let Err(kill_err) = job.signaler.signal_kill()
             {
                 tracing::warn!(?key, pid, ?kill_err, "orphan SIGKILL failed");
             }
-            if let Some(p) = tmp_path.as_ref() {
-                crate::tmp::cleanup(p);
+            // Roll back the half-installed slot.running. The caller's
+            // terminate_plan path expects slot.running to be None at the
+            // terminal arm — this preserves that invariant.
+            if let Some(slot) = self.slots.get_mut(key) {
+                slot.running = None;
             }
-            self.handle_reap_inner(
-                super::Reaped {
-                    key,
-                    sub,
-                    correlation,
-                    outcome: EffectOutcome::Failed {
-                        exit_code: None,
-                        signal: None,
-                    },
-                },
-                engine_in,
-                ReapPolicy::Pump,
-            );
+            return Err(SpawnError::Failed);
         }
+
+        tracing::debug!(?key, step_idx, pid, "spawned step");
+        Ok(())
     }
 }
 
-/// Wait-thread body. Block on `waiter.wait()`; on return, clean up the
-/// tmp file, release the permit, send a [`super::Reaped`] to the
-/// controller.
+/// Wait-thread body. Block on `waiter.wait()`; on return, release the
+/// permit and send a [`super::Reaped`] to the controller.
 ///
 /// Two orderings are load-bearing:
 ///
@@ -419,13 +803,18 @@ impl ActuatorState {
 ///    serialization). The brief stale-counter window between
 ///    `drop(permit)` and `handle_reap` is benign: same-Sub items
 ///    defer one extra pump cycle, no over-spawning.
+///
+/// **Tmp-file cleanup is NOT this thread's responsibility.** The diff
+/// tmp file lives for the whole plan (multiple steps may read it) —
+/// the wait thread can't see "is this the last step", only the
+/// controller can. Cleanup runs in
+/// [`ActuatorState::terminate_plan`] exactly once per plan.
 #[allow(clippy::needless_pass_by_value)] // closure-spawned: arguments owned for the thread
 fn wait_loop(
     waiter: Box<dyn ChildWaiter>,
     key: DedupKey,
     sub: SubId,
-    correlation: CorrelationId,
-    tmp_path: Option<PathBuf>,
+    correlation: specter_core::CorrelationId,
     permit: Permit,
     reap_tx: Sender<super::Reaped>,
 ) {
@@ -446,9 +835,6 @@ fn wait_loop(
             }
         }
     };
-    if let Some(p) = tmp_path.as_ref() {
-        crate::tmp::cleanup(p);
-    }
     drop(permit);
     let _ = reap_tx.send(super::Reaped {
         key,
@@ -469,22 +855,25 @@ pub(crate) const fn sub_of_key(key: &DedupKey) -> SubId {
 mod tests {
     //! Direct tests for [`ActuatorState::handle_reap_inner`] — the
     //! teardown that both the success and failure spawn paths route
-    //! through. The two synth-Reap callers (spawn-failure inline and
-    //! wait-thread-spawn-failure inline) are exercised here against
+    //! through. The synth-Reap-equivalent paths (spawn-failure inline
+    //! and wait-thread-spawn-failure inline) are exercised here against
     //! pre-loaded state, since neither has a fault-injection seam in
     //! the controller harness.
+    //!
+    //! The PR2 multi-step advance/terminate tests are in the dedicated
+    //! `multi_step` submodule below.
     use super::super::Reaped;
-    use super::{ActuatorState, ReapPolicy, RunningJob, Slot};
-    use crate::spawner::ChildSignaler;
+    use super::{ActuatorState, PlanContinuation, ReapPolicy, RunningJob, Slot};
+    use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
     use compact_str::CompactString;
-    use crossbeam::channel::unbounded;
+    use crossbeam::channel::{Sender, unbounded};
     use specter_core::{
         Action, ActionPlan, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
         ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::io;
     use std::num::NonZeroUsize;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -515,7 +904,29 @@ mod tests {
         }
     }
 
+    /// Plan with `n` literal `/bin/true` exec steps. Used by tests
+    /// that exercise multi-step advance / terminate.
+    fn n_step_plan(n: usize) -> Arc<ActionPlan> {
+        let steps: Vec<Action> = (0..n)
+            .map(|_| {
+                Action::Exec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                    "/bin/true",
+                )])]))
+            })
+            .collect();
+        Arc::new(ActionPlan::new(steps))
+    }
+
     fn dummy_effect(key: DedupKey, target: ResourceId, corr: u64) -> Effect {
+        dummy_effect_with_steps(key, target, corr, 1)
+    }
+
+    fn dummy_effect_with_steps(
+        key: DedupKey,
+        target: ResourceId,
+        corr: u64,
+        steps: usize,
+    ) -> Effect {
         Effect {
             key,
             target,
@@ -524,13 +935,125 @@ mod tests {
             diff: None,
             capture_output: false,
             sub_name: CompactString::new(""),
-            plan: Arc::new(ActionPlan::new([Action::Exec(ExecAction::new([
-                ArgTemplate::new([ArgPart::literal("/bin/true")]),
-            ]))])),
+            plan: n_step_plan(steps),
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
             target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
+        }
+    }
+
+    /// No-op Spawner stub for tests that go through `handle_reap_inner`
+    /// on paths where advance is not attempted (last step, Drop policy,
+    /// or non-Ok outcome). The spawner is plumbed through the function
+    /// signature; if a test path were to actually invoke `spawn`, the
+    /// `unreachable!` would fire and surface the regression.
+    #[derive(Default)]
+    struct UnusedSpawner;
+    impl Spawner for UnusedSpawner {
+        fn spawn(
+            &self,
+            _argv: &[String],
+            _env: &[EnvVar<'_>],
+            _cwd: &Path,
+            _capture_output: bool,
+        ) -> io::Result<SpawnHandles> {
+            unreachable!("UnusedSpawner used by a test that didn't expect spawn()")
+        }
+    }
+
+    /// Spawner stub that records every spawn and returns handles whose
+    /// waiter is driven via `complete(pid, outcome)`. Used by the
+    /// multi-step advance tests where `try_spawn_step` actually runs.
+    struct ScriptedSpawner {
+        next_pid: std::sync::atomic::AtomicU32,
+        spawns: std::sync::Mutex<Vec<u32>>,
+        completions: std::sync::Mutex<
+            std::collections::BTreeMap<u32, crossbeam::channel::Sender<EffectOutcome>>,
+        >,
+        inject_err: std::sync::Mutex<Option<io::ErrorKind>>,
+    }
+    impl ScriptedSpawner {
+        fn new() -> Self {
+            Self {
+                next_pid: std::sync::atomic::AtomicU32::new(20_000),
+                spawns: std::sync::Mutex::new(Vec::new()),
+                completions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                inject_err: std::sync::Mutex::new(None),
+            }
+        }
+        fn spawned(&self) -> Vec<u32> {
+            self.spawns.lock().unwrap().clone()
+        }
+        fn complete(&self, pid: u32, outcome: EffectOutcome) {
+            let tx = self
+                .completions
+                .lock()
+                .unwrap()
+                .get(&pid)
+                .cloned()
+                .expect("pid must have been spawned");
+            tx.send(outcome).expect("waiter still listening");
+        }
+        fn inject_spawn_error(&self, kind: io::ErrorKind) {
+            *self.inject_err.lock().unwrap() = Some(kind);
+        }
+    }
+    impl Spawner for ScriptedSpawner {
+        fn spawn(
+            &self,
+            _argv: &[String],
+            _env: &[EnvVar<'_>],
+            _cwd: &Path,
+            _capture_output: bool,
+        ) -> io::Result<SpawnHandles> {
+            // Copy out of the lock before checking — the MutexGuard's
+            // significant Drop would otherwise live across the if-let.
+            let injected = *self.inject_err.lock().unwrap();
+            if let Some(kind) = injected {
+                return Err(io::Error::from(kind));
+            }
+            let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
+            self.spawns.lock().unwrap().push(pid);
+            let (tx, rx) = crossbeam::channel::bounded::<EffectOutcome>(1);
+            self.completions.lock().unwrap().insert(pid, tx);
+            let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            Ok(SpawnHandles {
+                pid,
+                waiter: Box::new(ScriptedWaiter {
+                    rx,
+                    dead: Arc::clone(&dead),
+                }),
+                signaler: Box::new(ScriptedSignaler { dead }),
+            })
+        }
+    }
+    struct ScriptedWaiter {
+        rx: crossbeam::channel::Receiver<EffectOutcome>,
+        dead: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ChildWaiter for ScriptedWaiter {
+        fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
+            let r = self.rx.recv();
+            self.dead.store(true, Ordering::SeqCst);
+            r.map_err(|_| io::Error::other("waiter channel dropped"))
+        }
+    }
+    struct ScriptedSignaler {
+        dead: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ChildSignaler for ScriptedSignaler {
+        fn signal_term(&self) -> io::Result<()> {
+            if self.dead.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            Ok(())
+        }
+        fn signal_kill(&self) -> io::Result<()> {
+            if self.dead.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            Ok(())
         }
     }
 
@@ -553,7 +1076,10 @@ mod tests {
         }
     }
 
-    fn stub_running_job(sub: SubId, corr: u64, signaler: Arc<CountingSignaler>) -> RunningJob {
+    /// Build a stub `RunningJob` that mimics a freshly-spawned step of
+    /// a single-step plan. Counted signaler shared so tests can assert
+    /// no SIGTERM/SIGKILL during pure-state teardown.
+    fn stub_running_job(effect: Arc<Effect>, signaler: Arc<CountingSignaler>) -> RunningJob {
         struct Adapter(Arc<CountingSignaler>);
         impl ChildSignaler for Adapter {
             fn signal_term(&self) -> io::Result<()> {
@@ -565,24 +1091,32 @@ mod tests {
         }
         RunningJob {
             pid: 99_999,
-            sub,
-            correlation: CorrelationId(corr),
             signaler: Box::new(Adapter(signaler)),
+            effect,
+            step_idx: 0,
+            diff_tmp_path: None,
         }
     }
 
-    /// Spawn-failure shape: the slot exists (created in `handle_submit`)
-    /// but `running` was never set and `running_per_sub` was never
-    /// bumped (the spawn failed before the increment). The synth Reap
-    /// must remove the slot, leave the counter map empty (no
-    /// underflow), and emit `EffectComplete::Failed` to the engine.
+    /// Channel pair sized for the controller's reap channel; rarely
+    /// drained in these tests since most paths don't actually spawn.
+    fn reap_channel() -> (Sender<Reaped>, crossbeam::channel::Receiver<Reaped>) {
+        crossbeam::channel::bounded(64)
+    }
+
+    /// Stale-Reaped shape: slot exists with no running job and no
+    /// counter bump (today's spawn-failure-before-bump entry).
+    /// Terminal arm runs unconditionally — emits EffectComplete with
+    /// the reaped outcome, removes the slot, and leaves counters intact.
     #[test]
-    fn handle_reap_inner_synth_for_unspawned_slot_clears_state() {
+    fn handle_reap_inner_stale_for_unspawned_slot_clears_state() {
         let mut state = ActuatorState::new(nz(2));
         let key = perfile_key(1, 1, 1);
         let sub = unique_sub_id(1);
         state.slots.insert(key.clone(), Slot::default());
         let (tx, rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
 
         state.handle_reap_inner(
             Reaped {
@@ -595,6 +1129,8 @@ mod tests {
                 },
             },
             &tx,
+            &spawner,
+            &reap_tx,
             ReapPolicy::Pump,
         );
 
@@ -624,24 +1160,27 @@ mod tests {
         }
     }
 
-    /// Wait-thread-spawn-failure shape: spawn succeeded so `running`
-    /// is set and `running_per_sub[sub] == 1`, but the wait thread
-    /// failed to start. The synth Reap must drop the signaler from
-    /// `running`, decrement the counter to zero (removing the entry),
-    /// and remove the slot.
+    /// Single-step plan, Failed outcome: terminal arm runs, signaler is
+    /// dropped without sending SIGTERM/SIGKILL (the child already died,
+    /// we just got the reap), counter decrements to zero and entry is
+    /// removed.
     #[test]
-    fn handle_reap_inner_synth_for_running_slot_decrements_and_removes() {
+    fn handle_reap_inner_failed_single_step_decrements_and_removes() {
         let mut state = ActuatorState::new(nz(2));
         let key = perfile_key(2, 2, 2);
         let sub = unique_sub_id(2);
+        let res = unique_resource_id(2);
         let signaler = Arc::new(CountingSignaler::default());
+        let effect = Arc::new(dummy_effect(key.clone(), res, 5));
         let slot = Slot {
-            running: Some(stub_running_job(sub, 5, Arc::clone(&signaler))),
+            running: Some(stub_running_job(effect, Arc::clone(&signaler))),
             ..Slot::default()
         };
         state.slots.insert(key.clone(), slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
 
         state.handle_reap_inner(
             Reaped {
@@ -654,6 +1193,8 @@ mod tests {
                 },
             },
             &tx,
+            &spawner,
+            &reap_tx,
             ReapPolicy::Pump,
         );
 
@@ -682,14 +1223,17 @@ mod tests {
         let sub = unique_sub_id(3);
         let res = unique_resource_id(3);
         let signaler = Arc::new(CountingSignaler::default());
+        let effect = Arc::new(dummy_effect(key.clone(), res, 7));
         let slot = Slot {
-            running: Some(stub_running_job(sub, 7, signaler)),
+            running: Some(stub_running_job(effect, signaler)),
             pending: Some(dummy_effect(key.clone(), res, 8)),
             ..Slot::default()
         };
         state.slots.insert(key.clone(), slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, _rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
 
         state.handle_reap_inner(
             Reaped {
@@ -699,6 +1243,8 @@ mod tests {
                 outcome: EffectOutcome::Ok,
             },
             &tx,
+            &spawner,
+            &reap_tx,
             ReapPolicy::Pump,
         );
 
@@ -727,14 +1273,17 @@ mod tests {
         let sub = unique_sub_id(4);
         let res = unique_resource_id(4);
         let signaler = Arc::new(CountingSignaler::default());
+        let effect = Arc::new(dummy_effect(key.clone(), res, 11));
         let slot = Slot {
-            running: Some(stub_running_job(sub, 11, signaler)),
+            running: Some(stub_running_job(effect, signaler)),
             pending: Some(dummy_effect(key.clone(), res, 12)),
             ..Slot::default()
         };
         state.slots.insert(key.clone(), slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, _rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
 
         state.handle_reap_inner(
             Reaped {
@@ -747,11 +1296,458 @@ mod tests {
                 },
             },
             &tx,
+            &spawner,
+            &reap_tx,
             ReapPolicy::Drop,
         );
 
         assert!(state.slots.is_empty(), "slot removed under Drop policy");
         assert!(state.running_per_sub.is_empty());
         assert!(state.ready_queue.is_empty(), "no re-queue under Drop");
+    }
+
+    // ---------- multi-step advance / terminate ----------
+
+    /// Step Ok and not last under Pump policy: handle_reap_inner takes
+    /// the running, calls try_spawn_step which acquires a fresh permit
+    /// and spawns step N+1. Slot.running is reinstalled with step_idx
+    /// incremented; per-Sub counter stays at +1 (one bump per plan, not
+    /// per step); no EffectComplete is emitted.
+    #[test]
+    fn step_ok_not_last_advances_to_next_step() {
+        let mut state = ActuatorState::new(nz(2));
+        let key = perfile_key(10, 10, 10);
+        let sub = unique_sub_id(10);
+        let res = unique_resource_id(10);
+        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
+        let signaler = Arc::new(CountingSignaler::default());
+        let slot = Slot {
+            running: Some(RunningJob {
+                pid: 100,
+                signaler: {
+                    struct A(Arc<CountingSignaler>);
+                    impl ChildSignaler for A {
+                        fn signal_term(&self) -> io::Result<()> {
+                            self.0.signal_term()
+                        }
+                        fn signal_kill(&self) -> io::Result<()> {
+                            self.0.signal_kill()
+                        }
+                    }
+                    Box::new(A(Arc::clone(&signaler)))
+                },
+                effect: Arc::clone(&effect),
+                step_idx: 0,
+                diff_tmp_path: None,
+            }),
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.running_per_sub.insert(sub, 1);
+        let (tx, rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = ScriptedSpawner::new();
+
+        state.handle_reap_inner(
+            Reaped {
+                key: key.clone(),
+                sub,
+                correlation: CorrelationId(1),
+                outcome: EffectOutcome::Ok,
+            },
+            &tx,
+            &spawner,
+            &reap_tx,
+            ReapPolicy::Pump,
+        );
+
+        assert_eq!(spawner.spawned().len(), 1, "step 1 was spawned");
+        let slot_after = state
+            .slots
+            .get(&key)
+            .expect("slot preserved during advance");
+        let running = slot_after.running.as_ref().expect("running reinstalled");
+        assert_eq!(running.step_idx, 1, "step_idx advanced");
+        assert_eq!(
+            state.running_per_sub.get(&sub).copied(),
+            Some(1),
+            "per-Sub counter unchanged across step advance",
+        );
+        assert!(rx.try_recv().is_err(), "no EffectComplete emitted mid-plan",);
+        // Drain the wait thread so the test doesn't hang on Drop.
+        spawner.complete(running.pid, EffectOutcome::Ok);
+    }
+
+    /// Step Failed mid-plan: terminal arm runs with the reaped Failed
+    /// outcome — no advance attempted. Counter decrements; EffectComplete
+    /// emitted; slot removed.
+    #[test]
+    fn step_failed_mid_plan_terminates_without_advance() {
+        let mut state = ActuatorState::new(nz(2));
+        let key = perfile_key(11, 11, 11);
+        let sub = unique_sub_id(11);
+        let res = unique_resource_id(11);
+        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
+        let signaler = Arc::new(CountingSignaler::default());
+        let slot = Slot {
+            running: Some(RunningJob {
+                pid: 200,
+                signaler: {
+                    struct A(Arc<CountingSignaler>);
+                    impl ChildSignaler for A {
+                        fn signal_term(&self) -> io::Result<()> {
+                            self.0.signal_term()
+                        }
+                        fn signal_kill(&self) -> io::Result<()> {
+                            self.0.signal_kill()
+                        }
+                    }
+                    Box::new(A(Arc::clone(&signaler)))
+                },
+                effect: Arc::clone(&effect),
+                step_idx: 0,
+                diff_tmp_path: None,
+            }),
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.running_per_sub.insert(sub, 1);
+        let (tx, rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
+
+        state.handle_reap_inner(
+            Reaped {
+                key,
+                sub,
+                correlation: CorrelationId(1),
+                outcome: EffectOutcome::Failed {
+                    exit_code: Some(2),
+                    signal: None,
+                },
+            },
+            &tx,
+            &spawner,
+            &reap_tx,
+            ReapPolicy::Pump,
+        );
+
+        assert!(state.slots.is_empty(), "slot removed on terminal");
+        assert!(state.running_per_sub.is_empty(), "counter cleared");
+        match rx.try_recv() {
+            Ok(Input::EffectComplete { result, .. }) => assert!(matches!(
+                result,
+                EffectOutcome::Failed {
+                    exit_code: Some(2),
+                    signal: None,
+                }
+            )),
+            other => panic!("expected EffectComplete::Failed; got {other:?}"),
+        }
+    }
+
+    /// Last step Ok: terminal arm runs (no advance possible). Counter
+    /// decrements; EffectComplete emitted with Ok.
+    #[test]
+    fn last_step_ok_terminates() {
+        let mut state = ActuatorState::new(nz(2));
+        let key = perfile_key(12, 12, 12);
+        let sub = unique_sub_id(12);
+        let res = unique_resource_id(12);
+        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
+        let signaler = Arc::new(CountingSignaler::default());
+        let slot = Slot {
+            running: Some(RunningJob {
+                pid: 300,
+                signaler: {
+                    struct A(Arc<CountingSignaler>);
+                    impl ChildSignaler for A {
+                        fn signal_term(&self) -> io::Result<()> {
+                            self.0.signal_term()
+                        }
+                        fn signal_kill(&self) -> io::Result<()> {
+                            self.0.signal_kill()
+                        }
+                    }
+                    Box::new(A(Arc::clone(&signaler)))
+                },
+                effect: Arc::clone(&effect),
+                step_idx: 2, // last step (0-indexed) of a 3-step plan
+                diff_tmp_path: None,
+            }),
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.running_per_sub.insert(sub, 1);
+        let (tx, rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
+
+        state.handle_reap_inner(
+            Reaped {
+                key,
+                sub,
+                correlation: CorrelationId(1),
+                outcome: EffectOutcome::Ok,
+            },
+            &tx,
+            &spawner,
+            &reap_tx,
+            ReapPolicy::Pump,
+        );
+
+        assert!(state.slots.is_empty(), "slot removed after last step");
+        assert!(state.running_per_sub.is_empty());
+        match rx.try_recv() {
+            Ok(Input::EffectComplete { result, .. }) => {
+                assert!(matches!(result, EffectOutcome::Ok));
+            }
+            other => panic!("expected EffectComplete::Ok; got {other:?}"),
+        }
+    }
+
+    /// Permit unavailable mid-plan: try_spawn_step returns Deferred,
+    /// the slot's plan_continue is set to (effect, step_idx+1, diff),
+    /// the slot is queued for the next pump cycle, no EffectComplete is
+    /// emitted, the counter stays at +1.
+    #[test]
+    fn step_ok_not_last_with_no_permit_defers_via_plan_continue() {
+        // cap=1 with another job already holding the only permit.
+        let mut state = ActuatorState::new(nz(1));
+        let _hold = state
+            .permits
+            .try_acquire()
+            .expect("acquire hogs the only permit");
+        let key = perfile_key(13, 13, 13);
+        let sub = unique_sub_id(13);
+        let res = unique_resource_id(13);
+        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 2));
+        let signaler = Arc::new(CountingSignaler::default());
+        let slot = Slot {
+            running: Some(RunningJob {
+                pid: 400,
+                signaler: {
+                    struct A(Arc<CountingSignaler>);
+                    impl ChildSignaler for A {
+                        fn signal_term(&self) -> io::Result<()> {
+                            self.0.signal_term()
+                        }
+                        fn signal_kill(&self) -> io::Result<()> {
+                            self.0.signal_kill()
+                        }
+                    }
+                    Box::new(A(Arc::clone(&signaler)))
+                },
+                effect: Arc::clone(&effect),
+                step_idx: 0,
+                diff_tmp_path: None,
+            }),
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.running_per_sub.insert(sub, 1);
+        let (tx, rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
+
+        state.handle_reap_inner(
+            Reaped {
+                key: key.clone(),
+                sub,
+                correlation: CorrelationId(1),
+                outcome: EffectOutcome::Ok,
+            },
+            &tx,
+            &spawner,
+            &reap_tx,
+            ReapPolicy::Pump,
+        );
+
+        let slot_after = state.slots.get(&key).expect("slot preserved");
+        assert!(slot_after.running.is_none(), "running was taken");
+        let cont = slot_after
+            .plan_continue
+            .as_ref()
+            .expect("plan_continue installed");
+        assert_eq!(cont.step_idx, 1, "deferred at step 1");
+        assert!(slot_after.in_ready_queue);
+        assert_eq!(state.ready_queue.iter().collect::<Vec<_>>(), vec![&key]);
+        assert_eq!(
+            state.running_per_sub.get(&sub).copied(),
+            Some(1),
+            "counter stays at +1 across deferral",
+        );
+        assert!(rx.try_recv().is_err(), "no EffectComplete on deferral");
+    }
+
+    /// `handle_submit` during plan_continue replaces pending only;
+    /// plan_continue is left intact (plan-atomicity invariant).
+    #[test]
+    fn submit_during_plan_continue_replaces_pending_only() {
+        let mut state = ActuatorState::new(nz(1));
+        let _hold = state.permits.try_acquire().expect("acquire");
+        let key = perfile_key(14, 14, 14);
+        let sub = unique_sub_id(14);
+        let res = unique_resource_id(14);
+        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 2));
+        let slot = Slot {
+            plan_continue: Some(PlanContinuation {
+                effect: Arc::clone(&effect),
+                step_idx: 1,
+                diff_tmp_path: None,
+            }),
+            in_ready_queue: true,
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.ready_queue.push_back(key.clone());
+        state.running_per_sub.insert(sub, 1);
+        let (tx, _rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
+
+        // Submit a new effect for the same key.
+        let new_effect = dummy_effect(key.clone(), res, 99);
+        state.handle_submit(new_effect, &spawner, &reap_tx, &tx);
+
+        let slot_after = state.slots.get(&key).expect("slot preserved");
+        let cont = slot_after
+            .plan_continue
+            .as_ref()
+            .expect("plan_continue NOT touched by submit");
+        assert_eq!(cont.step_idx, 1);
+        let pending = slot_after.pending.as_ref().expect("pending set");
+        assert_eq!(
+            pending.correlation,
+            CorrelationId(99),
+            "pending replaced by new submit",
+        );
+    }
+
+    /// Drop policy mid-plan: terminal arm runs immediately with the
+    /// reaped outcome; advance is skipped under shutdown so subsequent
+    /// steps are abandoned.
+    #[test]
+    fn step_ok_not_last_under_drop_policy_skips_advance() {
+        let mut state = ActuatorState::new(nz(2));
+        let key = perfile_key(15, 15, 15);
+        let sub = unique_sub_id(15);
+        let res = unique_resource_id(15);
+        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
+        let signaler = Arc::new(CountingSignaler::default());
+        let slot = Slot {
+            running: Some(RunningJob {
+                pid: 500,
+                signaler: {
+                    struct A(Arc<CountingSignaler>);
+                    impl ChildSignaler for A {
+                        fn signal_term(&self) -> io::Result<()> {
+                            self.0.signal_term()
+                        }
+                        fn signal_kill(&self) -> io::Result<()> {
+                            self.0.signal_kill()
+                        }
+                    }
+                    Box::new(A(Arc::clone(&signaler)))
+                },
+                effect: Arc::clone(&effect),
+                step_idx: 0,
+                diff_tmp_path: None,
+            }),
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.running_per_sub.insert(sub, 1);
+        let (tx, rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
+
+        state.handle_reap_inner(
+            Reaped {
+                key,
+                sub,
+                correlation: CorrelationId(1),
+                outcome: EffectOutcome::Ok,
+            },
+            &tx,
+            &spawner,
+            &reap_tx,
+            ReapPolicy::Drop,
+        );
+
+        assert!(state.slots.is_empty(), "slot removed under Drop");
+        assert!(state.running_per_sub.is_empty());
+        match rx.try_recv() {
+            Ok(Input::EffectComplete { result, .. }) => {
+                assert!(matches!(result, EffectOutcome::Ok));
+            }
+            other => panic!("expected EffectComplete::Ok; got {other:?}"),
+        }
+    }
+
+    /// Spawn-failure on next step (try_spawn_step returns Failed):
+    /// terminate_plan runs with synthesised `Failed`, counter decrements,
+    /// slot removed.
+    #[test]
+    fn step_ok_not_last_with_spawn_failure_synthesises_failed() {
+        let mut state = ActuatorState::new(nz(2));
+        let key = perfile_key(16, 16, 16);
+        let sub = unique_sub_id(16);
+        let res = unique_resource_id(16);
+        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 2));
+        let signaler = Arc::new(CountingSignaler::default());
+        let slot = Slot {
+            running: Some(RunningJob {
+                pid: 600,
+                signaler: {
+                    struct A(Arc<CountingSignaler>);
+                    impl ChildSignaler for A {
+                        fn signal_term(&self) -> io::Result<()> {
+                            self.0.signal_term()
+                        }
+                        fn signal_kill(&self) -> io::Result<()> {
+                            self.0.signal_kill()
+                        }
+                    }
+                    Box::new(A(Arc::clone(&signaler)))
+                },
+                effect: Arc::clone(&effect),
+                step_idx: 0,
+                diff_tmp_path: None,
+            }),
+            ..Slot::default()
+        };
+        state.slots.insert(key.clone(), slot);
+        state.running_per_sub.insert(sub, 1);
+        let (tx, rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = ScriptedSpawner::new();
+        spawner.inject_spawn_error(io::ErrorKind::NotFound);
+
+        state.handle_reap_inner(
+            Reaped {
+                key,
+                sub,
+                correlation: CorrelationId(1),
+                outcome: EffectOutcome::Ok,
+            },
+            &tx,
+            &spawner,
+            &reap_tx,
+            ReapPolicy::Pump,
+        );
+
+        assert!(state.slots.is_empty(), "slot removed after synth Failed");
+        assert!(state.running_per_sub.is_empty(), "counter cleared");
+        match rx.try_recv() {
+            Ok(Input::EffectComplete { result, .. }) => assert!(matches!(
+                result,
+                EffectOutcome::Failed {
+                    exit_code: None,
+                    signal: None,
+                }
+            )),
+            other => panic!("expected EffectComplete::Failed; got {other:?}"),
+        }
     }
 }

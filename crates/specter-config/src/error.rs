@@ -40,9 +40,6 @@ pub enum IssueKind {
     /// is reserved so the validator can keep the "exactly one variant"
     /// rule as a single check across both v1 and v2.
     ActionAmbiguousVariant,
-    /// PR 1 guard: `actions.len() > 1` is rejected pending PR 2's
-    /// multi-step actuator support. Removed once PR 2 lands.
-    MultiStepNotYetSupported,
     EmptyArgv,
     NonAbsolute,
     NotCanonical,
@@ -163,7 +160,6 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::EmptyActions => "empty-actions",
         IssueKind::ActionMissingVariant => "action-missing-variant",
         IssueKind::ActionAmbiguousVariant => "action-ambiguous-variant",
-        IssueKind::MultiStepNotYetSupported => "multi-step-not-yet-supported",
         IssueKind::EmptyArgv => "empty-argv",
         IssueKind::NonAbsolute => "non-absolute",
         IssueKind::NotCanonical => "not-canonical",
