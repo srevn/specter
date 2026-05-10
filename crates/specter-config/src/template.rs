@@ -22,8 +22,9 @@ impl std::error::Error for TemplateError {}
 ///
 /// Lexer rules:
 /// - `$<name>` where `<name>` exactly matches a catalog entry
-///   (lowercase: `path`, `relative`, `anchor`, `created`, `deleted`,
-///   `modified`, `renamed_from`, `renamed_to`) → [`Placeholder`].
+///   (lowercase: `path`, `relative`, `anchor`, `watch`, `parent`,
+///   `time`, `created`, `deleted`, `modified`, `renamed_from`,
+///   `renamed_to`, `excluded`) → [`Placeholder`].
 /// - `$<name>` where `<name>` contains any ASCII uppercase letter → literal
 ///   `$<name>`. Preserves shell-expansion of env vars
 ///   (`$SPECTER_PATH`, `$SPECTER_FORCED`, etc.) and conventional uppercase
@@ -69,11 +70,15 @@ pub fn parse_arg(s: &str) -> Result<ArgTemplate, TemplateError> {
             "path" => Placeholder::Path,
             "relative" => Placeholder::Relative,
             "anchor" => Placeholder::Anchor,
+            "watch" => Placeholder::Watch,
+            "parent" => Placeholder::Parent,
+            "time" => Placeholder::Time,
             "created" => Placeholder::Created,
             "deleted" => Placeholder::Deleted,
             "modified" => Placeholder::Modified,
             "renamed_from" => Placeholder::RenamedFrom,
             "renamed_to" => Placeholder::RenamedTo,
+            "excluded" => Placeholder::Excluded,
             // Names with any uppercase ASCII letter pass through as literal
             // — they are env vars (`SPECTER_PATH`) or conventional shell
             // vars (`HOME`, `PATH`). Typo detection still applies to
@@ -132,11 +137,15 @@ mod tests {
             ("$path", Placeholder::Path),
             ("$relative", Placeholder::Relative),
             ("$anchor", Placeholder::Anchor),
+            ("$watch", Placeholder::Watch),
+            ("$parent", Placeholder::Parent),
+            ("$time", Placeholder::Time),
             ("$created", Placeholder::Created),
             ("$deleted", Placeholder::Deleted),
             ("$modified", Placeholder::Modified),
             ("$renamed_from", Placeholder::RenamedFrom),
             ("$renamed_to", Placeholder::RenamedTo),
+            ("$excluded", Placeholder::Excluded),
         ] {
             assert_eq!(parts(parse_arg(s).unwrap()), vec![ph(p)], "input {s}");
         }
@@ -274,11 +283,15 @@ mod tests {
         "path",
         "relative",
         "anchor",
+        "watch",
+        "parent",
+        "time",
         "created",
         "deleted",
         "modified",
         "renamed_from",
         "renamed_to",
+        "excluded",
     ];
 
     proptest! {

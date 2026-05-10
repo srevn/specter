@@ -789,6 +789,7 @@ version = "0.2.6"
 dependencies = [
  "compact_str",
  "crossbeam",
+ "humantime",
  "libc",
  "nix",
  "slotmap",

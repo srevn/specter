@@ -8,6 +8,7 @@ license.workspace      = true
 [dependencies]
 specter-core = { path = "../specter-core" }
 crossbeam.workspace = true
+humantime.workspace = true
 nix.workspace = true
 libc.workspace = true
 tracing.workspace = true

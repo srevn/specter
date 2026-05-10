@@ -237,8 +237,14 @@ impl ActuatorState {
         // `pending` and was replaced by `handle_submit`'s Latest-coalesce
         // path never reaches this point, so the bytes the resolver
         // allocates are guaranteed to back a real syscall.
+        //
+        // `SystemTime::now()` is sampled here — once per spawn — and
+        // threaded through to both the `$time` argv slot and the
+        // `SPECTER_TIME` env value so they agree on the wall-clock
+        // instant immediately before the kernel runs the user's command.
+        let now = std::time::SystemTime::now();
         let cwd = resolve::compute_cwd(&effect.anchor_path, effect.anchor_kind);
-        let (CommandResolved { argv }, mut env) = resolve::resolve_effect(&effect);
+        let (CommandResolved { argv }, mut env) = resolve::resolve_effect(&effect, now);
         let Effect {
             correlation,
             capture_output,

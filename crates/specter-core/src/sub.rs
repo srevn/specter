@@ -301,12 +301,14 @@ impl CommandTemplate {
 
     /// `true` iff any argv part references a diff-derived placeholder
     /// (`$created`/`$deleted`/`$modified`/`$renamed`-from-or-to). Computed
-    /// once at `Sub::new`; never re-evaluated.
+    /// once at `Sub::new`; never re-evaluated. `$excluded` is multi-value
+    /// but reads from `Profile.exclude_strings`, NOT from a `Diff`, so
+    /// it does not flip this predicate — see [`Placeholder::is_diff_derived`].
     #[must_use]
     pub fn references_diff_derived(&self) -> bool {
         self.argv
             .iter()
-            .any(|arg| arg.parts.iter().any(ArgPart::is_diff_placeholder))
+            .any(|arg| arg.parts.iter().any(ArgPart::is_diff_derived))
     }
 }
 
@@ -336,26 +338,108 @@ impl ArgPart {
         Self::Literal(s.into())
     }
 
+    /// True iff this part is a multi-value [`Placeholder`]. Thin
+    /// delegator over [`Placeholder::is_multivalue`] for ergonomic
+    /// `iter().any(ArgPart::is_multivalue)` use at call sites that need
+    /// to inspect mixed `Literal` / `Placeholder` parts.
     #[must_use]
-    pub const fn is_diff_placeholder(&self) -> bool {
-        use Placeholder::{Created, Deleted, Modified, RenamedFrom, RenamedTo};
-        matches!(
-            self,
-            Self::Placeholder(Created | Deleted | Modified | RenamedFrom | RenamedTo)
-        )
+    pub const fn is_multivalue(&self) -> bool {
+        match self {
+            Self::Placeholder(p) => p.is_multivalue(),
+            Self::Literal(_) => false,
+        }
+    }
+
+    /// True iff this part is a diff-derived [`Placeholder`]. See
+    /// [`Placeholder::is_diff_derived`] for the precise predicate.
+    #[must_use]
+    pub const fn is_diff_derived(&self) -> bool {
+        match self {
+            Self::Placeholder(p) => p.is_diff_derived(),
+            Self::Literal(_) => false,
+        }
     }
 }
 
+/// Argv-template substitution token. The catalog spans two predicates:
+///
+/// - **[`Self::is_multivalue`]** — true for any placeholder that can
+///   expand to >1 argv slot: `Created`, `Deleted`, `Modified`,
+///   `RenamedFrom`, `RenamedTo`, `Excluded`. Drives the resolver's
+///   prefix-accumulator branching.
+/// - **[`Self::is_diff_derived`]** — true for the multi-value
+///   placeholders sourced from the burst's `Diff`: the original five.
+///   `Excluded` is multi-value but reads from `Profile.exclude_strings`,
+///   not from a `Diff` — keeping it OUT of `is_diff_derived` is what
+///   prevents `Sub.needs_diff` from falsely ratcheting on `$excluded`.
+///
+/// Single-value variants (`Path`, `Relative`, `Anchor`, `Watch`,
+/// `Parent`, `Time`) render to one argv slot; multi-value variants
+/// drop the surrounding argv slot when their source list is empty.
+///
+/// `$parent` semantics for the corner cases:
+///
+/// | Scope    | Anchor    | Segment    | `target_path`     | `$parent`         |
+/// |----------|-----------|------------|-------------------|-------------------|
+/// | PerFile  | `/anchor` | `foo.rs`   | `/anchor/foo.rs`  | `/anchor`         |
+/// | PerFile  | `/anchor` | `src/lib`  | `/anchor/src/lib` | `/anchor/src`     |
+/// | PerFile  | `/`       | `foo.rs`   | `/foo.rs`         | `/` (NOT empty)   |
+/// | Subtree  | `/anchor` | (n/a)      | `/anchor`         | `/`               |
+/// | Subtree  | `/`       | (n/a)      | `/`               | `""` (only case)  |
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Placeholder {
     Path,
     Relative,
     Anchor,
+    Watch,
+    Parent,
+    /// RFC 3339 UTC second-precision (`2026-05-10T12:34:56Z`). Sampled
+    /// at spawn-time, not at engine emit time — operators reading
+    /// `$SPECTER_TIME` see the wall-clock instant immediately before
+    /// the kernel runs the user's command.
+    Time,
     Created,
     Deleted,
     Modified,
     RenamedFrom,
     RenamedTo,
+    /// One argv slot per pattern in `Profile.exclude_strings`. NOT
+    /// diff-derived: `Sub.needs_diff` does not ratchet on this.
+    Excluded,
+}
+
+impl Placeholder {
+    /// True for any placeholder that can expand to >1 argv slot:
+    /// `Created`, `Deleted`, `Modified`, `RenamedFrom`, `RenamedTo`,
+    /// `Excluded`. Drives the resolver's prefix-accumulator branching.
+    #[must_use]
+    pub const fn is_multivalue(self) -> bool {
+        matches!(
+            self,
+            Self::Created
+                | Self::Deleted
+                | Self::Modified
+                | Self::RenamedFrom
+                | Self::RenamedTo
+                | Self::Excluded
+        )
+    }
+
+    /// True for multi-value placeholders sourced from the burst's
+    /// `Diff` (the original five). `Excluded` is multi-value but reads
+    /// from `Profile.exclude_strings`, NOT from a `Diff` — it is
+    /// excluded from this predicate so the `Sub.needs_diff` derivation
+    /// doesn't falsely ratchet on `$excluded`.
+    ///
+    /// Invariant: `is_diff_derived ⇒ is_multivalue`. The converse does
+    /// not hold (`Excluded` breaks it).
+    #[must_use]
+    pub const fn is_diff_derived(self) -> bool {
+        matches!(
+            self,
+            Self::Created | Self::Deleted | Self::Modified | Self::RenamedFrom | Self::RenamedTo
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -538,14 +622,23 @@ mod tests {
     #[test]
     fn references_diff_derived_false_for_anchor_only_template() {
         assert!(!anchor_only_template().references_diff_derived());
+        // The full non-diff-derived set: every single-value placeholder
+        // PLUS `Excluded` (multi-value but not diff-derived). Including
+        // `Excluded` here is the load-bearing assertion of the
+        // `is_multivalue` / `is_diff_derived` split — using `$excluded`
+        // in a template must NOT ratchet `Sub.needs_diff` true.
         for p in [
             Placeholder::Path,
             Placeholder::Relative,
             Placeholder::Anchor,
+            Placeholder::Watch,
+            Placeholder::Parent,
+            Placeholder::Time,
+            Placeholder::Excluded,
         ] {
             assert!(
                 !template_with(p).references_diff_derived(),
-                "references_diff_derived must be false for anchor-only {p:?}"
+                "references_diff_derived must be false for non-diff-derived {p:?}"
             );
         }
     }
@@ -781,6 +874,60 @@ mod tests {
         assert!(reg.get(sid).is_none());
         assert!(reg.at(pid).is_empty());
         assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn placeholder_is_multivalue_includes_excluded() {
+        // Multi-value: Created/Deleted/Modified/RenamedFrom/RenamedTo
+        // (diff entries) + Excluded (Profile.exclude_strings).
+        for p in [
+            Placeholder::Created,
+            Placeholder::Deleted,
+            Placeholder::Modified,
+            Placeholder::RenamedFrom,
+            Placeholder::RenamedTo,
+            Placeholder::Excluded,
+        ] {
+            assert!(p.is_multivalue(), "{p:?}: must be multi-value");
+        }
+        for p in [
+            Placeholder::Path,
+            Placeholder::Relative,
+            Placeholder::Anchor,
+            Placeholder::Watch,
+            Placeholder::Parent,
+            Placeholder::Time,
+        ] {
+            assert!(!p.is_multivalue(), "{p:?}: must not be multi-value");
+        }
+    }
+
+    #[test]
+    fn placeholder_is_diff_derived_excludes_excluded() {
+        // Diff-derived: only the five diff entries. Excluded is
+        // multi-value but reads from Profile.exclude_strings — keeping
+        // it OUT of the diff-derived predicate prevents the Sub from
+        // falsely ratcheting `needs_diff` on a `$excluded` template.
+        for p in [
+            Placeholder::Created,
+            Placeholder::Deleted,
+            Placeholder::Modified,
+            Placeholder::RenamedFrom,
+            Placeholder::RenamedTo,
+        ] {
+            assert!(p.is_diff_derived(), "{p:?}: must be diff-derived");
+        }
+        for p in [
+            Placeholder::Path,
+            Placeholder::Relative,
+            Placeholder::Anchor,
+            Placeholder::Watch,
+            Placeholder::Parent,
+            Placeholder::Time,
+            Placeholder::Excluded,
+        ] {
+            assert!(!p.is_diff_derived(), "{p:?}: must not be diff-derived");
+        }
     }
 
     /// `Sub.command` is reference-counted: cloning the field bumps the

@@ -10,11 +10,20 @@
 use compact_str::CompactString;
 use smallvec::smallvec;
 use specter_core::{
-    ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Diff, Effect, EffectScope,
-    EntryKind, EntryRef, Placeholder, Rename, ResourceId, ResourceKind,
+    ArgPart, ArgTemplate, CommandResolved, CommandTemplate, CorrelationId, DedupKey, Diff, Effect,
+    EffectScope, EntryKind, EntryRef, Placeholder, Rename, ResourceId, ResourceKind,
 };
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
+
+/// Convenience wrapper for tests that don't exercise `$time` /
+/// `SPECTER_TIME` rendering — pins `now` to the Unix epoch so call sites
+/// stay terse. Time-sensitive tests call [`super::resolve_effect`]
+/// directly with the instant they want.
+fn resolve(e: &Effect) -> (CommandResolved, Vec<(String, String)>) {
+    super::resolve_effect(e, SystemTime::UNIX_EPOCH)
+}
 
 fn make_effect(
     sub_name: &str,
@@ -78,7 +87,7 @@ fn resolve_simple_literal_passes_through() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _env) = super::resolve_effect(&e);
+    let (cmd, _env) = resolve(&e);
     assert_eq!(cmd.argv, vec!["make".to_string()]);
 }
 
@@ -95,7 +104,7 @@ fn resolve_with_path_placeholder() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _env) = super::resolve_effect(&e);
+    let (cmd, _env) = resolve(&e);
     assert_eq!(
         cmd.argv,
         vec!["fmt".to_string(), "/proj/src/a.c".to_string()]
@@ -115,7 +124,7 @@ fn resolve_with_relative_placeholder() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _env) = super::resolve_effect(&e);
+    let (cmd, _env) = resolve(&e);
     assert_eq!(cmd.argv, vec!["log".to_string(), "src/a.c".to_string()]);
 }
 
@@ -132,8 +141,350 @@ fn resolve_with_anchor_placeholder() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _env) = super::resolve_effect(&e);
+    let (cmd, _env) = resolve(&e);
     assert_eq!(cmd.argv, vec!["build".to_string(), "/proj".to_string()]);
+}
+
+// ---------- $excluded / SPECTER_EXCLUDE ----------
+
+#[test]
+fn resolve_excluded_one_arg_per_pattern() {
+    // `--exclude=$excluded` tiles the literal prefix per pattern,
+    // mirroring the diff-derived multi-value behaviour.
+    let mut e = make_effect(
+        "rsync",
+        EffectScope::SubtreeRoot,
+        vec![
+            arg(vec![lit("rsync")]),
+            arg(vec![lit("--exclude="), ph(Placeholder::Excluded)]),
+            arg(vec![lit("/src/")]),
+        ],
+        Path::new("/p"),
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    e.exclude = vec![
+        CompactString::from("*.tmp"),
+        CompactString::from("cache/"),
+        CompactString::from("**/.git/"),
+    ]
+    .into();
+    let (cmd, _) = resolve(&e);
+    assert_eq!(
+        cmd.argv,
+        vec![
+            "rsync".to_string(),
+            "--exclude=*.tmp".to_string(),
+            "--exclude=cache/".to_string(),
+            "--exclude=**/.git/".to_string(),
+            "/src/".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn resolve_excluded_empty_drops_slot() {
+    // Empty exclude list mirrors empty-diff: drop the entire
+    // `--exclude=$excluded` slot rather than emit `--exclude=`.
+    let e = make_effect(
+        "rsync",
+        EffectScope::SubtreeRoot,
+        vec![
+            arg(vec![lit("rsync")]),
+            arg(vec![lit("--exclude="), ph(Placeholder::Excluded)]),
+            arg(vec![lit("/src/")]),
+        ],
+        Path::new("/p"),
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    // exclude defaults empty in make_effect.
+    let (cmd, _) = resolve(&e);
+    assert_eq!(
+        cmd.argv,
+        vec!["rsync".to_string(), "/src/".to_string()],
+        "empty $excluded drops the surrounding slot"
+    );
+}
+
+#[test]
+fn env_exclude_newline_separated() {
+    // Newline-separated source strings, no trailing newline. Survives
+    // any pattern content (commas, spaces, apostrophes) that's legal in
+    // glob source strings.
+    let mut e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/p"),
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    e.exclude = vec![
+        CompactString::from("*.tmp"),
+        CompactString::from("cache/"),
+        CompactString::from("**/.git/"),
+    ]
+    .into();
+    let (_, env) = resolve(&e);
+    assert_eq!(
+        env.iter().find(|(k, _)| k == "SPECTER_EXCLUDE").unwrap().1,
+        "*.tmp\ncache/\n**/.git/",
+        "no trailing newline; entries joined by single \\n",
+    );
+}
+
+#[test]
+fn env_exclude_empty_is_empty_string() {
+    // Empty exclude list ⇒ empty env value, NOT a blank line.
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/p"),
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (_, env) = resolve(&e);
+    assert_eq!(
+        env.iter().find(|(k, _)| k == "SPECTER_EXCLUDE").unwrap().1,
+        "",
+    );
+}
+
+// ---------- $time / SPECTER_TIME ----------
+
+/// Unix timestamp 1_700_000_000 = 2023-11-14T22:13:20Z. Chosen for
+/// readability in the assert; the format is RFC 3339 second-precision.
+const FIXED_NOW_SECS: u64 = 1_700_000_000;
+const FIXED_NOW_RFC3339: &str = "2023-11-14T22:13:20Z";
+
+#[test]
+fn resolve_time_uses_injected_now() {
+    let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(FIXED_NOW_SECS);
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![ph(Placeholder::Time)])],
+        Path::new("/p"),
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (cmd, _) = super::resolve_effect(&e, now);
+    assert_eq!(cmd.argv, vec![FIXED_NOW_RFC3339.to_owned()]);
+}
+
+#[test]
+fn env_specter_time_uses_injected_now() {
+    let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(FIXED_NOW_SECS);
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/p"),
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (_, env) = super::resolve_effect(&e, now);
+    assert_eq!(
+        env.iter().find(|(k, _)| k == "SPECTER_TIME").unwrap().1,
+        FIXED_NOW_RFC3339
+    );
+}
+
+#[test]
+fn format_now_clamps_pre_epoch() {
+    // humantime::format_rfc3339_seconds panics on pre-epoch SystemTime.
+    // Production never sees pre-epoch on a sane Unix host, but tests can
+    // construct one. The resolver clamps to UNIX_EPOCH so the spawn path
+    // can't panic on a hostile clock.
+    let pre = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![ph(Placeholder::Time)])],
+        Path::new("/p"),
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (cmd, _) = super::resolve_effect(&e, pre);
+    assert_eq!(cmd.argv, vec!["1970-01-01T00:00:00Z".to_owned()]);
+}
+
+// ---------- $parent ----------
+//
+// Documented edge cases (see Placeholder::Parent rustdoc):
+//   PerFile  | /anchor  | foo.rs       | $parent = /anchor
+//   PerFile  | /        | foo.rs       | $parent = /        (NOT empty)
+//   Subtree  | /anchor  | n/a          | $parent = /
+//   Subtree  | /        | n/a          | $parent = ""       (only empty case)
+
+#[test]
+fn resolve_parent_is_target_dir_for_perfile() {
+    // PerFile target = anchor.join(segment); $parent = the directory
+    // immediately containing the file that triggered the fire.
+    let e = make_effect(
+        "x",
+        EffectScope::PerStableFile,
+        vec![arg(vec![ph(Placeholder::Parent)])],
+        Path::new("/anchor"),
+        Path::new("/anchor/foo.rs"),
+        "foo.rs",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (cmd, _) = resolve(&e);
+    assert_eq!(cmd.argv, vec!["/anchor".to_string()]);
+}
+
+#[test]
+fn resolve_parent_is_anchor_parent_for_subtree() {
+    // Subtree target_path == anchor_path; $parent = parent of the anchor
+    // (one level above the watch root).
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![ph(Placeholder::Parent)])],
+        Path::new("/proj/sub"),
+        Path::new("/proj/sub"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (cmd, _) = resolve(&e);
+    assert_eq!(cmd.argv, vec!["/proj".to_string()]);
+}
+
+#[test]
+fn resolve_parent_for_perfile_at_root_is_root() {
+    // Filesystem-root anchor with PerFile scope: target_path = "/foo.rs",
+    // parent = "/" (NOT empty). Guards against the easy misreading that
+    // any anchor at root yields empty $parent.
+    let e = make_effect(
+        "x",
+        EffectScope::PerStableFile,
+        vec![arg(vec![ph(Placeholder::Parent)])],
+        Path::new("/"),
+        Path::new("/foo.rs"),
+        "foo.rs",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (cmd, _) = resolve(&e);
+    assert_eq!(cmd.argv, vec!["/".to_string()]);
+}
+
+#[test]
+fn resolve_parent_empty_only_for_subtree_at_root() {
+    // The only configuration that yields an empty $parent: Subtree scope
+    // anchored at filesystem root (target_path = "/", which has no parent).
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![ph(Placeholder::Parent)])],
+        Path::new("/"),
+        Path::new("/"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (cmd, _) = resolve(&e);
+    // Empty parent → ArgTemplate produces a single empty argv slot
+    // (single-value placeholders never drop the slot, only multi-values
+    // with zero entries do).
+    assert_eq!(cmd.argv, vec![String::new()]);
+}
+
+#[test]
+fn env_parent_empty_only_for_subtree_at_root() {
+    // SPECTER_PARENT mirrors $parent: empty string only at fs root for
+    // Subtree scope; "/" everywhere else at the root level.
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/"),
+        Path::new("/"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (_, env) = resolve(&e);
+    assert_eq!(
+        env.iter().find(|(k, _)| k == "SPECTER_PARENT").unwrap().1,
+        ""
+    );
+}
+
+#[test]
+fn env_parent_for_perfile_is_target_directory() {
+    let e = make_effect(
+        "x",
+        EffectScope::PerStableFile,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/anchor"),
+        Path::new("/anchor/src/foo.rs"),
+        "src/foo.rs",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (_, env) = resolve(&e);
+    assert_eq!(
+        env.iter().find(|(k, _)| k == "SPECTER_PARENT").unwrap().1,
+        "/anchor/src"
+    );
+}
+
+#[test]
+fn resolve_substitutes_watch_name() {
+    // `$watch` substitutes `effect.sub_name` — mirrors `$SPECTER_WATCH`
+    // env value but in argv form.
+    let e = make_effect(
+        "build",
+        EffectScope::SubtreeRoot,
+        vec![
+            arg(vec![lit("notify-send")]),
+            arg(vec![ph(Placeholder::Watch), lit(" settled")]),
+        ],
+        Path::new("/proj"),
+        Path::new("/proj"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (cmd, _env) = resolve(&e);
+    assert_eq!(
+        cmd.argv,
+        vec!["notify-send".to_string(), "build settled".to_string()]
+    );
 }
 
 #[test]
@@ -149,7 +500,7 @@ fn resolve_with_concatenated_literal_and_placeholder() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _env) = super::resolve_effect(&e);
+    let (cmd, _env) = resolve(&e);
     assert_eq!(cmd.argv, vec!["--input=/proj/a.c".to_string()]);
 }
 
@@ -174,7 +525,7 @@ fn resolve_with_created_expands_to_n_argv() {
         CorrelationId(1),
         Some(Arc::new(diff)),
     );
-    let (cmd, _env) = super::resolve_effect(&e);
+    let (cmd, _env) = resolve(&e);
     assert_eq!(
         cmd.argv,
         vec![
@@ -203,7 +554,7 @@ fn resolve_with_deleted_expands_to_n_argv() {
         CorrelationId(1),
         Some(Arc::new(diff)),
     );
-    let (cmd, _) = super::resolve_effect(&e);
+    let (cmd, _) = resolve(&e);
     assert_eq!(cmd.argv, vec!["x".to_string(), "y".to_string()]);
 }
 
@@ -224,7 +575,7 @@ fn resolve_with_modified_expands_to_n_argv() {
         CorrelationId(1),
         Some(Arc::new(diff)),
     );
-    let (cmd, _) = super::resolve_effect(&e);
+    let (cmd, _) = resolve(&e);
     assert_eq!(cmd.argv, vec!["m.rs".to_string()]);
 }
 
@@ -258,7 +609,7 @@ fn resolve_with_renamed_from_and_to_expands_independently() {
         CorrelationId(1),
         Some(Arc::new(diff)),
     );
-    let (cmd, _) = super::resolve_effect(&e);
+    let (cmd, _) = resolve(&e);
     assert_eq!(
         cmd.argv,
         vec![
@@ -284,7 +635,7 @@ fn resolve_with_diff_placeholder_and_no_diff_yields_zero_args() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _) = super::resolve_effect(&e);
+    let (cmd, _) = resolve(&e);
     assert_eq!(cmd.argv, vec!["fmt".to_string()]);
 }
 
@@ -301,7 +652,7 @@ fn resolve_with_empty_diff_placeholder_yields_zero_args() {
         CorrelationId(1),
         Some(Arc::new(Diff::default())),
     );
-    let (cmd, _) = super::resolve_effect(&e);
+    let (cmd, _) = resolve(&e);
     assert_eq!(cmd.argv, vec!["fmt".to_string()]);
 }
 
@@ -326,7 +677,7 @@ fn resolve_with_multivalue_in_separate_args_emits_literals_as_standalone_slots()
         CorrelationId(1),
         Some(Arc::new(diff)),
     );
-    let (cmd, _) = super::resolve_effect(&e);
+    let (cmd, _) = resolve(&e);
     assert_eq!(
         cmd.argv,
         vec![
@@ -355,7 +706,7 @@ fn resolve_with_multivalue_having_prefix_literal_tiles_per_value() {
         CorrelationId(1),
         Some(Arc::new(diff)),
     );
-    let (cmd, _) = super::resolve_effect(&e);
+    let (cmd, _) = resolve(&e);
     assert_eq!(cmd.argv, vec!["--out=a".to_string(), "--out=b".to_string()]);
 }
 
@@ -372,7 +723,7 @@ fn resolve_with_multivalue_having_prefix_and_empty_diff_yields_zero_slots() {
         CorrelationId(1),
         Some(Arc::new(Diff::default())),
     );
-    let (cmd, _) = super::resolve_effect(&e);
+    let (cmd, _) = resolve(&e);
     assert!(cmd.argv.is_empty());
 }
 
@@ -391,7 +742,7 @@ fn env_contains_specter_path_for_subtree_root() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     let path = env.iter().find(|(k, _)| k == "SPECTER_PATH").unwrap();
     assert_eq!(path.1, "/proj");
 }
@@ -409,7 +760,7 @@ fn env_contains_specter_path_for_per_stable_file() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     let path = env.iter().find(|(k, _)| k == "SPECTER_PATH").unwrap();
     assert_eq!(path.1, "/proj/a.c");
 }
@@ -427,7 +778,7 @@ fn env_specter_relative_path_empty_for_subtree_root() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
             .find(|(k, _)| k == "SPECTER_RELATIVE_PATH")
@@ -450,7 +801,7 @@ fn env_specter_relative_path_for_per_stable_file() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
             .find(|(k, _)| k == "SPECTER_RELATIVE_PATH")
@@ -474,7 +825,7 @@ fn env_specter_anchor_for_both_scopes() {
             CorrelationId(1),
             None,
         );
-        let (_, env) = super::resolve_effect(&e);
+        let (_, env) = resolve(&e);
         let v = env.iter().find(|(k, _)| k == "SPECTER_ANCHOR").unwrap();
         assert_eq!(v.1, "/anchor/dir", "scope = {scope:?}");
     }
@@ -493,7 +844,7 @@ fn env_specter_watch_uses_sub_name() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     assert_eq!(
         env.iter().find(|(k, _)| k == "SPECTER_WATCH").unwrap().1,
         "build"
@@ -513,7 +864,7 @@ fn env_specter_forced_zero_when_unforced() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     assert_eq!(
         env.iter().find(|(k, _)| k == "SPECTER_FORCED").unwrap().1,
         "0"
@@ -533,7 +884,7 @@ fn env_specter_forced_one_when_forced() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     assert_eq!(
         env.iter().find(|(k, _)| k == "SPECTER_FORCED").unwrap().1,
         "1"
@@ -553,7 +904,7 @@ fn env_specter_event_kind_dir_subtree_for_subtree_root() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
             .find(|(k, _)| k == "SPECTER_EVENT_KIND")
@@ -576,7 +927,7 @@ fn env_specter_event_kind_file_for_per_stable_file() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
             .find(|(k, _)| k == "SPECTER_EVENT_KIND")
@@ -599,7 +950,7 @@ fn env_specter_correlation_decimal_for_v1() {
         CorrelationId(42),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
             .find(|(k, _)| k == "SPECTER_CORRELATION")
@@ -626,7 +977,7 @@ fn env_does_not_contain_specter_diff_path() {
         CorrelationId(1),
         Some(Arc::new(diff)),
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     assert!(env.iter().all(|(k, _)| k != "SPECTER_DIFF_PATH"));
 }
 
@@ -643,7 +994,7 @@ fn env_order_is_alphabetical() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e);
+    let (_, env) = resolve(&e);
     let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(
         keys,
@@ -651,9 +1002,12 @@ fn env_order_is_alphabetical() {
             "SPECTER_ANCHOR",
             "SPECTER_CORRELATION",
             "SPECTER_EVENT_KIND",
+            "SPECTER_EXCLUDE",
             "SPECTER_FORCED",
+            "SPECTER_PARENT",
             "SPECTER_PATH",
             "SPECTER_RELATIVE_PATH",
+            "SPECTER_TIME",
             "SPECTER_WATCH",
         ]
     );
