@@ -2,30 +2,30 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key>
-  <string>io.specter</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-      <key>PATH</key>
-      <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/sbin</string>
-  </dict>
-  <key>ProgramArguments</key>
-  <array>
-      <string>@SPECTER_BIN@</string>
-      <string>--config</string>
-      <string>@SPECTER_CONF@</string>
-  </array>
-  <key>KeepAlive</key>
-  <true/>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>WorkingDirectory</key>
-  <string>/</string>
-  <key>StandardOutPath</key>
-  <string>/var/log/specter.log</string>
-  <key>StandardErrorPath</key>
-  <string>/var/log/specter.err</string>
-  <key>ProcessType</key>
-  <string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/sbin</string>
+    </dict>
+    <key>Label</key>
+    <string>io.specter</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@SPECTER_BIN@</string>
+        <string>--config</string>
+        <string>@SPECTER_CONF@</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>/</string>
+    <key>StandardOutPath</key>
+    <string>@SPECTER_LOG@</string>
+    <key>StandardErrorPath</key>
+    <string>@SPECTER_LOG@</string>
+    <key>ProcessType</key>
+    <string>Background</string>
 </dict>
 </plist>

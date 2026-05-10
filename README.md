@@ -52,15 +52,24 @@ make install             # → $(BINDIR)/specter (default /usr/local/bin)
 
 # Service template (one of):
 make install-systemd     # → /etc/systemd/system/specter.service
-make install-launchd     # → /Library/LaunchDaemons/io.specter.plist
+make install-launchd     # → $(LAUNCHD_DIR)/io.specter.plist
 make install-freebsd     # → $(PREFIX)/etc/rc.d/specter
 
 # All-in-one — auto-detect host OS and pick the right service template:
 make install-all
 ```
 
-Standard variables — `PREFIX`, `DESTDIR`, `BINDIR`, `SYSCONFDIR` — are
-honored throughout. See the top of `Makefile` for the full list.
+On macOS, install-launchd / install-config default to **user scope** — the
+plist lands in `~/Library/LaunchAgents/`, the config in `~/.config/specter/`,
+and `launchctl bootstrap`/`bootout` use `gui/<uid>` so no `sudo` is needed.
+Override `LAUNCHD_DIR=/Library/LaunchDaemons LAUNCHD_DOMAIN=system
+SYSCONFDIR=/usr/local/etc` (with `sudo`) for a system install.
+
+Linux/FreeBSD remain system-scope.
+
+Standard variables — `PREFIX`, `DESTDIR`, `BINDIR`, `SYSCONFDIR`,
+`LAUNCHD_DIR`, `LAUNCHD_DOMAIN` — are honored throughout. See the top of
+`Makefile` for the full list.
 
 ## Configuration
 

@@ -1,11 +1,4 @@
-# Specter install Makefile.
-#
-# Standard variables:
-#   PREFIX      install root (default /usr/local)
-#   DESTDIR     staging root for distro packagers (default empty)
-#   BINDIR      binary install dir (default $(PREFIX)/bin)
-#   SYSCONFDIR  config install dir (default $(PREFIX)/etc)
-#   SBINDIR     sbin install dir (default $(PREFIX)/sbin)
+# Specter install Makefile
 #
 # Targets:
 #   build / install / uninstall / clean        core
@@ -18,10 +11,29 @@
 #   uninstall-freebsd                          service-template removal
 #   install-all / uninstall-all                auto-detect host OS
 
-PREFIX     ?= /usr/local
-BINDIR     ?= $(PREFIX)/bin
-SYSCONFDIR ?= $(PREFIX)/etc
-SBINDIR    ?= $(PREFIX)/sbin
+MAKEFLAGS += --no-print-directory
+
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
+SBINDIR ?= $(PREFIX)/sbin
+
+BUILD_OS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
+
+ifeq ($(BUILD_OS),darwin)
+    SYSCONFDIR      ?= $(HOME)/.config/specter
+    LAUNCHD_DIR     ?= $(HOME)/Library/LaunchAgents
+    LAUNCHD_DOMAIN  ?= gui/$(shell id -u)
+    SPECTER_LOG_DIR ?= $(HOME)/Library/Logs
+else
+    LAUNCHD_DIR     ?= /Library/LaunchDaemons
+    LAUNCHD_DOMAIN  ?= system
+    SPECTER_LOG_DIR ?= /var/log
+endif
+
+SYSCONFDIR    ?= $(PREFIX)/etc
+SPECTER_LOG   ?= $(SPECTER_LOG_DIR)/specter.log
+SPECTER_USER  ?= $(shell id -un)
+SPECTER_GROUP ?= $(shell id -gn)
 
 INSTALL          ?= install
 INSTALL_PROGRAM  ?= $(INSTALL) -m 0755
@@ -31,10 +43,11 @@ INSTALL_SCRIPT   ?= $(INSTALL) -m 0755
 CARGO ?= cargo
 TARGET_RELEASE := target/release/specter
 
-BUILD_OS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
-
 SUBST = sed -e 's|@SPECTER_BIN@|$(BINDIR)/specter|g' \
-            -e 's|@SPECTER_CONF@|$(SYSCONFDIR)/specter.toml|g'
+            -e 's|@SPECTER_CONF@|$(SYSCONFDIR)/specter.toml|g' \
+            -e 's|@SPECTER_LOG@|$(SPECTER_LOG)|g' \
+            -e 's|@SPECTER_USER@|$(SPECTER_USER)|g' \
+            -e 's|@SPECTER_GROUP@|$(SPECTER_GROUP)|g'
 
 .PHONY: build install uninstall clean help \
         install-all uninstall-all \
@@ -46,10 +59,10 @@ help:
 	@echo "Targets:"
 	@echo "  build              cargo build --release"
 	@echo "  install            install binary to \$$(BINDIR)"
-	@echo "  install-config     install specter.toml.example to \$$(SYSCONFDIR);"
-	@echo "                     seeds specter.toml on first install"
+	@echo "  install-config     install specter.toml to \$$(SYSCONFDIR)"
+	@echo "                     (preserves any existing file)"
 	@echo "  install-systemd    install systemd unit to /etc/systemd/system/"
-	@echo "  install-launchd    install plist to /Library/LaunchDaemons/"
+	@echo "  install-launchd    install plist to \$$(LAUNCHD_DIR)"
 	@echo "  install-freebsd    install rc.d script to \$$(PREFIX)/etc/rc.d/"
 	@echo "  install-all        install binary, config, and host-OS service"
 	@echo "                     template (detected: $(BUILD_OS))"
@@ -58,65 +71,87 @@ help:
 	@echo "                     (active config files are preserved)"
 	@echo
 	@echo "Variables: PREFIX=$(PREFIX) DESTDIR=$(DESTDIR) BINDIR=$(BINDIR)"
+	@echo "           SYSCONFDIR=$(SYSCONFDIR) LAUNCHD_DIR=$(LAUNCHD_DIR)"
 
 build:
-	$(CARGO) build --release
+	@$(CARGO) build --release
 
 install: build
-	$(INSTALL) -d $(DESTDIR)$(BINDIR)
-	$(INSTALL_PROGRAM) $(TARGET_RELEASE) $(DESTDIR)$(BINDIR)/specter
+	@echo "Installing specter to $(DESTDIR)$(BINDIR)/"
+	@$(INSTALL) -d $(DESTDIR)$(BINDIR)
+	@$(INSTALL_PROGRAM) $(TARGET_RELEASE) $(DESTDIR)$(BINDIR)/specter
 
 uninstall:
-	rm -f $(DESTDIR)$(BINDIR)/specter
+	@echo "Removing $(DESTDIR)$(BINDIR)/specter"
+	@rm -f $(DESTDIR)$(BINDIR)/specter
 
 clean:
-	$(CARGO) clean
+	@$(CARGO) clean
 
 install-config:
-	$(INSTALL) -d $(DESTDIR)$(SYSCONFDIR)
-	$(INSTALL_DATA) etc/specter.toml.example \
-	    $(DESTDIR)$(SYSCONFDIR)/specter.toml.example
+	@$(INSTALL) -d $(DESTDIR)$(SYSCONFDIR)
 	@if [ ! -e $(DESTDIR)$(SYSCONFDIR)/specter.toml ]; then \
 	    $(INSTALL_DATA) etc/specter.toml.example \
 	        $(DESTDIR)$(SYSCONFDIR)/specter.toml; \
-	    echo "Seeded $(SYSCONFDIR)/specter.toml from example."; \
+	    echo "Installed $(SYSCONFDIR)/specter.toml"; \
 	else \
-	    echo "Preserved existing $(SYSCONFDIR)/specter.toml."; \
+	    echo "Preserved existing $(SYSCONFDIR)/specter.toml"; \
 	fi
 
 uninstall-config:
-	rm -f $(DESTDIR)$(SYSCONFDIR)/specter.toml.example
-	@echo "Left $(SYSCONFDIR)/specter.toml in place; remove manually if desired."
+	@echo "Removing $(DESTDIR)$(SYSCONFDIR)/specter.toml"
+	@rm -f $(DESTDIR)$(SYSCONFDIR)/specter.toml
 
 install-systemd:
-	$(INSTALL) -d $(DESTDIR)/etc/systemd/system
-	$(SUBST) etc/systemd/specter.service \
+	@echo "Installing systemd unit to $(DESTDIR)/etc/systemd/system/specter.service"
+	@$(INSTALL) -d $(DESTDIR)/etc/systemd/system
+	@$(SUBST) etc/systemd/specter.service \
 	    > $(DESTDIR)/etc/systemd/system/specter.service
-	chmod 0644 $(DESTDIR)/etc/systemd/system/specter.service
+	@chmod 0644 $(DESTDIR)/etc/systemd/system/specter.service
 	@echo "Next: systemctl daemon-reload && systemctl enable --now specter"
 
 uninstall-systemd:
-	rm -f $(DESTDIR)/etc/systemd/system/specter.service
+	@if [ -z "$(DESTDIR)" ]; then \
+	    echo "Stopping and disabling specter"; \
+	    systemctl disable --now specter 2>/dev/null || true; \
+	fi
+	@echo "Removing $(DESTDIR)/etc/systemd/system/specter.service"
+	@rm -f $(DESTDIR)/etc/systemd/system/specter.service
+	@if [ -z "$(DESTDIR)" ]; then \
+	    systemctl daemon-reload 2>/dev/null || true; \
+	fi
 
 install-launchd:
-	$(INSTALL) -d $(DESTDIR)/Library/LaunchDaemons
-	$(SUBST) etc/launchd/io.specter.plist \
-	    > $(DESTDIR)/Library/LaunchDaemons/io.specter.plist
-	chmod 0644 $(DESTDIR)/Library/LaunchDaemons/io.specter.plist
-	@echo "Next: sudo launchctl load -w /Library/LaunchDaemons/io.specter.plist"
+	@echo "Installing plist to $(DESTDIR)$(LAUNCHD_DIR)/io.specter.plist"
+	@$(INSTALL) -d $(DESTDIR)$(LAUNCHD_DIR) $(DESTDIR)$(SPECTER_LOG_DIR)
+	@$(SUBST) etc/launchd/io.specter.plist \
+	    > $(DESTDIR)$(LAUNCHD_DIR)/io.specter.plist
+	@chmod 0644 $(DESTDIR)$(LAUNCHD_DIR)/io.specter.plist
+	@echo "Next: launchctl bootstrap $(LAUNCHD_DOMAIN) $(LAUNCHD_DIR)/io.specter.plist"
 
 uninstall-launchd:
-	rm -f $(DESTDIR)/Library/LaunchDaemons/io.specter.plist
+	@if [ -z "$(DESTDIR)" ]; then \
+	    echo "Unloading specter from $(LAUNCHD_DOMAIN)"; \
+	    launchctl bootout $(LAUNCHD_DOMAIN) $(LAUNCHD_DIR)/io.specter.plist 2>/dev/null || true; \
+	fi
+	@echo "Removing $(DESTDIR)$(LAUNCHD_DIR)/io.specter.plist"
+	@rm -f $(DESTDIR)$(LAUNCHD_DIR)/io.specter.plist
 
 install-freebsd:
-	$(INSTALL) -d $(DESTDIR)$(PREFIX)/etc/rc.d
-	$(SUBST) etc/freebsd/specter \
+	@echo "Installing rc.d script to $(DESTDIR)$(PREFIX)/etc/rc.d/specter"
+	@$(INSTALL) -d $(DESTDIR)$(PREFIX)/etc/rc.d
+	@$(SUBST) etc/freebsd/specter \
 	    > $(DESTDIR)$(PREFIX)/etc/rc.d/specter
-	chmod 0755 $(DESTDIR)$(PREFIX)/etc/rc.d/specter
+	@chmod 0755 $(DESTDIR)$(PREFIX)/etc/rc.d/specter
 	@echo "Next: add 'specter_enable=\"YES\"' to /etc/rc.conf, then service specter start"
 
 uninstall-freebsd:
-	rm -f $(DESTDIR)$(PREFIX)/etc/rc.d/specter
+	@if [ -z "$(DESTDIR)" ]; then \
+	    echo "Stopping specter service"; \
+	    service specter onestop 2>/dev/null || true; \
+	fi
+	@echo "Removing $(DESTDIR)$(PREFIX)/etc/rc.d/specter"
+	@rm -f $(DESTDIR)$(PREFIX)/etc/rc.d/specter
 
 install-all: install install-config
 	@case "$(BUILD_OS)" in \
@@ -134,4 +169,4 @@ uninstall-all: uninstall
 	  freebsd) $(MAKE) uninstall-freebsd ;; \
 	  *) echo "specter: unknown OS '$(BUILD_OS)'; binary removed, service template skipped" ;; \
 	esac
-	@echo "Left $(SYSCONFDIR)/specter.toml{,.example} in place; run uninstall-config to remove the .example."
+	@echo "Left $(SYSCONFDIR)/specter.toml in place; run uninstall-config to remove it."

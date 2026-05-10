@@ -16,7 +16,8 @@ destination = "stderr"   # stderr | file  (when "file", path is required)
 [[watch]]
 name    = "example"
 path    = "/srv/data"            # absolute; lenient — pending paths are OK
-command = ["echo", "$path"]      # argv; placeholders: $path $rel $anchor
+command = ["echo", "$path"]      # argv; placeholders:
+                                 # $path $relative $anchor
                                  # $created $deleted $modified
                                  # $renamed_from $renamed_to
 

@@ -14,12 +14,15 @@ rcvar="${name}_enable"
 load_rc_config "${name}"
 
 : ${specter_enable:="NO"}
-: ${specter_user:="specter"}
+: ${specter_user:="@SPECTER_USER@"}
 : ${specter_config:="@SPECTER_CONF@"}
 : ${specter_logfile:="/var/log/specter.log"}
 
+procname="@SPECTER_BIN@"
 pidfile="/var/run/${name}.pid"
+
 command="/usr/sbin/daemon"
 command_args="-f -p ${pidfile} -o ${specter_logfile} -u ${specter_user} @SPECTER_BIN@ --config ${specter_config}"
+extra_commands="reload"
 
 run_rc_command "$1"

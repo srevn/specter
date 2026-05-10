@@ -9,8 +9,8 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 
-User=specter
-Group=specter
+User=@SPECTER_USER@
+Group=@SPECTER_GROUP@
 
 StandardOutput=journal
 StandardError=journal
