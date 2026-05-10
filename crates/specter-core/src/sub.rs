@@ -13,6 +13,7 @@ use slotmap::SlotMap;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tinyvec::TinyVec;
 
@@ -302,7 +303,7 @@ impl CommandTemplate {
     /// (`$created`/`$deleted`/`$modified`/`$renamed`-from-or-to). Computed
     /// once at `Sub::new`; never re-evaluated.
     #[must_use]
-    pub fn references_diff(&self) -> bool {
+    pub fn references_diff_derived(&self) -> bool {
         self.argv
             .iter()
             .any(|arg| arg.parts.iter().any(ArgPart::is_diff_placeholder))
@@ -362,7 +363,7 @@ pub struct Sub {
     pub id: SubId,
     pub name: CompactString,
     pub profile: ProfileId,
-    pub command: CommandTemplate,
+    pub command: Arc<CommandTemplate>,
     pub scope: EffectScope,
     pub settle: Duration,
     pub max_settle: Duration,
@@ -387,6 +388,10 @@ impl Sub {
     /// Construct a Sub. `needs_diff` is derived: true iff
     /// `scope == PerStableFile` OR the template references any diff entry.
     /// Pre-computed once; never re-evaluated.
+    ///
+    /// The caller passes a plain [`CommandTemplate`]; the constructor wraps
+    /// it in an [`Arc`] so [`crate::Effect`] emission can hand the template
+    /// to the actuator by Arc clone rather than by deep-cloning the argv.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -401,12 +406,12 @@ impl Sub {
         log_output: bool,
         source_promoter: Option<PromoterId>,
     ) -> Self {
-        let needs_diff = scope == EffectScope::PerStableFile || command.references_diff();
+        let needs_diff = scope == EffectScope::PerStableFile || command.references_diff_derived();
         Self {
             id,
             name: name.into(),
             profile,
-            command,
+            command: Arc::new(command),
             scope,
             settle,
             max_settle,
@@ -496,6 +501,7 @@ mod tests {
         ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, Placeholder, Sub, SubRegistry,
     };
     use crate::ids::{ProfileId, SubId};
+    use std::sync::Arc;
     use std::time::Duration;
 
     const SETTLE: Duration = Duration::from_millis(100);
@@ -514,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn references_diff_for_each_diff_placeholder() {
+    fn references_diff_derived_for_each_diff_placeholder() {
         for p in [
             Placeholder::Created,
             Placeholder::Deleted,
@@ -523,19 +529,19 @@ mod tests {
             Placeholder::RenamedTo,
         ] {
             assert!(
-                template_with(p).references_diff(),
-                "references_diff must be true for {p:?}"
+                template_with(p).references_diff_derived(),
+                "references_diff_derived must be true for {p:?}"
             );
         }
     }
 
     #[test]
-    fn references_diff_false_for_anchor_only_template() {
-        assert!(!anchor_only_template().references_diff());
+    fn references_diff_derived_false_for_anchor_only_template() {
+        assert!(!anchor_only_template().references_diff_derived());
         for p in [Placeholder::Path, Placeholder::Rel, Placeholder::Anchor] {
             assert!(
-                !template_with(p).references_diff(),
-                "references_diff must be false for anchor-only {p:?}"
+                !template_with(p).references_diff_derived(),
+                "references_diff_derived must be false for anchor-only {p:?}"
             );
         }
     }
@@ -771,6 +777,36 @@ mod tests {
         assert!(reg.get(sid).is_none());
         assert!(reg.at(pid).is_empty());
         assert_eq!(reg.len(), 0);
+    }
+
+    /// `Sub.command` is reference-counted: cloning the field bumps the
+    /// strong count without copying the inner `CommandTemplate`.
+    #[test]
+    fn sub_command_is_arc_wrapped() {
+        let sub = Sub::new(
+            SubId::default(),
+            "build",
+            ProfileId::default(),
+            anchor_only_template(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            MAX_SETTLE,
+            NO_EVENTS,
+            false,
+            None,
+        );
+
+        let initial = Arc::strong_count(&sub.command);
+        let bumped = Arc::clone(&sub.command);
+        assert_eq!(
+            Arc::strong_count(&sub.command),
+            initial + 1,
+            "Arc::clone increments strong_count on the field",
+        );
+        assert!(
+            Arc::ptr_eq(&bumped, &sub.command),
+            "the clone and the field point at the same allocation",
+        );
     }
 
     /// `Sub::new` threads `events` through to the constructed Sub.

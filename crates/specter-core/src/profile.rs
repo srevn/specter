@@ -17,6 +17,7 @@ use crate::tree::Tree;
 use compact_str::CompactString;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tinyvec::TinyVec;
 
@@ -358,6 +359,7 @@ pub enum AnchorClaim {
 pub struct Profile {
     pub resource: ResourceId,
     pub config: ScanConfig,
+    pub exclude_strings: Arc<[CompactString]>,
     pub config_hash: u64,
     /// Cached classification of the anchor — the on-disk shape Specter
     /// observed at the resource. Set on the path that first learned the
@@ -569,6 +571,10 @@ impl Profile {
     /// `has_per_file_fds` (true iff CONTENT or METADATA is in the mask).
     /// Every Sub on a Profile shares the same `events`, so
     /// `events_union` is invariant for the Profile's lifetime.
+    ///
+    /// `exclude_strings` is projected once here from `config.exclude` —
+    /// the [`ScanConfig`] builder has already sorted the vector by source,
+    /// so the projection is canonical without re-sorting.
     #[must_use]
     pub fn new(
         resource: ResourceId,
@@ -579,9 +585,15 @@ impl Profile {
     ) -> Self {
         let config_hash = compute_config_hash(&config, max_settle, events);
         let has_per_file_fds = events.intersects(ClassSet::CONTENT | ClassSet::METADATA);
+        let exclude_strings: Arc<[CompactString]> = config
+            .exclude
+            .iter()
+            .map(|g| CompactString::from(g.source()))
+            .collect();
         Self {
             resource,
             config,
+            exclude_strings,
             config_hash,
             kind: None,
             state: ProfileState::Idle,
@@ -744,9 +756,11 @@ mod tests {
     use super::{ClassSet, Profile, ProfileMap, ProfileState, ScanConfig, compute_config_hash};
     use crate::ids::ResourceId;
     use crate::resource::ResourceRole;
+    use crate::scan_config::GlobPattern;
     use crate::snapshot::EntryKind;
     use crate::snapshot::tree::{DirMeta, DirSnapshot, LeafEntry, TreeSnapshot};
     use crate::tree::Tree;
+    use compact_str::CompactString;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
@@ -757,6 +771,10 @@ mod tests {
 
     fn cfg() -> ScanConfig {
         ScanConfig::builder().build()
+    }
+
+    fn glob(source: &str) -> GlobPattern {
+        GlobPattern::compile(source).expect("test glob compiles")
     }
 
     #[test]
@@ -1066,6 +1084,74 @@ mod tests {
             p.last_settled_hash_at_loss,
             Some(0x00c0_ffee),
             "no-op preserves prior witness",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // exclude_strings projection
+    // -----------------------------------------------------------------------
+
+    /// `Profile.exclude_strings` mirrors `ScanConfig.exclude` in source-string
+    /// form, sorted lexicographically. The builder sorts at `build()`, so the
+    /// projection inherits the canonical order regardless of insertion order.
+    #[test]
+    fn profile_new_projects_exclude_strings_in_canonical_order() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let cfg = ScanConfig::builder()
+            .exclude(glob("z"))
+            .exclude(glob("a"))
+            .exclude(glob("m"))
+            .build();
+
+        let p = Profile::new(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS);
+
+        let actual: Vec<&str> = p
+            .exclude_strings
+            .iter()
+            .map(CompactString::as_str)
+            .collect();
+        assert_eq!(actual, vec!["a", "m", "z"]);
+    }
+
+    /// `Profile.exclude_strings` is empty (zero-length slice) when the
+    /// `ScanConfig` has no excludes — pin so consumers can rely on the
+    /// projection always being populated.
+    #[test]
+    fn profile_new_exclude_strings_empty_for_no_excludes() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        assert!(p.exclude_strings.is_empty());
+    }
+
+    /// The Arc on `Profile.exclude_strings` is the substitution-side handle
+    /// shared across every Sub joined to this Profile. Two clones of the
+    /// field point at the same allocation; the `bytes-per-Arc` cost is
+    /// constant regardless of Sub fanout.
+    #[test]
+    fn profile_exclude_strings_arc_shared_across_siblings() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let cfg = ScanConfig::builder()
+            .exclude(glob("*.tmp"))
+            .exclude(glob("*.bak"))
+            .build();
+
+        let p = Profile::new(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS);
+
+        let initial = Arc::strong_count(&p.exclude_strings);
+        let sibling_a = Arc::clone(&p.exclude_strings);
+        let sibling_b = Arc::clone(&p.exclude_strings);
+
+        assert!(
+            Arc::ptr_eq(&sibling_a, &sibling_b),
+            "siblings reading exclude_strings observe one allocation",
+        );
+        assert_eq!(
+            Arc::strong_count(&p.exclude_strings),
+            initial + 2,
+            "each sibling clone bumps the strong count",
         );
     }
 }
