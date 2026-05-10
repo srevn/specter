@@ -27,7 +27,6 @@ mod tree;
 
 pub use diag::{ClaimKind, Diagnostic, PromoterClaimKind};
 pub use diff::{Diff, EntryRef, Rename};
-pub use effect::resolve::resolve_effect;
 pub use effect::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome};
 pub use ids::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
 pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};

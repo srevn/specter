@@ -349,7 +349,7 @@ impl ArgPart {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Placeholder {
     Path,
-    Rel,
+    Relative,
     Anchor,
     Created,
     Deleted,
@@ -538,7 +538,11 @@ mod tests {
     #[test]
     fn references_diff_derived_false_for_anchor_only_template() {
         assert!(!anchor_only_template().references_diff_derived());
-        for p in [Placeholder::Path, Placeholder::Rel, Placeholder::Anchor] {
+        for p in [
+            Placeholder::Path,
+            Placeholder::Relative,
+            Placeholder::Anchor,
+        ] {
             assert!(
                 !template_with(p).references_diff_derived(),
                 "references_diff_derived must be false for anchor-only {p:?}"

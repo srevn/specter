@@ -22,15 +22,15 @@ impl std::error::Error for TemplateError {}
 ///
 /// Lexer rules:
 /// - `$<name>` where `<name>` exactly matches a catalog entry
-///   (lowercase: `path`, `rel`, `anchor`, `created`, `deleted`, `modified`,
-///   `renamed_from`, `renamed_to`) → [`Placeholder`].
+///   (lowercase: `path`, `relative`, `anchor`, `created`, `deleted`,
+///   `modified`, `renamed_from`, `renamed_to`) → [`Placeholder`].
 /// - `$<name>` where `<name>` contains any ASCII uppercase letter → literal
 ///   `$<name>`. Preserves shell-expansion of env vars
 ///   (`$SPECTER_PATH`, `$SPECTER_FORCED`, etc.) and conventional uppercase
 ///   shell vars (`$HOME`, `$PATH`, `$USER`).
 /// - `$<name>` where `<name>` is all-lowercase (with optional digits /
 ///   underscores) but not in the catalog → [`TemplateError::UnknownPlaceholder`].
-///   Catches typos of catalog names (`$pat`, `$rell`, etc.) since the
+///   Catches typos of catalog names (`$pat`, `$relativ`, etc.) since the
 ///   catalog is lowercase by convention.
 /// - `$` followed by a digit, punctuation, end-of-string, or any non-name-
 ///   start character is a literal `$`.
@@ -67,7 +67,7 @@ pub fn parse_arg(s: &str) -> Result<ArgTemplate, TemplateError> {
 
         let placeholder = match name.as_str() {
             "path" => Placeholder::Path,
-            "rel" => Placeholder::Rel,
+            "relative" => Placeholder::Relative,
             "anchor" => Placeholder::Anchor,
             "created" => Placeholder::Created,
             "deleted" => Placeholder::Deleted,
@@ -130,7 +130,7 @@ mod tests {
     fn each_catalog_placeholder_alone() {
         for (s, p) in [
             ("$path", Placeholder::Path),
-            ("$rel", Placeholder::Rel),
+            ("$relative", Placeholder::Relative),
             ("$anchor", Placeholder::Anchor),
             ("$created", Placeholder::Created),
             ("$deleted", Placeholder::Deleted),
@@ -161,8 +161,8 @@ mod tests {
     #[test]
     fn adjacent_single_value_placeholders() {
         assert_eq!(
-            parts(parse_arg("$path$rel").unwrap()),
-            vec![ph(Placeholder::Path), ph(Placeholder::Rel)]
+            parts(parse_arg("$path$relative").unwrap()),
+            vec![ph(Placeholder::Path), ph(Placeholder::Relative)]
         );
     }
 
@@ -272,7 +272,7 @@ mod tests {
 
     const CATALOG: &[&str] = &[
         "path",
-        "rel",
+        "relative",
         "anchor",
         "created",
         "deleted",

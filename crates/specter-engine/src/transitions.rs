@@ -23,7 +23,7 @@ use specter_core::{
     ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure,
     WatchOp, WatchRegistryDiff,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1967,16 +1967,20 @@ impl Engine {
         let current_snap = p.current.clone();
         let pattern = p.config.pattern.clone();
         // Read the cached anchor classification. `None` falls back to
-        // `Dir` (the path itself becomes cwd; if the actuator's later
-        // `chdir` discovers the path doesn't behave as a directory, the
-        // Effect surfaces `EffectOutcome::Failed`). Reaching `None`
-        // here implies a fresh resource-based attach whose Seed probe
-        // hasn't returned — `dispatch_seed_ok`'s fallback writes the
-        // field on the next Seed-Ok.
+        // `Dir` — the actuator's `compute_cwd` then anchors at the path
+        // itself; if the actuator's later `chdir` discovers the path
+        // doesn't behave as a directory, the Effect surfaces
+        // `EffectOutcome::Failed`. Reaching `None` here implies a fresh
+        // resource-based attach whose Seed probe hasn't returned —
+        // `dispatch_seed_ok`'s fallback writes the field on the next
+        // Seed-Ok.
         let anchor_kind = p.kind.unwrap_or(ResourceKind::Dir);
+        // Substitution-side projection of `ScanConfig.exclude`. The
+        // resolver iterates source strings; the sensor consults compiled
+        // matchers. The projection is sorted at `Profile::new`.
+        let exclude_strings = Arc::clone(&p.exclude_strings);
 
         let anchor_path = self.tree.path_of(resource).unwrap_or_default();
-        let anchor_cwd = compute_cwd(&anchor_path, anchor_kind);
 
         // Lazy-build the Diff Arc only if any Sub needs it AND both a
         // baseline and a current snapshot are present. With baseline pinned
@@ -2062,15 +2066,6 @@ impl Engine {
                     let Some(sub) = self.subs.get(sub_id) else {
                         continue;
                     };
-                    let (command, env) = specter_core::resolve_effect(
-                        sub,
-                        &anchor_path,
-                        &anchor_path,
-                        "",
-                        effect_forced,
-                        correlation,
-                        diff_for_effect.as_deref(),
-                    );
                     out.effects.push(Effect {
                         key: dk.clone(),
                         // Subtree's target is the anchor — `resource` was
@@ -2079,13 +2074,20 @@ impl Engine {
                         // survives any post-emit state churn without a
                         // ProfileMap lookup.
                         target: resource,
-                        command,
-                        env,
-                        cwd: anchor_cwd.clone(),
                         forced: effect_forced,
                         correlation,
                         diff: diff_for_effect,
                         capture_output: log_output,
+                        sub_name: sub.name.clone(),
+                        command: Arc::clone(&sub.command),
+                        scope: sub.scope,
+                        anchor_path: anchor_path.clone(),
+                        anchor_kind,
+                        // Subtree's `target_path` is the anchor itself;
+                        // `target_relative` is empty (no per-entry segment).
+                        target_path: anchor_path.clone(),
+                        target_relative: CompactString::new(""),
+                        exclude: Arc::clone(&exclude_strings),
                     });
                     count = count.saturating_add(1);
 
@@ -2113,7 +2115,8 @@ impl Engine {
                         pattern.as_ref(),
                         &diff,
                         &anchor_path,
-                        &anchor_cwd,
+                        anchor_kind,
+                        &exclude_strings,
                         out,
                     );
                     count = count.saturating_add(pushed);
@@ -2138,6 +2141,7 @@ impl Engine {
     /// Returns the number of Effects pushed to `out.effects`. The caller
     /// (`emit_effects`) sums this into the [`EmitOutcome.count`] it returns.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     fn emit_effects_per_stable_file(
         &mut self,
         sub_id: SubId,
@@ -2146,7 +2150,8 @@ impl Engine {
         pattern: Option<&specter_core::GlobPattern>,
         diff: &Arc<specter_core::Diff>,
         anchor_path: &Path,
-        anchor_cwd: &Path,
+        anchor_kind: ResourceKind,
+        exclude_strings: &Arc<[CompactString]>,
         out: &mut StepOutput,
     ) -> u32 {
         let profile_id = match self.subs.get(sub_id) {
@@ -2208,22 +2213,12 @@ impl Engine {
             };
 
             let target_path = anchor_path.join(entry.segment.as_str());
-            let target_rel = entry.segment.as_str();
             let correlation = self.next_effect_correlation();
             // The Sub may have been removed mid-burst; defensive lookup.
             let Some(sub) = self.subs.get(sub_id) else {
                 continue;
             };
             let log_output = sub.log_output;
-            let (command, env) = specter_core::resolve_effect(
-                sub,
-                anchor_path,
-                &target_path,
-                target_rel,
-                forced,
-                correlation,
-                Some(diff),
-            );
             out.effects.push(Effect {
                 key: dk.clone(),
                 // PerFile's target is the file resource — same value as
@@ -2231,13 +2226,18 @@ impl Engine {
                 // sort doesn't have to peek inside the variant; the pair
                 // `(sub_of_key, target)` is uniform across both arms.
                 target: resource,
-                command,
-                env,
-                cwd: anchor_cwd.to_path_buf(),
                 forced,
                 correlation,
                 diff: Some(diff.clone()),
                 capture_output: log_output,
+                sub_name: sub.name.clone(),
+                command: Arc::clone(&sub.command),
+                scope: sub.scope,
+                anchor_path: anchor_path.to_path_buf(),
+                anchor_kind,
+                target_path,
+                target_relative: entry.segment.clone(),
+                exclude: Arc::clone(exclude_strings),
             });
             count = count.saturating_add(1);
 
@@ -2503,24 +2503,6 @@ enum DispatchTarget {
     Rebase,
     Burst { intent: BurstIntent, forced: bool },
     Stale,
-}
-
-/// Resolve an Effect's `cwd` from the Profile's anchor path + kind.
-///
-/// `Command::current_dir` requires a directory; spawn fails with `ENOTDIR`
-/// otherwise. For File-anchored Profiles the parent directory is the
-/// natural cwd (user scripts use `$SPECTER_PATH` to locate the file).
-/// `Dir` and `Unknown` (rare; pending paths) anchor at the path itself —
-/// for `Unknown`, this may not exist on disk; the actuator surfaces such
-/// failures as `EffectOutcome::Failed`.
-fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> PathBuf {
-    match kind {
-        ResourceKind::File => anchor_path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map_or_else(|| anchor_path.to_path_buf(), Path::to_path_buf),
-        ResourceKind::Dir | ResourceKind::Unknown => anchor_path.to_path_buf(),
-    }
 }
 
 /// Event-class assignment. Maps an [`FsEvent`] + the resource's

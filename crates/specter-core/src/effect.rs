@@ -6,26 +6,25 @@
 //! the Sub's command template references diff entries (or scope is
 //! `PerStableFile`); otherwise `None`.
 
-pub mod resolve;
-
-#[cfg(test)]
-mod tests;
-
 use crate::diff::Diff;
 use crate::ids::{ProfileId, ResourceId, SubId};
+use crate::resource::ResourceKind;
+use crate::sub::{CommandTemplate, EffectScope};
+use compact_str::CompactString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Resolved command (substitution output). The data shape ships here;
-/// the resolver that turns `(CommandTemplate, Sub, Profile, Tree, Diff)`
-/// into argv strings lives next to the Actuator.
+/// Resolved command (substitution output). Constructed by the actuator's
+/// resolver immediately before spawn, from the substitution-domain
+/// projection carried on [`Effect`].
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CommandResolved {
     pub argv: Vec<String>,
 }
 
-/// Effect — a command ready for the Actuator.
+/// Effect — a command-to-be plus engine bookkeeping.
 ///
+/// **Coalescing identity + bookkeeping.**
 /// `key` drives `DedupKey`-based coalescing; `forced` mirrors
 /// `Burst.forced` at emission time (every Standard burst Effect carries
 /// the deadline-crossed flag, regardless of whether the eventual probe
@@ -48,17 +47,51 @@ pub struct CommandResolved {
 /// forwarded to Specter's own stdout/stderr, where the supervisor's
 /// log facility — systemd journal, launchd `StandardOutPath`, FreeBSD
 /// `daemon -o` — captures it).
+///
+/// **Substitution-domain projection of `(Sub, Profile, Tree)`.**
+/// The remaining fields are everything the actuator-side resolver reads
+/// to render argv + env + cwd at spawn time. Frozen at emit time;
+/// consumed at spawn time. Flat (not nested in an `EffectContext`)
+/// because there is no second consumer for the group, and a name for a
+/// group of fields that has no second consumer is overhead.
+///
+/// - `sub_name` — `$watch` substitute and `SPECTER_WATCH` env value.
+///   Owned `CompactString` rather than `Arc<str>` so the resolver
+///   reaches it via `Deref<Target = str>` without naming the type.
+/// - `command` — the parsed argv template, Arc-cloned from `Sub.command`
+///   at emit time so coalesced Effects share one allocation.
+/// - `scope` — `EffectScope` mirror; the resolver maps it to
+///   `SPECTER_EVENT_KIND` (`dir-subtree` vs `file`).
+/// - `anchor_path`, `anchor_kind` — the anchor's filesystem path and
+///   classification. The actuator computes `cwd` from these via
+///   `compute_cwd(anchor_path, anchor_kind)`. `anchor_kind` is one byte;
+///   carrying it lets the actuator pick the correct cwd shape (parent
+///   dir for File anchors, the path itself for Dir / Unknown) without a
+///   round-trip to the engine.
+/// - `target_path`, `target_relative` — `$path` and `$relative` substitutes.
+///   For `DedupKey::Subtree`, both equal the anchor (`target_relative == ""`);
+///   for `DedupKey::PerFile`, `target_path = anchor_path.join(segment)`
+///   and `target_relative = segment`.
+/// - `exclude` — Arc-clone of `Profile.exclude_strings`. Carried so
+///   the resolver can render the `$excluded` placeholder and
+///   `SPECTER_EXCLUDE` env value without a back-channel to the engine.
 #[derive(Clone, Debug)]
 pub struct Effect {
     pub key: DedupKey,
     pub target: ResourceId,
-    pub command: CommandResolved,
-    pub env: Vec<(String, String)>,
-    pub cwd: PathBuf,
     pub forced: bool,
     pub correlation: CorrelationId,
     pub diff: Option<Arc<Diff>>,
     pub capture_output: bool,
+
+    pub sub_name: CompactString,
+    pub command: Arc<CommandTemplate>,
+    pub scope: EffectScope,
+    pub anchor_path: PathBuf,
+    pub anchor_kind: ResourceKind,
+    pub target_path: PathBuf,
+    pub target_relative: CompactString,
+    pub exclude: Arc<[CompactString]>,
 }
 
 /// Per-Effect correlation token. Engine-monotonic in v1.

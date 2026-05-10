@@ -12,10 +12,12 @@
     clippy::wildcard_enum_match_arm
 )]
 
+use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
 use specter_actuator::{OsSpawner, SubprocessActuator};
 use specter_core::{
-    CommandResolved, CorrelationId, DedupKey, Effect, Input, ProfileId, ResourceId, SubId,
+    ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, EffectScope, Input,
+    ProfileId, ResourceId, ResourceKind, SubId,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -127,11 +129,30 @@ impl Drop for Harness {
     }
 }
 
+/// Wrap a `Vec<String>` argv as a literal-only [`CommandTemplate`].
+///
+/// The resolver renders each `ArgTemplate(Literal(s))` as the slot `s`,
+/// so `literal_command(["foo", "bar"])` resolves to `argv = ["foo",
+/// "bar"]` byte-for-byte. Used by the integration helpers below to
+/// satisfy `Effect.command: Arc<CommandTemplate>` while keeping fixture
+/// call sites' `Vec<String>` ergonomics intact.
+fn literal_command(argv: Vec<String>) -> Arc<CommandTemplate> {
+    Arc::new(CommandTemplate::new(
+        argv.into_iter()
+            .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
+    ))
+}
+
 /// Build a PerFile Effect with a literal `argv` and the given correlation.
 ///
 /// `profile_seed` mints the `DedupKey::PerFile.profile` field via
 /// [`unique_profile_id`]; tests that don't care about Profile identity can
 /// pass any stable value (e.g., the same as `sub_seed`).
+///
+/// `cwd` is mapped onto `anchor_path` with `anchor_kind = Dir`, so the
+/// actuator's `compute_cwd` returns the same path. Tests reading
+/// `Effect.anchor_path` see exactly what they passed as `cwd`; tests
+/// only caring about spawn cwd see the same byte sequence.
 pub fn perfile_effect(
     sub_seed: u64,
     profile_seed: u64,
@@ -141,6 +162,7 @@ pub fn perfile_effect(
     cwd: PathBuf,
 ) -> Effect {
     let resource = unique_resource_id(res_seed);
+    let target_path = cwd.clone();
     Effect {
         key: DedupKey::PerFile {
             sub: unique_sub_id(sub_seed),
@@ -148,13 +170,18 @@ pub fn perfile_effect(
             resource,
         },
         target: resource,
-        command: CommandResolved { argv },
-        env: Vec::new(),
-        cwd,
         forced: false,
         correlation: CorrelationId(corr),
         diff: None,
         capture_output: false,
+        sub_name: CompactString::new(""),
+        command: literal_command(argv),
+        scope: EffectScope::PerStableFile,
+        anchor_path: cwd,
+        anchor_kind: ResourceKind::Dir,
+        target_path,
+        target_relative: CompactString::new(""),
+        exclude: Arc::from(Vec::<CompactString>::new()),
     }
 }
 
@@ -171,18 +198,24 @@ pub fn subtree_effect(
     argv: Vec<String>,
     cwd: PathBuf,
 ) -> Effect {
+    let target_path = cwd.clone();
     Effect {
         key: DedupKey::Subtree {
             sub: unique_sub_id(sub_seed),
             profile: unique_profile_id(profile_seed),
         },
         target: unique_resource_id(profile_seed),
-        command: CommandResolved { argv },
-        env: Vec::new(),
-        cwd,
         forced: false,
         correlation: CorrelationId(corr),
         diff: None,
         capture_output: false,
+        sub_name: CompactString::new(""),
+        command: literal_command(argv),
+        scope: EffectScope::SubtreeRoot,
+        anchor_path: cwd,
+        anchor_kind: ResourceKind::Dir,
+        target_path,
+        target_relative: CompactString::new(""),
+        exclude: Arc::from(Vec::<CompactString>::new()),
     }
 }

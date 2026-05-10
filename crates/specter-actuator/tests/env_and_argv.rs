@@ -7,14 +7,31 @@ mod common;
 use common::*;
 use compact_str::CompactString;
 use smallvec::smallvec;
-use specter_core::{Diff, EffectOutcome, EntryKind, EntryRef, Input};
-use std::path::Path;
+use specter_core::{CorrelationId, Diff, Effect, EffectOutcome, EntryKind, EntryRef, Input};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Spawn a script that writes the given env-var to a captured file, then
 /// asserts on its content.
-fn assert_env_var_received(name: &str, expected: &str) {
+///
+/// The actuator-side resolver derives every `SPECTER_*` env value from the
+/// substitution-domain projection on [`Effect`] — there is no `Effect.env`
+/// field to push pairs onto. To assert "the child sees `name=expected`"
+/// the helper takes a `setup` closure that mutates the resolver's
+/// *inputs* (e.g., set `e.target_path` to assert on `SPECTER_PATH`); the
+/// resolver's render-time output is what the spawned process observes
+/// via `getenv`.
+///
+/// `expected_for` derives the expected value from the spawn cwd so that
+/// `SPECTER_ANCHOR` (which doubles as cwd) can assert against the
+/// tempdir's actual path; cases whose expected value is independent of
+/// the cwd ignore the argument.
+fn assert_env_var_received(
+    name: &str,
+    expected_for: impl FnOnce(&Path) -> String,
+    setup: impl FnOnce(&mut Effect),
+) {
     let dir = tempfile::tempdir().expect("tempdir");
     let out_path = dir.path().join("out");
     let script = format!(
@@ -31,7 +48,8 @@ fn assert_env_var_received(name: &str, expected: &str) {
         vec!["/bin/sh".into(), "-c".into(), script],
         dir.path().to_path_buf(),
     );
-    e.env.push((name.to_owned(), expected.to_owned()));
+    setup(&mut e);
+    let expected = expected_for(dir.path());
     h.submit(e);
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
@@ -45,27 +63,55 @@ fn assert_env_var_received(name: &str, expected: &str) {
 
 #[test]
 fn child_receives_specter_path() {
-    assert_env_var_received("SPECTER_PATH", "/abs/proj/src/a.c");
+    // `SPECTER_PATH` mirrors `Effect.target_path`. Set it to a path
+    // that disagrees with the spawn cwd (the tempdir on `anchor_path`)
+    // so any future collapse of the two fields fails here.
+    assert_env_var_received(
+        "SPECTER_PATH",
+        |_dir| "/abs/proj/src/a.c".to_owned(),
+        |e| e.target_path = PathBuf::from("/abs/proj/src/a.c"),
+    );
 }
 
 #[test]
 fn child_receives_specter_anchor() {
-    assert_env_var_received("SPECTER_ANCHOR", "/abs/proj");
+    // `SPECTER_ANCHOR` mirrors `Effect.anchor_path`, which doubles as
+    // the spawn cwd. Asserting against an arbitrary string (the prior
+    // helper's "/abs/proj" placeholder) would set `cwd = /abs/proj`
+    // and the spawn would fail with ENOENT. The integration here
+    // verifies the cwd-anchor coupling end-to-end.
+    assert_env_var_received(
+        "SPECTER_ANCHOR",
+        |dir| dir.to_string_lossy().into_owned(),
+        |_e| {},
+    );
 }
 
 #[test]
-fn child_receives_specter_rel_path() {
-    assert_env_var_received("SPECTER_REL_PATH", "src/a.c");
+fn child_receives_specter_relative_path() {
+    assert_env_var_received(
+        "SPECTER_RELATIVE_PATH",
+        |_dir| "src/a.c".to_owned(),
+        |e| e.target_relative = CompactString::from("src/a.c"),
+    );
 }
 
 #[test]
 fn child_receives_specter_correlation_decimal() {
-    assert_env_var_received("SPECTER_CORRELATION", "12345");
+    assert_env_var_received(
+        "SPECTER_CORRELATION",
+        |_dir| "12345".to_owned(),
+        |e| e.correlation = CorrelationId(12345),
+    );
 }
 
 #[test]
 fn child_receives_specter_forced_zero() {
-    assert_env_var_received("SPECTER_FORCED", "0");
+    assert_env_var_received(
+        "SPECTER_FORCED",
+        |_dir| "0".to_owned(),
+        |e| e.forced = false,
+    );
 }
 
 #[test]

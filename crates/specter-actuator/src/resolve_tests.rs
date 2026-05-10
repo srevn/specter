@@ -1,5 +1,5 @@
-//! Sibling unit tests for [`crate::effect::resolve`]. Pure data work —
-//! all fixtures are inline; no I/O.
+//! Sibling unit tests for [`super::resolve`]. Pure data work — all
+//! fixtures are inline; no I/O.
 
 #![allow(
     clippy::items_after_statements,
@@ -7,30 +7,42 @@
     clippy::too_many_lines
 )]
 
-use super::resolve::resolve_effect;
-use crate::diff::{Diff, EntryRef, Rename};
-use crate::effect::CorrelationId;
-use crate::ids::{ProfileId, SubId};
-use crate::snapshot::EntryKind;
-use crate::sub::{ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, Placeholder, Sub};
 use compact_str::CompactString;
 use smallvec::smallvec;
+use specter_core::{
+    ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Diff, Effect, EffectScope,
+    EntryKind, EntryRef, Placeholder, Rename, ResourceId, ResourceKind,
+};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Arc;
 
-fn sub(name: &str, scope: EffectScope, argv: Vec<ArgTemplate>) -> Sub {
-    Sub::new(
-        SubId::default(),
-        name,
-        ProfileId::default(),
-        CommandTemplate::new(argv),
+fn make_effect(
+    sub_name: &str,
+    scope: EffectScope,
+    argv: Vec<ArgTemplate>,
+    anchor_path: &Path,
+    target_path: &Path,
+    target_relative: &str,
+    forced: bool,
+    correlation: CorrelationId,
+    diff: Option<Arc<Diff>>,
+) -> Effect {
+    Effect {
+        key: DedupKey::default(),
+        target: ResourceId::default(),
+        forced,
+        correlation,
+        diff,
+        capture_output: false,
+        sub_name: CompactString::from(sub_name),
+        command: Arc::new(CommandTemplate::new(argv)),
         scope,
-        Duration::from_millis(100),
-        Duration::from_secs(6),
-        ClassSet::EMPTY,
-        false,
-        None,
-    )
+        anchor_path: anchor_path.to_path_buf(),
+        anchor_kind: ResourceKind::Dir,
+        target_path: target_path.to_path_buf(),
+        target_relative: CompactString::from(target_relative),
+        exclude: Arc::from(Vec::<CompactString>::new()),
+    }
 }
 
 fn lit(s: &str) -> ArgPart {
@@ -55,13 +67,10 @@ fn entry_ref(seg: &str, inode: u64) -> EntryRef {
 
 #[test]
 fn resolve_simple_literal_passes_through() {
-    let s = sub(
+    let e = make_effect(
         "build",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("make")])],
-    );
-    let (cmd, _env) = resolve_effect(
-        &s,
         Path::new("/proj"),
         Path::new("/proj"),
         "",
@@ -69,18 +78,16 @@ fn resolve_simple_literal_passes_through() {
         CorrelationId(1),
         None,
     );
+    let (cmd, _env) = super::resolve_effect(&e);
     assert_eq!(cmd.argv, vec!["make".to_string()]);
 }
 
 #[test]
 fn resolve_with_path_placeholder() {
-    let s = sub(
+    let e = make_effect(
         "fmt",
         EffectScope::PerStableFile,
         vec![arg(vec![lit("fmt")]), arg(vec![ph(Placeholder::Path)])],
-    );
-    let (cmd, _env) = resolve_effect(
-        &s,
         Path::new("/proj"),
         Path::new("/proj/src/a.c"),
         "src/a.c",
@@ -88,6 +95,7 @@ fn resolve_with_path_placeholder() {
         CorrelationId(1),
         None,
     );
+    let (cmd, _env) = super::resolve_effect(&e);
     assert_eq!(
         cmd.argv,
         vec!["fmt".to_string(), "/proj/src/a.c".to_string()]
@@ -95,14 +103,11 @@ fn resolve_with_path_placeholder() {
 }
 
 #[test]
-fn resolve_with_rel_placeholder() {
-    let s = sub(
+fn resolve_with_relative_placeholder() {
+    let e = make_effect(
         "log",
         EffectScope::PerStableFile,
-        vec![arg(vec![lit("log")]), arg(vec![ph(Placeholder::Rel)])],
-    );
-    let (cmd, _env) = resolve_effect(
-        &s,
+        vec![arg(vec![lit("log")]), arg(vec![ph(Placeholder::Relative)])],
         Path::new("/proj"),
         Path::new("/proj/src/a.c"),
         "src/a.c",
@@ -110,18 +115,16 @@ fn resolve_with_rel_placeholder() {
         CorrelationId(1),
         None,
     );
+    let (cmd, _env) = super::resolve_effect(&e);
     assert_eq!(cmd.argv, vec!["log".to_string(), "src/a.c".to_string()]);
 }
 
 #[test]
 fn resolve_with_anchor_placeholder() {
-    let s = sub(
+    let e = make_effect(
         "build",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("build")]), arg(vec![ph(Placeholder::Anchor)])],
-    );
-    let (cmd, _env) = resolve_effect(
-        &s,
         Path::new("/proj"),
         Path::new("/proj"),
         "",
@@ -129,18 +132,16 @@ fn resolve_with_anchor_placeholder() {
         CorrelationId(1),
         None,
     );
+    let (cmd, _env) = super::resolve_effect(&e);
     assert_eq!(cmd.argv, vec!["build".to_string(), "/proj".to_string()]);
 }
 
 #[test]
 fn resolve_with_concatenated_literal_and_placeholder() {
-    let s = sub(
+    let e = make_effect(
         "x",
         EffectScope::PerStableFile,
         vec![arg(vec![lit("--input="), ph(Placeholder::Path)])],
-    );
-    let (cmd, _env) = resolve_effect(
-        &s,
         Path::new("/proj"),
         Path::new("/proj/a.c"),
         "a.c",
@@ -148,16 +149,12 @@ fn resolve_with_concatenated_literal_and_placeholder() {
         CorrelationId(1),
         None,
     );
+    let (cmd, _env) = super::resolve_effect(&e);
     assert_eq!(cmd.argv, vec!["--input=/proj/a.c".to_string()]);
 }
 
 #[test]
 fn resolve_with_created_expands_to_n_argv() {
-    let s = sub(
-        "fmt",
-        EffectScope::PerStableFile,
-        vec![arg(vec![lit("fmt")]), arg(vec![ph(Placeholder::Created)])],
-    );
     let diff = Diff {
         created: smallvec![
             entry_ref("a.rs", 1),
@@ -166,15 +163,18 @@ fn resolve_with_created_expands_to_n_argv() {
         ],
         ..Default::default()
     };
-    let (cmd, _env) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "fmt",
+        EffectScope::PerStableFile,
+        vec![arg(vec![lit("fmt")]), arg(vec![ph(Placeholder::Created)])],
         Path::new("/proj"),
         Path::new("/proj"),
         "",
         false,
         CorrelationId(1),
-        Some(&diff),
+        Some(Arc::new(diff)),
     );
+    let (cmd, _env) = super::resolve_effect(&e);
     assert_eq!(
         cmd.argv,
         vec![
@@ -188,63 +188,48 @@ fn resolve_with_created_expands_to_n_argv() {
 
 #[test]
 fn resolve_with_deleted_expands_to_n_argv() {
-    let s = sub(
-        "rmlog",
-        EffectScope::PerStableFile,
-        vec![arg(vec![ph(Placeholder::Deleted)])],
-    );
     let diff = Diff {
         deleted: smallvec![entry_ref("x", 9), entry_ref("y", 10)],
         ..Default::default()
     };
-    let (cmd, _) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "rmlog",
+        EffectScope::PerStableFile,
+        vec![arg(vec![ph(Placeholder::Deleted)])],
         Path::new("/p"),
         Path::new("/p"),
         "",
         false,
         CorrelationId(1),
-        Some(&diff),
+        Some(Arc::new(diff)),
     );
+    let (cmd, _) = super::resolve_effect(&e);
     assert_eq!(cmd.argv, vec!["x".to_string(), "y".to_string()]);
 }
 
 #[test]
 fn resolve_with_modified_expands_to_n_argv() {
-    let s = sub(
-        "lint",
-        EffectScope::PerStableFile,
-        vec![arg(vec![ph(Placeholder::Modified)])],
-    );
     let diff = Diff {
         modified: smallvec![entry_ref("m.rs", 1)],
         ..Default::default()
     };
-    let (cmd, _) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "lint",
+        EffectScope::PerStableFile,
+        vec![arg(vec![ph(Placeholder::Modified)])],
         Path::new("/p"),
         Path::new("/p"),
         "",
         false,
         CorrelationId(1),
-        Some(&diff),
+        Some(Arc::new(diff)),
     );
+    let (cmd, _) = super::resolve_effect(&e);
     assert_eq!(cmd.argv, vec!["m.rs".to_string()]);
 }
 
 #[test]
 fn resolve_with_renamed_from_and_to_expands_independently() {
-    // `["mv", "$renamed_from", "$renamed_to"]` with two renames →
-    // `["mv", from1, from2, to1, to2]` — independent expansion, no zip.
-    let s = sub(
-        "mv",
-        EffectScope::PerStableFile,
-        vec![
-            arg(vec![lit("mv")]),
-            arg(vec![ph(Placeholder::RenamedFrom)]),
-            arg(vec![ph(Placeholder::RenamedTo)]),
-        ],
-    );
     let diff = Diff {
         renamed: smallvec![
             Rename {
@@ -258,15 +243,22 @@ fn resolve_with_renamed_from_and_to_expands_independently() {
         ],
         ..Default::default()
     };
-    let (cmd, _) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "mv",
+        EffectScope::PerStableFile,
+        vec![
+            arg(vec![lit("mv")]),
+            arg(vec![ph(Placeholder::RenamedFrom)]),
+            arg(vec![ph(Placeholder::RenamedTo)]),
+        ],
         Path::new("/p"),
         Path::new("/p"),
         "",
         false,
         CorrelationId(1),
-        Some(&diff),
+        Some(Arc::new(diff)),
     );
+    let (cmd, _) = super::resolve_effect(&e);
     assert_eq!(
         cmd.argv,
         vec![
@@ -281,13 +273,10 @@ fn resolve_with_renamed_from_and_to_expands_independently() {
 
 #[test]
 fn resolve_with_diff_placeholder_and_no_diff_yields_zero_args() {
-    let s = sub(
+    let e = make_effect(
         "fmt",
         EffectScope::PerStableFile,
         vec![arg(vec![lit("fmt")]), arg(vec![ph(Placeholder::Created)])],
-    );
-    let (cmd, _) = resolve_effect(
-        &s,
         Path::new("/p"),
         Path::new("/p"),
         "",
@@ -295,32 +284,34 @@ fn resolve_with_diff_placeholder_and_no_diff_yields_zero_args() {
         CorrelationId(1),
         None,
     );
+    let (cmd, _) = super::resolve_effect(&e);
     assert_eq!(cmd.argv, vec!["fmt".to_string()]);
 }
 
 #[test]
 fn resolve_with_empty_diff_placeholder_yields_zero_args() {
-    let s = sub(
+    let e = make_effect(
         "fmt",
         EffectScope::PerStableFile,
         vec![arg(vec![lit("fmt")]), arg(vec![ph(Placeholder::Created)])],
-    );
-    let diff = Diff::default();
-    let (cmd, _) = resolve_effect(
-        &s,
         Path::new("/p"),
         Path::new("/p"),
         "",
         false,
         CorrelationId(1),
-        Some(&diff),
+        Some(Arc::new(Diff::default())),
     );
+    let (cmd, _) = super::resolve_effect(&e);
     assert_eq!(cmd.argv, vec!["fmt".to_string()]);
 }
 
 #[test]
 fn resolve_with_multivalue_in_separate_args_emits_literals_as_standalone_slots() {
-    let s = sub(
+    let diff = Diff {
+        created: smallvec![entry_ref("a", 1), entry_ref("b", 2)],
+        ..Default::default()
+    };
+    let e = make_effect(
         "x",
         EffectScope::PerStableFile,
         vec![
@@ -328,20 +319,14 @@ fn resolve_with_multivalue_in_separate_args_emits_literals_as_standalone_slots()
             arg(vec![ph(Placeholder::Created)]),
             arg(vec![lit("post")]),
         ],
-    );
-    let diff = Diff {
-        created: smallvec![entry_ref("a", 1), entry_ref("b", 2)],
-        ..Default::default()
-    };
-    let (cmd, _) = resolve_effect(
-        &s,
         Path::new("/p"),
         Path::new("/p"),
         "",
         false,
         CorrelationId(1),
-        Some(&diff),
+        Some(Arc::new(diff)),
     );
+    let (cmd, _) = super::resolve_effect(&e);
     assert_eq!(
         cmd.argv,
         vec![
@@ -355,48 +340,39 @@ fn resolve_with_multivalue_in_separate_args_emits_literals_as_standalone_slots()
 
 #[test]
 fn resolve_with_multivalue_having_prefix_literal_tiles_per_value() {
-    // `["--out=$created"]` with [a, b] → `["--out=a", "--out=b"]`. The
-    // prefix literal tiles per emitted value when the multi-value
-    // placeholder shares an ArgTemplate with a leading literal.
-    let s = sub(
-        "x",
-        EffectScope::PerStableFile,
-        vec![arg(vec![lit("--out="), ph(Placeholder::Created)])],
-    );
     let diff = Diff {
         created: smallvec![entry_ref("a", 1), entry_ref("b", 2)],
         ..Default::default()
     };
-    let (cmd, _) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "x",
+        EffectScope::PerStableFile,
+        vec![arg(vec![lit("--out="), ph(Placeholder::Created)])],
         Path::new("/p"),
         Path::new("/p"),
         "",
         false,
         CorrelationId(1),
-        Some(&diff),
+        Some(Arc::new(diff)),
     );
+    let (cmd, _) = super::resolve_effect(&e);
     assert_eq!(cmd.argv, vec!["--out=a".to_string(), "--out=b".to_string()]);
 }
 
 #[test]
 fn resolve_with_multivalue_having_prefix_and_empty_diff_yields_zero_slots() {
-    // `["--out=$created"]` with empty diff → no slots (no values to emit).
-    let s = sub(
+    let e = make_effect(
         "x",
         EffectScope::PerStableFile,
         vec![arg(vec![lit("--out="), ph(Placeholder::Created)])],
-    );
-    let diff = Diff::default();
-    let (cmd, _) = resolve_effect(
-        &s,
         Path::new("/p"),
         Path::new("/p"),
         "",
         false,
         CorrelationId(1),
-        Some(&diff),
+        Some(Arc::new(Diff::default())),
     );
+    let (cmd, _) = super::resolve_effect(&e);
     assert!(cmd.argv.is_empty());
 }
 
@@ -404,13 +380,10 @@ fn resolve_with_multivalue_having_prefix_and_empty_diff_yields_zero_slots() {
 
 #[test]
 fn env_contains_specter_path_for_subtree_root() {
-    let s = sub(
+    let e = make_effect(
         "build",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("make")])],
-    );
-    let (_, env) = resolve_effect(
-        &s,
         Path::new("/proj"),
         Path::new("/proj"),
         "",
@@ -418,19 +391,17 @@ fn env_contains_specter_path_for_subtree_root() {
         CorrelationId(1),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     let path = env.iter().find(|(k, _)| k == "SPECTER_PATH").unwrap();
     assert_eq!(path.1, "/proj");
 }
 
 #[test]
 fn env_contains_specter_path_for_per_stable_file() {
-    let s = sub(
+    let e = make_effect(
         "fmt",
         EffectScope::PerStableFile,
         vec![arg(vec![lit("fmt")])],
-    );
-    let (_, env) = resolve_effect(
-        &s,
         Path::new("/proj"),
         Path::new("/proj/a.c"),
         "a.c",
@@ -438,15 +409,17 @@ fn env_contains_specter_path_for_per_stable_file() {
         CorrelationId(1),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     let path = env.iter().find(|(k, _)| k == "SPECTER_PATH").unwrap();
     assert_eq!(path.1, "/proj/a.c");
 }
 
 #[test]
-fn env_specter_rel_path_empty_for_subtree_root() {
-    let s = sub("b", EffectScope::SubtreeRoot, vec![arg(vec![lit("x")])]);
-    let (_, env) = resolve_effect(
-        &s,
+fn env_specter_relative_path_empty_for_subtree_root() {
+    let e = make_effect(
+        "b",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("x")])],
         Path::new("/p"),
         Path::new("/p"),
         "",
@@ -454,17 +427,22 @@ fn env_specter_rel_path_empty_for_subtree_root() {
         CorrelationId(1),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_REL_PATH").unwrap().1,
+        env.iter()
+            .find(|(k, _)| k == "SPECTER_RELATIVE_PATH")
+            .unwrap()
+            .1,
         ""
     );
 }
 
 #[test]
-fn env_specter_rel_path_for_per_stable_file() {
-    let s = sub("f", EffectScope::PerStableFile, vec![arg(vec![lit("x")])]);
-    let (_, env) = resolve_effect(
-        &s,
+fn env_specter_relative_path_for_per_stable_file() {
+    let e = make_effect(
+        "f",
+        EffectScope::PerStableFile,
+        vec![arg(vec![lit("x")])],
         Path::new("/p"),
         Path::new("/p/src/a.c"),
         "src/a.c",
@@ -472,8 +450,12 @@ fn env_specter_rel_path_for_per_stable_file() {
         CorrelationId(1),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_REL_PATH").unwrap().1,
+        env.iter()
+            .find(|(k, _)| k == "SPECTER_RELATIVE_PATH")
+            .unwrap()
+            .1,
         "src/a.c"
     );
 }
@@ -481,9 +463,10 @@ fn env_specter_rel_path_for_per_stable_file() {
 #[test]
 fn env_specter_anchor_for_both_scopes() {
     for scope in [EffectScope::SubtreeRoot, EffectScope::PerStableFile] {
-        let s = sub("x", scope, vec![arg(vec![lit("y")])]);
-        let (_, env) = resolve_effect(
-            &s,
+        let e = make_effect(
+            "x",
+            scope,
+            vec![arg(vec![lit("y")])],
             Path::new("/anchor/dir"),
             Path::new("/anchor/dir"),
             "",
@@ -491,16 +474,18 @@ fn env_specter_anchor_for_both_scopes() {
             CorrelationId(1),
             None,
         );
+        let (_, env) = super::resolve_effect(&e);
         let v = env.iter().find(|(k, _)| k == "SPECTER_ANCHOR").unwrap();
         assert_eq!(v.1, "/anchor/dir", "scope = {scope:?}");
     }
 }
 
 #[test]
-fn env_specter_sub_uses_sub_name() {
-    let s = sub("build", EffectScope::SubtreeRoot, vec![arg(vec![lit("y")])]);
-    let (_, env) = resolve_effect(
-        &s,
+fn env_specter_watch_uses_sub_name() {
+    let e = make_effect(
+        "build",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("y")])],
         Path::new("/p"),
         Path::new("/p"),
         "",
@@ -508,17 +493,19 @@ fn env_specter_sub_uses_sub_name() {
         CorrelationId(1),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_SUB").unwrap().1,
+        env.iter().find(|(k, _)| k == "SPECTER_WATCH").unwrap().1,
         "build"
     );
 }
 
 #[test]
 fn env_specter_forced_zero_when_unforced() {
-    let s = sub("x", EffectScope::SubtreeRoot, vec![arg(vec![lit("y")])]);
-    let (_, env) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("y")])],
         Path::new("/p"),
         Path::new("/p"),
         "",
@@ -526,6 +513,7 @@ fn env_specter_forced_zero_when_unforced() {
         CorrelationId(1),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     assert_eq!(
         env.iter().find(|(k, _)| k == "SPECTER_FORCED").unwrap().1,
         "0"
@@ -534,9 +522,10 @@ fn env_specter_forced_zero_when_unforced() {
 
 #[test]
 fn env_specter_forced_one_when_forced() {
-    let s = sub("x", EffectScope::SubtreeRoot, vec![arg(vec![lit("y")])]);
-    let (_, env) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("y")])],
         Path::new("/p"),
         Path::new("/p"),
         "",
@@ -544,6 +533,7 @@ fn env_specter_forced_one_when_forced() {
         CorrelationId(1),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     assert_eq!(
         env.iter().find(|(k, _)| k == "SPECTER_FORCED").unwrap().1,
         "1"
@@ -552,9 +542,10 @@ fn env_specter_forced_one_when_forced() {
 
 #[test]
 fn env_specter_event_kind_dir_subtree_for_subtree_root() {
-    let s = sub("x", EffectScope::SubtreeRoot, vec![arg(vec![lit("y")])]);
-    let (_, env) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("y")])],
         Path::new("/p"),
         Path::new("/p"),
         "",
@@ -562,6 +553,7 @@ fn env_specter_event_kind_dir_subtree_for_subtree_root() {
         CorrelationId(1),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     assert_eq!(
         env.iter()
             .find(|(k, _)| k == "SPECTER_EVENT_KIND")
@@ -573,9 +565,10 @@ fn env_specter_event_kind_dir_subtree_for_subtree_root() {
 
 #[test]
 fn env_specter_event_kind_file_for_per_stable_file() {
-    let s = sub("x", EffectScope::PerStableFile, vec![arg(vec![lit("y")])]);
-    let (_, env) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "x",
+        EffectScope::PerStableFile,
+        vec![arg(vec![lit("y")])],
         Path::new("/p"),
         Path::new("/p/a"),
         "a",
@@ -583,6 +576,7 @@ fn env_specter_event_kind_file_for_per_stable_file() {
         CorrelationId(1),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     assert_eq!(
         env.iter()
             .find(|(k, _)| k == "SPECTER_EVENT_KIND")
@@ -594,9 +588,10 @@ fn env_specter_event_kind_file_for_per_stable_file() {
 
 #[test]
 fn env_specter_correlation_decimal_for_v1() {
-    let s = sub("x", EffectScope::SubtreeRoot, vec![arg(vec![lit("y")])]);
-    let (_, env) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("y")])],
         Path::new("/p"),
         Path::new("/p"),
         "",
@@ -604,6 +599,7 @@ fn env_specter_correlation_decimal_for_v1() {
         CorrelationId(42),
         None,
     );
+    let (_, env) = super::resolve_effect(&e);
     assert_eq!(
         env.iter()
             .find(|(k, _)| k == "SPECTER_CORRELATION")
@@ -615,30 +611,31 @@ fn env_specter_correlation_decimal_for_v1() {
 
 #[test]
 fn env_does_not_contain_specter_diff_path() {
-    // Even when diff is Some, the resolver does NOT emit
-    // SPECTER_DIFF_PATH — that's the actuator's responsibility.
-    let s = sub("x", EffectScope::PerStableFile, vec![arg(vec![lit("y")])]);
     let diff = Diff {
         created: smallvec![entry_ref("a", 1)],
         ..Default::default()
     };
-    let (_, env) = resolve_effect(
-        &s,
+    let e = make_effect(
+        "x",
+        EffectScope::PerStableFile,
+        vec![arg(vec![lit("y")])],
         Path::new("/p"),
         Path::new("/p/a"),
         "a",
         false,
         CorrelationId(1),
-        Some(&diff),
+        Some(Arc::new(diff)),
     );
+    let (_, env) = super::resolve_effect(&e);
     assert!(env.iter().all(|(k, _)| k != "SPECTER_DIFF_PATH"));
 }
 
 #[test]
-fn env_order_is_stable_across_calls() {
-    let s = sub("x", EffectScope::SubtreeRoot, vec![arg(vec![lit("y")])]);
-    let (_, e1) = resolve_effect(
-        &s,
+fn env_order_is_alphabetical() {
+    let e = make_effect(
+        "watch",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("y")])],
         Path::new("/p"),
         Path::new("/p"),
         "",
@@ -646,16 +643,18 @@ fn env_order_is_stable_across_calls() {
         CorrelationId(1),
         None,
     );
-    let (_, e2) = resolve_effect(
-        &s,
-        Path::new("/p"),
-        Path::new("/p"),
-        "",
-        false,
-        CorrelationId(1),
-        None,
+    let (_, env) = super::resolve_effect(&e);
+    let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            "SPECTER_ANCHOR",
+            "SPECTER_CORRELATION",
+            "SPECTER_EVENT_KIND",
+            "SPECTER_FORCED",
+            "SPECTER_PATH",
+            "SPECTER_RELATIVE_PATH",
+            "SPECTER_WATCH",
+        ]
     );
-    let keys1: Vec<&String> = e1.iter().map(|(k, _)| k).collect();
-    let keys2: Vec<&String> = e2.iter().map(|(k, _)| k).collect();
-    assert_eq!(keys1, keys2);
 }

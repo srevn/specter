@@ -39,11 +39,12 @@ impl StepOutput {
 mod tests {
     use super::*;
     use crate::diff::Diff;
-    use crate::effect::{CommandResolved, CorrelationId, DedupKey};
+    use crate::effect::{CorrelationId, DedupKey};
     use crate::ids::{ProfileId, ResourceId, SubId};
     use crate::op::ProbeRequest;
     use crate::resource::ResourceKind;
-    use crate::sub::ClassSet;
+    use crate::sub::{ClassSet, CommandTemplate, EffectScope};
+    use compact_str::CompactString;
     use slotmap::KeyData;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -66,13 +67,18 @@ mod tests {
         Effect {
             key,
             target,
-            command: CommandResolved::default(),
-            env: Vec::new(),
-            cwd: PathBuf::new(),
             forced: false,
             correlation: CorrelationId::default(),
             diff: None::<Arc<Diff>>,
             capture_output: false,
+            sub_name: CompactString::new(""),
+            command: Arc::new(CommandTemplate::new([])),
+            scope: EffectScope::SubtreeRoot,
+            anchor_path: PathBuf::new(),
+            anchor_kind: ResourceKind::Dir,
+            target_path: PathBuf::new(),
+            target_relative: CompactString::new(""),
+            exclude: Arc::from(Vec::<CompactString>::new()),
         }
     }
 

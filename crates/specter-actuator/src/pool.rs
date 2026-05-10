@@ -210,10 +210,11 @@ impl SubprocessActuator {
 mod tests {
     use crate::SubprocessActuator;
     use crate::testkit::{MockSpawner, SignalRecord};
+    use compact_str::CompactString;
     use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
     use specter_core::{
-        CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, ProfileId,
-        ResourceId, SubId,
+        ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
+        EffectScope, Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -237,6 +238,12 @@ mod tests {
         ProfileId::from(KeyData::from_ffi(seed))
     }
 
+    fn literal_command() -> Arc<CommandTemplate> {
+        Arc::new(CommandTemplate::new([ArgTemplate::new([
+            ArgPart::literal("/bin/true"),
+        ])]))
+    }
+
     fn make_effect_perfile(sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64) -> Effect {
         let resource = unique_resource_id(res_seed);
         Effect {
@@ -246,15 +253,18 @@ mod tests {
                 resource,
             },
             target: resource,
-            command: CommandResolved {
-                argv: vec!["/bin/true".into()],
-            },
-            env: Vec::new(),
-            cwd: PathBuf::from("/tmp"),
             forced: false,
             correlation: CorrelationId(corr),
             diff: None,
             capture_output: false,
+            sub_name: CompactString::new(""),
+            command: literal_command(),
+            scope: EffectScope::PerStableFile,
+            anchor_path: PathBuf::from("/tmp"),
+            anchor_kind: ResourceKind::Dir,
+            target_path: PathBuf::from("/tmp"),
+            target_relative: CompactString::new(""),
+            exclude: Arc::from(Vec::<CompactString>::new()),
         }
     }
 
@@ -265,15 +275,18 @@ mod tests {
                 profile: unique_profile_id(profile_seed),
             },
             target: unique_resource_id(profile_seed),
-            command: CommandResolved {
-                argv: vec!["/bin/true".into()],
-            },
-            env: Vec::new(),
-            cwd: PathBuf::from("/tmp"),
             forced: false,
             correlation: CorrelationId(corr),
             diff: None,
             capture_output: false,
+            sub_name: CompactString::new(""),
+            command: literal_command(),
+            scope: EffectScope::SubtreeRoot,
+            anchor_path: PathBuf::from("/tmp"),
+            anchor_kind: ResourceKind::Dir,
+            target_path: PathBuf::from("/tmp"),
+            target_relative: CompactString::new(""),
+            exclude: Arc::from(Vec::<CompactString>::new()),
         }
     }
 

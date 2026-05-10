@@ -869,21 +869,45 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         burst.phase,
     );
     assert_eq!(out.effects.len(), 1, "one Effect emitted at stable verdict");
-    assert!(!out.effects[0].forced);
-    // Resolver populated the command + env (P8: was placeholders before).
-    assert_eq!(out.effects[0].command.argv, vec!["/bin/true".to_string()]);
-    let env = &out.effects[0].env;
-    assert!(env.iter().any(|(k, _)| k == "SPECTER_PATH"));
-    assert!(env.iter().any(|(k, _)| k == "SPECTER_SUB"));
-    assert!(env.iter().any(|(k, v)| k == "SPECTER_FORCED" && v == "0"));
+    let eff = &out.effects[0];
+    assert!(!eff.forced);
+    // Engine carries the parsed CommandTemplate; the actuator resolves
+    // argv at spawn time. Assert on the template's literal-only first arg
+    // instead of the resolved argv. (`/bin/true` is the test's stub
+    // command — see `empty_command()`.)
+    assert_eq!(eff.command.argv.len(), 1);
+    assert!(matches!(
+        eff.command.argv[0].parts.as_slice(),
+        [specter_core::ArgPart::Literal(s)] if s.as_str() == "/bin/true"
+    ));
+    // Substitution-domain inputs that the actuator-side resolver renders
+    // to SPECTER_PATH / SPECTER_WATCH / SPECTER_FORCED / SPECTER_EVENT_KIND.
     assert!(
-        env.iter()
-            .any(|(k, v)| k == "SPECTER_EVENT_KIND" && v == "dir-subtree")
+        !eff.target_path.as_os_str().is_empty(),
+        "target_path populated for $path / SPECTER_PATH"
     );
-    // SPECTER_DIFF_PATH is set by the actuator at spawn time, not the engine.
-    assert!(env.iter().all(|(k, _)| k != "SPECTER_DIFF_PATH"));
-    // cwd is the anchor (Dir Profile).
-    assert_eq!(out.effects[0].cwd.as_os_str(), "anchor");
+    assert!(
+        !eff.sub_name.is_empty(),
+        "sub_name populated for $watch / SPECTER_WATCH"
+    );
+    assert!(
+        !eff.forced,
+        "SPECTER_FORCED == \"0\" derives from forced=false"
+    );
+    assert_eq!(
+        eff.scope,
+        specter_core::EffectScope::SubtreeRoot,
+        "EVENT_KIND=dir-subtree derives from scope"
+    );
+    // SPECTER_DIFF_PATH is an actuator-side augmentation; engine's Effect
+    // doesn't carry it. The structural witness is `eff.diff`:
+    assert!(
+        eff.diff.is_none(),
+        "engine doesn't include diff for non-needs_diff Sub"
+    );
+    // cwd derives from (anchor_path, anchor_kind) at spawn time. Pin both:
+    assert_eq!(eff.anchor_path.as_os_str(), "anchor");
+    assert_eq!(eff.anchor_kind, specter_core::ResourceKind::Dir);
 }
 
 /// The Subtree suppress decision is `nothing_changed &&
@@ -1051,22 +1075,20 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         t2,
     );
     assert_eq!(out.effects.len(), 1);
-    // Anchor path: parentdir/main.rs. cwd should be parentdir.
-    assert_eq!(
-        out.effects[0].cwd.as_os_str(),
-        "parentdir",
-        "File-kind anchor uses parent dir as cwd",
-    );
-    // SPECTER_PATH is the file itself; SPECTER_ANCHOR is the file too.
-    let env = &out.effects[0].env;
-    assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_PATH").unwrap().1,
-        "parentdir/main.rs",
-    );
-    assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_ANCHOR").unwrap().1,
-        "parentdir/main.rs",
-    );
+    let eff = &out.effects[0];
+    // File-kind anchor: actuator's `compute_cwd` returns parent dir.
+    // The engine's job here is to pin (anchor_path, anchor_kind) so the
+    // actuator's compute_cwd reaches "parentdir". The original cwd
+    // assertion ("File-kind anchor uses parent dir as cwd") is now
+    // structural: anchor_path is the file, anchor_kind is File ⇒
+    // compute_cwd returns parent.
+    assert_eq!(eff.anchor_path.as_os_str(), "parentdir/main.rs");
+    assert_eq!(eff.anchor_kind, specter_core::ResourceKind::File);
+    // SPECTER_PATH derives from target_path; SPECTER_ANCHOR from
+    // anchor_path. For a File-anchor Subtree Effect both equal the
+    // anchor file path itself.
+    assert_eq!(eff.target_path.as_os_str(), "parentdir/main.rs");
+    assert_eq!(eff.anchor_path.as_os_str(), "parentdir/main.rs");
 }
 
 #[test]
@@ -3173,33 +3195,34 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         .filter(|e| matches!(&e.key, DedupKey::PerFile { sub, .. } if *sub == sid))
         .collect();
     assert_eq!(per_file_effects.len(), 2, "one Effect per created file");
-    // diff_command = [ArgTemplate([Lit("fmt"), Placeholder($created)])] — the
-    // literal "fmt" tiles per emitted multi-value entry. Each PerStableFile
-    // Effect carries the same diff (all created entries), so each Effect's
-    // argv expands to ["fmta.rs", "fmtb.rs"].
     for eff in &per_file_effects {
-        assert_eq!(
-            eff.command.argv,
-            vec!["fmta.rs".to_string(), "fmtb.rs".to_string()],
-            "literal tiles per multi-value entry"
+        // Engine carries the unresolved CommandTemplate; the resolver
+        // runs in the actuator. Assert the template references the
+        // diff-derived `$created` placeholder (the test fixture's
+        // `diff_command()`).
+        assert!(
+            eff.command
+                .argv
+                .iter()
+                .any(|a| a.parts.iter().any(|p| matches!(
+                    p,
+                    specter_core::ArgPart::Placeholder(specter_core::Placeholder::Created)
+                ))),
+            "diff_command's template references $created"
         );
-        // cwd is the anchor (a Dir), not the per-entry file path.
-        assert_eq!(eff.cwd.as_os_str(), "anchor");
-        // SPECTER_PATH is the per-entry path.
-        let env = &eff.env;
-        let path = &env.iter().find(|(k, _)| k == "SPECTER_PATH").unwrap().1;
-        assert!(path.starts_with("anchor/"));
-        // SPECTER_REL_PATH is the segment.
-        let rel = &env.iter().find(|(k, _)| k == "SPECTER_REL_PATH").unwrap().1;
-        assert!(rel == "a.rs" || rel == "b.rs");
-        // SPECTER_EVENT_KIND = "file" (PerStableFile scope).
-        assert_eq!(
-            env.iter()
-                .find(|(k, _)| k == "SPECTER_EVENT_KIND")
-                .unwrap()
-                .1,
-            "file"
+        // anchor_path + anchor_kind ⇒ actuator's compute_cwd("anchor", Dir) = "anchor".
+        assert_eq!(eff.anchor_path.as_os_str(), "anchor");
+        assert_eq!(eff.anchor_kind, specter_core::ResourceKind::Dir);
+        // target_path ⇒ SPECTER_PATH source.
+        assert!(eff.target_path.starts_with("anchor/"));
+        // target_relative ⇒ SPECTER_RELATIVE_PATH source.
+        assert!(
+            eff.target_relative == "a.rs" || eff.target_relative == "b.rs",
+            "target_relative = {:?}",
+            eff.target_relative,
         );
+        // scope ⇒ SPECTER_EVENT_KIND="file" for PerStableFile.
+        assert_eq!(eff.scope, specter_core::EffectScope::PerStableFile);
     }
 }
 
@@ -3320,14 +3343,8 @@ fn per_stable_file_skips_dir_entries() {
         1,
         "exactly ONE Effect for the File entry; Dir entries skipped"
     );
-    // SPECTER_REL_PATH must be the file, not a directory.
-    let rel = &per_file_effects[0]
-        .env
-        .iter()
-        .find(|(k, _)| k == "SPECTER_REL_PATH")
-        .unwrap()
-        .1;
-    assert_eq!(rel, "main.rs");
+    // SPECTER_RELATIVE_PATH source.
+    assert_eq!(per_file_effects[0].target_relative, "main.rs");
 }
 
 // ---------- Dedup-hash + drift suppression ----------

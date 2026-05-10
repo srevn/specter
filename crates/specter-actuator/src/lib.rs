@@ -36,6 +36,8 @@ mod permits;
 #[cfg(unix)]
 mod pool;
 #[cfg(unix)]
+mod resolve;
+#[cfg(unix)]
 mod spawner;
 #[cfg(unix)]
 mod tmp;

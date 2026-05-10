@@ -11,6 +11,7 @@
 //! whose pending was just replaced) doesn't get pushed twice.
 
 use crate::permits::{Permit, Permits};
+use crate::resolve;
 use crate::spawner::{ChildSignaler, ChildWaiter, Spawner};
 use crossbeam::channel::Sender;
 use specter_core::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId};
@@ -231,10 +232,14 @@ impl ActuatorState {
         reap_tx: &Sender<super::Reaped>,
         engine_in: &Sender<Input>,
     ) {
+        // Resolution at the spawn boundary preserves "render late" as
+        // an architectural invariant: a same-key Effect that raced into
+        // `pending` and was replaced by `handle_submit`'s Latest-coalesce
+        // path never reaches this point, so the bytes the resolver
+        // allocates are guaranteed to back a real syscall.
+        let cwd = resolve::compute_cwd(&effect.anchor_path, effect.anchor_kind);
+        let (CommandResolved { argv }, mut env) = resolve::resolve_effect(&effect);
         let Effect {
-            command: CommandResolved { argv },
-            mut env,
-            cwd,
             correlation,
             capture_output,
             diff,
@@ -459,10 +464,11 @@ mod tests {
     use super::super::Reaped;
     use super::{ActuatorState, ReapPolicy, RunningJob, Slot};
     use crate::spawner::ChildSignaler;
+    use compact_str::CompactString;
     use crossbeam::channel::unbounded;
     use specter_core::{
-        CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, ProfileId,
-        ResourceId, SubId,
+        ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
+        EffectScope, Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::io;
     use std::num::NonZeroUsize;
@@ -501,15 +507,20 @@ mod tests {
         Effect {
             key,
             target,
-            command: CommandResolved {
-                argv: vec!["/bin/true".into()],
-            },
-            env: Vec::new(),
-            cwd: PathBuf::from("/tmp"),
             forced: false,
             correlation: CorrelationId(corr),
             diff: None,
             capture_output: false,
+            sub_name: CompactString::new(""),
+            command: Arc::new(CommandTemplate::new([ArgTemplate::new([
+                ArgPart::literal("/bin/true"),
+            ])])),
+            scope: EffectScope::PerStableFile,
+            anchor_path: PathBuf::from("/tmp"),
+            anchor_kind: ResourceKind::Dir,
+            target_path: PathBuf::from("/tmp"),
+            target_relative: CompactString::new(""),
+            exclude: Arc::from(Vec::<CompactString>::new()),
         }
     }
 
