@@ -105,20 +105,60 @@ log_output = true                     # send formatter output to the journal
 
 ### Placeholders
 
-`command` slots may reference Specter's resolved-substitution catalog:
+`command` slots reference Specter's lowercase-only substitution catalog.
+Single-value placeholders render one string into the surrounding argv
+slot:
 
-| Placeholder | Meaning                                                 |
-|-------------|---------------------------------------------------------|
+| Placeholder | Meaning                                                                |
+|-------------|------------------------------------------------------------------------|
 | `$path`     | Absolute path of the target (`per-stable-file`) or anchor (`subtree-root`) |
-| `$rel`      | Path relative to the watch anchor                       |
-| `$anchor`   | Absolute path of the watch's anchor                     |
-| `$created`  | Newline-separated list of created paths                 |
-| `$deleted`  | Newline-separated list of deleted paths                 |
-| `$modified` | Newline-separated list of modified paths                |
-| `$renamedfrom`, `$renamedto` | Rename pairs                           |
+| `$relative` | Path relative to the watch anchor (empty for `subtree-root`)           |
+| `$anchor`   | Absolute path of the watch's anchor                                    |
+| `$parent`   | Parent directory of `$path` (empty only for a subtree-root anchored at `/`) |
+| `$watch`    | Watch name (the `[[watch]] name` field)                                |
+| `$time`     | Wall-clock instant sampled immediately before spawn, RFC 3339 UTC, second-precision (`2026-05-10T12:34:56Z`) |
 
-Plus environment variables — `$HOME`, `$USER`, `$SPECTER_*` — pass
-through unchanged for the spawned shell to expand.
+Multi-value placeholders produce **one argv slot per value**, with any
+surrounding literal prefix tiled into each slot; an empty list drops the
+entire surrounding slot:
+
+| Placeholder     | Source                                       |
+|-----------------|----------------------------------------------|
+| `$created`      | New entries (anchor-relative segments)       |
+| `$deleted`      | Deleted entries                              |
+| `$modified`     | Entries with changed content                 |
+| `$renamed_from` | Source side of each rename                   |
+| `$renamed_to`   | Target side of each rename                   |
+| `$excluded`     | The watch's `exclude` patterns               |
+
+Example — `rsync` with one `--exclude=` per pattern:
+
+```toml
+command = ["rsync", "-av", "--exclude=$excluded", "$anchor/", "/backup/"]
+# argv = ["rsync", "-av", "--exclude=*.tmp", "--exclude=cache/", "/srv/repo/", "/backup/"]
+```
+
+Uppercase `$NAMES` (e.g. `$HOME`, `$SPECTER_PATH`) pass through verbatim
+so a spawned shell (`["sh", "-c", "..."]`) can expand them.
+
+### Environment variables
+
+The spawned child receives a `SPECTER_*` set in addition to the
+inherited parent environment:
+
+| Variable                | Value                                                                |
+|-------------------------|----------------------------------------------------------------------|
+| `SPECTER_PATH`          | mirrors `$path`                                                      |
+| `SPECTER_RELATIVE_PATH` | mirrors `$relative`                                                  |
+| `SPECTER_ANCHOR`        | mirrors `$anchor`                                                    |
+| `SPECTER_PARENT`        | mirrors `$parent`                                                    |
+| `SPECTER_WATCH`         | mirrors `$watch`                                                     |
+| `SPECTER_TIME`          | mirrors `$time` (same instant — the resolver samples once per spawn) |
+| `SPECTER_EXCLUDE`       | `exclude` patterns, newline-separated (no trailing newline)          |
+| `SPECTER_EVENT_KIND`    | `dir-subtree` or `file`                                              |
+| `SPECTER_FORCED`        | `0` or `1` — `1` when the burst crossed `max_settle` before settling |
+| `SPECTER_CORRELATION`   | per-Effect monotonic decimal id                                      |
+| `SPECTER_DIFF_PATH`     | absolute path of a tab-separated diff file (set only when the watch's command references diff-derived placeholders or `scope = "per-stable-file"`; the file is removed once the command exits) |
 
 ### CLI flags
 
