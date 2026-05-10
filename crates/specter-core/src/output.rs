@@ -43,7 +43,7 @@ mod tests {
     use crate::ids::{ProfileId, ResourceId, SubId};
     use crate::op::ProbeRequest;
     use crate::resource::ResourceKind;
-    use crate::sub::{ClassSet, CommandTemplate, EffectScope};
+    use crate::sub::{ClassSet, CommandTemplate};
     use compact_str::CompactString;
     use slotmap::KeyData;
     use std::path::PathBuf;
@@ -73,10 +73,8 @@ mod tests {
             capture_output: false,
             sub_name: CompactString::new(""),
             command: Arc::new(CommandTemplate::new([])),
-            scope: EffectScope::SubtreeRoot,
-            anchor_path: PathBuf::new(),
+            anchor_path: Arc::from(PathBuf::new()),
             anchor_kind: ResourceKind::Dir,
-            target_path: PathBuf::new(),
             target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
         }

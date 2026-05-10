@@ -16,8 +16,8 @@ use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
 use specter_actuator::{OsSpawner, SubprocessActuator};
 use specter_core::{
-    ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, EffectScope, Input,
-    ProfileId, ResourceId, ResourceKind, SubId,
+    ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, Input, ProfileId,
+    ResourceId, ResourceKind, SubId,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -150,9 +150,11 @@ fn literal_command(argv: Vec<String>) -> Arc<CommandTemplate> {
 /// pass any stable value (e.g., the same as `sub_seed`).
 ///
 /// `cwd` is mapped onto `anchor_path` with `anchor_kind = Dir`, so the
-/// actuator's `compute_cwd` returns the same path. Tests reading
-/// `Effect.anchor_path` see exactly what they passed as `cwd`; tests
-/// only caring about spawn cwd see the same byte sequence.
+/// actuator's `compute_cwd` returns the same path. The fixture leaves
+/// `target_relative` empty — `SPECTER_PATH` then mirrors `anchor_path`
+/// (the resolver derives `target_path` from `anchor_path` when
+/// `target_relative` is empty). Tests asserting on `SPECTER_PATH` set
+/// `target_relative` directly to introduce a per-file segment.
 pub fn perfile_effect(
     sub_seed: u64,
     profile_seed: u64,
@@ -162,7 +164,6 @@ pub fn perfile_effect(
     cwd: PathBuf,
 ) -> Effect {
     let resource = unique_resource_id(res_seed);
-    let target_path = cwd.clone();
     Effect {
         key: DedupKey::PerFile {
             sub: unique_sub_id(sub_seed),
@@ -176,10 +177,8 @@ pub fn perfile_effect(
         capture_output: false,
         sub_name: CompactString::new(""),
         command: literal_command(argv),
-        scope: EffectScope::PerStableFile,
-        anchor_path: cwd,
+        anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
-        target_path,
         target_relative: CompactString::new(""),
         exclude: Arc::from(Vec::<CompactString>::new()),
     }
@@ -198,7 +197,6 @@ pub fn subtree_effect(
     argv: Vec<String>,
     cwd: PathBuf,
 ) -> Effect {
-    let target_path = cwd.clone();
     Effect {
         key: DedupKey::Subtree {
             sub: unique_sub_id(sub_seed),
@@ -211,10 +209,8 @@ pub fn subtree_effect(
         capture_output: false,
         sub_name: CompactString::new(""),
         command: literal_command(argv),
-        scope: EffectScope::SubtreeRoot,
-        anchor_path: cwd,
+        anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
-        target_path,
         target_relative: CompactString::new(""),
         exclude: Arc::from(Vec::<CompactString>::new()),
     }

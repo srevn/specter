@@ -214,7 +214,7 @@ mod tests {
     use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
     use specter_core::{
         ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
-        EffectScope, Input, ProfileId, ResourceId, ResourceKind, SubId,
+        Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -259,10 +259,8 @@ mod tests {
             capture_output: false,
             sub_name: CompactString::new(""),
             command: literal_command(),
-            scope: EffectScope::PerStableFile,
-            anchor_path: PathBuf::from("/tmp"),
+            anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
-            target_path: PathBuf::from("/tmp"),
             target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
         }
@@ -281,10 +279,8 @@ mod tests {
             capture_output: false,
             sub_name: CompactString::new(""),
             command: literal_command(),
-            scope: EffectScope::SubtreeRoot,
-            anchor_path: PathBuf::from("/tmp"),
+            anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
-            target_path: PathBuf::from("/tmp"),
             target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
         }

@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn new_creates_bounded_effects_at_1024() {
         use compact_str::CompactString;
-        use specter_core::{CommandTemplate, CorrelationId, DedupKey, EffectScope, ResourceKind};
+        use specter_core::{CommandTemplate, CorrelationId, DedupKey, ResourceKind};
         use std::path::PathBuf;
         use std::sync::Arc;
         let chans = Channels::new();
@@ -316,10 +316,8 @@ mod tests {
             capture_output: false,
             sub_name: CompactString::new(""),
             command: Arc::new(CommandTemplate::new([])),
-            scope: EffectScope::SubtreeRoot,
-            anchor_path: PathBuf::new(),
+            anchor_path: Arc::from(PathBuf::new()),
             anchor_kind: ResourceKind::Dir,
-            target_path: PathBuf::new(),
             target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
         };

@@ -11,33 +11,52 @@ use compact_str::CompactString;
 use smallvec::smallvec;
 use specter_core::{
     ArgPart, ArgTemplate, CommandResolved, CommandTemplate, CorrelationId, DedupKey, Diff, Effect,
-    EffectScope, EntryKind, EntryRef, Placeholder, Rename, ResourceId, ResourceKind,
+    EffectScope, EntryKind, EntryRef, Placeholder, ProfileId, Rename, ResourceId, ResourceKind,
+    SubId,
 };
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 /// Convenience wrapper for tests that don't exercise `$time` /
-/// `SPECTER_TIME` rendering — pins `now` to the Unix epoch so call sites
-/// stay terse. Time-sensitive tests call [`super::resolve_effect`]
-/// directly with the instant they want.
+/// `SPECTER_TIME` rendering — pins `now` to the Unix epoch and omits the
+/// diff tmp file. Time-sensitive tests call [`super::resolve_effect`]
+/// directly with the instant they want; diff-tmp-aware tests pass
+/// `diff_path: Some(_)` directly.
 fn resolve(e: &Effect) -> (CommandResolved, Vec<(String, String)>) {
-    super::resolve_effect(e, SystemTime::UNIX_EPOCH)
+    super::resolve_effect(e, SystemTime::UNIX_EPOCH, None)
 }
 
+/// `target_path` is no longer a field on [`Effect`] — the resolver
+/// derives it from `(anchor_path, target_relative)` at spawn time. Tests
+/// pass the anchor + relative pair; the helper does no extra dispatch.
+///
+/// `scope` selects the [`DedupKey`] variant (Subtree ⇒ no per-file
+/// resource, PerStableFile ⇒ default per-file resource); the resolver
+/// then derives `SPECTER_EVENT_KIND` from the variant.
 fn make_effect(
     sub_name: &str,
     scope: EffectScope,
     argv: Vec<ArgTemplate>,
     anchor_path: &Path,
-    target_path: &Path,
     target_relative: &str,
     forced: bool,
     correlation: CorrelationId,
     diff: Option<Arc<Diff>>,
 ) -> Effect {
+    let key = match scope {
+        EffectScope::SubtreeRoot => DedupKey::Subtree {
+            sub: SubId::default(),
+            profile: ProfileId::default(),
+        },
+        EffectScope::PerStableFile => DedupKey::PerFile {
+            sub: SubId::default(),
+            profile: ProfileId::default(),
+            resource: ResourceId::default(),
+        },
+    };
     Effect {
-        key: DedupKey::default(),
+        key,
         target: ResourceId::default(),
         forced,
         correlation,
@@ -45,10 +64,8 @@ fn make_effect(
         capture_output: false,
         sub_name: CompactString::from(sub_name),
         command: Arc::new(CommandTemplate::new(argv)),
-        scope,
-        anchor_path: anchor_path.to_path_buf(),
+        anchor_path: Arc::from(anchor_path.to_path_buf()),
         anchor_kind: ResourceKind::Dir,
-        target_path: target_path.to_path_buf(),
         target_relative: CompactString::from(target_relative),
         exclude: Arc::from(Vec::<CompactString>::new()),
     }
@@ -81,7 +98,6 @@ fn resolve_simple_literal_passes_through() {
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("make")])],
         Path::new("/proj"),
-        Path::new("/proj"),
         "",
         false,
         CorrelationId(1),
@@ -98,7 +114,6 @@ fn resolve_with_path_placeholder() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("fmt")]), arg(vec![ph(Placeholder::Path)])],
         Path::new("/proj"),
-        Path::new("/proj/src/a.c"),
         "src/a.c",
         false,
         CorrelationId(1),
@@ -118,7 +133,6 @@ fn resolve_with_relative_placeholder() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("log")]), arg(vec![ph(Placeholder::Relative)])],
         Path::new("/proj"),
-        Path::new("/proj/src/a.c"),
         "src/a.c",
         false,
         CorrelationId(1),
@@ -134,7 +148,6 @@ fn resolve_with_anchor_placeholder() {
         "build",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("build")]), arg(vec![ph(Placeholder::Anchor)])],
-        Path::new("/proj"),
         Path::new("/proj"),
         "",
         false,
@@ -159,7 +172,6 @@ fn resolve_excluded_one_arg_per_pattern() {
             arg(vec![lit("--exclude="), ph(Placeholder::Excluded)]),
             arg(vec![lit("/src/")]),
         ],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -198,7 +210,6 @@ fn resolve_excluded_empty_drops_slot() {
             arg(vec![lit("/src/")]),
         ],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
@@ -222,7 +233,6 @@ fn env_exclude_newline_separated() {
         "x",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("noop")])],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -251,7 +261,6 @@ fn env_exclude_empty_is_empty_string() {
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("noop")])],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
@@ -279,13 +288,12 @@ fn resolve_time_uses_injected_now() {
         EffectScope::SubtreeRoot,
         vec![arg(vec![ph(Placeholder::Time)])],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
         None,
     );
-    let (cmd, _) = super::resolve_effect(&e, now);
+    let (cmd, _) = super::resolve_effect(&e, now, None);
     assert_eq!(cmd.argv, vec![FIXED_NOW_RFC3339.to_owned()]);
 }
 
@@ -297,13 +305,12 @@ fn env_specter_time_uses_injected_now() {
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("noop")])],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e, now);
+    let (_, env) = super::resolve_effect(&e, now, None);
     assert_eq!(
         env.iter().find(|(k, _)| k == "SPECTER_TIME").unwrap().1,
         FIXED_NOW_RFC3339
@@ -322,13 +329,12 @@ fn format_now_clamps_pre_epoch() {
         EffectScope::SubtreeRoot,
         vec![arg(vec![ph(Placeholder::Time)])],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
         None,
     );
-    let (cmd, _) = super::resolve_effect(&e, pre);
+    let (cmd, _) = super::resolve_effect(&e, pre, None);
     assert_eq!(cmd.argv, vec!["1970-01-01T00:00:00Z".to_owned()]);
 }
 
@@ -349,7 +355,6 @@ fn resolve_parent_is_target_dir_for_perfile() {
         EffectScope::PerStableFile,
         vec![arg(vec![ph(Placeholder::Parent)])],
         Path::new("/anchor"),
-        Path::new("/anchor/foo.rs"),
         "foo.rs",
         false,
         CorrelationId(1),
@@ -367,7 +372,6 @@ fn resolve_parent_is_anchor_parent_for_subtree() {
         "x",
         EffectScope::SubtreeRoot,
         vec![arg(vec![ph(Placeholder::Parent)])],
-        Path::new("/proj/sub"),
         Path::new("/proj/sub"),
         "",
         false,
@@ -388,7 +392,6 @@ fn resolve_parent_for_perfile_at_root_is_root() {
         EffectScope::PerStableFile,
         vec![arg(vec![ph(Placeholder::Parent)])],
         Path::new("/"),
-        Path::new("/foo.rs"),
         "foo.rs",
         false,
         CorrelationId(1),
@@ -406,7 +409,6 @@ fn resolve_parent_empty_only_for_subtree_at_root() {
         "x",
         EffectScope::SubtreeRoot,
         vec![arg(vec![ph(Placeholder::Parent)])],
-        Path::new("/"),
         Path::new("/"),
         "",
         false,
@@ -429,7 +431,6 @@ fn env_parent_empty_only_for_subtree_at_root() {
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("noop")])],
         Path::new("/"),
-        Path::new("/"),
         "",
         false,
         CorrelationId(1),
@@ -449,7 +450,6 @@ fn env_parent_for_perfile_is_target_directory() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("noop")])],
         Path::new("/anchor"),
-        Path::new("/anchor/src/foo.rs"),
         "src/foo.rs",
         false,
         CorrelationId(1),
@@ -474,7 +474,6 @@ fn resolve_substitutes_watch_name() {
             arg(vec![ph(Placeholder::Watch), lit(" settled")]),
         ],
         Path::new("/proj"),
-        Path::new("/proj"),
         "",
         false,
         CorrelationId(1),
@@ -494,7 +493,6 @@ fn resolve_with_concatenated_literal_and_placeholder() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("--input="), ph(Placeholder::Path)])],
         Path::new("/proj"),
-        Path::new("/proj/a.c"),
         "a.c",
         false,
         CorrelationId(1),
@@ -518,7 +516,6 @@ fn resolve_with_created_expands_to_n_argv() {
         "fmt",
         EffectScope::PerStableFile,
         vec![arg(vec![lit("fmt")]), arg(vec![ph(Placeholder::Created)])],
-        Path::new("/proj"),
         Path::new("/proj"),
         "",
         false,
@@ -548,7 +545,6 @@ fn resolve_with_deleted_expands_to_n_argv() {
         EffectScope::PerStableFile,
         vec![arg(vec![ph(Placeholder::Deleted)])],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
@@ -568,7 +564,6 @@ fn resolve_with_modified_expands_to_n_argv() {
         "lint",
         EffectScope::PerStableFile,
         vec![arg(vec![ph(Placeholder::Modified)])],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -603,7 +598,6 @@ fn resolve_with_renamed_from_and_to_expands_independently() {
             arg(vec![ph(Placeholder::RenamedTo)]),
         ],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
@@ -629,7 +623,6 @@ fn resolve_with_diff_placeholder_and_no_diff_yields_zero_args() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("fmt")]), arg(vec![ph(Placeholder::Created)])],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
@@ -645,7 +638,6 @@ fn resolve_with_empty_diff_placeholder_yields_zero_args() {
         "fmt",
         EffectScope::PerStableFile,
         vec![arg(vec![lit("fmt")]), arg(vec![ph(Placeholder::Created)])],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -670,7 +662,6 @@ fn resolve_with_multivalue_in_separate_args_emits_literals_as_standalone_slots()
             arg(vec![ph(Placeholder::Created)]),
             arg(vec![lit("post")]),
         ],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -700,7 +691,6 @@ fn resolve_with_multivalue_having_prefix_literal_tiles_per_value() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("--out="), ph(Placeholder::Created)])],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
@@ -716,7 +706,6 @@ fn resolve_with_multivalue_having_prefix_and_empty_diff_yields_zero_slots() {
         "x",
         EffectScope::PerStableFile,
         vec![arg(vec![lit("--out="), ph(Placeholder::Created)])],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -736,7 +725,6 @@ fn env_contains_specter_path_for_subtree_root() {
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("make")])],
         Path::new("/proj"),
-        Path::new("/proj"),
         "",
         false,
         CorrelationId(1),
@@ -754,7 +742,6 @@ fn env_contains_specter_path_for_per_stable_file() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("fmt")])],
         Path::new("/proj"),
-        Path::new("/proj/a.c"),
         "a.c",
         false,
         CorrelationId(1),
@@ -771,7 +758,6 @@ fn env_specter_relative_path_empty_for_subtree_root() {
         "b",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("x")])],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -795,7 +781,6 @@ fn env_specter_relative_path_for_per_stable_file() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("x")])],
         Path::new("/p"),
-        Path::new("/p/src/a.c"),
         "src/a.c",
         false,
         CorrelationId(1),
@@ -819,7 +804,6 @@ fn env_specter_anchor_for_both_scopes() {
             scope,
             vec![arg(vec![lit("y")])],
             Path::new("/anchor/dir"),
-            Path::new("/anchor/dir"),
             "",
             false,
             CorrelationId(1),
@@ -837,7 +821,6 @@ fn env_specter_watch_uses_sub_name() {
         "build",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("y")])],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -858,7 +841,6 @@ fn env_specter_forced_zero_when_unforced() {
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("y")])],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         false,
         CorrelationId(1),
@@ -878,7 +860,6 @@ fn env_specter_forced_one_when_forced() {
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("y")])],
         Path::new("/p"),
-        Path::new("/p"),
         "",
         true,
         CorrelationId(1),
@@ -897,7 +878,6 @@ fn env_specter_event_kind_dir_subtree_for_subtree_root() {
         "x",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("y")])],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -921,7 +901,6 @@ fn env_specter_event_kind_file_for_per_stable_file() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("y")])],
         Path::new("/p"),
-        Path::new("/p/a"),
         "a",
         false,
         CorrelationId(1),
@@ -943,7 +922,6 @@ fn env_specter_correlation_decimal_for_v1() {
         "x",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("y")])],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -971,7 +949,6 @@ fn env_does_not_contain_specter_diff_path() {
         EffectScope::PerStableFile,
         vec![arg(vec![lit("y")])],
         Path::new("/p"),
-        Path::new("/p/a"),
         "a",
         false,
         CorrelationId(1),
@@ -987,7 +964,6 @@ fn env_order_is_alphabetical() {
         "watch",
         EffectScope::SubtreeRoot,
         vec![arg(vec![lit("y")])],
-        Path::new("/p"),
         Path::new("/p"),
         "",
         false,
@@ -1010,5 +986,49 @@ fn env_order_is_alphabetical() {
             "SPECTER_TIME",
             "SPECTER_WATCH",
         ]
+    );
+}
+
+#[test]
+fn env_order_with_diff_path_is_alphabetical() {
+    // With `diff_path: Some(_)`, SPECTER_DIFF_PATH joins the env in
+    // alphabetical position (between SPECTER_CORRELATION and
+    // SPECTER_EVENT_KIND), keeping a total order across the spawn-time
+    // set the child observes.
+    let e = make_effect(
+        "watch",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("y")])],
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let diff_path = Path::new("/tmp/specter-1234-deadbeef.diff");
+    let (_, env) = super::resolve_effect(&e, SystemTime::UNIX_EPOCH, Some(diff_path));
+    let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            "SPECTER_ANCHOR",
+            "SPECTER_CORRELATION",
+            "SPECTER_DIFF_PATH",
+            "SPECTER_EVENT_KIND",
+            "SPECTER_EXCLUDE",
+            "SPECTER_FORCED",
+            "SPECTER_PARENT",
+            "SPECTER_PATH",
+            "SPECTER_RELATIVE_PATH",
+            "SPECTER_TIME",
+            "SPECTER_WATCH",
+        ]
+    );
+    assert_eq!(
+        env.iter()
+            .find(|(k, _)| k == "SPECTER_DIFF_PATH")
+            .unwrap()
+            .1,
+        "/tmp/specter-1234-deadbeef.diff"
     );
 }

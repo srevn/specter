@@ -210,7 +210,7 @@ impl ActuatorState {
                 drop(permit);
                 continue;
             };
-            self.spawn_effect(key, sub, effect, permit, spawner, reap_tx, engine_in);
+            self.spawn_effect(key, sub, &effect, permit, spawner, reap_tx, engine_in);
         }
         for k in blocked {
             // The flag is already true (we set it when we pushed and only
@@ -226,7 +226,7 @@ impl ActuatorState {
         &mut self,
         key: DedupKey,
         sub: SubId,
-        effect: Effect,
+        effect: &Effect,
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
@@ -244,19 +244,18 @@ impl ActuatorState {
         // instant immediately before the kernel runs the user's command.
         let now = std::time::SystemTime::now();
         let cwd = resolve::compute_cwd(&effect.anchor_path, effect.anchor_kind);
-        let (CommandResolved { argv }, mut env) = resolve::resolve_effect(&effect, now);
-        let Effect {
-            correlation,
-            capture_output,
-            diff,
-            ..
-        } = effect;
+        let correlation = effect.correlation;
+        let capture_output = effect.capture_output;
 
-        // Materialize the diff tmp file (best-effort: on write failure we
-        // proceed without SPECTER_DIFF_PATH; the user's command sees no
-        // diff file and reports a missing-var error on its own if it
-        // requires one).
-        let tmp_path = diff.as_ref().and_then(|diff| {
+        // Materialise the diff tmp file before resolving so the resolver
+        // can slot `SPECTER_DIFF_PATH` into its alphabetical position
+        // (between SPECTER_CORRELATION and SPECTER_EVENT_KIND). Best-
+        // effort: on write failure we proceed with `diff_path = None`,
+        // which the resolver translates to "omit the env var entirely";
+        // the user's command sees no diff file and reports a missing-var
+        // error on its own if it requires one. The tmp_path is retained
+        // for cleanup on the spawn-failure / wait-thread-failure paths.
+        let tmp_path = effect.diff.as_ref().and_then(|diff| {
             let path = crate::tmp::tmp_path(correlation);
             match crate::tmp::write_diff_file(&path, diff) {
                 Ok(()) => Some(path),
@@ -271,12 +270,8 @@ impl ActuatorState {
             }
         });
 
-        if let Some(p) = tmp_path.as_ref() {
-            env.push((
-                "SPECTER_DIFF_PATH".to_owned(),
-                p.to_string_lossy().into_owned(),
-            ));
-        }
+        let (CommandResolved { argv }, env) =
+            resolve::resolve_effect(effect, now, tmp_path.as_deref());
 
         let handles = match spawner.spawn(&argv, &env, &cwd, capture_output) {
             Ok(h) => h,
@@ -474,7 +469,7 @@ mod tests {
     use crossbeam::channel::unbounded;
     use specter_core::{
         ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
-        EffectScope, Input, ProfileId, ResourceId, ResourceKind, SubId,
+        Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::io;
     use std::num::NonZeroUsize;
@@ -521,10 +516,8 @@ mod tests {
             command: Arc::new(CommandTemplate::new([ArgTemplate::new([
                 ArgPart::literal("/bin/true"),
             ])])),
-            scope: EffectScope::PerStableFile,
-            anchor_path: PathBuf::from("/tmp"),
+            anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
-            target_path: PathBuf::from("/tmp"),
             target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
         }

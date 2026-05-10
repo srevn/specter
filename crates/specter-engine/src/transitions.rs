@@ -1980,7 +1980,12 @@ impl Engine {
         // matchers. The projection is sorted at `Profile::new`.
         let exclude_strings = Arc::clone(&p.exclude_strings);
 
-        let anchor_path = self.tree.path_of(resource).unwrap_or_default();
+        // One Arc allocation per `emit_effects` call — every Effect we
+        // emit (one per Sub × per matching diff entry for PerFile) Arc-
+        // clones the same path. `Tree::path_of` already builds a fresh
+        // PathBuf on every call; wrapping it once amortises that cost
+        // across the whole burst's emissions.
+        let anchor_path: Arc<Path> = Arc::from(self.tree.path_of(resource).unwrap_or_default());
 
         // Lazy-build the Diff Arc only if any Sub needs it AND both a
         // baseline and a current snapshot are present. With baseline pinned
@@ -2080,12 +2085,12 @@ impl Engine {
                         capture_output: log_output,
                         sub_name: sub.name.clone(),
                         command: Arc::clone(&sub.command),
-                        scope: sub.scope,
-                        anchor_path: anchor_path.clone(),
+                        anchor_path: Arc::clone(&anchor_path),
                         anchor_kind,
-                        // Subtree's `target_path` is the anchor itself;
-                        // `target_relative` is empty (no per-entry segment).
-                        target_path: anchor_path.clone(),
+                        // Subtree: no per-entry segment. The resolver
+                        // derives `$path` (and `SPECTER_PATH`) from
+                        // `anchor_path` directly when `target_relative`
+                        // is empty.
                         target_relative: CompactString::new(""),
                         exclude: Arc::clone(&exclude_strings),
                     });
@@ -2149,7 +2154,7 @@ impl Engine {
         forced: bool,
         pattern: Option<&specter_core::GlobPattern>,
         diff: &Arc<specter_core::Diff>,
-        anchor_path: &Path,
+        anchor_path: &Arc<Path>,
         anchor_kind: ResourceKind,
         exclude_strings: &Arc<[CompactString]>,
         out: &mut StepOutput,
@@ -2212,7 +2217,6 @@ impl Engine {
                 resource,
             };
 
-            let target_path = anchor_path.join(entry.segment.as_str());
             let correlation = self.next_effect_correlation();
             // The Sub may have been removed mid-burst; defensive lookup.
             let Some(sub) = self.subs.get(sub_id) else {
@@ -2232,10 +2236,13 @@ impl Engine {
                 capture_output: log_output,
                 sub_name: sub.name.clone(),
                 command: Arc::clone(&sub.command),
-                scope: sub.scope,
-                anchor_path: anchor_path.to_path_buf(),
+                anchor_path: Arc::clone(anchor_path),
                 anchor_kind,
-                target_path,
+                // PerFile: the file segment. The resolver derives `$path`
+                // (and `SPECTER_PATH`) by joining `anchor_path` with this
+                // at spawn time — deferring the `PathBuf` allocation past
+                // the actuator's Latest-coalesce so dropped Effects don't
+                // pay for it.
                 target_relative: entry.segment.clone(),
                 exclude: Arc::clone(exclude_strings),
             });

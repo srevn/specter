@@ -12,13 +12,26 @@
 //! actuator's `spawn_effect` is the sole production caller; sibling unit
 //! tests drive directly.
 //!
-//! # `SPECTER_DIFF_PATH` is **not** set here
+//! # `target_path` is derived, not stored
 //!
-//! The actuator at spawn time materialises the diff tmp file (its path
-//! depends on the actuator process's pid) and appends `SPECTER_DIFF_PATH`
-//! to the env it passes to `Command::envs`. The resolver returns env
-//! without that var; the actuator decides whether the file write
-//! succeeded and conditionally extends env.
+//! The Effect carries `anchor_path: Arc<Path>` and `target_relative:
+//! CompactString`; the resolver derives `target_path` (`$path` /
+//! `SPECTER_PATH`) by joining the two when `target_relative` is non-empty,
+//! or by borrowing `anchor_path` when it is. Subtree fires (always empty
+//! relative) avoid the `PathBuf` allocation entirely; PerFile fires
+//! allocate exactly once per resolve, at the spawn boundary where
+//! Latest-coalesce has already filtered Effects that won't run.
+//!
+//! # `SPECTER_DIFF_PATH` slots in alphabetically
+//!
+//! The actuator's `spawn_effect` materialises the diff tmp file (path
+//! depends on the actuator process's pid, so it can't be derived purely)
+//! and passes the resulting `&Path` to [`resolve_effect`] as `diff_path`.
+//! The resolver inserts `SPECTER_DIFF_PATH` at its alphabetical position
+//! in the env vec rather than relying on the caller to append after the
+//! fact. The env-order golden test ([`tests::env_order_is_alphabetical`])
+//! is then a guarantee about the bytes the spawned child sees, not just a
+//! property of the resolver's standalone output.
 //!
 //! # Argv substitution semantics
 //!
@@ -48,16 +61,19 @@
 //! **independently** — no parallel zip. Users wanting per-pair semantics
 //! use `EffectScope::PerStableFile`.
 //!
-//! # Env emission order
+//! # Single rendering pass per resolve
 //!
-//! Keys land in **alphabetical order** by name, a v1 break from the
-//! prior logical-grouping order. Children consuming env via
-//! `getenv("SPECTER_X")` are unaffected; out-of-tree consumers indexing
-//! positionally would break. None observed.
+//! `format_now(now)` and the `$parent` string are computed exactly once
+//! at the top of [`resolve_effect`] and threaded through both
+//! `substitute_argv` and `build_env`. The `$time` argv slot and
+//! `SPECTER_TIME` env value, plus `$parent` and `SPECTER_PARENT`, share
+//! the same source string by construction — no risk of one surface
+//! formatting differently from the other under future edits.
 
 use specter_core::{
-    ArgPart, ArgTemplate, CommandResolved, Diff, Effect, EffectScope, Placeholder, ResourceKind,
+    ArgPart, ArgTemplate, CommandResolved, DedupKey, Diff, Effect, Placeholder, ResourceKind,
 };
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -66,16 +82,28 @@ use std::time::SystemTime;
 ///
 /// `now` is sampled by the actuator's `spawn_effect` immediately before
 /// `spawner.spawn` and reused for the `$time` argv slot AND the
-/// `SPECTER_TIME` env value — they agree on the wall-clock instant by
-/// construction. Tests inject a deterministic `now`; production sources
-/// `SystemTime::now()`.
+/// `SPECTER_TIME` env value — they agree on the wall-clock instant
+/// immediately before the kernel runs the user's command. Tests inject a
+/// deterministic `now`; production sources `SystemTime::now()`.
+///
+/// `diff_path` is the absolute path of the actuator-materialised diff tmp
+/// file when the Effect carries a [`Diff`] AND the file write succeeded;
+/// otherwise `None`. The resolver emits `SPECTER_DIFF_PATH` in
+/// alphabetical position iff this is `Some`, keeping env order total
+/// across the spawn-time set the child observes.
 #[must_use]
 pub(crate) fn resolve_effect(
     effect: &Effect,
     now: SystemTime,
+    diff_path: Option<&Path>,
 ) -> (CommandResolved, Vec<(String, String)>) {
-    let argv = substitute_argv(&effect.command.argv, effect, effect.diff.as_deref(), now);
-    let env = build_env(effect, now);
+    // Materialise once, share with both surfaces.
+    let target_path = compute_target_path(effect);
+    let parent_str = parent_string(&target_path);
+    let time_str = format_now(now);
+
+    let argv = substitute_argv(effect, &target_path, &parent_str, &time_str);
+    let env = build_env(effect, &target_path, &parent_str, &time_str, diff_path);
     (CommandResolved { argv }, env)
 }
 
@@ -98,16 +126,44 @@ pub(crate) fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> PathBuf {
     }
 }
 
+/// Derive `target_path` from `(anchor_path, target_relative)`.
+///
+/// Subtree fires set `target_relative` to empty (no per-entry segment) —
+/// `target_path` is then the anchor itself, borrowed as `Cow::Borrowed`
+/// to avoid a `PathBuf` allocation. PerFile fires set `target_relative`
+/// to the diff entry's segment — `target_path = anchor_path.join(segment)`,
+/// owned as `Cow::Owned`.
+///
+/// The empty-segment dispatch is invariant-preserving: it matches the
+/// `DedupKey` variant by construction (Subtree ⇒ empty; PerFile ⇒
+/// non-empty diff segment) without re-matching the variant here.
+fn compute_target_path(effect: &Effect) -> Cow<'_, Path> {
+    if effect.target_relative.is_empty() {
+        Cow::Borrowed(&*effect.anchor_path)
+    } else {
+        Cow::Owned(effect.anchor_path.join(effect.target_relative.as_str()))
+    }
+}
+
 /// Substitute placeholders into argv slots.
 fn substitute_argv(
-    template: &[ArgTemplate],
     effect: &Effect,
-    diff: Option<&Diff>,
-    now: SystemTime,
+    target_path: &Path,
+    parent_str: &str,
+    time_str: &str,
 ) -> Vec<String> {
+    let template = &effect.command.argv;
     let mut argv = Vec::with_capacity(template.len());
     for arg in template {
-        substitute_one(arg, effect, diff, now, &mut argv);
+        substitute_one(
+            arg,
+            effect,
+            target_path,
+            parent_str,
+            time_str,
+            effect.diff.as_deref(),
+            &mut argv,
+        );
     }
     argv
 }
@@ -117,8 +173,10 @@ fn substitute_argv(
 fn substitute_one(
     arg: &ArgTemplate,
     effect: &Effect,
+    target_path: &Path,
+    parent_str: &str,
+    time_str: &str,
     diff: Option<&Diff>,
-    now: SystemTime,
     out: &mut Vec<String>,
 ) {
     let mut prefix = String::new();
@@ -127,12 +185,12 @@ fn substitute_one(
         match part {
             ArgPart::Literal(s) => prefix.push_str(s),
             ArgPart::Placeholder(p) => match p {
-                Placeholder::Path => prefix.push_str(&effect.target_path.to_string_lossy()),
+                Placeholder::Path => prefix.push_str(&target_path.to_string_lossy()),
                 Placeholder::Relative => prefix.push_str(&effect.target_relative),
                 Placeholder::Anchor => prefix.push_str(&effect.anchor_path.to_string_lossy()),
                 Placeholder::Watch => prefix.push_str(&effect.sub_name),
-                Placeholder::Parent => prefix.push_str(&parent_string(&effect.target_path)),
-                Placeholder::Time => prefix.push_str(&format_now(now)),
+                Placeholder::Parent => prefix.push_str(parent_str),
+                Placeholder::Time => prefix.push_str(time_str),
                 Placeholder::Created
                 | Placeholder::Deleted
                 | Placeholder::Modified
@@ -159,12 +217,9 @@ fn substitute_one(
             out.push(prefix);
         }
     } else if has_multivalue(arg) {
-        // No multi-value placeholders consumed (or all yielded zero
-        // entries with no leading literals/single-values). If we saw
-        // *any* multi-value at all (even with zero values), the
-        // ArgTemplate produces zero slots — `emitted_any == false &&
-        // arg has a multi-value` is the empty-diff case.
-        // Drop the prefix; zero-slot output.
+        // A multi-value placeholder consumed but yielded zero entries:
+        // drop the entire ArgTemplate (zero argv slots). Empty-diff /
+        // empty-exclude case.
     } else {
         out.push(prefix);
     }
@@ -190,40 +245,37 @@ fn parent_string(target_path: &Path) -> String {
 ///
 /// Diff-derived multi-value (`$created` / `$deleted` / `$modified` /
 /// `$renamed_from` / `$renamed_to`) sources from `diff`; an absent or
-/// empty diff list returns an empty `Vec`.
+/// empty diff list returns an empty `Vec`. `$excluded` sources from
+/// `effect.exclude` (Profile-level config), independent of the burst's
+/// diff.
 ///
-/// `$excluded` sources from `effect.exclude` (Profile-level config),
-/// independent of the burst's diff. The two data sources are split here
-/// rather than at the caller because the resolver's prefix-accumulator
-/// branching (in [`substitute_one`]) treats every multi-value
-/// placeholder uniformly — empty list ⇒ drop the surrounding argv slot.
+/// The single-value arms are unreachable by caller contract
+/// (`substitute_one` only routes the six multi-value variants here);
+/// Rust's exhaustiveness check forces the empty fallback.
 fn multivalue_values(p: Placeholder, effect: &Effect, diff: Option<&Diff>) -> Vec<String> {
-    if matches!(p, Placeholder::Excluded) {
-        return effect.exclude.iter().map(ToString::to_string).collect();
-    }
-    let Some(d) = diff else {
-        return Vec::new();
+    let segs = |xs: &[specter_core::EntryRef]| -> Vec<String> {
+        xs.iter().map(|e| e.segment.to_string()).collect()
     };
     match p {
-        Placeholder::Created => d.created.iter().map(|e| e.segment.to_string()).collect(),
-        Placeholder::Deleted => d.deleted.iter().map(|e| e.segment.to_string()).collect(),
-        Placeholder::Modified => d.modified.iter().map(|e| e.segment.to_string()).collect(),
-        Placeholder::RenamedFrom => d
-            .renamed
-            .iter()
-            .map(|r| r.from.segment.to_string())
-            .collect(),
-        Placeholder::RenamedTo => d.renamed.iter().map(|r| r.to.segment.to_string()).collect(),
-        // Unreachable: caller filters to multi-value variants, and the
-        // `Excluded` short-circuit above handles the only non-diff
-        // multi-value source.
+        Placeholder::Excluded => effect.exclude.iter().map(ToString::to_string).collect(),
+        Placeholder::Created => diff.map_or_else(Vec::new, |d| segs(&d.created)),
+        Placeholder::Deleted => diff.map_or_else(Vec::new, |d| segs(&d.deleted)),
+        Placeholder::Modified => diff.map_or_else(Vec::new, |d| segs(&d.modified)),
+        Placeholder::RenamedFrom => diff.map_or_else(Vec::new, |d| {
+            d.renamed
+                .iter()
+                .map(|r| r.from.segment.to_string())
+                .collect()
+        }),
+        Placeholder::RenamedTo => diff.map_or_else(Vec::new, |d| {
+            d.renamed.iter().map(|r| r.to.segment.to_string()).collect()
+        }),
         Placeholder::Path
         | Placeholder::Relative
         | Placeholder::Anchor
         | Placeholder::Watch
         | Placeholder::Parent
-        | Placeholder::Time
-        | Placeholder::Excluded => Vec::new(),
+        | Placeholder::Time => Vec::new(),
     }
 }
 
@@ -256,47 +308,70 @@ fn join_exclude<S: AsRef<str>>(exclude: &[S]) -> String {
     out
 }
 
-/// Build the standard `SPECTER_*` env-var set excluding `SPECTER_DIFF_PATH`
-/// (the actuator appends that at spawn time). Keys land in alphabetical
+/// Build the standard `SPECTER_*` env-var set. Keys land in alphabetical
 /// order by name — pinned by [`tests::env_order_is_alphabetical`].
 ///
-/// `now` is the same instant passed to [`resolve_effect`]; it underpins
-/// `SPECTER_TIME` and `$time` agreeing within a single resolve call.
-fn build_env(effect: &Effect, now: SystemTime) -> Vec<(String, String)> {
-    let event_kind = match effect.scope {
-        EffectScope::SubtreeRoot => "dir-subtree",
-        EffectScope::PerStableFile => "file",
+/// `SPECTER_DIFF_PATH` slots into its alphabetical position when
+/// `diff_path` is `Some`; absent when `None`. The env order is total
+/// across both cases — the spawned child observes alphabetical keys
+/// regardless of whether a diff is present. Order is fixed for
+/// golden-test stability and operator predictability (e.g., `env | sort`
+/// matches positional `getenv` reads).
+///
+/// `target_path`, `parent_str`, `time_str` are pre-rendered in
+/// [`resolve_effect`] so this function and [`substitute_argv`] share the
+/// same byte sequences for `$path / SPECTER_PATH`, `$parent /
+/// SPECTER_PARENT`, and `$time / SPECTER_TIME` respectively.
+fn build_env(
+    effect: &Effect,
+    target_path: &Path,
+    parent_str: &str,
+    time_str: &str,
+    diff_path: Option<&Path>,
+) -> Vec<(String, String)> {
+    // `event_kind` derives from the DedupKey variant — Subtree/PerFile
+    // by construction agree with the originating Sub's EffectScope, so
+    // there is no second source-of-truth to consult.
+    let event_kind = match effect.key {
+        DedupKey::Subtree { .. } => "dir-subtree",
+        DedupKey::PerFile { .. } => "file",
     };
-    vec![
-        (
-            "SPECTER_ANCHOR".to_owned(),
-            effect.anchor_path.to_string_lossy().into_owned(),
-        ),
-        (
-            "SPECTER_CORRELATION".to_owned(),
-            effect.correlation.0.to_string(),
-        ),
-        ("SPECTER_EVENT_KIND".to_owned(), event_kind.to_owned()),
-        ("SPECTER_EXCLUDE".to_owned(), join_exclude(&effect.exclude)),
-        (
-            "SPECTER_FORCED".to_owned(),
-            if effect.forced { "1" } else { "0" }.to_owned(),
-        ),
-        (
-            "SPECTER_PARENT".to_owned(),
-            parent_string(&effect.target_path),
-        ),
-        (
-            "SPECTER_PATH".to_owned(),
-            effect.target_path.to_string_lossy().into_owned(),
-        ),
-        (
-            "SPECTER_RELATIVE_PATH".to_owned(),
-            effect.target_relative.to_string(),
-        ),
-        ("SPECTER_TIME".to_owned(), format_now(now)),
-        ("SPECTER_WATCH".to_owned(), effect.sub_name.to_string()),
-    ]
+    // 10 keys + optional SPECTER_DIFF_PATH. Pre-size to avoid the
+    // resize churn under push.
+    let cap = if diff_path.is_some() { 11 } else { 10 };
+    let mut env: Vec<(String, String)> = Vec::with_capacity(cap);
+    env.push((
+        "SPECTER_ANCHOR".to_owned(),
+        effect.anchor_path.to_string_lossy().into_owned(),
+    ));
+    env.push((
+        "SPECTER_CORRELATION".to_owned(),
+        effect.correlation.0.to_string(),
+    ));
+    if let Some(p) = diff_path {
+        env.push((
+            "SPECTER_DIFF_PATH".to_owned(),
+            p.to_string_lossy().into_owned(),
+        ));
+    }
+    env.push(("SPECTER_EVENT_KIND".to_owned(), event_kind.to_owned()));
+    env.push(("SPECTER_EXCLUDE".to_owned(), join_exclude(&effect.exclude)));
+    env.push((
+        "SPECTER_FORCED".to_owned(),
+        if effect.forced { "1" } else { "0" }.to_owned(),
+    ));
+    env.push(("SPECTER_PARENT".to_owned(), parent_str.to_owned()));
+    env.push((
+        "SPECTER_PATH".to_owned(),
+        target_path.to_string_lossy().into_owned(),
+    ));
+    env.push((
+        "SPECTER_RELATIVE_PATH".to_owned(),
+        effect.target_relative.to_string(),
+    ));
+    env.push(("SPECTER_TIME".to_owned(), time_str.to_owned()));
+    env.push(("SPECTER_WATCH".to_owned(), effect.sub_name.to_string()));
+    env
 }
 
 #[cfg(test)]

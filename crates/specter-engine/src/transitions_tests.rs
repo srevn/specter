@@ -883,8 +883,8 @@ fn standard_burst_stable_emits_effect_and_awaits() {
     // Substitution-domain inputs that the actuator-side resolver renders
     // to SPECTER_PATH / SPECTER_WATCH / SPECTER_FORCED / SPECTER_EVENT_KIND.
     assert!(
-        !eff.target_path.as_os_str().is_empty(),
-        "target_path populated for $path / SPECTER_PATH"
+        !eff.anchor_path.as_os_str().is_empty(),
+        "anchor_path populated; resolver derives target_path from anchor + relative"
     );
     assert!(
         !eff.sub_name.is_empty(),
@@ -894,10 +894,9 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         !eff.forced,
         "SPECTER_FORCED == \"0\" derives from forced=false"
     );
-    assert_eq!(
-        eff.scope,
-        specter_core::EffectScope::SubtreeRoot,
-        "EVENT_KIND=dir-subtree derives from scope"
+    assert!(
+        matches!(eff.key, specter_core::DedupKey::Subtree { .. }),
+        "EVENT_KIND=dir-subtree derives from DedupKey::Subtree variant",
     );
     // SPECTER_DIFF_PATH is an actuator-side augmentation; engine's Effect
     // doesn't carry it. The structural witness is `eff.diff`:
@@ -1084,11 +1083,11 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     // compute_cwd returns parent.
     assert_eq!(eff.anchor_path.as_os_str(), "parentdir/main.rs");
     assert_eq!(eff.anchor_kind, specter_core::ResourceKind::File);
-    // SPECTER_PATH derives from target_path; SPECTER_ANCHOR from
-    // anchor_path. For a File-anchor Subtree Effect both equal the
-    // anchor file path itself.
-    assert_eq!(eff.target_path.as_os_str(), "parentdir/main.rs");
-    assert_eq!(eff.anchor_path.as_os_str(), "parentdir/main.rs");
+    // SPECTER_PATH and SPECTER_ANCHOR both derive from `anchor_path`
+    // for a File-anchor Subtree Effect: the resolver returns
+    // `Cow::Borrowed(&anchor_path)` when `target_relative` is empty,
+    // so both env values share the same byte sequence.
+    assert_eq!(eff.target_relative.as_str(), "");
 }
 
 #[test]
@@ -3213,16 +3212,18 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         // anchor_path + anchor_kind ⇒ actuator's compute_cwd("anchor", Dir) = "anchor".
         assert_eq!(eff.anchor_path.as_os_str(), "anchor");
         assert_eq!(eff.anchor_kind, specter_core::ResourceKind::Dir);
-        // target_path ⇒ SPECTER_PATH source.
-        assert!(eff.target_path.starts_with("anchor/"));
-        // target_relative ⇒ SPECTER_RELATIVE_PATH source.
+        // target_relative ⇒ SPECTER_RELATIVE_PATH source. The resolver
+        // derives SPECTER_PATH = anchor_path.join(target_relative) at
+        // spawn time; this assertion implicitly pins target_path to
+        // "anchor/a.rs" or "anchor/b.rs".
         assert!(
             eff.target_relative == "a.rs" || eff.target_relative == "b.rs",
             "target_relative = {:?}",
             eff.target_relative,
         );
-        // scope ⇒ SPECTER_EVENT_KIND="file" for PerStableFile.
-        assert_eq!(eff.scope, specter_core::EffectScope::PerStableFile);
+        // SPECTER_EVENT_KIND="file" derives from the DedupKey::PerFile
+        // variant.
+        assert!(matches!(eff.key, specter_core::DedupKey::PerFile { .. }));
     }
 }
 

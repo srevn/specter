@@ -8,7 +8,7 @@ use common::*;
 use compact_str::CompactString;
 use smallvec::smallvec;
 use specter_core::{CorrelationId, Diff, Effect, EffectOutcome, EntryKind, EntryRef, Input};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,8 +19,9 @@ use std::time::Duration;
 /// substitution-domain projection on [`Effect`] — there is no `Effect.env`
 /// field to push pairs onto. To assert "the child sees `name=expected`"
 /// the helper takes a `setup` closure that mutates the resolver's
-/// *inputs* (e.g., set `e.target_path` to assert on `SPECTER_PATH`); the
-/// resolver's render-time output is what the spawned process observes
+/// *inputs* (e.g., set `e.target_relative` to assert on `SPECTER_PATH`,
+/// since `target_path` is now derived as `anchor_path.join(target_relative)`);
+/// the resolver's render-time output is what the spawned process observes
 /// via `getenv`.
 ///
 /// `expected_for` derives the expected value from the spawn cwd so that
@@ -63,13 +64,17 @@ fn assert_env_var_received(
 
 #[test]
 fn child_receives_specter_path() {
-    // `SPECTER_PATH` mirrors `Effect.target_path`. Set it to a path
-    // that disagrees with the spawn cwd (the tempdir on `anchor_path`)
-    // so any future collapse of the two fields fails here.
+    // `SPECTER_PATH` mirrors the resolver-derived `target_path` —
+    // `anchor_path.join(target_relative)`. The fixture defaults
+    // `anchor_path = cwd` (the tempdir) and `target_relative = ""`, so
+    // setting `target_relative = "src/a.c"` produces
+    // `SPECTER_PATH = <tempdir>/src/a.c`. The cwd-derivation
+    // `expected_for` keeps the assertion symmetrical with the actual
+    // join the resolver performs.
     assert_env_var_received(
         "SPECTER_PATH",
-        |_dir| "/abs/proj/src/a.c".to_owned(),
-        |e| e.target_path = PathBuf::from("/abs/proj/src/a.c"),
+        |dir| dir.join("src/a.c").to_string_lossy().into_owned(),
+        |e| e.target_relative = CompactString::from("src/a.c"),
     );
 }
 
