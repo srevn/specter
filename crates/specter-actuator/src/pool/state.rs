@@ -685,10 +685,24 @@ impl ActuatorState {
     /// immediately before the kernel runs the user's command", which
     /// must hold per step in a multi-step plan.
     ///
-    /// On wait-thread spawn failure: SIGKILL the orphan child, clear
-    /// the half-installed `slot.running`, return `SpawnError::Failed`.
-    /// The closure (and its captured `permit`) drops on
-    /// `thread::Builder::spawn` error so the permit is released.
+    /// On wait-thread spawn failure: the freshly-spawned child is
+    /// alive but has no waiter (the closure that owned it has been
+    /// dropped by `Builder::spawn`'s `Err` path). The recovery branch
+    /// SIGKILLs the orphan via the signaler held in `slot.running`,
+    /// then synchronously reaps it via
+    /// [`crate::spawner::ChildSignaler::reap_blocking`] so the OS
+    /// doesn't leak a zombie. `slot.running` is then cleared (the
+    /// terminate_plan caller expects it to be `None`) and
+    /// `SpawnError::Failed` returns.
+    ///
+    /// **Slot invariant.** Both `self.slots.get_mut(key)` lookups in
+    /// this function assume the slot was just touched by the caller
+    /// (the controller is single-threaded; no Reap or Submit can
+    /// interleave between caller's `pump` / `handle_reap_inner` and
+    /// here). A missing slot is a programming error, surfaced via
+    /// `expect` rather than silently masked — silent masking would
+    /// otherwise leak the signaler and leave the child unreachable
+    /// from shutdown signaling.
     fn spawn_step_with_permit(
         &mut self,
         key: &DedupKey,
@@ -727,15 +741,17 @@ impl ActuatorState {
         // before the controller knows about it. PathBuf is allocated
         // here (one per step transition); `effect` is Arc-cloned (cheap).
         let diff_tmp_path: Option<PathBuf> = diff_path.map(Path::to_path_buf);
-        if let Some(slot) = self.slots.get_mut(key) {
-            slot.running = Some(RunningJob {
-                pid,
-                signaler,
-                effect: Arc::clone(effect),
-                step_idx,
-                diff_tmp_path,
-            });
-        }
+        let slot = self
+            .slots
+            .get_mut(key)
+            .expect("slot present at install (single-threaded controller just dispatched here)");
+        slot.running = Some(RunningJob {
+            pid,
+            signaler,
+            effect: Arc::clone(effect),
+            step_idx,
+            diff_tmp_path,
+        });
 
         let reap_tx_for_thread = reap_tx.clone();
         let wait_key = key.clone();
@@ -760,28 +776,53 @@ impl ActuatorState {
                 step_idx,
                 pid,
                 ?e,
-                "wait thread spawn failed; SIGKILL orphan + synth Failed",
+                "wait thread spawn failed; SIGKILL + sync reap orphan, synth Failed",
             );
-            // Child is alive but has no waiter. SIGKILL via the freshly
-            // installed signaler before we clear slot.running (which
-            // owns it).
-            if let Some(slot) = self.slots.get(key)
-                && let Some(job) = slot.running.as_ref()
-                && let Err(kill_err) = job.signaler.signal_kill()
-            {
-                tracing::warn!(?key, pid, ?kill_err, "orphan SIGKILL failed");
-            }
-            // Roll back the half-installed slot.running. The caller's
-            // terminate_plan path expects slot.running to be None at the
-            // terminal arm — this preserves that invariant.
-            if let Some(slot) = self.slots.get_mut(key) {
-                slot.running = None;
-            }
+            let slot = self
+                .slots
+                .get_mut(key)
+                .expect("slot present at wait-thread-spawn-failure recovery");
+            let job = slot
+                .running
+                .take()
+                .expect("slot.running installed unconditionally above");
+            recover_orphan_after_wait_thread_failure(job);
             return Err(SpawnError::Failed);
         }
 
         tracing::debug!(?key, step_idx, pid, "spawned step");
         Ok(())
+    }
+}
+
+/// Recovery path for the wait-thread-spawn-failure case in
+/// [`ActuatorState::spawn_step_with_permit`]. The child is alive but
+/// its paired [`crate::spawner::ChildWaiter`] was dropped along with
+/// the failed `Builder::spawn` closure — so the controller must
+/// SIGKILL it and synchronously reap it through the signaler. Without
+/// the reap the OS would leak a zombie until process exit.
+///
+/// Both syscalls are best-effort: errors are logged and swallowed.
+/// The caller's synthesised `EffectOutcome::Failed` is what the engine
+/// observes; this function exists only for OS resource hygiene.
+///
+/// Extracted as a free function so it can be unit-tested in isolation
+/// without standing up the full spawn flow (the actual `thread::Builder::spawn`
+/// failure path is rare and not directly injectable in tests).
+///
+/// `job` is taken by value to express the ownership transfer: the
+/// caller has just `slot.running.take()`-ed the in-flight bookkeeping
+/// and hands it over for tear-down; once we return, the signaler /
+/// effect Arc / diff-tmp path all drop. Borrowing would force the
+/// caller into a take-then-restore dance for no behavioural gain.
+#[allow(clippy::needless_pass_by_value)]
+fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
+    let pid = job.pid;
+    if let Err(e) = job.signaler.signal_kill() {
+        tracing::warn!(pid, ?e, "orphan SIGKILL failed");
+    }
+    if let Err(e) = job.signaler.reap_blocking() {
+        tracing::warn!(pid, ?e, "orphan reap_blocking failed");
     }
 }
 
@@ -1055,15 +1096,26 @@ mod tests {
             }
             Ok(())
         }
+        fn reap_blocking(&self) -> io::Result<()> {
+            // ScriptedSpawner's waiter drives reap via the completion
+            // channel; this method is the recovery-path only and
+            // should not be invoked under the tests that use this
+            // stub. A no-op is correct for shape-only conformance.
+            self.dead.store(true, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
-    /// Counts SIGTERM / SIGKILL invocations; never errors. Shared
-    /// across `RunningJob` constructions in tests so we can assert
-    /// neither was sent during pure-state teardown.
+    /// Counts SIGTERM / SIGKILL / reap_blocking invocations; never
+    /// errors. Shared across `RunningJob` constructions in tests so
+    /// teardown assertions can distinguish which signaler methods
+    /// fired (e.g. the wait-thread-spawn-failure recovery test
+    /// asserts both `kill` and `reap` bumped by 1).
     #[derive(Default)]
     struct CountingSignaler {
         term: AtomicUsize,
         kill: AtomicUsize,
+        reap: AtomicUsize,
     }
     impl ChildSignaler for CountingSignaler {
         fn signal_term(&self) -> io::Result<()> {
@@ -1072,6 +1124,10 @@ mod tests {
         }
         fn signal_kill(&self) -> io::Result<()> {
             self.kill.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn reap_blocking(&self) -> io::Result<()> {
+            self.reap.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -1088,6 +1144,9 @@ mod tests {
             fn signal_kill(&self) -> io::Result<()> {
                 self.0.signal_kill()
             }
+            fn reap_blocking(&self) -> io::Result<()> {
+                self.0.reap_blocking()
+            }
         }
         RunningJob {
             pid: 99_999,
@@ -1102,6 +1161,47 @@ mod tests {
     /// drained in these tests since most paths don't actually spawn.
     fn reap_channel() -> (Sender<Reaped>, crossbeam::channel::Receiver<Reaped>) {
         crossbeam::channel::bounded(64)
+    }
+
+    // ---------- wait-thread-spawn-failure recovery ----------
+
+    /// Direct test for [`super::recover_orphan_after_wait_thread_failure`].
+    /// The production-path trigger (`thread::Builder::spawn` returning
+    /// `Err`) is rare and not directly injectable in the controller
+    /// harness, so we exercise the recovery helper in isolation against
+    /// a pre-constructed [`RunningJob`].
+    ///
+    /// The bug the helper closes: pre-fix, the recovery branch only
+    /// called `signal_kill`. The waiter (the sole reap path) was
+    /// dropped along with the failed thread closure, so the SIGKILL'd
+    /// orphan was never `waitpid`-ed — leaking a zombie until process
+    /// exit. The helper now drives both `signal_kill` and
+    /// `reap_blocking` through the controller-held signaler.
+    #[test]
+    fn recover_orphan_after_wait_thread_failure_kills_and_reaps() {
+        let key = perfile_key(50, 50, 50);
+        let res = unique_resource_id(50);
+        let effect = Arc::new(dummy_effect(key, res, 1));
+        let signaler = Arc::new(CountingSignaler::default());
+        let job = stub_running_job(effect, Arc::clone(&signaler));
+
+        super::recover_orphan_after_wait_thread_failure(job);
+
+        assert_eq!(
+            signaler.kill.load(Ordering::SeqCst),
+            1,
+            "orphan must receive exactly one SIGKILL",
+        );
+        assert_eq!(
+            signaler.reap.load(Ordering::SeqCst),
+            1,
+            "orphan must be synchronously reaped via waitpid",
+        );
+        assert_eq!(
+            signaler.term.load(Ordering::SeqCst),
+            0,
+            "recovery never sends SIGTERM; it's a hard-fail path",
+        );
     }
 
     /// Stale-Reaped shape: slot exists with no running job and no
@@ -1333,6 +1433,9 @@ mod tests {
                         fn signal_kill(&self) -> io::Result<()> {
                             self.0.signal_kill()
                         }
+                        fn reap_blocking(&self) -> io::Result<()> {
+                            self.0.reap_blocking()
+                        }
                     }
                     Box::new(A(Arc::clone(&signaler)))
                 },
@@ -1373,7 +1476,7 @@ mod tests {
             Some(1),
             "per-Sub counter unchanged across step advance",
         );
-        assert!(rx.try_recv().is_err(), "no EffectComplete emitted mid-plan",);
+        assert!(rx.try_recv().is_err(), "no EffectComplete emitted mid-plan");
         // Drain the wait thread so the test doesn't hang on Drop.
         spawner.complete(running.pid, EffectOutcome::Ok);
     }
@@ -1400,6 +1503,9 @@ mod tests {
                         }
                         fn signal_kill(&self) -> io::Result<()> {
                             self.0.signal_kill()
+                        }
+                        fn reap_blocking(&self) -> io::Result<()> {
+                            self.0.reap_blocking()
                         }
                     }
                     Box::new(A(Arc::clone(&signaler)))
@@ -1468,6 +1574,9 @@ mod tests {
                         fn signal_kill(&self) -> io::Result<()> {
                             self.0.signal_kill()
                         }
+                        fn reap_blocking(&self) -> io::Result<()> {
+                            self.0.reap_blocking()
+                        }
                     }
                     Box::new(A(Arc::clone(&signaler)))
                 },
@@ -1534,6 +1643,9 @@ mod tests {
                         }
                         fn signal_kill(&self) -> io::Result<()> {
                             self.0.signal_kill()
+                        }
+                        fn reap_blocking(&self) -> io::Result<()> {
+                            self.0.reap_blocking()
                         }
                     }
                     Box::new(A(Arc::clone(&signaler)))
@@ -1647,6 +1759,9 @@ mod tests {
                         fn signal_kill(&self) -> io::Result<()> {
                             self.0.signal_kill()
                         }
+                        fn reap_blocking(&self) -> io::Result<()> {
+                            self.0.reap_blocking()
+                        }
                     }
                     Box::new(A(Arc::clone(&signaler)))
                 },
@@ -1707,6 +1822,9 @@ mod tests {
                         }
                         fn signal_kill(&self) -> io::Result<()> {
                             self.0.signal_kill()
+                        }
+                        fn reap_blocking(&self) -> io::Result<()> {
+                            self.0.reap_blocking()
                         }
                     }
                     Box::new(A(Arc::clone(&signaler)))

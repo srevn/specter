@@ -98,15 +98,19 @@ actions   = [{ exec = ["cargo", "build"] }]  # argv-only (no shell expansion)
 # Optional knobs (defaults shown).
 # enabled    = true                   # false ⇒ inert at runtime; toggle without deleting
 settle       = "200ms"                # debounce window after the last event
-# max_settle = "1h"                   # forced fire even if events keep arriving (default 1h)
+# max_settle = "1h"                   # forced fire even if events keep arriving (default 1h).
+                                      # If `actions` has multiple steps, `max_settle * 4` is
+                                      # the recovery budget for the whole plan — tune up for
+                                      # long sequences (a 5-step plan that legitimately runs
+                                      # 25 min would otherwise trip the hatch).
 # scope      = "subtree-root"         # subtree-root | per-stable-file
-# events        = ["structure", "content"]  # default mask depends on scope
-# pattern       = "**/*.rs"           # glob filter
-# exclude       = ["target/**", ".git/**"]
-# hidden        = false               # scan dotfiles
-# recursive     = true                # descend into subdirectories
-# max_depth     = 8                   # cap descent depth
-# log_output    = false               # forward child stdout/stderr to specter's stdio
+# events     = ["structure", "content"]  # default mask depends on scope
+# pattern    = "**/*.rs"              # glob filter
+# exclude    = ["target/**", ".git/**"]
+# hidden     = false                  # scan dotfiles
+# recursive  = true                   # descend into subdirectories
+# max_depth  = 8                      # cap descent depth
+# log_output = false                  # forward child stdout/stderr to specter's stdio
 
 [[watch]]
 name       = "format-each"
@@ -169,6 +173,11 @@ actions = [{ exec = ["rsync", "-av", "--exclude=${specter.excluded}", "${specter
 # argv = ["rsync", "-av", "--exclude=*.tmp", "--exclude=cache/", "/srv/repo/", "/backup/"]
 ```
 
+A literal **after** a multi-value placeholder (e.g. `"--flag=${specter.excluded}-end"`)
+is not appended to each emitted value — when at least one value emits, the trailing
+literal becomes its own standalone argv slot. Place per-value suffixes inside the
+prefix or use a wrapper script.
+
 Two escape rules round out the grammar:
 
 - `$$` — a literal `$`. Use `$$$$` to pass `$$` through to a shell that
@@ -204,7 +213,7 @@ inherited parent environment:
 | `SPECTER_EVENT_KIND`    | `dir-subtree` or `file`                                              |
 | `SPECTER_FORCED`        | `0` or `1` — `1` when the burst crossed `max_settle` before settling |
 | `SPECTER_CORRELATION`   | per-Effect monotonic decimal id                                      |
-| `SPECTER_DIFF_PATH`     | absolute path of a tab-separated diff file (set only when the watch's actions reference diff-derived placeholders or `scope = "per-stable-file"`; the file is removed once the command exits) |
+| `SPECTER_DIFF_PATH`     | absolute path of a tab-separated diff file (set only when the watch's actions reference diff-derived placeholders or `scope = "per-stable-file"`; the same file is shared across every step of a multi-step plan and is removed once the plan exits) |
 
 ### CLI flags
 

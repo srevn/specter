@@ -28,11 +28,13 @@ pub struct SpawnRecord {
     pub capture_output: bool,
 }
 
-/// Recorded signal call.
+/// Recorded signal call. `Reap` records the synchronous reap path
+/// taken on wait-thread-spawn-failure recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalRecord {
     Term(u32),
     Kill(u32),
+    Reap(u32),
 }
 
 /// Pure-Rust [`Spawner`] test fixture.
@@ -209,6 +211,17 @@ impl ChildSignaler for MockChildSignaler {
             .lock()
             .unwrap()
             .push(SignalRecord::Kill(self.pid));
+        Ok(())
+    }
+    fn reap_blocking(&self) -> io::Result<()> {
+        if self.dead.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.signals
+            .lock()
+            .unwrap()
+            .push(SignalRecord::Reap(self.pid));
+        self.dead.store(true, Ordering::SeqCst);
         Ok(())
     }
 }

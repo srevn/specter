@@ -1284,8 +1284,12 @@ mod tests {
 
     #[test]
     fn lowercase_typo_placeholder_still_rejected_as_unknown() {
-        // Lowercase non-catalog names remain typo errors; the catalog is
-        // exclusively lowercase, so a lowercase miss is almost always a typo.
+        // *Inside the `${specter.…}` namespace*, lowercase non-catalog
+        // names remain typo errors; the catalog is exclusively lowercase,
+        // so a lowercase miss inside the namespace is almost always a
+        // typo. Bare `$paht` (outside the namespace) is literal
+        // pass-through under the new grammar — exercised by
+        // `template::tests::bare_dollar_name_is_literal`.
         let toml = format!(
             "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"fmt\", \"${{specter.paht}}\"] }}]"
         );

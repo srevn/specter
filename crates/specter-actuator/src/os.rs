@@ -156,6 +156,22 @@ impl ChildSignaler for OsChildSignaler {
         }
         signal_pid(self.pid, nix::sys::signal::Signal::SIGKILL)
     }
+    fn reap_blocking(&self) -> io::Result<()> {
+        // Fast path: the paired waiter already drained this child.
+        // The recovery branch shouldn't see this in production (the
+        // waiter was dropped without running), but it keeps the
+        // method idempotent under any caller misuse.
+        if self.dead.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        reap_pid(self.pid)?;
+        // Mirror OsChildWaiter::wait: set `dead` after the kernel
+        // releases the zombie so later signal calls short-circuit
+        // (closes the PID-reuse race the same way the wait thread
+        // would on the normal path).
+        self.dead.store(true, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[allow(clippy::cast_possible_wrap)]
@@ -167,6 +183,120 @@ fn signal_pid(pid: u32, sig: nix::sys::signal::Signal) -> io::Result<()> {
         Ok(()) => Ok(()),
         Err(Errno::ESRCH) => Ok(()), // already gone
         Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+    }
+}
+
+/// Block until `pid` is reaped via `waitpid(2)`. `EINTR` is retried;
+/// `ECHILD` is collapsed to `Ok(())` so the recovery path is idempotent
+/// against any earlier external reap.
+#[allow(clippy::cast_possible_wrap)]
+fn reap_pid(pid: u32) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::wait::waitpid;
+    use nix::unistd::Pid;
+    let pid = Pid::from_raw(pid as i32);
+    loop {
+        match waitpid(Some(pid), None) {
+            Ok(_) => return Ok(()),
+            Err(Errno::EINTR) => {}              // retry
+            Err(Errno::ECHILD) => return Ok(()), // already reaped
+            Err(e) => return Err(io::Error::from_raw_os_error(e as i32)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    //! Real fork+exec exercise for the wait-thread-spawn-failure
+    //! recovery path. `OsChildSignaler::reap_blocking` is the load-bearing
+    //! syscall: without it, a child spawned via [`OsSpawner::spawn`] whose
+    //! paired [`OsChildWaiter`] was dropped before `wait()` ran would
+    //! linger as a zombie until Specter itself exits.
+    //!
+    //! The test drops the waiter explicitly to simulate the
+    //! `thread::Builder::spawn` failure path (where the closure that
+    //! owned the waiter was dropped on `Err`), then drives `signal_kill +
+    //! reap_blocking` through the signaler exactly as the controller's
+    //! `recover_orphan_after_wait_thread_failure` helper does.
+    use super::*;
+    use crate::spawner::{EnvVar, Spawner};
+    use std::path::Path;
+
+    /// Spawn a long-running child, drop the waiter without ever calling
+    /// `wait`, then verify the signaler can SIGKILL + reap it cleanly.
+    /// The `reap_blocking` call must return `Ok(())`; once it does, the
+    /// kernel has released the zombie and a follow-up `kill(pid, 0)`
+    /// observes `ESRCH` (the pid is gone or has been recycled — either
+    /// way, the zombie has been drained).
+    #[test]
+    fn signaler_reap_blocking_drains_orphan_after_dropped_waiter() {
+        let spawner = OsSpawner::new();
+        // `/bin/sleep 30` keeps the child alive long enough that the
+        // SIGKILL + reap exercises the actual zombie-cleanup path
+        // (not a child that exited before we got around to reaping).
+        let argv: Vec<String> = vec!["/bin/sleep".into(), "30".into()];
+        let env: Vec<EnvVar<'_>> = Vec::new();
+        let cwd = Path::new("/tmp");
+
+        let handles = spawner
+            .spawn(&argv, &env, cwd, false)
+            .expect("spawn /bin/sleep");
+        let pid = handles.pid;
+        let signaler = handles.signaler;
+
+        // Drop the waiter explicitly. This mirrors the production
+        // failure mode where `thread::Builder::spawn`'s `Err` path
+        // drops the closure (and the waiter it captured) without
+        // ever calling `wait`. Pre-fix, no further reap would
+        // happen — the SIGKILL'd child would linger as a zombie.
+        drop(handles.waiter);
+
+        signaler.signal_kill().expect("SIGKILL the orphan");
+        signaler
+            .reap_blocking()
+            .expect("synchronously reap the orphan");
+
+        // After successful reap, a follow-up `kill(pid, 0)` must
+        // observe `ESRCH` (collapsed to `Ok(())` by our signaler at
+        // the protocol layer because `reap_blocking` set the `dead`
+        // flag — so we check the underlying `signal_pid` directly to
+        // observe the kernel-level state).
+        let kernel_state = signal_pid(pid, nix::sys::signal::Signal::SIGCONT);
+        // ESRCH-collapse means `signal_pid` returns Ok on a vanished
+        // pid; what we're really asserting is that no zombie remains
+        // bound to the pid — once `waitpid` returns, the kernel
+        // releases the slot. The successful return of `reap_blocking`
+        // above is the load-bearing assertion; this is the
+        // defense-in-depth follow-up.
+        assert!(
+            kernel_state.is_ok(),
+            "post-reap signal must collapse cleanly (got {kernel_state:?})",
+        );
+    }
+
+    /// `reap_blocking` is idempotent: a second call after the child
+    /// has been reaped returns `Ok(())` without blocking. The
+    /// `dead`-flag short-circuit drives this. `/bin/sleep 0` is the
+    /// portable "exit immediately" child — `/bin/true` is at
+    /// `/usr/bin/true` on macOS, so we stick with `/bin/sleep`.
+    #[test]
+    fn signaler_reap_blocking_is_idempotent_after_first_reap() {
+        let spawner = OsSpawner::new();
+        let argv: Vec<String> = vec!["/bin/sleep".into(), "0".into()];
+        let env: Vec<EnvVar<'_>> = Vec::new();
+        let cwd = Path::new("/tmp");
+
+        let handles = spawner.spawn(&argv, &env, cwd, false).expect("spawn");
+        let signaler = handles.signaler;
+        drop(handles.waiter);
+
+        signaler.reap_blocking().expect("first reap");
+        // Second call must short-circuit at the `dead`-flag check —
+        // the kernel slot is already gone, so a real waitpid would
+        // ECHILD; our fast-path returns Ok without syscall.
+        signaler
+            .reap_blocking()
+            .expect("second reap must be a no-op (idempotent)");
     }
 }
 

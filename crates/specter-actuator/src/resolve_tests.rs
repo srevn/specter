@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-/// Convenience wrapper for tests that don't exercise `$time` /
+/// Convenience wrapper for tests that don't exercise `${specter.time}` /
 /// `SPECTER_TIME` rendering — pins `now` to the Unix epoch and omits the
 /// diff tmp file. Time-sensitive tests call [`super::resolve_step`]
 /// directly with the instant they want; diff-tmp-aware tests pass
@@ -169,11 +169,11 @@ fn resolve_with_anchor_placeholder() {
     assert_eq!(cmd.argv, vec!["build".to_string(), "/proj".to_string()]);
 }
 
-// ---------- $excluded / SPECTER_EXCLUDED ----------
+// ---------- ${specter.excluded} / SPECTER_EXCLUDED ----------
 
 #[test]
 fn resolve_excluded_one_arg_per_pattern() {
-    // `--exclude=$excluded` tiles the literal prefix per pattern,
+    // `--exclude=${specter.excluded}` tiles the literal prefix per pattern,
     // mirroring the diff-derived multi-value behaviour.
     let mut e = make_effect(
         "rsync",
@@ -211,7 +211,7 @@ fn resolve_excluded_one_arg_per_pattern() {
 #[test]
 fn resolve_excluded_empty_drops_slot() {
     // Empty exclude list mirrors empty-diff: drop the entire
-    // `--exclude=$excluded` slot rather than emit `--exclude=`.
+    // `--exclude=${specter.excluded}` slot rather than emit `--exclude=`.
     let e = make_effect(
         "rsync",
         EffectScope::SubtreeRoot,
@@ -231,7 +231,7 @@ fn resolve_excluded_empty_drops_slot() {
     assert_eq!(
         cmd.argv,
         vec!["rsync".to_string(), "/src/".to_string()],
-        "empty $excluded drops the surrounding slot"
+        "empty ${{specter.excluded}} drops the surrounding slot"
     );
 }
 
@@ -290,7 +290,7 @@ fn env_exclude_empty_is_empty_string() {
     );
 }
 
-// ---------- $time / SPECTER_TIME ----------
+// ---------- ${specter.time} / SPECTER_TIME ----------
 
 /// Unix timestamp 1_700_000_000 = 2023-11-14T22:13:20Z. Chosen for
 /// readability in the assert; the format is RFC 3339 second-precision.
@@ -355,17 +355,17 @@ fn format_now_clamps_pre_epoch() {
     assert_eq!(cmd.argv, vec!["1970-01-01T00:00:00Z".to_owned()]);
 }
 
-// ---------- $parent ----------
+// ---------- ${specter.parent} ----------
 //
 // Documented edge cases (see Placeholder::Parent rustdoc):
-//   PerFile  | /anchor  | foo.rs       | $parent = /anchor
-//   PerFile  | /        | foo.rs       | $parent = /        (NOT empty)
-//   Subtree  | /anchor  | n/a          | $parent = /
-//   Subtree  | /        | n/a          | $parent = ""       (only empty case)
+//   PerFile  | /anchor  | foo.rs       | ${specter.parent} = /anchor
+//   PerFile  | /        | foo.rs       | ${specter.parent} = /        (NOT empty)
+//   Subtree  | /anchor  | n/a          | ${specter.parent} = /
+//   Subtree  | /        | n/a          | ${specter.parent} = ""       (only empty case)
 
 #[test]
 fn resolve_parent_is_target_dir_for_perfile() {
-    // PerFile target = anchor.join(segment); $parent = the directory
+    // PerFile target = anchor.join(segment); ${specter.parent} = the directory
     // immediately containing the file that triggered the fire.
     let e = make_effect(
         "x",
@@ -383,7 +383,7 @@ fn resolve_parent_is_target_dir_for_perfile() {
 
 #[test]
 fn resolve_parent_is_anchor_parent_for_subtree() {
-    // Subtree target_path == anchor_path; $parent = parent of the anchor
+    // Subtree target_path == anchor_path; ${specter.parent} = parent of the anchor
     // (one level above the watch root).
     let e = make_effect(
         "x",
@@ -403,7 +403,7 @@ fn resolve_parent_is_anchor_parent_for_subtree() {
 fn resolve_parent_for_perfile_at_root_is_root() {
     // Filesystem-root anchor with PerFile scope: target_path = "/foo.rs",
     // parent = "/" (NOT empty). Guards against the easy misreading that
-    // any anchor at root yields empty $parent.
+    // any anchor at root yields empty ${specter.parent}.
     let e = make_effect(
         "x",
         EffectScope::PerStableFile,
@@ -420,7 +420,7 @@ fn resolve_parent_for_perfile_at_root_is_root() {
 
 #[test]
 fn resolve_parent_empty_only_for_subtree_at_root() {
-    // The only configuration that yields an empty $parent: Subtree scope
+    // The only configuration that yields an empty ${specter.parent}: Subtree scope
     // anchored at filesystem root (target_path = "/", which has no parent).
     let e = make_effect(
         "x",
@@ -441,7 +441,7 @@ fn resolve_parent_empty_only_for_subtree_at_root() {
 
 #[test]
 fn env_parent_empty_only_for_subtree_at_root() {
-    // SPECTER_PARENT mirrors $parent: empty string only at fs root for
+    // SPECTER_PARENT mirrors ${specter.parent}: empty string only at fs root for
     // Subtree scope; "/" everywhere else at the root level.
     let e = make_effect(
         "x",
@@ -487,7 +487,7 @@ fn env_parent_for_perfile_is_target_directory() {
 
 #[test]
 fn resolve_substitutes_watch_name() {
-    // `$watch` substitutes `effect.sub_name` — mirrors `$SPECTER_WATCH`
+    // `${specter.watch}` substitutes `effect.sub_name` — mirrors `$SPECTER_WATCH`
     // env value but in argv form.
     let e = make_effect(
         "build",

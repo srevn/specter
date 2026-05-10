@@ -2088,9 +2088,9 @@ impl Engine {
                         anchor_path: Arc::clone(&anchor_path),
                         anchor_kind,
                         // Subtree: no per-entry segment. The resolver
-                        // derives `$path` (and `SPECTER_PATH`) from
-                        // `anchor_path` directly when `target_relative`
-                        // is empty.
+                        // derives `${specter.path}` (and `SPECTER_PATH`)
+                        // from `anchor_path` directly when
+                        // `target_relative` is empty.
                         target_relative: CompactString::new(""),
                         exclude: Arc::clone(&exclude_strings),
                     });
@@ -2238,11 +2238,11 @@ impl Engine {
                 plan: Arc::clone(&sub.plan),
                 anchor_path: Arc::clone(anchor_path),
                 anchor_kind,
-                // PerFile: the file segment. The resolver derives `$path`
-                // (and `SPECTER_PATH`) by joining `anchor_path` with this
-                // at spawn time — deferring the `PathBuf` allocation past
-                // the actuator's Latest-coalesce so dropped Effects don't
-                // pay for it.
+                // PerFile: the file segment. The resolver derives
+                // `${specter.path}` (and `SPECTER_PATH`) by joining
+                // `anchor_path` with this at spawn time — deferring the
+                // `PathBuf` allocation past the actuator's Latest-coalesce
+                // so dropped Effects don't pay for it.
                 target_relative: entry.segment.clone(),
                 exclude: Arc::clone(exclude_strings),
             });

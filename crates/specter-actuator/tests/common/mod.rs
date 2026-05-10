@@ -144,6 +144,56 @@ fn literal_plan(argv: Vec<String>) -> Arc<ActionPlan> {
     Arc::new(ActionPlan::new([Action::Exec(exec)]))
 }
 
+/// Wrap a sequence of literal argvs as a multi-step [`ActionPlan`] —
+/// one `Action::Exec` per inner vec. The actuator walks them
+/// sequentially with stop-on-failure semantics.
+pub fn literal_multi_plan(steps: Vec<Vec<String>>) -> Arc<ActionPlan> {
+    let actions: Vec<Action> = steps
+        .into_iter()
+        .map(|argv| {
+            Action::Exec(ExecAction::new(
+                argv.into_iter()
+                    .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
+            ))
+        })
+        .collect();
+    Arc::new(ActionPlan::new(actions))
+}
+
+/// PerFile Effect with an arbitrary (possibly multi-step) plan. Mirrors
+/// [`perfile_effect`] but lets the caller supply a pre-built
+/// `Arc<ActionPlan>` directly — needed for tests that need to assert
+/// plan-snapshot invariants by re-using the same `Arc` across multiple
+/// fixtures.
+pub fn perfile_effect_with_plan(
+    sub_seed: u64,
+    profile_seed: u64,
+    res_seed: u64,
+    corr: u64,
+    plan: Arc<ActionPlan>,
+    cwd: PathBuf,
+) -> Effect {
+    let resource = unique_resource_id(res_seed);
+    Effect {
+        key: DedupKey::PerFile {
+            sub: unique_sub_id(sub_seed),
+            profile: unique_profile_id(profile_seed),
+            resource,
+        },
+        target: resource,
+        forced: false,
+        correlation: CorrelationId(corr),
+        diff: None,
+        capture_output: false,
+        sub_name: CompactString::new(""),
+        plan,
+        anchor_path: Arc::from(cwd),
+        anchor_kind: ResourceKind::Dir,
+        target_relative: CompactString::new(""),
+        exclude: Arc::from(Vec::<CompactString>::new()),
+    }
+}
+
 /// Build a PerFile Effect with a literal `argv` and the given correlation.
 ///
 /// `profile_seed` mints the `DedupKey::PerFile.profile` field via

@@ -95,7 +95,8 @@ pub trait ChildWaiter: Send {
     fn wait(self: Box<Self>) -> io::Result<EffectOutcome>;
 }
 
-/// Held by the controller; consulted on shutdown.
+/// Held by the controller; consulted on shutdown and on the
+/// wait-thread-spawn-failure recovery path.
 ///
 /// `Send + Sync` lets the controller move signaler boxes between
 /// thread-local maps without ceremony. Implementations short-circuit
@@ -119,4 +120,24 @@ pub trait ChildSignaler: Send + Sync {
     /// Send SIGKILL. Same ESRCH-collapse + short-circuit as
     /// [`Self::signal_term`].
     fn signal_kill(&self) -> io::Result<()>;
+    /// Synchronously reap the child via blocking `waitpid(2)`. Used as
+    /// the recovery path when the paired [`ChildWaiter`] cannot be
+    /// driven (i.e. the wait thread spawn failed after fork+exec, so
+    /// the closure that owned the waiter was dropped without ever
+    /// calling `wait`). Without this, an orphan child that has been
+    /// SIGKILLed would linger as a zombie until process exit.
+    ///
+    /// **Caller invariant**: no other party is `waitpid`-ing on this
+    /// child. The production caller is the wait-thread-spawn-failure
+    /// branch where the wait thread does not exist, so this trivially
+    /// holds. Returns `Ok(())` once the kernel has reaped the child;
+    /// `ECHILD` (child already gone, e.g. external reap or never
+    /// existed) is collapsed to `Ok(())` so the recovery path is
+    /// idempotent. `EINTR` is retried internally.
+    ///
+    /// Production impls set the shared `dead` flag on success so any
+    /// later `signal_term` / `signal_kill` against the (reusable) pid
+    /// short-circuits at the protocol layer — same guarantee the
+    /// paired waiter provides on the normal path.
+    fn reap_blocking(&self) -> io::Result<()>;
 }

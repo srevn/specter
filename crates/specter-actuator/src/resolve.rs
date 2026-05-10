@@ -83,14 +83,14 @@
 //! surprises and lets shell scripts iterate uniformly with `while IFS=
 //! read -r ...`. The mapping is:
 //!
-//! | Placeholder       | Env var                |
-//! |-------------------|------------------------|
-//! | `$created`        | `SPECTER_CREATED`      |
-//! | `$deleted`        | `SPECTER_DELETED`      |
-//! | `$modified`       | `SPECTER_MODIFIED`     |
-//! | `$renamed_from`   | `SPECTER_RENAMED_FROM` |
-//! | `$renamed_to`     | `SPECTER_RENAMED_TO`   |
-//! | `$excluded`       | `SPECTER_EXCLUDED`     |
+//! | Placeholder              | Env var                |
+//! |--------------------------|------------------------|
+//! | `${specter.created}`     | `SPECTER_CREATED`      |
+//! | `${specter.deleted}`     | `SPECTER_DELETED`      |
+//! | `${specter.modified}`    | `SPECTER_MODIFIED`     |
+//! | `${specter.renamed_from}`| `SPECTER_RENAMED_FROM` |
+//! | `${specter.renamed_to}`  | `SPECTER_RENAMED_TO`   |
+//! | `${specter.excluded}`    | `SPECTER_EXCLUDED`     |
 //!
 //! The env-side surface carries segments only — inodes and rename pairing
 //! live in the line-oriented `SPECTER_DIFF_PATH` tmp file.
@@ -286,11 +286,11 @@ fn has_multivalue(arg: &ArgTemplate) -> bool {
 }
 
 /// `target_path.parent()` rendered as a UTF-8-lossy [`String`], or empty
-/// when `parent()` returns `None`. Shared between `$parent` argv
-/// substitution and `SPECTER_PARENT` env emission so both surfaces apply
-/// the same path semantics. The empty-string case is reachable only for
-/// Subtree scope at the filesystem root (`target_path == "/"`); see the
-/// table on [`Placeholder`].
+/// when `parent()` returns `None`. Shared between `${specter.parent}`
+/// argv substitution and `SPECTER_PARENT` env emission so both surfaces
+/// apply the same path semantics. The empty-string case is reachable
+/// only for Subtree scope at the filesystem root (`target_path == "/"`);
+/// see the table on [`Placeholder`].
 fn parent_string(target_path: &Path) -> String {
     target_path
         .parent()

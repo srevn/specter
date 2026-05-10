@@ -322,11 +322,12 @@ impl ActionPlan {
     }
 
     /// `true` iff any leaf in the plan references a diff-derived
-    /// placeholder (`$created`/`$deleted`/`$modified`/`$renamed_from`/
-    /// `$renamed_to`). Computed once at `Sub::new`; never re-evaluated.
-    /// `$excluded` is multi-value but reads from `Profile.exclude_strings`,
-    /// NOT from a `Diff`, so it does not flip this predicate — see
-    /// [`Placeholder::is_diff_derived`].
+    /// placeholder ([`Placeholder::Created`], [`Placeholder::Deleted`],
+    /// [`Placeholder::Modified`], [`Placeholder::RenamedFrom`],
+    /// [`Placeholder::RenamedTo`]). Computed once at `Sub::new`; never
+    /// re-evaluated. [`Placeholder::Excluded`] is multi-value but reads
+    /// from `Profile.exclude_strings`, NOT from a `Diff`, so it does
+    /// not flip this predicate — see [`Placeholder::is_diff_derived`].
     #[must_use]
     pub fn references_diff_derived(&self) -> bool {
         self.steps.iter().any(Action::references_diff_derived)
@@ -452,15 +453,15 @@ impl ArgPart {
 ///   placeholders sourced from the burst's `Diff`: the original five.
 ///   `Excluded` is multi-value but reads from `Profile.exclude_strings`,
 ///   not from a `Diff` — keeping it OUT of `is_diff_derived` is what
-///   prevents `Sub.needs_diff` from falsely ratcheting on `$excluded`.
+///   prevents `Sub.needs_diff` from falsely ratcheting on `Excluded`.
 ///
 /// Single-value variants (`Path`, `Relative`, `Anchor`, `Watch`,
 /// `Parent`, `Time`) render to one argv slot; multi-value variants
 /// drop the surrounding argv slot when their source list is empty.
 ///
-/// `$parent` semantics for the corner cases:
+/// `Parent` semantics for the corner cases:
 ///
-/// | Scope    | Anchor    | Segment    | `target_path`     | `$parent`         |
+/// | Scope    | Anchor    | Segment    | `target_path`     | `Parent`          |
 /// |----------|-----------|------------|-------------------|-------------------|
 /// | PerFile  | `/anchor` | `foo.rs`   | `/anchor/foo.rs`  | `/anchor`         |
 /// | PerFile  | `/anchor` | `src/lib`  | `/anchor/src/lib` | `/anchor/src`     |
@@ -510,7 +511,7 @@ impl Placeholder {
     /// `Diff` (the original five). `Excluded` is multi-value but reads
     /// from `Profile.exclude_strings`, NOT from a `Diff` — it is
     /// excluded from this predicate so the `Sub.needs_diff` derivation
-    /// doesn't falsely ratchet on `$excluded`.
+    /// doesn't falsely ratchet on the `Excluded` variant.
     ///
     /// Invariant: `is_diff_derived ⇒ is_multivalue`. The converse does
     /// not hold (`Excluded` breaks it).
@@ -710,8 +711,9 @@ mod tests {
         // The full non-diff-derived set: every single-value placeholder
         // PLUS `Excluded` (multi-value but not diff-derived). Including
         // `Excluded` here is the load-bearing assertion of the
-        // `is_multivalue` / `is_diff_derived` split — using `$excluded`
-        // in a template must NOT ratchet `Sub.needs_diff` true.
+        // `is_multivalue` / `is_diff_derived` split — using the
+        // `Excluded` variant in a template must NOT ratchet
+        // `Sub.needs_diff` true.
         for p in [
             Placeholder::Path,
             Placeholder::Relative,
@@ -992,7 +994,7 @@ mod tests {
         // Diff-derived: only the five diff entries. Excluded is
         // multi-value but reads from Profile.exclude_strings — keeping
         // it OUT of the diff-derived predicate prevents the Sub from
-        // falsely ratcheting `needs_diff` on a `$excluded` template.
+        // falsely ratcheting `needs_diff` on an `Excluded` template.
         for p in [
             Placeholder::Created,
             Placeholder::Deleted,
