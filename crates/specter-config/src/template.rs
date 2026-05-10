@@ -3,15 +3,53 @@ use smallvec::smallvec;
 use specter_core::{ArgPart, ArgTemplate, Placeholder};
 use std::fmt;
 
+/// Namespace prefix that opens a Specter placeholder. Anything not
+/// matching this exact byte sequence (including the trailing dot) falls
+/// through as a literal `$` — bare `$NAME`, `$home`, `${VAR}`, `${specter}`
+/// (no dot), `${SPECTER.path}` (uppercase), etc. are all literals.
+const NAMESPACE: &str = "${specter.";
+
+/// Failures the lexer can surface from inside a `${specter.…}` placeholder.
+///
+/// Outside the namespace, the lexer never errors — every other
+/// `$`-bearing byte sequence passes through verbatim, freeing operators
+/// to write arbitrary shell / awk / perl `$` syntax in argv slots
+/// without a Specter typo tax.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TemplateError {
+    /// `${specter.<name>}` where `<name>` is not in the placeholder
+    /// catalog. Catches mistypes (`${specter.ptah}`) and members of the
+    /// catalog that aren't yet implemented.
     UnknownPlaceholder { name: String },
+    /// `${specter.<name>` reached end-of-string without a closing `}`.
+    /// `partial` is the substring from the opening `${` to end-of-input.
+    UnterminatedPlaceholder { partial: String },
+    /// `${specter.}` — the namespace was opened but no name follows.
+    EmptyPlaceholderName,
+    /// `${specter.<name>}` where `<name>` contains a character outside
+    /// `[a-z0-9_]`. The first offending character is reported.
+    InvalidPlaceholderChar { name: String, ch: char },
 }
 
 impl fmt::Display for TemplateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownPlaceholder { name } => write!(f, "unknown placeholder `${name}`"),
+            Self::UnknownPlaceholder { name } => {
+                write!(f, "unknown placeholder `${{specter.{name}}}`")
+            }
+            Self::UnterminatedPlaceholder { partial } => {
+                write!(f, "unterminated placeholder `{partial}` (missing `}}`)")
+            }
+            Self::EmptyPlaceholderName => {
+                f.write_str("empty placeholder name `${specter.}` (expected `${specter.<name>}`)")
+            }
+            Self::InvalidPlaceholderChar { name, ch } => {
+                write!(
+                    f,
+                    "invalid character `{ch}` in placeholder name `{name}` \
+                     (expected `[a-z0-9_]`)",
+                )
+            }
         }
     }
 }
@@ -20,87 +58,143 @@ impl std::error::Error for TemplateError {}
 
 /// Parse one TOML argv string into an [`ArgTemplate`].
 ///
-/// Lexer rules:
-/// - `$<name>` where `<name>` exactly matches a catalog entry
-///   (lowercase: `path`, `relative`, `anchor`, `watch`, `parent`,
-///   `time`, `created`, `deleted`, `modified`, `renamed_from`,
-///   `renamed_to`, `excluded`) → [`Placeholder`].
-/// - `$<name>` where `<name>` contains any ASCII uppercase letter → literal
-///   `$<name>`. Preserves shell-expansion of env vars
-///   (`$SPECTER_PATH`, `$SPECTER_FORCED`, etc.) and conventional uppercase
-///   shell vars (`$HOME`, `$PATH`, `$USER`).
-/// - `$<name>` where `<name>` is all-lowercase (with optional digits /
-///   underscores) but not in the catalog → [`TemplateError::UnknownPlaceholder`].
-///   Catches typos of catalog names (`$pat`, `$relativ`, etc.) since the
-///   catalog is lowercase by convention.
-/// - `$` followed by a digit, punctuation, end-of-string, or any non-name-
-///   start character is a literal `$`.
-/// - Empty input → `[Literal("")]` (rejected by the validator, but the
-///   lexer stays total).
+/// Recognises exactly two `$`-prefix patterns; everything else passes
+/// through as a literal:
+///
+/// - `${specter.<name>}` — the Specter placeholder namespace. `<name>`
+///   must be a non-empty `[a-z0-9_]` sequence and must match a catalog
+///   entry (`path`, `relative`, `anchor`, `watch`, `parent`, `time`,
+///   `created`, `deleted`, `modified`, `renamed_from`, `renamed_to`,
+///   `excluded`); anything else inside the namespace returns an error.
+/// - `$$` — escapes a literal `$`. The only way to write a single `$`
+///   that the spawned shell will not interpret as the start of an env
+///   var name; doubles up shell `$$` (PID expansion) as `$$$$`.
+///
+/// Every other `$`-bearing sequence is a literal: `$HOME`, `$path`,
+/// `$5`, `${VAR}`, `${specter}`, `${SPECTER.path}` all pass through
+/// verbatim. The strict typo guard fires only inside the namespace; the
+/// shell can expand the rest as it likes.
 pub fn parse_arg(s: &str) -> Result<ArgTemplate, TemplateError> {
     let mut parts: smallvec::SmallVec<[ArgPart; 2]> = smallvec![];
     let mut buf = CompactString::new("");
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c != '$' {
-            buf.push(c);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Fast-forward to the next `$`. Bytes are pure ASCII for `$` and
+        // `{`, so byte-level scanning is correct without char boundary
+        // checks; non-ASCII content lives in `buf` as bytes which
+        // re-assemble into valid UTF-8 because we never split a code
+        // point.
+        if bytes[i] != b'$' {
+            // Push as a single char to preserve UTF-8 boundaries.
+            let ch_start = i;
+            let ch_end = next_char_boundary(s, i);
+            buf.push_str(&s[ch_start..ch_end]);
+            i = ch_end;
             continue;
         }
 
-        let starts_name = chars
-            .peek()
-            .is_some_and(|c| c.is_ascii_alphabetic() || *c == '_');
-        if !starts_name {
+        // `$$` — escape to literal `$`.
+        if matches!(bytes.get(i + 1), Some(&b'$')) {
             buf.push('$');
+            i += 2;
             continue;
         }
 
-        let mut name = String::new();
-        while let Some(c) = chars.peek() {
-            if c.is_ascii_alphanumeric() || *c == '_' {
-                name.push(*c);
-                chars.next();
-            } else {
-                break;
-            }
+        // `${specter.` — open namespace.
+        if s[i..].starts_with(NAMESPACE) {
+            let name_start = i + NAMESPACE.len();
+            let Some(rel_end) = s[name_start..].find('}') else {
+                return Err(TemplateError::UnterminatedPlaceholder {
+                    partial: s[i..].to_owned(),
+                });
+            };
+            let name = &s[name_start..name_start + rel_end];
+            let placeholder = parse_namespace_name(name)?;
+            flush_literal(&mut parts, &mut buf);
+            parts.push(ArgPart::Placeholder(placeholder));
+            i = name_start + rel_end + 1;
+            continue;
         }
 
-        let placeholder = match name.as_str() {
-            "path" => Placeholder::Path,
-            "relative" => Placeholder::Relative,
-            "anchor" => Placeholder::Anchor,
-            "watch" => Placeholder::Watch,
-            "parent" => Placeholder::Parent,
-            "time" => Placeholder::Time,
-            "created" => Placeholder::Created,
-            "deleted" => Placeholder::Deleted,
-            "modified" => Placeholder::Modified,
-            "renamed_from" => Placeholder::RenamedFrom,
-            "renamed_to" => Placeholder::RenamedTo,
-            "excluded" => Placeholder::Excluded,
-            // Names with any uppercase ASCII letter pass through as literal
-            // — they are env vars (`SPECTER_PATH`) or conventional shell
-            // vars (`HOME`, `PATH`). Typo detection still applies to
-            // all-lowercase non-catalog names below.
-            other if other.bytes().any(|b| b.is_ascii_uppercase()) => {
-                buf.push('$');
-                buf.push_str(other);
-                continue;
-            }
-            _ => return Err(TemplateError::UnknownPlaceholder { name }),
-        };
-
-        if !buf.is_empty() {
-            parts.push(ArgPart::Literal(std::mem::take(&mut buf)));
-        }
-        parts.push(ArgPart::Placeholder(placeholder));
+        // Lone `$` — literal pass-through.
+        buf.push('$');
+        i += 1;
     }
 
     if !buf.is_empty() || parts.is_empty() {
         parts.push(ArgPart::Literal(buf));
     }
     Ok(ArgTemplate { parts })
+}
+
+/// Validate `name` against the namespace grammar and resolve it to a
+/// catalog [`Placeholder`].
+///
+/// `[a-z0-9_]+` and a catalog entry. Any deviation surfaces a typed
+/// error so the validator can render a useful operator-facing message.
+fn parse_namespace_name(name: &str) -> Result<Placeholder, TemplateError> {
+    if name.is_empty() {
+        return Err(TemplateError::EmptyPlaceholderName);
+    }
+    for ch in name.chars() {
+        let ok = ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_';
+        if !ok {
+            return Err(TemplateError::InvalidPlaceholderChar {
+                name: name.to_owned(),
+                ch,
+            });
+        }
+    }
+    catalog_lookup(name).ok_or_else(|| TemplateError::UnknownPlaceholder {
+        name: name.to_owned(),
+    })
+}
+
+/// Resolve a syntactically valid lowercase name to a [`Placeholder`].
+/// `None` means the name is well-formed but not in the catalog —
+/// surfaced as [`TemplateError::UnknownPlaceholder`] by the caller.
+const fn catalog_lookup(name: &str) -> Option<Placeholder> {
+    // `match` over `&str` lets the catalog stay one source of truth; the
+    // compiler folds it to a hash-free dispatch.
+    Some(match name.as_bytes() {
+        b"path" => Placeholder::Path,
+        b"relative" => Placeholder::Relative,
+        b"anchor" => Placeholder::Anchor,
+        b"watch" => Placeholder::Watch,
+        b"parent" => Placeholder::Parent,
+        b"time" => Placeholder::Time,
+        b"created" => Placeholder::Created,
+        b"deleted" => Placeholder::Deleted,
+        b"modified" => Placeholder::Modified,
+        b"renamed_from" => Placeholder::RenamedFrom,
+        b"renamed_to" => Placeholder::RenamedTo,
+        b"excluded" => Placeholder::Excluded,
+        _ => return None,
+    })
+}
+
+/// Flush the in-flight literal buffer as one [`ArgPart::Literal`] when
+/// non-empty. Adjacent literals always coalesce because every literal
+/// byte goes into the same `buf` and we only flush at placeholder
+/// boundaries / end-of-input.
+fn flush_literal(parts: &mut smallvec::SmallVec<[ArgPart; 2]>, buf: &mut CompactString) {
+    if !buf.is_empty() {
+        parts.push(ArgPart::Literal(std::mem::take(buf)));
+    }
+}
+
+/// Return the byte index just past the UTF-8 character starting at `i`.
+/// `s.is_char_boundary` is the canonical Rust API; we trust the input
+/// `s` is valid UTF-8 (it came from a `&str`) so a forward scan over
+/// continuation bytes is sufficient.
+fn next_char_boundary(s: &str, i: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut j = i + 1;
+    while j < bytes.len() && (bytes[j] & 0b1100_0000) == 0b1000_0000 {
+        j += 1;
+    }
+    j
 }
 
 #[cfg(test)]
@@ -121,6 +215,41 @@ mod tests {
         t.parts.into_iter().collect()
     }
 
+    // === Catalog membership ===
+
+    #[test]
+    fn each_catalog_placeholder_alone() {
+        for (s, p) in [
+            ("${specter.path}", Placeholder::Path),
+            ("${specter.relative}", Placeholder::Relative),
+            ("${specter.anchor}", Placeholder::Anchor),
+            ("${specter.watch}", Placeholder::Watch),
+            ("${specter.parent}", Placeholder::Parent),
+            ("${specter.time}", Placeholder::Time),
+            ("${specter.created}", Placeholder::Created),
+            ("${specter.deleted}", Placeholder::Deleted),
+            ("${specter.modified}", Placeholder::Modified),
+            ("${specter.renamed_from}", Placeholder::RenamedFrom),
+            ("${specter.renamed_to}", Placeholder::RenamedTo),
+            ("${specter.excluded}", Placeholder::Excluded),
+        ] {
+            assert_eq!(parts(parse_arg(s).unwrap()), vec![ph(p)], "input {s}");
+        }
+    }
+
+    #[test]
+    fn unknown_placeholder_inside_namespace() {
+        let err = parse_arg("${specter.unknown}").unwrap_err();
+        assert_eq!(
+            err,
+            TemplateError::UnknownPlaceholder {
+                name: "unknown".to_owned()
+            }
+        );
+    }
+
+    // === Literal pass-through (the strict break) ===
+
     #[test]
     fn pure_literal_input() {
         assert_eq!(parts(parse_arg("hello").unwrap()), vec![lit("hello")]);
@@ -132,29 +261,94 @@ mod tests {
     }
 
     #[test]
-    fn each_catalog_placeholder_alone() {
-        for (s, p) in [
-            ("$path", Placeholder::Path),
-            ("$relative", Placeholder::Relative),
-            ("$anchor", Placeholder::Anchor),
-            ("$watch", Placeholder::Watch),
-            ("$parent", Placeholder::Parent),
-            ("$time", Placeholder::Time),
-            ("$created", Placeholder::Created),
-            ("$deleted", Placeholder::Deleted),
-            ("$modified", Placeholder::Modified),
-            ("$renamed_from", Placeholder::RenamedFrom),
-            ("$renamed_to", Placeholder::RenamedTo),
-            ("$excluded", Placeholder::Excluded),
-        ] {
-            assert_eq!(parts(parse_arg(s).unwrap()), vec![ph(p)], "input {s}");
-        }
+    fn bare_dollar_name_is_literal() {
+        // Under the new grammar, `$<name>` is shell territory regardless
+        // of catalog membership. The lexer never touches it.
+        assert_eq!(parts(parse_arg("$path").unwrap()), vec![lit("$path")]);
+        assert_eq!(parts(parse_arg("$watch").unwrap()), vec![lit("$watch")]);
+        assert_eq!(parts(parse_arg("$created").unwrap()), vec![lit("$created")]);
+        assert_eq!(parts(parse_arg("$HOME").unwrap()), vec![lit("$HOME")]);
+        assert_eq!(parts(parse_arg("$Path").unwrap()), vec![lit("$Path")]);
+        assert_eq!(parts(parse_arg("$_x").unwrap()), vec![lit("$_x")]);
+        assert_eq!(parts(parse_arg("$5").unwrap()), vec![lit("$5")]);
     }
+
+    #[test]
+    fn brace_var_outside_namespace_is_literal() {
+        // `${VAR}`, `${HOME}` — shell-style braced expansion. The lexer
+        // doesn't open a namespace here (the prefix is `${specter.`,
+        // requiring the lowercase `specter.` exactly), so the `$`
+        // becomes a single literal char and `{HOME}` follows as plain
+        // bytes.
+        assert_eq!(parts(parse_arg("${HOME}").unwrap()), vec![lit("${HOME}")]);
+        assert_eq!(parts(parse_arg("${VAR}").unwrap()), vec![lit("${VAR}")]);
+    }
+
+    #[test]
+    fn brace_namespace_no_dot_is_literal() {
+        // `${specter}` (no dot) is NOT the namespace opener. The dot is
+        // load-bearing.
+        assert_eq!(
+            parts(parse_arg("${specter}").unwrap()),
+            vec![lit("${specter}")]
+        );
+    }
+
+    #[test]
+    fn uppercase_namespace_is_literal() {
+        // `${SPECTER.path}` is uppercase; the namespace prefix is
+        // lowercase only. Falls through as literal.
+        assert_eq!(
+            parts(parse_arg("${SPECTER.path}").unwrap()),
+            vec![lit("${SPECTER.path}")]
+        );
+    }
+
+    #[test]
+    fn space_after_dollar_is_literal() {
+        // `$ {specter.path}` — must be `${` adjacent. The space breaks
+        // the prefix; lone `$` becomes literal.
+        assert_eq!(
+            parts(parse_arg("$ {specter.path}").unwrap()),
+            vec![lit("$ {specter.path}")]
+        );
+    }
+
+    // === Escape rules ===
+
+    #[test]
+    fn double_dollar_collapses_to_literal() {
+        assert_eq!(parts(parse_arg("$$").unwrap()), vec![lit("$")]);
+        assert_eq!(parts(parse_arg("$$$$").unwrap()), vec![lit("$$")]);
+    }
+
+    #[test]
+    fn double_dollar_then_namespace_escapes_namespace() {
+        // `$${specter.path}` — `$$` consumes the leading `$`, leaving a
+        // literal `$` followed by `{specter.path}` plain bytes.
+        assert_eq!(
+            parts(parse_arg("$${specter.path}").unwrap()),
+            vec![lit("${specter.path}")]
+        );
+    }
+
+    #[test]
+    fn triple_dollar_then_namespace() {
+        // `$$$` — `$$` collapses to literal `$`, then a lone `$`
+        // followed by `{specter.path}` opens the namespace and
+        // resolves to a placeholder.
+        assert_eq!(
+            parts(parse_arg("$$${specter.path}").unwrap()),
+            vec![lit("$"), ph(Placeholder::Path)]
+        );
+    }
+
+    // === Composition with literals and adjacent placeholders ===
 
     #[test]
     fn literal_prefix_then_placeholder() {
         assert_eq!(
-            parts(parse_arg("--input=$path").unwrap()),
+            parts(parse_arg("--input=${specter.path}").unwrap()),
             vec![lit("--input="), ph(Placeholder::Path)]
         );
     }
@@ -162,43 +356,35 @@ mod tests {
     #[test]
     fn placeholder_then_literal_suffix() {
         assert_eq!(
-            parts(parse_arg("$path/foo").unwrap()),
+            parts(parse_arg("${specter.path}/foo").unwrap()),
             vec![ph(Placeholder::Path), lit("/foo")]
         );
     }
 
     #[test]
-    fn adjacent_single_value_placeholders() {
+    fn literal_around_placeholder_yields_three_parts() {
+        // The adjacent-literal coalescing invariant: one literal before,
+        // one placeholder, one literal after — exactly three parts.
         assert_eq!(
-            parts(parse_arg("$path$relative").unwrap()),
+            parts(parse_arg("abc${specter.path}xyz").unwrap()),
+            vec![lit("abc"), ph(Placeholder::Path), lit("xyz")]
+        );
+    }
+
+    #[test]
+    fn adjacent_placeholders() {
+        assert_eq!(
+            parts(parse_arg("${specter.path}${specter.relative}").unwrap()),
             vec![ph(Placeholder::Path), ph(Placeholder::Relative)]
         );
     }
 
     #[test]
-    fn adjacent_multi_value_placeholders() {
+    fn unicode_literal_preserved() {
         assert_eq!(
-            parts(parse_arg("$created$deleted").unwrap()),
-            vec![ph(Placeholder::Created), ph(Placeholder::Deleted)]
+            parts(parse_arg("build-🚀-${specter.path}").unwrap()),
+            vec![lit("build-🚀-"), ph(Placeholder::Path)]
         );
-    }
-
-    #[test]
-    fn dollar_dollar_then_placeholder() {
-        assert_eq!(
-            parts(parse_arg("$$path").unwrap()),
-            vec![lit("$"), ph(Placeholder::Path)]
-        );
-    }
-
-    #[test]
-    fn double_dollar_alone_is_two_literal_dollars() {
-        assert_eq!(parts(parse_arg("$$").unwrap()), vec![lit("$$")]);
-    }
-
-    #[test]
-    fn dollar_followed_by_digit_is_literal() {
-        assert_eq!(parts(parse_arg("$5").unwrap()), vec![lit("$5")]);
     }
 
     #[test]
@@ -206,127 +392,108 @@ mod tests {
         assert_eq!(parts(parse_arg("$").unwrap()), vec![lit("$")]);
     }
 
-    #[test]
-    fn dollar_in_middle_followed_by_digit_is_literal() {
-        assert_eq!(parts(parse_arg("abc$5xy").unwrap()), vec![lit("abc$5xy")]);
-    }
+    // === Errors inside the namespace ===
 
     #[test]
-    fn capitalized_name_passes_through_as_literal_for_shell_expansion() {
-        // Env vars (uppercase) and conventional shell vars must reach the
-        // spawned shell unchanged. Names containing ANY uppercase letter
-        // bypass the catalog lookup; the catalog is lowercase-only.
-        assert_eq!(parts(parse_arg("$Path").unwrap()), vec![lit("$Path")]);
-        assert_eq!(
-            parts(parse_arg("$SPECTER_ANCHOR").unwrap()),
-            vec![lit("$SPECTER_ANCHOR")]
-        );
-        assert_eq!(parts(parse_arg("$HOME").unwrap()), vec![lit("$HOME")]);
-    }
-
-    #[test]
-    fn mixed_case_with_literal_neighbors() {
-        // Uppercase identifiers concatenate with surrounding literal context.
-        assert_eq!(
-            parts(parse_arg("export $HOME=$path").unwrap()),
-            vec![lit("export $HOME="), ph(Placeholder::Path)]
-        );
-    }
-
-    #[test]
-    fn unknown_placeholder_rejected() {
-        let err = parse_arg("$unknown").unwrap_err();
+    fn unterminated_placeholder() {
+        let err = parse_arg("${specter.path").unwrap_err();
         assert_eq!(
             err,
-            TemplateError::UnknownPlaceholder {
-                name: "unknown".to_owned()
+            TemplateError::UnterminatedPlaceholder {
+                partial: "${specter.path".to_owned(),
             }
         );
     }
 
     #[test]
-    fn name_starting_with_underscore_rejected_when_not_in_catalog() {
-        let err = parse_arg("$_path").unwrap_err();
+    fn empty_placeholder_name() {
+        let err = parse_arg("${specter.}").unwrap_err();
+        assert_eq!(err, TemplateError::EmptyPlaceholderName);
+    }
+
+    #[test]
+    fn invalid_placeholder_char_uppercase() {
+        let err = parse_arg("${specter.PATH}").unwrap_err();
         assert_eq!(
             err,
-            TemplateError::UnknownPlaceholder {
-                name: "_path".to_owned()
+            TemplateError::InvalidPlaceholderChar {
+                name: "PATH".to_owned(),
+                ch: 'P',
             }
         );
     }
 
     #[test]
-    fn literal_separates_placeholder_from_suffix() {
+    fn invalid_placeholder_char_dot() {
+        // Dots inside the name are reserved — no nested namespace
+        // (`${specter.renamed.from}` is not how `renamed_from` is
+        // spelled).
+        let err = parse_arg("${specter.renamed.from}").unwrap_err();
         assert_eq!(
-            parts(parse_arg("abc$path-suffix").unwrap()),
-            vec![lit("abc"), ph(Placeholder::Path), lit("-suffix")]
+            err,
+            TemplateError::InvalidPlaceholderChar {
+                name: "renamed.from".to_owned(),
+                ch: '.',
+            }
         );
     }
 
     #[test]
-    fn unicode_literal_preserved() {
+    fn invalid_placeholder_char_dollar() {
+        // Nested-dollar sentinel inside the name fails at the first `$`.
+        let err = parse_arg("${specter.${specter.foo}}").unwrap_err();
         assert_eq!(
-            parts(parse_arg("build-🚀-$path").unwrap()),
-            vec![lit("build-🚀-"), ph(Placeholder::Path)]
+            err,
+            TemplateError::InvalidPlaceholderChar {
+                name: "${specter.foo".to_owned(),
+                ch: '$',
+            }
         );
     }
 
+    // === Display rendering ===
+
     #[test]
-    fn template_error_display_renders_dollar_prefix() {
-        let err = TemplateError::UnknownPlaceholder {
-            name: "Foo".to_owned(),
-        };
-        assert_eq!(err.to_string(), "unknown placeholder `$Foo`");
+    fn template_error_display_renders_specter_namespace() {
+        assert_eq!(
+            TemplateError::UnknownPlaceholder {
+                name: "Foo".to_owned()
+            }
+            .to_string(),
+            "unknown placeholder `${specter.Foo}`"
+        );
+        assert_eq!(
+            TemplateError::EmptyPlaceholderName.to_string(),
+            "empty placeholder name `${specter.}` (expected `${specter.<name>}`)"
+        );
     }
 
-    const CATALOG: &[&str] = &[
-        "path",
-        "relative",
-        "anchor",
-        "watch",
-        "parent",
-        "time",
-        "created",
-        "deleted",
-        "modified",
-        "renamed_from",
-        "renamed_to",
-        "excluded",
-    ];
+    // === Property tests ===
 
     proptest! {
+        /// Total: any UTF-8 input parses without panic.
         #[test]
-        fn prop_literal_only_inputs_round_trip(s in "[a-zA-Z0-9_/\\-=. ]{0,32}") {
+        fn prop_parser_is_total(s in "[\\PC]{0,64}") {
+            let _ = parse_arg(&s);
+        }
+
+        /// Bare `$<name>` — regardless of casing, digits, underscores —
+        /// passes through verbatim. The lexer never opens a placeholder
+        /// without the `${specter.` prefix.
+        #[test]
+        fn prop_bare_dollar_name_literal(name in "[A-Za-z_][A-Za-z0-9_]{0,15}") {
+            let s = format!("${name}");
             let parsed = parse_arg(&s).unwrap();
             prop_assert_eq!(parts(parsed), vec![lit(&s)]);
         }
 
+        /// `${VAR}` braced shell-style expansion is literal regardless of
+        /// content — only `${specter.…}` opens the namespace.
         #[test]
-        fn prop_unknown_lowercase_placeholder_rejected(name in "[a-z_][a-z0-9_]{0,15}") {
-            // Lowercase-only names not in the catalog → typo error. The
-            // catalog is exclusively lowercase, so this gate catches `$pat`,
-            // `$paht`, `$rell`, etc.
-            if CATALOG.contains(&name.as_str()) {
-                return Ok(());
-            }
-            let s = format!("${name}");
-            let err = parse_arg(&s).unwrap_err();
-            prop_assert_eq!(err, TemplateError::UnknownPlaceholder { name });
-        }
-
-        #[test]
-        fn prop_uppercase_or_mixed_passes_through_as_literal(
-            name in "[A-Za-z_][A-Za-z0-9_]{0,15}"
-        ) {
-            // Names containing any uppercase letter pass through as literal
-            // `$<name>` so the spawned shell can expand them as env vars.
-            // Pure-lowercase names land in the lowercase prop above.
-            if !name.bytes().any(|b| b.is_ascii_uppercase()) {
-                return Ok(());
-            }
-            let s = format!("${name}");
-            let expected_lit = format!("${name}");
-            prop_assert_eq!(parts(parse_arg(&s).unwrap()), vec![lit(&expected_lit)]);
+        fn prop_brace_non_namespace_literal(name in "[A-Z_][A-Z0-9_]{0,15}") {
+            let s = format!("${{{name}}}");
+            let parsed = parse_arg(&s).unwrap();
+            prop_assert_eq!(parts(parsed), vec![lit(&s)]);
         }
     }
 }

@@ -41,7 +41,7 @@ use crate::op::ProbeCorrelation;
 use crate::pattern::PatternSpec;
 use crate::profile::DescentState;
 use crate::scan_config::ScanConfig;
-use crate::sub::{ClassSet, CommandTemplate, EffectScope};
+use crate::sub::{ActionPlan, ClassSet, EffectScope};
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,7 +63,7 @@ pub struct PromoterAttachRequest {
     pub config: ScanConfig,
     pub max_settle: Duration,
     pub settle: Duration,
-    pub command: CommandTemplate,
+    pub plan: ActionPlan,
     pub scope: EffectScope,
     pub events: ClassSet,
     pub log_output: bool,
@@ -83,7 +83,7 @@ pub struct Promoter {
     pub config: ScanConfig,
     pub max_settle: Duration,
     pub settle: Duration,
-    pub command: CommandTemplate,
+    pub plan: ActionPlan,
     pub scope: EffectScope,
     pub events: ClassSet,
     pub log_output: bool,
@@ -278,7 +278,9 @@ mod tests {
     use crate::pattern::PatternSpec;
     use crate::profile::DescentState;
     use crate::scan_config::ScanConfig;
-    use crate::sub::{ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, Placeholder};
+    use crate::sub::{
+        Action, ActionPlan, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Placeholder,
+    };
     use compact_str::CompactString;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
@@ -287,11 +289,11 @@ mod tests {
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
 
-    fn cmd() -> CommandTemplate {
-        CommandTemplate::new([ArgTemplate::new([
+    fn plan() -> ActionPlan {
+        ActionPlan::new([Action::Exec(ExecAction::new([ArgTemplate::new([
             ArgPart::literal("/bin/build"),
             ArgPart::Placeholder(Placeholder::Path),
-        ])])
+        ])]))])
     }
 
     fn build_promoter(id: PromoterId, name: &str, pattern: &str) -> Promoter {
@@ -302,7 +304,7 @@ mod tests {
             config: ScanConfig::builder().recursive(true).build(),
             max_settle: MAX_SETTLE,
             settle: SETTLE,
-            command: cmd(),
+            plan: plan(),
             scope: EffectScope::SubtreeRoot,
             events: ClassSet::DEFAULT_SUBTREE_ROOT,
             log_output: false,
@@ -383,7 +385,7 @@ mod tests {
             config: ScanConfig::builder().recursive(true).build(),
             max_settle: MAX_SETTLE,
             settle: SETTLE,
-            command: cmd(),
+            plan: plan(),
             scope: EffectScope::SubtreeRoot,
             events: ClassSet::DEFAULT_SUBTREE_ROOT,
             log_output: false,

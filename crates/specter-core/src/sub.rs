@@ -1,7 +1,13 @@
-//! Subscription, command templates, and `EffectScope`.
+//! Subscription, action plans, and `EffectScope`.
+//!
+//! A `Sub` is a *reaction declaration*: it names what to watch and what
+//! plan should run when the watched tree settles. The plan is a tree —
+//! [`ActionPlan`] holds an ordered list of [`Action`] nodes; v1 ships the
+//! `Action::Exec` leaf only. Future variants (`Parallel`, `Pipeline`,
+//! `Conditional`) land additively at the enum.
 //!
 //! `Sub.needs_diff` is derived at construction: true iff the `EffectScope`
-//! is `PerStableFile` *or* the command template references any diff-derived
+//! is `PerStableFile` *or* the plan references any diff-derived
 //! placeholder (`Created`/`Deleted`/`Modified`/`RenamedFrom`/`RenamedTo`).
 //!
 //! v1 surface is argv-only — no shell variant.
@@ -50,7 +56,7 @@ pub struct SubAttachRequest {
     pub config: ScanConfig,
     pub max_settle: Duration,
     pub settle: Duration,
-    pub command: CommandTemplate,
+    pub plan: ActionPlan,
     pub scope: EffectScope,
     /// Event-class mask the user opted into. The engine folds this into
     /// `config_hash` so two Subs differing only on classes fork separate
@@ -88,7 +94,7 @@ impl SubAttachRequest {
         config: ScanConfig,
         max_settle: Duration,
         settle: Duration,
-        command: CommandTemplate,
+        plan: ActionPlan,
         scope: EffectScope,
         events: ClassSet,
         log_output: bool,
@@ -100,7 +106,7 @@ impl SubAttachRequest {
             config,
             max_settle,
             settle,
-            command,
+            plan,
             scope,
             events,
             log_output,
@@ -123,7 +129,7 @@ impl SubAttachRequest {
         config: ScanConfig,
         max_settle: Duration,
         settle: Duration,
-        command: CommandTemplate,
+        plan: ActionPlan,
         scope: EffectScope,
         events: ClassSet,
         log_output: bool,
@@ -135,7 +141,7 @@ impl SubAttachRequest {
             config,
             max_settle,
             settle,
-            command,
+            plan,
             scope,
             events,
             log_output,
@@ -156,14 +162,14 @@ impl SubAttachRequest {
         config: ScanConfig,
         max_settle: Duration,
         settle: Duration,
-        command: CommandTemplate,
+        plan: ActionPlan,
         scope: EffectScope,
         events: ClassSet,
         log_output: bool,
         source_promoter: PromoterId,
     ) -> Self {
         let mut req = Self::for_path(
-            name, path, config, max_settle, settle, command, scope, events, log_output,
+            name, path, config, max_settle, settle, plan, scope, events, log_output,
         );
         req.source_promoter = Some(source_promoter);
         req
@@ -286,24 +292,99 @@ impl std::ops::BitAndAssign for ClassSet {
     }
 }
 
+/// User-declared reaction body: a tree-shaped plan the actuator walks
+/// to drive zero or more processes per emitted Effect.
+///
+/// v1 reserves the tree but ships only the [`Action::Exec`] leaf. The
+/// tree is the forward-compatibility hook; introducing `Parallel`,
+/// `Pipeline`, or `Conditional` is purely additive at the enum and
+/// serde-tag level.
+///
+/// `steps` runs sequentially with stop-on-failure semantics: the first
+/// non-`Ok` step terminates the plan; remaining steps don't run. The
+/// engine's `EffectComplete` accounting is per-plan, not per-step — a
+/// plan emits exactly one `EffectComplete` regardless of how many
+/// steps ran.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommandTemplate {
-    pub argv: Vec<ArgTemplate>,
+pub struct ActionPlan {
+    /// Sequential steps, frozen by construction. `Arc<[Action]>` so the
+    /// engine's hot Effect-emission path Arc-clones the steps slice
+    /// without deep-copying the action templates.
+    pub steps: Arc<[Action]>,
 }
 
-impl CommandTemplate {
+impl ActionPlan {
     #[must_use]
-    pub fn new(argv: impl IntoIterator<Item = ArgTemplate>) -> Self {
+    pub fn new(steps: impl IntoIterator<Item = Action>) -> Self {
         Self {
-            argv: argv.into_iter().collect(),
+            steps: steps.into_iter().collect(),
         }
     }
 
-    /// `true` iff any argv part references a diff-derived placeholder
-    /// (`$created`/`$deleted`/`$modified`/`$renamed`-from-or-to). Computed
-    /// once at `Sub::new`; never re-evaluated. `$excluded` is multi-value
-    /// but reads from `Profile.exclude_strings`, NOT from a `Diff`, so
-    /// it does not flip this predicate — see [`Placeholder::is_diff_derived`].
+    /// `true` iff any leaf in the plan references a diff-derived
+    /// placeholder (`$created`/`$deleted`/`$modified`/`$renamed_from`/
+    /// `$renamed_to`). Computed once at `Sub::new`; never re-evaluated.
+    /// `$excluded` is multi-value but reads from `Profile.exclude_strings`,
+    /// NOT from a `Diff`, so it does not flip this predicate — see
+    /// [`Placeholder::is_diff_derived`].
+    #[must_use]
+    pub fn references_diff_derived(&self) -> bool {
+        self.steps.iter().any(Action::references_diff_derived)
+    }
+}
+
+/// One node in an [`ActionPlan`]. v1 has only the `Exec` leaf; future
+/// variants (`Parallel`, `Pipeline`, `Conditional`) extend the tree
+/// without retrofitting existing leaves.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Action {
+    /// Spawn a single process with this argv template.
+    Exec(ExecAction),
+}
+
+impl Action {
+    /// Borrow the `ExecAction` payload of an [`Action::Exec`] node.
+    /// Future variants (`Parallel`, `Pipeline`, `Conditional`) return
+    /// `None`; the actuator dispatches on this distinction.
+    #[must_use]
+    pub const fn as_exec(&self) -> Option<&ExecAction> {
+        match self {
+            Self::Exec(e) => Some(e),
+        }
+    }
+
+    /// `true` iff this node's leaves reference any diff-derived
+    /// placeholder. Recurses through future tree variants.
+    #[must_use]
+    pub fn references_diff_derived(&self) -> bool {
+        match self {
+            Self::Exec(e) => e.references_diff_derived(),
+        }
+    }
+}
+
+/// Single argv-spawn leaf inside an [`ActionPlan`].
+///
+/// `argv` is frozen `Box<[ArgTemplate]>` — once a config is validated,
+/// the per-step argv shape is fixed and `Vec`'s capacity slot is dead
+/// weight; `Box` saves the two extra words per leaf and prevents
+/// accidental push paths.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecAction {
+    /// argv template for this exec step. Renders to one or more argv
+    /// slots at spawn time.
+    pub argv: Box<[ArgTemplate]>,
+}
+
+impl ExecAction {
+    #[must_use]
+    pub fn new(argv: impl IntoIterator<Item = ArgTemplate>) -> Self {
+        Self {
+            argv: argv.into_iter().collect::<Vec<_>>().into_boxed_slice(),
+        }
+    }
+
+    /// `true` iff any argv part references a diff-derived placeholder.
     #[must_use]
     pub fn references_diff_derived(&self) -> bool {
         self.argv
@@ -447,7 +528,7 @@ pub struct Sub {
     pub id: SubId,
     pub name: CompactString,
     pub profile: ProfileId,
-    pub command: Arc<CommandTemplate>,
+    pub plan: Arc<ActionPlan>,
     pub scope: EffectScope,
     pub settle: Duration,
     pub max_settle: Duration,
@@ -470,19 +551,20 @@ pub struct Sub {
 
 impl Sub {
     /// Construct a Sub. `needs_diff` is derived: true iff
-    /// `scope == PerStableFile` OR the template references any diff entry.
-    /// Pre-computed once; never re-evaluated.
+    /// `scope == PerStableFile` OR the plan references any diff-derived
+    /// placeholder. Pre-computed once; never re-evaluated.
     ///
-    /// The caller passes a plain [`CommandTemplate`]; the constructor wraps
-    /// it in an [`Arc`] so [`crate::Effect`] emission can hand the template
-    /// to the actuator by Arc clone rather than by deep-cloning the argv.
+    /// The caller passes a plain [`ActionPlan`]; the constructor wraps
+    /// it in an [`Arc`] so [`crate::Effect`] emission can hand the plan
+    /// to the actuator by Arc clone rather than by deep-cloning the
+    /// step tree.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: SubId,
         name: impl Into<CompactString>,
         profile: ProfileId,
-        command: CommandTemplate,
+        plan: ActionPlan,
         scope: EffectScope,
         settle: Duration,
         max_settle: Duration,
@@ -490,12 +572,12 @@ impl Sub {
         log_output: bool,
         source_promoter: Option<PromoterId>,
     ) -> Self {
-        let needs_diff = scope == EffectScope::PerStableFile || command.references_diff_derived();
+        let needs_diff = scope == EffectScope::PerStableFile || plan.references_diff_derived();
         Self {
             id,
             name: name.into(),
             profile,
-            command: Arc::new(command),
+            plan: Arc::new(plan),
             scope,
             settle,
             max_settle,
@@ -582,7 +664,8 @@ impl SubRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, Placeholder, Sub, SubRegistry,
+        Action, ActionPlan, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Placeholder,
+        Sub, SubRegistry,
     };
     use crate::ids::{ProfileId, SubId};
     use std::sync::Arc;
@@ -592,15 +675,17 @@ mod tests {
     const MAX_SETTLE: Duration = Duration::from_secs(6);
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-    fn anchor_only_template() -> CommandTemplate {
-        CommandTemplate::new([ArgTemplate::new([
+    fn anchor_only_plan() -> ActionPlan {
+        ActionPlan::new([Action::Exec(ExecAction::new([ArgTemplate::new([
             ArgPart::literal("/bin/build"),
             ArgPart::Placeholder(Placeholder::Path),
-        ])])
+        ])]))])
     }
 
-    fn template_with(p: Placeholder) -> CommandTemplate {
-        CommandTemplate::new([ArgTemplate::new([ArgPart::Placeholder(p)])])
+    fn plan_with(p: Placeholder) -> ActionPlan {
+        ActionPlan::new([Action::Exec(ExecAction::new([ArgTemplate::new([
+            ArgPart::Placeholder(p),
+        ])]))])
     }
 
     #[test]
@@ -613,15 +698,15 @@ mod tests {
             Placeholder::RenamedTo,
         ] {
             assert!(
-                template_with(p).references_diff_derived(),
+                plan_with(p).references_diff_derived(),
                 "references_diff_derived must be true for {p:?}"
             );
         }
     }
 
     #[test]
-    fn references_diff_derived_false_for_anchor_only_template() {
-        assert!(!anchor_only_template().references_diff_derived());
+    fn references_diff_derived_false_for_anchor_only_plan() {
+        assert!(!anchor_only_plan().references_diff_derived());
         // The full non-diff-derived set: every single-value placeholder
         // PLUS `Excluded` (multi-value but not diff-derived). Including
         // `Excluded` here is the load-bearing assertion of the
@@ -637,7 +722,7 @@ mod tests {
             Placeholder::Excluded,
         ] {
             assert!(
-                !template_with(p).references_diff_derived(),
+                !plan_with(p).references_diff_derived(),
                 "references_diff_derived must be false for non-diff-derived {p:?}"
             );
         }
@@ -649,7 +734,7 @@ mod tests {
             SubId::default(),
             "fmt",
             ProfileId::default(),
-            anchor_only_template(),
+            anchor_only_plan(),
             EffectScope::PerStableFile,
             SETTLE,
             MAX_SETTLE,
@@ -666,7 +751,7 @@ mod tests {
             SubId::default(),
             "report",
             ProfileId::default(),
-            template_with(Placeholder::Created),
+            plan_with(Placeholder::Created),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
@@ -683,7 +768,7 @@ mod tests {
             SubId::default(),
             "build",
             ProfileId::default(),
-            anchor_only_template(),
+            anchor_only_plan(),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
@@ -703,7 +788,7 @@ mod tests {
                 id,
                 "build",
                 pid,
-                anchor_only_template(),
+                anchor_only_plan(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -728,7 +813,7 @@ mod tests {
                 id,
                 "a",
                 pid,
-                anchor_only_template(),
+                anchor_only_plan(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -742,7 +827,7 @@ mod tests {
                 id,
                 "b",
                 pid,
-                anchor_only_template(),
+                anchor_only_plan(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -774,7 +859,7 @@ mod tests {
                 id,
                 "build",
                 pid,
-                anchor_only_template(),
+                anchor_only_plan(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -801,7 +886,7 @@ mod tests {
                 id,
                 "build",
                 pid,
-                anchor_only_template(),
+                anchor_only_plan(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -823,7 +908,7 @@ mod tests {
                 id,
                 "shared",
                 pid,
-                anchor_only_template(),
+                anchor_only_plan(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -837,7 +922,7 @@ mod tests {
                 id,
                 "shared",
                 pid,
-                anchor_only_template(),
+                anchor_only_plan(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -859,7 +944,7 @@ mod tests {
                 id,
                 "build",
                 pid,
-                anchor_only_template(),
+                anchor_only_plan(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -930,15 +1015,15 @@ mod tests {
         }
     }
 
-    /// `Sub.command` is reference-counted: cloning the field bumps the
-    /// strong count without copying the inner `CommandTemplate`.
+    /// `Sub.plan` is reference-counted: cloning the field bumps the
+    /// strong count without copying the inner [`ActionPlan`].
     #[test]
-    fn sub_command_is_arc_wrapped() {
+    fn sub_plan_is_arc_wrapped() {
         let sub = Sub::new(
             SubId::default(),
             "build",
             ProfileId::default(),
-            anchor_only_template(),
+            anchor_only_plan(),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
@@ -947,15 +1032,15 @@ mod tests {
             None,
         );
 
-        let initial = Arc::strong_count(&sub.command);
-        let bumped = Arc::clone(&sub.command);
+        let initial = Arc::strong_count(&sub.plan);
+        let bumped = Arc::clone(&sub.plan);
         assert_eq!(
-            Arc::strong_count(&sub.command),
+            Arc::strong_count(&sub.plan),
             initial + 1,
             "Arc::clone increments strong_count on the field",
         );
         assert!(
-            Arc::ptr_eq(&bumped, &sub.command),
+            Arc::ptr_eq(&bumped, &sub.plan),
             "the clone and the field point at the same allocation",
         );
     }
@@ -967,7 +1052,7 @@ mod tests {
             SubId::default(),
             "x",
             ProfileId::default(),
-            anchor_only_template(),
+            anchor_only_plan(),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,

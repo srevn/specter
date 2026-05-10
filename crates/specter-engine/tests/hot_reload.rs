@@ -15,9 +15,9 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    ActionPlan, ChildEntry, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
+    EffectOutcome, EffectScope, EntryKind, ExecAction, FsEvent, Input, LeafEntry, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
     SubAttachRequest, SubRegistryDiff, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
@@ -30,10 +30,10 @@ const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        specter_core::ArgTemplate::new([specter_core::ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 /// V5-native helper: build a `TreeSnapshot::Dir` with single-component
@@ -83,7 +83,7 @@ fn config_diff_add_sub_to_existing_profile() {
             cfg.clone(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -101,7 +101,7 @@ fn config_diff_add_sub_to_existing_profile() {
         cfg,
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -144,7 +144,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -209,7 +209,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -311,7 +311,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
             cfg.clone(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -359,7 +359,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
             cfg,
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -418,7 +418,7 @@ fn effect_complete_after_detach_drops_silently() {
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -498,7 +498,7 @@ fn config_diff_modified_remove_then_add() {
             ScanConfig::builder().recursive(true).build(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -534,7 +534,7 @@ fn config_diff_modified_remove_then_add() {
             ScanConfig::builder().recursive(false).build(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,

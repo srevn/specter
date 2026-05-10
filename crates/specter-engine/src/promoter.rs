@@ -151,7 +151,7 @@ impl Engine {
             config: req.config.clone(),
             max_settle: req.max_settle,
             settle: req.settle,
-            command: req.command.clone(),
+            plan: req.plan.clone(),
             scope: req.scope,
             events: req.events,
             log_output: req.log_output,
@@ -870,16 +870,16 @@ impl Engine {
 
         // Capture spec fields BEFORE the &mut borrow chain on
         // attach_sub_inner. Cloning the heavy fields once (config /
-        // command) is cheaper than re-borrowing the registry across
+        // plan) is cheaper than re-borrowing the registry across
         // each access.
-        let Some((promoter_name, config, max_settle, settle, command, scope, events, log_output)) =
+        let Some((promoter_name, config, max_settle, settle, plan, scope, events, log_output)) =
             self.promoters.get(promoter_id).map(|q| {
                 (
                     q.name.clone(),
                     q.config.clone(),
                     q.max_settle,
                     q.settle,
-                    q.command.clone(),
+                    q.plan.clone(),
                     q.scope,
                     q.events,
                     q.log_output,
@@ -897,7 +897,7 @@ impl Engine {
             config,
             max_settle,
             settle,
-            command,
+            plan,
             scope,
             events,
             log_output,

@@ -35,7 +35,7 @@ const fn empty_promoter_ids() -> BTreeMap<CompactString, PromoterId> {
 
 #[test]
 fn three_watches_against_minimal_classifies_each_correctly() {
-    // minimal.toml has watch `build` with command = ["echo"].
+    // minimal.toml has watch `build` with actions = [{ exec = ["echo"] }].
     // three-watches.toml has `build` (cmd ["make"]), `lint`, `fmt`.
     // small → big: `build` is modified, `lint`+`fmt` are added.
     let small = load("minimal.toml");
@@ -87,8 +87,8 @@ fn reorder_only_yields_no_diff() {
 
 #[test]
 fn changing_only_command_marks_modified() {
-    let toml_a = "[[watch]]\nname = \"a\"\npath = \"/\"\ncommand = [\"echo\"]";
-    let toml_b = "[[watch]]\nname = \"a\"\npath = \"/\"\ncommand = [\"fmt\"]";
+    let toml_a = "[[watch]]\nname = \"a\"\npath = \"/\"\nactions = [{ exec = [\"echo\"] }]";
+    let toml_b = "[[watch]]\nname = \"a\"\npath = \"/\"\nactions = [{ exec = [\"fmt\"] }]";
     let a = Config::from_str(toml_a).unwrap();
     let b = Config::from_str(toml_b).unwrap();
     let ids = sub_ids_for(&a, 1);

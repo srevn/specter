@@ -23,8 +23,8 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic,
-    DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
+    ActionPlan, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DedupKey, Diagnostic,
+    DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, ExecAction, FsEvent, Input, LeafEntry,
     ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
     ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, WatchOp,
 };
@@ -41,8 +41,10 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 // Fixtures
 // ───────────────────────────────────────────────────────────────────────
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        ArgTemplate::new([ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 fn dir_snap(
@@ -119,7 +121,7 @@ fn attach_sub_with_events(
         config,
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         scope,
         events,
         false,
@@ -392,7 +394,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT, // user wants CONTENT only
         false,
@@ -1181,7 +1183,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
         false,
@@ -1192,7 +1194,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE + Duration::from_secs(1),
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
         false,
@@ -1623,7 +1625,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
         false,
@@ -1634,7 +1636,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE + Duration::from_secs(1),
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
         false,
@@ -1751,7 +1753,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
         false,
@@ -1762,7 +1764,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE + Duration::from_secs(1),
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::METADATA,
         false,

@@ -20,10 +20,10 @@ use crate::Engine;
 use crate::refcounts::clamp_watch_demand_to_zero;
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DedupKey, DirChild,
-    DirMeta, DirSnapshot, EffectScope, EntryKind, Input, LeafEntry, ProbeCorrelation, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, StepOutput, SubAttachRequest, SubId, WatchOp,
+    ActionPlan, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DedupKey, DirChild,
+    DirMeta, DirSnapshot, EffectScope, EntryKind, ExecAction, Input, LeafEntry, ProbeCorrelation,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,8 +32,10 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        ArgTemplate::new([ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
@@ -87,7 +89,7 @@ fn engine_with_materialised_profile(
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         events,
         false,
@@ -372,7 +374,7 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::EMPTY,
         false,

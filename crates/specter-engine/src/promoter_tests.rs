@@ -46,10 +46,10 @@ fn cfg() -> ScanConfig {
     ScanConfig::builder().recursive(true).build()
 }
 
-fn empty_command() -> specter_core::CommandTemplate {
-    specter_core::CommandTemplate::new([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
+fn empty_plan() -> specter_core::ActionPlan {
+    specter_core::ActionPlan::new([specter_core::Action::Exec(specter_core::ExecAction::new([
+        specter_core::ArgTemplate::new([specter_core::ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 /// Build a `PromoterAttachRequest` with a freshly parsed `PatternSpec`.
@@ -60,7 +60,7 @@ fn req_for(name: &str, pattern: &str) -> PromoterAttachRequest {
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -1398,7 +1398,7 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -1469,7 +1469,7 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -1515,7 +1515,7 @@ fn anchor_terminal_predicate_static_sub_makes_mixed() {
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,

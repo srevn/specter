@@ -43,7 +43,7 @@ mod tests {
     use crate::ids::{ProfileId, ResourceId, SubId};
     use crate::op::ProbeRequest;
     use crate::resource::ResourceKind;
-    use crate::sub::{ClassSet, CommandTemplate};
+    use crate::sub::{ActionPlan, ClassSet};
     use compact_str::CompactString;
     use slotmap::KeyData;
     use std::path::PathBuf;
@@ -72,7 +72,7 @@ mod tests {
             diff: None::<Arc<Diff>>,
             capture_output: false,
             sub_name: CompactString::new(""),
-            command: Arc::new(CommandTemplate::new([])),
+            plan: Arc::new(ActionPlan::new([])),
             anchor_path: Arc::from(PathBuf::new()),
             anchor_kind: ResourceKind::Dir,
             target_relative: CompactString::new(""),

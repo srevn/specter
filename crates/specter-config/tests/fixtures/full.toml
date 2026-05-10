@@ -4,7 +4,7 @@ level = "debug"
 [[watch]]
 name          = "build"
 path          = "/"
-command       = ["make", "--input=$path", "$created"]
+actions       = [{ exec = ["make", "--input=${specter.path}", "${specter.created}"] }]
 recursive     = true
 pattern       = "**/*.{c,h,rs}"
 exclude       = ["target/**", "**/node_modules/**"]

@@ -1122,7 +1122,7 @@ mod tests {
     [[watch]]
     name      = "build"
     path      = "{}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     settle    = "50ms"
     "#,
             path.display(),
@@ -1253,7 +1253,7 @@ mod tests {
     [[watch]]
     name      = "build"
     path      = "{}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1283,7 +1283,7 @@ mod tests {
     [[watch]]
     name      = "a"
     path      = "{}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1292,12 +1292,12 @@ mod tests {
     [[watch]]
     name      = "a"
     path      = "{0}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     
     [[watch]]
     name      = "b"
     path      = "{0}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     settle    = "100ms"
     "#,
             tmp.path().display(),
@@ -1330,12 +1330,12 @@ mod tests {
     [[watch]]
     name      = "a"
     path      = "{0}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     
     [[watch]]
     name      = "b"
     path      = "{0}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1344,7 +1344,7 @@ mod tests {
     [[watch]]
     name      = "a"
     path      = "{}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1498,7 +1498,7 @@ mod tests {
     [[watch]]
     name      = "logs"
     path      = "{}/{{a,b}}/access.log"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     settle    = "50ms"
     "#,
             path.display(),
@@ -1568,13 +1568,13 @@ mod tests {
     [[watch]]
     name      = "build"
     path      = "{0}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     settle    = "50ms"
 
     [[watch]]
     name      = "logs"
     path      = "{0}/{{a,b}}/access.log"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     settle    = "50ms"
     "#,
             tmp.path().display(),
@@ -1606,26 +1606,26 @@ mod tests {
     [[watch]]
     name      = "build"
     path      = "{0}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     settle    = "50ms"
 
     [[watch]]
     name      = "build_off"
     path      = "{0}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     settle    = "50ms"
     enabled   = false
 
     [[watch]]
     name      = "logs"
     path      = "{0}/{{a,b}}/access.log"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     settle    = "50ms"
 
     [[watch]]
     name      = "logs_off"
     path      = "{0}/disabled/*"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     settle    = "50ms"
     enabled   = false
     "#,
@@ -1664,7 +1664,7 @@ mod tests {
     [[watch]]
     name      = "logs"
     path      = "{}/{{a,b}}/access.log"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1699,7 +1699,7 @@ mod tests {
     [[watch]]
     name      = "logs"
     path      = "{}/{{a,b}}/access.log"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1736,7 +1736,7 @@ mod tests {
     [[watch]]
     name      = "logs"
     path      = "{}/{{a,b}}/access.log"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1745,7 +1745,7 @@ mod tests {
     [[watch]]
     name      = "logs"
     path      = "{}/{{a,b}}/access.log"
-    command   = ["echo"]
+    actions   = [{{ exec = ["echo"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1791,7 +1791,7 @@ mod tests {
     [[watch]]
     name      = "foo"
     path      = "{}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1800,7 +1800,7 @@ mod tests {
     [[watch]]
     name      = "foo"
     path      = "{}/*"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1839,7 +1839,7 @@ mod tests {
     [[watch]]
     name      = "foo"
     path      = "{}/*"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1848,7 +1848,7 @@ mod tests {
     [[watch]]
     name      = "foo"
     path      = "{}"
-    command   = ["true"]
+    actions   = [{{ exec = ["true"] }}]
     "#,
             tmp.path().display(),
         );
@@ -1951,7 +1951,7 @@ mod tests {
 [[watch]]
 name    = "build"
 path    = "{}"
-command = ["true"]
+actions = [{{ exec = ["true"] }}]
 "#,
                 tmp.path().display(),
             ),
@@ -1989,7 +1989,7 @@ command = ["true"]
 [[watch]]
 name      = "a"
 path      = "{}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 "#,
             tmp.path().display(),
         );
@@ -1998,12 +1998,12 @@ command   = ["true"]
 [[watch]]
 name      = "a"
 path      = "{0}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 
 [[watch]]
 name      = "b"
 path      = "{0}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 settle    = "100ms"
 "#,
             tmp.path().display(),
@@ -2055,7 +2055,7 @@ settle    = "100ms"
 [[watch]]
 name      = "build"
 path      = "{}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 "#,
             tmp.path().display(),
         );
@@ -2325,7 +2325,7 @@ command   = ["true"]
 [[watch]]
 name      = "build"
 path      = "{}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 "#,
             tmp.path().display(),
         );
@@ -2379,7 +2379,7 @@ command   = ["true"]
 [[watch]]
 name      = "a"
 path      = "{}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 "#,
             tmp.path().display(),
         );
@@ -2399,12 +2399,12 @@ command   = ["true"]
 [[watch]]
 name      = "a"
 path      = "{0}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 
 [[watch]]
 name      = "b"
 path      = "{0}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 "#,
             tmp.path().display(),
         );
@@ -2497,7 +2497,7 @@ command   = ["true"]
 [[watch]]
 name      = "a"
 path      = "{}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 "#,
             tmp.path().display(),
         );
@@ -2516,12 +2516,12 @@ command   = ["true"]
 [[watch]]
 name      = "a"
 path      = "{0}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 
 [[watch]]
 name      = "b"
 path      = "{0}"
-command   = ["true"]
+actions   = [{{ exec = ["true"] }}]
 "#,
             tmp.path().display(),
         );

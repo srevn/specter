@@ -26,9 +26,9 @@
 )]
 
 use specter_core::{
-    ClassSet, CommandTemplate, Diagnostic, EffectScope, Input, PatternSpec, PromoterAttachRequest,
-    PromoterRegistryDiff, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
-    SubRegistryDiff, WatchRegistryDiff,
+    ActionPlan, ClassSet, Diagnostic, EffectScope, ExecAction, Input, PatternSpec,
+    PromoterAttachRequest, PromoterRegistryDiff, ResourceKind, ResourceRole, ScanConfig,
+    SubAttachRequest, SubRegistryDiff, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::time::{Duration, Instant};
@@ -36,10 +36,10 @@ use std::time::{Duration, Instant};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        specter_core::ArgTemplate::new([specter_core::ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 fn sub_req_at_root(name: &str, e: &mut Engine) -> SubAttachRequest {
@@ -51,7 +51,7 @@ fn sub_req_at_root(name: &str, e: &mut Engine) -> SubAttachRequest {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::EMPTY,
         false,
@@ -65,7 +65,7 @@ fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -151,7 +151,7 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
     // Build a modify-diff: same names; both entries with a
     // structurally-distinct request. The static Sub keeps its
     // resource but with a different command (the test rig's
-    // `empty_command()` — for symmetry; the registry minted a
+    // `empty_plan()` — for symmetry; the registry minted a
     // fresh id regardless on modify). The Promoter changes its
     // pattern (pattern source changed).
     let modify_sub_req = SubAttachRequest {

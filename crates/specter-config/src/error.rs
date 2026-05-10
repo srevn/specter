@@ -29,7 +29,20 @@ pub struct ValidationIssue {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum IssueKind {
     Empty,
-    EmptyCommand,
+    /// `actions = []` — at least one entry required.
+    EmptyActions,
+    /// `actions[i]` carries no variant (e.g., `actions = [{}]`). Once
+    /// new variants land alongside `exec`, this kind also fires when
+    /// every variant is `None` — exactly one must be set.
+    ActionMissingVariant,
+    /// `actions[i]` carries multiple variants set simultaneously. v1's
+    /// single `exec` variant means this is unreachable today; the kind
+    /// is reserved so the validator can keep the "exactly one variant"
+    /// rule as a single check across both v1 and v2.
+    ActionAmbiguousVariant,
+    /// PR 1 guard: `actions.len() > 1` is rejected pending PR 2's
+    /// multi-step actuator support. Removed once PR 2 lands.
+    MultiStepNotYetSupported,
     EmptyArgv,
     NonAbsolute,
     NotCanonical,
@@ -147,7 +160,10 @@ impl fmt::Display for ValidationIssue {
 const fn kind_label(k: IssueKind) -> &'static str {
     match k {
         IssueKind::Empty => "empty",
-        IssueKind::EmptyCommand => "empty-command",
+        IssueKind::EmptyActions => "empty-actions",
+        IssueKind::ActionMissingVariant => "action-missing-variant",
+        IssueKind::ActionAmbiguousVariant => "action-ambiguous-variant",
+        IssueKind::MultiStepNotYetSupported => "multi-step-not-yet-supported",
         IssueKind::EmptyArgv => "empty-argv",
         IssueKind::NonAbsolute => "non-absolute",
         IssueKind::NotCanonical => "not-canonical",

@@ -213,8 +213,8 @@ mod tests {
     use compact_str::CompactString;
     use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
     use specter_core::{
-        ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
-        Input, ProfileId, ResourceId, ResourceKind, SubId,
+        Action, ActionPlan, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
+        ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -238,10 +238,9 @@ mod tests {
         ProfileId::from(KeyData::from_ffi(seed))
     }
 
-    fn literal_command() -> Arc<CommandTemplate> {
-        Arc::new(CommandTemplate::new([ArgTemplate::new([
-            ArgPart::literal("/bin/true"),
-        ])]))
+    fn literal_plan() -> Arc<ActionPlan> {
+        let exec = ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])]);
+        Arc::new(ActionPlan::new([Action::Exec(exec)]))
     }
 
     fn make_effect_perfile(sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64) -> Effect {
@@ -258,7 +257,7 @@ mod tests {
             diff: None,
             capture_output: false,
             sub_name: CompactString::new(""),
-            command: literal_command(),
+            plan: literal_plan(),
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
             target_relative: CompactString::new(""),
@@ -278,7 +277,7 @@ mod tests {
             diff: None,
             capture_output: false,
             sub_name: CompactString::new(""),
-            command: literal_command(),
+            plan: literal_plan(),
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
             target_relative: CompactString::new(""),

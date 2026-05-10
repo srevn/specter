@@ -1,4 +1,4 @@
 [[watch]]
 name    = "minimal"
 path    = "/"
-command = ["echo"]
+actions = [{ exec = ["echo"] }]

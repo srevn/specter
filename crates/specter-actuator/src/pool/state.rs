@@ -14,7 +14,9 @@ use crate::permits::{Permit, Permits};
 use crate::resolve;
 use crate::spawner::{ChildSignaler, ChildWaiter, Spawner};
 use crossbeam::channel::Sender;
-use specter_core::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId};
+use specter_core::{
+    Action, CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId,
+};
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -270,8 +272,17 @@ impl ActuatorState {
             }
         });
 
+        // v1 invariant: validation guarantees `plan.steps.len() == 1`
+        // and the single step is `Action::Exec`. Multi-step plans are
+        // rejected at the config layer until the step cursor lands.
+        // `let` binding works because `Action::Exec` is the only
+        // variant today; introducing `Action::Parallel` etc. will turn
+        // this into a refutable pattern that the compiler will demand
+        // gets handled.
+        let Action::Exec(exec) = &effect.plan.steps[0];
+
         let (CommandResolved { argv }, env) =
-            resolve::resolve_effect(effect, now, tmp_path.as_deref());
+            resolve::resolve_step(effect, exec, now, tmp_path.as_deref());
 
         let handles = match spawner.spawn(&argv, &env, cwd, capture_output) {
             Ok(h) => h,
@@ -468,8 +479,8 @@ mod tests {
     use compact_str::CompactString;
     use crossbeam::channel::unbounded;
     use specter_core::{
-        ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
-        Input, ProfileId, ResourceId, ResourceKind, SubId,
+        Action, ActionPlan, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
+        ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::io;
     use std::num::NonZeroUsize;
@@ -513,9 +524,9 @@ mod tests {
             diff: None,
             capture_output: false,
             sub_name: CompactString::new(""),
-            command: Arc::new(CommandTemplate::new([ArgTemplate::new([
-                ArgPart::literal("/bin/true"),
-            ])])),
+            plan: Arc::new(ActionPlan::new([Action::Exec(ExecAction::new([
+                ArgTemplate::new([ArgPart::literal("/bin/true")]),
+            ]))])),
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
             target_relative: CompactString::new(""),

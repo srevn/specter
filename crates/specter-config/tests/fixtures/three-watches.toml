@@ -1,15 +1,15 @@
 [[watch]]
 name    = "build"
 path    = "/"
-command = ["make"]
+actions = [{ exec = ["make"] }]
 
 [[watch]]
 name    = "lint"
 path    = "/"
-command = ["clippy"]
+actions = [{ exec = ["clippy"] }]
 
 [[watch]]
 name    = "fmt"
 path    = "/"
-command = ["fmt", "$path"]
+actions = [{ exec = ["fmt", "${specter.path}"] }]
 scope   = "per-stable-file"

@@ -31,11 +31,11 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, BurstPhase, ChildEntry, ClassSet, CommandTemplate, DedupKey, Diagnostic,
-    DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input,
-    LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
-    SubId, TimerKind, TreeSnapshot,
+    ActionPlan, ArgPart, ArgTemplate, BurstPhase, ChildEntry, ClassSet, DedupKey, Diagnostic,
+    DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, ExecAction, FsEvent,
+    Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
+    ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    SubAttachRequest, SubId, TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -46,8 +46,10 @@ const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        ArgTemplate::new([ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 fn dir_snap(
@@ -103,7 +105,7 @@ fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -119,7 +121,7 @@ fn subtree_request_with_content(name: &str, r: ResourceId) -> SubAttachRequest {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
         false,
@@ -816,7 +818,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::PerStableFile,
         ClassSet::CONTENT,
         false,
@@ -1299,7 +1301,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::PerStableFile,
         ClassSet::CONTENT,
         false,

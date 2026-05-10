@@ -1,12 +1,12 @@
 use crate::error::{ConfigError, IssueKind, ValidationIssue};
 use crate::file_meta::FileMeta;
 use crate::path::canonicalize_lenient;
-use crate::raw::{RawConfig, RawLogConfig, RawWatch};
+use crate::raw::{RawAction, RawConfig, RawLogConfig, RawWatch};
 use crate::template;
 use compact_str::CompactString;
 use specter_core::{
-    self as core, ArgTemplate, ClassSet, CommandTemplate, EffectScope, GlobPattern, PatternSpec,
-    PromoterAttachRequest, ScanConfig, SubAttachRequest,
+    self as core, Action, ActionPlan, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
+    PatternSpec, PromoterAttachRequest, ScanConfig, SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -128,7 +128,7 @@ pub enum LogDestination {
 pub struct SubSpec {
     pub name: CompactString,
     pub path: PathBuf,
-    pub command: CommandTemplate,
+    pub plan: ActionPlan,
     pub scope: EffectScope,
     pub settle: Duration,
     pub max_settle: Duration,
@@ -174,7 +174,7 @@ impl SubSpec {
             self.scan.clone(),
             self.max_settle,
             self.settle,
-            self.command.clone(),
+            self.plan.clone(),
             self.scope,
             self.events,
             self.log_output,
@@ -201,7 +201,7 @@ impl SubSpec {
 pub struct PromoterSpec {
     pub name: CompactString,
     pub pattern: PatternSpec,
-    pub command: CommandTemplate,
+    pub plan: ActionPlan,
     pub scope: EffectScope,
     pub settle: Duration,
     pub max_settle: Duration,
@@ -231,7 +231,7 @@ impl PromoterSpec {
             config: self.scan.clone(),
             max_settle: self.max_settle,
             settle: self.settle,
-            command: self.command.clone(),
+            plan: self.plan.clone(),
             scope: self.scope,
             events: self.events,
             log_output: self.log_output,
@@ -555,54 +555,152 @@ fn validate_name(idx: usize, raw_name: &str, errors: &mut Vec<ValidationIssue>) 
     }
 }
 
-/// Validate the `command` field. Each empty argv slot, parse failure,
-/// or empty top-level array yields one [`ValidationIssue`]; a single
-/// command failure short-circuits the returned `Some` (callers fall
-/// through to `expect` after `errors.is_empty()` in the success path).
-fn validate_command(
+/// Validate the `actions` array. Returns `Some(ActionPlan)` when every
+/// action lexes cleanly and the PR 1 single-step guard passes.
+///
+/// PR 1 contract: `actions.len() == 1`. PR 2 lifts this to "any positive
+/// number of steps, sequentially with stop-on-failure." The guard is
+/// concentrated in this one helper so PR 2's diff is a single deletion.
+///
+/// Errors accumulate into `errors`; one issue per offending action /
+/// argv slot. The function returns `None` when *any* part of the plan
+/// failed validation — partial plans are not handed back, since a
+/// half-built plan in the engine would be observably worse than no
+/// plan at all (the `expect` at the success path call site enforces
+/// the all-or-nothing contract).
+fn validate_actions(
     idx: usize,
-    raw_command: &[String],
+    raw_actions: &[RawAction],
     errors: &mut Vec<ValidationIssue>,
-) -> Option<CommandTemplate> {
-    if raw_command.is_empty() {
+) -> Option<ActionPlan> {
+    if raw_actions.is_empty() {
         errors.push(ValidationIssue::new(
             Some(idx),
-            "command",
-            IssueKind::EmptyCommand,
-            "command must have at least one argv slot".to_owned(),
+            "actions",
+            IssueKind::EmptyActions,
+            "actions must have at least one entry".to_owned(),
         ));
         return None;
     }
-    let mut command_failed = false;
-    let mut argv: Vec<ArgTemplate> = Vec::with_capacity(raw_command.len());
-    for (j, slot) in raw_command.iter().enumerate() {
+
+    if raw_actions.len() > 1 {
+        errors.push(ValidationIssue::new(
+            Some(idx),
+            "actions",
+            IssueKind::MultiStepNotYetSupported,
+            format!(
+                "actions has {} entries; only single-action plans are \
+                 supported in this build (multi-step execution lands in a \
+                 follow-up)",
+                raw_actions.len(),
+            ),
+        ));
+        return None;
+    }
+
+    let mut steps: Vec<Action> = Vec::with_capacity(raw_actions.len());
+    let mut any_failed = false;
+    for (j, raw) in raw_actions.iter().enumerate() {
+        match validate_one_action(idx, j, raw, errors) {
+            Some(action) => steps.push(action),
+            None => any_failed = true,
+        }
+    }
+    if any_failed {
+        None
+    } else {
+        Some(ActionPlan::new(steps))
+    }
+}
+
+/// Validate a single action entry. v1 has only the `exec` variant;
+/// future variants extend the dispatch via additional `Option<…>`
+/// fields on [`RawAction`]. The "exactly one variant set" rule is the
+/// single source of truth — it stays the same shape as new variants
+/// land.
+fn validate_one_action(
+    watch_idx: usize,
+    action_idx: usize,
+    raw: &RawAction,
+    errors: &mut Vec<ValidationIssue>,
+) -> Option<Action> {
+    // Count how many variant fields are set. v1: just `exec`. v2 will
+    // add `parallel`, `pipeline`, `conditional` — each contributes an
+    // `is_some()` term to this count.
+    let variants_set = usize::from(raw.exec.is_some());
+    if variants_set == 0 {
+        errors.push(ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::ActionMissingVariant,
+            format!("actions[{action_idx}]: must specify a variant (`exec`)",),
+        ));
+        return None;
+    }
+    if variants_set > 1 {
+        errors.push(ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::ActionAmbiguousVariant,
+            format!("actions[{action_idx}]: must specify exactly one variant",),
+        ));
+        return None;
+    }
+    if let Some(argv) = raw.exec.as_deref() {
+        return validate_exec_argv(watch_idx, action_idx, argv, errors).map(Action::Exec);
+    }
+    // Unreachable in v1: variants_set ≥ 1 with `exec` the only field.
+    None
+}
+
+/// Validate one `exec = [...]` argv. Each empty slot or parse failure
+/// yields one [`ValidationIssue`]; the function returns `None` on any
+/// failure so the partial argv can't reach the engine.
+fn validate_exec_argv(
+    watch_idx: usize,
+    action_idx: usize,
+    raw_argv: &[String],
+    errors: &mut Vec<ValidationIssue>,
+) -> Option<ExecAction> {
+    if raw_argv.is_empty() {
+        errors.push(ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::EmptyArgv,
+            format!("actions[{action_idx}].exec must have at least one slot"),
+        ));
+        return None;
+    }
+    let mut argv: Vec<ArgTemplate> = Vec::with_capacity(raw_argv.len());
+    let mut any_failed = false;
+    for (k, slot) in raw_argv.iter().enumerate() {
         if slot.is_empty() {
             errors.push(ValidationIssue::new(
-                Some(idx),
-                "command",
+                Some(watch_idx),
+                "actions",
                 IssueKind::EmptyArgv,
-                format!("argv[{j}] is empty"),
+                format!("actions[{action_idx}].exec[{k}] is empty"),
             ));
-            command_failed = true;
+            any_failed = true;
             continue;
         }
         match template::parse_arg(slot) {
             Ok(arg) => argv.push(arg),
             Err(e) => {
                 errors.push(ValidationIssue::new(
-                    Some(idx),
-                    "command",
+                    Some(watch_idx),
+                    "actions",
                     IssueKind::UnknownPlaceholder,
-                    format!("argv[{j}]: {e}"),
+                    format!("actions[{action_idx}].exec[{k}]: {e}"),
                 ));
-                command_failed = true;
+                any_failed = true;
             }
         }
     }
-    if command_failed {
+    if any_failed {
         None
     } else {
-        Some(CommandTemplate::new(argv))
+        Some(ExecAction::new(argv))
     }
 }
 
@@ -787,7 +885,7 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
         None
     };
 
-    let command = validate_command(idx, &raw.command, &mut errors);
+    let plan = validate_actions(idx, &raw.actions, &mut errors);
     let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
     let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
     // Parse `events` after scope so the default resolver can read
@@ -810,7 +908,7 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
     Ok(SubSpec {
         name: CompactString::new(&raw.name),
         path: path.expect("path validated"),
-        command: command.expect("command validated"),
+        plan: plan.expect("plan validated"),
         scope: scope.expect("scope validated"),
         settle,
         max_settle,
@@ -849,7 +947,7 @@ fn validate_dynamic_watch(
         }
     };
 
-    let command = validate_command(idx, &raw.command, &mut errors);
+    let plan = validate_actions(idx, &raw.actions, &mut errors);
     let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
     let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
     let events = parse_events_field(
@@ -867,7 +965,7 @@ fn validate_dynamic_watch(
     Ok(PromoterSpec {
         name: CompactString::new(&raw.name),
         pattern: pattern.expect("pattern validated"),
-        command: command.expect("command validated"),
+        plan: plan.expect("plan validated"),
         scope: scope.expect("scope validated"),
         settle,
         max_settle,
@@ -970,7 +1068,9 @@ mod tests {
     const ROOT: &str = "/";
 
     fn minimal_toml(extra: &str) -> String {
-        format!("[[watch]]\nname = \"build\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n{extra}")
+        format!(
+            "[[watch]]\nname = \"build\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n{extra}"
+        )
     }
 
     fn validation_errors(err: ConfigError) -> Vec<crate::error::ValidationIssue> {
@@ -1103,7 +1203,7 @@ mod tests {
         assert!(w.scan.exclude.is_empty());
         assert!(w.scan.pattern.is_none());
         assert_eq!(w.scan.max_depth, None);
-        assert_eq!(w.command.argv.len(), 1);
+        assert_eq!(w.plan.steps[0].as_exec().expect("exec step").argv.len(), 1);
         assert!(!w.log_output, "log_output defaults to false");
         assert!(w.enabled, "enabled defaults to true (field omitted)");
     }
@@ -1146,7 +1246,7 @@ mod tests {
         // path (path containing `*?[{` routes to the Promoter
         // validator).
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
-                    command = [\"echo\"]\nenabled = false\n";
+                    actions = [{ exec = [\"echo\"] }]\nenabled = false\n";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.promoters.len(), 1);
         assert!(!cfg.promoters[0].enabled);
@@ -1159,12 +1259,12 @@ mod tests {
         // dynamic side. Source order is preserved among the entries
         // each helper yields.
         let toml = format!(
-            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
-             [[watch]]\nname = \"b\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nenabled = false\n\
-             [[watch]]\nname = \"c\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
-             [[watch]]\nname = \"d\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nenabled = false\n\
-             [[watch]]\nname = \"e\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\nenabled = false\n\
-             [[watch]]\nname = \"f\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n",
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n\
+             [[watch]]\nname = \"b\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\nenabled = false\n\
+             [[watch]]\nname = \"c\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n\
+             [[watch]]\nname = \"d\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\nenabled = false\n\
+             [[watch]]\nname = \"e\"\npath = \"/srv/*\"\nactions = [{{ exec = [\"echo\"] }}]\nenabled = false\n\
+             [[watch]]\nname = \"f\"\npath = \"/srv/*\"\nactions = [{{ exec = [\"echo\"] }}]\n",
         );
         let cfg = Config::from_str(&toml).unwrap();
         let watches: Vec<&str> = cfg.active_watches().map(|s| s.name.as_str()).collect();
@@ -1175,25 +1275,29 @@ mod tests {
 
     #[test]
     fn empty_name_rejected() {
-        let toml = format!("[[watch]]\nname = \"\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]");
+        let toml = format!(
+            "[[watch]]\nname = \"\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]"
+        );
         assert_only_kind(&toml, IssueKind::Empty);
     }
 
     #[test]
     fn relative_path_rejected() {
-        let toml = "[[watch]]\nname = \"a\"\npath = \"src\"\ncommand = [\"echo\"]";
+        let toml = "[[watch]]\nname = \"a\"\npath = \"src\"\nactions = [{ exec = [\"echo\"] }]";
         assert_only_kind(toml, IssueKind::NonAbsolute);
     }
 
     #[test]
     fn empty_command_array_rejected() {
-        let toml = format!("[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = []");
-        assert_only_kind(&toml, IssueKind::EmptyCommand);
+        let toml =
+            format!("[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [] }}]");
+        assert_only_kind(&toml, IssueKind::EmptyArgv);
     }
 
     #[test]
     fn empty_argv_slot_rejected() {
-        let toml = format!("[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"\"]");
+        let toml =
+            format!("[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"\"] }}]");
         assert_only_kind(&toml, IssueKind::EmptyArgv);
     }
 
@@ -1201,8 +1305,9 @@ mod tests {
     fn lowercase_typo_placeholder_still_rejected_as_unknown() {
         // Lowercase non-catalog names remain typo errors; the catalog is
         // exclusively lowercase, so a lowercase miss is almost always a typo.
-        let toml =
-            format!("[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"fmt\", \"$paht\"]");
+        let toml = format!(
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"fmt\", \"${{specter.paht}}\"] }}]"
+        );
         assert_only_kind(&toml, IssueKind::UnknownPlaceholder);
     }
 
@@ -1215,7 +1320,9 @@ mod tests {
             "[\"sh\", \"-c\", \"cd $HOME\"]",
             "[\"sh\", \"-c\", \"echo hi $User\"]",
         ] {
-            let toml = format!("[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = {cmd}");
+            let toml = format!(
+                "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = {cmd} }}]"
+            );
             let cfg = Config::from_str(&toml).expect("config should accept uppercase shell vars");
             assert_eq!(cfg.watches.len(), 1);
         }
@@ -1307,8 +1414,8 @@ mod tests {
     #[test]
     fn duplicate_name_rejected_for_each_extra_occurrence() {
         let toml = format!(
-            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
-             [[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n",
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n\
+             [[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n",
         );
         let err = Config::from_str(&toml).unwrap_err();
         let errors = validation_errors(err);
@@ -1320,9 +1427,9 @@ mod tests {
     #[test]
     fn duplicate_name_three_blocks_yields_two_issues() {
         let toml = format!(
-            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
-             [[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n\
-             [[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\n",
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n\
+             [[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n\
+             [[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n",
         );
         let err = Config::from_str(&toml).unwrap_err();
         let errors = validation_errors(err);
@@ -1341,7 +1448,7 @@ mod tests {
     #[test]
     fn unknown_watch_field_yields_parse_error() {
         let toml = format!(
-            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]\nfoo = \"bar\""
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\nfoo = \"bar\""
         );
         let err = Config::from_str(&toml).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
@@ -1371,10 +1478,13 @@ mod tests {
     fn command_template_carries_lexed_argv() {
         let toml = format!(
             "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
-             command = [\"fmt\", \"--input=$path\", \"$created\"]"
+             actions = [{{ exec = [\"fmt\", \"--input=${{specter.path}}\", \"${{specter.created}}\"] }}]"
         );
         let cfg = Config::from_str(&toml).unwrap();
-        let argv = &cfg.watches[0].command.argv;
+        let argv = &cfg.watches[0].plan.steps[0]
+            .as_exec()
+            .expect("exec step")
+            .argv;
         assert_eq!(argv.len(), 3);
         assert_eq!(argv[0].parts[0], ArgPart::literal("fmt"));
         assert_eq!(argv[1].parts[0], ArgPart::literal("--input="));
@@ -1384,14 +1494,13 @@ mod tests {
 
     #[test]
     fn multiple_errors_in_one_watch_collected() {
-        let toml =
-            "[[watch]]\nname = \"\"\npath = \"src\"\ncommand = []\nsettle = \"0ms\"\nmax_depth = 0";
+        let toml = "[[watch]]\nname = \"\"\npath = \"src\"\nactions = [{ exec = [] }]\nsettle = \"0ms\"\nmax_depth = 0";
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
         let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&IssueKind::Empty));
         assert!(kinds.contains(&IssueKind::NonAbsolute));
-        assert!(kinds.contains(&IssueKind::EmptyCommand));
+        assert!(kinds.contains(&IssueKind::EmptyArgv));
         assert!(kinds.contains(&IssueKind::SettleTooSmall));
         assert!(kinds.contains(&IssueKind::MaxDepthZero));
         assert_eq!(errors.len(), 5);
@@ -1399,8 +1508,8 @@ mod tests {
 
     #[test]
     fn errors_across_multiple_watches_preserve_source_order() {
-        let toml = "[[watch]]\nname = \"a\"\npath = \"src1\"\ncommand = [\"echo\"]\n\
-                    [[watch]]\nname = \"b\"\npath = \"src2\"\ncommand = [\"echo\"]\n";
+        let toml = "[[watch]]\nname = \"a\"\npath = \"src1\"\nactions = [{ exec = [\"echo\"] }]\n\
+                    [[watch]]\nname = \"b\"\npath = \"src2\"\nactions = [{ exec = [\"echo\"] }]\n";
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
         assert_eq!(errors.len(), 2);
@@ -1600,7 +1709,7 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let pending = td.path().join("does-not-exist").join("leaf");
         let toml = format!(
-            "[[watch]]\nname = \"p\"\npath = \"{}\"\ncommand = [\"echo\"]",
+            "[[watch]]\nname = \"p\"\npath = \"{}\"\nactions = [{{ exec = [\"echo\"] }}]",
             pending.display(),
         );
         let cfg = Config::from_str(&toml).unwrap();
@@ -1621,8 +1730,9 @@ mod tests {
     /// substring; reject at config-load.
     #[test]
     fn at_sign_in_static_name_rejected() {
-        let toml =
-            format!("[[watch]]\nname = \"foo@bar\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]");
+        let toml = format!(
+            "[[watch]]\nname = \"foo@bar\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]"
+        );
         assert_only_kind(&toml, IssueKind::InvalidName);
     }
 
@@ -1631,7 +1741,7 @@ mod tests {
     /// path routes to.
     #[test]
     fn at_sign_in_dynamic_name_rejected() {
-        let toml = "[[watch]]\nname = \"foo@bar\"\npath = \"/var/log/*\"\ncommand = [\"echo\"]";
+        let toml = "[[watch]]\nname = \"foo@bar\"\npath = \"/var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         assert_only_kind(toml, IssueKind::InvalidName);
     }
 
@@ -1639,14 +1749,17 @@ mod tests {
     /// — the helper short-circuits empty before checking `@`.
     #[test]
     fn empty_static_name_emits_empty_kind_not_invalid_name() {
-        let toml = format!("[[watch]]\nname = \"\"\npath = \"{ROOT}\"\ncommand = [\"echo\"]");
+        let toml = format!(
+            "[[watch]]\nname = \"\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]"
+        );
         assert_only_kind(&toml, IssueKind::Empty);
     }
 
     /// Empty dynamic name surfaces as `Empty` for the same reason.
     #[test]
     fn empty_dynamic_name_emits_empty_kind_not_invalid_name() {
-        let toml = "[[watch]]\nname = \"\"\npath = \"/var/log/*\"\ncommand = [\"echo\"]";
+        let toml =
+            "[[watch]]\nname = \"\"\npath = \"/var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         assert_only_kind(toml, IssueKind::Empty);
     }
 
@@ -1655,7 +1768,7 @@ mod tests {
     /// Pure-literal absolute path → static dispatch → `Config.watches`.
     #[test]
     fn pure_literal_path_dispatches_to_static() {
-        let toml = "[[watch]]\nname = \"static\"\npath = \"/var/log/myapp\"\ncommand = [\"echo\"]";
+        let toml = "[[watch]]\nname = \"static\"\npath = \"/var/log/myapp\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.watches.len(), 1);
         assert!(cfg.promoters.is_empty());
@@ -1665,7 +1778,8 @@ mod tests {
     /// Path with `*` discriminator → dynamic dispatch → `Config.promoters`.
     #[test]
     fn glob_star_path_dispatches_to_dynamic() {
-        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/var/log/*\"\ncommand = [\"echo\"]";
+        let toml =
+            "[[watch]]\nname = \"dyn\"\npath = \"/var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         assert!(cfg.watches.is_empty());
         assert_eq!(cfg.promoters.len(), 1);
@@ -1676,7 +1790,8 @@ mod tests {
     /// Path with `?` → dynamic.
     #[test]
     fn question_mark_path_dispatches_to_dynamic() {
-        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/srv/?/data\"\ncommand = [\"echo\"]";
+        let toml =
+            "[[watch]]\nname = \"dyn\"\npath = \"/srv/?/data\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.promoters.len(), 1);
     }
@@ -1684,7 +1799,7 @@ mod tests {
     /// Path with `[…]` → dynamic.
     #[test]
     fn bracket_path_dispatches_to_dynamic() {
-        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/srv/[a-z]/data\"\ncommand = [\"echo\"]";
+        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/srv/[a-z]/data\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.promoters.len(), 1);
     }
@@ -1693,7 +1808,7 @@ mod tests {
     #[test]
     fn brace_path_dispatches_to_dynamic() {
         let toml = "[[watch]]\nname = \"dyn\"\npath = \"/var/log/{app,system}/access.log\"\n\
-                    command = [\"echo\"]";
+                    actions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.promoters.len(), 1);
         // brace stays as a single Glob component; literal_prefix_len = 3.
@@ -1706,10 +1821,10 @@ mod tests {
     #[test]
     fn mixed_static_and_dynamic_routes_each_correctly() {
         let toml = "\
-            [[watch]]\nname = \"a\"\npath = \"/foo\"\ncommand = [\"echo\"]\n\
-            [[watch]]\nname = \"b\"\npath = \"/bar/*\"\ncommand = [\"echo\"]\n\
-            [[watch]]\nname = \"c\"\npath = \"/baz\"\ncommand = [\"echo\"]\n\
-            [[watch]]\nname = \"d\"\npath = \"/qux/{a,b}\"\ncommand = [\"echo\"]\n\
+            [[watch]]\nname = \"a\"\npath = \"/foo\"\nactions = [{ exec = [\"echo\"] }]\n\
+            [[watch]]\nname = \"b\"\npath = \"/bar/*\"\nactions = [{ exec = [\"echo\"] }]\n\
+            [[watch]]\nname = \"c\"\npath = \"/baz\"\nactions = [{ exec = [\"echo\"] }]\n\
+            [[watch]]\nname = \"d\"\npath = \"/qux/{a,b}\"\nactions = [{ exec = [\"echo\"] }]\n\
         ";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.watches.len(), 2);
@@ -1725,8 +1840,8 @@ mod tests {
     #[test]
     fn duplicate_name_across_static_and_dynamic_rejected() {
         let toml = "\
-            [[watch]]\nname = \"foo\"\npath = \"/foo\"\ncommand = [\"echo\"]\n\
-            [[watch]]\nname = \"foo\"\npath = \"/foo/*\"\ncommand = [\"echo\"]\n\
+            [[watch]]\nname = \"foo\"\npath = \"/foo\"\nactions = [{ exec = [\"echo\"] }]\n\
+            [[watch]]\nname = \"foo\"\npath = \"/foo/*\"\nactions = [{ exec = [\"echo\"] }]\n\
         ";
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
@@ -1741,7 +1856,8 @@ mod tests {
     /// `IssueKind::InvalidPattern`.
     #[test]
     fn globstar_pattern_rejected_as_invalid_pattern() {
-        let toml = "[[watch]]\nname = \"d\"\npath = \"/var/log/**/x\"\ncommand = [\"echo\"]";
+        let toml =
+            "[[watch]]\nname = \"d\"\npath = \"/var/log/**/x\"\nactions = [{ exec = [\"echo\"] }]";
         assert_only_kind(toml, IssueKind::InvalidPattern);
     }
 
@@ -1750,7 +1866,8 @@ mod tests {
     /// as `IssueKind::InvalidPattern` with the source rendered.
     #[test]
     fn relative_dynamic_path_rejected_as_invalid_pattern() {
-        let toml = "[[watch]]\nname = \"d\"\npath = \"var/log/*\"\ncommand = [\"echo\"]";
+        let toml =
+            "[[watch]]\nname = \"d\"\npath = \"var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
         assert_eq!(errors.len(), 1);
@@ -1770,7 +1887,8 @@ mod tests {
     /// Double-slash → empty segment via PatternSpec parser → InvalidPattern.
     #[test]
     fn double_slash_dynamic_path_rejected_as_invalid_pattern() {
-        let toml = "[[watch]]\nname = \"d\"\npath = \"//var/log/*\"\ncommand = [\"echo\"]";
+        let toml =
+            "[[watch]]\nname = \"d\"\npath = \"//var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         assert_only_kind(toml, IssueKind::InvalidPattern);
     }
 
@@ -1779,7 +1897,7 @@ mod tests {
     /// `IssueKind::InvalidPattern`.
     #[test]
     fn malformed_glob_segment_rejected_as_invalid_pattern() {
-        let toml = "[[watch]]\nname = \"d\"\npath = \"/var/log/[unbalanced\"\ncommand = [\"echo\"]";
+        let toml = "[[watch]]\nname = \"d\"\npath = \"/var/log/[unbalanced\"\nactions = [{ exec = [\"echo\"] }]";
         assert_only_kind(toml, IssueKind::InvalidPattern);
     }
 
@@ -1789,7 +1907,8 @@ mod tests {
     /// static validator (settle = 200ms, max_settle = 12s, etc.).
     #[test]
     fn minimal_dynamic_watch_round_trips_with_defaults() {
-        let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\ncommand = [\"echo\"]";
+        let toml =
+            "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         let p = &cfg.promoters[0];
         assert_eq!(p.name, "logs");
@@ -1806,7 +1925,7 @@ mod tests {
     #[test]
     fn promoter_to_attach_request_threads_fields() {
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
-                    command = [\"fmt\", \"$path\"]\n\
+                    actions = [{ exec = [\"fmt\", \"${specter.path}\"] }]\n\
                     settle = \"300ms\"\nmax_settle = \"1200ms\"\n\
                     scope = \"per-stable-file\"\n\
                     events = [\"content\"]\n\
@@ -1833,7 +1952,7 @@ mod tests {
     #[test]
     fn dynamic_watch_carries_scan_pattern_and_excludes() {
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
-                    command = [\"echo\"]\n\
+                    actions = [{ exec = [\"echo\"] }]\n\
                     pattern = \"*.log\"\n\
                     exclude = [\"*.gz\"]\n";
         let cfg = Config::from_str(toml).unwrap();
@@ -1847,14 +1966,14 @@ mod tests {
     /// validation. The operator gets the full list at once.
     #[test]
     fn multiple_errors_in_one_dynamic_watch_accumulate() {
-        let toml = "[[watch]]\nname = \"\"\npath = \"/foo/**/x\"\ncommand = []\n\
+        let toml = "[[watch]]\nname = \"\"\npath = \"/foo/**/x\"\nactions = [{ exec = [] }]\n\
                     settle = \"0ms\"\nmax_depth = 0";
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
         let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&IssueKind::Empty));
         assert!(kinds.contains(&IssueKind::InvalidPattern));
-        assert!(kinds.contains(&IssueKind::EmptyCommand));
+        assert!(kinds.contains(&IssueKind::EmptyArgv));
         assert!(kinds.contains(&IssueKind::SettleTooSmall));
         assert!(kinds.contains(&IssueKind::MaxDepthZero));
         assert_eq!(errors.len(), 5, "got {errors:?}");
@@ -1864,7 +1983,7 @@ mod tests {
     /// `literal_prefix_len = 1`.
     #[test]
     fn fs_root_glob_pattern_accepted() {
-        let toml = "[[watch]]\nname = \"root\"\npath = \"/*\"\ncommand = [\"echo\"]";
+        let toml = "[[watch]]\nname = \"root\"\npath = \"/*\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.promoters.len(), 1);
         assert_eq!(cfg.promoters[0].pattern.literal_prefix_len(), 1);
@@ -1899,7 +2018,8 @@ mod from_path_with_meta_tests {
     use std::path::Path;
     use tempfile::TempDir;
 
-    const MINIMAL: &str = "[[watch]]\nname = \"x\"\npath = \"/\"\ncommand = [\"echo\"]\n";
+    const MINIMAL: &str =
+        "[[watch]]\nname = \"x\"\npath = \"/\"\nactions = [{ exec = [\"echo\"] }]\n";
 
     fn write(path: &Path, bytes: &[u8]) {
         std::fs::write(path, bytes).expect("write tempfile");

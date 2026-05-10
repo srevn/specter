@@ -16,8 +16,8 @@ use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
 use specter_actuator::{OsSpawner, SubprocessActuator};
 use specter_core::{
-    ArgPart, ArgTemplate, CommandTemplate, CorrelationId, DedupKey, Effect, Input, ProfileId,
-    ResourceId, ResourceKind, SubId,
+    Action, ActionPlan, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, ExecAction, Input,
+    ProfileId, ResourceId, ResourceKind, SubId,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -129,18 +129,19 @@ impl Drop for Harness {
     }
 }
 
-/// Wrap a `Vec<String>` argv as a literal-only [`CommandTemplate`].
+/// Wrap a `Vec<String>` argv as a literal-only single-step [`ActionPlan`].
 ///
 /// The resolver renders each `ArgTemplate(Literal(s))` as the slot `s`,
-/// so `literal_command(["foo", "bar"])` resolves to `argv = ["foo",
+/// so `literal_plan(["foo", "bar"])` resolves to `argv = ["foo",
 /// "bar"]` byte-for-byte. Used by the integration helpers below to
-/// satisfy `Effect.command: Arc<CommandTemplate>` while keeping fixture
-/// call sites' `Vec<String>` ergonomics intact.
-fn literal_command(argv: Vec<String>) -> Arc<CommandTemplate> {
-    Arc::new(CommandTemplate::new(
+/// satisfy `Effect.plan: Arc<ActionPlan>` while keeping fixture call
+/// sites' `Vec<String>` ergonomics intact.
+fn literal_plan(argv: Vec<String>) -> Arc<ActionPlan> {
+    let exec = ExecAction::new(
         argv.into_iter()
             .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
-    ))
+    );
+    Arc::new(ActionPlan::new([Action::Exec(exec)]))
 }
 
 /// Build a PerFile Effect with a literal `argv` and the given correlation.
@@ -176,7 +177,7 @@ pub fn perfile_effect(
         diff: None,
         capture_output: false,
         sub_name: CompactString::new(""),
-        command: literal_command(argv),
+        plan: literal_plan(argv),
         anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
         target_relative: CompactString::new(""),
@@ -208,7 +209,7 @@ pub fn subtree_effect(
         diff: None,
         capture_output: false,
         sub_name: CompactString::new(""),
-        command: literal_command(argv),
+        plan: literal_plan(argv),
         anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
         target_relative: CompactString::new(""),

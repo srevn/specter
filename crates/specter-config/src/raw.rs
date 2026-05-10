@@ -27,7 +27,10 @@ pub(crate) struct RawLogConfig {
 pub(crate) struct RawWatch {
     pub name: String,
     pub path: String,
-    pub command: Vec<String>,
+    /// Reaction body — sequence of [`RawAction`]s. Replaces the v0
+    /// `command: Vec<String>` field. PR 1 validation requires
+    /// `actions.len() == 1`; PR 2 unlocks multi-step.
+    pub actions: Vec<RawAction>,
     pub recursive: Option<bool>,
     pub pattern: Option<String>,
     pub exclude: Option<Vec<String>>,
@@ -49,17 +52,31 @@ pub(crate) struct RawWatch {
     pub enabled: Option<bool>,
 }
 
+/// One entry in `actions = [...]`. v1's only variant is `exec`; future
+/// variants (`parallel`, `pipeline`, `conditional`) land additively as
+/// sibling `Option<…>` fields. `deny_unknown_fields` catches typos at
+/// the variant tag level (e.g., `exce`, `paralel`) and flags missing
+/// future variants when an operator prematurely uses one.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAction {
+    /// `Some(argv)` for `{ exec = [...] }` actions. v1 validation
+    /// requires exactly one variant set per action; once future variants
+    /// land, the `exactly_one` check stays the same shape.
+    pub exec: Option<Vec<String>>,
+}
+
 #[cfg(test)]
 impl RawWatch {
     /// Construct a `RawWatch` directly for tests that exercise the
     /// validator helpers without routing through TOML deserialization
     /// (e.g., the `validate_static_watch` defensive `is_dynamic`
     /// re-check, which is unreachable through the dispatcher).
-    pub(crate) fn for_test(name: String, path: String, command: Vec<String>) -> Self {
+    pub(crate) fn for_test(name: String, path: String, exec: Vec<String>) -> Self {
         Self {
             name,
             path,
-            command,
+            actions: vec![RawAction { exec: Some(exec) }],
             recursive: None,
             pattern: None,
             exclude: None,

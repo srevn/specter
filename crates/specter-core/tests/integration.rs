@@ -7,8 +7,9 @@
 //! seam.
 
 use specter_core::{
-    ArgPart, ArgTemplate, ClassSet, CommandTemplate, EffectScope, GlobPattern, Placeholder,
-    Profile, ProfileMap, ResourceRole, ScanConfig, Sub, SubRegistry, Tree, compute_config_hash,
+    Action, ActionPlan, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
+    Placeholder, Profile, ProfileMap, ResourceRole, ScanConfig, Sub, SubRegistry, Tree,
+    compute_config_hash,
 };
 use std::time::Duration;
 
@@ -20,11 +21,11 @@ fn bare_cfg() -> ScanConfig {
     ScanConfig::builder().build()
 }
 
-fn build_template() -> CommandTemplate {
-    CommandTemplate::new([ArgTemplate::new([
+fn build_plan() -> ActionPlan {
+    ActionPlan::new([Action::Exec(ExecAction::new([ArgTemplate::new([
         ArgPart::literal("/bin/build"),
         ArgPart::Placeholder(Placeholder::Path),
-    ])])
+    ])]))])
 }
 
 #[test]
@@ -50,7 +51,7 @@ fn shared_profile_via_config_hash() {
             id,
             "build-a",
             pid_a,
-            build_template(),
+            build_plan(),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,

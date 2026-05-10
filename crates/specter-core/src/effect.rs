@@ -3,13 +3,13 @@
 //! No `baseline_snapshot` / `captured_current` on `Effect`: the
 //! Engine re-probes after `EffectComplete::Ok` rather than trust a
 //! snapshot taken at emission time. The `diff` field is populated only
-//! when the Sub's command template references diff-derived placeholders
-//! or the Sub's scope is `PerStableFile`; otherwise `None`.
+//! when the Sub's plan references diff-derived placeholders or the
+//! Sub's scope is `PerStableFile`; otherwise `None`.
 
 use crate::diff::Diff;
 use crate::ids::{ProfileId, ResourceId, SubId};
 use crate::resource::ResourceKind;
-use crate::sub::CommandTemplate;
+use crate::sub::ActionPlan;
 use compact_str::CompactString;
 use std::path::Path;
 use std::sync::Arc;
@@ -55,11 +55,13 @@ pub struct CommandResolved {
 /// because there is no second consumer for the group, and a name for a
 /// group of fields that has no second consumer is overhead.
 ///
-/// - `sub_name` — `$watch` substitute and `SPECTER_WATCH` env value.
-///   Owned `CompactString` rather than `Arc<str>` so the resolver
+/// - `sub_name` — `${specter.watch}` substitute and `SPECTER_WATCH` env
+///   value. Owned `CompactString` rather than `Arc<str>` so the resolver
 ///   reaches it via `Deref<Target = str>` without naming the type.
-/// - `command` — the parsed argv template, Arc-cloned from `Sub.command`
-///   at emit time so coalesced Effects share one allocation.
+/// - `plan` — the parsed action plan, Arc-cloned from `Sub.plan` at emit
+///   time so coalesced Effects share one allocation. Validation
+///   guarantees at least one `Action::Exec` step for v1; the actuator
+///   walks the steps in order, stopping on the first non-`Ok` outcome.
 /// - `anchor_path`, `anchor_kind` — the anchor's filesystem path and
 ///   classification. `anchor_path` is `Arc<Path>` so the engine builds
 ///   it once per `emit_effects` call and every Effect emitted from that
@@ -69,16 +71,16 @@ pub struct CommandResolved {
 ///   carrying it lets the actuator pick the correct cwd shape (parent
 ///   dir for File anchors, the path itself for Dir / Unknown) without a
 ///   round-trip to the engine.
-/// - `target_relative` — `$relative` substitute and the per-entry
-///   segment used by the resolver to derive `target_path` (`$path` /
-///   `SPECTER_PATH`) at spawn time. Empty for `DedupKey::Subtree`
+/// - `target_relative` — `${specter.relative}` substitute and the
+///   per-entry segment used by the resolver to derive `target_path`
+///   (`${specter.path}` / `SPECTER_PATH`) at spawn time. Empty for `DedupKey::Subtree`
 ///   (target_path == anchor_path); the file segment for
 ///   `DedupKey::PerFile` (target_path == anchor_path.join(segment)).
 ///   Carrying only the relative — not the joined path — defers the
 ///   `PathBuf` allocation to the spawn boundary, where Latest-coalesce
 ///   has already filtered Effects that won't reach a syscall.
 /// - `exclude` — Arc-clone of `Profile.exclude_strings`. Carried so
-///   the resolver can render the `$excluded` placeholder and
+///   the resolver can render the `${specter.excluded}` placeholder and
 ///   `SPECTER_EXCLUDED` env value without a back-channel to the engine.
 ///
 /// `SPECTER_EVENT_KIND` (`dir-subtree` vs `file`) and the resolver-side
@@ -96,7 +98,7 @@ pub struct Effect {
     pub capture_output: bool,
 
     pub sub_name: CompactString,
-    pub command: Arc<CommandTemplate>,
+    pub plan: Arc<ActionPlan>,
     pub anchor_path: Arc<Path>,
     pub anchor_kind: ResourceKind,
     pub target_relative: CompactString,

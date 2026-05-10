@@ -33,10 +33,10 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, ClassSet, CommandTemplate, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileState, PromoterAttachRequest, PromoterRegistryDiff, PromoterState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, WatchOp,
+    ActionPlan, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
+    EntryKind, ExecAction, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeResponse, ProfileState, PromoterAttachRequest, PromoterRegistryDiff,
+    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, WatchOp,
     WatchRegistryDiff,
 };
 use specter_engine::Engine;
@@ -49,10 +49,10 @@ const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const FS_ROOT_SEG: &str = "/";
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        specter_core::ArgTemplate::new([specter_core::ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
@@ -62,7 +62,7 @@ fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -383,7 +383,7 @@ fn static_attach_emits_sub_attached_with_no_source_promoter() {
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::EMPTY,
         false,
@@ -500,7 +500,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         ClassSet::EMPTY,
         false,

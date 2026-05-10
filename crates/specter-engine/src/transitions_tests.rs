@@ -20,9 +20,9 @@ use crate::engine::FS_ROOT_SEG;
 use crate::{Engine, SubAttachRequest};
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind, ClassSet,
-    CommandTemplate, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
-    EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, PatternSpec, Placeholder,
+    ActionPlan, AnchorClaim, ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry, ClaimKind,
+    ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope,
+    EntryKind, ExecAction, FsEvent, Input, LeafEntry, OverflowScope, PatternSpec, Placeholder,
     ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileState,
     PromoterAttachRequest, PromoterId, PromoterRegistryDiff, PromoterState, ResourceId,
     ResourceKind, ResourceRole, ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
@@ -42,15 +42,19 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 /// separate Profiles (intentional partition).
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        ArgTemplate::new([ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
-fn diff_command() -> CommandTemplate {
-    CommandTemplate::new([ArgTemplate::new([
-        ArgPart::literal("fmt"),
-        ArgPart::Placeholder(Placeholder::Created),
-    ])])
+fn diff_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        ArgTemplate::new([
+            ArgPart::literal("fmt"),
+            ArgPart::Placeholder(Placeholder::Created),
+        ]),
+    ]))])
 }
 
 /// Engine + Sub attached at `/anchor` (Dir, recursive). Returns the
@@ -73,7 +77,7 @@ fn engine_with_attached_sub() -> (
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -204,7 +208,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -260,7 +264,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -319,7 +323,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -381,7 +385,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -489,7 +493,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -871,13 +875,16 @@ fn standard_burst_stable_emits_effect_and_awaits() {
     assert_eq!(out.effects.len(), 1, "one Effect emitted at stable verdict");
     let eff = &out.effects[0];
     assert!(!eff.forced);
-    // Engine carries the parsed CommandTemplate; the actuator resolves
+    // Engine carries the parsed ActionPlan; the actuator resolves
     // argv at spawn time. Assert on the template's literal-only first arg
     // instead of the resolved argv. (`/bin/true` is the test's stub
-    // command — see `empty_command()`.)
-    assert_eq!(eff.command.argv.len(), 1);
+    // command — see `empty_plan()`.)
+    assert_eq!(
+        eff.plan.steps[0].as_exec().expect("exec step").argv.len(),
+        1
+    );
     assert!(matches!(
-        eff.command.argv[0].parts.as_slice(),
+        eff.plan.steps[0].as_exec().expect("exec step").argv[0].parts.as_slice(),
         [specter_core::ArgPart::Literal(s)] if s.as_str() == "/bin/true"
     ));
     // Substitution-domain inputs that the actuator-side resolver renders
@@ -888,7 +895,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
     );
     assert!(
         !eff.sub_name.is_empty(),
-        "sub_name populated for $watch / SPECTER_WATCH"
+        "sub_name populated for ${{specter.watch}} / SPECTER_WATCH"
     );
     assert!(
         !eff.forced,
@@ -1021,7 +1028,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         config: ScanConfig::builder().recursive(false).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -1112,7 +1119,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         config: ScanConfig::builder().recursive(false).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -1501,7 +1508,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::STRUCTURE,
         log_output: false,
@@ -1875,7 +1882,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: diff_command(), // references $created
+        plan: diff_plan(), // references ${specter.created}
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -1988,7 +1995,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
         config: ScanConfig::builder().build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -2087,7 +2094,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -2224,7 +2231,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -2235,7 +2242,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -2390,7 +2397,7 @@ fn sensor_overflow_pending_profile_is_skipped() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -2451,7 +2458,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -2669,7 +2676,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             config: cfg.clone(),
             max_settle: MAX_SETTLE,
             settle: Duration::from_millis(50),
-            command: empty_command(),
+            plan: empty_plan(),
             scope: EffectScope::SubtreeRoot,
             events: NO_EVENTS,
             log_output: false,
@@ -2686,7 +2693,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             config: cfg,
             max_settle: MAX_SETTLE,
             settle: Duration::from_millis(200),
-            command: empty_command(),
+            plan: empty_plan(),
             scope: EffectScope::SubtreeRoot,
             events: NO_EVENTS,
             log_output: false,
@@ -2723,7 +2730,7 @@ fn config_diff_added_only_attaches_subs() {
         config: ScanConfig::builder().build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -2767,7 +2774,7 @@ fn config_diff_removed_then_added_atomic() {
         ScanConfig::builder().build(), // different config_hash (non-recursive)
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -2799,7 +2806,7 @@ fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -2964,7 +2971,7 @@ fn config_diff_applies_both_halves_in_one_step() {
         config: ScanConfig::builder().build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -3098,7 +3105,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: diff_command(),
+        plan: diff_plan(),
         scope: EffectScope::PerStableFile,
         events: NO_EVENTS,
         log_output: false,
@@ -3195,19 +3202,21 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         .collect();
     assert_eq!(per_file_effects.len(), 2, "one Effect per created file");
     for eff in &per_file_effects {
-        // Engine carries the unresolved CommandTemplate; the resolver
+        // Engine carries the unresolved ActionPlan; the resolver
         // runs in the actuator. Assert the template references the
-        // diff-derived `$created` placeholder (the test fixture's
-        // `diff_command()`).
+        // diff-derived `${specter.created}` placeholder (the test fixture's
+        // `diff_plan()`).
         assert!(
-            eff.command
+            eff.plan.steps[0]
+                .as_exec()
+                .expect("exec step")
                 .argv
                 .iter()
                 .any(|a| a.parts.iter().any(|p| matches!(
                     p,
                     specter_core::ArgPart::Placeholder(specter_core::Placeholder::Created)
                 ))),
-            "diff_command's template references $created"
+            "diff_plan's template references ${{specter.created}}"
         );
         // anchor_path + anchor_kind ⇒ actuator's compute_cwd("anchor", Dir) = "anchor".
         assert_eq!(eff.anchor_path.as_os_str(), "anchor");
@@ -3242,7 +3251,7 @@ fn per_stable_file_skips_dir_entries() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: diff_command(),
+        plan: diff_plan(),
         scope: EffectScope::PerStableFile,
         events: NO_EVENTS,
         log_output: false,
@@ -3502,7 +3511,7 @@ fn per_file_effect_target_matches_dedup_key_resource() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: diff_command(),
+        plan: diff_plan(),
         scope: EffectScope::PerStableFile,
         events: NO_EVENTS,
         log_output: false,
@@ -3676,7 +3685,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::PerStableFile,
         events: ClassSet::CONTENT,
         log_output: false,
@@ -3765,7 +3774,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::PerStableFile,
         events: ClassSet::CONTENT,
         log_output: false,
@@ -3787,7 +3796,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::PerStableFile,
         events: ClassSet::CONTENT,
         log_output: false,
@@ -3818,7 +3827,7 @@ fn structure_only_profile_has_per_file_fds_false() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::STRUCTURE,
         log_output: false,
@@ -4127,7 +4136,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::CONTENT,
         log_output: false,
@@ -4722,7 +4731,7 @@ mod props {
             config: ScanConfig::builder().recursive(true).build(),
             max_settle: MAX_SETTLE,
             settle: SETTLE,
-            command: empty_command(),
+            plan: empty_plan(),
             scope: EffectScope::SubtreeRoot,
             events: NO_EVENTS,
             log_output: false,

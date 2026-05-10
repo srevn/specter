@@ -46,15 +46,21 @@ fn full_fixture_round_trips_every_field() {
     assert_eq!(w.scan.exclude.len(), 2);
     assert_eq!(w.scan.max_depth, Some(5));
     assert_eq!(w.events, ClassSet::STRUCTURE | ClassSet::CONTENT);
-    assert_eq!(w.command.argv.len(), 3);
-    assert_eq!(w.command.argv[0].parts[0], ArgPart::literal("make"));
-    assert_eq!(w.command.argv[1].parts[0], ArgPart::literal("--input="));
+    assert_eq!(w.plan.steps[0].as_exec().expect("exec step").argv.len(), 3);
     assert_eq!(
-        w.command.argv[1].parts[1],
+        w.plan.steps[0].as_exec().expect("exec step").argv[0].parts[0],
+        ArgPart::literal("make")
+    );
+    assert_eq!(
+        w.plan.steps[0].as_exec().expect("exec step").argv[1].parts[0],
+        ArgPart::literal("--input=")
+    );
+    assert_eq!(
+        w.plan.steps[0].as_exec().expect("exec step").argv[1].parts[1],
         ArgPart::Placeholder(Placeholder::Path)
     );
     assert_eq!(
-        w.command.argv[2].parts[0],
+        w.plan.steps[0].as_exec().expect("exec step").argv[2].parts[0],
         ArgPart::Placeholder(Placeholder::Created)
     );
 }
@@ -81,7 +87,7 @@ fn pending_path_round_trips_via_lenient_canonicalization() {
     let td = tempfile::tempdir().unwrap();
     let pending = td.path().join("missing").join("leaf.txt");
     let toml = format!(
-        "[[watch]]\nname = \"p\"\npath = \"{}\"\ncommand = [\"echo\"]",
+        "[[watch]]\nname = \"p\"\npath = \"{}\"\nactions = [{{ exec = [\"echo\"] }}]",
         pending.display(),
     );
     let cfg = Config::from_str(&toml).unwrap();
@@ -156,7 +162,7 @@ fn missing_file_yields_io_error() {
 #[test]
 fn enabled_string_value_yields_parse_error() {
     let toml = "[[watch]]\nname = \"a\"\npath = \"/\"\n\
-                command = [\"echo\"]\nenabled = \"true\"";
+                actions = [{ exec = [\"echo\"] }]\nenabled = \"true\"";
     let err = Config::from_str(toml).unwrap_err();
     assert!(matches!(err, ConfigError::Parse { .. }), "got {err:?}");
 }

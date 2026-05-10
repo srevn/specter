@@ -34,10 +34,10 @@ fn cfg() -> ScanConfig {
     ScanConfig::builder().recursive(true).build()
 }
 
-fn empty_command() -> specter_core::CommandTemplate {
-    specter_core::CommandTemplate::new([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
+fn empty_plan() -> specter_core::ActionPlan {
+    specter_core::ActionPlan::new([specter_core::Action::Exec(specter_core::ExecAction::new([
+        specter_core::ArgTemplate::new([specter_core::ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 /// Build an `Arc<DirSnapshot>` carrying the supplied single-component
@@ -93,7 +93,7 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
         cfg(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -170,7 +170,7 @@ fn descent_two_levels_advances_progressively() {
         cfg(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -419,7 +419,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         cfg(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -489,7 +489,7 @@ fn second_absolute_attach_reuses_fs_root() {
         cfg(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -500,7 +500,7 @@ fn second_absolute_attach_reuses_fs_root() {
         cfg(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -528,7 +528,7 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
         cfg(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -573,7 +573,7 @@ fn descent_probe_uses_descent_variant() {
         user_cfg,
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -691,7 +691,7 @@ fn descent_state_helper_returns_none_for_idle() {
         cfg(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -727,7 +727,7 @@ fn descent_state_helper_returns_none_for_active() {
         cfg(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -829,7 +829,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
         cfg(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,

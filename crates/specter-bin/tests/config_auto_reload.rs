@@ -171,12 +171,12 @@ impl Sandbox {
     }
 
     /// Write a single-`[[watch]]` config bound to `name`, watching
-    /// `self.watched`. `command = ["true"]` is a no-op (so tests don't
+    /// `self.watched`. `actions = [{ exec = ["true"] }]` is a no-op (so tests don't
     /// need to clean up child processes); the ID we care about is the
     /// bin's reload-pipeline log strings, not the subprocess output.
     fn write_one_watch(&self, name: &str) {
         let toml = format!(
-            "[[watch]]\nname = \"{name}\"\npath = \"{}\"\ncommand = [\"true\"]\nsettle = \"50ms\"\n",
+            "[[watch]]\nname = \"{name}\"\npath = \"{}\"\nactions = [{{ exec = [\"true\"] }}]\nsettle = \"50ms\"\n",
             self.watched.display(),
         );
         fs::write(&self.cfg, toml).expect("write config");
@@ -187,8 +187,8 @@ impl Sandbox {
     /// loaded at startup.
     fn write_two_watches(&self, a: &str, b: &str) {
         let toml = format!(
-            "[[watch]]\nname = \"{a}\"\npath = \"{wp}\"\ncommand = [\"true\"]\nsettle = \"50ms\"\n\n\
-             [[watch]]\nname = \"{b}\"\npath = \"{wp}\"\ncommand = [\"true\"]\nsettle = \"50ms\"\n",
+            "[[watch]]\nname = \"{a}\"\npath = \"{wp}\"\nactions = [{{ exec = [\"true\"] }}]\nsettle = \"50ms\"\n\n\
+             [[watch]]\nname = \"{b}\"\npath = \"{wp}\"\nactions = [{{ exec = [\"true\"] }}]\nsettle = \"50ms\"\n",
             wp = self.watched.display(),
         );
         fs::write(&self.cfg, toml).expect("write config");
@@ -458,7 +458,7 @@ fn enabled_toggle_round_trips_via_auto_reload() {
     // the reload's `removed` count is 1.
     let toml_disabled = format!(
         "[[watch]]\nname = \"a\"\npath = \"{}\"\n\
-         command = [\"true\"]\nsettle = \"50ms\"\nenabled = false\n",
+         actions = [{{ exec = [\"true\"] }}]\nsettle = \"50ms\"\nenabled = false\n",
         sb.watched.display(),
     );
     fs::write(&sb.cfg, &toml_disabled).expect("write disabled config");

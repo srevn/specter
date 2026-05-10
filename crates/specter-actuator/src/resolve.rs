@@ -1,6 +1,6 @@
 //! Pure resolver — turns the substitution-domain projection on
-//! [`Effect`] into [`CommandResolved`] argv plus the standard `SPECTER_*`
-//! env-var set.
+//! [`Effect`] plus one [`ExecAction`] step into [`CommandResolved`] argv
+//! plus the standard `SPECTER_*` env-var set.
 //!
 //! Lives next to the actuator because resolution runs immediately before
 //! `spawner.spawn` — Latest-coalesce drops `pending` Effects before they
@@ -12,21 +12,31 @@
 //! actuator's `spawn_effect` is the sole production caller; sibling unit
 //! tests drive directly.
 //!
+//! # The `(Effect, ExecAction)` split
+//!
+//! Per-Effect-stable values live on [`Effect`] (`anchor_path`,
+//! `target_relative`, `sub_name`, `exclude`, `diff`, `key`, `forced`,
+//! `correlation`); the per-step argv template lives on [`ExecAction`].
+//! The caller extracts the step from `effect.plan.steps[i]` and passes
+//! both references in. v1 always passes `steps[0]`; future multi-step
+//! plans pass each step's `ExecAction` in turn.
+//!
 //! # `target_path` is derived, not stored
 //!
 //! The Effect carries `anchor_path: Arc<Path>` and `target_relative:
-//! CompactString`; the resolver derives `target_path` (`$path` /
-//! `SPECTER_PATH`) by joining the two when `target_relative` is non-empty,
-//! or by borrowing `anchor_path` when it is. Subtree fires (always empty
-//! relative) avoid the `PathBuf` allocation entirely; PerFile fires
-//! allocate exactly once per resolve, at the spawn boundary where
-//! Latest-coalesce has already filtered Effects that won't run.
+//! CompactString`; the resolver derives `target_path`
+//! (`${specter.path}` / `SPECTER_PATH`) by joining the two when
+//! `target_relative` is non-empty, or by borrowing `anchor_path` when
+//! it is. Subtree fires (always empty relative) avoid the `PathBuf`
+//! allocation entirely; PerFile fires allocate exactly once per
+//! resolve, at the spawn boundary where Latest-coalesce has already
+//! filtered Effects that won't run.
 //!
 //! # `SPECTER_DIFF_PATH` slots in alphabetically
 //!
 //! The actuator's `spawn_effect` materialises the diff tmp file (path
 //! depends on the actuator process's pid, so it can't be derived purely)
-//! and passes the resulting `&Path` to [`resolve_effect`] as `diff_path`.
+//! and passes the resulting `&Path` to [`resolve_step`] as `diff_path`.
 //! The resolver inserts `SPECTER_DIFF_PATH` at its alphabetical position
 //! in the env vec rather than relying on the caller to append after the
 //! fact. The env-order golden test ([`tests::env_order_is_alphabetical`])
@@ -35,17 +45,19 @@
 //!
 //! # Argv substitution semantics
 //!
-//! Each [`ArgTemplate`] in `Effect.command.argv` produces one or more
-//! argv slots. The walk is single-pass with a prefix accumulator:
+//! Each [`ArgTemplate`] in `ExecAction.argv` produces one or more argv
+//! slots. The walk is single-pass with a prefix accumulator:
 //!
-//! - **Literals** and **single-value placeholders** (`$path`,
-//!   `$relative`, `$anchor`, `$watch`, `$parent`, `$time`) append to
-//!   the prefix.
-//! - **Multi-value placeholders** (`$created`, `$deleted`, `$modified`,
-//!   `$renamed_from`, `$renamed_to`, `$excluded`) emit one argv slot
-//!   per source entry, each prefixed by the accumulated prefix; then
-//!   the accumulator resets to empty. The first five source from
-//!   `Diff`; `$excluded` sources from `effect.exclude`.
+//! - **Literals** and **single-value placeholders** (`${specter.path}`,
+//!   `${specter.relative}`, `${specter.anchor}`, `${specter.watch}`,
+//!   `${specter.parent}`, `${specter.time}`) append to the prefix.
+//! - **Multi-value placeholders** (`${specter.created}`,
+//!   `${specter.deleted}`, `${specter.modified}`,
+//!   `${specter.renamed_from}`, `${specter.renamed_to}`,
+//!   `${specter.excluded}`) emit one argv slot per source entry, each
+//!   prefixed by the accumulated prefix; then the accumulator resets
+//!   to empty. The first five source from `Diff`; `${specter.excluded}`
+//!   sources from `effect.exclude`.
 //! - At end-of-template: if anything was ever emitted from a multi-value,
 //!   any remaining accumulator becomes a standalone trailing slot. If
 //!   nothing was emitted (no multi-value found), the single-slot
@@ -54,12 +66,13 @@
 //!   zero entries (empty diff list, `diff = None`, or empty exclude
 //!   list) produces zero argv slots — there's no value to emit, and
 //!   dropping the surrounding prefix is the principle-of-least-surprise
-//!   (`["fmt", "$created"]` with no created entries is just `["fmt"]`).
+//!   (`["fmt", "${specter.created}"]` with no created entries is just
+//!   `["fmt"]`).
 //!
 //! Two multi-value placeholders within one template (exotic; e.g.
-//! `["mv $renamed_from $renamed_to"]` as one quoted arg) expand
-//! **independently** — no parallel zip. Users wanting per-pair semantics
-//! use `EffectScope::PerStableFile`.
+//! `["mv ${specter.renamed_from} ${specter.renamed_to}"]` as one quoted
+//! arg) expand **independently** — no parallel zip. Users wanting
+//! per-pair semantics use `EffectScope::PerStableFile`.
 //!
 //! # Env catalog
 //!
@@ -94,29 +107,32 @@
 //!
 //! # Single rendering pass per resolve
 //!
-//! `format_now(now)` and the `$parent` string are computed exactly once
-//! at the top of [`resolve_effect`] and threaded through both
-//! `substitute_argv` and `build_env`. The `$time` argv slot and
-//! `SPECTER_TIME` env value, plus `$parent` and `SPECTER_PARENT`, share
-//! the same source string by construction — no risk of one surface
-//! formatting differently from the other under future edits.
+//! `format_now(now)` and the `${specter.parent}` string are computed
+//! exactly once at the top of [`resolve_step`] and threaded through
+//! both `substitute_argv` and `build_env`. The `${specter.time}` argv
+//! slot and `SPECTER_TIME` env value, plus `${specter.parent}` and
+//! `SPECTER_PARENT`, share the same source string by construction — no
+//! risk of one surface formatting differently from the other under
+//! future edits.
 
 use crate::spawner::EnvVar;
 use specter_core::{
-    ArgPart, ArgTemplate, CommandResolved, DedupKey, Diff, Effect, Placeholder, ResourceKind,
+    ArgPart, ArgTemplate, CommandResolved, DedupKey, Diff, Effect, ExecAction, Placeholder,
+    ResourceKind,
 };
 use std::borrow::Cow;
 use std::path::Path;
 use std::time::SystemTime;
 
-/// Resolve an Effect's command + env from its substitution-domain
-/// projection. See module docs.
+/// Resolve one [`ExecAction`] step against its owning [`Effect`] —
+/// rendering argv plus the standard `SPECTER_*` env-var set. See module
+/// docs.
 ///
 /// `now` is sampled by the actuator's `spawn_effect` immediately before
-/// `spawner.spawn` and reused for the `$time` argv slot AND the
-/// `SPECTER_TIME` env value — they agree on the wall-clock instant
-/// immediately before the kernel runs the user's command. Tests inject a
-/// deterministic `now`; production sources `SystemTime::now()`.
+/// `spawner.spawn` and reused for the `${specter.time}` argv slot AND
+/// the `SPECTER_TIME` env value — they agree on the wall-clock instant
+/// immediately before the kernel runs the user's command. Tests inject
+/// a deterministic `now`; production sources `SystemTime::now()`.
 ///
 /// `diff_path` is the absolute path of the actuator-materialised diff tmp
 /// file when the Effect carries a [`Diff`] AND the file write succeeded;
@@ -124,8 +140,9 @@ use std::time::SystemTime;
 /// alphabetical position iff this is `Some`, keeping env order total
 /// across the spawn-time set the child observes.
 #[must_use]
-pub(crate) fn resolve_effect<'a>(
+pub(crate) fn resolve_step<'a>(
     effect: &'a Effect,
+    exec: &'a ExecAction,
     now: SystemTime,
     diff_path: Option<&'a Path>,
 ) -> (CommandResolved, Vec<EnvVar<'a>>) {
@@ -134,7 +151,7 @@ pub(crate) fn resolve_effect<'a>(
     let parent_str = parent_string(&target_path);
     let time_str = format_now(now);
 
-    let argv = substitute_argv(effect, &target_path, &parent_str, &time_str);
+    let argv = substitute_argv(exec, effect, &target_path, &parent_str, &time_str);
     // Argv done with `parent_str` / `time_str` — move them into the env
     // vec as `Cow::Owned` instead of cloning at the SPECTER_PARENT /
     // SPECTER_TIME push sites.
@@ -184,14 +201,15 @@ fn compute_target_path(effect: &Effect) -> Cow<'_, Path> {
     }
 }
 
-/// Substitute placeholders into argv slots.
+/// Substitute placeholders into argv slots for one step.
 fn substitute_argv(
+    exec: &ExecAction,
     effect: &Effect,
     target_path: &Path,
     parent_str: &str,
     time_str: &str,
 ) -> Vec<String> {
-    let template = &effect.command.argv;
+    let template = &exec.argv;
     let mut argv = Vec::with_capacity(template.len());
     for arg in template {
         substitute_one(
@@ -391,11 +409,11 @@ fn format_now(now: SystemTime) -> String {
 /// matches positional `getenv` reads).
 ///
 /// `target_path`, `parent_str`, `time_str` are pre-rendered in
-/// [`resolve_effect`] so this function and [`substitute_argv`] share the
-/// same byte sequences for `$path / SPECTER_PATH`, `$parent /
-/// SPECTER_PARENT`, and `$time / SPECTER_TIME` respectively. `parent_str`
-/// and `time_str` arrive by-value and move into the env vec via
-/// `Cow::Owned`.
+/// [`resolve_step`] so this function and [`substitute_argv`] share the
+/// same byte sequences for `${specter.path}` / `SPECTER_PATH`,
+/// `${specter.parent}` / `SPECTER_PARENT`, and `${specter.time}` /
+/// `SPECTER_TIME` respectively. `parent_str` and `time_str` arrive
+/// by-value and move into the env vec via `Cow::Owned`.
 ///
 /// Values are `Cow<'a, str>` so fields already living on the [`Effect`]
 /// (anchor path lossy, `target_relative`, `sub_name`) and the

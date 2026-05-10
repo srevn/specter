@@ -15,8 +15,8 @@
 )]
 
 use specter_core::{
-    ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope, Input, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    ActionPlan, ClassSet, DirMeta, DirSnapshot, EffectScope, ExecAction, Input, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
     SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
@@ -28,10 +28,10 @@ const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        specter_core::ArgTemplate::new([specter_core::ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 /// Empty `TreeSnapshot::Dir` rooted at `root`.
@@ -65,7 +65,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -99,7 +99,7 @@ fn root_anchor_has_no_watch_root_parent() {
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -124,7 +124,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -184,7 +184,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -198,7 +198,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -232,7 +232,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             ScanConfig::builder().recursive(false).build(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -252,7 +252,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
-            empty_command(),
+            empty_plan(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,

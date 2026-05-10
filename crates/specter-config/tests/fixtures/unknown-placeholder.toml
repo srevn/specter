@@ -1,7 +1,8 @@
 [[watch]]
 name    = "build"
 path    = "/"
-# Lowercase non-catalog name: typo of `$path`. Uppercase names like
-# `$Path` / `$SPECTER_PATH` pass through as literal for shell expansion;
-# only lowercase catalog misses are typos.
-command = ["fmt", "$paht"]
+# Typo inside the Specter namespace: `${specter.paht}` is a well-formed
+# placeholder reference but `paht` isn't in the catalog. Bare `$paht`
+# would now pass through as a literal — shell territory — so the typo
+# guard fires only inside the explicit namespace.
+actions = [{ exec = ["fmt", "${specter.paht}"] }]

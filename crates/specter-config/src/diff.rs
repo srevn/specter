@@ -160,28 +160,32 @@ mod tests {
         Config::from_str(&s).expect("config valid")
     }
 
-    fn block(name: &str, command: &str) -> String {
-        format!("[[watch]]\nname = \"{name}\"\npath = \"{ROOT}\"\ncommand = [\"{command}\"]")
+    fn block(name: &str, exec: &str) -> String {
+        format!(
+            "[[watch]]\nname = \"{name}\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"{exec}\"] }}]"
+        )
     }
 
     /// Build a watch block with an explicit `settle`. `max_settle` is
     /// left to the default (1h), which is comfortably above the floor
     /// for any reasonable `settle`.
-    fn block_full(name: &str, command: &str, settle: &str) -> String {
+    fn block_full(name: &str, exec: &str, settle: &str) -> String {
         format!(
             "[[watch]]\nname = \"{name}\"\npath = \"{ROOT}\"\n\
-             command = [\"{command}\"]\nsettle = \"{settle}\"\n",
+             actions = [{{ exec = [\"{exec}\"] }}]\nsettle = \"{settle}\"\n",
         )
     }
 
-    fn dyn_block(name: &str, pattern: &str, command: &str) -> String {
-        format!("[[watch]]\nname = \"{name}\"\npath = \"{pattern}\"\ncommand = [\"{command}\"]")
+    fn dyn_block(name: &str, pattern: &str, exec: &str) -> String {
+        format!(
+            "[[watch]]\nname = \"{name}\"\npath = \"{pattern}\"\nactions = [{{ exec = [\"{exec}\"] }}]"
+        )
     }
 
-    fn dyn_block_full(name: &str, pattern: &str, command: &str, settle: &str) -> String {
+    fn dyn_block_full(name: &str, pattern: &str, exec: &str, settle: &str) -> String {
         format!(
             "[[watch]]\nname = \"{name}\"\npath = \"{pattern}\"\n\
-             command = [\"{command}\"]\nsettle = \"{settle}\"\n",
+             actions = [{{ exec = [\"{exec}\"] }}]\nsettle = \"{settle}\"\n",
         )
     }
 
@@ -401,7 +405,7 @@ mod tests {
         let old_blocks = [block("a", "echo")];
         let new_blocks = [format!(
             "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
-             command = [\"echo\"]\nevents = [\"content\"]"
+             actions = [{{ exec = [\"echo\"] }}]\nevents = [\"content\"]"
         )];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
@@ -423,7 +427,7 @@ mod tests {
         let old_blocks = [block("a", "echo")];
         let new_blocks = [format!(
             "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
-             command = [\"echo\"]\nevents = [\"structure\", \"content\"]"
+             actions = [{{ exec = [\"echo\"] }}]\nevents = [\"structure\", \"content\"]"
         )];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
@@ -437,11 +441,11 @@ mod tests {
         // collapses both orderings to the same ClassSet.
         let old_blocks = [format!(
             "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
-             command = [\"echo\"]\nevents = [\"structure\", \"content\"]"
+             actions = [{{ exec = [\"echo\"] }}]\nevents = [\"structure\", \"content\"]"
         )];
         let new_blocks = [format!(
             "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
-             command = [\"echo\"]\nevents = [\"content\", \"structure\"]"
+             actions = [{{ exec = [\"echo\"] }}]\nevents = [\"content\", \"structure\"]"
         )];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
@@ -693,17 +697,17 @@ mod tests {
 
     // ---- Enabled-toggle transitions ----
 
-    fn block_with_enabled(name: &str, command: &str, enabled: bool) -> String {
+    fn block_with_enabled(name: &str, exec: &str, enabled: bool) -> String {
         format!(
             "[[watch]]\nname = \"{name}\"\npath = \"{ROOT}\"\n\
-             command = [\"{command}\"]\nenabled = {enabled}\n",
+             actions = [{{ exec = [\"{exec}\"] }}]\nenabled = {enabled}\n",
         )
     }
 
-    fn dyn_block_with_enabled(name: &str, pattern: &str, command: &str, enabled: bool) -> String {
+    fn dyn_block_with_enabled(name: &str, pattern: &str, exec: &str, enabled: bool) -> String {
         format!(
             "[[watch]]\nname = \"{name}\"\npath = \"{pattern}\"\n\
-             command = [\"{command}\"]\nenabled = {enabled}\n",
+             actions = [{{ exec = [\"{exec}\"] }}]\nenabled = {enabled}\n",
         )
     }
 

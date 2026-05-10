@@ -160,7 +160,7 @@ mod tests {
     [[watch]]
     name    = "build"
     path    = "/tmp"
-    command = ["true"]
+    actions = [{ exec = ["true"] }]
     "#;
         Config::from_str(toml).expect("fixture parses")
     }
@@ -236,8 +236,9 @@ mod tests {
     /// ceiling).
     #[test]
     fn derive_drain_window_static_only_uses_static_min() {
-        let loader =
-            loader_with_toml("[[watch]]\nname = \"a\"\npath = \"/tmp\"\ncommand = [\"echo\"]");
+        let loader = loader_with_toml(
+            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\nactions = [{ exec = [\"echo\"] }]",
+        );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(50));
     }
 
@@ -245,8 +246,9 @@ mod tests {
     /// settle now folds into the min computation.
     #[test]
     fn derive_drain_window_dynamic_only_uses_dynamic_min() {
-        let loader =
-            loader_with_toml("[[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]");
+        let loader = loader_with_toml(
+            "[[watch]]\nname = \"d\"\npath = \"/srv/*\"\nactions = [{ exec = [\"echo\"] }]",
+        );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(50));
     }
 
@@ -256,9 +258,9 @@ mod tests {
     #[test]
     fn derive_drain_window_mixed_uses_overall_min() {
         let loader = loader_with_toml(
-            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\ncommand = [\"echo\"]\n\
+            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\nactions = [{ exec = [\"echo\"] }]\n\
              settle = \"1000ms\"\n\
-             [[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n\
+             [[watch]]\nname = \"d\"\npath = \"/srv/*\"\nactions = [{ exec = [\"echo\"] }]\n\
              settle = \"100ms\"\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(25));
@@ -269,9 +271,9 @@ mod tests {
     #[test]
     fn derive_drain_window_mixed_static_smaller() {
         let loader = loader_with_toml(
-            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\ncommand = [\"echo\"]\n\
+            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\nactions = [{ exec = [\"echo\"] }]\n\
              settle = \"100ms\"\n\
-             [[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n\
+             [[watch]]\nname = \"d\"\npath = \"/srv/*\"\nactions = [{ exec = [\"echo\"] }]\n\
              settle = \"1000ms\"\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(25));
@@ -282,7 +284,7 @@ mod tests {
     #[test]
     fn derive_drain_window_tiny_settle_clamps_to_floor() {
         let loader = loader_with_toml(
-            "[[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n\
+            "[[watch]]\nname = \"d\"\npath = \"/srv/*\"\nactions = [{ exec = [\"echo\"] }]\n\
              settle = \"40ms\"\nmax_settle = \"200ms\"\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(10));
@@ -292,7 +294,7 @@ mod tests {
     #[test]
     fn derive_drain_window_sub_floor_dynamic_settle_clamps_to_floor() {
         let loader = loader_with_toml(
-            "[[watch]]\nname = \"d\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\n\
+            "[[watch]]\nname = \"d\"\npath = \"/srv/*\"\nactions = [{ exec = [\"echo\"] }]\n\
              settle = \"1ms\"\nmax_settle = \"60ms\"\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(10));
@@ -307,9 +309,9 @@ mod tests {
     #[test]
     fn derive_drain_window_ignores_disabled_settle() {
         let loader = loader_with_toml(
-            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\ncommand = [\"echo\"]\n\
+            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\nactions = [{ exec = [\"echo\"] }]\n\
              settle = \"1000ms\"\n\
-             [[watch]]\nname = \"b\"\npath = \"/tmp\"\ncommand = [\"echo\"]\n\
+             [[watch]]\nname = \"b\"\npath = \"/tmp\"\nactions = [{ exec = [\"echo\"] }]\n\
              settle = \"1ms\"\nmax_settle = \"60ms\"\nenabled = false\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(50));
@@ -321,8 +323,8 @@ mod tests {
     #[test]
     fn derive_drain_window_all_disabled_returns_floor() {
         let loader = loader_with_toml(
-            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\ncommand = [\"echo\"]\nenabled = false\n\
-             [[watch]]\nname = \"b\"\npath = \"/srv/*\"\ncommand = [\"echo\"]\nenabled = false\n",
+            "[[watch]]\nname = \"a\"\npath = \"/tmp\"\nactions = [{ exec = [\"echo\"] }]\nenabled = false\n\
+             [[watch]]\nname = \"b\"\npath = \"/srv/*\"\nactions = [{ exec = [\"echo\"] }]\nenabled = false\n",
         );
         assert_eq!(loader.derive_drain_window(), Duration::from_millis(10));
     }

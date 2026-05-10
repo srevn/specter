@@ -1,9 +1,9 @@
 [[watch]]
 name    = "build"
 path    = "/"
-command = ["echo"]
+actions = [{ exec = ["echo"] }]
 
 [[watch]]
 name    = "build"
 path    = "/"
-command = ["echo"]
+actions = [{ exec = ["echo"] }]

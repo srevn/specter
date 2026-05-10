@@ -15,10 +15,10 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, ClassSet, CommandTemplate, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachRequest,
+    ActionPlan, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
+    EntryKind, ExecAction, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachRequest,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -30,10 +30,10 @@ const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        specter_core::ArgTemplate::new([specter_core::ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 /// V5-native helper: build a `DirSnapshot` rooted at `target` (the
@@ -94,7 +94,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -189,7 +189,7 @@ fn pending_path_failed_probe_retains_state() {
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -235,7 +235,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -294,7 +294,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -363,7 +363,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -425,7 +425,7 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -533,7 +533,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -569,7 +569,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -609,7 +609,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_command(),
+        empty_plan(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,

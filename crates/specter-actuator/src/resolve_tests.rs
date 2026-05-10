@@ -11,9 +11,9 @@ use crate::spawner::EnvVar;
 use compact_str::CompactString;
 use smallvec::smallvec;
 use specter_core::{
-    ArgPart, ArgTemplate, CommandResolved, CommandTemplate, CorrelationId, DedupKey, Diff, Effect,
-    EffectScope, EntryKind, EntryRef, Placeholder, ProfileId, Rename, ResourceId, ResourceKind,
-    SubId,
+    Action, ActionPlan, ArgPart, ArgTemplate, CommandResolved, CorrelationId, DedupKey, Diff,
+    Effect, EffectScope, EntryKind, EntryRef, ExecAction, Placeholder, ProfileId, Rename,
+    ResourceId, ResourceKind, SubId,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -21,11 +21,21 @@ use std::time::SystemTime;
 
 /// Convenience wrapper for tests that don't exercise `$time` /
 /// `SPECTER_TIME` rendering — pins `now` to the Unix epoch and omits the
-/// diff tmp file. Time-sensitive tests call [`super::resolve_effect`]
+/// diff tmp file. Time-sensitive tests call [`super::resolve_step`]
 /// directly with the instant they want; diff-tmp-aware tests pass
 /// `diff_path: Some(_)` directly.
 fn resolve(e: &Effect) -> (CommandResolved, Vec<EnvVar<'_>>) {
-    super::resolve_effect(e, SystemTime::UNIX_EPOCH, None)
+    let exec = exec_of(e);
+    super::resolve_step(e, exec, SystemTime::UNIX_EPOCH, None)
+}
+
+/// Borrow the single [`ExecAction`] inside an [`Effect`]'s plan. Tests
+/// build effects with exactly one `Action::Exec` step; this is a
+/// fixture-side accessor, not a production API.
+fn exec_of(e: &Effect) -> &ExecAction {
+    match &e.plan.steps[0] {
+        Action::Exec(exec) => exec,
+    }
 }
 
 /// `target_path` is no longer a field on [`Effect`] — the resolver
@@ -64,7 +74,7 @@ fn make_effect(
         diff,
         capture_output: false,
         sub_name: CompactString::from(sub_name),
-        command: Arc::new(CommandTemplate::new(argv)),
+        plan: Arc::new(ActionPlan::new([Action::Exec(ExecAction::new(argv))])),
         anchor_path: Arc::from(anchor_path.to_path_buf()),
         anchor_kind: ResourceKind::Dir,
         target_relative: CompactString::from(target_relative),
@@ -300,7 +310,7 @@ fn resolve_time_uses_injected_now() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _) = super::resolve_effect(&e, now, None);
+    let (cmd, _) = super::resolve_step(&e, exec_of(&e), now, None);
     assert_eq!(cmd.argv, vec![FIXED_NOW_RFC3339.to_owned()]);
 }
 
@@ -317,7 +327,7 @@ fn env_specter_time_uses_injected_now() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_effect(&e, now, None);
+    let (_, env) = super::resolve_step(&e, exec_of(&e), now, None);
     assert_eq!(
         env.iter().find(|e| e.key == "SPECTER_TIME").unwrap().value,
         FIXED_NOW_RFC3339
@@ -341,7 +351,7 @@ fn format_now_clamps_pre_epoch() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _) = super::resolve_effect(&e, pre, None);
+    let (cmd, _) = super::resolve_step(&e, exec_of(&e), pre, None);
     assert_eq!(cmd.argv, vec!["1970-01-01T00:00:00Z".to_owned()]);
 }
 
@@ -1191,7 +1201,7 @@ fn env_order_with_diff_path_is_alphabetical() {
         None,
     );
     let diff_path = Path::new("/tmp/specter-1234-deadbeef.diff");
-    let (_, env) = super::resolve_effect(&e, SystemTime::UNIX_EPOCH, Some(diff_path));
+    let (_, env) = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, Some(diff_path));
     let keys: Vec<&str> = env.iter().map(|e| e.key).collect();
     assert_eq!(
         keys,

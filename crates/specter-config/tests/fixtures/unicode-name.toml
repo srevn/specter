@@ -1,4 +1,4 @@
 [[watch]]
 name    = "build-🚀"
 path    = "/"
-command = ["echo"]
+actions = [{ exec = ["echo"] }]

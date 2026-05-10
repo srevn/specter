@@ -26,7 +26,7 @@ Tested on macOS and FreeBSD.
 
 Conventional file-watch tools fire on every kernel event. The result is
 a flurry of redundant runs against partially-written files. Specter
-inverts the contract: events restart a settle timer; commands fire
+inverts the contract: events restart a settle timer; reactions fire
 **only after the burst has decayed**, against a snapshot of the tree
 that includes every change up to that quiescent point.
 
@@ -38,7 +38,7 @@ Concretely:
 - Hierarchical content hashing — re-running the same edit (saving
   with no changes, touching mtime, idempotent reformatters) does not
   re-fire the command.
-- Self-event absorption — the command itself usually writes inside
+- Self-event absorption — the reaction itself usually writes inside
   the watched tree; Specter folds those events into the post-fire
   rebase rather than treating them as a fresh burst.
 - A built-in `--config` reload pipeline (SIGHUP) and supervisor
@@ -84,11 +84,13 @@ level       = "info"                  # trace | debug | info | warn | error
 destination = "stderr"                # stderr | file
 # path      = "/var/log/specter.log"  # required when destination = "file"
 
-# One [[watch]] block per command. Names must be unique.
+# One [[watch]] block per reaction. Names must be unique. The `actions`
+# array names what should run when the watch settles; v1 carries one
+# entry per watch (multi-step plans land in a follow-up).
 [[watch]]
 name      = "rebuild"                 # identifies this watch in logs
 path      = "/srv/repo/src"           # absolute; pending paths supported
-command   = ["cargo", "build"]        # argv-only (no shell expansion)
+actions   = [{ exec = ["cargo", "build"] }]  # argv-only (no shell expansion)
 
 # Optional knobs (defaults shown).
 # enabled    = true                   # false ⇒ inert at runtime; toggle without deleting
@@ -106,49 +108,76 @@ settle       = "200ms"                # debounce window after the last event
 [[watch]]
 name       = "format-each"
 path       = "/srv/repo/docs"
-command    = ["prettier", "--write", "$path"]
+actions    = [{ exec = ["prettier", "--write", "${specter.path}"] }]
 scope      = "per-stable-file"        # one Effect per stable file
 pattern    = "**/*.md"
 log_output = true                     # send formatter output to the journal
 ```
 
+The `actions` array also accepts the equivalent block-table form, which
+reads better for longer watches:
+
+```toml
+[[watch]]
+name = "format-each"
+path = "/srv/repo/docs"
+
+[[watch.actions]]
+exec = ["prettier", "--write", "${specter.path}"]
+```
+
 ### Placeholders
 
-`command` slots reference Specter's lowercase-only substitution catalog.
+`exec` argv slots reference Specter's substitution catalog through the
+`${specter.<name>}` namespace. Anything else `$`-shaped — bare
+`$NAME`, `${VAR}`, `$5` — passes through to the spawned process
+verbatim, so shell, awk, perl, or make idioms inside an `sh -c` slot
+keep working.
+
 Single-value placeholders render one string into the surrounding argv
 slot:
 
-| Placeholder | Meaning                                                                |
-|-------------|------------------------------------------------------------------------|
-| `$path`     | Absolute path of the target (`per-stable-file`) or anchor (`subtree-root`) |
-| `$relative` | Path relative to the watch anchor (empty for `subtree-root`)           |
-| `$anchor`   | Absolute path of the watch's anchor                                    |
-| `$parent`   | Parent directory of `$path` (empty only for a subtree-root anchored at `/`) |
-| `$watch`    | Watch name (the `[[watch]] name` field)                                |
-| `$time`     | Wall-clock instant sampled immediately before spawn, RFC 3339 UTC, second-precision (`2026-05-10T12:34:56Z`) |
+| Placeholder           | Meaning                                                                |
+|-----------------------|------------------------------------------------------------------------|
+| `${specter.path}`     | Absolute path of the target (`per-stable-file`) or anchor (`subtree-root`) |
+| `${specter.relative}` | Path relative to the watch anchor (empty for `subtree-root`)           |
+| `${specter.anchor}`   | Absolute path of the watch's anchor                                    |
+| `${specter.parent}`   | Parent directory of `${specter.path}` (empty only for a subtree-root anchored at `/`) |
+| `${specter.watch}`    | Watch name (the `[[watch]] name` field)                                |
+| `${specter.time}`     | Wall-clock instant sampled immediately before spawn, RFC 3339 UTC, second-precision (`2026-05-10T12:34:56Z`) |
 
 Multi-value placeholders produce **one argv slot per value**, with any
 surrounding literal prefix tiled into each slot; an empty list drops the
 entire surrounding slot:
 
-| Placeholder     | Source                                       |
-|-----------------|----------------------------------------------|
-| `$created`      | New entries (anchor-relative segments)       |
-| `$deleted`      | Deleted entries                              |
-| `$modified`     | Entries with changed content                 |
-| `$renamed_from` | Source side of each rename                   |
-| `$renamed_to`   | Target side of each rename                   |
-| `$excluded`     | The watch's `exclude` patterns               |
+| Placeholder                | Source                                       |
+|----------------------------|----------------------------------------------|
+| `${specter.created}`       | New entries (anchor-relative segments)       |
+| `${specter.deleted}`       | Deleted entries                              |
+| `${specter.modified}`      | Entries with changed content                 |
+| `${specter.renamed_from}`  | Source side of each rename                   |
+| `${specter.renamed_to}`    | Target side of each rename                   |
+| `${specter.excluded}`      | The watch's `exclude` patterns               |
 
 Example — `rsync` with one `--exclude=` per pattern:
 
 ```toml
-command = ["rsync", "-av", "--exclude=$excluded", "$anchor/", "/backup/"]
+actions = [{ exec = ["rsync", "-av", "--exclude=${specter.excluded}", "${specter.anchor}/", "/backup/"] }]
 # argv = ["rsync", "-av", "--exclude=*.tmp", "--exclude=cache/", "/srv/repo/", "/backup/"]
 ```
 
-Uppercase `$NAMES` (e.g. `$HOME`, `$SPECTER_PATH`) pass through verbatim
-so a spawned shell (`["sh", "-c", "..."]`) can expand them.
+Two escape rules round out the grammar:
+
+- `$$` — a literal `$`. Use `$$$$` to pass `$$` through to a shell that
+  wants to expand its PID.
+- `${specter.<unknown>}` — a typo guard fires (fail-loud) only inside
+  the explicit namespace. `${specter.PATH}`, `${specter.}`, and
+  unterminated `${specter.path` likewise error during config validation.
+
+Anything that doesn't match `${specter.<name>}` exactly — `$path`,
+`${specter}` (no dot), `${SPECTER.path}` (uppercase prefix),
+`${HOME}` — is literal pass-through. The shell, if any, sees those
+bytes unchanged.
 
 ### Environment variables
 
@@ -157,22 +186,22 @@ inherited parent environment:
 
 | Variable                | Value                                                                |
 |-------------------------|----------------------------------------------------------------------|
-| `SPECTER_PATH`          | mirrors `$path`                                                      |
-| `SPECTER_RELATIVE_PATH` | mirrors `$relative`                                                  |
-| `SPECTER_ANCHOR`        | mirrors `$anchor`                                                    |
-| `SPECTER_PARENT`        | mirrors `$parent`                                                    |
-| `SPECTER_WATCH`         | mirrors `$watch`                                                     |
-| `SPECTER_TIME`          | mirrors `$time` (same instant — the resolver samples once per spawn) |
-| `SPECTER_EXCLUDED`      | mirrors `$excluded` (newline-separated, no trailing newline)         |
-| `SPECTER_CREATED`       | mirrors `$created` (newline-separated, empty when no diff)           |
-| `SPECTER_DELETED`       | mirrors `$deleted` (newline-separated, empty when no diff)           |
-| `SPECTER_MODIFIED`      | mirrors `$modified` (newline-separated, empty when no diff)          |
-| `SPECTER_RENAMED_FROM`  | mirrors `$renamed_from` (newline-separated, empty when no diff)      |
-| `SPECTER_RENAMED_TO`    | mirrors `$renamed_to` (newline-separated, empty when no diff)        |
+| `SPECTER_PATH`          | mirrors `${specter.path}`                                            |
+| `SPECTER_RELATIVE_PATH` | mirrors `${specter.relative}`                                        |
+| `SPECTER_ANCHOR`        | mirrors `${specter.anchor}`                                          |
+| `SPECTER_PARENT`        | mirrors `${specter.parent}`                                          |
+| `SPECTER_WATCH`         | mirrors `${specter.watch}`                                           |
+| `SPECTER_TIME`          | mirrors `${specter.time}` (same instant — the resolver samples once per spawn) |
+| `SPECTER_EXCLUDED`      | mirrors `${specter.excluded}` (newline-separated, no trailing newline) |
+| `SPECTER_CREATED`       | mirrors `${specter.created}` (newline-separated, empty when no diff) |
+| `SPECTER_DELETED`       | mirrors `${specter.deleted}` (newline-separated, empty when no diff) |
+| `SPECTER_MODIFIED`      | mirrors `${specter.modified}` (newline-separated, empty when no diff) |
+| `SPECTER_RENAMED_FROM`  | mirrors `${specter.renamed_from}` (newline-separated, empty when no diff) |
+| `SPECTER_RENAMED_TO`    | mirrors `${specter.renamed_to}` (newline-separated, empty when no diff) |
 | `SPECTER_EVENT_KIND`    | `dir-subtree` or `file`                                              |
 | `SPECTER_FORCED`        | `0` or `1` — `1` when the burst crossed `max_settle` before settling |
 | `SPECTER_CORRELATION`   | per-Effect monotonic decimal id                                      |
-| `SPECTER_DIFF_PATH`     | absolute path of a tab-separated diff file (set only when the watch's command references diff-derived placeholders or `scope = "per-stable-file"`; the file is removed once the command exits) |
+| `SPECTER_DIFF_PATH`     | absolute path of a tab-separated diff file (set only when the watch's actions reference diff-derived placeholders or `scope = "per-stable-file"`; the file is removed once the command exits) |
 
 ### CLI flags
 
@@ -199,7 +228,7 @@ For more elaborate routing (notifications, conditional teeing), use a
 shell wrapper:
 
 ```toml
-command = ["sh", "-c", "build.sh 2>&1 | tee /tmp/last && curl -d @/tmp/last ntfy.sh/topic"]
+actions = [{ exec = ["sh", "-c", "build.sh 2>&1 | tee /tmp/last && curl -d @/tmp/last ntfy.sh/topic"] }]
 ```
 
 ## Layout

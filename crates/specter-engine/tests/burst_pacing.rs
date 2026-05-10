@@ -18,9 +18,9 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, ChildEntry, ClassSet, CommandTemplate, DirMeta, DirSnapshot, EffectScope,
-    FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    ActionPlan, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope,
+    ExecAction, FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
 };
 use specter_engine::{Engine, SubAttachRequest};
 use std::collections::BTreeMap;
@@ -30,8 +30,10 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 
-fn empty_command() -> CommandTemplate {
-    CommandTemplate::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
+fn empty_plan() -> ActionPlan {
+    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
+        ArgTemplate::new([ArgPart::literal("/bin/true")]),
+    ]))])
 }
 
 fn empty_dir_snap(root: ResourceId) -> Arc<DirSnapshot> {
@@ -87,7 +89,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::CONTENT,
         log_output: false,
@@ -194,7 +196,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        command: empty_command(),
+        plan: empty_plan(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::CONTENT,
         log_output: false,
