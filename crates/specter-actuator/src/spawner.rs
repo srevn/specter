@@ -10,8 +10,31 @@
 //! racing PID-reuse.
 
 use specter_core::EffectOutcome;
+use std::borrow::Cow;
 use std::io;
 use std::path::Path;
+
+/// One `(name, value)` env-var pair the spawner passes to the child.
+///
+/// `key` is `&'static str` because every env-var name the resolver
+/// emits is a literal (`"SPECTER_*"`); allocating those at the trait
+/// boundary would be pure waste. `value` is `Cow<'_, str>` so the
+/// resolver can borrow from the [`specter_core::Effect`] (anchor path
+/// lossy-rendered, `target_relative`, `sub_name`, etc.) when the data
+/// is already there, and own only the strings it genuinely synthesises
+/// (newline-joined diff lists, formatted timestamp, parent-dir lossy,
+/// joined target path). The trait shape thereby matches the producer's
+/// natural lifetimes instead of forcing a flatten-to-owned hop.
+///
+/// The lifetime parameter `'a` ties the borrow to the source data: in
+/// production, the resolver returns a `Vec<EnvVar<'_>>` borrowing from
+/// the `Effect` and the optional diff-tmp path, both of which outlive
+/// the synchronous `Spawner::spawn` call.
+#[derive(Clone, Debug)]
+pub struct EnvVar<'a> {
+    pub key: &'static str,
+    pub value: Cow<'a, str>,
+}
 
 /// Process spawner — the single I/O seam between the actuator's
 /// (otherwise pure) state machine and the OS.
@@ -35,7 +58,7 @@ pub trait Spawner: Send + Sync {
     fn spawn(
         &self,
         argv: &[String],
-        env: &[(String, String)],
+        env: &[EnvVar<'_>],
         cwd: &Path,
         capture_output: bool,
     ) -> io::Result<SpawnHandles>;

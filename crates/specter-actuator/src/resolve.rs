@@ -61,6 +61,37 @@
 //! **independently** — no parallel zip. Users wanting per-pair semantics
 //! use `EffectScope::PerStableFile`.
 //!
+//! # Env catalog
+//!
+//! Every multi-value placeholder has an env-var counterpart whose value
+//! is the same source list joined by `\n` (no trailing newline). Empty
+//! list (or absent diff) renders as the empty string — unlike the argv
+//! path, which drops the surrounding slot. Always-emit avoids `set -u`
+//! surprises and lets shell scripts iterate uniformly with `while IFS=
+//! read -r ...`. The mapping is:
+//!
+//! | Placeholder       | Env var                |
+//! |-------------------|------------------------|
+//! | `$created`        | `SPECTER_CREATED`      |
+//! | `$deleted`        | `SPECTER_DELETED`      |
+//! | `$modified`       | `SPECTER_MODIFIED`     |
+//! | `$renamed_from`   | `SPECTER_RENAMED_FROM` |
+//! | `$renamed_to`     | `SPECTER_RENAMED_TO`   |
+//! | `$excluded`       | `SPECTER_EXCLUDED`     |
+//!
+//! The env-side surface carries segments only — inodes and rename pairing
+//! live in the line-oriented `SPECTER_DIFF_PATH` tmp file.
+//!
+//! # Single-pass multi-value dispatch
+//!
+//! Both surfaces — argv prefix-tiling and env newline-joining — funnel
+//! through [`for_each_multivalue`], which iterates a placeholder's
+//! source list once and yields each value as `&str` via callback. The
+//! argv consumer ([`substitute_one`]) tiles a clone of the accumulated
+//! prefix per emitted value; the env consumer ([`env_multivalue`])
+//! newline-joins into one owned `String`. The `Placeholder → source
+//! list` mapping has one definition — argv and env can't drift.
+//!
 //! # Single rendering pass per resolve
 //!
 //! `format_now(now)` and the `$parent` string are computed exactly once
@@ -70,11 +101,12 @@
 //! the same source string by construction — no risk of one surface
 //! formatting differently from the other under future edits.
 
+use crate::spawner::EnvVar;
 use specter_core::{
     ArgPart, ArgTemplate, CommandResolved, DedupKey, Diff, Effect, Placeholder, ResourceKind,
 };
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 
 /// Resolve an Effect's command + env from its substitution-domain
@@ -92,18 +124,21 @@ use std::time::SystemTime;
 /// alphabetical position iff this is `Some`, keeping env order total
 /// across the spawn-time set the child observes.
 #[must_use]
-pub(crate) fn resolve_effect(
-    effect: &Effect,
+pub(crate) fn resolve_effect<'a>(
+    effect: &'a Effect,
     now: SystemTime,
-    diff_path: Option<&Path>,
-) -> (CommandResolved, Vec<(String, String)>) {
+    diff_path: Option<&'a Path>,
+) -> (CommandResolved, Vec<EnvVar<'a>>) {
     // Materialise once, share with both surfaces.
     let target_path = compute_target_path(effect);
     let parent_str = parent_string(&target_path);
     let time_str = format_now(now);
 
     let argv = substitute_argv(effect, &target_path, &parent_str, &time_str);
-    let env = build_env(effect, &target_path, &parent_str, &time_str, diff_path);
+    // Argv done with `parent_str` / `time_str` — move them into the env
+    // vec as `Cow::Owned` instead of cloning at the SPECTER_PARENT /
+    // SPECTER_TIME push sites.
+    let env = build_env(effect, &target_path, parent_str, time_str, diff_path);
     (CommandResolved { argv }, env)
 }
 
@@ -115,14 +150,18 @@ pub(crate) fn resolve_effect(
 /// `Dir` and `Unknown` (rare; pending paths) anchor at the path itself —
 /// for `Unknown`, this may not exist on disk; the actuator surfaces such
 /// failures as `EffectOutcome::Failed`.
+///
+/// Every branch is structurally a borrow of `anchor_path` (the path
+/// itself, or its parent), so the function returns `&Path` and the
+/// caller passes it straight to `Spawner::spawn` without an owning hop.
 #[must_use]
-pub(crate) fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> PathBuf {
+pub(crate) fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> &Path {
     match kind {
         ResourceKind::File => anchor_path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
-            .map_or_else(|| anchor_path.to_path_buf(), Path::to_path_buf),
-        ResourceKind::Dir | ResourceKind::Unknown => anchor_path.to_path_buf(),
+            .unwrap_or(anchor_path),
+        ResourceKind::Dir | ResourceKind::Unknown => anchor_path,
     }
 }
 
@@ -197,13 +236,12 @@ fn substitute_one(
                 | Placeholder::RenamedFrom
                 | Placeholder::RenamedTo
                 | Placeholder::Excluded => {
-                    let values = multivalue_values(*p, effect, diff);
-                    for v in values {
+                    for_each_multivalue(*p, effect, diff, |v| {
                         let mut slot = prefix.clone();
-                        slot.push_str(&v);
+                        slot.push_str(v);
                         out.push(slot);
                         emitted_any = true;
-                    }
+                    });
                     prefix.clear();
                 }
             },
@@ -241,42 +279,94 @@ fn parent_string(target_path: &Path) -> String {
         .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
 }
 
-/// Resolve a multi-value placeholder to its rendered values.
+/// Walk a multi-value placeholder's source list, yielding each value as
+/// `&str` via `emit`. Zero allocation: every value is borrowed in-place
+/// from `effect.exclude` (Excluded) or `diff` (the five diff-derived
+/// variants).
 ///
-/// Diff-derived multi-value (`$created` / `$deleted` / `$modified` /
-/// `$renamed_from` / `$renamed_to`) sources from `diff`; an absent or
-/// empty diff list returns an empty `Vec`. `$excluded` sources from
-/// `effect.exclude` (Profile-level config), independent of the burst's
-/// diff.
+/// The single-value arms (`Path`, `Relative`, `Anchor`, `Watch`,
+/// `Parent`, `Time`) are unreachable by caller contract — argv routes
+/// only the six multi-value variants here, env's [`env_multivalue`]
+/// likewise. The empty fallback satisfies Rust's exhaustiveness.
 ///
-/// The single-value arms are unreachable by caller contract
-/// (`substitute_one` only routes the six multi-value variants here);
-/// Rust's exhaustiveness check forces the empty fallback.
-fn multivalue_values(p: Placeholder, effect: &Effect, diff: Option<&Diff>) -> Vec<String> {
-    let segs = |xs: &[specter_core::EntryRef]| -> Vec<String> {
-        xs.iter().map(|e| e.segment.to_string()).collect()
-    };
+/// Argv ([`substitute_one`]) tiles a clone of the accumulated prefix per
+/// emitted value; env ([`env_multivalue`]) newline-joins into one owned
+/// `String`. Both surfaces share this dispatch — argv and env can't drift
+/// on the `Placeholder → source list` mapping.
+fn for_each_multivalue(
+    p: Placeholder,
+    effect: &Effect,
+    diff: Option<&Diff>,
+    mut emit: impl FnMut(&str),
+) {
     match p {
-        Placeholder::Excluded => effect.exclude.iter().map(ToString::to_string).collect(),
-        Placeholder::Created => diff.map_or_else(Vec::new, |d| segs(&d.created)),
-        Placeholder::Deleted => diff.map_or_else(Vec::new, |d| segs(&d.deleted)),
-        Placeholder::Modified => diff.map_or_else(Vec::new, |d| segs(&d.modified)),
-        Placeholder::RenamedFrom => diff.map_or_else(Vec::new, |d| {
-            d.renamed
-                .iter()
-                .map(|r| r.from.segment.to_string())
-                .collect()
-        }),
-        Placeholder::RenamedTo => diff.map_or_else(Vec::new, |d| {
-            d.renamed.iter().map(|r| r.to.segment.to_string()).collect()
-        }),
+        Placeholder::Excluded => {
+            for s in effect.exclude.iter() {
+                emit(s.as_str());
+            }
+        }
+        Placeholder::Created => {
+            if let Some(d) = diff {
+                for e in &d.created {
+                    emit(e.segment.as_str());
+                }
+            }
+        }
+        Placeholder::Deleted => {
+            if let Some(d) = diff {
+                for e in &d.deleted {
+                    emit(e.segment.as_str());
+                }
+            }
+        }
+        Placeholder::Modified => {
+            if let Some(d) = diff {
+                for e in &d.modified {
+                    emit(e.segment.as_str());
+                }
+            }
+        }
+        Placeholder::RenamedFrom => {
+            if let Some(d) = diff {
+                for r in &d.renamed {
+                    emit(r.from.segment.as_str());
+                }
+            }
+        }
+        Placeholder::RenamedTo => {
+            if let Some(d) = diff {
+                for r in &d.renamed {
+                    emit(r.to.segment.as_str());
+                }
+            }
+        }
         Placeholder::Path
         | Placeholder::Relative
         | Placeholder::Anchor
         | Placeholder::Watch
         | Placeholder::Parent
-        | Placeholder::Time => Vec::new(),
+        | Placeholder::Time => {}
     }
+}
+
+/// Newline-joined render of a multi-value placeholder's source list, no
+/// trailing newline. Empty list (or absent diff) renders as the empty
+/// string, NOT a blank line — keeps list-content env values
+/// (`SPECTER_EXCLUDED`, `SPECTER_CREATED`, etc.) distinguishable from "one
+/// empty entry" for shell consumers reading via `while read`. The `first`
+/// flag (instead of `out.is_empty()`) preserves the separator when an
+/// interior entry is itself empty.
+fn env_multivalue(p: Placeholder, effect: &Effect, diff: Option<&Diff>) -> String {
+    let mut out = String::new();
+    let mut first = true;
+    for_each_multivalue(p, effect, diff, |v| {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        out.push_str(v);
+    });
+    out
 }
 
 /// Render `now` as RFC 3339 UTC second-precision (`2026-05-10T12:34:56Z`).
@@ -288,24 +378,6 @@ fn multivalue_values(p: Placeholder, effect: &Effect, diff: Option<&Diff>) -> Ve
 fn format_now(now: SystemTime) -> String {
     let now = now.max(SystemTime::UNIX_EPOCH);
     humantime::format_rfc3339_seconds(now).to_string()
-}
-
-/// Join the exclude patterns with `\n` (no trailing newline). Empty list
-/// renders as the empty string, NOT a blank line — keeps the
-/// `SPECTER_EXCLUDE` env value distinguishable from "one empty pattern"
-/// for shell consumers reading via `while read`. Generic over
-/// `AsRef<str>` to avoid pulling `compact_str` into actuator's direct
-/// dependencies — `effect.exclude` is `Arc<[CompactString]>` which
-/// satisfies the bound via deref.
-fn join_exclude<S: AsRef<str>>(exclude: &[S]) -> String {
-    let mut out = String::new();
-    for (i, s) in exclude.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(s.as_ref());
-    }
-    out
 }
 
 /// Build the standard `SPECTER_*` env-var set. Keys land in alphabetical
@@ -321,56 +393,102 @@ fn join_exclude<S: AsRef<str>>(exclude: &[S]) -> String {
 /// `target_path`, `parent_str`, `time_str` are pre-rendered in
 /// [`resolve_effect`] so this function and [`substitute_argv`] share the
 /// same byte sequences for `$path / SPECTER_PATH`, `$parent /
-/// SPECTER_PARENT`, and `$time / SPECTER_TIME` respectively.
-fn build_env(
-    effect: &Effect,
+/// SPECTER_PARENT`, and `$time / SPECTER_TIME` respectively. `parent_str`
+/// and `time_str` arrive by-value and move into the env vec via
+/// `Cow::Owned`.
+///
+/// Values are `Cow<'a, str>` so fields already living on the [`Effect`]
+/// (anchor path lossy, `target_relative`, `sub_name`) and the
+/// `diff_path` argument are emitted as `Cow::Borrowed`; values
+/// synthesised here (`event_kind` is a literal, multi-value joins,
+/// formatted correlation, `target_path` lossy, `parent_str`,
+/// `time_str`) are emitted as `Cow::Owned`. Keys are always
+/// `&'static str`.
+fn build_env<'a>(
+    effect: &'a Effect,
     target_path: &Path,
-    parent_str: &str,
-    time_str: &str,
-    diff_path: Option<&Path>,
-) -> Vec<(String, String)> {
+    parent_str: String,
+    time_str: String,
+    diff_path: Option<&'a Path>,
+) -> Vec<EnvVar<'a>> {
     // `event_kind` derives from the DedupKey variant — Subtree/PerFile
     // by construction agree with the originating Sub's EffectScope, so
     // there is no second source-of-truth to consult.
-    let event_kind = match effect.key {
+    let event_kind: &'static str = match effect.key {
         DedupKey::Subtree { .. } => "dir-subtree",
         DedupKey::PerFile { .. } => "file",
     };
-    // 10 keys + optional SPECTER_DIFF_PATH. Pre-size to avoid the
+    let diff = effect.diff.as_deref();
+    // 15 keys + optional SPECTER_DIFF_PATH. Pre-size to avoid the
     // resize churn under push.
-    let cap = if diff_path.is_some() { 11 } else { 10 };
-    let mut env: Vec<(String, String)> = Vec::with_capacity(cap);
-    env.push((
-        "SPECTER_ANCHOR".to_owned(),
-        effect.anchor_path.to_string_lossy().into_owned(),
-    ));
-    env.push((
-        "SPECTER_CORRELATION".to_owned(),
-        effect.correlation.0.to_string(),
-    ));
+    let cap = if diff_path.is_some() { 16 } else { 15 };
+    let mut env: Vec<EnvVar<'a>> = Vec::with_capacity(cap);
+    env.push(EnvVar {
+        key: "SPECTER_ANCHOR",
+        value: effect.anchor_path.to_string_lossy(),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_CORRELATION",
+        value: Cow::Owned(effect.correlation.0.to_string()),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_CREATED",
+        value: Cow::Owned(env_multivalue(Placeholder::Created, effect, diff)),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_DELETED",
+        value: Cow::Owned(env_multivalue(Placeholder::Deleted, effect, diff)),
+    });
     if let Some(p) = diff_path {
-        env.push((
-            "SPECTER_DIFF_PATH".to_owned(),
-            p.to_string_lossy().into_owned(),
-        ));
+        env.push(EnvVar {
+            key: "SPECTER_DIFF_PATH",
+            value: p.to_string_lossy(),
+        });
     }
-    env.push(("SPECTER_EVENT_KIND".to_owned(), event_kind.to_owned()));
-    env.push(("SPECTER_EXCLUDE".to_owned(), join_exclude(&effect.exclude)));
-    env.push((
-        "SPECTER_FORCED".to_owned(),
-        if effect.forced { "1" } else { "0" }.to_owned(),
-    ));
-    env.push(("SPECTER_PARENT".to_owned(), parent_str.to_owned()));
-    env.push((
-        "SPECTER_PATH".to_owned(),
-        target_path.to_string_lossy().into_owned(),
-    ));
-    env.push((
-        "SPECTER_RELATIVE_PATH".to_owned(),
-        effect.target_relative.to_string(),
-    ));
-    env.push(("SPECTER_TIME".to_owned(), time_str.to_owned()));
-    env.push(("SPECTER_WATCH".to_owned(), effect.sub_name.to_string()));
+    env.push(EnvVar {
+        key: "SPECTER_EVENT_KIND",
+        value: Cow::Borrowed(event_kind),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_EXCLUDED",
+        value: Cow::Owned(env_multivalue(Placeholder::Excluded, effect, diff)),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_FORCED",
+        value: Cow::Borrowed(if effect.forced { "1" } else { "0" }),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_MODIFIED",
+        value: Cow::Owned(env_multivalue(Placeholder::Modified, effect, diff)),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_PARENT",
+        value: Cow::Owned(parent_str),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_PATH",
+        value: Cow::Owned(target_path.to_string_lossy().into_owned()),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_RELATIVE_PATH",
+        value: Cow::Borrowed(effect.target_relative.as_str()),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_RENAMED_FROM",
+        value: Cow::Owned(env_multivalue(Placeholder::RenamedFrom, effect, diff)),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_RENAMED_TO",
+        value: Cow::Owned(env_multivalue(Placeholder::RenamedTo, effect, diff)),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_TIME",
+        value: Cow::Owned(time_str),
+    });
+    env.push(EnvVar {
+        key: "SPECTER_WATCH",
+        value: Cow::Borrowed(effect.sub_name.as_str()),
+    });
     env
 }
 

@@ -163,7 +163,12 @@ inherited parent environment:
 | `SPECTER_PARENT`        | mirrors `$parent`                                                    |
 | `SPECTER_WATCH`         | mirrors `$watch`                                                     |
 | `SPECTER_TIME`          | mirrors `$time` (same instant — the resolver samples once per spawn) |
-| `SPECTER_EXCLUDE`       | `exclude` patterns, newline-separated (no trailing newline)          |
+| `SPECTER_EXCLUDED`      | mirrors `$excluded` (newline-separated, no trailing newline)         |
+| `SPECTER_CREATED`       | mirrors `$created` (newline-separated, empty when no diff)           |
+| `SPECTER_DELETED`       | mirrors `$deleted` (newline-separated, empty when no diff)           |
+| `SPECTER_MODIFIED`      | mirrors `$modified` (newline-separated, empty when no diff)          |
+| `SPECTER_RENAMED_FROM`  | mirrors `$renamed_from` (newline-separated, empty when no diff)      |
+| `SPECTER_RENAMED_TO`    | mirrors `$renamed_to` (newline-separated, empty when no diff)        |
 | `SPECTER_EVENT_KIND`    | `dir-subtree` or `file`                                              |
 | `SPECTER_FORCED`        | `0` or `1` — `1` when the burst crossed `max_settle` before settling |
 | `SPECTER_CORRELATION`   | per-Effect monotonic decimal id                                      |

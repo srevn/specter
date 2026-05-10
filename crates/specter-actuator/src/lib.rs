@@ -52,7 +52,7 @@ pub use permits::{Permit, Permits};
 #[cfg(unix)]
 pub use pool::{DEFAULT_CONCURRENCY, Reaped, SubprocessActuator};
 #[cfg(unix)]
-pub use spawner::{ChildSignaler, ChildWaiter, SpawnHandles, Spawner};
+pub use spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 
 /// Construct the platform's default spawner as a `Box<dyn Spawner>`.
 ///

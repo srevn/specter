@@ -120,6 +120,59 @@ fn child_receives_specter_forced_zero() {
 }
 
 #[test]
+fn child_receives_specter_created_newline_separated() {
+    // End-to-end witness for the diff-derived list env vars: a populated
+    // `Effect.diff.created` lands in the spawned child's `SPECTER_CREATED`
+    // newline-joined, no trailing newline. Resolver-level rendering is
+    // pinned by the unit tests; this test pins that the
+    // `cmd.envs(env.iter()...)` plumbing in `OsSpawner` propagates the
+    // value byte-for-byte through `execve`. The four sibling vars
+    // (`DELETED`/`MODIFIED`/`RENAMED_FROM`/`RENAMED_TO`) ride the same
+    // plumbing — no separate integration test is justified.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_path = dir.path().join("out");
+    let cwd = dir.path().to_path_buf();
+    let script = format!(
+        "printf '%s' \"$SPECTER_CREATED\" > {out}",
+        out = out_path.display()
+    );
+    let mut h = Harness::new(2);
+    let diff = Arc::new(Diff {
+        created: smallvec![
+            EntryRef {
+                segment: CompactString::from("a.rs"),
+                kind: EntryKind::File,
+                inode: 1,
+            },
+            EntryRef {
+                segment: CompactString::from("src/b.rs"),
+                kind: EntryKind::File,
+                inode: 2,
+            },
+        ],
+        ..Default::default()
+    });
+    let mut e = perfile_effect(
+        1,
+        1,
+        1,
+        next_corr(),
+        vec!["/bin/sh".into(), "-c".into(), script],
+        cwd,
+    );
+    e.diff = Some(diff);
+    h.submit(e);
+    let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
+    match &completions[0] {
+        Input::EffectComplete { result, .. } => assert_eq!(*result, EffectOutcome::Ok),
+        other => panic!("expected Ok; got {other:?}"),
+    }
+    h.shutdown();
+    let captured = std::fs::read_to_string(&out_path).expect("read captured");
+    assert_eq!(captured, "a.rs\nsrc/b.rs");
+}
+
+#[test]
 fn child_receives_specter_diff_path_when_diff_present() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out_path = dir.path().join("out");

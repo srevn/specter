@@ -7,6 +7,7 @@
     clippy::too_many_lines
 )]
 
+use crate::spawner::EnvVar;
 use compact_str::CompactString;
 use smallvec::smallvec;
 use specter_core::{
@@ -23,7 +24,7 @@ use std::time::SystemTime;
 /// diff tmp file. Time-sensitive tests call [`super::resolve_effect`]
 /// directly with the instant they want; diff-tmp-aware tests pass
 /// `diff_path: Some(_)` directly.
-fn resolve(e: &Effect) -> (CommandResolved, Vec<(String, String)>) {
+fn resolve(e: &Effect) -> (CommandResolved, Vec<EnvVar<'_>>) {
     super::resolve_effect(e, SystemTime::UNIX_EPOCH, None)
 }
 
@@ -158,7 +159,7 @@ fn resolve_with_anchor_placeholder() {
     assert_eq!(cmd.argv, vec!["build".to_string(), "/proj".to_string()]);
 }
 
-// ---------- $excluded / SPECTER_EXCLUDE ----------
+// ---------- $excluded / SPECTER_EXCLUDED ----------
 
 #[test]
 fn resolve_excluded_one_arg_per_pattern() {
@@ -247,7 +248,10 @@ fn env_exclude_newline_separated() {
     .into();
     let (_, env) = resolve(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_EXCLUDE").unwrap().1,
+        env.iter()
+            .find(|e| e.key == "SPECTER_EXCLUDED")
+            .unwrap()
+            .value,
         "*.tmp\ncache/\n**/.git/",
         "no trailing newline; entries joined by single \\n",
     );
@@ -268,7 +272,10 @@ fn env_exclude_empty_is_empty_string() {
     );
     let (_, env) = resolve(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_EXCLUDE").unwrap().1,
+        env.iter()
+            .find(|e| e.key == "SPECTER_EXCLUDED")
+            .unwrap()
+            .value,
         "",
     );
 }
@@ -312,7 +319,7 @@ fn env_specter_time_uses_injected_now() {
     );
     let (_, env) = super::resolve_effect(&e, now, None);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_TIME").unwrap().1,
+        env.iter().find(|e| e.key == "SPECTER_TIME").unwrap().value,
         FIXED_NOW_RFC3339
     );
 }
@@ -438,7 +445,10 @@ fn env_parent_empty_only_for_subtree_at_root() {
     );
     let (_, env) = resolve(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_PARENT").unwrap().1,
+        env.iter()
+            .find(|e| e.key == "SPECTER_PARENT")
+            .unwrap()
+            .value,
         ""
     );
 }
@@ -457,7 +467,10 @@ fn env_parent_for_perfile_is_target_directory() {
     );
     let (_, env) = resolve(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_PARENT").unwrap().1,
+        env.iter()
+            .find(|e| e.key == "SPECTER_PARENT")
+            .unwrap()
+            .value,
         "/anchor/src"
     );
 }
@@ -716,6 +729,167 @@ fn resolve_with_multivalue_having_prefix_and_empty_diff_yields_zero_slots() {
     assert!(cmd.argv.is_empty());
 }
 
+// ---------- diff-derived env vars ----------
+
+#[test]
+fn env_specter_created_newline_separated() {
+    // Diff-derived multi-value env var mirrors the argv form: each entry's
+    // segment, joined by `\n`, no trailing newline. Empty list ⇒ empty
+    // string (asserted in env_diff_lists_*); populated list ⇒ the segments.
+    let diff = Diff {
+        created: smallvec![
+            entry_ref("a.rs", 1),
+            entry_ref("src/b.rs", 2),
+            entry_ref("c", 3),
+        ],
+        ..Default::default()
+    };
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        Some(Arc::new(diff)),
+    );
+    let (_, env) = resolve(&e);
+    assert_eq!(
+        env.iter()
+            .find(|e| e.key == "SPECTER_CREATED")
+            .unwrap()
+            .value,
+        "a.rs\nsrc/b.rs\nc",
+        "no trailing newline; entries joined by single \\n",
+    );
+}
+
+#[test]
+fn env_specter_deleted_and_modified_render_their_categories() {
+    // One Diff carrying entries for two categories; each env var pulls
+    // from its own list. Asserts the dispatch in `diff_env_segs` doesn't
+    // cross-contaminate.
+    let diff = Diff {
+        deleted: smallvec![entry_ref("d1", 1), entry_ref("d2", 2)],
+        modified: smallvec![entry_ref("m1", 3)],
+        ..Default::default()
+    };
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        Some(Arc::new(diff)),
+    );
+    let (_, env) = resolve(&e);
+    assert_eq!(
+        env.iter()
+            .find(|e| e.key == "SPECTER_DELETED")
+            .unwrap()
+            .value,
+        "d1\nd2",
+    );
+    assert_eq!(
+        env.iter()
+            .find(|e| e.key == "SPECTER_MODIFIED")
+            .unwrap()
+            .value,
+        "m1",
+    );
+    // Categories not populated stay empty even though the diff is present.
+    assert_eq!(
+        env.iter()
+            .find(|e| e.key == "SPECTER_CREATED")
+            .unwrap()
+            .value,
+        "",
+    );
+}
+
+#[test]
+fn env_specter_renamed_from_and_to_use_correct_sides() {
+    // Two renames, each with distinct from/to segments. The two env vars
+    // must each pull their respective side; cross-contamination would
+    // mean the from/to projection in `diff_env_renames` is broken.
+    let diff = Diff {
+        renamed: smallvec![
+            Rename {
+                from: entry_ref("old1", 1),
+                to: entry_ref("new1", 1),
+            },
+            Rename {
+                from: entry_ref("old2", 2),
+                to: entry_ref("new2", 2),
+            },
+        ],
+        ..Default::default()
+    };
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        Some(Arc::new(diff)),
+    );
+    let (_, env) = resolve(&e);
+    assert_eq!(
+        env.iter()
+            .find(|e| e.key == "SPECTER_RENAMED_FROM")
+            .unwrap()
+            .value,
+        "old1\nold2",
+    );
+    assert_eq!(
+        env.iter()
+            .find(|e| e.key == "SPECTER_RENAMED_TO")
+            .unwrap()
+            .value,
+        "new1\nnew2",
+    );
+}
+
+#[test]
+fn env_diff_lists_empty_when_no_diff() {
+    // `Effect.diff = None` (Sub doesn't reference any diff-derived
+    // placeholder and isn't `per-stable-file`). All five list env vars
+    // emit as empty strings — always-emit policy mirrors SPECTER_EXCLUDED
+    // and avoids `set -u` surprises in the spawned shell. The
+    // `Some(Diff::default())` variant exits the same way through
+    // `join_with_newlines`'s empty-iter branch (already pinned by
+    // `env_exclude_empty_is_empty_string`).
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (_, env) = resolve(&e);
+    for k in [
+        "SPECTER_CREATED",
+        "SPECTER_DELETED",
+        "SPECTER_MODIFIED",
+        "SPECTER_RENAMED_FROM",
+        "SPECTER_RENAMED_TO",
+    ] {
+        assert_eq!(
+            env.iter().find(|e| e.key == k).unwrap().value,
+            "",
+            "{k} must be empty when Effect.diff is None",
+        );
+    }
+}
+
 // ---------- env vars ----------
 
 #[test]
@@ -731,8 +905,8 @@ fn env_contains_specter_path_for_subtree_root() {
         None,
     );
     let (_, env) = resolve(&e);
-    let path = env.iter().find(|(k, _)| k == "SPECTER_PATH").unwrap();
-    assert_eq!(path.1, "/proj");
+    let path = env.iter().find(|e| e.key == "SPECTER_PATH").unwrap();
+    assert_eq!(path.value, "/proj");
 }
 
 #[test]
@@ -748,8 +922,8 @@ fn env_contains_specter_path_for_per_stable_file() {
         None,
     );
     let (_, env) = resolve(&e);
-    let path = env.iter().find(|(k, _)| k == "SPECTER_PATH").unwrap();
-    assert_eq!(path.1, "/proj/a.c");
+    let path = env.iter().find(|e| e.key == "SPECTER_PATH").unwrap();
+    assert_eq!(path.value, "/proj/a.c");
 }
 
 #[test]
@@ -767,9 +941,9 @@ fn env_specter_relative_path_empty_for_subtree_root() {
     let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
-            .find(|(k, _)| k == "SPECTER_RELATIVE_PATH")
+            .find(|e| e.key == "SPECTER_RELATIVE_PATH")
             .unwrap()
-            .1,
+            .value,
         ""
     );
 }
@@ -789,9 +963,9 @@ fn env_specter_relative_path_for_per_stable_file() {
     let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
-            .find(|(k, _)| k == "SPECTER_RELATIVE_PATH")
+            .find(|e| e.key == "SPECTER_RELATIVE_PATH")
             .unwrap()
-            .1,
+            .value,
         "src/a.c"
     );
 }
@@ -810,8 +984,8 @@ fn env_specter_anchor_for_both_scopes() {
             None,
         );
         let (_, env) = resolve(&e);
-        let v = env.iter().find(|(k, _)| k == "SPECTER_ANCHOR").unwrap();
-        assert_eq!(v.1, "/anchor/dir", "scope = {scope:?}");
+        let v = env.iter().find(|e| e.key == "SPECTER_ANCHOR").unwrap();
+        assert_eq!(v.value, "/anchor/dir", "scope = {scope:?}");
     }
 }
 
@@ -829,7 +1003,7 @@ fn env_specter_watch_uses_sub_name() {
     );
     let (_, env) = resolve(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_WATCH").unwrap().1,
+        env.iter().find(|e| e.key == "SPECTER_WATCH").unwrap().value,
         "build"
     );
 }
@@ -848,7 +1022,10 @@ fn env_specter_forced_zero_when_unforced() {
     );
     let (_, env) = resolve(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_FORCED").unwrap().1,
+        env.iter()
+            .find(|e| e.key == "SPECTER_FORCED")
+            .unwrap()
+            .value,
         "0"
     );
 }
@@ -867,7 +1044,10 @@ fn env_specter_forced_one_when_forced() {
     );
     let (_, env) = resolve(&e);
     assert_eq!(
-        env.iter().find(|(k, _)| k == "SPECTER_FORCED").unwrap().1,
+        env.iter()
+            .find(|e| e.key == "SPECTER_FORCED")
+            .unwrap()
+            .value,
         "1"
     );
 }
@@ -887,9 +1067,9 @@ fn env_specter_event_kind_dir_subtree_for_subtree_root() {
     let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
-            .find(|(k, _)| k == "SPECTER_EVENT_KIND")
+            .find(|e| e.key == "SPECTER_EVENT_KIND")
             .unwrap()
-            .1,
+            .value,
         "dir-subtree"
     );
 }
@@ -909,9 +1089,9 @@ fn env_specter_event_kind_file_for_per_stable_file() {
     let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
-            .find(|(k, _)| k == "SPECTER_EVENT_KIND")
+            .find(|e| e.key == "SPECTER_EVENT_KIND")
             .unwrap()
-            .1,
+            .value,
         "file"
     );
 }
@@ -931,9 +1111,9 @@ fn env_specter_correlation_decimal_for_v1() {
     let (_, env) = resolve(&e);
     assert_eq!(
         env.iter()
-            .find(|(k, _)| k == "SPECTER_CORRELATION")
+            .find(|e| e.key == "SPECTER_CORRELATION")
             .unwrap()
-            .1,
+            .value,
         "42"
     );
 }
@@ -955,7 +1135,7 @@ fn env_does_not_contain_specter_diff_path() {
         Some(Arc::new(diff)),
     );
     let (_, env) = resolve(&e);
-    assert!(env.iter().all(|(k, _)| k != "SPECTER_DIFF_PATH"));
+    assert!(env.iter().all(|e| e.key != "SPECTER_DIFF_PATH"));
 }
 
 #[test]
@@ -971,18 +1151,23 @@ fn env_order_is_alphabetical() {
         None,
     );
     let (_, env) = resolve(&e);
-    let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    let keys: Vec<&str> = env.iter().map(|e| e.key).collect();
     assert_eq!(
         keys,
         vec![
             "SPECTER_ANCHOR",
             "SPECTER_CORRELATION",
+            "SPECTER_CREATED",
+            "SPECTER_DELETED",
             "SPECTER_EVENT_KIND",
-            "SPECTER_EXCLUDE",
+            "SPECTER_EXCLUDED",
             "SPECTER_FORCED",
+            "SPECTER_MODIFIED",
             "SPECTER_PARENT",
             "SPECTER_PATH",
             "SPECTER_RELATIVE_PATH",
+            "SPECTER_RENAMED_FROM",
+            "SPECTER_RENAMED_TO",
             "SPECTER_TIME",
             "SPECTER_WATCH",
         ]
@@ -992,7 +1177,7 @@ fn env_order_is_alphabetical() {
 #[test]
 fn env_order_with_diff_path_is_alphabetical() {
     // With `diff_path: Some(_)`, SPECTER_DIFF_PATH joins the env in
-    // alphabetical position (between SPECTER_CORRELATION and
+    // alphabetical position (between SPECTER_DELETED and
     // SPECTER_EVENT_KIND), keeping a total order across the spawn-time
     // set the child observes.
     let e = make_effect(
@@ -1007,28 +1192,33 @@ fn env_order_with_diff_path_is_alphabetical() {
     );
     let diff_path = Path::new("/tmp/specter-1234-deadbeef.diff");
     let (_, env) = super::resolve_effect(&e, SystemTime::UNIX_EPOCH, Some(diff_path));
-    let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    let keys: Vec<&str> = env.iter().map(|e| e.key).collect();
     assert_eq!(
         keys,
         vec![
             "SPECTER_ANCHOR",
             "SPECTER_CORRELATION",
+            "SPECTER_CREATED",
+            "SPECTER_DELETED",
             "SPECTER_DIFF_PATH",
             "SPECTER_EVENT_KIND",
-            "SPECTER_EXCLUDE",
+            "SPECTER_EXCLUDED",
             "SPECTER_FORCED",
+            "SPECTER_MODIFIED",
             "SPECTER_PARENT",
             "SPECTER_PATH",
             "SPECTER_RELATIVE_PATH",
+            "SPECTER_RENAMED_FROM",
+            "SPECTER_RENAMED_TO",
             "SPECTER_TIME",
             "SPECTER_WATCH",
         ]
     );
     assert_eq!(
         env.iter()
-            .find(|(k, _)| k == "SPECTER_DIFF_PATH")
+            .find(|e| e.key == "SPECTER_DIFF_PATH")
             .unwrap()
-            .1,
+            .value,
         "/tmp/specter-1234-deadbeef.diff"
     );
 }

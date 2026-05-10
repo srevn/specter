@@ -8,7 +8,7 @@
 //! shutdown logic be tested deterministically without forking real
 //! children.
 
-use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles, Spawner};
+use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 use crossbeam::channel::{Receiver, Sender, bounded};
 use specter_core::EffectOutcome;
 use std::collections::BTreeMap;
@@ -119,7 +119,7 @@ impl Spawner for MockSpawner {
     fn spawn(
         &self,
         argv: &[String],
-        env: &[(String, String)],
+        env: &[EnvVar<'_>],
         cwd: &Path,
         capture_output: bool,
     ) -> io::Result<SpawnHandles> {
@@ -132,10 +132,18 @@ impl Spawner for MockSpawner {
         let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = bounded::<EffectOutcome>(1);
         self.completions.lock().unwrap().insert(pid, tx);
+        // SpawnRecord stores owned `(String, String)` so existing test
+        // assertions compare against literal keys/values without
+        // tracking the borrow lifetime; one owning hop at the test
+        // boundary is the price of preserving the trait's borrow shape.
+        let env_owned: Vec<(String, String)> = env
+            .iter()
+            .map(|e| (e.key.to_owned(), e.value.as_ref().to_owned()))
+            .collect();
         self.spawns.lock().unwrap().push(SpawnRecord {
             pid,
             argv: argv.to_vec(),
-            env: env.to_vec(),
+            env: env_owned,
             cwd: cwd.to_owned(),
             capture_output,
         });

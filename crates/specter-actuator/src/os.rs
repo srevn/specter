@@ -30,7 +30,7 @@
 //! race is small but live; v2 may switch to process descriptors (Linux
 //! pidfd, FreeBSD pdfork) to eliminate it entirely.
 
-use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles, Spawner};
+use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 use specter_core::EffectOutcome;
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -60,7 +60,7 @@ impl Spawner for OsSpawner {
     fn spawn(
         &self,
         argv: &[String],
-        env: &[(String, String)],
+        env: &[EnvVar<'_>],
         cwd: &Path,
         capture_output: bool,
     ) -> io::Result<SpawnHandles> {
@@ -74,7 +74,7 @@ impl Spawner for OsSpawner {
         };
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..])
-            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .envs(env.iter().map(|e| (e.key, e.value.as_ref())))
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(stdout)
@@ -253,7 +253,7 @@ mod tests {
         let spawner = OsSpawner::new();
         let cwd = Path::new("/tmp");
         let argv: Vec<String> = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
-        let env: Vec<(String, String)> = Vec::new();
+        let env: Vec<EnvVar<'_>> = Vec::new();
         let handles = spawner
             .spawn(&argv, &env, cwd, false)
             .expect("spawn must succeed under high fd pressure (fork+exec route)");

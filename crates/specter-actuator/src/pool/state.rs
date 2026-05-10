@@ -18,7 +18,7 @@ use specter_core::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutco
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Policy for [`ActuatorState::handle_reap_inner`]: during normal
 /// operation we re-queue pending and let the pump dispatch the next
@@ -243,7 +243,7 @@ impl ActuatorState {
         // `SPECTER_TIME` env value so they agree on the wall-clock
         // instant immediately before the kernel runs the user's command.
         let now = std::time::SystemTime::now();
-        let cwd = resolve::compute_cwd(&effect.anchor_path, effect.anchor_kind);
+        let cwd: &Path = resolve::compute_cwd(&effect.anchor_path, effect.anchor_kind);
         let correlation = effect.correlation;
         let capture_output = effect.capture_output;
 
@@ -273,7 +273,7 @@ impl ActuatorState {
         let (CommandResolved { argv }, env) =
             resolve::resolve_effect(effect, now, tmp_path.as_deref());
 
-        let handles = match spawner.spawn(&argv, &env, &cwd, capture_output) {
+        let handles = match spawner.spawn(&argv, &env, cwd, capture_output) {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!(?key, ?cwd, ?e, "spawn failed");

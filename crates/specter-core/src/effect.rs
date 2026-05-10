@@ -79,7 +79,7 @@ pub struct CommandResolved {
 ///   has already filtered Effects that won't reach a syscall.
 /// - `exclude` — Arc-clone of `Profile.exclude_strings`. Carried so
 ///   the resolver can render the `$excluded` placeholder and
-///   `SPECTER_EXCLUDE` env value without a back-channel to the engine.
+///   `SPECTER_EXCLUDED` env value without a back-channel to the engine.
 ///
 /// `SPECTER_EVENT_KIND` (`dir-subtree` vs `file`) and the resolver-side
 /// dispatch on scope are derived from `key`'s variant — no separate

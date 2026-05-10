@@ -7,6 +7,7 @@ license.workspace      = true
 
 [dependencies]
 specter-core = { path = "../specter-core" }
+compact_str.workspace = true
 crossbeam.workspace = true
 humantime.workspace = true
 nix.workspace = true
@@ -15,7 +16,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-compact_str.workspace = true
 smallvec.workspace = true
 slotmap.workspace = true
 
