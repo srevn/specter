@@ -22,3 +22,24 @@ pub fn single_exec_program(argv: impl IntoIterator<Item = ArgTemplate>) -> Arc<A
         ExecAction::new(argv),
     )]))
 }
+
+/// Two-instruction `[Predicate(when, jump=2), Exec(then)]` program.
+///
+/// Mirrors the lowering of `{ when = ..., then = [{ exec = ... }] }`
+/// with no `else` branch — the predicate's `jump_target` points one
+/// past the last instruction (the natural "skip past end" form), so
+/// a Failed predicate terminates the plan Ok without running the
+/// then-exec.
+///
+/// Convenience fixture for actuator tests that exercise predicate
+/// dispatch without routing through the config layer.
+#[must_use]
+pub fn predicate_then_program(when: ExecAction, then_exec: ExecAction) -> Arc<ActionProgram> {
+    Arc::new(ActionProgram::new([
+        Instruction::SpawnPredicate {
+            exec: when,
+            jump_target: 2,
+        },
+        Instruction::SpawnExec(then_exec),
+    ]))
+}

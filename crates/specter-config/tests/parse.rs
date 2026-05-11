@@ -253,3 +253,238 @@ fn exec_env_invalid_name_yields_validation_error() {
         "got {errors:?}",
     );
 }
+
+// ----- Conditional actions (`when` / `then` / `else`) -----
+
+/// Conditional with `when` + `then` lowers to a two-instruction
+/// program: `SpawnPredicate(when, jump=2)` then the then-branch's
+/// `SpawnExec`. With no `else`, the predicate's `jump_target` is
+/// `len = 2` — the natural "skip past end" form treated by the
+/// actuator's reap-path as terminate-Ok.
+#[test]
+fn conditional_when_then_lowers_to_predicate_plus_then() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [\n\
+                  { when = { exec = [\"check\"] }, then = [{ exec = [\"yes\"] }] },\n\
+                ]";
+    let cfg = Config::from_str(toml).unwrap();
+    let p = &cfg.watches[0].program;
+    assert_eq!(p.instructions.len(), 2);
+    match &p.instructions[0] {
+        Instruction::SpawnPredicate { jump_target, .. } => {
+            assert_eq!(*jump_target, 2, "no-else: jump past end");
+        }
+        other => panic!("expected SpawnPredicate, got {other:?}"),
+    }
+    assert!(matches!(p.instructions[1], Instruction::SpawnExec(_)));
+}
+
+/// Conditional with `when` + `then` + `else` lowers to a four-
+/// instruction program with the Jump-after-then skipping the
+/// else-branch on the Ok path: `SpawnPredicate(jump=3)`,
+/// `SpawnExec(then)`, `Jump(target=4)`, `SpawnExec(else)`.
+#[test]
+fn conditional_with_else_lowers_to_predicate_then_jump_else() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [\n\
+                  { when = { exec = [\"check\"] }, \
+                    then = [{ exec = [\"yes\"] }], \
+                    else = [{ exec = [\"no\"] }] },\n\
+                ]";
+    let cfg = Config::from_str(toml).unwrap();
+    let p = &cfg.watches[0].program;
+    assert_eq!(p.instructions.len(), 4);
+    match &p.instructions[0] {
+        Instruction::SpawnPredicate { jump_target, .. } => assert_eq!(*jump_target, 3),
+        other => panic!("expected SpawnPredicate, got {other:?}"),
+    }
+    assert!(matches!(p.instructions[1], Instruction::SpawnExec(_)));
+    match &p.instructions[2] {
+        Instruction::Jump { target } => assert_eq!(*target, 4),
+        other => panic!("expected Jump, got {other:?}"),
+    }
+    assert!(matches!(p.instructions[3], Instruction::SpawnExec(_)));
+}
+
+/// `when` carries its own per-step `timeout` inside the nested
+/// `RawExec`. Confirms the predicate's `ExecAction.timeout` is
+/// threaded from TOML, distinct from the surrounding action's
+/// top-level (forbidden) `timeout`.
+#[test]
+fn conditional_predicate_carries_per_step_timeout() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [\n\
+                  { when = { exec = [\"check\"], timeout = \"2s\" }, \
+                    then = [{ exec = [\"yes\"] }] },\n\
+                ]";
+    let cfg = Config::from_str(toml).unwrap();
+    match &cfg.watches[0].program.instructions[0] {
+        Instruction::SpawnPredicate { exec, .. } => {
+            assert_eq!(exec.timeout, Some(Duration::from_secs(2)));
+        }
+        other => panic!("expected SpawnPredicate, got {other:?}"),
+    }
+}
+
+/// `when` without `then` is rejected at the variant-completeness
+/// gate as [`IssueKind::ConditionalIncomplete`]. Operators get a
+/// single, clear "you wrote half a conditional" error.
+#[test]
+fn conditional_when_without_then_is_rejected() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [{ when = { exec = [\"check\"] } }]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.kind == IssueKind::ConditionalIncomplete),
+        "got {errors:?}",
+    );
+}
+
+/// `then` without `when` is the symmetric case — also flagged as
+/// [`IssueKind::ConditionalIncomplete`].
+#[test]
+fn conditional_then_without_when_is_rejected() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [{ then = [{ exec = [\"y\"] }] }]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.kind == IssueKind::ConditionalIncomplete),
+        "got {errors:?}",
+    );
+}
+
+/// Conditional with empty `then` and no `else` (or empty `else`) is
+/// pointless — the predicate would have no observable effect.
+/// Rejected as [`IssueKind::EmptyConditional`].
+#[test]
+fn conditional_empty_then_and_no_else_is_rejected() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [{ when = { exec = [\"check\"] }, then = [] }]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors.iter().any(|e| e.kind == IssueKind::EmptyConditional),
+        "got {errors:?}",
+    );
+}
+
+/// Empty `then` with non-empty `else` is allowed — operationally
+/// equivalent to a negated predicate (run else iff predicate failed).
+/// Lowers to a 3-instruction program: predicate, Jump, else.
+#[test]
+fn conditional_empty_then_nonempty_else_is_allowed() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [\n\
+                  { when = { exec = [\"check\"] }, then = [], else = [{ exec = [\"no\"] }] },\n\
+                ]";
+    let cfg = Config::from_str(toml).unwrap();
+    let p = &cfg.watches[0].program;
+    assert_eq!(p.instructions.len(), 3);
+    match &p.instructions[0] {
+        Instruction::SpawnPredicate { jump_target, .. } => {
+            assert_eq!(*jump_target, 2, "predicate jumps directly to else_start");
+        }
+        other => panic!("expected SpawnPredicate, got {other:?}"),
+    }
+    match &p.instructions[1] {
+        Instruction::Jump { target } => {
+            assert_eq!(*target, 3, "Jump (Ok path) skips past else");
+        }
+        other => panic!("expected Jump, got {other:?}"),
+    }
+    assert!(matches!(p.instructions[2], Instruction::SpawnExec(_)));
+}
+
+/// Conditional with both `exec` and `when` set is ambiguous — flagged
+/// as [`IssueKind::ActionAmbiguousVariant`]. The exactly-one-variant
+/// rule applies across exec / pipe / conditional uniformly.
+#[test]
+fn exec_and_conditional_together_is_rejected() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [\n\
+                  { exec = [\"a\"], when = { exec = [\"b\"] }, then = [{ exec = [\"c\"] }] },\n\
+                ]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.kind == IssueKind::ActionAmbiguousVariant),
+        "got {errors:?}",
+    );
+}
+
+/// Top-level `timeout` on a conditional action is rejected — the
+/// predicate carries its own per-step timeout inside the nested
+/// `RawExec`. Operators sometimes try `timeout` at the outer scope;
+/// the validator catches it as [`IssueKind::TimeoutNotApplicable`].
+#[test]
+fn conditional_top_level_timeout_is_rejected() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [\n\
+                  { when = { exec = [\"check\"] }, \
+                    then = [{ exec = [\"y\"] }], timeout = \"5s\" },\n\
+                ]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.kind == IssueKind::TimeoutNotApplicable),
+        "got {errors:?}",
+    );
+}
+
+/// Nested conditional inside `then` lowers recursively — each
+/// nesting level produces its own `SpawnPredicate` with correctly
+/// backpatched jumps. Pinned to detect off-by-one drift in
+/// [`crate::action::lower_actions`] under nested input.
+#[test]
+fn nested_conditional_inside_then_lowers_recursively() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [\n\
+                  { when = { exec = [\"outer\"] }, \
+                    then = [{ when = { exec = [\"inner\"] }, \
+                              then = [{ exec = [\"y\"] }] }] },\n\
+                ]";
+    let cfg = Config::from_str(toml).unwrap();
+    let p = &cfg.watches[0].program;
+    // [SpawnPredicate(outer, jump=3), SpawnPredicate(inner, jump=3), SpawnExec(y)]
+    assert_eq!(p.instructions.len(), 3);
+    let preds: Vec<u32> = p
+        .instructions
+        .iter()
+        .filter_map(|i| match i {
+            Instruction::SpawnPredicate { jump_target, .. } => Some(*jump_target),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(preds, vec![3, 3], "both predicates jump past plan end");
+}
+
+/// Empty `else` array (explicit `else = []`) is normalised to "no
+/// else" — lowering omits the Jump instruction since the else-body
+/// would be a zero-length sequence. The predicate's `jump_target`
+/// points one past the then-branch end, mirroring the no-`else` form.
+#[test]
+fn conditional_explicit_empty_else_normalises_to_no_else() {
+    let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
+                actions = [\n\
+                  { when = { exec = [\"check\"] }, \
+                    then = [{ exec = [\"y\"] }], else = [] },\n\
+                ]";
+    let cfg = Config::from_str(toml).unwrap();
+    let p = &cfg.watches[0].program;
+    assert_eq!(p.instructions.len(), 2, "no Jump emitted for empty else");
+    assert!(matches!(
+        p.instructions[0],
+        Instruction::SpawnPredicate { .. }
+    ));
+    assert!(matches!(p.instructions[1], Instruction::SpawnExec(_)));
+}

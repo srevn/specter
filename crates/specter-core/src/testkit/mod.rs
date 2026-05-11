@@ -9,5 +9,5 @@ pub mod program;
 pub mod sensor;
 
 pub use clock::MockClock;
-pub use program::single_exec_program;
+pub use program::{predicate_then_program, single_exec_program};
 pub use sensor::MockSensor;

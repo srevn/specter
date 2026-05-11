@@ -53,26 +53,65 @@ pub(crate) struct RawWatch {
     pub enabled: Option<bool>,
 }
 
-/// One entry in `actions = [...]`. v1's only variant is `exec`; future
-/// variants (`parallel`, `pipeline`, `conditional`) land additively as
-/// sibling `Option<…>` fields. `deny_unknown_fields` catches typos at
-/// the variant tag level (e.g., `exce`, `paralel`) and flags missing
-/// future variants when an operator prematurely uses one.
+/// One entry in `actions = [...]`. Variants light up additively as
+/// sibling `Option<…>` fields: `exec` for a single process, the
+/// `when` / `then` / `else` triple for conditionals, and (future)
+/// `pipe` for piped stages. `deny_unknown_fields` catches typos at
+/// the variant tag level (e.g., `exce`, `paralel`).
+///
+/// Validation enforces "exactly one variant set" — the variant tags
+/// `exec`, `when` and (future) `pipe` are mutually exclusive on a
+/// single `[[watch.actions]]` entry. Inside a conditional, `when` is
+/// the predicate and `then` / `else` carry nested `RawAction` arrays
+/// (full recursive grammar).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawAction {
-    /// `Some(argv)` for `{ exec = [...] }` actions. v1 validation
-    /// requires exactly one variant set per action; once future variants
-    /// land, the `exactly_one` check stays the same shape.
+    /// `Some(argv)` for `{ exec = [...] }` actions. Mutually exclusive
+    /// with `when` (and future `pipe`).
     pub exec: Option<Vec<String>>,
+    /// Predicate of a conditional action. `Some(predicate)` opens the
+    /// `when` / `then` / `else` group; the validator requires `then`
+    /// alongside it. The predicate carries its own per-step `timeout`
+    /// inside the nested [`RawExec`].
+    pub when: Option<RawExec>,
+    /// Then-branch of a conditional action. Required alongside
+    /// `when`; rejected when `when` is absent. The actuator runs the
+    /// `then` body on predicate Ok; full `RawAction` grammar is
+    /// recursive here (nested conditionals are allowed).
+    pub then: Option<Vec<Self>>,
+    /// Else-branch of a conditional action. Optional even when `when`
+    /// is set: omitting `else` makes the predicate's Failed outcome
+    /// skip past the conditional with no propagation. TOML field name
+    /// is `else` (a Rust keyword); serde renames it to the Rust-side
+    /// `otherwise` identifier.
+    #[serde(default, rename = "else")]
+    pub otherwise: Option<Vec<Self>>,
     /// Per-step deadline in humantime format (`"500ms"`, `"30s"`,
     /// `"5m"`). Valid only on `exec`-bearing actions; validation rejects
-    /// it on future non-exec variants (pipe stages will carry their own
-    /// per-stage `timeout` once that variant lands). `None` ⇒ no
-    /// deadline. Threaded onto [`specter_core::ExecAction::timeout`]
-    /// and enforced by the actuator's per-step timer thread:
-    /// SIGTERM at `now + timeout`, SIGKILL after the actuator's
-    /// `shutdown_grace`.
+    /// it on non-exec variants (predicates carry their own per-step
+    /// `timeout` inside the `when` table; future `pipe` stages will
+    /// each carry their own). `None` ⇒ no deadline. Threaded onto
+    /// [`specter_core::ExecAction::timeout`] and enforced by the
+    /// actuator's per-step timer thread: SIGTERM at `now + timeout`,
+    /// SIGKILL after the actuator's `shutdown_grace`.
+    #[serde(default, with = "humantime_serde")]
+    pub timeout: Option<Duration>,
+}
+
+/// Nested-exec table used inside the predicate slot of a conditional
+/// action (`when = { exec = [...], timeout = "5s" }`). Future `pipe`
+/// stages will reuse this same shape — one `RawExec` per stage.
+///
+/// The shape is intentionally tighter than [`RawAction`]: only the
+/// `exec` and `timeout` fields are allowed, no variant tags. A
+/// predicate cannot itself be a pipe or a nested conditional. A
+/// future relaxation would swap this for a `Box<RawAction>` and let
+/// the validator recurse.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawExec {
+    pub exec: Vec<String>,
     #[serde(default, with = "humantime_serde")]
     pub timeout: Option<Duration>,
 }
@@ -89,6 +128,9 @@ impl RawWatch {
             path,
             actions: vec![RawAction {
                 exec: Some(exec),
+                when: None,
+                then: None,
+                otherwise: None,
                 timeout: None,
             }],
             recursive: None,

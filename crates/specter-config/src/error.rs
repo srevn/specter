@@ -83,6 +83,18 @@ pub enum IssueKind {
     /// which is almost certainly a typo. Operators wanting "no
     /// deadline" omit the field entirely.
     TimeoutZero,
+    /// `actions[i]` partially sets the conditional triple: `when`
+    /// without `then`, or `then` / `else` without `when`. The grammar
+    /// requires both `when` and `then` together; `else` is optional.
+    /// Fires before the conditional body is validated so per-branch
+    /// errors don't pile on a structurally-broken entry.
+    ConditionalIncomplete,
+    /// `actions[i]` is a fully-formed conditional with both `then = []`
+    /// and `else = []` (or `else` absent). The predicate would run for
+    /// no observable effect; almost certainly an operator mistake.
+    /// Empty `then` with a non-empty `else` is allowed (equivalent to
+    /// a negated predicate).
+    EmptyConditional,
 }
 
 impl ConfigError {
@@ -188,5 +200,7 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::PathContainsGlobChars => "path-contains-glob-chars",
         IssueKind::TimeoutNotApplicable => "timeout-not-applicable",
         IssueKind::TimeoutZero => "timeout-zero",
+        IssueKind::ConditionalIncomplete => "conditional-incomplete",
+        IssueKind::EmptyConditional => "empty-conditional",
     }
 }

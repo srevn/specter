@@ -2,7 +2,7 @@ use crate::action::{Action, lower_to_program};
 use crate::error::{ConfigError, IssueKind, ValidationIssue};
 use crate::file_meta::FileMeta;
 use crate::path::canonicalize_lenient;
-use crate::raw::{RawAction, RawConfig, RawLogConfig, RawWatch};
+use crate::raw::{RawAction, RawConfig, RawExec, RawLogConfig, RawWatch};
 use crate::template;
 use compact_str::CompactString;
 use specter_core::{
@@ -594,42 +594,66 @@ fn validate_actions(
         return None;
     }
 
+    let tree = validate_action_list(idx, "actions", raw_actions, errors)?;
+    Some(lower_to_program(&tree))
+}
+
+/// Recursive validation of a `[RawAction]` slice. `path` is the
+/// breadcrumb-style label of the slice within the watch — `"actions"`
+/// at the top, `"actions[0].then"` inside a then-branch, etc. The
+/// returned `Vec<Action>` is `Some` iff every element validated; on
+/// any failure the per-element errors are recorded and the function
+/// returns `None`.
+///
+/// Empty input is the *caller's* responsibility to reject (only the
+/// top-level `actions = []` carries [`IssueKind::EmptyActions`];
+/// nested empty arrays are rejected via [`IssueKind::EmptyConditional`]
+/// against the enclosing conditional). This function is silent on
+/// emptiness — it returns `Some(Vec::new())` in that case so the
+/// caller can fold the empty branch into the AST as `None` (no else)
+/// or apply the conditional-level check.
+fn validate_action_list(
+    watch_idx: usize,
+    path: &str,
+    raw_actions: &[RawAction],
+    errors: &mut Vec<ValidationIssue>,
+) -> Option<Vec<Action>> {
     let mut tree: Vec<Action> = Vec::with_capacity(raw_actions.len());
     let mut any_failed = false;
     for (j, raw) in raw_actions.iter().enumerate() {
-        match validate_one_action(idx, j, raw, errors) {
+        let child_path = format!("{path}[{j}]");
+        match validate_one_action(watch_idx, &child_path, raw, errors) {
             Some(action) => tree.push(action),
             None => any_failed = true,
         }
     }
-    if any_failed {
-        None
-    } else {
-        Some(lower_to_program(&tree))
-    }
+    if any_failed { None } else { Some(tree) }
 }
 
-/// Validate a single action entry. v1 has only the `exec` variant;
-/// future variants extend the dispatch via additional `Option<…>`
-/// fields on [`RawAction`]. The "exactly one variant set" rule is the
-/// single source of truth — it stays the same shape as new variants
-/// land.
+/// Validate a single action entry. The "exactly one variant set" rule
+/// is the single source of truth across `exec`, the conditional
+/// triple (`when` + `then` + optional `else`), and (future) `pipe` —
+/// it stays the same shape as new variants land.
+///
+/// `path` is the action's breadcrumb-style label
+/// (`"actions[0]"`, `"actions[0].then[1]"`, etc). Error messages
+/// quote it so operators can locate the offending entry without
+/// re-counting nested arrays.
 fn validate_one_action(
     watch_idx: usize,
-    action_idx: usize,
+    path: &str,
     raw: &RawAction,
     errors: &mut Vec<ValidationIssue>,
 ) -> Option<Action> {
-    // Count how many variant fields are set. v1: just `exec`. v2 will
-    // add `parallel`, `pipeline`, `conditional` — each contributes an
-    // `is_some()` term to this count.
-    let variants_set = usize::from(raw.exec.is_some());
+    let is_exec = raw.exec.is_some();
+    let is_conditional = raw.when.is_some() || raw.then.is_some() || raw.otherwise.is_some();
+    let variants_set = usize::from(is_exec) + usize::from(is_conditional);
     if variants_set == 0 {
         errors.push(ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::ActionMissingVariant,
-            format!("actions[{action_idx}]: must specify a variant (`exec`)"),
+            format!("{path}: must specify a variant (`exec` or `when`/`then`)"),
         ));
         return None;
     }
@@ -638,32 +662,137 @@ fn validate_one_action(
             Some(watch_idx),
             "actions",
             IssueKind::ActionAmbiguousVariant,
-            format!("actions[{action_idx}]: must specify exactly one variant"),
+            format!(
+                "{path}: must specify exactly one variant \
+                 (`exec` and `when`/`then` are mutually exclusive)",
+            ),
         ));
         return None;
     }
-    // `timeout` is exec-only in v1. Future non-exec variants
-    // (`pipe`, `conditional`) carry timeouts on their stages /
-    // predicate, not on the top-level action. The variant-applicability
-    // check stays here so the rule is co-located with the dispatch.
-    if raw.timeout.is_some() && raw.exec.is_none() {
+    // `timeout` at the action level applies only to `exec`. Predicates
+    // (`when`) carry their own per-step `timeout` inside the nested
+    // `RawExec`; future `pipe` stages will each carry their own.
+    if raw.timeout.is_some() && !is_exec {
         errors.push(ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::TimeoutNotApplicable,
             format!(
-                "actions[{action_idx}]: top-level `timeout` requires `exec` \
-                 (other action variants set their own per-stage timeouts)",
+                "{path}: top-level `timeout` requires `exec` \
+                 (the predicate of a conditional sets `when.timeout` instead)",
             ),
         ));
         return None;
     }
     if let Some(argv) = raw.exec.as_deref() {
-        return validate_exec_argv(watch_idx, action_idx, argv, raw.timeout, errors)
+        return validate_exec_argv(watch_idx, path, "exec", argv, raw.timeout, errors)
             .map(Action::Exec);
     }
-    // Unreachable in v1: variants_set ≥ 1 with `exec` the only field.
-    None
+    if is_conditional {
+        return validate_conditional(watch_idx, path, raw, errors);
+    }
+    unreachable!("variants_set ∈ {{1}} and exec/conditional are exhaustive in v1")
+}
+
+/// Validate the `when` / `then` / `else` triple on a [`RawAction`].
+///
+/// Structural rules:
+/// - Both `when` and `then` must be present (one without the other is
+///   [`IssueKind::ConditionalIncomplete`]). `else` is optional.
+/// - `then = []` AND (`else` absent OR `else = []`) is
+///   [`IssueKind::EmptyConditional`] — the predicate would fire with
+///   no observable effect.
+/// - `then = []` with non-empty `else` is permitted (operationally
+///   equivalent to a negated predicate).
+///
+/// Per-branch errors (argv shape, nested action variants, etc.) are
+/// collected alongside the structural errors so a single config-load
+/// surfaces every issue.
+fn validate_conditional(
+    watch_idx: usize,
+    path: &str,
+    raw: &RawAction,
+    errors: &mut Vec<ValidationIssue>,
+) -> Option<Action> {
+    let when_raw = raw.when.as_ref();
+    let then_raw = raw.then.as_deref();
+    let otherwise_raw = raw.otherwise.as_deref();
+
+    if when_raw.is_none() || then_raw.is_none() {
+        errors.push(ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::ConditionalIncomplete,
+            format!(
+                "{path}: conditional requires both `when` and `then` \
+                 (got when={}, then={}{})",
+                when_raw.is_some(),
+                then_raw.is_some(),
+                if otherwise_raw.is_some() {
+                    ", else=true"
+                } else {
+                    ""
+                },
+            ),
+        ));
+        return None;
+    }
+    let when_raw = when_raw.expect("checked Some directly above");
+    let then_raw = then_raw.expect("checked Some directly above");
+
+    // Empty-conditional check fires *before* per-branch validation so
+    // operators see one structural error rather than a flood of
+    // per-empty-branch issues (which is exactly nothing in that case).
+    let else_empty = otherwise_raw.is_none_or(<[RawAction]>::is_empty);
+    if then_raw.is_empty() && else_empty {
+        errors.push(ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::EmptyConditional,
+            format!(
+                "{path}: conditional has empty `then` and no `else` body \
+                 (predicate would have no observable effect)",
+            ),
+        ));
+        return None;
+    }
+
+    let when_path = format!("{path}.when");
+    let when = validate_raw_exec(watch_idx, &when_path, when_raw, errors);
+
+    let then_path = format!("{path}.then");
+    let then = validate_action_list(watch_idx, &then_path, then_raw, errors);
+
+    // `Some(empty)` normalises to `None` so the AST shape matches the
+    // lowering precondition (`Some(_)` ⇒ non-empty body). Lowering also
+    // handles empty defensively, but normalising here keeps the AST
+    // the canonical form.
+    let otherwise = match otherwise_raw {
+        Some(body) if !body.is_empty() => {
+            let path = format!("{path}.else");
+            validate_action_list(watch_idx, &path, body, errors).map(Some)
+        }
+        Some(_) | None => Some(None),
+    };
+
+    Some(Action::Conditional {
+        when: when?,
+        then: then?.into_boxed_slice(),
+        otherwise: otherwise?.map(Vec::into_boxed_slice),
+    })
+}
+
+/// Validate the nested-exec table used inside a conditional predicate
+/// (`when = { exec = [...], timeout = "..." }`). Delegates to
+/// [`validate_exec_argv`] under the path label `"<path>.exec"` so
+/// argv-slot errors quote the surrounding action's location.
+fn validate_raw_exec(
+    watch_idx: usize,
+    path: &str,
+    raw: &RawExec,
+    errors: &mut Vec<ValidationIssue>,
+) -> Option<ExecAction> {
+    validate_exec_argv(watch_idx, path, "exec", &raw.exec, raw.timeout, errors)
 }
 
 /// Validate one `exec = [...]` argv plus its optional `timeout`. Each
@@ -678,9 +807,17 @@ fn validate_one_action(
 /// the child has any chance to make progress, which is almost
 /// certainly a typo (`"0s"`, `"0ms"`). Operators wanting "no timeout"
 /// omit the field entirely.
+///
+/// `path` is the surrounding action's breadcrumb (e.g.,
+/// `"actions[0]"` or `"actions[0].then[1]"`); `argv_field` is the
+/// field name of the argv slot within that action — `"exec"` for both
+/// top-level exec and predicate-exec; future `pipe` stages will pass
+/// `"pipe[i].exec"`. The error detail joins them with `.` so the
+/// path is unambiguous.
 fn validate_exec_argv(
     watch_idx: usize,
-    action_idx: usize,
+    path: &str,
+    argv_field: &str,
     raw_argv: &[String],
     timeout: Option<Duration>,
     errors: &mut Vec<ValidationIssue>,
@@ -690,7 +827,7 @@ fn validate_exec_argv(
             Some(watch_idx),
             "actions",
             IssueKind::EmptyArgv,
-            format!("actions[{action_idx}].exec must have at least one slot"),
+            format!("{path}.{argv_field} must have at least one slot"),
         ));
         return None;
     }
@@ -702,7 +839,7 @@ fn validate_exec_argv(
                 Some(watch_idx),
                 "actions",
                 IssueKind::EmptyArgv,
-                format!("actions[{action_idx}].exec[{k}] is empty"),
+                format!("{path}.{argv_field}[{k}] is empty"),
             ));
             any_failed = true;
             continue;
@@ -714,7 +851,7 @@ fn validate_exec_argv(
                     Some(watch_idx),
                     "actions",
                     IssueKind::UnknownPlaceholder,
-                    format!("actions[{action_idx}].exec[{k}]: {e}"),
+                    format!("{path}.{argv_field}[{k}]: {e}"),
                 ));
                 any_failed = true;
             }
@@ -728,7 +865,7 @@ fn validate_exec_argv(
             "actions",
             IssueKind::TimeoutZero,
             format!(
-                "actions[{action_idx}].timeout must be > 0 \
+                "{path}.timeout must be > 0 \
                  (omit the field for `no deadline`)",
             ),
         ));

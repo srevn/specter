@@ -178,9 +178,9 @@ impl SubprocessActuator {
         tracing::info!("shutdown phase 1: SIGTERM running children");
         for slot in self.state.slots.values() {
             if let Some(job) = slot.running.as_ref()
-                && let Err(e) = job.signaler.signal_term()
+                && let Err(e) = job.shutdown_signaler().signal_term()
             {
-                tracing::debug!(pid = job.pid, ?e, "SIGTERM failed");
+                tracing::debug!(pid = job.pid(), ?e, "SIGTERM failed");
             }
         }
         // Phase 2: drain reaps for shutdown_grace. No pump — pending
@@ -209,9 +209,9 @@ impl SubprocessActuator {
             tracing::info!("shutdown phase 3: SIGKILL stragglers");
             for slot in self.state.slots.values() {
                 if let Some(job) = slot.running.as_ref()
-                    && let Err(e) = job.signaler.signal_kill()
+                    && let Err(e) = job.shutdown_signaler().signal_kill()
                 {
-                    tracing::debug!(pid = job.pid, ?e, "SIGKILL failed");
+                    tracing::debug!(pid = job.pid(), ?e, "SIGKILL failed");
                 }
             }
         }
@@ -1441,5 +1441,305 @@ mod tests {
             h.spawner.signals(),
         );
         h.shutdown();
+    }
+
+    // ---------- conditional dispatch (SpawnPredicate) ----------
+
+    /// Build a program for `when=W; then=[T]` (no else): predicate
+    /// at cursor 0 with `jump_target=2` (skip past end), then-exec at
+    /// cursor 1. The actuator's reap-path treats `cursor>=len` as
+    /// "plan complete OK."
+    fn predicate_then_no_else(when_label: &str, then_label: &str) -> Arc<ActionProgram> {
+        Arc::new(ActionProgram::new([
+            Instruction::SpawnPredicate {
+                exec: ExecAction::new([ArgTemplate::new([ArgPart::literal(when_label)])]),
+                jump_target: 2,
+            },
+            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                then_label,
+            )])])),
+        ]))
+    }
+
+    /// Build a program for `when=W; then=[T]; else=[E]`:
+    /// [SpawnPredicate(W, jump=3), SpawnExec(T), Jump(target=4),
+    /// SpawnExec(E)]. Mirrors the lowering of a 4-instruction
+    /// conditional with both branches present.
+    fn predicate_then_else(
+        when_label: &str,
+        then_label: &str,
+        else_label: &str,
+    ) -> Arc<ActionProgram> {
+        Arc::new(ActionProgram::new([
+            Instruction::SpawnPredicate {
+                exec: ExecAction::new([ArgTemplate::new([ArgPart::literal(when_label)])]),
+                jump_target: 3,
+            },
+            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                then_label,
+            )])])),
+            Instruction::Jump { target: 4 },
+            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                else_label,
+            )])])),
+        ]))
+    }
+
+    /// Predicate reaping Ok enters the then-branch: the actuator
+    /// spawns the then-exec after the predicate reaps. Exactly one
+    /// EffectComplete is emitted (Ok) at plan terminus.
+    #[test]
+    fn predicate_ok_spawns_then_branch_and_terminates_ok() {
+        let mut h = Harness::new(4);
+        let program = predicate_then_else("/bin/check", "/bin/then", "/bin/else");
+        h.submit(make_effect_perfile_with_program(1, 1, 1, 1, program));
+
+        // Predicate (cursor 0) spawns first.
+        let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+        assert_eq!(s0[0].argv, vec!["/bin/check".to_string()]);
+        h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
+
+        // Predicate Ok → enter then-branch. Then-exec spawns.
+        let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
+        assert_eq!(s1[1].argv, vec!["/bin/then".to_string()]);
+        h.spawner.complete(s1[1].pid, EffectOutcome::Ok).unwrap();
+
+        // After then-exec reaps, the Jump (cursor 2) skips else;
+        // cursor 4 is past end → terminate Ok.
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        assert!(matches!(
+            completions[0],
+            Input::EffectComplete {
+                result: EffectOutcome::Ok,
+                ..
+            }
+        ));
+        // Else-exec was never spawned.
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            h.spawner.spawns().len(),
+            2,
+            "else-exec must not run when predicate Ok",
+        );
+        h.shutdown();
+    }
+
+    /// Predicate reaping Failed jumps to the else-branch (no
+    /// propagation). The else-exec spawns; the predicate's Failed
+    /// outcome does NOT surface as `EffectComplete::Failed`. Plan
+    /// terminates Ok after else-exec reaps Ok.
+    #[test]
+    fn predicate_failed_spawns_else_branch_outcome_does_not_propagate() {
+        let mut h = Harness::new(4);
+        let program = predicate_then_else("/bin/check", "/bin/then", "/bin/else");
+        h.submit(make_effect_perfile_with_program(2, 2, 2, 1, program));
+
+        let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+        h.spawner
+            .complete(
+                s0[0].pid,
+                EffectOutcome::Failed {
+                    exit_code: Some(99),
+                    signal: None,
+                },
+            )
+            .unwrap();
+
+        // Predicate Failed → jump to else_start. Else-exec spawns;
+        // then-exec is skipped.
+        let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
+        assert_eq!(s1[1].argv, vec!["/bin/else".to_string()]);
+        h.spawner.complete(s1[1].pid, EffectOutcome::Ok).unwrap();
+
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        assert!(
+            matches!(
+                completions[0],
+                Input::EffectComplete {
+                    result: EffectOutcome::Ok,
+                    ..
+                }
+            ),
+            "predicate Failed must not propagate to EffectComplete; got {:?}",
+            completions[0],
+        );
+        h.shutdown();
+    }
+
+    /// Predicate reaping Failed with no else-branch terminates the
+    /// plan Ok (`cursor=jump_target` lands at `instructions.len()`,
+    /// the natural skip-past-end form). The reaped Failed outcome
+    /// stays out of `EffectComplete`.
+    #[test]
+    fn predicate_failed_no_else_terminates_ok_without_propagation() {
+        let mut h = Harness::new(4);
+        let program = predicate_then_no_else("/bin/check", "/bin/then");
+        h.submit(make_effect_perfile_with_program(3, 3, 3, 1, program));
+
+        let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+        h.spawner
+            .complete(
+                s0[0].pid,
+                EffectOutcome::Failed {
+                    exit_code: Some(7),
+                    signal: None,
+                },
+            )
+            .unwrap();
+
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        assert!(
+            matches!(
+                completions[0],
+                Input::EffectComplete {
+                    result: EffectOutcome::Ok,
+                    ..
+                }
+            ),
+            "predicate Failed past plan end must terminate Ok; got {:?}",
+            completions[0],
+        );
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            h.spawner.spawns().len(),
+            1,
+            "then-exec must not run when predicate Failed",
+        );
+        h.shutdown();
+    }
+
+    /// Predicate spawn failure routes through the same dispatch as a
+    /// natural Failed reap — the predicate's outcome does NOT
+    /// propagate to plan terminus.
+    ///
+    /// Deterministic shape: a no-else conditional whose predicate
+    /// spawn-fails (via injected `ErrorKind::NotFound`). The dispatch
+    /// at cursor 0 sees `(SpawnPredicate, synth-Failed)` and emits
+    /// `Advance(jump_target=2)`; `next_spawnable(2) == 2 == len`, so
+    /// the plan terminates with `EffectOutcome::Ok`. If predicate
+    /// spawn-failure had short-circuited to terminate directly (the
+    /// pre-PR3 behaviour), this would emit `EffectComplete::Failed`.
+    /// The Ok outcome is the no-propagation invariant in observable
+    /// form.
+    ///
+    /// Zero spawns are recorded — the injection short-circuits
+    /// `MockSpawner::spawn` before the `SpawnRecord` push.
+    #[test]
+    fn predicate_spawn_failure_does_not_propagate_no_else() {
+        let mut h = Harness::new(4);
+        let program = predicate_then_no_else("/bin/check", "/bin/then");
+        h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
+        h.submit(make_effect_perfile_with_program(4, 4, 4, 1, program));
+
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        assert!(
+            matches!(
+                completions[0],
+                Input::EffectComplete {
+                    result: EffectOutcome::Ok,
+                    ..
+                }
+            ),
+            "predicate spawn-failure must terminate Ok via dispatch; got {:?}",
+            completions[0],
+        );
+        assert!(
+            h.spawner.spawns().is_empty(),
+            "no spawn recorded — both injection short-circuits before push",
+        );
+        h.shutdown();
+    }
+
+    /// Multi-instruction plan with a conditional in the middle:
+    /// `[Exec(A), Predicate(B), Exec(C)]` (B with no else, jump past
+    /// C). When B fires Ok, C runs as the predicate's then-branch.
+    /// When B fires Failed, the plan terminates Ok after B (without
+    /// running C).
+    ///
+    /// This pins the "predicate is one instruction within a larger
+    /// sequence" shape — the predicate slot at cursor 1 doesn't end
+    /// the plan in either outcome; the dispatcher decides based on
+    /// the conditional's structure.
+    #[test]
+    fn predicate_within_sequence_skips_or_runs_then() {
+        let prog_path = || {
+            // [Exec(/bin/a), Predicate(/bin/b, jump=3), Exec(/bin/c)]
+            // jump=3 = len → predicate Failed terminates Ok without
+            // running C.
+            Arc::new(ActionProgram::new([
+                Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                    "/bin/a",
+                )])])),
+                Instruction::SpawnPredicate {
+                    exec: ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
+                    jump_target: 3,
+                },
+                Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                    "/bin/c",
+                )])])),
+            ]))
+        };
+
+        // Path 1: B reaps Ok → C runs.
+        {
+            let mut h = Harness::new(4);
+            h.submit(make_effect_perfile_with_program(10, 10, 10, 1, prog_path()));
+            let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+            assert_eq!(s0[0].argv, vec!["/bin/a".to_string()]);
+            h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
+            let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
+            assert_eq!(s1[1].argv, vec!["/bin/b".to_string()]);
+            h.spawner.complete(s1[1].pid, EffectOutcome::Ok).unwrap();
+            let s2 = h.wait_for_spawns(3, Duration::from_secs(1));
+            assert_eq!(s2[2].argv, vec!["/bin/c".to_string()]);
+            h.spawner.complete(s2[2].pid, EffectOutcome::Ok).unwrap();
+            let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+            assert!(matches!(
+                completions[0],
+                Input::EffectComplete {
+                    result: EffectOutcome::Ok,
+                    ..
+                }
+            ));
+            h.shutdown();
+        }
+
+        // Path 2: B reaps Failed → C is skipped, plan terminates Ok.
+        {
+            let mut h = Harness::new(4);
+            h.submit(make_effect_perfile_with_program(11, 11, 11, 1, prog_path()));
+            let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
+            h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
+            let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
+            h.spawner
+                .complete(
+                    s1[1].pid,
+                    EffectOutcome::Failed {
+                        exit_code: Some(1),
+                        signal: None,
+                    },
+                )
+                .unwrap();
+            // C must not spawn.
+            thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                h.spawner.spawns().len(),
+                2,
+                "C must not run when predicate B fails",
+            );
+            let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+            assert!(
+                matches!(
+                    completions[0],
+                    Input::EffectComplete {
+                        result: EffectOutcome::Ok,
+                        ..
+                    }
+                ),
+                "predicate Failed past plan end ⇒ Ok terminus; got {:?}",
+                completions[0],
+            );
+            h.shutdown();
+        }
     }
 }

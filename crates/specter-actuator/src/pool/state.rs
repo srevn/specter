@@ -73,16 +73,121 @@ enum ReapPolicy {
 /// Both failure variants carry no detail: a deferred attempt has no
 /// outcome to report (nothing happened), and an OS-level spawn / wait-
 /// thread spawn failure is uniformly surfaced as
-/// `EffectOutcome::Failed { exit_code: None, signal: None }`.
+/// `EffectOutcome::Failed { exit_code: None, signal: None }` at the
+/// caller, which then routes through [`ActuatorState::advance_or_terminate`]
+/// — predicate spawn-failures still get their no-propagation
+/// semantics through that dispatch.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SpawnError {
     /// Permit semaphore at capacity. The caller defers the instruction
     /// into [`Slot::plan_continue`] and re-queues the slot.
     Deferred,
-    /// OS-level process spawn or wait-thread spawn failed. The caller
-    /// terminates the plan with `EffectOutcome::Failed` via
-    /// [`ActuatorState::terminate_plan`].
+    /// OS-level process spawn, resolver error, or wait-thread spawn
+    /// failed. The caller routes through
+    /// [`ActuatorState::advance_or_terminate`] with a synthesised
+    /// `EffectOutcome::Failed`; the dispatch then decides terminate vs
+    /// continue based on the instruction variant at the failing cursor.
     Failed,
+}
+
+/// Bytecode dispatch decision after a step reaps or fails to spawn.
+///
+/// Produced by [`dispatch_outcome`] from the
+/// `(Instruction, EffectOutcome)` pair at the current cursor:
+///
+/// - **SpawnExec/SpawnPipe + Ok** → `Advance(cursor + 1)`: the next
+///   instruction runs after this one succeeded.
+/// - **SpawnExec/SpawnPipe + Failed** → `Terminate`: stop-on-failure;
+///   the carried outcome propagates to the engine via
+///   `EffectComplete::Failed`.
+/// - **SpawnPredicate + Ok** → `Advance(cursor + 1)`: enter the
+///   then-branch.
+/// - **SpawnPredicate + Failed** → `Advance(jump_target)`: enter the
+///   else-branch (or past the conditional if no else). The reaped
+///   outcome itself does NOT propagate — the caller substitutes
+///   `EffectOutcome::Ok` at plan terminus if the jump lands past end.
+/// - **Jump** is unreachable in [`dispatch_outcome`]: Jumps are
+///   consumed by [`next_spawnable`] before any spawn, so a Jump never
+///   becomes the current cursor at reap-time.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum OutcomeDecision {
+    /// Plan complete. Caller calls
+    /// [`ActuatorState::terminate_plan`] with the outcome it owns.
+    Terminate,
+    /// Continue at `cursor` (raw — pre-`next_spawnable`). Caller
+    /// walks through any leading Jumps before attempting to spawn.
+    Advance { cursor: u32 },
+}
+
+/// Map `(instruction at cursor, outcome)` to a dispatch decision.
+///
+/// See [`OutcomeDecision`] for the full transition table. The Jump
+/// arm is `unreachable!()` — Jumps are walked past in
+/// [`next_spawnable`] before any instruction is spawned, so a Jump
+/// cannot be the value at the cursor at reap time.
+fn dispatch_outcome(
+    program: &specter_core::ActionProgram,
+    cursor: u32,
+    outcome: &EffectOutcome,
+) -> OutcomeDecision {
+    let instruction = &program.instructions[cursor as usize];
+    match (instruction, outcome) {
+        (
+            Instruction::SpawnExec(_)
+            | Instruction::SpawnPipe(_)
+            | Instruction::SpawnPredicate { .. },
+            EffectOutcome::Ok,
+        ) => OutcomeDecision::Advance { cursor: cursor + 1 },
+        (Instruction::SpawnExec(_) | Instruction::SpawnPipe(_), EffectOutcome::Failed { .. }) => {
+            OutcomeDecision::Terminate
+        }
+        (Instruction::SpawnPredicate { jump_target, .. }, EffectOutcome::Failed { .. }) => {
+            OutcomeDecision::Advance {
+                cursor: *jump_target,
+            }
+        }
+        (Instruction::Jump { .. }, _) => {
+            unreachable!("Jump consumed by next_spawnable before spawn; cannot reach dispatch")
+        }
+    }
+}
+
+/// Walk past any `Jump` instructions at and after `cursor`, returning
+/// the cursor of the first spawnable instruction (SpawnExec /
+/// SpawnPipe / SpawnPredicate) or `program.instructions.len()` if the
+/// walk falls past the end.
+///
+/// **Termination guarantee.** The lowering invariant pins every
+/// `Jump.target > position`, so each iteration strictly increases
+/// `cursor`. Since `cursor` is bounded by the program length, the
+/// loop terminates in at most `program.instructions.len()` steps.
+///
+/// **`cursor >= len`** is the legal "skip past end" form — the caller
+/// treats this as "plan complete," terminating with
+/// `EffectOutcome::Ok`. The conversion is bound-check-free since
+/// every Jump target is `<= u32::MAX` (validation rejects
+/// over-`u32::MAX` programs upstream).
+fn next_spawnable(program: &specter_core::ActionProgram, mut cursor: u32) -> u32 {
+    while (cursor as usize) < program.instructions.len() {
+        match &program.instructions[cursor as usize] {
+            Instruction::Jump { target } => cursor = *target,
+            Instruction::SpawnExec(_)
+            | Instruction::SpawnPipe(_)
+            | Instruction::SpawnPredicate { .. } => return cursor,
+        }
+    }
+    cursor
+}
+
+/// Parameter bundle for arming a per-step timer thread. Bundled as an
+/// `Option<TimerSpec>` at the install site so the arm-or-skip intent
+/// is declarative: `Some(spec) ⇒ arm; None ⇒ skip`. Replaces a trio
+/// of loose locals (`timeout`, `timer_grace`, `timer_signaler`) that
+/// the previous shape carried in parallel — easy to typo-mismatch.
+struct TimerSpec {
+    deadline: Duration,
+    grace: Duration,
+    signaler: Arc<dyn ChildSignaler>,
 }
 
 /// Per-`DedupKey` actuator slot.
@@ -122,7 +227,53 @@ pub(crate) struct Slot {
     pub in_ready_queue: bool,
 }
 
-/// Bookkeeping for one in-flight instruction of a plan.
+/// Bookkeeping for one in-flight instruction of a plan, discriminated
+/// by the [`Instruction`] variant that produced it.
+///
+/// **Why an enum.** The reap-path dispatches outcome semantics by the
+/// instruction at `cursor`:
+///
+/// - [`Self::Exec`] (and the future `Pipe` variant) propagate Failed
+///   to plan terminus.
+/// - [`Self::Predicate`] does NOT propagate Failed — instead the
+///   cursor jumps to the conditional's else-branch (or past the
+///   conditional) and the plan continues.
+///
+/// The variant tag carries that distinction at the value level so
+/// the dispatcher doesn't have to reconstruct it from
+/// `effect.program.instructions[cursor]` (which is also correct but
+/// less explicit). When the `Pipe` variant lands it adds a third
+/// variant with per-stage bookkeeping (`combined_signaler`,
+/// `stage_signalers`); the [`Self::Exec`] and [`Self::Predicate`]
+/// variants share an inner shape today but the enum is what lets the
+/// future divergence stay local.
+///
+/// All variants carry the per-instruction `cursor`, the shared
+/// `effect` Arc (lifetime of the plan), and the optional
+/// `diff_tmp_path` (materialised once per plan in [`start_plan`],
+/// cleaned at terminus).
+#[derive(Debug)]
+pub(crate) enum RunningJob {
+    /// A [`Instruction::SpawnExec`] — `Failed` propagates.
+    Exec(ExecJob),
+    /// A [`Instruction::SpawnPredicate`] — `Failed` redirects to
+    /// `jump_target` and the plan continues with the same Effect.
+    /// The reaped outcome itself never reaches `Input::EffectComplete`.
+    Predicate(PredicateJob),
+}
+
+/// Per-process bookkeeping for an [`Instruction::SpawnExec`] step.
+///
+/// `signaler` is shared with the per-step timer thread (when
+/// [`specter_core::ExecAction::timeout`] is set) — the timer needs
+/// its own handle to deliver SIGTERM / SIGKILL when the deadline
+/// elapses. The controller holds the install-side clone; the timer
+/// thread holds another; either may outlive the other (the timer
+/// thread can fire after the controller has dropped the job; the
+/// controller's shutdown can fire before the timer wakes). `Arc<dyn>`
+/// over `Box<dyn>` is the minimum-cost expression of "two co-owners,
+/// neither dominates"; `Box → Arc` is allocation-free at the install
+/// boundary via `Arc::from`.
 ///
 /// `effect` is `Arc`-shared so the next-instruction advance branch in
 /// [`ActuatorState::handle_reap_inner`] can re-resolve instruction
@@ -136,33 +287,126 @@ pub(crate) struct Slot {
 /// terminus. Cleaned at the terminal arm in
 /// [`ActuatorState::terminate_plan`] — not by the wait thread, which
 /// can't see "is this the last instruction".
-pub(crate) struct RunningJob {
+pub(crate) struct ExecJob {
     pub pid: u32,
-    /// Shared with the per-step timer thread (when [`ExecAction::timeout`]
-    /// is set) — the timer needs its own handle to deliver SIGTERM /
-    /// SIGKILL when the deadline elapses. The controller holds the
-    /// install-side clone; the timer thread holds another; either may
-    /// outlive the other (the timer thread can fire after the
-    /// controller has dropped the job; the controller's shutdown can
-    /// fire before the timer wakes). `Arc<dyn>` over `Box<dyn>` is the
-    /// minimum-cost expression of "two co-owners, neither dominates";
-    /// `Box → Arc` is allocation-free at the install boundary via
-    /// `Arc::from`.
     pub signaler: Arc<dyn ChildSignaler>,
     pub effect: Arc<Effect>,
     pub cursor: u32,
     pub diff_tmp_path: Option<PathBuf>,
 }
 
-impl std::fmt::Debug for RunningJob {
+/// Per-process bookkeeping for an [`Instruction::SpawnPredicate`]
+/// step. Field shape mirrors [`ExecJob`] today; the structurally
+/// distinct type documents intent at field-access sites and leaves
+/// room for predicate-specific bookkeeping (e.g., a future
+/// `captured_stdout` slot for `${capture.<name>}`).
+pub(crate) struct PredicateJob {
+    pub pid: u32,
+    pub signaler: Arc<dyn ChildSignaler>,
+    pub effect: Arc<Effect>,
+    pub cursor: u32,
+    pub diff_tmp_path: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for ExecJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RunningJob")
+        f.debug_struct("ExecJob")
             .field("pid", &self.pid)
             .field("cursor", &self.cursor)
             .field("sub", &self.effect.key.sub())
             .field("correlation", &self.effect.correlation)
             .finish_non_exhaustive()
     }
+}
+
+impl std::fmt::Debug for PredicateJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PredicateJob")
+            .field("pid", &self.pid)
+            .field("cursor", &self.cursor)
+            .field("sub", &self.effect.key.sub())
+            .field("correlation", &self.effect.correlation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RunningJob {
+    /// The signaler used for shutdown SIGTERM / SIGKILL. For
+    /// [`Self::Exec`] and [`Self::Predicate`] this is the single-child
+    /// signaler; for the future `Pipe` variant this will be a
+    /// combined signaler that fans out to every stage.
+    pub fn shutdown_signaler(&self) -> &dyn ChildSignaler {
+        match self {
+            Self::Exec(j) => &*j.signaler,
+            Self::Predicate(j) => &*j.signaler,
+        }
+    }
+
+    pub const fn pid(&self) -> u32 {
+        match self {
+            Self::Exec(j) => j.pid,
+            Self::Predicate(j) => j.pid,
+        }
+    }
+
+    /// Cursor accessor — the instruction position the running step
+    /// occupies in the owning `effect.program.instructions` slice.
+    /// Immutable for the lifetime of the job.
+    ///
+    /// Production paths move-consume cursor (and `effect`) via
+    /// [`Self::into_parts`]; this borrow accessor exists for tests
+    /// that assert advance bookkeeping mid-plan. `#[allow(dead_code)]`
+    /// because the lib build (without `cfg(test)`) doesn't see those
+    /// callers.
+    #[allow(dead_code)]
+    pub const fn cursor(&self) -> u32 {
+        match self {
+            Self::Exec(j) => j.cursor,
+            Self::Predicate(j) => j.cursor,
+        }
+    }
+
+    /// Decompose into the carried plan state for ownership transfer
+    /// in the reap-path advance arm (and the wait-thread-spawn-failure
+    /// orphan-recovery path). The variant tag is consumed; the caller
+    /// re-derives "what was running" from
+    /// `effect.program.instructions[cursor]` if needed.
+    pub fn into_parts(self) -> JobParts {
+        match self {
+            Self::Exec(ExecJob {
+                pid,
+                signaler,
+                effect,
+                cursor,
+                diff_tmp_path,
+            })
+            | Self::Predicate(PredicateJob {
+                pid,
+                signaler,
+                effect,
+                cursor,
+                diff_tmp_path,
+            }) => JobParts {
+                pid,
+                signaler,
+                effect,
+                cursor,
+                diff_tmp_path,
+            },
+        }
+    }
+}
+
+/// Decomposed shape returned by [`RunningJob::into_parts`]. Carries
+/// the per-process bookkeeping that's common across all variants;
+/// the caller routes the parts to the next-step spawn or to the
+/// terminate-plan path.
+pub(crate) struct JobParts {
+    pub pid: u32,
+    pub signaler: Arc<dyn ChildSignaler>,
+    pub effect: Arc<Effect>,
+    pub cursor: u32,
+    pub diff_tmp_path: Option<PathBuf>,
 }
 
 /// Hand-off slot between two adjacent instructions when no permit is
@@ -274,21 +518,30 @@ impl ActuatorState {
         self.handle_reap_inner(reaped, engine_in, spawner, reap_tx, ReapPolicy::Drop);
     }
 
-    /// The reap pipeline. Three exits:
+    /// The reap pipeline. Two main exits:
     ///
-    /// 1. **Advance**: instruction N reaped Ok, more instructions
-    ///    remain (Pump only). Try-acquire a fresh permit; on Ok, spawn
-    ///    instruction N+1 and return — the wait thread will reap it.
-    ///    On `Deferred`, defer via [`Slot::plan_continue`] and re-queue
-    ///    the slot. On `Failed`, the instruction's spawn raced into an
-    ///    OS error; route to terminate with a synthesised `Failed`
-    ///    outcome.
-    /// 2. **Terminate**: last instruction (or any failure, or
-    ///    shutdown) — emit `EffectComplete`, decrement per-Sub counter,
-    ///    clean tmp, re-queue pending or remove slot per policy.
-    /// 3. **Defensive no-job**: stale Reaped after slot removal — fall
-    ///    through to terminate with no diff cleanup. Preserves the
-    ///    "always emit EffectComplete" invariant for the engine.
+    /// 1. **Advance**: outcome dispatch ([`dispatch_outcome`]) decided
+    ///    the plan should continue at a different cursor — either
+    ///    `cursor + 1` (SpawnExec/SpawnPipe Ok, SpawnPredicate Ok) or a
+    ///    predicate's `jump_target` (SpawnPredicate Failed). Walked
+    ///    through [`next_spawnable`] to skip past `Jump` instructions,
+    ///    then handed to [`Self::try_spawn_step`]. A `SpawnError::Failed`
+    ///    here loops the dispatch with a synthesised `Failed` outcome
+    ///    for the new cursor — a predicate spawn-failure cascade
+    ///    naturally walks to its own jump_target, an exec spawn-failure
+    ///    terminates the plan.
+    /// 2. **Terminate**: outcome dispatch decided the plan is done —
+    ///    either an Exec/Pipe Failed (propagates), an Ok at the last
+    ///    instruction, a predicate Failed whose jump_target lands past
+    ///    plan end (no propagation), or any reap under shutdown's
+    ///    `Drop` policy. `terminate_plan` emits one `EffectComplete`,
+    ///    decrements the per-Sub counter, cleans the diff tmp file,
+    ///    and either re-queues the slot's `pending` (Pump policy) or
+    ///    removes the slot (Drop policy).
+    ///
+    /// **Defensive no-job**: a stale Reaped after slot removal falls
+    /// through directly to `terminate_plan` without a job — preserves
+    /// the "always emit EffectComplete" invariant for the engine.
     fn handle_reap_inner(
         &mut self,
         reaped: super::Reaped,
@@ -313,70 +566,146 @@ impl ActuatorState {
             return;
         };
 
-        let program_len = job.effect.program.instructions.len();
-        let last_instruction = (job.cursor as usize) + 1 >= program_len;
-        let try_advance = matches!(policy, ReapPolicy::Pump)
-            && matches!(outcome, EffectOutcome::Ok)
-            && !last_instruction;
+        let JobParts {
+            effect,
+            cursor,
+            diff_tmp_path,
+            ..
+        } = job.into_parts();
 
-        if try_advance {
-            let next_cursor = job.cursor + 1;
-            // try_spawn_step takes references; on Ok it consumes the
-            // Arc/PathBuf clones into a fresh RunningJob installed in
-            // slot.running. On Err the originals stay on `job` so we
-            // can route them to plan_continue / terminate_plan without
-            // re-cloning.
-            match self.try_spawn_step(
-                &key,
+        // Drop policy (shutdown): no advance, no dispatch. Pass the
+        // reaped outcome straight through to terminate. Predicate
+        // semantics (Failed doesn't propagate) are inert under
+        // shutdown — the engine is tearing down and only counts
+        // EffectCompletes.
+        if matches!(policy, ReapPolicy::Drop) {
+            self.terminate_plan(
+                key,
                 sub,
-                &job.effect,
-                next_cursor,
-                job.diff_tmp_path.as_deref(),
-                spawner,
-                reap_tx,
-            ) {
-                Ok(()) => return, // wait thread now drives the next reap.
-                Err(SpawnError::Deferred) => {
-                    self.queue_plan_continue(
-                        key,
-                        PlanContinuation {
-                            effect: job.effect,
-                            cursor: next_cursor,
-                            diff_tmp_path: job.diff_tmp_path,
-                        },
-                    );
-                    return;
-                }
-                Err(SpawnError::Failed) => {
-                    // Instruction N+1 spawn failed mid-plan. Terminate
-                    // the plan with synthesised Failed; tmp cleanup
-                    // happens here (the failure path consumed nothing
-                    // from job).
+                diff_tmp_path.as_deref(),
+                outcome,
+                policy,
+                engine_in,
+            );
+            return;
+        }
+
+        self.advance_or_terminate(
+            key,
+            sub,
+            effect,
+            diff_tmp_path,
+            cursor,
+            outcome,
+            spawner,
+            reap_tx,
+            engine_in,
+        );
+    }
+
+    /// Drive the post-reap / post-spawn-failure dispatch loop.
+    ///
+    /// `cursor` and `outcome` define "where we are" and "what just
+    /// happened." [`dispatch_outcome`] decides whether the plan
+    /// terminates (with the carried outcome) or advances to a new
+    /// cursor. Advancing walks past `Jump` instructions via
+    /// [`next_spawnable`], then attempts a spawn:
+    ///
+    /// - **Ok**: the wait thread now drives the next reap; return.
+    /// - **Deferred** (permit cap): park in
+    ///   [`Slot::plan_continue`] and return.
+    /// - **Failed** (OS spawn or resolver error): loop with a
+    ///   synthesised `Failed` outcome at the new cursor. A predicate
+    ///   at that cursor will jump to its else; an exec/pipe will
+    ///   terminate the plan with the synth Failed.
+    ///
+    /// The loop is bounded: every iteration either returns or moves
+    /// the cursor strictly forward via the lowering invariant
+    /// "forward-only jumps." A pathological program is impossible by
+    /// construction.
+    ///
+    /// Called only under [`ReapPolicy::Pump`]. The Drop arm in
+    /// [`Self::handle_reap_inner`] bypasses dispatch entirely.
+    fn advance_or_terminate(
+        &mut self,
+        key: DedupKey,
+        sub: SubId,
+        effect: Arc<Effect>,
+        diff_tmp_path: Option<PathBuf>,
+        mut cursor: u32,
+        mut outcome: EffectOutcome,
+        spawner: &dyn Spawner,
+        reap_tx: &Sender<super::Reaped>,
+        engine_in: &Sender<Input>,
+    ) {
+        loop {
+            let decision = dispatch_outcome(&effect.program, cursor, &outcome);
+            match decision {
+                OutcomeDecision::Terminate => {
                     self.terminate_plan(
                         key,
                         sub,
-                        job.diff_tmp_path.as_deref(),
-                        EffectOutcome::Failed {
-                            exit_code: None,
-                            signal: None,
-                        },
-                        policy,
+                        diff_tmp_path.as_deref(),
+                        outcome,
+                        ReapPolicy::Pump,
                         engine_in,
                     );
                     return;
                 }
+                OutcomeDecision::Advance { cursor: raw_next } => {
+                    let next = next_spawnable(&effect.program, raw_next);
+                    if (next as usize) >= effect.program.instructions.len() {
+                        // Past plan end. Two cases:
+                        // 1. Exec/Pipe Ok at last instruction → natural Ok terminus.
+                        // 2. Predicate Failed jumped past end → conditional
+                        //    skipped, predicate outcome does NOT propagate.
+                        // Both terminate with EffectOutcome::Ok.
+                        self.terminate_plan(
+                            key,
+                            sub,
+                            diff_tmp_path.as_deref(),
+                            EffectOutcome::Ok,
+                            ReapPolicy::Pump,
+                            engine_in,
+                        );
+                        return;
+                    }
+                    match self.try_spawn_step(
+                        &key,
+                        sub,
+                        &effect,
+                        next,
+                        diff_tmp_path.as_deref(),
+                        spawner,
+                        reap_tx,
+                    ) {
+                        Ok(()) => return,
+                        Err(SpawnError::Deferred) => {
+                            self.queue_plan_continue(
+                                key,
+                                PlanContinuation {
+                                    effect,
+                                    cursor: next,
+                                    diff_tmp_path,
+                                },
+                            );
+                            return;
+                        }
+                        Err(SpawnError::Failed) => {
+                            // Synthesise Failed for `next` and loop.
+                            // The next iteration's dispatch decides
+                            // whether to propagate (Exec/Pipe) or jump
+                            // (Predicate).
+                            cursor = next;
+                            outcome = EffectOutcome::Failed {
+                                exit_code: None,
+                                signal: None,
+                            };
+                        }
+                    }
+                }
             }
         }
-
-        // Terminal: last instruction, any failure, or shutdown.
-        self.terminate_plan(
-            key,
-            sub,
-            job.diff_tmp_path.as_deref(),
-            outcome,
-            policy,
-            engine_in,
-        );
     }
 
     /// Park a plan's next instruction into [`Slot::plan_continue`] and
@@ -542,23 +871,27 @@ impl ActuatorState {
         }
     }
 
-    /// Start a plan: materialise the diff tmp file (if needed), spawn
-    /// step 0 with the given permit, bump the per-Sub counter on
-    /// success.
+    /// Start a plan: materialise the diff tmp file (if needed), bump
+    /// the per-Sub counter, spawn instruction 0 with the given permit.
     ///
-    /// On spawn failure, calls [`Self::terminate_plan`] with synthesised
-    /// `EffectOutcome::Failed`; the per-Sub counter never bumped (so
-    /// the saturating_sub there is a no-op against the absent entry —
-    /// counter stays consistent).
+    /// **Per-Sub counter is bumped unconditionally** before the spawn
+    /// attempt — predicate spawn-failure semantics may continue the
+    /// plan via [`Self::advance_or_terminate`], and any in-progress
+    /// continuation needs the per-Sub gate to hold same-Sub fresh
+    /// plans behind it. On failure, the dispatch loop's terminate
+    /// arms decrement normally; the controller is single-threaded so
+    /// the bump-then-decrement is atomic from any observer's
+    /// perspective.
     ///
-    /// The counter bump is sequenced **after** spawn success so the
-    /// failure path's terminate doesn't need a counter rollback. The
-    /// controller is single-threaded, so no Reaped can race in between.
+    /// On spawn failure, routes through [`Self::advance_or_terminate`]
+    /// with a synthesised `EffectOutcome::Failed`. The dispatch decides
+    /// whether to propagate (Exec/Pipe at cursor 0) or jump to the
+    /// predicate's else-branch (SpawnPredicate at cursor 0).
     ///
     /// `effect` is taken by value so the caller (pump) hands off the
     /// freshly-constructed `Arc<Effect>` and forgets about it; on
     /// success the Arc is cloned into [`Slot::running`], on failure it
-    /// drops at end of scope. Passing by reference would work but
+    /// drops or moves into the advance loop. Passing by reference
     /// would force pump to keep the Arc alive past the call for no
     /// reason.
     #[allow(clippy::needless_pass_by_value)]
@@ -593,6 +926,7 @@ impl ActuatorState {
             }
         });
 
+        *self.running_per_sub.entry(sub).or_insert(0) += 1;
         match self.spawn_step_with_permit(
             &key,
             sub,
@@ -603,25 +937,24 @@ impl ActuatorState {
             spawner,
             reap_tx,
         ) {
-            Ok(()) => {
-                // Spawn succeeded: bump per-Sub counter (one bump per
-                // plan, mirrored by terminate_plan's decrement).
-                *self.running_per_sub.entry(sub).or_insert(0) += 1;
-            }
+            Ok(()) => {}
             Err(_) => {
-                // OS spawn or wait-thread spawn failed at the first
-                // instruction. The counter was never bumped;
-                // terminate_plan's saturating_sub no-ops against the
-                // absent entry.
-                self.terminate_plan(
+                // OS spawn / resolver / wait-thread failure at the
+                // first instruction. Hand off to the dispatch loop
+                // with synthesised Failed — a predicate at cursor 0
+                // still jumps to its else-branch via this path.
+                self.advance_or_terminate(
                     key,
                     sub,
-                    diff_tmp_path.as_deref(),
+                    effect,
+                    diff_tmp_path,
+                    0,
                     EffectOutcome::Failed {
                         exit_code: None,
                         signal: None,
                     },
-                    ReapPolicy::Pump,
+                    spawner,
+                    reap_tx,
                     engine_in,
                 );
             }
@@ -634,9 +967,12 @@ impl ActuatorState {
     /// `start_plan`), no tmp materialisation (path inherited from the
     /// `PlanContinuation`).
     ///
-    /// On spawn failure, [`Self::terminate_plan`] decrements the
-    /// per-Sub counter (which is at +1 from the original start_plan),
-    /// cleans the inherited tmp, and removes the slot.
+    /// On spawn failure, routes through [`Self::advance_or_terminate`]
+    /// — predicate spawn-failure at the continuation's cursor jumps
+    /// to its else-branch, exec/pipe spawn-failure propagates to
+    /// plan terminus. Either way the per-Sub counter (which is at +1
+    /// from the original start_plan) decrements at terminate, and
+    /// any subsequent advance reuses the inherited tmp path.
     fn spawn_continuation(
         &mut self,
         key: DedupKey,
@@ -664,15 +1000,18 @@ impl ActuatorState {
         ) {
             Ok(()) => {}
             Err(_) => {
-                self.terminate_plan(
+                self.advance_or_terminate(
                     key,
                     sub,
-                    diff_tmp_path.as_deref(),
+                    effect,
+                    diff_tmp_path,
+                    cursor,
                     EffectOutcome::Failed {
                         exit_code: None,
                         signal: None,
                     },
-                    ReapPolicy::Pump,
+                    spawner,
+                    reap_tx,
                     engine_in,
                 );
             }
@@ -726,11 +1065,15 @@ impl ActuatorState {
     ///
     /// # Dispatch
     ///
-    /// PR1 only produces [`Instruction::SpawnExec`] from validation;
-    /// the dispatch matches on that variant. The non-`SpawnExec` arms
-    /// are `unreachable!()` — PR2's pipe / conditional support will
-    /// light them up by adding lowering paths in `specter-config` and
-    /// branching here.
+    /// Both [`Instruction::SpawnExec`] and
+    /// [`Instruction::SpawnPredicate`] spawn a single child: the
+    /// shared payload (`exec: &ExecAction`) drives resolve + spawn;
+    /// the variant determines which [`RunningJob`] arm is installed
+    /// in `slot.running` so the reap path can apply the right
+    /// outcome dispatch. [`Instruction::Jump`] is unreachable —
+    /// callers (`start_plan` / reap-advance) walk through
+    /// [`next_spawnable`] before reaching here.
+    /// [`Instruction::SpawnPipe`] is reserved for a future PR.
     ///
     /// On wait-thread spawn failure: the freshly-spawned child is
     /// alive but has no waiter (the closure that owned it has been
@@ -766,12 +1109,15 @@ impl ActuatorState {
         let correlation = effect.correlation;
         let capture_output = effect.capture_output;
 
-        let exec = match &effect.program.instructions[cursor as usize] {
-            Instruction::SpawnExec(exec) => exec,
-            Instruction::SpawnPipe(_)
-            | Instruction::SpawnPredicate { .. }
-            | Instruction::Jump { .. } => {
-                unreachable!("PR1 lowering only emits SpawnExec; pipe/predicate/jump lands in PR2",)
+        let instruction = &effect.program.instructions[cursor as usize];
+        let (exec, is_predicate) = match instruction {
+            Instruction::SpawnExec(exec) => (exec, false),
+            Instruction::SpawnPredicate { exec, .. } => (exec, true),
+            Instruction::SpawnPipe(_) => {
+                unreachable!("SpawnPipe lands in a future PR; lowering does not emit it yet")
+            }
+            Instruction::Jump { .. } => {
+                unreachable!("Jump is consumed by next_spawnable; never reaches spawn")
             }
         };
         let (CommandResolved { argv }, env) =
@@ -780,8 +1126,9 @@ impl ActuatorState {
                 Err(e) => {
                     // Strict `${env.<NAME>}` failure: no spawn, no
                     // wait thread, no timer. Permit drops at the end
-                    // of this scope; caller terminates the plan with
-                    // synthesised `EffectOutcome::Failed`.
+                    // of this scope; caller routes through
+                    // `advance_or_terminate` with synthesised
+                    // `EffectOutcome::Failed`.
                     tracing::error!(?key, cursor, %e, "resolver error; aborting step");
                     drop(permit);
                     return Err(SpawnError::Failed);
@@ -815,20 +1162,32 @@ impl ActuatorState {
         // controller's installed-side reference live regardless of
         // whether the timer is armed.
         let signaler: Arc<dyn ChildSignaler> = Arc::from(signaler);
-        let timer_signaler = exec.timeout.is_some().then(|| Arc::clone(&signaler));
-        let timeout = exec.timeout;
-        let timer_grace = self.shutdown_grace;
+        let timer_spec: Option<TimerSpec> = exec.timeout.map(|deadline| TimerSpec {
+            deadline,
+            grace: self.shutdown_grace,
+            signaler: Arc::clone(&signaler),
+        });
         let diff_tmp_path: Option<PathBuf> = diff_path.map(Path::to_path_buf);
         let slot = self
             .slots
             .get_mut(key)
             .expect("slot present at install (single-threaded controller just dispatched here)");
-        slot.running = Some(RunningJob {
-            pid,
-            signaler,
-            effect: Arc::clone(effect),
-            cursor,
-            diff_tmp_path,
+        slot.running = Some(if is_predicate {
+            RunningJob::Predicate(PredicateJob {
+                pid,
+                signaler,
+                effect: Arc::clone(effect),
+                cursor,
+                diff_tmp_path,
+            })
+        } else {
+            RunningJob::Exec(ExecJob {
+                pid,
+                signaler,
+                effect: Arc::clone(effect),
+                cursor,
+                diff_tmp_path,
+            })
         });
 
         let reap_tx_for_thread = reap_tx.clone();
@@ -864,7 +1223,7 @@ impl ActuatorState {
                 .running
                 .take()
                 .expect("slot.running installed unconditionally above");
-            recover_orphan_after_wait_thread_failure(job);
+            recover_orphan_after_wait_thread_failure(job.into_parts());
             return Err(SpawnError::Failed);
         }
 
@@ -872,17 +1231,19 @@ impl ActuatorState {
         // wait thread's `dead` flag is the natural-completion signal
         // the timer short-circuits on. Best-effort — see
         // [`crate::timer`] module docs for the spawn-failure policy.
-        if let (Some(d), Some(sig)) = (timeout, timer_signaler) {
+        if let Some(spec) = timer_spec {
             // `pid` is unique within the actuator process; cursor
             // distinguishes steps within an Effect. Sub is implied by
             // the wait thread's `act-wait-{pid}` name visible alongside.
             let timer_name = format!("c{cursor}-pid{pid}");
-            if let Err(e) = timer::spawn_timer(&timer_name, d, timer_grace, sig) {
+            if let Err(e) =
+                timer::spawn_timer(&timer_name, spec.deadline, spec.grace, spec.signaler)
+            {
                 tracing::error!(
                     ?key,
                     cursor,
                     pid,
-                    timeout = ?d,
+                    timeout = ?exec.timeout,
                     ?e,
                     "per-step timer thread spawn failed; deadline not enforced",
                 );
@@ -909,18 +1270,24 @@ impl ActuatorState {
 /// without standing up the full spawn flow (the actual `thread::Builder::spawn`
 /// failure path is rare and not directly injectable in tests).
 ///
-/// `job` is taken by value to express the ownership transfer: the
-/// caller has just `slot.running.take()`-ed the in-flight bookkeeping
-/// and hands it over for tear-down; once we return, the signaler /
+/// `parts` is taken by value to express the ownership transfer: the
+/// caller has just `slot.running.take()`-ed and decomposed the
+/// in-flight bookkeeping via [`RunningJob::into_parts`], and hands
+/// the pieces over for tear-down; once we return, the signaler /
 /// effect Arc / diff-tmp path all drop. Borrowing would force the
 /// caller into a take-then-restore dance for no behavioural gain.
+///
+/// `JobParts` (rather than `RunningJob`) so the recovery never needs
+/// to re-pattern-match on the variant — every variant's orphan is
+/// recovered the same way (SIGKILL + reap_blocking via the single
+/// signaler held in `parts`).
 #[allow(clippy::needless_pass_by_value)]
-fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
-    let pid = job.pid;
-    if let Err(e) = job.signaler.signal_kill() {
+fn recover_orphan_after_wait_thread_failure(parts: JobParts) {
+    let pid = parts.pid;
+    if let Err(e) = parts.signaler.signal_kill() {
         tracing::warn!(pid, ?e, "orphan SIGKILL failed");
     }
-    if let Err(e) = job.signaler.reap_blocking() {
+    if let Err(e) = parts.signaler.reap_blocking() {
         tracing::warn!(pid, ?e, "orphan reap_blocking failed");
     }
 }
@@ -1003,7 +1370,7 @@ mod tests {
     //! The PR2 multi-step advance/terminate tests are in the dedicated
     //! `multi_step` submodule below.
     use super::super::{Reaped, SHUTDOWN_GRACE};
-    use super::{ActuatorState, PlanContinuation, ReapPolicy, RunningJob, Slot};
+    use super::{ActuatorState, ExecJob, PlanContinuation, ReapPolicy, RunningJob, Slot};
     use crate::env::EnvSnapshot;
     use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
     use compact_str::CompactString;
@@ -1257,17 +1624,19 @@ mod tests {
         }
     }
 
-    /// Build a stub `RunningJob` that mimics a freshly-spawned step of
-    /// a single-step plan. Counted signaler shared so tests can assert
-    /// no SIGTERM/SIGKILL during pure-state teardown.
+    /// Build a stub `RunningJob` that mimics a freshly-spawned step
+    /// of a single-step plan. Counted signaler shared so tests can
+    /// assert no SIGTERM/SIGKILL during pure-state teardown. Defaults
+    /// to [`RunningJob::Exec`] — the most common shape; tests that
+    /// need the Predicate variant build inline.
     fn stub_running_job(effect: Arc<Effect>, signaler: Arc<CountingSignaler>) -> RunningJob {
-        RunningJob {
+        RunningJob::Exec(ExecJob {
             pid: 99_999,
             signaler,
             effect,
             cursor: 0,
             diff_tmp_path: None,
-        }
+        })
     }
 
     /// Channel pair sized for the controller's reap channel; rarely
@@ -1281,8 +1650,9 @@ mod tests {
     /// Direct test for [`super::recover_orphan_after_wait_thread_failure`].
     /// The production-path trigger (`thread::Builder::spawn` returning
     /// `Err`) is rare and not directly injectable in the controller
-    /// harness, so we exercise the recovery helper in isolation against
-    /// a pre-constructed [`RunningJob`].
+    /// harness, so we exercise the recovery helper in isolation
+    /// against a pre-constructed [`JobParts`] (obtained by decomposing
+    /// a [`RunningJob`] via [`RunningJob::into_parts`]).
     ///
     /// The bug the helper closes: pre-fix, the recovery branch only
     /// called `signal_kill`. The waiter (the sole reap path) was
@@ -1298,7 +1668,7 @@ mod tests {
         let signaler = Arc::new(CountingSignaler::default());
         let job = stub_running_job(effect, Arc::clone(&signaler));
 
-        super::recover_orphan_after_wait_thread_failure(job);
+        super::recover_orphan_after_wait_thread_failure(job.into_parts());
 
         assert_eq!(
             signaler.kill.load(Ordering::SeqCst),
@@ -1535,13 +1905,13 @@ mod tests {
         let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
-            running: Some(RunningJob {
+            running: Some(RunningJob::Exec(ExecJob {
                 pid: 100,
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,
-            }),
+            })),
             ..Slot::default()
         };
         state.slots.insert(key.clone(), slot);
@@ -1569,7 +1939,7 @@ mod tests {
             .get(&key)
             .expect("slot preserved during advance");
         let running = slot_after.running.as_ref().expect("running reinstalled");
-        assert_eq!(running.cursor, 1, "cursor advanced");
+        assert_eq!(running.cursor(), 1, "cursor advanced");
         assert_eq!(
             state.running_per_sub.get(&sub).copied(),
             Some(1),
@@ -1577,7 +1947,7 @@ mod tests {
         );
         assert!(rx.try_recv().is_err(), "no EffectComplete emitted mid-plan");
         // Drain the wait thread so the test doesn't hang on Drop.
-        spawner.complete(running.pid, EffectOutcome::Ok);
+        spawner.complete(running.pid(), EffectOutcome::Ok);
     }
 
     /// Step Failed mid-plan: terminal arm runs with the reaped Failed
@@ -1592,13 +1962,13 @@ mod tests {
         let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
-            running: Some(RunningJob {
+            running: Some(RunningJob::Exec(ExecJob {
                 pid: 200,
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,
-            }),
+            })),
             ..Slot::default()
         };
         state.slots.insert(key.clone(), slot);
@@ -1648,13 +2018,13 @@ mod tests {
         let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
-            running: Some(RunningJob {
+            running: Some(RunningJob::Exec(ExecJob {
                 pid: 300,
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 2, // last instruction (0-indexed) of a 3-instruction program
                 diff_tmp_path: None,
-            }),
+            })),
             ..Slot::default()
         };
         state.slots.insert(key.clone(), slot);
@@ -1704,13 +2074,13 @@ mod tests {
         let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 2));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
-            running: Some(RunningJob {
+            running: Some(RunningJob::Exec(ExecJob {
                 pid: 400,
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,
-            }),
+            })),
             ..Slot::default()
         };
         state.slots.insert(key.clone(), slot);
@@ -1805,13 +2175,13 @@ mod tests {
         let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
-            running: Some(RunningJob {
+            running: Some(RunningJob::Exec(ExecJob {
                 pid: 500,
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,
-            }),
+            })),
             ..Slot::default()
         };
         state.slots.insert(key.clone(), slot);
@@ -1855,13 +2225,13 @@ mod tests {
         let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 2));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
-            running: Some(RunningJob {
+            running: Some(RunningJob::Exec(ExecJob {
                 pid: 600,
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,
-            }),
+            })),
             ..Slot::default()
         };
         state.slots.insert(key.clone(), slot);
@@ -1896,5 +2266,134 @@ mod tests {
             )),
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
+    }
+
+    // ---------- outcome dispatch + next_spawnable ----------
+    //
+    // These pure-function tests pin the bytecode dispatch table
+    // without standing up a controller. Behavioural coverage of the
+    // predicate path lives in the higher-level pool harness in
+    // `pool.rs`.
+
+    fn lit_exec(s: &str) -> ExecAction {
+        ExecAction::new([ArgTemplate::new([ArgPart::literal(s)])])
+    }
+
+    /// SpawnExec + Ok advances by one. SpawnExec + Failed terminates
+    /// (outcome propagates).
+    #[test]
+    fn dispatch_exec_ok_advances_failed_terminates() {
+        let program = ActionProgram::new([Instruction::SpawnExec(lit_exec("/bin/true"))]);
+        assert_eq!(
+            super::dispatch_outcome(&program, 0, &EffectOutcome::Ok),
+            super::OutcomeDecision::Advance { cursor: 1 },
+        );
+        assert_eq!(
+            super::dispatch_outcome(
+                &program,
+                0,
+                &EffectOutcome::Failed {
+                    exit_code: Some(2),
+                    signal: None,
+                },
+            ),
+            super::OutcomeDecision::Terminate,
+        );
+    }
+
+    /// SpawnPredicate + Ok advances by one (enters then-branch).
+    /// SpawnPredicate + Failed jumps to `jump_target` (enters
+    /// else-branch or past the conditional) WITHOUT terminating the
+    /// plan — the carried outcome doesn't propagate.
+    #[test]
+    fn dispatch_predicate_ok_advances_failed_jumps_to_jump_target() {
+        let program = ActionProgram::new([
+            Instruction::SpawnPredicate {
+                exec: lit_exec("/bin/check"),
+                jump_target: 5,
+            },
+            Instruction::SpawnExec(lit_exec("/bin/then")),
+        ]);
+        assert_eq!(
+            super::dispatch_outcome(&program, 0, &EffectOutcome::Ok),
+            super::OutcomeDecision::Advance { cursor: 1 },
+        );
+        assert_eq!(
+            super::dispatch_outcome(
+                &program,
+                0,
+                &EffectOutcome::Failed {
+                    exit_code: Some(99),
+                    signal: None,
+                },
+            ),
+            super::OutcomeDecision::Advance { cursor: 5 },
+            "predicate Failed jumps; no termination signal",
+        );
+    }
+
+    /// `next_spawnable` returns the input cursor unchanged when the
+    /// instruction at that cursor is already spawnable.
+    #[test]
+    fn next_spawnable_on_spawnable_is_identity() {
+        let program = ActionProgram::new([
+            Instruction::SpawnExec(lit_exec("/bin/a")),
+            Instruction::SpawnPredicate {
+                exec: lit_exec("/bin/b"),
+                jump_target: 3,
+            },
+            Instruction::SpawnExec(lit_exec("/bin/c")),
+        ]);
+        assert_eq!(super::next_spawnable(&program, 0), 0);
+        assert_eq!(super::next_spawnable(&program, 1), 1);
+        assert_eq!(super::next_spawnable(&program, 2), 2);
+    }
+
+    /// `next_spawnable` walks past Jump instructions to the first
+    /// spawnable instruction. The lowering invariant pins forward-
+    /// only jumps, so the walk terminates.
+    #[test]
+    fn next_spawnable_walks_past_jump_to_spawnable() {
+        // 0: SpawnExec, 1: Jump→3, 2: SpawnExec (unreachable from Jump), 3: SpawnExec.
+        let program = ActionProgram::new([
+            Instruction::SpawnExec(lit_exec("/bin/a")),
+            Instruction::Jump { target: 3 },
+            Instruction::SpawnExec(lit_exec("/bin/b")),
+            Instruction::SpawnExec(lit_exec("/bin/c")),
+        ]);
+        assert_eq!(super::next_spawnable(&program, 1), 3);
+    }
+
+    /// `next_spawnable` walks past a chain of Jumps. Forward-jump
+    /// invariant means each step strictly increases the cursor,
+    /// bounding the walk.
+    #[test]
+    fn next_spawnable_walks_chain_of_jumps() {
+        let program = ActionProgram::new([
+            Instruction::Jump { target: 1 },
+            Instruction::Jump { target: 2 },
+            Instruction::Jump { target: 3 },
+            Instruction::SpawnExec(lit_exec("/bin/end")),
+        ]);
+        assert_eq!(super::next_spawnable(&program, 0), 3);
+    }
+
+    /// A Jump targeting `program.instructions.len()` is the legal
+    /// "skip past end" form — `next_spawnable` returns `len` and the
+    /// caller terminates the plan.
+    #[test]
+    fn next_spawnable_jump_to_end_returns_len() {
+        let program = ActionProgram::new([
+            Instruction::SpawnExec(lit_exec("/bin/a")),
+            Instruction::Jump { target: 2 },
+        ]);
+        assert_eq!(super::next_spawnable(&program, 1), 2);
+    }
+
+    /// Cursor >= len is the natural terminate-Ok form.
+    #[test]
+    fn next_spawnable_cursor_past_end_returns_len() {
+        let program = ActionProgram::new([Instruction::SpawnExec(lit_exec("/bin/a"))]);
+        assert_eq!(super::next_spawnable(&program, 5), 5);
     }
 }
