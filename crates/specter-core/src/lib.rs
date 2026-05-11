@@ -8,6 +8,7 @@
 
 pub mod effect;
 pub mod hash;
+pub mod program;
 
 mod diag;
 mod diff;
@@ -40,6 +41,7 @@ pub use profile::{
     AnchorClaim, Burst, BurstIntent, BurstPhase, DescentState, Profile, ProfileMap, ProfileState,
     TimerKind,
 };
+pub use program::{ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{
     Promoter, PromoterAttachRequest, PromoterRegistry, PromoterRegistryDiff, PromoterState,
     ProxyState,
@@ -54,8 +56,8 @@ pub use snapshot::tree::{
     splice,
 };
 pub use sub::{
-    ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Instruction,
-    Placeholder, Sub, SubAttachRequest, SubRegistry, SubRegistryDiff,
+    ActionProgram, ClassSet, EffectScope, Instruction, Sub, SubAttachRequest, SubRegistry,
+    SubRegistryDiff,
 };
 pub use time::{Clock, SystemClock};
 pub use tree::Tree;

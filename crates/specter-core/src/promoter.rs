@@ -278,11 +278,9 @@ mod tests {
     use crate::ids::{PromoterId, ResourceId, SubId};
     use crate::pattern::PatternSpec;
     use crate::profile::DescentState;
+    use crate::program::{ArgPart, ArgTemplate, ExecAction, Placeholder};
     use crate::scan_config::ScanConfig;
-    use crate::sub::{
-        ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Instruction,
-        Placeholder,
-    };
+    use crate::sub::{ActionProgram, ClassSet, EffectScope, Instruction};
     use compact_str::CompactString;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;

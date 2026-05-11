@@ -7,7 +7,8 @@
 //! operationally identical to one produced by config lowering of a
 //! single `[[watch.actions]] exec = [...]` entry.
 
-use crate::sub::{ActionProgram, ArgTemplate, ExecAction, Instruction};
+use crate::program::{ArgTemplate, ExecAction};
+use crate::sub::{ActionProgram, Instruction};
 use std::sync::Arc;
 
 /// Single-exec program with no per-step timeout.
