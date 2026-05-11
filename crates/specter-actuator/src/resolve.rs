@@ -17,7 +17,7 @@
 //! Per-Effect-stable values live on [`Effect`] (`anchor_path`,
 //! `target_relative`, `sub_name`, `exclude`, `diff`, `key`, `forced`,
 //! `correlation`); the per-op argv template lives on [`ExecAction`].
-//! The caller extracts the op at `effect.program.ops[cursor]`, reaches
+//! The caller extracts the op at `effect.program.ops()[cursor]`, reaches
 //! into its [`specter_core::program::SpawnBody`] for the
 //! `ExecAction(s)`, and passes both references in. Single-process ops
 //! ([`specter_core::program::SpawnBody::Exec`]) hand one `ExecAction`;

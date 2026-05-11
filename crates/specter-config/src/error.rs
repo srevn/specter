@@ -105,16 +105,15 @@ pub enum IssueKind {
     /// validator rejects it so the operator's intent is unambiguous;
     /// `exec = [...]` at the action's top level is the right shape.
     SingleStagePipe,
-    /// Lowered program would exceed `u32::MAX` ops. Operator-caused;
-    /// practically unreachable in v1 (a program that big can't be
-    /// loaded — each op is ≥24 bytes), but kept as a typed surface so
-    /// the lowering pass returns Result rather than panicking.
-    ProgramTooLarge,
     /// Internal lowering invariant violation — an unpatched edge, a
     /// backward branch, or an out-of-bounds target leaked from the
     /// lowering pass. Unreachable from a correct lowering, surfaced as
     /// a validation issue (rather than a panic) so the operator gets a
     /// loadable error message instead of a crashed process.
+    ///
+    /// The "program too large" case (> `u32::MAX` ops) is not
+    /// representable: the builder panics on emit as a precondition
+    /// failure (~128 GiB of in-memory state, physically impossible).
     LoweringInternal,
 }
 
@@ -225,35 +224,29 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::EmptyConditional => "empty-conditional",
         IssueKind::EmptyPipe => "empty-pipe",
         IssueKind::SingleStagePipe => "single-stage-pipe",
-        IssueKind::ProgramTooLarge => "program-too-large",
         IssueKind::LoweringInternal => "lowering-internal",
     }
 }
 
 impl ValidationIssue {
     /// Map a [`specter_core::program::ProgramError`] into the
-    /// validation-issue surface. Operator-caused
-    /// [`specter_core::program::ProgramError::ProgramTooLarge`] becomes
-    /// its own [`IssueKind::ProgramTooLarge`]; builder-hygiene variants
-    /// (`UnpatchedEdge` / `BackwardEdge` / `OutOfBoundsEdge` /
-    /// `EmptyProgram`) collapse to a single [`IssueKind::LoweringInternal`]
-    /// — they're unreachable from a correct lowering pass, but the
-    /// validator captures them as issues rather than panicking.
+    /// validation-issue surface. Every variant collapses to
+    /// [`IssueKind::LoweringInternal`] — none are reachable from a
+    /// correct lowering pass, but the validator captures them as
+    /// issues rather than panicking. The "program too large" case is
+    /// not representable on the source error (the builder panics on
+    /// emit as a precondition failure — physically impossible to
+    /// load).
     pub(crate) fn from_program_error(
-        e: specter_core::program::ProgramError,
+        e: &specter_core::program::ProgramError,
         watch_index: Option<usize>,
         field: &'static str,
     ) -> Self {
-        let (kind, detail) = match e {
-            specter_core::program::ProgramError::ProgramTooLarge => (
-                IssueKind::ProgramTooLarge,
-                "lowered program exceeds u32::MAX ops".to_owned(),
-            ),
-            other => (
-                IssueKind::LoweringInternal,
-                format!("lowering invariant violated: {other}"),
-            ),
-        };
-        Self::new(watch_index, field, kind, detail)
+        Self::new(
+            watch_index,
+            field,
+            IssueKind::LoweringInternal,
+            format!("lowering invariant violated: {e}"),
+        )
     }
 }

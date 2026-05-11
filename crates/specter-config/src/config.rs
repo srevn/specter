@@ -598,7 +598,11 @@ fn validate_actions(
     match lower_to_program(&tree) {
         Ok(program) => Some(program),
         Err(e) => {
-            errors.push(ValidationIssue::from_program_error(e, Some(idx), "actions"));
+            errors.push(ValidationIssue::from_program_error(
+                &e,
+                Some(idx),
+                "actions",
+            ));
             None
         }
     }
@@ -1451,7 +1455,7 @@ mod tests {
         assert!(w.scan.exclude.is_empty());
         assert!(w.scan.pattern.is_none());
         assert_eq!(w.scan.max_depth, None);
-        let SpawnBody::Exec(exec) = &w.program.ops[0].body else {
+        let SpawnBody::Exec(exec) = &w.program.ops()[0].body else {
             panic!("expected SpawnBody::Exec");
         };
         assert_eq!(exec.argv.len(), 1);
@@ -1736,7 +1740,7 @@ mod tests {
              actions = [{{ exec = [\"fmt\", \"--input=${{specter.path}}\", \"${{specter.created}}\"] }}]"
         );
         let cfg = Config::from_str(&toml).unwrap();
-        let SpawnBody::Exec(exec) = &cfg.watches[0].program.ops[0].body else {
+        let SpawnBody::Exec(exec) = &cfg.watches[0].program.ops()[0].body else {
             panic!("expected SpawnBody::Exec");
         };
         let argv = &exec.argv;

@@ -3,6 +3,14 @@
 //! Emit each op once, then patch its two outgoing edges. The builder
 //! enforces:
 //!
+//! - **Bounded size.** Every emitted op gets a `u32` index. The
+//!   builder upholds the post-condition `pending.len() <= u32::MAX`
+//!   after every successful emit by refusing to push when
+//!   `pending.len() == u32::MAX`. This is a precondition failure
+//!   (panic, not Result) — a program with `u32::MAX + 1` ops is
+//!   physically impossible to load (~128 GiB of in-memory builder
+//!   state). Downstream casts of `pending.len()` to `u32` rely on
+//!   this invariant.
 //! - **Forward-only.** A `Continue(target)` may only point past the
 //!   origin op (`target > origin`).
 //! - **In-bounds.** A `Continue(target)` must land on an emitted op
@@ -75,12 +83,17 @@ impl fmt::Display for Edge {
 
 /// Failure modes for builder operations.
 ///
-/// [`Self::UnpatchedEdge`] / [`Self::BackwardEdge`] /
-/// [`Self::OutOfBoundsEdge`] are builder-hygiene bugs — the lowering
-/// pass should never produce them from valid input.
-/// [`Self::EmptyProgram`] and [`Self::ProgramTooLarge`] are
-/// operator-caused; the latter is practically unreachable (a program
-/// with > `u32::MAX` ops is physically impossible to load).
+/// Every variant here is a builder-hygiene bug — the lowering pass
+/// should never produce them from valid input.
+/// [`Self::EmptyProgram`] is the only one a non-lowering caller can
+/// trigger (calling [`ProgramBuilder::build`] on a fresh builder).
+///
+/// The "program exceeds `u32::MAX` ops" case is *not* representable
+/// here: [`ProgramBuilder::emit`] enforces `pending.len() <= u32::MAX`
+/// as a precondition, panicking otherwise. Such a program is
+/// physically impossible to load (~128 GiB of builder state); treating
+/// it as a precondition failure rather than a recoverable error keeps
+/// the surface clean.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProgramError {
     /// [`ProgramBuilder::build`] called on a builder with no emits.
@@ -97,10 +110,6 @@ pub enum ProgramError {
     /// the time the error was raised — current pending length for
     /// patch-time rejections, final op count for build-time rejections.
     OutOfBoundsEdge { origin: u32, target: u32, len: u32 },
-    /// The builder produced more than `u32::MAX` ops. Defensive — the
-    /// `emit` path panics before this can be reached; this variant
-    /// exists for `ValidationIssue` mapping at the config layer.
-    ProgramTooLarge,
 }
 
 impl fmt::Display for ProgramError {
@@ -121,7 +130,6 @@ impl fmt::Display for ProgramError {
                 f,
                 "out-of-bounds edge from op {origin} to op {target} (bound: {len})"
             ),
-            Self::ProgramTooLarge => write!(f, "program exceeds u32::MAX ops"),
         }
     }
 }
@@ -141,12 +149,22 @@ impl ProgramBuilder {
     /// # Panics
     ///
     /// Panics if the builder already holds `u32::MAX` pending ops —
-    /// minting a `u32` index would overflow. In practice this is
+    /// the next index would not fit in `u32`, and the post-condition
+    /// `pending.len() <= u32::MAX` would break. In practice this is
     /// unreachable (such a program would need 100+ GiB of memory to
-    /// even hold).
+    /// even hold); treating it as a precondition failure keeps the
+    /// downstream casts of `pending.len()` to `u32` infallible.
     pub fn emit(&mut self, body: SpawnBody) -> OpHandle {
+        // Two-step bound: the new index must fit in `u32`, AND the
+        // resulting `pending.len()` after push must also fit (so the
+        // post-condition `pending.len() <= u32::MAX` holds — downstream
+        // casts of `pending.len()` rely on it). `checked_add(1)` over
+        // the converted index covers both in one path.
         let index =
             u32::try_from(self.pending.len()).expect("program length cannot exceed u32::MAX");
+        index
+            .checked_add(1)
+            .expect("emit would grow pending past u32::MAX");
         self.pending.push(PendingOp {
             body,
             on_ok: None,
@@ -158,10 +176,7 @@ impl ProgramBuilder {
     /// Patch the `on_ok` edge of `h`. See [`Self::patch_target_check`]
     /// for the patch-time invariants.
     pub fn patch_on_ok(&mut self, h: OpHandle, target: BranchTarget) -> Result<(), ProgramError> {
-        self.patch_target_check(h.0, target)?;
-        // `patch_target_check` already verified the index is in pending.
-        self.pending[h.0 as usize].on_ok = Some(target);
-        Ok(())
+        self.patch(h, Edge::OnOk, target)
     }
 
     /// Patch the `on_failed` edge of `h`. See [`Self::patch_target_check`]
@@ -171,8 +186,26 @@ impl ProgramBuilder {
         h: OpHandle,
         target: BranchTarget,
     ) -> Result<(), ProgramError> {
+        self.patch(h, Edge::OnFailed, target)
+    }
+
+    /// Patch the named `edge` of `h`. Equivalent to
+    /// [`Self::patch_on_ok`] / [`Self::patch_on_failed`] but selects
+    /// the edge by [`Edge`] value — for callers (the lowering pass)
+    /// that carry the edge as a runtime token alongside the handle.
+    pub fn patch(
+        &mut self,
+        h: OpHandle,
+        edge: Edge,
+        target: BranchTarget,
+    ) -> Result<(), ProgramError> {
         self.patch_target_check(h.0, target)?;
-        self.pending[h.0 as usize].on_failed = Some(target);
+        // `patch_target_check` already verified the index is in pending.
+        let slot = &mut self.pending[h.0 as usize];
+        match edge {
+            Edge::OnOk => slot.on_ok = Some(target),
+            Edge::OnFailed => slot.on_failed = Some(target),
+        }
         Ok(())
     }
 
@@ -197,14 +230,13 @@ impl ProgramBuilder {
         if self.pending.is_empty() {
             return Err(ProgramError::EmptyProgram);
         }
-        let final_len =
-            u32::try_from(self.pending.len()).map_err(|_| ProgramError::ProgramTooLarge)?;
+        let final_len = u32::try_from(self.pending.len())
+            .expect("program length cannot exceed u32::MAX; emit() enforces this");
 
         let mut ops: Vec<ProgramOp> = Vec::with_capacity(self.pending.len());
         for (idx, pending_op) in self.pending.into_iter().enumerate() {
-            // `idx < final_len`; final_len conversion above already
-            // proved the cast fits.
-            let origin = u32::try_from(idx).expect("idx < final_len, which fit u32 above");
+            // `idx < pending.len()`, which fit `u32` above.
+            let origin = u32::try_from(idx).expect("idx < pending.len() <= u32::MAX");
             let on_ok = pending_op.on_ok.ok_or(ProgramError::UnpatchedEdge {
                 op_index: origin,
                 edge: Edge::OnOk,

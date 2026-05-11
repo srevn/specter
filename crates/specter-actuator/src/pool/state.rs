@@ -428,7 +428,7 @@ impl ActuatorState {
         engine_in: &Sender<Input>,
     ) {
         loop {
-            let op = &effect.program.ops[cursor as usize];
+            let op = &effect.program.ops()[cursor as usize];
             match op.target(&outcome) {
                 BranchTarget::Terminate => {
                     self.terminate_plan(
@@ -458,7 +458,7 @@ impl ActuatorState {
                     // enforced at builder patch time (the F4 tripwire
                     // is kept against future regressions).
                     debug_assert!(
-                        next > cursor && (next as usize) < effect.program.ops.len(),
+                        next > cursor && (next as usize) < effect.program.ops().len(),
                         "forward-only + in-bounds (builder invariant)",
                     );
                     match self.try_spawn_step(
@@ -886,7 +886,7 @@ impl ActuatorState {
         let correlation = effect.correlation;
         let capture_output = effect.capture_output;
 
-        let op = &effect.program.ops[cursor as usize];
+        let op = &effect.program.ops()[cursor as usize];
         match &op.body {
             SpawnBody::Exec(exec) => self.spawn_exec_with_permit(
                 key,
@@ -1269,7 +1269,7 @@ impl ActuatorState {
     ///
     /// The function is `&mut self` because the recovery branch
     /// mutates `self.slots[key].running`. The slot lookup is an
-    /// `expect` for the same reason as `spawn_exec_or_predicate_with_permit`:
+    /// `expect` for the same reason as `spawn_exec_with_permit`:
     /// the controller is single-threaded and the caller has just
     /// installed `slot.running`.
     #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]

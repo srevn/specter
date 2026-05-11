@@ -33,24 +33,34 @@ pub use op::{BranchIndex, BranchTarget, ProgramOp, SpawnBody};
 /// Lowered execution program — a CFG-shaped bytecode IR.
 ///
 /// Built once at config validation, shared by-Arc across every emitted
-/// [`crate::Effect`]. The actuator walks `ops` by `u32` cursor; each op
-/// carries explicit `on_ok` / `on_failed` branch targets, so dispatch
-/// after a process reaps is a single lookup on the outcome.
+/// [`crate::Effect`]. The actuator walks the op slice by `u32` cursor;
+/// each op carries explicit `on_ok` / `on_failed` branch targets, so
+/// dispatch after a process reaps is a single lookup on the outcome.
 ///
-/// `ops` is `Box<[ProgramOp]>` — the program shape is fixed at
-/// construction time. [`ProgramBuilder`] enforces forward-only edges
-/// and in-bounds Continue targets, so the dispatcher does not need to
-/// handle backward jumps or out-of-bounds cursors.
+/// The op slice is `Box<[ProgramOp]>` — the program shape is fixed at
+/// construction time, and the field is private so [`ProgramBuilder`]
+/// is the sole construction path. Combined with the seal on
+/// [`BranchIndex`], every value of this type provably came from a
+/// builder that validated forward-only edges and in-bounds Continue
+/// targets; the dispatcher does not need to handle backward jumps or
+/// out-of-bounds cursors.
 ///
 /// Structural `Eq` propagates from [`ProgramOp`]: two programs with
 /// byte-equal ops compare equal even when their Arc allocations differ.
 /// Consumed by hot-reload diffing to suppress no-op replacements.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionProgram {
-    pub ops: Box<[ProgramOp]>,
+    pub(super) ops: Box<[ProgramOp]>,
 }
 
 impl ActionProgram {
+    /// Borrow the op slice. Cursor-indexed by the actuator; iterated
+    /// for read-only scans (e.g., diff-derived placeholder detection).
+    #[must_use]
+    pub fn ops(&self) -> &[ProgramOp] {
+        &self.ops
+    }
+
     /// `true` iff any op in the program references a diff-derived
     /// placeholder (see [`Placeholder::is_diff_derived`]). Linear scan;
     /// called once at `Sub` construction to derive `Sub.needs_diff`.

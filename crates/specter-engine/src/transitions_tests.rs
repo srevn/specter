@@ -877,7 +877,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
     // argv at spawn time. Assert on the template's literal-only first arg
     // instead of the resolved argv. (`/bin/true` is the test's stub
     // command — see `empty_program()`.)
-    let SpawnBody::Exec(exec) = &eff.program.ops[0].body else {
+    let SpawnBody::Exec(exec) = &eff.program.ops()[0].body else {
         panic!("expected SpawnBody::Exec");
     };
     assert_eq!(exec.argv.len(), 1);
@@ -3204,7 +3204,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         // runs in the actuator. Assert the template references the
         // diff-derived `${specter.created}` placeholder (the test fixture's
         // `diff_program()`).
-        let SpawnBody::Exec(exec) = &eff.program.ops[0].body else {
+        let SpawnBody::Exec(exec) = &eff.program.ops()[0].body else {
             panic!("expected SpawnBody::Exec");
         };
         assert!(

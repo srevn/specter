@@ -24,13 +24,14 @@
 //!   [`BranchTarget::Terminate`] (stop-on-failure, outcome propagates).
 //! - **`Conditional`** — the predicate (lowered as `SpawnBody::Exec`)'s
 //!   edges depend on then/else presence:
-//!   - `on_ok` → then-branch's first op when non-empty; otherwise the
-//!     post-conditional slot (`after`).
-//!   - `on_failed` → else-branch's first op when non-empty; otherwise
-//!     `after`. When `after` resolves to [`BranchTarget::Escape`], the
-//!     "branch, not guard" outcome elision is preserved: a Failed
-//!     predicate with no else terminates Ok rather than propagating
-//!     Failed.
+//!     - `on_ok` → then-branch's first op when non-empty; otherwise the
+//!       post-conditional slot (`after`).
+//!     - `on_failed` → else-branch's first op when non-empty; otherwise
+//!       `after`. When `after` resolves to [`BranchTarget::Escape`], the
+//!       "branch, not guard" outcome elision is preserved: a Failed
+//!       predicate with no else terminates Ok rather than propagating
+//!       Failed.
+//!
 //!   Then-body and else-body tails are patched with the post-conditional
 //!   `after` slot the same way sequence tails are.
 //!
@@ -39,7 +40,8 @@
 //! by construction (no `Loop`-like surface).
 
 use specter_core::program::{
-    ActionProgram, BranchTarget, ExecAction, OpHandle, ProgramBuilder, ProgramError, SpawnBody,
+    ActionProgram, BranchTarget, Edge, ExecAction, OpHandle, ProgramBuilder, ProgramError,
+    SpawnBody,
 };
 use std::sync::Arc;
 
@@ -94,23 +96,28 @@ pub(crate) enum Action {
 /// and propagated up to the enclosing block, which patches each tail
 /// with the slot where execution should continue after this body.
 ///
-/// Two flavours because a no-else conditional's pred carries its tail
-/// on `on_failed` (Failed predicate falls through), while every other
-/// case has its tail on `on_ok`.
+/// The `edge` discriminates the two flavours: a no-else conditional's
+/// pred carries its tail on `on_failed` (Failed predicate falls
+/// through); every other case has its tail on `on_ok`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Tail {
-    OnOk(OpHandle),
-    OnFailed(OpHandle),
+struct Tail {
+    handle: OpHandle,
+    edge: Edge,
 }
 
-fn patch_tail(
-    b: &mut ProgramBuilder,
-    tail: Tail,
-    target: BranchTarget,
-) -> Result<(), ProgramError> {
-    match tail {
-        Tail::OnOk(h) => b.patch_on_ok(h, target),
-        Tail::OnFailed(h) => b.patch_on_failed(h, target),
+impl Tail {
+    const fn on_ok(handle: OpHandle) -> Self {
+        Self {
+            handle,
+            edge: Edge::OnOk,
+        }
+    }
+
+    const fn on_failed(handle: OpHandle) -> Self {
+        Self {
+            handle,
+            edge: Edge::OnFailed,
+        }
     }
 }
 
@@ -119,15 +126,16 @@ fn patch_tail(
 /// `Sub.program` and every emitted `Effect.program` references — one
 /// shared CFG-shaped op program per validated Sub.
 ///
-/// Returns [`ProgramError`] on builder-hygiene violations or operator-
-/// caused overflow ([`ProgramError::ProgramTooLarge`]); the caller maps
-/// these to validation issues.
+/// Returns [`ProgramError`] on builder-hygiene violations (unreachable
+/// from a correct lowering pass); the caller maps these to validation
+/// issues so an internal bug surfaces as a config-load error rather
+/// than a panic.
 pub(crate) fn lower_to_program(tree: &[Action]) -> Result<Arc<ActionProgram>, ProgramError> {
     let mut b = ProgramBuilder::new();
     let top_tails = lower_block(tree, &mut b)?;
     // Top-level tails escape — natural completion terminates Ok.
     for tail in top_tails {
-        patch_tail(&mut b, tail, BranchTarget::Escape)?;
+        b.patch(tail.handle, tail.edge, BranchTarget::Escape)?;
     }
     Ok(Arc::new(b.build()?))
 }
@@ -157,7 +165,7 @@ fn lower_block(actions: &[Action], b: &mut ProgramBuilder) -> Result<Vec<Tail>, 
             // filled by the upcoming emit).
             let next_slot = b.continue_to_next();
             for tail in action_tails {
-                patch_tail(b, tail, next_slot)?;
+                b.patch(tail.handle, tail.edge, next_slot)?;
             }
         }
     }
@@ -168,7 +176,7 @@ fn lower_block(actions: &[Action], b: &mut ProgramBuilder) -> Result<Vec<Tail>, 
 /// Lower one [`Action`], returning its tail handles.
 ///
 /// `Exec` and `Pipe` produce one op with `on_failed = Terminate` and
-/// `on_ok` unpatched (the single tail).
+/// `on_ok` unpatched (the single tail) via [`lower_spawn`].
 ///
 /// `Conditional` produces the predicate op plus the lowered then- and
 /// else-bodies. The predicate's edges are patched here for the
@@ -177,16 +185,8 @@ fn lower_block(actions: &[Action], b: &mut ProgramBuilder) -> Result<Vec<Tail>, 
 /// bubble up to the caller for patching with the post-conditional slot.
 fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, ProgramError> {
     match action {
-        Action::Exec(e) => {
-            let h = b.emit(SpawnBody::Exec(e.clone()));
-            b.patch_on_failed(h, BranchTarget::Terminate)?;
-            Ok(vec![Tail::OnOk(h)])
-        }
-        Action::Pipe { stages } => {
-            let h = b.emit(SpawnBody::Pipe(Arc::clone(stages)));
-            b.patch_on_failed(h, BranchTarget::Terminate)?;
-            Ok(vec![Tail::OnOk(h)])
-        }
+        Action::Exec(e) => lower_spawn(SpawnBody::Exec(e.clone()), b),
+        Action::Pipe { stages } => lower_spawn(SpawnBody::Pipe(Arc::clone(stages)), b),
         Action::Conditional {
             when,
             then,
@@ -198,7 +198,7 @@ fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, Pr
             // pred.on_ok: chain to then's first slot, or surface as a
             // tail for empty-then (the caller patches it with `after`).
             if then.is_empty() {
-                tails.push(Tail::OnOk(pred));
+                tails.push(Tail::on_ok(pred));
             } else {
                 let then_first = b.continue_to_next();
                 b.patch_on_ok(pred, then_first)?;
@@ -216,13 +216,23 @@ fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, Pr
                     tails.extend(lower_block(body, b)?);
                 }
                 _ => {
-                    tails.push(Tail::OnFailed(pred));
+                    tails.push(Tail::on_failed(pred));
                 }
             }
 
             Ok(tails)
         }
     }
+}
+
+/// Lower a "spawn-and-stop-on-failure" body (Exec or Pipe) — emit one
+/// op, patch `on_failed = Terminate`, surface `on_ok` as the tail.
+/// Shared by [`Action::Exec`] and [`Action::Pipe`] since they differ
+/// only in the [`SpawnBody`] discriminant.
+fn lower_spawn(body: SpawnBody, b: &mut ProgramBuilder) -> Result<Vec<Tail>, ProgramError> {
+    let h = b.emit(body);
+    b.patch_on_failed(h, BranchTarget::Terminate)?;
+    Ok(vec![Tail::on_ok(h)])
 }
 
 #[cfg(test)]
@@ -241,7 +251,7 @@ mod tests {
     /// `BranchIndex::new` constructor is sealed to `program::*`, so test
     /// assertions reach for the [`ProgramOp`]'s actual edge enum.
     fn ops(program: &Arc<ActionProgram>) -> &[ProgramOp] {
-        program.ops.as_ref()
+        program.ops()
     }
 
     fn assert_continue(target: BranchTarget, expected: u32) {
@@ -262,7 +272,7 @@ mod tests {
     fn single_exec_lowers_to_one_op() {
         let tree = [Action::Exec(exec_with_literal("/bin/build"))];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 1);
+        assert_eq!(program.ops().len(), 1);
         assert!(matches!(ops(&program)[0].body, SpawnBody::Exec(_)));
         assert_eq!(ops(&program)[0].on_ok, BranchTarget::Escape);
         assert_eq!(ops(&program)[0].on_failed, BranchTarget::Terminate);
@@ -278,7 +288,7 @@ mod tests {
             Action::Exec(exec_with_literal("/bin/third")),
         ];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 3);
+        assert_eq!(program.ops().len(), 3);
 
         assert_continue(ops(&program)[0].on_ok, 1);
         assert_continue(ops(&program)[1].on_ok, 2);
@@ -300,7 +310,7 @@ mod tests {
         let stages_for_assert = Arc::clone(&stages);
         let tree = [Action::Pipe { stages }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 1);
+        assert_eq!(program.ops().len(), 1);
         match &ops(&program)[0].body {
             SpawnBody::Pipe(s) => {
                 assert_eq!(s.len(), 2);
@@ -309,7 +319,7 @@ mod tests {
                     "lowering must Arc::clone the stages slice, not re-allocate",
                 );
             }
-            other => panic!("expected SpawnBody::Pipe, got {other:?}"),
+            other @ SpawnBody::Exec(_) => panic!("expected SpawnBody::Pipe, got {other:?}"),
         }
         assert_eq!(ops(&program)[0].on_ok, BranchTarget::Escape);
         assert_eq!(ops(&program)[0].on_failed, BranchTarget::Terminate);
@@ -328,7 +338,7 @@ mod tests {
             Action::Exec(exec_with_literal("/bin/post")),
         ];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 3);
+        assert_eq!(program.ops().len(), 3);
         assert!(matches!(ops(&program)[0].body, SpawnBody::Exec(_)));
         assert!(matches!(ops(&program)[1].body, SpawnBody::Pipe(_)));
         assert!(matches!(ops(&program)[2].body, SpawnBody::Exec(_)));
@@ -351,7 +361,7 @@ mod tests {
             otherwise: None,
         }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 2);
+        assert_eq!(program.ops().len(), 2);
         assert_continue(ops(&program)[0].on_ok, 1);
         assert_eq!(
             ops(&program)[0].on_failed,
@@ -373,7 +383,7 @@ mod tests {
             otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/else"))])),
         }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 3);
+        assert_eq!(program.ops().len(), 3);
 
         assert_continue(ops(&program)[0].on_ok, 1);
         assert_continue(ops(&program)[0].on_failed, 2);
@@ -397,7 +407,7 @@ mod tests {
             otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/else"))])),
         }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 2);
+        assert_eq!(program.ops().len(), 2);
 
         assert_eq!(
             ops(&program)[0].on_ok,
@@ -423,7 +433,7 @@ mod tests {
             otherwise: Some(Box::new([])),
         }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 2);
+        assert_eq!(program.ops().len(), 2);
         assert_continue(ops(&program)[0].on_ok, 1);
         assert_eq!(ops(&program)[0].on_failed, BranchTarget::Escape);
     }
@@ -449,7 +459,7 @@ mod tests {
             ))])),
         }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 5, "5 ops (was 7 with Jumps)");
+        assert_eq!(program.ops().len(), 5, "5 ops (was 7 with Jumps)");
 
         // 0: outer pred. on_ok = 1 (inner pred). on_failed = 4 (outer else).
         assert_continue(ops(&program)[0].on_ok, 1);
@@ -481,7 +491,7 @@ mod tests {
             Action::Exec(exec_with_literal("/bin/after")),
         ];
         let program = lower_to_program(&tree).expect("lowering succeeds");
-        assert_eq!(program.ops.len(), 3);
+        assert_eq!(program.ops().len(), 3);
 
         // 0: pred. on_ok = 1 (then). on_failed = 2 (post-conditional = after).
         assert_continue(ops(&program)[0].on_ok, 1);

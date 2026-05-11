@@ -8,7 +8,7 @@
 //! the actuator's per-slot `pending`. The invariant under test:
 //! **once started, a plan runs all its ops before `pending` fires**,
 //! regardless of new submits. Equivalently: `Effect.program` is a
-//! frozen snapshot — the in-flight step's `effect.program.ops[N+1]` is
+//! frozen snapshot — the in-flight step's `effect.program.ops()[N+1]` is
 //! sourced from the same `Arc` installed at plan start, never from a
 //! later submit's program.
 //!
