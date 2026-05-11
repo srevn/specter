@@ -42,8 +42,11 @@ mod tests {
     use crate::effect::{CorrelationId, DedupKey};
     use crate::ids::{ProfileId, ResourceId, SubId};
     use crate::op::ProbeRequest;
+    use crate::program::{
+        ActionProgram, ArgPart, ArgTemplate, BranchTarget, ExecAction, ProgramBuilder, SpawnBody,
+    };
     use crate::resource::ResourceKind;
-    use crate::sub::{ActionProgram, ClassSet};
+    use crate::sub::ClassSet;
     use compact_str::CompactString;
     use slotmap::KeyData;
     use std::path::PathBuf;
@@ -61,6 +64,19 @@ mod tests {
         SubId::from(KeyData::from_ffi(n))
     }
 
+    /// Minimal one-op program for fixture construction; the body content
+    /// doesn't matter for the sort-emission tests below, only that the
+    /// field is well-typed and non-empty.
+    fn fixture_program() -> Arc<ActionProgram> {
+        let mut b = ProgramBuilder::new();
+        let h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+            ArgPart::literal("/bin/true"),
+        ])])));
+        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
+        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+        Arc::new(b.build().unwrap())
+    }
+
     /// Test fixture for an [`Effect`] when only `(key, target)` matter
     /// (sort tests). Other fields take their natural empty values.
     fn effect(key: DedupKey, target: ResourceId) -> Effect {
@@ -72,7 +88,7 @@ mod tests {
             diff: None::<Arc<Diff>>,
             capture_output: false,
             sub_name: CompactString::new(""),
-            program: Arc::new(ActionProgram::new([])),
+            program: fixture_program(),
             anchor_path: Arc::from(PathBuf::new()),
             anchor_kind: ResourceKind::Dir,
             target_relative: CompactString::new(""),

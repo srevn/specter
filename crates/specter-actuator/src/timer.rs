@@ -29,8 +29,7 @@
 //! same lifetime, same ownership model, same `Arc<dyn ChildSignaler>`
 //! sharing pattern. A consolidated timer heap would amortise OS thread
 //! cost at high pid volumes but reintroduces a single coordination point
-//! that v1 doesn't need. Assumption A3 in the action-types expansion
-//! plan documents the v2 evolution.
+//! that v1 doesn't need.
 //!
 //! # Spawn-failure policy
 //!

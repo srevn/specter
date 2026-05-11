@@ -87,13 +87,10 @@ impl Spawner for OsSpawner {
         );
         let child = cmd.spawn()?;
         let (pid, waiter, signaler) = build_pair(child);
-        // Single-spawn surface keeps the historic `Box<dyn>` shape on
-        // SpawnHandles. The controller converts to `Arc<dyn>` at install
-        // time (one allocation per spawn, on a cold path).
         Ok(SpawnHandles {
             pid,
             waiter: Box::new(waiter),
-            signaler: Box::new(signaler),
+            signaler: Arc::new(signaler),
         })
     }
 
@@ -303,11 +300,10 @@ fn build_command(
 /// circuits the syscall (closes the PID-reuse race at the protocol
 /// layer; ESRCH-collapse is the syscall fallback).
 ///
-/// Returns concrete types — the caller wraps in `Box<dyn>` or
-/// `Arc<dyn>` per use site. The single-spawn path keeps the historic
-/// `Box<dyn>` shape on [`SpawnHandles`]; the pipe path needs
-/// `Arc<dyn ChildSignaler>` so the combined signaler, per-stage timer,
-/// and aggregating waiter can co-own without ceremony.
+/// Returns concrete types — the caller wraps in `Box<dyn>` for the
+/// waiter (single-consumer at wait time) and `Arc<dyn>` for the signaler
+/// (the controller installs it on [`crate::pool::state::RunningJob`] and
+/// clones it into any per-step timer thread).
 fn build_pair(child: Child) -> (u32, OsChildWaiter, OsChildSignaler) {
     let pid = child.id();
     let dead = Arc::new(AtomicBool::new(false));

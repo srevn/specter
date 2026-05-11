@@ -178,9 +178,9 @@ impl SubprocessActuator {
         tracing::info!("shutdown phase 1: SIGTERM running children");
         for slot in self.state.slots.values() {
             if let Some(job) = slot.running.as_ref()
-                && let Err(e) = job.shutdown_signaler().signal_term()
+                && let Err(e) = job.signaler.signal_term()
             {
-                tracing::debug!(pid = job.pid(), ?e, "SIGTERM failed");
+                tracing::debug!(pid = job.pid, ?e, "SIGTERM failed");
             }
         }
         // Phase 2: drain reaps for shutdown_grace. No pump — pending
@@ -209,9 +209,9 @@ impl SubprocessActuator {
             tracing::info!("shutdown phase 3: SIGKILL stragglers");
             for slot in self.state.slots.values() {
                 if let Some(job) = slot.running.as_ref()
-                    && let Err(e) = job.shutdown_signaler().signal_kill()
+                    && let Err(e) = job.signaler.signal_kill()
                 {
-                    tracing::debug!(pid = job.pid(), ?e, "SIGKILL failed");
+                    tracing::debug!(pid = job.pid, ?e, "SIGKILL failed");
                 }
             }
         }
@@ -258,9 +258,11 @@ mod tests {
     use crate::testkit::{MockSpawner, SignalRecord};
     use compact_str::CompactString;
     use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
+    use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
+    use specter_core::testkit::{predicate_then_program, single_exec_program};
     use specter_core::{
         ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
-        ExecAction, Input, Instruction, ProfileId, ResourceId, ResourceKind, SubId,
+        ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -288,19 +290,30 @@ mod tests {
         n_step_program(1)
     }
 
-    /// Build an `n`-instruction program whose every instruction is a
-    /// literal `/bin/true` `SpawnExec`. Used by multi-instruction tests
-    /// to drive the actuator's advance / terminate path without caring
-    /// about argv shape.
+    /// Build an `n`-op program whose every op is a literal `/bin/true`
+    /// Exec, chained `on_ok = Continue` (final op `on_ok = Escape`);
+    /// every `on_failed = Terminate`. Used by multi-op tests to drive
+    /// the actuator's advance / terminate path without caring about
+    /// argv shape.
     fn n_step_program(n: usize) -> Arc<ActionProgram> {
-        let instructions: Vec<Instruction> = (0..n)
-            .map(|_| {
-                Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-                    "/bin/true",
-                )])]))
-            })
-            .collect();
-        Arc::new(ActionProgram::new(instructions))
+        assert!(n >= 1, "n_step_program requires at least one step");
+        let mut b = ProgramBuilder::new();
+        let mut prev: Option<specter_core::program::OpHandle> = None;
+        for _ in 0..n {
+            if let Some(ph) = prev {
+                let next = b.continue_to_next();
+                b.patch_on_ok(ph, next).unwrap();
+            }
+            let h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+                ArgPart::literal("/bin/true"),
+            ])])));
+            b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+            prev = Some(h);
+        }
+        if let Some(last) = prev {
+            b.patch_on_ok(last, BranchTarget::Escape).unwrap();
+        }
+        Arc::new(b.build().unwrap())
     }
 
     fn make_effect_perfile(sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64) -> Effect {
@@ -1251,16 +1264,14 @@ mod tests {
 
     // ---------- ${env.<NAME>} strict + default ----------
 
-    /// Build a single-instruction program whose argv is the one given
+    /// Build a single-op program whose argv is the one given
     /// [`ArgPart`]. The actuator-level env tests need to inject precise
     /// `EnvVar` placeholders without routing through the config layer.
     fn env_var_program(name: &str, default: Option<&str>) -> Arc<ActionProgram> {
-        Arc::new(ActionProgram::new([Instruction::SpawnExec(
-            ExecAction::new([ArgTemplate::new([ArgPart::EnvVar {
-                name: name.into(),
-                default: default.map(CompactString::from),
-            }])]),
-        )]))
+        single_exec_program([ArgTemplate::new([ArgPart::EnvVar {
+            name: name.into(),
+            default: default.map(CompactString::from),
+        }])])
     }
 
     /// Strict-unset: an Effect that references an unset env var with
@@ -1344,13 +1355,16 @@ mod tests {
 
     // ---------- per-step timeout ----------
 
-    /// Build a single-instruction program with `timeout` set. Mirrors
-    /// what the config layer would emit for
-    /// `{ exec = ["..."], timeout = "..." }`.
+    /// Build a single-op program with `timeout` set. Mirrors what the
+    /// config layer would emit for `{ exec = ["..."], timeout = "..." }`.
     fn timeout_program(d: Duration) -> Arc<ActionProgram> {
-        Arc::new(ActionProgram::new([Instruction::SpawnExec(
+        let mut b = ProgramBuilder::new();
+        let h = b.emit(SpawnBody::Exec(
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])]).with_timeout(d),
-        )]))
+        ));
+        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
+        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+        Arc::new(b.build().unwrap())
     }
 
     /// A child that doesn't complete within `timeout` receives SIGTERM
@@ -1443,46 +1457,55 @@ mod tests {
         h.shutdown();
     }
 
-    // ---------- conditional dispatch (SpawnPredicate) ----------
+    // ---------- conditional dispatch (predicate edges) ----------
 
-    /// Build a program for `when=W; then=[T]` (no else): predicate
-    /// at cursor 0 with `jump_target=2` (skip past end), then-exec at
-    /// cursor 1. The actuator's reap-path treats `cursor>=len` as
-    /// "plan complete OK."
+    /// Build a program for `when=W; then=[T]` (no else): predicate op
+    /// (Exec) with `on_failed = Escape` (the "branch, not guard"
+    /// outcome elision — predicate Failed terminates the plan Ok
+    /// without propagation), then the then-Exec.
     fn predicate_then_no_else(when_label: &str, then_label: &str) -> Arc<ActionProgram> {
-        Arc::new(ActionProgram::new([
-            Instruction::SpawnPredicate {
-                exec: ExecAction::new([ArgTemplate::new([ArgPart::literal(when_label)])]),
-                jump_target: 2,
-            },
-            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-                then_label,
-            )])])),
-        ]))
+        predicate_then_program(
+            ExecAction::new([ArgTemplate::new([ArgPart::literal(when_label)])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal(then_label)])]),
+        )
     }
 
-    /// Build a program for `when=W; then=[T]; else=[E]`:
-    /// [SpawnPredicate(W, jump=3), SpawnExec(T), Jump(target=4),
-    /// SpawnExec(E)]. Mirrors the lowering of a 4-instruction
-    /// conditional with both branches present.
+    /// Build a program for `when=W; then=[T]; else=[E]`: three ops in
+    /// CFG-shape.
+    ///
+    /// - op 0: predicate `W` — `on_ok = Continue(1)` (then), `on_failed
+    ///   = Continue(2)` (else).
+    /// - op 1: then-Exec `T` — `on_ok = Escape` (skip else), `on_failed
+    ///   = Terminate`.
+    /// - op 2: else-Exec `E` — `on_ok = Escape`, `on_failed =
+    ///   Terminate`.
     fn predicate_then_else(
         when_label: &str,
         then_label: &str,
         else_label: &str,
     ) -> Arc<ActionProgram> {
-        Arc::new(ActionProgram::new([
-            Instruction::SpawnPredicate {
-                exec: ExecAction::new([ArgTemplate::new([ArgPart::literal(when_label)])]),
-                jump_target: 3,
-            },
-            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-                then_label,
-            )])])),
-            Instruction::Jump { target: 4 },
-            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-                else_label,
-            )])])),
-        ]))
+        let mut b = ProgramBuilder::new();
+        let pred = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+            ArgPart::literal(when_label),
+        ])])));
+        // then enters at cursor 1
+        let then_first = b.continue_to_next();
+        b.patch_on_ok(pred, then_first).unwrap();
+        let then_h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+            ArgPart::literal(then_label),
+        ])])));
+        // else enters at cursor 2 — patch predicate's on_failed to it,
+        // and then-Exec's on_ok is Escape (skip past else).
+        let else_first = b.continue_to_next();
+        b.patch_on_failed(pred, else_first).unwrap();
+        b.patch_on_ok(then_h, BranchTarget::Escape).unwrap();
+        b.patch_on_failed(then_h, BranchTarget::Terminate).unwrap();
+        let else_h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+            ArgPart::literal(else_label),
+        ])])));
+        b.patch_on_ok(else_h, BranchTarget::Escape).unwrap();
+        b.patch_on_failed(else_h, BranchTarget::Terminate).unwrap();
+        Arc::new(b.build().unwrap())
     }
 
     /// Predicate reaping Ok enters the then-branch: the actuator
@@ -1567,9 +1590,9 @@ mod tests {
     }
 
     /// Predicate reaping Failed with no else-branch terminates the
-    /// plan Ok (`cursor=jump_target` lands at `instructions.len()`,
-    /// the natural skip-past-end form). The reaped Failed outcome
-    /// stays out of `EffectComplete`.
+    /// plan Ok (predicate's `on_failed = Escape` — the "branch, not
+    /// guard" outcome elision). The reaped Failed outcome stays out
+    /// of `EffectComplete`.
     #[test]
     fn predicate_failed_no_else_terminates_ok_without_propagation() {
         let mut h = Harness::new(4);
@@ -1614,13 +1637,13 @@ mod tests {
     ///
     /// Deterministic shape: a no-else conditional whose predicate
     /// spawn-fails (via injected `ErrorKind::NotFound`). The dispatch
-    /// at cursor 0 sees `(SpawnPredicate, synth-Failed)` and emits
-    /// `Advance(jump_target=2)`; `next_spawnable(2) == 2 == len`, so
-    /// the plan terminates with `EffectOutcome::Ok`. If predicate
-    /// spawn-failure had short-circuited to terminate directly (the
-    /// pre-PR3 behaviour), this would emit `EffectComplete::Failed`.
-    /// The Ok outcome is the no-propagation invariant in observable
-    /// form.
+    /// at cursor 0 sees the predicate op's synth-Failed outcome and
+    /// reads `op.target(&Failed) = on_failed = Escape` (the no-else
+    /// "branch, not guard" elision), so the plan terminates with
+    /// `EffectOutcome::Ok`. If predicate spawn-failure had short-
+    /// circuited to terminate directly (the pre-PR3 behaviour), this
+    /// would emit `EffectComplete::Failed`. The Ok outcome is the
+    /// no-propagation invariant in observable form.
     ///
     /// Zero spawns are recorded — the injection short-circuits
     /// `MockSpawner::spawn` before the `SpawnRecord` push.
@@ -1658,9 +1681,9 @@ mod tests {
     /// Shape: `when` references `${env.MISSING}` (no default) against
     /// an empty [`EnvSnapshot`]; the resolver returns `UnsetEnvVar`
     /// before any process spawns. The actuator synthesises `Failed` at
-    /// cursor 0 → `dispatch_outcome(SpawnPredicate, Failed)` →
-    /// `Advance { jump_target = 3 }` → `next_spawnable(3) = 3` → spawn
-    /// the else-branch (cursor 3, literal `/bin/else`).
+    /// cursor 0 → predicate op's `on_failed` resolves to `Continue(2)`
+    /// (the else-branch's first op) → spawn the else-branch
+    /// (literal `/bin/else`).
     ///
     /// **Why this is a distinct test from
     /// [`predicate_spawn_failure_does_not_propagate_no_else`]**:
@@ -1676,26 +1699,34 @@ mod tests {
     /// shape" across all three Failed-at-cursor-0 sources.
     #[test]
     fn predicate_resolver_failure_cascades_to_else_branch() {
-        // [SpawnPredicate(${env.MISSING}, jump=3),
-        //  SpawnExec(/bin/then),
-        //  Jump(target=4),
-        //  SpawnExec(/bin/else)]
-        let program = Arc::new(ActionProgram::new([
-            Instruction::SpawnPredicate {
-                exec: ExecAction::new([ArgTemplate::new([ArgPart::EnvVar {
+        // Three-op CFG: predicate(${env.MISSING}) → on_ok = Continue(1)
+        // (then), on_failed = Continue(2) (else). Then-Exec on_ok =
+        // Escape, on_failed = Terminate. Else-Exec on_ok = Escape,
+        // on_failed = Terminate.
+        let program = {
+            let mut b = ProgramBuilder::new();
+            let pred = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+                ArgPart::EnvVar {
                     name: CompactString::new("MISSING"),
                     default: None,
-                }])]),
-                jump_target: 3,
-            },
-            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-                "/bin/then",
-            )])])),
-            Instruction::Jump { target: 4 },
-            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-                "/bin/else",
-            )])])),
-        ]));
+                },
+            ])])));
+            let then_first = b.continue_to_next();
+            b.patch_on_ok(pred, then_first).unwrap();
+            let then_h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+                ArgPart::literal("/bin/then"),
+            ])])));
+            let else_first = b.continue_to_next();
+            b.patch_on_failed(pred, else_first).unwrap();
+            b.patch_on_ok(then_h, BranchTarget::Escape).unwrap();
+            b.patch_on_failed(then_h, BranchTarget::Terminate).unwrap();
+            let else_h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+                ArgPart::literal("/bin/else"),
+            ])])));
+            b.patch_on_ok(else_h, BranchTarget::Escape).unwrap();
+            b.patch_on_failed(else_h, BranchTarget::Terminate).unwrap();
+            Arc::new(b.build().unwrap())
+        };
         let mut h = Harness::new_with_grace_and_env(
             4,
             Duration::from_secs(5),
@@ -1749,21 +1780,30 @@ mod tests {
     #[test]
     fn predicate_within_sequence_skips_or_runs_then() {
         let prog_path = || {
-            // [Exec(/bin/a), Predicate(/bin/b, jump=3), Exec(/bin/c)]
-            // jump=3 = len → predicate Failed terminates Ok without
-            // running C.
-            Arc::new(ActionProgram::new([
-                Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-                    "/bin/a",
-                )])])),
-                Instruction::SpawnPredicate {
-                    exec: ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
-                    jump_target: 3,
-                },
-                Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-                    "/bin/c",
-                )])])),
-            ]))
+            // CFG-shape mirror of `[exec=a, when=b then=[exec=c]]`:
+            //   op 0: Exec(a) — on_ok = Continue(1), on_failed = Terminate
+            //   op 1: predicate b — on_ok = Continue(2) (then),
+            //                       on_failed = Escape (no-else branch elision)
+            //   op 2: Exec(c) — on_ok = Escape, on_failed = Terminate
+            let mut b = ProgramBuilder::new();
+            let a = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+                ArgPart::literal("/bin/a"),
+            ])])));
+            let after_a = b.continue_to_next();
+            b.patch_on_ok(a, after_a).unwrap();
+            b.patch_on_failed(a, BranchTarget::Terminate).unwrap();
+            let pred = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+                ArgPart::literal("/bin/b"),
+            ])])));
+            let after_pred = b.continue_to_next();
+            b.patch_on_ok(pred, after_pred).unwrap();
+            b.patch_on_failed(pred, BranchTarget::Escape).unwrap();
+            let c = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+                ArgPart::literal("/bin/c"),
+            ])])));
+            b.patch_on_ok(c, BranchTarget::Escape).unwrap();
+            b.patch_on_failed(c, BranchTarget::Terminate).unwrap();
+            Arc::new(b.build().unwrap())
         };
 
         // Path 1: B reaps Ok → C runs.
@@ -1829,13 +1869,23 @@ mod tests {
         }
     }
 
-    // ---------- pipe dispatch (SpawnPipe) ----------
+    // ---------- pipe dispatch (Pipe body) ----------
     //
     // The pipe variant is the heaviest behavioural slice of PR4: a
-    // single `Instruction::SpawnPipe` triggers N spawns, an
+    // single op with `SpawnBody::Pipe` triggers N spawns, an
     // aggregating waiter, a combined signaler for shutdown, and
     // optional per-stage timers. These tests exercise the dispatcher
     // wiring against the testkit `MockSpawner::spawn_pipe`.
+
+    /// Build a single-op program wrapping a pipe body. `on_ok = Escape`,
+    /// `on_failed = Terminate`.
+    fn pipe_program(stages: Arc<[ExecAction]>) -> Arc<ActionProgram> {
+        let mut b = ProgramBuilder::new();
+        let h = b.emit(SpawnBody::Pipe(stages));
+        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
+        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+        Arc::new(b.build().unwrap())
+    }
 
     /// Two-stage pipe with both stages Ok: aggregated outcome is Ok;
     /// the actuator emits exactly one EffectComplete (the engine's
@@ -1846,7 +1896,7 @@ mod tests {
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
         ]);
-        let program = Arc::new(ActionProgram::new([Instruction::SpawnPipe(stages)]));
+        let program = pipe_program(stages);
 
         let mut h = Harness::new(4);
         h.submit(make_effect_perfile_with_program(50, 50, 50, 1, program));
@@ -1887,7 +1937,7 @@ mod tests {
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
         ]);
-        let program = Arc::new(ActionProgram::new([Instruction::SpawnPipe(stages)]));
+        let program = pipe_program(stages);
 
         let mut h = Harness::new(4);
         h.submit(make_effect_perfile_with_program(51, 51, 51, 1, program));
@@ -1957,7 +2007,7 @@ mod tests {
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
         ]);
-        let program = Arc::new(ActionProgram::new([Instruction::SpawnPipe(stages)]));
+        let program = pipe_program(stages);
 
         let mut h = Harness::new(4);
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
@@ -1985,19 +2035,27 @@ mod tests {
 
     /// Pipe followed by another action in the same program: pipe
     /// Ok ⇒ next action runs; pipe Failed ⇒ next action is skipped
-    /// (stop-on-failure semantics, same as SpawnExec).
+    /// (stop-on-failure semantics, same as a plain Exec).
     #[test]
     fn pipe_followed_by_exec_runs_only_on_pipe_ok() {
         let pipe_stages: Arc<[ExecAction]> = Arc::from(vec![
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
         ]);
-        let program = Arc::new(ActionProgram::new([
-            Instruction::SpawnPipe(pipe_stages),
-            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-                "/bin/after",
-            )])])),
-        ]));
+        let program = {
+            let mut b = ProgramBuilder::new();
+            let p = b.emit(SpawnBody::Pipe(pipe_stages));
+            let after = b.continue_to_next();
+            b.patch_on_ok(p, after).unwrap();
+            b.patch_on_failed(p, BranchTarget::Terminate).unwrap();
+            let exec_after = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+                ArgPart::literal("/bin/after"),
+            ])])));
+            b.patch_on_ok(exec_after, BranchTarget::Escape).unwrap();
+            b.patch_on_failed(exec_after, BranchTarget::Terminate)
+                .unwrap();
+            Arc::new(b.build().unwrap())
+        };
 
         // Path 1: pipe Ok → /bin/after runs.
         {
@@ -2081,7 +2139,7 @@ mod tests {
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]).with_timeout(timeout),
         ]);
-        let program = Arc::new(ActionProgram::new([Instruction::SpawnPipe(stages)]));
+        let program = pipe_program(stages);
 
         // Short shutdown_grace so the SIGKILL escalation also lands
         // inside the test window if SIGTERM doesn't take effect.

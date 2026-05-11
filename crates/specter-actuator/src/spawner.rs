@@ -155,10 +155,17 @@ impl std::fmt::Debug for PipeSpawnHandles {
 /// shutdown to deliver SIGTERM and (after the grace window) SIGKILL.
 /// Production impls share an `Arc<AtomicBool>` between the two so
 /// post-reap signals are no-ops (closes the PID-reuse race).
+///
+/// `signaler` is `Arc<dyn>` because the controller installs the signaler
+/// into [`crate::pool::state::RunningJob::signaler`] and *also* clones it
+/// into the per-step timer thread (when [`super::ExecAction::timeout`]
+/// is set) — both paths need to outlive each other independently. The
+/// pipe path's `PipeSpawnHandles::stage_signalers` are likewise `Arc`,
+/// so the spawn surface speaks a single signaler-ownership shape.
 pub struct SpawnHandles {
     pub pid: u32,
     pub waiter: Box<dyn ChildWaiter>,
-    pub signaler: Box<dyn ChildSignaler>,
+    pub signaler: Arc<dyn ChildSignaler>,
 }
 
 impl std::fmt::Debug for SpawnHandles {

@@ -31,14 +31,13 @@ pub enum IssueKind {
     Empty,
     /// `actions = []` — at least one entry required.
     EmptyActions,
-    /// `actions[i]` carries no variant (e.g., `actions = [{}]`). Once
-    /// new variants land alongside `exec`, this kind also fires when
-    /// every variant is `None` — exactly one must be set.
+    /// `actions[i]` carries no variant (e.g., `actions = [{}]`) — none
+    /// of `exec`, `pipe`, or the conditional triple (`when` / `then` /
+    /// `else`) is set. Exactly one variant must be supplied.
     ActionMissingVariant,
-    /// `actions[i]` carries multiple variants set simultaneously. v1's
-    /// single `exec` variant means this is unreachable today; the kind
-    /// is reserved so the validator can keep the "exactly one variant"
-    /// rule as a single check across both v1 and v2.
+    /// `actions[i]` carries multiple variants set simultaneously
+    /// (e.g., both `exec` and `pipe`, or `exec` together with the
+    /// conditional triple). The three variants are mutually exclusive.
     ActionAmbiguousVariant,
     EmptyArgv,
     NonAbsolute,
@@ -106,6 +105,17 @@ pub enum IssueKind {
     /// validator rejects it so the operator's intent is unambiguous;
     /// `exec = [...]` at the action's top level is the right shape.
     SingleStagePipe,
+    /// Lowered program would exceed `u32::MAX` ops. Operator-caused;
+    /// practically unreachable in v1 (a program that big can't be
+    /// loaded — each op is ≥24 bytes), but kept as a typed surface so
+    /// the lowering pass returns Result rather than panicking.
+    ProgramTooLarge,
+    /// Internal lowering invariant violation — an unpatched edge, a
+    /// backward branch, or an out-of-bounds target leaked from the
+    /// lowering pass. Unreachable from a correct lowering, surfaced as
+    /// a validation issue (rather than a panic) so the operator gets a
+    /// loadable error message instead of a crashed process.
+    LoweringInternal,
 }
 
 impl ConfigError {
@@ -215,5 +225,35 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::EmptyConditional => "empty-conditional",
         IssueKind::EmptyPipe => "empty-pipe",
         IssueKind::SingleStagePipe => "single-stage-pipe",
+        IssueKind::ProgramTooLarge => "program-too-large",
+        IssueKind::LoweringInternal => "lowering-internal",
+    }
+}
+
+impl ValidationIssue {
+    /// Map a [`specter_core::program::ProgramError`] into the
+    /// validation-issue surface. Operator-caused
+    /// [`specter_core::program::ProgramError::ProgramTooLarge`] becomes
+    /// its own [`IssueKind::ProgramTooLarge`]; builder-hygiene variants
+    /// (`UnpatchedEdge` / `BackwardEdge` / `OutOfBoundsEdge` /
+    /// `EmptyProgram`) collapse to a single [`IssueKind::LoweringInternal`]
+    /// — they're unreachable from a correct lowering pass, but the
+    /// validator captures them as issues rather than panicking.
+    pub(crate) fn from_program_error(
+        e: specter_core::program::ProgramError,
+        watch_index: Option<usize>,
+        field: &'static str,
+    ) -> Self {
+        let (kind, detail) = match e {
+            specter_core::program::ProgramError::ProgramTooLarge => (
+                IssueKind::ProgramTooLarge,
+                "lowered program exceeds u32::MAX ops".to_owned(),
+            ),
+            other => (
+                IssueKind::LoweringInternal,
+                format!("lowering invariant violated: {other}"),
+            ),
+        };
+        Self::new(watch_index, field, kind, detail)
     }
 }

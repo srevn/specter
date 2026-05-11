@@ -1,7 +1,8 @@
 //! Integration tests: parse + validate against TOML fixtures.
 
 use specter_config::{Config, ConfigError, IssueKind};
-use specter_core::{ArgPart, ClassSet, EffectScope, Instruction, Placeholder};
+use specter_core::program::{BranchTarget, SpawnBody};
+use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -46,8 +47,8 @@ fn full_fixture_round_trips_every_field() {
     assert_eq!(w.scan.exclude.len(), 2);
     assert_eq!(w.scan.max_depth, Some(5));
     assert_eq!(w.events, ClassSet::STRUCTURE | ClassSet::CONTENT);
-    let Instruction::SpawnExec(exec) = &w.program.instructions[0] else {
-        panic!("expected SpawnExec instruction");
+    let SpawnBody::Exec(exec) = &w.program.ops[0].body else {
+        panic!("expected SpawnBody::Exec");
     };
     assert_eq!(exec.argv.len(), 3);
     assert_eq!(exec.argv[0].parts[0], ArgPart::literal("make"));
@@ -181,11 +182,11 @@ fn exec_timeout_threads_per_action_via_humantime_serde() {
     let cfg = Config::from_str(toml).unwrap();
     let timeouts: Vec<Option<Duration>> = cfg.watches[0]
         .program
-        .instructions
+        .ops
         .iter()
-        .map(|i| match i {
-            Instruction::SpawnExec(e) => e.timeout,
-            other => panic!("expected SpawnExec, got {other:?}"),
+        .map(|op| match &op.body {
+            SpawnBody::Exec(e) => e.timeout,
+            other => panic!("expected SpawnBody::Exec, got {other:?}"),
         })
         .collect();
     assert_eq!(
@@ -222,9 +223,9 @@ fn exec_env_placeholder_lowers_into_program() {
     let toml = "[[watch]]\nname = \"e\"\npath = \"/\"\n\
                 actions = [{ exec = [\"echo\", \"${env.HOME:-/tmp}\"] }]";
     let cfg = Config::from_str(toml).unwrap();
-    let exec = match &cfg.watches[0].program.instructions[0] {
-        Instruction::SpawnExec(e) => e,
-        other => panic!("expected SpawnExec, got {other:?}"),
+    let exec = match &cfg.watches[0].program.ops[0].body {
+        SpawnBody::Exec(e) => e,
+        other => panic!("expected SpawnBody::Exec, got {other:?}"),
     };
     match &exec.argv[1].parts[0] {
         ArgPart::EnvVar { name, default } => {
@@ -256,11 +257,11 @@ fn exec_env_invalid_name_yields_validation_error() {
 
 // ----- Conditional actions (`when` / `then` / `else`) -----
 
-/// Conditional with `when` + `then` lowers to a two-instruction
-/// program: `SpawnPredicate(when, jump=2)` then the then-branch's
-/// `SpawnExec`. With no `else`, the predicate's `jump_target` is
-/// `len = 2` — the natural "skip past end" form treated by the
-/// actuator's reap-path as terminate-Ok.
+/// Conditional with `when` + `then` lowers to a two-op program:
+/// predicate op (Exec body, `on_failed = Escape` — "branch, not guard")
+/// then the then-branch's Exec op. With no `else`, the predicate's
+/// `on_failed = Escape` (the "branch, not guard" outcome elision —
+/// predicate Failed terminates the plan Ok without propagating).
 #[test]
 fn conditional_when_then_lowers_to_predicate_plus_then() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -269,22 +270,33 @@ fn conditional_when_then_lowers_to_predicate_plus_then() {
                 ]";
     let cfg = Config::from_str(toml).unwrap();
     let p = &cfg.watches[0].program;
-    assert_eq!(p.instructions.len(), 2);
-    match &p.instructions[0] {
-        Instruction::SpawnPredicate { jump_target, .. } => {
-            assert_eq!(*jump_target, 2, "no-else: jump past end");
-        }
-        other => panic!("expected SpawnPredicate, got {other:?}"),
+    assert_eq!(p.ops.len(), 2);
+    // Predicate op (cursor 0): Exec body; on_ok continues to then-branch
+    // (op 1); on_failed = Escape (no-else: terminate Ok without propagation).
+    assert!(matches!(p.ops[0].body, SpawnBody::Exec(_)));
+    match p.ops[0].on_ok {
+        BranchTarget::Continue(idx) => assert_eq!(idx.get(), 1, "predicate Ok enters then"),
+        other => panic!("expected Continue(1), got {other:?}"),
     }
-    assert!(matches!(p.instructions[1], Instruction::SpawnExec(_)));
+    assert_eq!(p.ops[0].on_failed, BranchTarget::Escape);
+    // Then-exec (cursor 1): on_ok = Escape (top-level natural completion);
+    // on_failed = Terminate (stop-on-failure, outcome propagates).
+    assert!(matches!(p.ops[1].body, SpawnBody::Exec(_)));
+    assert_eq!(p.ops[1].on_ok, BranchTarget::Escape);
+    assert_eq!(p.ops[1].on_failed, BranchTarget::Terminate);
 }
 
-/// Conditional with `when` + `then` + `else` lowers to a four-
-/// instruction program with the Jump-after-then skipping the
-/// else-branch on the Ok path: `SpawnPredicate(jump=3)`,
-/// `SpawnExec(then)`, `Jump(target=4)`, `SpawnExec(else)`.
+/// Conditional with `when` + `then` + `else` lowers to a three-op
+/// program (the explicit Jump opcode is gone — the CFG-shaped IR encodes
+/// the skip via edges instead). Layout:
+///
+/// - op 0: predicate Exec — `on_ok = Continue(1)` (enter then),
+///   `on_failed = Continue(2)` (enter else).
+/// - op 1: then-Exec — `on_ok = Escape` (skip past else), `on_failed =
+///   Terminate` (stop-on-failure).
+/// - op 2: else-Exec — `on_ok = Escape`, `on_failed = Terminate`.
 #[test]
-fn conditional_with_else_lowers_to_predicate_then_jump_else() {
+fn conditional_with_else_lowers_to_predicate_then_else_via_edges() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
                 actions = [\n\
                   { when = { exec = [\"check\"] }, \
@@ -293,17 +305,25 @@ fn conditional_with_else_lowers_to_predicate_then_jump_else() {
                 ]";
     let cfg = Config::from_str(toml).unwrap();
     let p = &cfg.watches[0].program;
-    assert_eq!(p.instructions.len(), 4);
-    match &p.instructions[0] {
-        Instruction::SpawnPredicate { jump_target, .. } => assert_eq!(*jump_target, 3),
-        other => panic!("expected SpawnPredicate, got {other:?}"),
+    assert_eq!(p.ops.len(), 3);
+    // op 0: predicate
+    assert!(matches!(p.ops[0].body, SpawnBody::Exec(_)));
+    match p.ops[0].on_ok {
+        BranchTarget::Continue(idx) => assert_eq!(idx.get(), 1),
+        other => panic!("expected Continue(1), got {other:?}"),
     }
-    assert!(matches!(p.instructions[1], Instruction::SpawnExec(_)));
-    match &p.instructions[2] {
-        Instruction::Jump { target } => assert_eq!(*target, 4),
-        other => panic!("expected Jump, got {other:?}"),
+    match p.ops[0].on_failed {
+        BranchTarget::Continue(idx) => assert_eq!(idx.get(), 2),
+        other => panic!("expected Continue(2), got {other:?}"),
     }
-    assert!(matches!(p.instructions[3], Instruction::SpawnExec(_)));
+    // op 1: then-Exec; on_ok = Escape skips past else.
+    assert!(matches!(p.ops[1].body, SpawnBody::Exec(_)));
+    assert_eq!(p.ops[1].on_ok, BranchTarget::Escape);
+    assert_eq!(p.ops[1].on_failed, BranchTarget::Terminate);
+    // op 2: else-Exec
+    assert!(matches!(p.ops[2].body, SpawnBody::Exec(_)));
+    assert_eq!(p.ops[2].on_ok, BranchTarget::Escape);
+    assert_eq!(p.ops[2].on_failed, BranchTarget::Terminate);
 }
 
 /// `when` carries its own per-step `timeout` inside the nested
@@ -318,12 +338,13 @@ fn conditional_predicate_carries_per_step_timeout() {
                     then = [{ exec = [\"yes\"] }] },\n\
                 ]";
     let cfg = Config::from_str(toml).unwrap();
-    match &cfg.watches[0].program.instructions[0] {
-        Instruction::SpawnPredicate { exec, .. } => {
-            assert_eq!(exec.timeout, Some(Duration::from_secs(2)));
-        }
-        other => panic!("expected SpawnPredicate, got {other:?}"),
-    }
+    // The predicate op (cursor 0) carries an Exec body whose timeout
+    // round-trips from TOML through validation into ExecAction.timeout.
+    let p = &cfg.watches[0].program;
+    let SpawnBody::Exec(exec) = &p.ops[0].body else {
+        panic!("expected SpawnBody::Exec for predicate");
+    };
+    assert_eq!(exec.timeout, Some(Duration::from_secs(2)));
 }
 
 /// `when` without `then` is rejected at the variant-completeness
@@ -376,7 +397,10 @@ fn conditional_empty_then_and_no_else_is_rejected() {
 
 /// Empty `then` with non-empty `else` is allowed — operationally
 /// equivalent to a negated predicate (run else iff predicate failed).
-/// Lowers to a 3-instruction program: predicate, Jump, else.
+/// Lowers to a 2-op program: predicate then else-Exec. The empty
+/// then-block contributes no ops; the predicate's `on_ok` resolves to
+/// `Escape` (the empty then-tail's escape — skip past else on Ok).
+/// `on_failed` continues into the else-Exec.
 #[test]
 fn conditional_empty_then_nonempty_else_is_allowed() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -385,20 +409,22 @@ fn conditional_empty_then_nonempty_else_is_allowed() {
                 ]";
     let cfg = Config::from_str(toml).unwrap();
     let p = &cfg.watches[0].program;
-    assert_eq!(p.instructions.len(), 3);
-    match &p.instructions[0] {
-        Instruction::SpawnPredicate { jump_target, .. } => {
-            assert_eq!(*jump_target, 2, "predicate jumps directly to else_start");
+    assert_eq!(p.ops.len(), 2);
+    // op 0: predicate
+    assert!(matches!(p.ops[0].body, SpawnBody::Exec(_)));
+    // The empty then-block has no ops — predicate on_ok resolves
+    // to Escape (skip past else on the Ok path).
+    assert_eq!(p.ops[0].on_ok, BranchTarget::Escape);
+    match p.ops[0].on_failed {
+        BranchTarget::Continue(idx) => {
+            assert_eq!(idx.get(), 1, "predicate Failed enters else-branch");
         }
-        other => panic!("expected SpawnPredicate, got {other:?}"),
+        other => panic!("expected Continue(1), got {other:?}"),
     }
-    match &p.instructions[1] {
-        Instruction::Jump { target } => {
-            assert_eq!(*target, 3, "Jump (Ok path) skips past else");
-        }
-        other => panic!("expected Jump, got {other:?}"),
-    }
-    assert!(matches!(p.instructions[2], Instruction::SpawnExec(_)));
+    // op 1: else-Exec
+    assert!(matches!(p.ops[1].body, SpawnBody::Exec(_)));
+    assert_eq!(p.ops[1].on_ok, BranchTarget::Escape);
+    assert_eq!(p.ops[1].on_failed, BranchTarget::Terminate);
 }
 
 /// Conditional with both `exec` and `when` set is ambiguous — flagged
@@ -442,9 +468,17 @@ fn conditional_top_level_timeout_is_rejected() {
 }
 
 /// Nested conditional inside `then` lowers recursively — each
-/// nesting level produces its own `SpawnPredicate` with correctly
-/// backpatched jumps. Pinned to detect off-by-one drift in
+/// nesting level produces its own predicate op with edges patched to
+/// the right surrounding context. Pinned to detect off-by-one drift in
 /// [`crate::action::lower_actions`] under nested input.
+///
+/// Shape for outer-when=outer, outer-then=[inner-when, inner-then=[y]]:
+///
+/// - op 0: outer predicate Exec — `on_ok = Continue(1)` (enter outer-then),
+///   `on_failed = Escape` (outer has no else, "branch-not-guard").
+/// - op 1: inner predicate Exec — `on_ok = Continue(2)` (enter inner-then),
+///   `on_failed = Escape` (inner has no else either).
+/// - op 2: inner-then Exec `/bin/y` — `on_ok = Escape`, `on_failed = Terminate`.
 #[test]
 fn nested_conditional_inside_then_lowers_recursively() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -455,23 +489,30 @@ fn nested_conditional_inside_then_lowers_recursively() {
                 ]";
     let cfg = Config::from_str(toml).unwrap();
     let p = &cfg.watches[0].program;
-    // [SpawnPredicate(outer, jump=3), SpawnPredicate(inner, jump=3), SpawnExec(y)]
-    assert_eq!(p.instructions.len(), 3);
-    let preds: Vec<u32> = p
-        .instructions
-        .iter()
-        .filter_map(|i| match i {
-            Instruction::SpawnPredicate { jump_target, .. } => Some(*jump_target),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(preds, vec![3, 3], "both predicates jump past plan end");
+    assert_eq!(p.ops.len(), 3);
+    for op in p.ops.iter() {
+        assert!(matches!(op.body, SpawnBody::Exec(_)));
+    }
+    // Outer predicate's on_failed is Escape (no-else "branch, not guard").
+    assert_eq!(p.ops[0].on_failed, BranchTarget::Escape);
+    match p.ops[0].on_ok {
+        BranchTarget::Continue(idx) => assert_eq!(idx.get(), 1),
+        other => panic!("op 0 on_ok: expected Continue(1), got {other:?}"),
+    }
+    // Inner predicate's on_failed is also Escape (its own no-else branch).
+    assert_eq!(p.ops[1].on_failed, BranchTarget::Escape);
+    match p.ops[1].on_ok {
+        BranchTarget::Continue(idx) => assert_eq!(idx.get(), 2),
+        other => panic!("op 1 on_ok: expected Continue(2), got {other:?}"),
+    }
+    // Inner-then Exec terminates the plan.
+    assert_eq!(p.ops[2].on_ok, BranchTarget::Escape);
+    assert_eq!(p.ops[2].on_failed, BranchTarget::Terminate);
 }
 
 /// Empty `else` array (explicit `else = []`) is normalised to "no
-/// else" — lowering omits the Jump instruction since the else-body
-/// would be a zero-length sequence. The predicate's `jump_target`
-/// points one past the then-branch end, mirroring the no-`else` form.
+/// else" — the lowered shape is identical to the omitted-`else` form
+/// (predicate + then, with predicate's `on_failed = Escape`).
 #[test]
 fn conditional_explicit_empty_else_normalises_to_no_else() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -481,19 +522,23 @@ fn conditional_explicit_empty_else_normalises_to_no_else() {
                 ]";
     let cfg = Config::from_str(toml).unwrap();
     let p = &cfg.watches[0].program;
-    assert_eq!(p.instructions.len(), 2, "no Jump emitted for empty else");
-    assert!(matches!(
-        p.instructions[0],
-        Instruction::SpawnPredicate { .. }
-    ));
-    assert!(matches!(p.instructions[1], Instruction::SpawnExec(_)));
+    assert_eq!(p.ops.len(), 2);
+    assert!(matches!(p.ops[0].body, SpawnBody::Exec(_)));
+    // Predicate on_failed escapes (no-else "branch, not guard").
+    assert_eq!(p.ops[0].on_failed, BranchTarget::Escape);
+    match p.ops[0].on_ok {
+        BranchTarget::Continue(idx) => assert_eq!(idx.get(), 1),
+        other => panic!("expected Continue(1), got {other:?}"),
+    }
+    assert!(matches!(p.ops[1].body, SpawnBody::Exec(_)));
+    assert_eq!(p.ops[1].on_ok, BranchTarget::Escape);
+    assert_eq!(p.ops[1].on_failed, BranchTarget::Terminate);
 }
 
-/// Two-stage pipe lowers to a single `Instruction::SpawnPipe` with
-/// the same number of stages as the TOML array. Each stage's argv
-/// is preserved verbatim.
+/// Two-stage pipe lowers to a single op with `SpawnBody::Pipe` carrying
+/// every stage. Each stage's argv is preserved verbatim.
 #[test]
-fn pipe_two_stages_lowers_to_single_instruction() {
+fn pipe_two_stages_lowers_to_single_op() {
     let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
                 actions = [\n\
                   { pipe = [\n\
@@ -503,17 +548,20 @@ fn pipe_two_stages_lowers_to_single_instruction() {
                 ]";
     let cfg = Config::from_str(toml).unwrap();
     let p = &cfg.watches[0].program;
-    assert_eq!(p.instructions.len(), 1);
-    match &p.instructions[0] {
-        Instruction::SpawnPipe(stages) => {
+    assert_eq!(p.ops.len(), 1);
+    match &p.ops[0].body {
+        SpawnBody::Pipe(stages) => {
             assert_eq!(stages.len(), 2);
             assert_eq!(stages[0].argv.len(), 2);
             assert_eq!(stages[1].argv.len(), 1);
             assert_eq!(stages[0].argv[0].parts[0], ArgPart::literal("grep"));
             assert_eq!(stages[1].argv[0].parts[0], ArgPart::literal("sort"));
         }
-        other => panic!("expected SpawnPipe; got {other:?}"),
+        other => panic!("expected SpawnBody::Pipe; got {other:?}"),
     }
+    // Top-level pipe is the only op — on_ok escapes, on_failed terminates.
+    assert_eq!(p.ops[0].on_ok, BranchTarget::Escape);
+    assert_eq!(p.ops[0].on_failed, BranchTarget::Terminate);
 }
 
 /// Each pipe stage carries its own per-stage `timeout`. Validation
@@ -530,8 +578,8 @@ fn pipe_stage_timeouts_threaded_per_stage() {
                   ] },\n\
                 ]";
     let cfg = Config::from_str(toml).unwrap();
-    let Instruction::SpawnPipe(stages) = &cfg.watches[0].program.instructions[0] else {
-        panic!("expected SpawnPipe");
+    let SpawnBody::Pipe(stages) = &cfg.watches[0].program.ops[0].body else {
+        panic!("expected SpawnBody::Pipe");
     };
     assert_eq!(stages[0].timeout, Some(Duration::from_millis(500)));
     assert_eq!(stages[1].timeout, None);

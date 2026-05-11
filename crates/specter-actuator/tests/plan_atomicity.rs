@@ -6,11 +6,11 @@
 //! watch's `actions` list via SIGHUP while a plan is in flight; the
 //! engine emits a new Effect with the new program, which lands in
 //! the actuator's per-slot `pending`. The invariant under test:
-//! **once started, a plan runs all its instructions before `pending`
-//! fires**, regardless of new submits. Equivalently: `Effect.program`
-//! is a frozen snapshot — the in-flight step's
-//! `effect.program.instructions[N+1]` is sourced from the same `Arc`
-//! installed at plan start, never from a later submit's program.
+//! **once started, a plan runs all its ops before `pending` fires**,
+//! regardless of new submits. Equivalently: `Effect.program` is a
+//! frozen snapshot — the in-flight step's `effect.program.ops[N+1]` is
+//! sourced from the same `Arc` installed at plan start, never from a
+//! later submit's program.
 //!
 //! At the actuator's boundary, "hot reload" manifests as a fresh
 //! submit for the same `DedupKey` carrying the new plan. The slot's

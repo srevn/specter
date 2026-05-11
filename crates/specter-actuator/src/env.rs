@@ -26,8 +26,8 @@
 //!
 //! Specter never `setenv`s internally, so the snapshot doesn't go stale
 //! under our own code. An operator wanting live re-reads on SIGHUP would
-//! swap this for a `dyn EnvSource` (assumption A4 in the action-types
-//! expansion plan).
+//! need to swap this for a `dyn EnvSource` and propagate re-captures
+//! through the actuator's existing `Arc<EnvSnapshot>` swap point.
 //!
 //! Non-UTF-8 entries are silently dropped at capture time. The lexer
 //! [`crate::spawner`]'s upstream grammar guarantees placeholder names

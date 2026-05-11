@@ -15,9 +15,11 @@
 use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
 use specter_actuator::{OsSpawner, SubprocessActuator};
+use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
+use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, ExecAction, Input,
-    Instruction, ProfileId, ResourceId, ResourceKind, SubId,
+    ProfileId, ResourceId, ResourceKind, SubId,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -129,7 +131,7 @@ impl Drop for Harness {
     }
 }
 
-/// Wrap a `Vec<String>` argv as a literal-only single-instruction
+/// Wrap a `Vec<String>` argv as a literal-only single-op
 /// [`ActionProgram`].
 ///
 /// The resolver renders each `ArgTemplate(Literal(s))` as the slot `s`,
@@ -138,27 +140,37 @@ impl Drop for Harness {
 /// satisfy `Effect.program: Arc<ActionProgram>` while keeping fixture
 /// call sites' `Vec<String>` ergonomics intact.
 fn literal_program(argv: Vec<String>) -> Arc<ActionProgram> {
-    let exec = ExecAction::new(
+    single_exec_program(
         argv.into_iter()
             .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
-    );
-    Arc::new(ActionProgram::new([Instruction::SpawnExec(exec)]))
+    )
 }
 
-/// Wrap a sequence of literal argvs as a multi-instruction
-/// [`ActionProgram`] — one `Instruction::SpawnExec` per inner vec.
-/// The actuator walks them sequentially with stop-on-failure semantics.
+/// Wrap a sequence of literal argvs as a multi-op [`ActionProgram`] —
+/// one `Exec` op per inner vec, chained on `on_ok = Continue` with the
+/// final op `on_ok = Escape`; every `on_failed` is `Terminate`. The
+/// actuator walks them sequentially with stop-on-failure semantics.
 pub fn literal_multi_program(steps: Vec<Vec<String>>) -> Arc<ActionProgram> {
-    let instructions: Vec<Instruction> = steps
-        .into_iter()
-        .map(|argv| {
-            Instruction::SpawnExec(ExecAction::new(
-                argv.into_iter()
-                    .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
-            ))
-        })
-        .collect();
-    Arc::new(ActionProgram::new(instructions))
+    assert!(!steps.is_empty(), "literal_multi_program requires >=1 step");
+    let mut b = ProgramBuilder::new();
+    let mut prev: Option<specter_core::program::OpHandle> = None;
+    for argv in steps {
+        if let Some(ph) = prev {
+            let next = b.continue_to_next();
+            b.patch_on_ok(ph, next).unwrap();
+        }
+        let exec = ExecAction::new(
+            argv.into_iter()
+                .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
+        );
+        let h = b.emit(SpawnBody::Exec(exec));
+        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+        prev = Some(h);
+    }
+    if let Some(last) = prev {
+        b.patch_on_ok(last, BranchTarget::Escape).unwrap();
+    }
+    Arc::new(b.build().unwrap())
 }
 
 /// PerFile Effect with an arbitrary (possibly multi-instruction)

@@ -595,7 +595,13 @@ fn validate_actions(
     }
 
     let tree = validate_action_list(idx, "actions", raw_actions, errors)?;
-    Some(lower_to_program(&tree))
+    match lower_to_program(&tree) {
+        Ok(program) => Some(program),
+        Err(e) => {
+            errors.push(ValidationIssue::from_program_error(e, Some(idx), "actions"));
+            None
+        }
+    }
 }
 
 /// Recursive validation of a `[RawAction]` slice. `path` is the
@@ -711,7 +717,7 @@ fn validate_one_action(
 ///   unambiguous; stage-local errors don't short-circuit later stages.
 ///
 /// Stages are stored as `Arc<[ExecAction]>` so lowering can
-/// `Arc::clone` into [`specter_core::Instruction::SpawnPipe`] without
+/// `Arc::clone` into [`specter_core::program::SpawnBody::Pipe`] without
 /// re-allocating.
 fn validate_pipe(
     watch_idx: usize,
@@ -1303,7 +1309,8 @@ fn parse_events_field(
 mod tests {
     use super::{Config, LogDestination, LogLevel, SubSpec};
     use crate::error::{ConfigError, IssueKind};
-    use specter_core::{ArgPart, ClassSet, EffectScope, Instruction, Placeholder};
+    use specter_core::program::SpawnBody;
+    use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
     use std::time::Duration;
 
     const ROOT: &str = "/";
@@ -1444,8 +1451,8 @@ mod tests {
         assert!(w.scan.exclude.is_empty());
         assert!(w.scan.pattern.is_none());
         assert_eq!(w.scan.max_depth, None);
-        let Instruction::SpawnExec(exec) = &w.program.instructions[0] else {
-            panic!("expected SpawnExec instruction");
+        let SpawnBody::Exec(exec) = &w.program.ops[0].body else {
+            panic!("expected SpawnBody::Exec");
         };
         assert_eq!(exec.argv.len(), 1);
         assert!(!w.log_output, "log_output defaults to false");
@@ -1729,8 +1736,8 @@ mod tests {
              actions = [{{ exec = [\"fmt\", \"--input=${{specter.path}}\", \"${{specter.created}}\"] }}]"
         );
         let cfg = Config::from_str(&toml).unwrap();
-        let Instruction::SpawnExec(exec) = &cfg.watches[0].program.instructions[0] else {
-            panic!("expected SpawnExec instruction");
+        let SpawnBody::Exec(exec) = &cfg.watches[0].program.ops[0].body else {
+            panic!("expected SpawnBody::Exec");
         };
         let argv = &exec.argv;
         assert_eq!(argv.len(), 3);

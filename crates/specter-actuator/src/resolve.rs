@@ -16,14 +16,14 @@
 //!
 //! Per-Effect-stable values live on [`Effect`] (`anchor_path`,
 //! `target_relative`, `sub_name`, `exclude`, `diff`, `key`, `forced`,
-//! `correlation`); the per-instruction argv template lives on
-//! [`ExecAction`]. The caller extracts the instruction from
-//! `effect.program.instructions[cursor]`, projects out the
-//! `ExecAction` payload of the `SpawnExec` variant, and passes both
-//! references in. v1 always carries `cursor = 0` for the active
-//! instruction set (`SpawnExec`-only); future variants
-//! (`SpawnPredicate`, multi-stage `SpawnPipe`) pass each leaf
-//! `ExecAction` in turn.
+//! `correlation`); the per-op argv template lives on [`ExecAction`].
+//! The caller extracts the op at `effect.program.ops[cursor]`, reaches
+//! into its [`specter_core::program::SpawnBody`] for the
+//! `ExecAction(s)`, and passes both references in. Single-process ops
+//! ([`specter_core::program::SpawnBody::Exec`]) hand one `ExecAction`;
+//! multi-stage pipes
+//! ([`specter_core::program::SpawnBody::Pipe`]) pass each stage's
+//! [`ExecAction`] in turn.
 //!
 //! # `target_path` is derived, not stored
 //!

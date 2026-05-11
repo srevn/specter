@@ -41,7 +41,7 @@ pub use profile::{
     AnchorClaim, Burst, BurstIntent, BurstPhase, DescentState, Profile, ProfileMap, ProfileState,
     TimerKind,
 };
-pub use program::{ArgPart, ArgTemplate, ExecAction, Placeholder};
+pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{
     Promoter, PromoterAttachRequest, PromoterRegistry, PromoterRegistryDiff, PromoterState,
     ProxyState,
@@ -55,10 +55,7 @@ pub use snapshot::tree::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot, diff_tree,
     splice,
 };
-pub use sub::{
-    ActionProgram, ClassSet, EffectScope, Instruction, Sub, SubAttachRequest, SubRegistry,
-    SubRegistryDiff,
-};
+pub use sub::{ClassSet, EffectScope, Sub, SubAttachRequest, SubRegistry, SubRegistryDiff};
 pub use time::{Clock, SystemClock};
 pub use tree::Tree;
 

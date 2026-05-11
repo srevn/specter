@@ -6,10 +6,11 @@
 //! attach if absent) so any future shape change here is visible at this
 //! seam.
 
+use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    Instruction, Placeholder, Profile, ProfileMap, ResourceRole, ScanConfig, Sub, SubRegistry,
-    Tree, compute_config_hash,
+    Placeholder, Profile, ProfileMap, ResourceRole, ScanConfig, Sub, SubRegistry, Tree,
+    compute_config_hash,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,12 +24,14 @@ fn bare_cfg() -> ScanConfig {
 }
 
 fn build_program() -> Arc<ActionProgram> {
-    Arc::new(ActionProgram::new([Instruction::SpawnExec(
-        ExecAction::new([ArgTemplate::new([
-            ArgPart::literal("/bin/build"),
-            ArgPart::Placeholder(Placeholder::Path),
-        ])]),
-    )]))
+    let mut b = ProgramBuilder::new();
+    let h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+        ArgPart::literal("/bin/build"),
+        ArgPart::Placeholder(Placeholder::Path),
+    ])])));
+    b.patch_on_ok(h, BranchTarget::Escape).unwrap();
+    b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+    Arc::new(b.build().unwrap())
 }
 
 #[test]

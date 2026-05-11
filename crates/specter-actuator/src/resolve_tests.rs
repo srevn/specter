@@ -11,11 +11,12 @@ use crate::env::EnvSnapshot;
 use crate::spawner::EnvVar;
 use compact_str::CompactString;
 use smallvec::smallvec;
+use specter_core::program::SpawnBody;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ArgPart, ArgTemplate, CommandResolved, CorrelationId, DedupKey, Diff, Effect, EffectScope,
-    EntryKind, EntryRef, ExecAction, Instruction, Placeholder, ProfileId, Rename, ResourceId,
-    ResourceKind, SubId,
+    EntryKind, EntryRef, ExecAction, Placeholder, ProfileId, Rename, ResourceId, ResourceKind,
+    SubId,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -41,12 +42,12 @@ fn resolve(e: &Effect) -> (CommandResolved, Vec<EnvVar<'_>>) {
 }
 
 /// Borrow the single [`ExecAction`] inside an [`Effect`]'s program. Tests
-/// build effects with exactly one `Instruction::SpawnExec` instruction;
-/// this is a fixture-side accessor, not a production API.
+/// build effects with exactly one `SpawnBody::Exec` op; this is a
+/// fixture-side accessor, not a production API.
 fn exec_of(e: &Effect) -> &ExecAction {
-    match &e.program.instructions[0] {
-        Instruction::SpawnExec(exec) => exec,
-        _ => panic!("test fixtures use only SpawnExec"),
+    match &e.program.ops[0].body {
+        SpawnBody::Exec(exec) => exec,
+        SpawnBody::Pipe(_) => panic!("test fixtures use only Exec body"),
     }
 }
 

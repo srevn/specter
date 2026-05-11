@@ -40,8 +40,9 @@ use crate::ids::{PromoterId, ResourceId, SubId};
 use crate::op::ProbeCorrelation;
 use crate::pattern::PatternSpec;
 use crate::profile::DescentState;
+use crate::program::ActionProgram;
 use crate::scan_config::ScanConfig;
-use crate::sub::{ActionProgram, ClassSet, EffectScope};
+use crate::sub::{ClassSet, EffectScope};
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -278,9 +279,12 @@ mod tests {
     use crate::ids::{PromoterId, ResourceId, SubId};
     use crate::pattern::PatternSpec;
     use crate::profile::DescentState;
-    use crate::program::{ArgPart, ArgTemplate, ExecAction, Placeholder};
+    use crate::program::{
+        ActionProgram, ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder,
+        SpawnBody,
+    };
     use crate::scan_config::ScanConfig;
-    use crate::sub::{ActionProgram, ClassSet, EffectScope, Instruction};
+    use crate::sub::{ClassSet, EffectScope};
     use compact_str::CompactString;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
@@ -291,12 +295,14 @@ mod tests {
     const MAX_SETTLE: Duration = Duration::from_secs(6);
 
     fn program() -> Arc<ActionProgram> {
-        Arc::new(ActionProgram::new([Instruction::SpawnExec(
-            ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/build"),
-                ArgPart::Placeholder(Placeholder::Path),
-            ])]),
-        )]))
+        let mut b = ProgramBuilder::new();
+        let h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
+            ArgPart::literal("/bin/build"),
+            ArgPart::Placeholder(Placeholder::Path),
+        ])])));
+        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
+        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+        Arc::new(b.build().unwrap())
     }
 
     fn build_promoter(id: PromoterId, name: &str, pattern: &str) -> Promoter {

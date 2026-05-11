@@ -8,27 +8,39 @@
 //!
 //! # Why a separate AST
 //!
-//! The runtime sees only the lowered bytecode IR — there is no benefit
-//! to teaching the engine or actuator about pipes, conditionals, or
-//! other surface-grammar shapes. Keeping the AST in `specter-config`
+//! The runtime sees only the lowered CFG-shaped op program — there is no
+//! benefit to teaching the engine or actuator about pipes, conditionals,
+//! or other surface-grammar shapes. Keeping the AST in `specter-config`
 //! means future variants land here without bloating `specter-core`'s
-//! public surface; the lowering pass is the single seam between the
-//! two layers.
+//! public surface; the lowering pass is the single seam between the two
+//! layers.
 //!
 //! # Lowering invariants
 //!
-//! - **Forward-only jumps.** Every jump target (predicate `jump_target`
-//!   and unconditional `Jump.target`) is strictly greater than the
-//!   position of the jump-emitting instruction. The lowering walk is
-//!   the sole producer; backward jumps are unrepresentable by
-//!   construction (no `Loop`-like surface).
-//! - **`target == instructions.len()`** is the legal "skip past end"
-//!   form — the actuator's `next_spawnable` walks past it and the
-//!   reap-path terminates Ok. Used by an unconditional `Conditional`
-//!   whose `then` runs to plan-end with no `else`, and by an `else`
-//!   that itself runs to plan-end.
+//! Each op has explicit `on_ok` / `on_failed` edges. Lowering produces:
+//!
+//! - **`Exec` / `Pipe`** — `on_ok` continues to the next action's first
+//!   op (or [`BranchTarget::Escape`] at scope tail); `on_failed` is
+//!   [`BranchTarget::Terminate`] (stop-on-failure, outcome propagates).
+//! - **`Conditional`** — the predicate (lowered as `SpawnBody::Exec`)'s
+//!   edges depend on then/else presence:
+//!   - `on_ok` → then-branch's first op when non-empty; otherwise the
+//!     post-conditional slot (`after`).
+//!   - `on_failed` → else-branch's first op when non-empty; otherwise
+//!     `after`. When `after` resolves to [`BranchTarget::Escape`], the
+//!     "branch, not guard" outcome elision is preserved: a Failed
+//!     predicate with no else terminates Ok rather than propagating
+//!     Failed.
+//!   Then-body and else-body tails are patched with the post-conditional
+//!   `after` slot the same way sequence tails are.
+//!
+//! The [`ProgramBuilder`] enforces forward-only edges and in-bounds
+//! Continue targets at patch time; backward jumps are unrepresentable
+//! by construction (no `Loop`-like surface).
 
-use specter_core::{ActionProgram, ExecAction, Instruction};
+use specter_core::program::{
+    ActionProgram, BranchTarget, ExecAction, OpHandle, ProgramBuilder, ProgramError, SpawnBody,
+};
 use std::sync::Arc;
 
 /// Surface-syntax tree produced by validation. Lives in `specter-config`
@@ -44,12 +56,11 @@ pub(crate) enum Action {
     Exec(ExecAction),
     /// Spawn N processes wired stdout→stdin. `stages` is the spawn
     /// order — stage 0's stdout feeds stage 1's stdin, etc. Each
-    /// stage carries its own [`specter_core::ExecAction::timeout`];
-    /// the actuator's per-stage timer thread enforces them
-    /// independently.
+    /// stage carries its own [`ExecAction::timeout`]; the actuator's
+    /// per-stage timer thread enforces them independently.
     ///
     /// `stages: Arc<[ExecAction]>` (not `Box<[…]>`) so lowering can
-    /// `Arc::clone` directly into [`Instruction::SpawnPipe`] without
+    /// `Arc::clone` directly into [`SpawnBody::Pipe`] without
     /// re-allocating the leaf vector. Validation guarantees
     /// `stages.len() >= 2` (single-stage pipes are rejected as
     /// [`crate::error::IssueKind::SingleStagePipe`] — use top-level
@@ -79,211 +90,234 @@ pub(crate) enum Action {
     },
 }
 
-/// Walk a validated `[Action]` sequence and emit the equivalent
-/// `ActionProgram`. The Arc is the same allocation that the engine's
-/// `Sub.program` and every emitted `Effect.program` references — one
-/// shared bytecode IR per validated Sub.
-pub(crate) fn lower_to_program(tree: &[Action]) -> Arc<ActionProgram> {
-    let mut out: Vec<Instruction> = Vec::with_capacity(tree.len());
-    lower_actions(tree, &mut out);
-    Arc::new(ActionProgram::new(out))
+/// One unpatched edge from a lowered op. Returned by [`lower_action`]
+/// and propagated up to the enclosing block, which patches each tail
+/// with the slot where execution should continue after this body.
+///
+/// Two flavours because a no-else conditional's pred carries its tail
+/// on `on_failed` (Failed predicate falls through), while every other
+/// case has its tail on `on_ok`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Tail {
+    OnOk(OpHandle),
+    OnFailed(OpHandle),
 }
 
-/// Recursive lowering pass.
-///
-/// `Action::Exec` lowers to a single [`Instruction::SpawnExec`].
-///
-/// `Action::Pipe` lowers to a single [`Instruction::SpawnPipe`]
-/// carrying the stages `Arc` by clone — no per-leaf re-allocation.
-///
-/// `Action::Conditional` lowers to a [`Instruction::SpawnPredicate`]
-/// whose `jump_target` is backpatched to the start of the else-branch
-/// (or to one past the then-branch when no else exists). When an
-/// else-branch is present, an unconditional [`Instruction::Jump`] is
-/// emitted immediately after the then-branch to skip past the
-/// else-branch on the predicate-Ok path; its `target` is backpatched
-/// to one past the else-branch.
-fn lower_actions(actions: &[Action], out: &mut Vec<Instruction>) {
-    for action in actions {
-        match action {
-            Action::Exec(e) => out.push(Instruction::SpawnExec(e.clone())),
+fn patch_tail(
+    b: &mut ProgramBuilder,
+    tail: Tail,
+    target: BranchTarget,
+) -> Result<(), ProgramError> {
+    match tail {
+        Tail::OnOk(h) => b.patch_on_ok(h, target),
+        Tail::OnFailed(h) => b.patch_on_failed(h, target),
+    }
+}
 
-            Action::Pipe { stages } => {
-                out.push(Instruction::SpawnPipe(Arc::clone(stages)));
+/// Walk a validated `[Action]` sequence and emit the equivalent
+/// [`ActionProgram`]. The Arc is the same allocation that the engine's
+/// `Sub.program` and every emitted `Effect.program` references — one
+/// shared CFG-shaped op program per validated Sub.
+///
+/// Returns [`ProgramError`] on builder-hygiene violations or operator-
+/// caused overflow ([`ProgramError::ProgramTooLarge`]); the caller maps
+/// these to validation issues.
+pub(crate) fn lower_to_program(tree: &[Action]) -> Result<Arc<ActionProgram>, ProgramError> {
+    let mut b = ProgramBuilder::new();
+    let top_tails = lower_block(tree, &mut b)?;
+    // Top-level tails escape — natural completion terminates Ok.
+    for tail in top_tails {
+        patch_tail(&mut b, tail, BranchTarget::Escape)?;
+    }
+    Ok(Arc::new(b.build()?))
+}
+
+/// Lower a block (a slice of [`Action`]s in execution order), returning
+/// the tails of the block's last action that need to be patched with
+/// "where execution continues after this block."
+///
+/// For each non-last action, the tails are patched inline to point at
+/// the next action's first op slot — known at iteration end via
+/// [`ProgramBuilder::continue_to_next`] (the next iteration's first
+/// emit fills the deferred slot).
+fn lower_block(actions: &[Action], b: &mut ProgramBuilder) -> Result<Vec<Tail>, ProgramError> {
+    let n = actions.len();
+    let mut returned_tails: Vec<Tail> = Vec::new();
+
+    for (idx, action) in actions.iter().enumerate() {
+        let is_last = idx + 1 == n;
+        let action_tails = lower_action(action, b)?;
+
+        if is_last {
+            returned_tails.extend(action_tails);
+        } else {
+            // The next iteration's first emit lands at the slot
+            // `continue_to_next` names right now — patch-time
+            // deferred-slot promise (accepted as `target == pending.len()`,
+            // filled by the upcoming emit).
+            let next_slot = b.continue_to_next();
+            for tail in action_tails {
+                patch_tail(b, tail, next_slot)?;
+            }
+        }
+    }
+
+    Ok(returned_tails)
+}
+
+/// Lower one [`Action`], returning its tail handles.
+///
+/// `Exec` and `Pipe` produce one op with `on_failed = Terminate` and
+/// `on_ok` unpatched (the single tail).
+///
+/// `Conditional` produces the predicate op plus the lowered then- and
+/// else-bodies. The predicate's edges are patched here for the
+/// non-empty-body sides; the empty-body side becomes a tail (pred's
+/// `on_ok` for empty-then, pred's `on_failed` for no-else). Body tails
+/// bubble up to the caller for patching with the post-conditional slot.
+fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, ProgramError> {
+    match action {
+        Action::Exec(e) => {
+            let h = b.emit(SpawnBody::Exec(e.clone()));
+            b.patch_on_failed(h, BranchTarget::Terminate)?;
+            Ok(vec![Tail::OnOk(h)])
+        }
+        Action::Pipe { stages } => {
+            let h = b.emit(SpawnBody::Pipe(Arc::clone(stages)));
+            b.patch_on_failed(h, BranchTarget::Terminate)?;
+            Ok(vec![Tail::OnOk(h)])
+        }
+        Action::Conditional {
+            when,
+            then,
+            otherwise,
+        } => {
+            let pred = b.emit(SpawnBody::Exec(when.clone()));
+            let mut tails: Vec<Tail> = Vec::new();
+
+            // pred.on_ok: chain to then's first slot, or surface as a
+            // tail for empty-then (the caller patches it with `after`).
+            if then.is_empty() {
+                tails.push(Tail::OnOk(pred));
+            } else {
+                let then_first = b.continue_to_next();
+                b.patch_on_ok(pred, then_first)?;
+                tails.extend(lower_block(then, b)?);
             }
 
-            Action::Conditional {
-                when,
-                then,
-                otherwise,
-            } => {
-                let pred_idx = out.len();
-                // Backpatched below; the placeholder target is never
-                // observed since the next mutation rewrites it.
-                out.push(Instruction::SpawnPredicate {
-                    exec: when.clone(),
-                    jump_target: 0,
-                });
-                lower_actions(then, out);
-
-                match otherwise {
-                    Some(else_body) if !else_body.is_empty() => {
-                        // Emit Jump after the then-branch to skip past
-                        // the else-branch on the Ok path; backpatched
-                        // after we know `after_else`.
-                        let skip_idx = out.len();
-                        out.push(Instruction::Jump { target: 0 });
-
-                        let else_start = u32_or_program_overflow(out.len());
-                        lower_actions(else_body, out);
-                        let after_else = u32_or_program_overflow(out.len());
-
-                        backpatch_jump(&mut out[pred_idx], else_start);
-                        backpatch_jump(&mut out[skip_idx], after_else);
-                    }
-                    _ => {
-                        // No else-branch (or empty after normalisation):
-                        // predicate's Failed cursor lands one past the
-                        // then-branch — the natural "skip past end of
-                        // conditional" form.
-                        let after_then = u32_or_program_overflow(out.len());
-                        backpatch_jump(&mut out[pred_idx], after_then);
-                    }
+            // pred.on_failed: chain to else's first slot when present and
+            // non-empty; otherwise surface as a tail (no-else fall-through
+            // → `after`, which preserves "branch, not guard" outcome
+            // elision when `after` resolves to `Escape`).
+            match otherwise {
+                Some(body) if !body.is_empty() => {
+                    let else_first = b.continue_to_next();
+                    b.patch_on_failed(pred, else_first)?;
+                    tails.extend(lower_block(body, b)?);
+                }
+                _ => {
+                    tails.push(Tail::OnFailed(pred));
                 }
             }
+
+            Ok(tails)
         }
     }
-}
-
-/// Rewrite the jump-bearing field of an [`Instruction`] in place.
-/// Called from [`lower_actions`] for backpatching after the target
-/// position is known.
-///
-/// The `unreachable` arm enforces that the caller indexed the right
-/// slot — only [`Instruction::SpawnPredicate`] and
-/// [`Instruction::Jump`] carry a jump-bearing field. A caller
-/// indexing wrong is a lowering bug, not a config-author error.
-fn backpatch_jump(insn: &mut Instruction, target: u32) {
-    match insn {
-        Instruction::SpawnPredicate { jump_target, .. } => *jump_target = target,
-        Instruction::Jump { target: t } => *t = target,
-        Instruction::SpawnExec(_) | Instruction::SpawnPipe(_) => {
-            unreachable!("backpatch site must be a SpawnPredicate or Jump instruction")
-        }
-    }
-}
-
-/// Convert a `usize` instruction-vector length to `u32`. The `u32`
-/// width is the lowering invariant — every `cursor` and jump target
-/// is `u32`, so the program slice is also `u32`-indexable.
-///
-/// The `expect` is structurally unreachable: every [`Instruction`]
-/// is ≥24 bytes (the largest variant is `SpawnExec(ExecAction)`),
-/// so a `u32::MAX` instruction-count `Vec<Instruction>` is ≥96 GiB
-/// — the process OOMs long before lowering can produce it.
-///
-/// The plan called for an `IssueKind::ProgramTooLarge`
-/// [`ValidationIssue`] at the `validate_actions` boundary; in
-/// practice the panic is defensible (it triggers only on a path
-/// that would already have OOMed) and adding the variant + check
-/// would pay validator-side complexity for a defensive belt that
-/// never tightens. The deviation is intentional — if a future
-/// surface grammar makes `u32::MAX` programs reachable without OOM
-/// (e.g., a parameterised loop variant), the right fix is to move
-/// the check upstream into validation, not to soften this panic.
-///
-/// [`ValidationIssue`]: crate::error::ValidationIssue
-fn u32_or_program_overflow(len: usize) -> u32 {
-    u32::try_from(len).expect("program length fits in u32 by construction")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Action, lower_to_program};
-    use specter_core::{ArgPart, ArgTemplate, ExecAction, Instruction};
+    use specter_core::program::{
+        ActionProgram, ArgPart, ArgTemplate, BranchTarget, ExecAction, ProgramOp, SpawnBody,
+    };
     use std::sync::Arc;
 
     fn exec_with_literal(literal: &str) -> ExecAction {
         ExecAction::new([ArgTemplate::new([ArgPart::literal(literal)])])
     }
 
-    /// Single Exec lowers to a one-instruction program — the natural
-    /// shape of every v1 single-action watch.
-    #[test]
-    fn single_exec_lowers_to_one_spawn_exec() {
-        let tree = [Action::Exec(exec_with_literal("/bin/build"))];
-        let program = lower_to_program(&tree);
-        assert_eq!(program.instructions.len(), 1);
-        assert!(matches!(program.instructions[0], Instruction::SpawnExec(_)));
+    /// Build a `Continue(idx)` for assertion ergonomics. The
+    /// `BranchIndex::new` constructor is sealed to `program::*`, so test
+    /// assertions reach for the [`ProgramOp`]'s actual edge enum.
+    fn ops(program: &Arc<ActionProgram>) -> &[ProgramOp] {
+        program.ops.as_ref()
     }
 
-    /// Multiple Execs preserve order and produce one instruction per
-    /// surface entry — the actuator walks them sequentially with
-    /// stop-on-failure semantics.
+    fn assert_continue(target: BranchTarget, expected: u32) {
+        match target {
+            BranchTarget::Continue(idx) => assert_eq!(
+                idx.get(),
+                expected,
+                "expected Continue({expected}), got Continue({})",
+                idx.get(),
+            ),
+            other => panic!("expected Continue({expected}), got {other:?}"),
+        }
+    }
+
+    /// Single Exec lowers to a one-op program. on_ok escapes; on_failed
+    /// terminates (stop-on-failure).
     #[test]
-    fn multi_exec_lowers_preserving_order() {
+    fn single_exec_lowers_to_one_op() {
+        let tree = [Action::Exec(exec_with_literal("/bin/build"))];
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 1);
+        assert!(matches!(ops(&program)[0].body, SpawnBody::Exec(_)));
+        assert_eq!(ops(&program)[0].on_ok, BranchTarget::Escape);
+        assert_eq!(ops(&program)[0].on_failed, BranchTarget::Terminate);
+    }
+
+    /// Multiple Execs chain via `Continue` on_ok; the last one escapes.
+    /// on_failed is Terminate at every step (stop-on-failure).
+    #[test]
+    fn multi_exec_chains_via_continue() {
         let tree = [
             Action::Exec(exec_with_literal("/bin/first")),
             Action::Exec(exec_with_literal("/bin/second")),
             Action::Exec(exec_with_literal("/bin/third")),
         ];
-        let program = lower_to_program(&tree);
-        assert_eq!(program.instructions.len(), 3);
-        for (idx, expected) in ["/bin/first", "/bin/second", "/bin/third"]
-            .iter()
-            .enumerate()
-        {
-            let Instruction::SpawnExec(exec) = &program.instructions[idx] else {
-                panic!(
-                    "instruction {idx}: expected SpawnExec, got {:?}",
-                    program.instructions[idx]
-                );
-            };
-            let Some(ArgPart::Literal(s)) = exec.argv[0].parts.first() else {
-                panic!("argv[0].parts[0] not Literal");
-            };
-            assert_eq!(s.as_str(), *expected);
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 3);
+
+        assert_continue(ops(&program)[0].on_ok, 1);
+        assert_continue(ops(&program)[1].on_ok, 2);
+        assert_eq!(ops(&program)[2].on_ok, BranchTarget::Escape);
+
+        for op in ops(&program) {
+            assert_eq!(op.on_failed, BranchTarget::Terminate);
         }
     }
 
-    /// Empty surface trees lower to zero-instruction programs. The
-    /// `validate_actions` entry point rejects the empty case before
-    /// calling `lower_to_program`, so this is purely a defensive
-    /// contract test for the lowering primitive.
+    /// `Action::Pipe` lowers to a single `SpawnBody::Pipe` carrying the
+    /// same `Arc` — no per-leaf re-allocation.
     #[test]
-    fn empty_tree_lowers_to_empty_program() {
-        let program = lower_to_program(&[]);
-        assert_eq!(program.instructions.len(), 0);
-    }
-
-    /// `Action::Pipe` lowers to a single `Instruction::SpawnPipe`
-    /// carrying the same `Arc` — no per-leaf re-allocation.
-    #[test]
-    fn pipe_lowers_to_one_spawn_pipe_sharing_arc() {
+    fn pipe_lowers_to_one_op_sharing_arc() {
         let stages: Arc<[ExecAction]> = Arc::from(vec![
             exec_with_literal("/bin/a"),
             exec_with_literal("/bin/b"),
         ]);
         let stages_for_assert = Arc::clone(&stages);
         let tree = [Action::Pipe { stages }];
-        let program = lower_to_program(&tree);
-        assert_eq!(program.instructions.len(), 1);
-        match &program.instructions[0] {
-            Instruction::SpawnPipe(s) => {
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 1);
+        match &ops(&program)[0].body {
+            SpawnBody::Pipe(s) => {
                 assert_eq!(s.len(), 2);
                 assert!(
                     Arc::ptr_eq(s, &stages_for_assert),
                     "lowering must Arc::clone the stages slice, not re-allocate",
                 );
             }
-            other => panic!("expected SpawnPipe, got {other:?}"),
+            other => panic!("expected SpawnBody::Pipe, got {other:?}"),
         }
+        assert_eq!(ops(&program)[0].on_ok, BranchTarget::Escape);
+        assert_eq!(ops(&program)[0].on_failed, BranchTarget::Terminate);
     }
 
-    /// Pipe and Exec mix freely in a single tree — each lowers to one
-    /// instruction; order is preserved.
+    /// Pipe and Exec mix freely; each lowers to one op; order preserved.
     #[test]
-    fn pipe_and_exec_mixed_lowers_preserving_order() {
+    fn pipe_and_exec_mixed_preserves_order() {
         let stages: Arc<[ExecAction]> = Arc::from(vec![
             exec_with_literal("/bin/pipe-a"),
             exec_with_literal("/bin/pipe-b"),
@@ -293,71 +327,68 @@ mod tests {
             Action::Pipe { stages },
             Action::Exec(exec_with_literal("/bin/post")),
         ];
-        let program = lower_to_program(&tree);
-        assert_eq!(program.instructions.len(), 3);
-        assert!(matches!(program.instructions[0], Instruction::SpawnExec(_)));
-        assert!(matches!(program.instructions[1], Instruction::SpawnPipe(_)));
-        assert!(matches!(program.instructions[2], Instruction::SpawnExec(_)));
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 3);
+        assert!(matches!(ops(&program)[0].body, SpawnBody::Exec(_)));
+        assert!(matches!(ops(&program)[1].body, SpawnBody::Pipe(_)));
+        assert!(matches!(ops(&program)[2].body, SpawnBody::Exec(_)));
+
+        // Each non-last op chains forward; the last escapes.
+        assert_continue(ops(&program)[0].on_ok, 1);
+        assert_continue(ops(&program)[1].on_ok, 2);
+        assert_eq!(ops(&program)[2].on_ok, BranchTarget::Escape);
     }
 
-    /// Conditional with no else-branch lowers to predicate + then
-    /// instructions; predicate's `jump_target` is the natural
-    /// `instructions.len()` "skip past end" form, which the actuator
-    /// treats as terminate-Ok.
+    /// Conditional with no else: predicate's on_failed = Escape ("branch,
+    /// not guard" outcome elision); on_ok chains into then-body, whose
+    /// tail escapes. At top level there's no propagation of predicate
+    /// Failed.
     #[test]
-    fn conditional_no_else_predicate_jumps_past_then() {
+    fn conditional_no_else_predicate_failed_escapes() {
         let tree = [Action::Conditional {
             when: exec_with_literal("/bin/check"),
             then: Box::new([Action::Exec(exec_with_literal("/bin/then"))]),
             otherwise: None,
         }];
-        let program = lower_to_program(&tree);
-        // [SpawnPredicate(check, jump=2), SpawnExec(then)]
-        assert_eq!(program.instructions.len(), 2);
-        match &program.instructions[0] {
-            Instruction::SpawnPredicate { jump_target, .. } => {
-                assert_eq!(*jump_target, 2, "no-else: jump past then-branch end");
-            }
-            other => panic!("expected SpawnPredicate, got {other:?}"),
-        }
-        assert!(matches!(program.instructions[1], Instruction::SpawnExec(_)));
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 2);
+        assert_continue(ops(&program)[0].on_ok, 1);
+        assert_eq!(
+            ops(&program)[0].on_failed,
+            BranchTarget::Escape,
+            "no-else predicate falls through to Escape (no propagation)",
+        );
+        assert_eq!(ops(&program)[1].on_ok, BranchTarget::Escape);
+        assert_eq!(ops(&program)[1].on_failed, BranchTarget::Terminate);
     }
 
-    /// Conditional with an else-branch lowers to predicate + then +
-    /// Jump + else; predicate jumps to `else_start`, Jump targets past
-    /// the else.
+    /// Conditional with else: predicate routes Ok→then-first,
+    /// Failed→else-first. Both then-tail and else-tail escape at the
+    /// post-conditional slot (= Escape at top level).
     #[test]
-    fn conditional_with_else_predicate_jumps_to_else_jump_skips_else() {
+    fn conditional_with_else_routes_both_branches() {
         let tree = [Action::Conditional {
             when: exec_with_literal("/bin/check"),
             then: Box::new([Action::Exec(exec_with_literal("/bin/then"))]),
             otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/else"))])),
         }];
-        let program = lower_to_program(&tree);
-        // [SpawnPredicate(check, jump=3), SpawnExec(then), Jump(target=4), SpawnExec(else)]
-        assert_eq!(program.instructions.len(), 4);
-        match &program.instructions[0] {
-            Instruction::SpawnPredicate { jump_target, .. } => {
-                assert_eq!(*jump_target, 3, "predicate jumps to else_start");
-            }
-            other => panic!("expected SpawnPredicate, got {other:?}"),
-        }
-        assert!(matches!(program.instructions[1], Instruction::SpawnExec(_)));
-        match &program.instructions[2] {
-            Instruction::Jump { target } => {
-                assert_eq!(*target, 4, "Jump skips past else-branch");
-            }
-            other => panic!("expected Jump, got {other:?}"),
-        }
-        assert!(matches!(program.instructions[3], Instruction::SpawnExec(_)));
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 3);
+
+        assert_continue(ops(&program)[0].on_ok, 1);
+        assert_continue(ops(&program)[0].on_failed, 2);
+
+        assert_eq!(ops(&program)[1].on_ok, BranchTarget::Escape);
+        assert_eq!(ops(&program)[1].on_failed, BranchTarget::Terminate);
+
+        assert_eq!(ops(&program)[2].on_ok, BranchTarget::Escape);
+        assert_eq!(ops(&program)[2].on_failed, BranchTarget::Terminate);
     }
 
-    /// Conditional with empty `then` and non-empty `else` lowers to
-    /// predicate + Jump + else. Predicate's `jump_target` points to the
-    /// else-start, which is `pred_idx + 2` (one past the Jump). The
-    /// Jump immediately following the predicate is unreachable on the
-    /// Ok path (zero-instruction then-branch); on the Failed path the
-    /// predicate jumps directly into else.
+    /// Conditional with empty then and non-empty else: predicate's
+    /// on_ok escapes directly (no then-body to enter); on_failed enters
+    /// the else-branch. Validation rejects empty-then-empty-else, so
+    /// this shape always has a non-empty else when then is empty.
     #[test]
     fn conditional_empty_then_nonempty_else() {
         let tree = [Action::Conditional {
@@ -365,52 +396,45 @@ mod tests {
             then: Box::new([]),
             otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/else"))])),
         }];
-        let program = lower_to_program(&tree);
-        // [SpawnPredicate(check, jump=2), Jump(target=3), SpawnExec(else)]
-        assert_eq!(program.instructions.len(), 3);
-        match &program.instructions[0] {
-            Instruction::SpawnPredicate { jump_target, .. } => {
-                assert_eq!(*jump_target, 2, "predicate jumps to else_start");
-            }
-            other => panic!("expected SpawnPredicate, got {other:?}"),
-        }
-        match &program.instructions[1] {
-            Instruction::Jump { target } => {
-                assert_eq!(*target, 3, "Jump (Ok path) targets after else");
-            }
-            other => panic!("expected Jump, got {other:?}"),
-        }
-        assert!(matches!(program.instructions[2], Instruction::SpawnExec(_)));
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 2);
+
+        assert_eq!(
+            ops(&program)[0].on_ok,
+            BranchTarget::Escape,
+            "empty-then: pred.on_ok bypasses to post-conditional slot",
+        );
+        assert_continue(ops(&program)[0].on_failed, 1);
+
+        assert_eq!(ops(&program)[1].on_ok, BranchTarget::Escape);
+        assert_eq!(ops(&program)[1].on_failed, BranchTarget::Terminate);
     }
 
-    /// Conditional with `Some(empty)` else is treated the same as
-    /// `None`: lowering omits the Jump. Validation normalises this
-    /// before calling lower, but the lowering pass also handles it
-    /// directly via the `_` arm of the otherwise match.
+    /// `Some(empty)` else is shape-equivalent to `None`: lowering emits
+    /// pred.on_failed = Escape (the no-else fall-through). Validation
+    /// rejects this shape upstream (EmptyConditional fires for
+    /// then=[]+else=[]); pinning the lowering's response keeps the IR
+    /// well-formed even if the validator's check is bypassed.
     #[test]
-    fn conditional_some_empty_else_treated_as_none() {
+    fn conditional_some_empty_else_falls_through_like_none() {
         let tree = [Action::Conditional {
             when: exec_with_literal("/bin/check"),
             then: Box::new([Action::Exec(exec_with_literal("/bin/then"))]),
             otherwise: Some(Box::new([])),
         }];
-        let program = lower_to_program(&tree);
-        // Same as `None` — no Jump emitted.
-        assert_eq!(program.instructions.len(), 2);
-        match &program.instructions[0] {
-            Instruction::SpawnPredicate { jump_target, .. } => {
-                assert_eq!(*jump_target, 2);
-            }
-            other => panic!("expected SpawnPredicate, got {other:?}"),
-        }
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 2);
+        assert_continue(ops(&program)[0].on_ok, 1);
+        assert_eq!(ops(&program)[0].on_failed, BranchTarget::Escape);
     }
 
-    /// Nested conditional in the `then` branch produces two predicates
-    /// with correctly-backpatched jump targets. Outer predicate jumps
-    /// past the entire inner conditional + outer Jump; inner predicate
-    /// jumps to inner else_start.
+    /// Nested conditional in the then-branch produces 5 ops with the
+    /// CFG-shaped IR (no intermediate Jump opcodes needed). Outer
+    /// predicate routes Ok→inner-pred, Failed→outer-else. Inner
+    /// predicate routes Ok→inner-then, Failed→inner-else. All body tails
+    /// escape at the top level.
     #[test]
-    fn nested_conditional_in_then_backpatches_correctly() {
+    fn nested_conditional_in_then_lowers_to_five_ops() {
         let tree = [Action::Conditional {
             when: exec_with_literal("/bin/outer"),
             then: Box::new([Action::Conditional {
@@ -424,87 +448,64 @@ mod tests {
                 "/bin/outer-else",
             ))])),
         }];
-        let program = lower_to_program(&tree);
-        // [
-        //   0: SpawnPredicate(outer, jump=6),
-        //   1: SpawnPredicate(inner, jump=4),
-        //   2: SpawnExec(inner-then),
-        //   3: Jump(target=5),
-        //   4: SpawnExec(inner-else),
-        //   5: Jump(target=7),
-        //   6: SpawnExec(outer-else),
-        // ]
-        assert_eq!(program.instructions.len(), 7);
-        match &program.instructions[0] {
-            Instruction::SpawnPredicate { jump_target, .. } => assert_eq!(*jump_target, 6),
-            other => panic!("expected SpawnPredicate, got {other:?}"),
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 5, "5 ops (was 7 with Jumps)");
+
+        // 0: outer pred. on_ok = 1 (inner pred). on_failed = 4 (outer else).
+        assert_continue(ops(&program)[0].on_ok, 1);
+        assert_continue(ops(&program)[0].on_failed, 4);
+
+        // 1: inner pred. on_ok = 2 (inner then). on_failed = 3 (inner else).
+        assert_continue(ops(&program)[1].on_ok, 2);
+        assert_continue(ops(&program)[1].on_failed, 3);
+
+        // 2-4: bodies, each escape on Ok, terminate on Failed.
+        for idx in 2..5 {
+            assert_eq!(ops(&program)[idx].on_ok, BranchTarget::Escape);
+            assert_eq!(ops(&program)[idx].on_failed, BranchTarget::Terminate);
         }
-        match &program.instructions[1] {
-            Instruction::SpawnPredicate { jump_target, .. } => assert_eq!(*jump_target, 4),
-            other => panic!("expected SpawnPredicate, got {other:?}"),
-        }
-        assert!(matches!(program.instructions[2], Instruction::SpawnExec(_)));
-        match &program.instructions[3] {
-            Instruction::Jump { target } => assert_eq!(*target, 5),
-            other => panic!("expected Jump, got {other:?}"),
-        }
-        assert!(matches!(program.instructions[4], Instruction::SpawnExec(_)));
-        match &program.instructions[5] {
-            Instruction::Jump { target } => assert_eq!(*target, 7),
-            other => panic!("expected Jump, got {other:?}"),
-        }
-        assert!(matches!(program.instructions[6], Instruction::SpawnExec(_)));
     }
 
-    /// Lowering invariant: every jump emitted is forward (`target` >
-    /// position of jump-emitting instruction). Pinned across the
-    /// representative shapes — single conditional, with-else,
-    /// empty-then, nested.
+    /// Conditional inside a non-last sequence position: the conditional's
+    /// tails (then-tail and else-tail / pred.on_failed for no-else) chain
+    /// to the next iteration's first slot, not to Escape. The next
+    /// iteration's own tail is what escapes.
     #[test]
-    fn all_jumps_are_forward() {
-        let trees: Vec<Vec<Action>> = vec![
-            vec![Action::Conditional {
-                when: exec_with_literal("/bin/c"),
-                then: Box::new([Action::Exec(exec_with_literal("/bin/t"))]),
+    fn conditional_in_non_last_position_chains_to_next() {
+        let tree = [
+            Action::Conditional {
+                when: exec_with_literal("/bin/check"),
+                then: Box::new([Action::Exec(exec_with_literal("/bin/then"))]),
                 otherwise: None,
-            }],
-            vec![Action::Conditional {
-                when: exec_with_literal("/bin/c"),
-                then: Box::new([Action::Exec(exec_with_literal("/bin/t"))]),
-                otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/e"))])),
-            }],
-            vec![Action::Conditional {
-                when: exec_with_literal("/bin/c"),
-                then: Box::new([]),
-                otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/e"))])),
-            }],
-            vec![Action::Conditional {
-                when: exec_with_literal("/bin/outer"),
-                then: Box::new([Action::Conditional {
-                    when: exec_with_literal("/bin/inner"),
-                    then: Box::new([Action::Exec(exec_with_literal("/bin/it"))]),
-                    otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/ie"))])),
-                }]),
-                otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/oe"))])),
-            }],
+            },
+            Action::Exec(exec_with_literal("/bin/after")),
         ];
-        for tree in trees {
-            let program = lower_to_program(&tree);
-            for (idx, insn) in program.instructions.iter().enumerate() {
-                let pos = u32::try_from(idx).unwrap();
-                match insn {
-                    Instruction::SpawnPredicate { jump_target, .. } => {
-                        assert!(
-                            *jump_target > pos,
-                            "predicate jump at {pos} is backward to {jump_target}",
-                        );
-                    }
-                    Instruction::Jump { target } => {
-                        assert!(*target > pos, "Jump at {pos} is backward to {target}");
-                    }
-                    Instruction::SpawnExec(_) | Instruction::SpawnPipe(_) => {}
-                }
-            }
-        }
+        let program = lower_to_program(&tree).expect("lowering succeeds");
+        assert_eq!(program.ops.len(), 3);
+
+        // 0: pred. on_ok = 1 (then). on_failed = 2 (post-conditional = after).
+        assert_continue(ops(&program)[0].on_ok, 1);
+        assert_continue(ops(&program)[0].on_failed, 2);
+
+        // 1: then. on_ok = 2 (after). on_failed = Terminate.
+        assert_continue(ops(&program)[1].on_ok, 2);
+        assert_eq!(ops(&program)[1].on_failed, BranchTarget::Terminate);
+
+        // 2: after. on_ok = Escape (top-level tail). on_failed = Terminate.
+        assert_eq!(ops(&program)[2].on_ok, BranchTarget::Escape);
+        assert_eq!(ops(&program)[2].on_failed, BranchTarget::Terminate);
+    }
+
+    /// Empty surface trees lower to a [`ProgramError::EmptyProgram`].
+    /// The `validate_actions` entry point rejects the empty case before
+    /// calling `lower_to_program`, so this is purely a defensive contract
+    /// test for the lowering primitive.
+    #[test]
+    fn empty_tree_returns_empty_program_error() {
+        let err = lower_to_program(&[]).expect_err("empty tree must error");
+        assert!(matches!(
+            err,
+            specter_core::program::ProgramError::EmptyProgram
+        ));
     }
 }

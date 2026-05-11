@@ -1,12 +1,12 @@
-//! Subscription, action programs, and `EffectScope`.
+//! Subscription and `EffectScope`.
 //!
 //! A `Sub` is a *reaction declaration*: it names what to watch and what
-//! program should run when the watched tree settles. The program is a flat
-//! bytecode IR — [`ActionProgram`] holds a `Box<[Instruction]>` walked by
-//! a `u32` cursor at the actuator. The surface syntax (validation-side
-//! [`crate::action::Action`] tree, lives in `specter-config`) folds into
-//! the program at validation time; the engine and actuator see only the
-//! lowered form.
+//! program should run when the watched tree settles. The program is a
+//! CFG-shaped op IR — [`ActionProgram`] (see [`crate::program`]) holds a
+//! `Box<[ProgramOp]>` walked by a `u32` cursor at the actuator. The
+//! surface syntax (validation-side `Action` tree, lives in
+//! `specter-config`) folds into the program at validation time; the
+//! engine and actuator see only the lowered form.
 //!
 //! `Sub.needs_diff` is derived at construction: true iff the `EffectScope`
 //! is `PerStableFile` *or* the program references any diff-derived
@@ -15,7 +15,7 @@
 //! v1 surface is argv-only — no shell variant.
 
 use crate::ids::{ProfileId, PromoterId, ResourceId, SubId};
-use crate::program::ExecAction;
+use crate::program::ActionProgram;
 use crate::scan_config::ScanConfig;
 use compact_str::CompactString;
 use slotmap::SlotMap;
@@ -300,114 +300,6 @@ impl std::ops::BitAndAssign for ClassSet {
     }
 }
 
-/// Lowered execution program — a tiny bytecode IR.
-///
-/// Built once at config validation (`specter_config::action::lower_to_program`),
-/// shared by-Arc across every [`crate::Effect`] emitted from the owning
-/// [`Sub`]. The actuator walks `instructions` via a `u32` cursor that
-/// indexes the slice directly.
-///
-/// # Why pre-flatten
-///
-/// A multi-level surface AST has no execution semantics that the
-/// actuator needs at runtime — the tree exists to give operators a
-/// structured grammar. The cursor-over-flat-slice form removes
-/// recursion from the reap-path advance arm and keeps the actuator's
-/// `cursor: u32` invariant a single index. Forward jumps encode
-/// branching (predicate-driven `Conditional`) without re-introducing
-/// tree walks at the dispatch site.
-///
-/// # Extension hooks
-///
-/// Future opcodes land additively without grammar churn at the
-/// `Action` surface:
-///
-/// - `SpawnParallel(Arc<[u32]>)` + `Join { count }` — concurrent branches.
-/// - `Capture { name, source: u32 }` — `${capture.<name>}`.
-/// - `Retry { spec, target: u32 }` — per-step retry.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ActionProgram {
-    pub instructions: Box<[Instruction]>,
-}
-
-impl ActionProgram {
-    /// Build a program from an instruction sequence. The lowering pass
-    /// in `specter-config` is the sole production producer; tests use
-    /// this directly via the `testkit` helpers.
-    #[must_use]
-    pub fn new(instructions: impl IntoIterator<Item = Instruction>) -> Self {
-        Self {
-            instructions: instructions
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        }
-    }
-
-    /// `true` iff any instruction in the program references a
-    /// diff-derived placeholder (see [`Placeholder::is_diff_derived`]).
-    /// Linear scan; called once at [`Sub::new`].
-    #[must_use]
-    pub fn references_diff_derived(&self) -> bool {
-        self.instructions
-            .iter()
-            .any(Instruction::references_diff_derived)
-    }
-}
-
-/// One bytecode opcode in an [`ActionProgram`].
-///
-/// PR1 introduces all four variants on the shape side; lowering and the
-/// actuator only exercise [`Self::SpawnExec`] for now. Pipe / Predicate /
-/// Jump arms light up in subsequent PRs (Slices 3 + 5 of the action-types
-/// expansion plan) — keeping the variant set stable from PR1 avoids
-/// re-shaping the type as features ship.
-///
-/// Jump targets and predicate fall-through targets are `u32` indices
-/// into the owning program's `instructions` slice. A target equal to
-/// `instructions.len()` is the legal "skip past end" form — the
-/// actuator's reap-path advance treats it as `terminate Ok`. Backward
-/// jumps are unrepresentable by the lowering invariants (the producer
-/// is the sole writer); the type itself doesn't enforce direction.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Instruction {
-    /// Spawn one process; argv resolves at spawn time.
-    SpawnExec(ExecAction),
-    /// Spawn N processes wired stdout→stdin. Pipefail-on: any
-    /// non-zero stage exit ⇒ aggregated `Failed`. Reserved for the
-    /// pipe-and-conditional expansion; PR1 does not produce this
-    /// variant.
-    SpawnPipe(Arc<[ExecAction]>),
-    /// Predicate. Ok ⇒ cursor advances to the next instruction (enters
-    /// then-branch). Failed ⇒ cursor jumps to `jump_target` (enters
-    /// else-branch or post-conditional). The predicate's outcome does
-    /// NOT propagate to plan terminus. Reserved for the
-    /// pipe-and-conditional expansion; PR1 does not produce this
-    /// variant.
-    SpawnPredicate { exec: ExecAction, jump_target: u32 },
-    /// Unconditional forward jump emitted by lowering to skip past an
-    /// else-branch when the then-branch ran. Reserved for the
-    /// pipe-and-conditional expansion; PR1 does not produce this
-    /// variant.
-    Jump { target: u32 },
-}
-
-impl Instruction {
-    /// `true` iff any leaf in this instruction references a diff-derived
-    /// placeholder. Recurses through all variants — fork-additive in
-    /// future opcodes.
-    #[must_use]
-    pub fn references_diff_derived(&self) -> bool {
-        match self {
-            Self::SpawnExec(e) | Self::SpawnPredicate { exec: e, .. } => {
-                e.references_diff_derived()
-            }
-            Self::SpawnPipe(stages) => stages.iter().any(ExecAction::references_diff_derived),
-            Self::Jump { .. } => false,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct Sub {
     pub id: SubId,
@@ -548,9 +440,11 @@ impl SubRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionProgram, ClassSet, EffectScope, Instruction, Sub, SubRegistry};
+    use super::{ActionProgram, ClassSet, EffectScope, Sub, SubRegistry};
     use crate::ids::{ProfileId, SubId};
-    use crate::program::{ArgPart, ArgTemplate, ExecAction, Placeholder};
+    use crate::program::{
+        ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder, SpawnBody,
+    };
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -558,19 +452,27 @@ mod tests {
     const MAX_SETTLE: Duration = Duration::from_secs(6);
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
+    /// Build a one-op program holding a single Exec body. Equivalent to
+    /// the lowering of a single `[[watch.actions]] exec = [...]` entry.
+    fn single_exec_program(exec: ExecAction) -> Arc<ActionProgram> {
+        let mut b = ProgramBuilder::new();
+        let h = b.emit(SpawnBody::Exec(exec));
+        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
+        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+        Arc::new(b.build().unwrap())
+    }
+
     fn anchor_only_program() -> Arc<ActionProgram> {
-        Arc::new(ActionProgram::new([Instruction::SpawnExec(
-            ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/build"),
-                ArgPart::Placeholder(Placeholder::Path),
-            ])]),
-        )]))
+        single_exec_program(ExecAction::new([ArgTemplate::new([
+            ArgPart::literal("/bin/build"),
+            ArgPart::Placeholder(Placeholder::Path),
+        ])]))
     }
 
     fn program_with(p: Placeholder) -> Arc<ActionProgram> {
-        Arc::new(ActionProgram::new([Instruction::SpawnExec(
-            ExecAction::new([ArgTemplate::new([ArgPart::Placeholder(p)])]),
-        )]))
+        single_exec_program(ExecAction::new([ArgTemplate::new([ArgPart::Placeholder(
+            p,
+        )])]))
     }
 
     #[test]

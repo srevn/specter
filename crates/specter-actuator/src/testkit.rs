@@ -186,7 +186,7 @@ impl Spawner for MockSpawner {
                 rx,
                 dead: Arc::clone(&dead),
             }),
-            signaler: Box::new(MockChildSignaler {
+            signaler: Arc::new(MockChildSignaler {
                 pid,
                 dead,
                 signals: Arc::clone(&self.signals),

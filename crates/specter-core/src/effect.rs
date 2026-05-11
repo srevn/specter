@@ -8,8 +8,8 @@
 
 use crate::diff::Diff;
 use crate::ids::{ProfileId, ResourceId, SubId};
+use crate::program::ActionProgram;
 use crate::resource::ResourceKind;
-use crate::sub::ActionProgram;
 use compact_str::CompactString;
 use std::path::Path;
 use std::sync::Arc;
@@ -58,11 +58,11 @@ pub struct CommandResolved {
 /// - `sub_name` — `${specter.watch}` substitute and `SPECTER_WATCH` env
 ///   value. Owned `CompactString` rather than `Arc<str>` so the resolver
 ///   reaches it via `Deref<Target = str>` without naming the type.
-/// - `program` — the lowered bytecode IR, Arc-cloned from `Sub.program`
-///   at emit time so coalesced Effects share one allocation. Validation
-///   guarantees at least one `Instruction::SpawnExec` for v1; the
-///   actuator walks instructions via a `u32` cursor, stopping on the
-///   first non-`Ok` outcome.
+/// - `program` — the lowered CFG-shaped op IR, Arc-cloned from
+///   `Sub.program` at emit time so coalesced Effects share one
+///   allocation. Validation guarantees at least one op; the actuator
+///   walks ops via a `u32` cursor, reading each op's `on_ok` /
+///   `on_failed` edge after the spawned child reaps.
 /// - `anchor_path`, `anchor_kind` — the anchor's filesystem path and
 ///   classification. `anchor_path` is `Arc<Path>` so the engine builds
 ///   it once per `emit_effects` call and every Effect emitted from that
