@@ -175,12 +175,24 @@ fn backpatch_jump(insn: &mut Instruction, target: u32) {
 
 /// Convert a `usize` instruction-vector length to `u32`. The `u32`
 /// width is the lowering invariant — every `cursor` and jump target
-/// is `u32`, so the program slice is also `u32`-indexable. The
-/// `expect` is structurally unreachable: a single `[[watch]]` block
-/// at `u32::MAX` instructions would already exceed any plausible
-/// validator-enforced ceiling and would OOM long before. The panic
-/// is preferred over `unwrap_or(u32::MAX)`-style truncation, which
-/// would silently produce invalid jump targets.
+/// is `u32`, so the program slice is also `u32`-indexable.
+///
+/// The `expect` is structurally unreachable: every [`Instruction`]
+/// is ≥24 bytes (the largest variant is `SpawnExec(ExecAction)`),
+/// so a `u32::MAX` instruction-count `Vec<Instruction>` is ≥96 GiB
+/// — the process OOMs long before lowering can produce it.
+///
+/// The plan called for an `IssueKind::ProgramTooLarge`
+/// [`ValidationIssue`] at the `validate_actions` boundary; in
+/// practice the panic is defensible (it triggers only on a path
+/// that would already have OOMed) and adding the variant + check
+/// would pay validator-side complexity for a defensive belt that
+/// never tightens. The deviation is intentional — if a future
+/// surface grammar makes `u32::MAX` programs reachable without OOM
+/// (e.g., a parameterised loop variant), the right fix is to move
+/// the check upstream into validation, not to soften this panic.
+///
+/// [`ValidationIssue`]: crate::error::ValidationIssue
 fn u32_or_program_overflow(len: usize) -> u32 {
     u32::try_from(len).expect("program length fits in u32 by construction")
 }

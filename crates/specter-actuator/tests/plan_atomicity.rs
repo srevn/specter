@@ -1,15 +1,16 @@
 //! Integration regression: plan-atomicity across hot-reload-shaped
 //! coalesce.
 //!
-//! The reshape introduced `Effect.plan: Arc<ActionPlan>` and a per-step
-//! actuator advance loop. Operators can change a watch's `actions`
-//! list via SIGHUP while a plan is in flight; the engine emits a new
-//! Effect with the new plan, which lands in the actuator's per-slot
-//! `pending`. The invariant under test: **once started, a plan runs
-//! all its steps before `pending` fires**, regardless of new submits.
-//! Equivalently: `Effect.plan` is a frozen snapshot — the in-flight
-//! step's `effect.plan.steps[N+1]` is sourced from the same `Arc`
-//! installed at plan start, never from a later submit's plan.
+//! The reshape introduced `Effect.program: Arc<ActionProgram>` and a
+//! per-instruction actuator advance loop. Operators can change a
+//! watch's `actions` list via SIGHUP while a plan is in flight; the
+//! engine emits a new Effect with the new program, which lands in
+//! the actuator's per-slot `pending`. The invariant under test:
+//! **once started, a plan runs all its instructions before `pending`
+//! fires**, regardless of new submits. Equivalently: `Effect.program`
+//! is a frozen snapshot — the in-flight step's
+//! `effect.program.instructions[N+1]` is sourced from the same `Arc`
+//! installed at plan start, never from a later submit's program.
 //!
 //! At the actuator's boundary, "hot reload" manifests as a fresh
 //! submit for the same `DedupKey` carrying the new plan. The slot's
@@ -48,7 +49,7 @@ use std::time::Duration;
 ///    (`a0 < b0 < a1`, or `a1` missing entirely) would mean plan_a's
 ///    snapshot was replaced mid-flight or pending was dispatched
 ///    ahead of plan_continue — both are bugs the structural
-///    `Arc<ActionPlan>` is meant to prevent.
+///    `Arc<ActionProgram>` is meant to prevent.
 /// 4. The engine sees exactly two `EffectComplete::Ok` — one per
 ///    Effect — preserving the per-Effect outstanding accounting.
 #[test]

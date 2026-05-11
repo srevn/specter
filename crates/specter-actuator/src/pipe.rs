@@ -328,7 +328,7 @@ mod tests {
                 assert_eq!(exit_code, Some(7), "last non-zero exit propagates");
                 assert_eq!(signal, None, "no signal seen");
             }
-            other => panic!("expected Failed; got {other:?}"),
+            EffectOutcome::Ok => panic!("expected Failed; got Ok"),
         }
         // Stage 0 does NOT receive a cascade SIGTERM (it's the
         // failing stage, already reaped). Stages 1 and 2 do.
@@ -377,7 +377,7 @@ mod tests {
                 assert_eq!(exit_code, Some(7), "last non-zero exit (stage 2)");
                 assert_eq!(signal, Some(15), "first observed signal (stage 0)");
             }
-            other => panic!("expected Failed; got {other:?}"),
+            EffectOutcome::Ok => panic!("expected Failed; got Ok"),
         }
     }
 

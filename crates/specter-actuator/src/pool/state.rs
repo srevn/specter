@@ -333,19 +333,16 @@ pub(crate) struct PredicateJob {
 /// clones for the SIGTERM-cascade-on-first-failure path; the combined
 /// signaler here is independent of those.
 ///
-/// **`_stage_signalers` is install-only**, kept for the
-/// `_`-prefix convention to mark "owned but read only at install
-/// time". The install site at [`ActuatorState::spawn_step_with_permit`]
-/// arms one timer per timeout-bearing stage; once those timer threads
-/// are spawned (each holding its own `Arc` clone of the stage signaler
-/// it watches), the slice's job is done. Keeping it on the variant
-/// makes the lifetime explicit — the per-stage Arcs stay alive until
-/// the pipe terminates, even if the controller never reads them
-/// again.
+/// **`stage_signalers` is lifetime-bearing**, read only at install
+/// time (to arm per-stage timer threads, each holding its own `Arc`
+/// clone) and by [`PipeJob`]'s `Debug` impl (which reports the stage
+/// count for diagnostics). Keeping the slice on the variant makes the
+/// lifetime explicit — the per-stage `Arc`s stay alive until the pipe
+/// terminates, even after every timer thread has been spawned.
 pub(crate) struct PipeJob {
     pub last_pid: u32,
     pub combined_signaler: Arc<dyn ChildSignaler>,
-    pub _stage_signalers: Box<[Arc<dyn ChildSignaler>]>,
+    pub stage_signalers: Box<[Arc<dyn ChildSignaler>]>,
     pub effect: Arc<Effect>,
     pub cursor: u32,
     pub diff_tmp_path: Option<PathBuf>,
@@ -378,7 +375,7 @@ impl std::fmt::Debug for PipeJob {
         f.debug_struct("PipeJob")
             .field("last_pid", &self.last_pid)
             .field("cursor", &self.cursor)
-            .field("stages", &self._stage_signalers.len())
+            .field("stages", &self.stage_signalers.len())
             .field("sub", &self.effect.key.sub())
             .field("correlation", &self.effect.correlation)
             .finish_non_exhaustive()
@@ -460,7 +457,7 @@ impl RunningJob {
             Self::Pipe(PipeJob {
                 last_pid,
                 combined_signaler,
-                _stage_signalers,
+                stage_signalers: _,
                 effect,
                 cursor,
                 diff_tmp_path,
@@ -1364,9 +1361,16 @@ impl ActuatorState {
         // the timer short-circuits on. Best-effort — see
         // [`crate::timer`] module docs for the spawn-failure policy.
         if let Some(spec) = timer_spec {
-            // `pid` is unique within the actuator process; cursor
-            // distinguishes steps within an Effect. Sub is implied by
-            // the wait thread's `act-wait-{pid}` name visible alongside.
+            // Thread name budget: Linux pthread_setname_np truncates
+            // to 15 chars + null, so we shape the name around what
+            // `ps -T` / `gdb info threads` can render without
+            // truncation. `c{cursor}-pid{pid}` fits a 9-char pid
+            // unscathed. The sub identifier is intentionally omitted
+            // — adding it would push the name past the Linux ceiling.
+            // Sub/key cross-reference is via `tracing` logs keyed on
+            // the same `pid` (the `tracing::debug!` line below emits
+            // ?key + pid; live system inspection follows pid → log
+            // for the sub identity).
             let timer_name = format!("c{cursor}-pid{pid}");
             if let Err(e) =
                 timer::spawn_timer(&timer_name, spec.deadline, spec.grace, spec.signaler)
@@ -1517,7 +1521,7 @@ impl ActuatorState {
         slot.running = Some(RunningJob::Pipe(PipeJob {
             last_pid,
             combined_signaler,
-            _stage_signalers: stage_signalers,
+            stage_signalers,
             effect: Arc::clone(effect),
             cursor,
             diff_tmp_path,

@@ -9,11 +9,16 @@
 //!
 //! Two reasons:
 //!
-//! 1. **Determinism.** Two spawn-time resolves of the same `${env.X}`
-//!    placeholder, within one Effect's plan, must return the same value
-//!    — even if a separate thread (or, in theory, the operator) mutates
-//!    the process env between steps. A snapshot pins "what env did
-//!    Specter start under" as the authoritative answer.
+//! 1. **Determinism (scoped).** Two spawn-time resolves of the same
+//!    `${env.X}` placeholder, within one Effect's plan, must return
+//!    the same value — even if a separate thread (or, in theory, the
+//!    operator) mutates the process env between steps. A snapshot
+//!    pins "what env did Specter start under" as the authoritative
+//!    answer for **specter-mediated placeholder reads**. It is *not*
+//!    a guarantee about what the child process sees when it reads env
+//!    directly — see [`crate::os`]'s `build_command` for the additive
+//!    parent-env contract; a child shell reading `$HOME` reads the
+//!    daemon's live env, not the snapshot.
 //! 2. **Cheap reads.** `std::env::vars_os` allocates and re-walks the
 //!    OS env block on every call; per-step resolves would re-pay that
 //!    cost. The snapshot is read with a `BTreeMap::get` plus a string
@@ -33,6 +38,7 @@
 
 use compact_str::CompactString;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 
 /// Frozen snapshot of the operator environment at actuator startup.
 ///
@@ -49,8 +55,27 @@ impl EnvSnapshot {
     /// actuator at startup. Non-UTF-8 keys or values are skipped.
     #[must_use]
     pub fn capture() -> Self {
+        Self::from_vars_os(std::env::vars_os())
+    }
+
+    /// Build a snapshot from any iterator of `(OsString, OsString)`
+    /// pairs — the same shape `std::env::vars_os` yields. Non-UTF-8
+    /// keys or values are dropped silently.
+    ///
+    /// Production [`Self::capture`] delegates here; tests reach for
+    /// this directly when they need to exercise the UTF-8 filter
+    /// deterministically (without touching the ambient process env,
+    /// which would require `unsafe std::env::set_var` and is racy
+    /// across single-process test runners). [`Self::from_map`] is
+    /// the lighter test fixture for the common case where the test
+    /// doesn't care about the filter and only needs ASCII keys.
+    #[must_use]
+    fn from_vars_os<I>(vars: I) -> Self
+    where
+        I: IntoIterator<Item = (OsString, OsString)>,
+    {
         let mut map = BTreeMap::new();
-        for (k, v) in std::env::vars_os() {
+        for (k, v) in vars {
             if let (Ok(k), Ok(v)) = (k.into_string(), v.into_string()) {
                 map.insert(CompactString::from(k), CompactString::from(v));
             }
@@ -115,23 +140,40 @@ mod tests {
         assert!(snap.get("ANYTHING").is_none());
     }
 
+    /// Exercise the production [`EnvSnapshot::from_vars_os`] pipeline
+    /// (which [`EnvSnapshot::capture`] delegates to) on synthetic
+    /// `(OsString, OsString)` pairs. Pins three behaviors at once:
+    ///
+    /// - UTF-8 keys and values round-trip through the snapshot.
+    /// - Non-UTF-8 keys are silently dropped (matches the module
+    ///   docstring: the lexer's grammar guarantees ASCII placeholder
+    ///   names, so a non-UTF-8 key would never match a placeholder).
+    /// - Non-UTF-8 values are silently dropped for the same reason —
+    ///   the rendered argv slot would be replacement-char garbage
+    ///   regardless.
+    ///
+    /// Avoids `unsafe std::env::set_var` (Rust 2024 marks it unsafe
+    /// due to inherent data races against concurrent `getenv`) by
+    /// driving the pipeline with synthetic input instead of the
+    /// ambient process env.
     #[test]
-    fn capture_includes_a_known_env_var() {
-        // Set a sentinel before capture so we don't depend on the
-        // ambient environment (which may or may not have `PATH`,
-        // `HOME`, etc. set under CI sandboxes).
-        // SAFETY: this test is single-threaded; we set + read the
-        // sentinel without racing other tests because nothing else
-        // touches `SPECTER_ENVSNAPSHOT_SENTINEL`.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("SPECTER_ENVSNAPSHOT_SENTINEL", "captured");
-        }
-        let snap = EnvSnapshot::capture();
-        assert_eq!(snap.get("SPECTER_ENVSNAPSHOT_SENTINEL"), Some("captured"));
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::remove_var("SPECTER_ENVSNAPSHOT_SENTINEL");
-        }
+    fn from_vars_os_round_trips_utf8_and_filters_non_utf8() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let invalid_key = OsString::from_vec(vec![0xff, 0xfe]);
+        let invalid_val = OsString::from_vec(vec![0xff, 0xfe]);
+        let snap = EnvSnapshot::from_vars_os([
+            (OsString::from("HOME"), OsString::from("/home/op")),
+            (OsString::from("USER"), OsString::from("op")),
+            // Non-UTF-8 key — filtered.
+            (invalid_key, OsString::from("filtered-by-key")),
+            // Non-UTF-8 value — filtered.
+            (OsString::from("BAD_VALUE"), invalid_val),
+        ]);
+        assert_eq!(snap.get("HOME"), Some("/home/op"));
+        assert_eq!(snap.get("USER"), Some("op"));
+        assert_eq!(snap.get("BAD_VALUE"), None, "non-UTF-8 value filtered");
+        assert_eq!(snap.map.len(), 2, "only the two UTF-8 entries survive");
     }
 }

@@ -1650,6 +1650,92 @@ mod tests {
         h.shutdown();
     }
 
+    /// Predicate **resolver-failure** with an else-branch present
+    /// cascades to else; the resolver's [`crate::resolve::ResolveError`]
+    /// routes through the same `advance_or_terminate` dispatch as a
+    /// natural Failed reap and a spawn-failure.
+    ///
+    /// Shape: `when` references `${env.MISSING}` (no default) against
+    /// an empty [`EnvSnapshot`]; the resolver returns `UnsetEnvVar`
+    /// before any process spawns. The actuator synthesises `Failed` at
+    /// cursor 0 → `dispatch_outcome(SpawnPredicate, Failed)` →
+    /// `Advance { jump_target = 3 }` → `next_spawnable(3) = 3` → spawn
+    /// the else-branch (cursor 3, literal `/bin/else`).
+    ///
+    /// **Why this is a distinct test from
+    /// [`predicate_spawn_failure_does_not_propagate_no_else`]**:
+    /// resolver failure short-circuits in
+    /// [`crate::resolve::resolve_step`] before `Spawner::spawn` is
+    /// reached at all (different code path from OS-level
+    /// spawn-failure). And **why distinct from
+    /// [`predicate_failed_spawns_else_branch_outcome_does_not_propagate`]**:
+    /// that test reaps a natural Failed from a real spawn; this test
+    /// has zero predicate spawns recorded — the synth-Failed dispatch
+    /// must work without any in-flight `RunningJob` for cursor 0.
+    /// Together they pin "the dispatch loop is uniform on bytecode
+    /// shape" across all three Failed-at-cursor-0 sources.
+    #[test]
+    fn predicate_resolver_failure_cascades_to_else_branch() {
+        // [SpawnPredicate(${env.MISSING}, jump=3),
+        //  SpawnExec(/bin/then),
+        //  Jump(target=4),
+        //  SpawnExec(/bin/else)]
+        let program = Arc::new(ActionProgram::new([
+            Instruction::SpawnPredicate {
+                exec: ExecAction::new([ArgTemplate::new([ArgPart::EnvVar {
+                    name: CompactString::new("MISSING"),
+                    default: None,
+                }])]),
+                jump_target: 3,
+            },
+            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                "/bin/then",
+            )])])),
+            Instruction::Jump { target: 4 },
+            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                "/bin/else",
+            )])])),
+        ]));
+        let mut h = Harness::new_with_grace_and_env(
+            4,
+            Duration::from_secs(5),
+            Arc::new(EnvSnapshot::from_map::<_, &str, &str>([])),
+        );
+        h.submit(make_effect_perfile_with_program(5, 5, 5, 1, program));
+
+        // The else-branch spawn must be the only spawn recorded — the
+        // predicate's resolver-failure short-circuits before any
+        // `MockSpawner::spawn` call.
+        let s = h.wait_for_spawns(1, Duration::from_secs(1));
+        assert_eq!(
+            s.len(),
+            1,
+            "exactly one spawn recorded (the else-branch); predicate's resolver-failure \
+             must not reach the spawner",
+        );
+        assert_eq!(
+            s[0].argv,
+            vec!["/bin/else".to_string()],
+            "the spawn is the else-branch, not the then-branch (cursor 1 was skipped)",
+        );
+        h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
+
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        assert!(
+            matches!(
+                completions[0],
+                Input::EffectComplete {
+                    result: EffectOutcome::Ok,
+                    ..
+                }
+            ),
+            "plan terminates Ok — predicate's resolver-failure does not propagate; \
+             got {:?}",
+            completions[0],
+        );
+        h.shutdown();
+    }
+
     /// Multi-instruction plan with a conditional in the middle:
     /// `[Exec(A), Predicate(B), Exec(C)]` (B with no else, jump past
     /// C). When B fires Ok, C runs as the predicate's then-branch.

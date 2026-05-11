@@ -232,6 +232,38 @@ impl Spawner for OsSpawner {
 /// pre-exec hook that disqualifies `posix_spawn` (so we always go
 /// through fork+exec — see the comment on the pre_exec hook below for
 /// the macOS fd-table rationale).
+///
+/// # Env-handling contract: **additive**
+///
+/// `.envs(...)` adds the resolver-emitted `SPECTER_*` vars **on top
+/// of** the parent (specter daemon) process's environment. The child
+/// sees `parent_env ∪ resolver_env`, with resolver entries shadowing
+/// any parent-env collisions on the same key.
+///
+/// **Why not `env_clear()` + additive?** Without per-action env spec
+/// (v1 [`crate::spawner::EnvVar`] only carries the resolver's
+/// `SPECTER_*` set; the action grammar has no operator-side `env`
+/// field), `env_clear()` would strip `PATH`, `HOME`, `LANG`, etc.,
+/// breaking the common case of `["/bin/sh", "-c", "..."]` whose body
+/// invokes other binaries by name. The operator can already pin
+/// specific parent-env values into argv at resolve time via
+/// `${env.NAME}` (snapshot-backed; see [`crate::env::EnvSnapshot`])
+/// when determinism matters per-placeholder.
+///
+/// **Determinism boundary.** [`crate::env::EnvSnapshot`] freezes
+/// `${env.NAME}` resolves at actuator startup. That guarantee is
+/// scoped to specter-mediated placeholder reads — it does **not**
+/// extend to env reads the child performs directly (e.g., a shell
+/// script reading `$HOME`). Operators who require a fully hermetic
+/// child env should land per-action `env_clear` + explicit env-spec
+/// in v2; today, the contract is "additive, with snapshot-backed
+/// `${env.*}` for the specter-mediated subset."
+///
+/// **Security boundary.** The child inherits every env var the
+/// specter daemon was launched with. Operators who run specter under
+/// a credential-bearing supervisor should scrub the supervisor's env
+/// before spawning specter (a `systemd` unit with `Environment=` is
+/// the canonical shape), since v1 has no actuator-side scrub.
 fn build_command(
     arg0: &str,
     argv_tail: &[String],
