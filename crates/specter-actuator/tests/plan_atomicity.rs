@@ -72,14 +72,14 @@ fn pending_submit_during_running_plan_does_not_replace_in_flight_steps() {
     // plan_a step 0 sleeps long enough that submit-2 is comfortably
     // queued into pending before step 0 reaps. Steps 1 and b0 are
     // brief — we just need the ordering invariant.
-    let plan_a = literal_multi_plan(vec![touch("a0", "0.2"), touch("a1", "0.05")]);
-    let plan_b = literal_multi_plan(vec![touch("b0", "0.05")]);
+    let plan_a = literal_multi_program(vec![touch("a0", "0.2"), touch("a1", "0.05")]);
+    let plan_b = literal_multi_program(vec![touch("b0", "0.05")]);
 
     // Effect 1 (plan_a) and Effect 2 (plan_b) share a DedupKey so
     // submit-2 hits the same slot. Distinct correlations preserve
     // engine-side identity.
     let key_seeds = (7, 7, 7);
-    h.submit(perfile_effect_with_plan(
+    h.submit(perfile_effect_with_program(
         key_seeds.0,
         key_seeds.1,
         key_seeds.2,
@@ -92,7 +92,7 @@ fn pending_submit_during_running_plan_does_not_replace_in_flight_steps() {
     // 60ms is comfortably less than step 0's 200ms sleep, so step 0
     // is still in flight when we submit.
     std::thread::sleep(Duration::from_millis(60));
-    h.submit(perfile_effect_with_plan(
+    h.submit(perfile_effect_with_program(
         key_seeds.0,
         key_seeds.1,
         key_seeds.2,

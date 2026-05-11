@@ -24,12 +24,12 @@
 )]
 
 use compact_str::CompactString;
+use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionPlan, ArgPart, ArgTemplate, BurstIntent, ChildEntry, ClassSet, Diagnostic, DirChild,
-    DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, ExecAction, FsEvent, Input,
-    LeafEntry, Placeholder, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree,
-    WatchOp,
+    ActionProgram, ArgPart, ArgTemplate, BurstIntent, ChildEntry, ClassSet, Diagnostic, DirChild,
+    DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
+    Placeholder, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, Profile,
+    ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, WatchOp,
 };
 use specter_engine::{Engine, SubAttachRequest, covers, nearest_covering_ancestor};
 use std::collections::BTreeMap;
@@ -162,19 +162,15 @@ fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
     })
 }
 
-fn empty_plan() -> ActionPlan {
-    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
-        ArgTemplate::new([ArgPart::literal("/bin/true")]),
-    ]))])
+fn empty_program() -> Arc<ActionProgram> {
+    single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn diff_aware_command() -> ActionPlan {
-    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
-        ArgTemplate::new([
-            ArgPart::literal("fmt"),
-            ArgPart::Placeholder(Placeholder::Created),
-        ]),
-    ]))])
+fn diff_aware_command() -> Arc<ActionProgram> {
+    single_exec_program([ArgTemplate::new([
+        ArgPart::literal("fmt"),
+        ArgPart::Placeholder(Placeholder::Created),
+    ])])
 }
 
 /// V5-native helper: build a `TreeSnapshot::Dir` from a list of
@@ -280,7 +276,7 @@ fn golden_path_full_lifecycle() {
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -386,7 +382,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         config: ScanConfig::builder().build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -425,7 +421,7 @@ fn pending_event_race_late_probe_response_discarded() {
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -474,7 +470,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -519,7 +515,7 @@ fn force_fire_emits_effect_with_forced_true() {
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,
@@ -587,7 +583,7 @@ fn step_output_is_sorted() {
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: NO_EVENTS,
         log_output: false,

@@ -2084,7 +2084,7 @@ impl Engine {
                         diff: diff_for_effect,
                         capture_output: log_output,
                         sub_name: sub.name.clone(),
-                        plan: Arc::clone(&sub.plan),
+                        program: Arc::clone(&sub.program),
                         anchor_path: Arc::clone(&anchor_path),
                         anchor_kind,
                         // Subtree: no per-entry segment. The resolver
@@ -2235,7 +2235,7 @@ impl Engine {
                 diff: Some(diff.clone()),
                 capture_output: log_output,
                 sub_name: sub.name.clone(),
-                plan: Arc::clone(&sub.plan),
+                program: Arc::clone(&sub.program),
                 anchor_path: Arc::clone(anchor_path),
                 anchor_kind,
                 // PerFile: the file segment. The resolver derives

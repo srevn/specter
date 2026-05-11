@@ -1,7 +1,7 @@
 //! Integration tests: parse + validate against TOML fixtures.
 
 use specter_config::{Config, ConfigError, IssueKind};
-use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
+use specter_core::{ArgPart, ClassSet, EffectScope, Instruction, Placeholder};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -46,21 +46,18 @@ fn full_fixture_round_trips_every_field() {
     assert_eq!(w.scan.exclude.len(), 2);
     assert_eq!(w.scan.max_depth, Some(5));
     assert_eq!(w.events, ClassSet::STRUCTURE | ClassSet::CONTENT);
-    assert_eq!(w.plan.steps[0].as_exec().expect("exec step").argv.len(), 3);
+    let Instruction::SpawnExec(exec) = &w.program.instructions[0] else {
+        panic!("expected SpawnExec instruction");
+    };
+    assert_eq!(exec.argv.len(), 3);
+    assert_eq!(exec.argv[0].parts[0], ArgPart::literal("make"));
+    assert_eq!(exec.argv[1].parts[0], ArgPart::literal("--input="));
     assert_eq!(
-        w.plan.steps[0].as_exec().expect("exec step").argv[0].parts[0],
-        ArgPart::literal("make")
-    );
-    assert_eq!(
-        w.plan.steps[0].as_exec().expect("exec step").argv[1].parts[0],
-        ArgPart::literal("--input=")
-    );
-    assert_eq!(
-        w.plan.steps[0].as_exec().expect("exec step").argv[1].parts[1],
+        exec.argv[1].parts[1],
         ArgPart::Placeholder(Placeholder::Path)
     );
     assert_eq!(
-        w.plan.steps[0].as_exec().expect("exec step").argv[2].parts[0],
+        exec.argv[2].parts[0],
         ArgPart::Placeholder(Placeholder::Created)
     );
 }

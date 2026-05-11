@@ -18,11 +18,12 @@
 )]
 
 use compact_str::CompactString;
+use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionPlan, BurstPhase, ChildEntry, ClassSet, Diff, DirChild, DirMeta, DirSnapshot,
-    EffectScope, EntryKind, ExecAction, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, StepOutput, SubAttachRequest, WatchOp,
+    ActionProgram, BurstPhase, ChildEntry, ClassSet, Diff, DirChild, DirMeta, DirSnapshot,
+    EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -33,10 +34,10 @@ const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-fn empty_plan() -> ActionPlan {
-    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
-        specter_core::ArgTemplate::new([specter_core::ArgPart::literal("/bin/true")]),
-    ]))])
+fn empty_program() -> Arc<ActionProgram> {
+    single_exec_program([specter_core::ArgTemplate::new([
+        specter_core::ArgPart::literal("/bin/true"),
+    ])])
 }
 
 /// V5-native helper: build a `TreeSnapshot::Dir` with flat single-component
@@ -94,7 +95,7 @@ fn two_profiles_one_resource_share_watch_demand() {
         cfg_a,
         MAX_SETTLE,
         SETTLE,
-        empty_plan(),
+        empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -113,7 +114,7 @@ fn two_profiles_one_resource_share_watch_demand() {
         cfg_b,
         MAX_SETTLE,
         SETTLE,
-        empty_plan(),
+        empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -150,7 +151,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
             cfg.clone(),
             MAX_SETTLE,
             SETTLE,
-            empty_plan(),
+            empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -177,7 +178,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
             cfg,
             MAX_SETTLE,
             SETTLE,
-            empty_plan(),
+            empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -246,7 +247,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             cfg.clone(),
             MAX_SETTLE,
             SETTLE,
-            empty_plan(),
+            empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -271,7 +272,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             cfg,
             MAX_SETTLE,
             SETTLE,
-            empty_plan(),
+            empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -465,7 +466,7 @@ fn co_located_profiles_share_suppress_count() {
             cfg_a,
             MAX_SETTLE,
             SETTLE,
-            empty_plan(),
+            empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -481,7 +482,7 @@ fn co_located_profiles_share_suppress_count() {
             cfg_b,
             MAX_SETTLE,
             SETTLE,
-            empty_plan(),
+            empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,

@@ -1,3 +1,4 @@
+use crate::action::{Action, lower_to_program};
 use crate::error::{ConfigError, IssueKind, ValidationIssue};
 use crate::file_meta::FileMeta;
 use crate::path::canonicalize_lenient;
@@ -5,11 +6,12 @@ use crate::raw::{RawAction, RawConfig, RawLogConfig, RawWatch};
 use crate::template;
 use compact_str::CompactString;
 use specter_core::{
-    self as core, Action, ActionPlan, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
+    self as core, ActionProgram, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
     PatternSpec, PromoterAttachRequest, ScanConfig, SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Default debounce window when `[[watch]] settle` is omitted.
@@ -128,7 +130,13 @@ pub enum LogDestination {
 pub struct SubSpec {
     pub name: CompactString,
     pub path: PathBuf,
-    pub plan: ActionPlan,
+    /// Lowered bytecode IR. Built once at config validation; cloned by
+    /// Arc into each [`SubAttachRequest`] (and from there into every
+    /// emitted `Effect`). Equality is structural over the instruction
+    /// sequence — two TOML configs that lower to the same program
+    /// compare equal, so the hot-reload diff suppresses no-op churn on
+    /// cosmetic edits (whitespace, comment, key ordering).
+    pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
     pub settle: Duration,
     pub max_settle: Duration,
@@ -174,7 +182,7 @@ impl SubSpec {
             self.scan.clone(),
             self.max_settle,
             self.settle,
-            self.plan.clone(),
+            Arc::clone(&self.program),
             self.scope,
             self.events,
             self.log_output,
@@ -201,7 +209,10 @@ impl SubSpec {
 pub struct PromoterSpec {
     pub name: CompactString,
     pub pattern: PatternSpec,
-    pub plan: ActionPlan,
+    /// Lowered bytecode IR. See [`SubSpec::program`]; the Promoter
+    /// holds the same Arc and clones it into every synthesised dynamic
+    /// Sub via [`Self::to_attach_request`].
+    pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
     pub settle: Duration,
     pub max_settle: Duration,
@@ -231,7 +242,7 @@ impl PromoterSpec {
             config: self.scan.clone(),
             max_settle: self.max_settle,
             settle: self.settle,
-            plan: self.plan.clone(),
+            program: Arc::clone(&self.program),
             scope: self.scope,
             events: self.events,
             log_output: self.log_output,
@@ -555,20 +566,24 @@ fn validate_name(idx: usize, raw_name: &str, errors: &mut Vec<ValidationIssue>) 
     }
 }
 
-/// Validate the `actions` array. Returns `Some(ActionPlan)` when every
-/// action lexes cleanly.
+/// Validate the `actions` array. Returns `Some(Arc<ActionProgram>)`
+/// when every action lexes cleanly.
 ///
 /// Errors accumulate into `errors`; one issue per offending action /
-/// argv slot. The function returns `None` when *any* part of the plan
-/// failed validation — partial plans are not handed back, since a
-/// half-built plan in the engine would be observably worse than no
-/// plan at all (the `expect` at the success path call site enforces
-/// the all-or-nothing contract).
+/// argv slot. The function returns `None` when *any* part of the
+/// program failed validation — partial programs are not handed back,
+/// since a half-built program in the engine would be observably worse
+/// than none at all (the `expect` at the success path call site
+/// enforces the all-or-nothing contract).
+///
+/// The returned Arc is the same allocation the engine's `Sub.program`
+/// and every emitted `Effect.program` references — one shared
+/// bytecode IR per validated Sub.
 fn validate_actions(
     idx: usize,
     raw_actions: &[RawAction],
     errors: &mut Vec<ValidationIssue>,
-) -> Option<ActionPlan> {
+) -> Option<Arc<ActionProgram>> {
     if raw_actions.is_empty() {
         errors.push(ValidationIssue::new(
             Some(idx),
@@ -579,18 +594,18 @@ fn validate_actions(
         return None;
     }
 
-    let mut steps: Vec<Action> = Vec::with_capacity(raw_actions.len());
+    let mut tree: Vec<Action> = Vec::with_capacity(raw_actions.len());
     let mut any_failed = false;
     for (j, raw) in raw_actions.iter().enumerate() {
         match validate_one_action(idx, j, raw, errors) {
-            Some(action) => steps.push(action),
+            Some(action) => tree.push(action),
             None => any_failed = true,
         }
     }
     if any_failed {
         None
     } else {
-        Some(ActionPlan::new(steps))
+        Some(lower_to_program(&tree))
     }
 }
 
@@ -866,7 +881,7 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
         None
     };
 
-    let plan = validate_actions(idx, &raw.actions, &mut errors);
+    let program = validate_actions(idx, &raw.actions, &mut errors);
     let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
     let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
     // Parse `events` after scope so the default resolver can read
@@ -889,7 +904,7 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
     Ok(SubSpec {
         name: CompactString::new(&raw.name),
         path: path.expect("path validated"),
-        plan: plan.expect("plan validated"),
+        program: program.expect("program validated"),
         scope: scope.expect("scope validated"),
         settle,
         max_settle,
@@ -928,7 +943,7 @@ fn validate_dynamic_watch(
         }
     };
 
-    let plan = validate_actions(idx, &raw.actions, &mut errors);
+    let program = validate_actions(idx, &raw.actions, &mut errors);
     let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
     let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
     let events = parse_events_field(
@@ -946,7 +961,7 @@ fn validate_dynamic_watch(
     Ok(PromoterSpec {
         name: CompactString::new(&raw.name),
         pattern: pattern.expect("pattern validated"),
-        plan: plan.expect("plan validated"),
+        program: program.expect("program validated"),
         scope: scope.expect("scope validated"),
         settle,
         max_settle,
@@ -1043,7 +1058,7 @@ fn parse_events_field(
 mod tests {
     use super::{Config, LogDestination, LogLevel, SubSpec};
     use crate::error::{ConfigError, IssueKind};
-    use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
+    use specter_core::{ArgPart, ClassSet, EffectScope, Instruction, Placeholder};
     use std::time::Duration;
 
     const ROOT: &str = "/";
@@ -1184,7 +1199,10 @@ mod tests {
         assert!(w.scan.exclude.is_empty());
         assert!(w.scan.pattern.is_none());
         assert_eq!(w.scan.max_depth, None);
-        assert_eq!(w.plan.steps[0].as_exec().expect("exec step").argv.len(), 1);
+        let Instruction::SpawnExec(exec) = &w.program.instructions[0] else {
+            panic!("expected SpawnExec instruction");
+        };
+        assert_eq!(exec.argv.len(), 1);
         assert!(!w.log_output, "log_output defaults to false");
         assert!(w.enabled, "enabled defaults to true (field omitted)");
     }
@@ -1466,10 +1484,10 @@ mod tests {
              actions = [{{ exec = [\"fmt\", \"--input=${{specter.path}}\", \"${{specter.created}}\"] }}]"
         );
         let cfg = Config::from_str(&toml).unwrap();
-        let argv = &cfg.watches[0].plan.steps[0]
-            .as_exec()
-            .expect("exec step")
-            .argv;
+        let Instruction::SpawnExec(exec) = &cfg.watches[0].program.instructions[0] else {
+            panic!("expected SpawnExec instruction");
+        };
+        let argv = &exec.argv;
         assert_eq!(argv.len(), 3);
         assert_eq!(argv[0].parts[0], ArgPart::literal("fmt"));
         assert_eq!(argv[1].parts[0], ArgPart::literal("--input="));

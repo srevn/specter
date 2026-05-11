@@ -41,11 +41,12 @@ use crate::op::ProbeCorrelation;
 use crate::pattern::PatternSpec;
 use crate::profile::DescentState;
 use crate::scan_config::ScanConfig;
-use crate::sub::{ActionPlan, ClassSet, EffectScope};
+use crate::sub::{ActionProgram, ClassSet, EffectScope};
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Pre-id spec carried on `WatchRegistryDiff::promoters.{added,modified}`.
@@ -63,7 +64,7 @@ pub struct PromoterAttachRequest {
     pub config: ScanConfig,
     pub max_settle: Duration,
     pub settle: Duration,
-    pub plan: ActionPlan,
+    pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
     pub events: ClassSet,
     pub log_output: bool,
@@ -83,7 +84,7 @@ pub struct Promoter {
     pub config: ScanConfig,
     pub max_settle: Duration,
     pub settle: Duration,
-    pub plan: ActionPlan,
+    pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
     pub events: ClassSet,
     pub log_output: bool,
@@ -279,21 +280,25 @@ mod tests {
     use crate::profile::DescentState;
     use crate::scan_config::ScanConfig;
     use crate::sub::{
-        Action, ActionPlan, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Placeholder,
+        ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Instruction,
+        Placeholder,
     };
     use compact_str::CompactString;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Duration;
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
 
-    fn plan() -> ActionPlan {
-        ActionPlan::new([Action::Exec(ExecAction::new([ArgTemplate::new([
-            ArgPart::literal("/bin/build"),
-            ArgPart::Placeholder(Placeholder::Path),
-        ])]))])
+    fn program() -> Arc<ActionProgram> {
+        Arc::new(ActionProgram::new([Instruction::SpawnExec(
+            ExecAction::new([ArgTemplate::new([
+                ArgPart::literal("/bin/build"),
+                ArgPart::Placeholder(Placeholder::Path),
+            ])]),
+        )]))
     }
 
     fn build_promoter(id: PromoterId, name: &str, pattern: &str) -> Promoter {
@@ -304,7 +309,7 @@ mod tests {
             config: ScanConfig::builder().recursive(true).build(),
             max_settle: MAX_SETTLE,
             settle: SETTLE,
-            plan: plan(),
+            program: program(),
             scope: EffectScope::SubtreeRoot,
             events: ClassSet::DEFAULT_SUBTREE_ROOT,
             log_output: false,
@@ -385,7 +390,7 @@ mod tests {
             config: ScanConfig::builder().recursive(true).build(),
             max_settle: MAX_SETTLE,
             settle: SETTLE,
-            plan: plan(),
+            program: program(),
             scope: EffectScope::SubtreeRoot,
             events: ClassSet::DEFAULT_SUBTREE_ROOT,
             log_output: false,

@@ -4,6 +4,7 @@
 //! Outputs: [`Config`], [`SubRegistryDiff`](specter_core::SubRegistryDiff),
 //! [`Cli`]. No engine or actor deps.
 
+mod action;
 mod cli;
 mod config;
 mod diff;

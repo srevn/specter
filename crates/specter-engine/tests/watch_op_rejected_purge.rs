@@ -8,13 +8,13 @@
 )]
 
 use compact_str::CompactString;
+use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionPlan, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClaimKind, ClassSet, Diagnostic,
-    DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, ExecAction, FsEvent, Input, LeafEntry,
-    PatternSpec, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileState, PromoterAttachRequest, PromoterClaimKind, PromoterState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, WatchFailure,
-    WatchOp,
+    ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClaimKind, ClassSet, Diagnostic,
+    DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry, PatternSpec,
+    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
+    PromoterAttachRequest, PromoterClaimKind, PromoterState, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, WatchFailure, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -29,10 +29,8 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 // Fixtures
 // ───────────────────────────────────────────────────────────────────────
 
-fn empty_plan() -> ActionPlan {
-    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
-        ArgTemplate::new([ArgPart::literal("/bin/true")]),
-    ]))])
+fn empty_program() -> Arc<ActionProgram> {
+    single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
 fn dir_snap(
@@ -99,7 +97,7 @@ fn attach_subtree_root(
         ScanConfig::builder().recursive(true).build(),
         max_settle,
         SETTLE,
-        empty_plan(),
+        empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
         false,
@@ -386,7 +384,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_plan(),
+        empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::EMPTY,
         false,
@@ -468,7 +466,7 @@ fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -671,7 +669,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_plan(),
+        empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::EMPTY,
         false,

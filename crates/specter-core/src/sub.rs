@@ -1,13 +1,15 @@
-//! Subscription, action plans, and `EffectScope`.
+//! Subscription, action programs, and `EffectScope`.
 //!
 //! A `Sub` is a *reaction declaration*: it names what to watch and what
-//! plan should run when the watched tree settles. The plan is a tree —
-//! [`ActionPlan`] holds an ordered list of [`Action`] nodes; v1 ships the
-//! `Action::Exec` leaf only. Future variants (`Parallel`, `Pipeline`,
-//! `Conditional`) land additively at the enum.
+//! program should run when the watched tree settles. The program is a flat
+//! bytecode IR — [`ActionProgram`] holds a `Box<[Instruction]>` walked by
+//! a `u32` cursor at the actuator. The surface syntax (validation-side
+//! [`crate::action::Action`] tree, lives in `specter-config`) folds into
+//! the program at validation time; the engine and actuator see only the
+//! lowered form.
 //!
 //! `Sub.needs_diff` is derived at construction: true iff the `EffectScope`
-//! is `PerStableFile` *or* the plan references any diff-derived
+//! is `PerStableFile` *or* the program references any diff-derived
 //! placeholder (`Created`/`Deleted`/`Modified`/`RenamedFrom`/`RenamedTo`).
 //!
 //! v1 surface is argv-only — no shell variant.
@@ -47,7 +49,11 @@ use tinyvec::TinyVec;
 /// [`crate::Input::ConfigDiff`]) can carry pre-id `SubAttachRequest`s without
 /// introducing a `core → engine` cycle. `Clone` is derived for the
 /// (rare) call sites that fan a request out to multiple Engines —
-/// production paths consume by value.
+/// production paths consume by value. `program` is `Arc<ActionProgram>`
+/// so the Arc travels straight from the config layer's
+/// `lower_to_program` into the engine's `Sub.program` without a
+/// re-allocation: one Arc per Sub, refcount-bumped on each emitted
+/// `Effect`.
 #[derive(Clone, Debug)]
 pub struct SubAttachRequest {
     pub name: String,
@@ -56,7 +62,7 @@ pub struct SubAttachRequest {
     pub config: ScanConfig,
     pub max_settle: Duration,
     pub settle: Duration,
-    pub plan: ActionPlan,
+    pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
     /// Event-class mask the user opted into. The engine folds this into
     /// `config_hash` so two Subs differing only on classes fork separate
@@ -88,13 +94,14 @@ impl SubAttachRequest {
     /// `source_promoter` defaults to `None` — static attach. Use
     /// [`Self::for_dynamic`] when a Promoter is the source.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub const fn for_resource(
         name: String,
         resource: ResourceId,
         config: ScanConfig,
         max_settle: Duration,
         settle: Duration,
-        plan: ActionPlan,
+        program: Arc<ActionProgram>,
         scope: EffectScope,
         events: ClassSet,
         log_output: bool,
@@ -106,7 +113,7 @@ impl SubAttachRequest {
             config,
             max_settle,
             settle,
-            plan,
+            program,
             scope,
             events,
             log_output,
@@ -123,13 +130,14 @@ impl SubAttachRequest {
     /// `source_promoter` defaults to `None` — static attach. Use
     /// [`Self::for_dynamic`] when a Promoter is the source.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn for_path(
         name: String,
         path: PathBuf,
         config: ScanConfig,
         max_settle: Duration,
         settle: Duration,
-        plan: ActionPlan,
+        program: Arc<ActionProgram>,
         scope: EffectScope,
         events: ClassSet,
         log_output: bool,
@@ -141,7 +149,7 @@ impl SubAttachRequest {
             config,
             max_settle,
             settle,
-            plan,
+            program,
             scope,
             events,
             log_output,
@@ -162,14 +170,14 @@ impl SubAttachRequest {
         config: ScanConfig,
         max_settle: Duration,
         settle: Duration,
-        plan: ActionPlan,
+        program: Arc<ActionProgram>,
         scope: EffectScope,
         events: ClassSet,
         log_output: bool,
         source_promoter: PromoterId,
     ) -> Self {
         let mut req = Self::for_path(
-            name, path, config, max_settle, settle, plan, scope, events, log_output,
+            name, path, config, max_settle, settle, program, scope, events, log_output,
         );
         req.source_promoter = Some(source_promoter);
         req
@@ -292,89 +300,133 @@ impl std::ops::BitAndAssign for ClassSet {
     }
 }
 
-/// User-declared reaction body: a tree-shaped plan the actuator walks
-/// to drive zero or more processes per emitted Effect.
+/// Lowered execution program — a tiny bytecode IR.
 ///
-/// v1 reserves the tree but ships only the [`Action::Exec`] leaf. The
-/// tree is the forward-compatibility hook; introducing `Parallel`,
-/// `Pipeline`, or `Conditional` is purely additive at the enum and
-/// serde-tag level.
+/// Built once at config validation (`specter_config::action::lower_to_program`),
+/// shared by-Arc across every [`crate::Effect`] emitted from the owning
+/// [`Sub`]. The actuator walks `instructions` via a `u32` cursor that
+/// indexes the slice directly.
 ///
-/// `steps` runs sequentially with stop-on-failure semantics: the first
-/// non-`Ok` step terminates the plan; remaining steps don't run. The
-/// engine's `EffectComplete` accounting is per-plan, not per-step — a
-/// plan emits exactly one `EffectComplete` regardless of how many
-/// steps ran.
+/// # Why pre-flatten
+///
+/// A multi-level surface AST has no execution semantics that the
+/// actuator needs at runtime — the tree exists to give operators a
+/// structured grammar. The cursor-over-flat-slice form removes
+/// recursion from the reap-path advance arm and keeps the actuator's
+/// `cursor: u32` invariant a single index. Forward jumps encode
+/// branching (predicate-driven `Conditional`) without re-introducing
+/// tree walks at the dispatch site.
+///
+/// # Extension hooks
+///
+/// Future opcodes land additively without grammar churn at the
+/// `Action` surface:
+///
+/// - `SpawnParallel(Arc<[u32]>)` + `Join { count }` — concurrent branches.
+/// - `Capture { name, source: u32 }` — `${capture.<name>}`.
+/// - `Retry { spec, target: u32 }` — per-step retry.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ActionPlan {
-    /// Sequential steps, frozen by construction. `Arc<[Action]>` so the
-    /// engine's hot Effect-emission path Arc-clones the steps slice
-    /// without deep-copying the action templates.
-    pub steps: Arc<[Action]>,
+pub struct ActionProgram {
+    pub instructions: Box<[Instruction]>,
 }
 
-impl ActionPlan {
+impl ActionProgram {
+    /// Build a program from an instruction sequence. The lowering pass
+    /// in `specter-config` is the sole production producer; tests use
+    /// this directly via the `testkit` helpers.
     #[must_use]
-    pub fn new(steps: impl IntoIterator<Item = Action>) -> Self {
+    pub fn new(instructions: impl IntoIterator<Item = Instruction>) -> Self {
         Self {
-            steps: steps.into_iter().collect(),
+            instructions: instructions
+                .into_iter()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
         }
     }
 
-    /// `true` iff any leaf in the plan references a diff-derived
-    /// placeholder ([`Placeholder::Created`], [`Placeholder::Deleted`],
-    /// [`Placeholder::Modified`], [`Placeholder::RenamedFrom`],
-    /// [`Placeholder::RenamedTo`]). Computed once at `Sub::new`; never
-    /// re-evaluated. [`Placeholder::Excluded`] is multi-value but reads
-    /// from `Profile.exclude_strings`, NOT from a `Diff`, so it does
-    /// not flip this predicate — see [`Placeholder::is_diff_derived`].
+    /// `true` iff any instruction in the program references a
+    /// diff-derived placeholder (see [`Placeholder::is_diff_derived`]).
+    /// Linear scan; called once at [`Sub::new`].
     #[must_use]
     pub fn references_diff_derived(&self) -> bool {
-        self.steps.iter().any(Action::references_diff_derived)
+        self.instructions
+            .iter()
+            .any(Instruction::references_diff_derived)
     }
 }
 
-/// One node in an [`ActionPlan`]. v1 has only the `Exec` leaf; future
-/// variants (`Parallel`, `Pipeline`, `Conditional`) extend the tree
-/// without retrofitting existing leaves.
+/// One bytecode opcode in an [`ActionProgram`].
+///
+/// PR1 introduces all four variants on the shape side; lowering and the
+/// actuator only exercise [`Self::SpawnExec`] for now. Pipe / Predicate /
+/// Jump arms light up in subsequent PRs (Slices 3 + 5 of the action-types
+/// expansion plan) — keeping the variant set stable from PR1 avoids
+/// re-shaping the type as features ship.
+///
+/// Jump targets and predicate fall-through targets are `u32` indices
+/// into the owning program's `instructions` slice. A target equal to
+/// `instructions.len()` is the legal "skip past end" form — the
+/// actuator's reap-path advance treats it as `terminate Ok`. Backward
+/// jumps are unrepresentable by the lowering invariants (the producer
+/// is the sole writer); the type itself doesn't enforce direction.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Action {
-    /// Spawn a single process with this argv template.
-    Exec(ExecAction),
+pub enum Instruction {
+    /// Spawn one process; argv resolves at spawn time.
+    SpawnExec(ExecAction),
+    /// Spawn N processes wired stdout→stdin. Pipefail-on: any
+    /// non-zero stage exit ⇒ aggregated `Failed`. Reserved for the
+    /// pipe-and-conditional expansion; PR1 does not produce this
+    /// variant.
+    SpawnPipe(Arc<[ExecAction]>),
+    /// Predicate. Ok ⇒ cursor advances to the next instruction (enters
+    /// then-branch). Failed ⇒ cursor jumps to `jump_target` (enters
+    /// else-branch or post-conditional). The predicate's outcome does
+    /// NOT propagate to plan terminus. Reserved for the
+    /// pipe-and-conditional expansion; PR1 does not produce this
+    /// variant.
+    SpawnPredicate { exec: ExecAction, jump_target: u32 },
+    /// Unconditional forward jump emitted by lowering to skip past an
+    /// else-branch when the then-branch ran. Reserved for the
+    /// pipe-and-conditional expansion; PR1 does not produce this
+    /// variant.
+    Jump { target: u32 },
 }
 
-impl Action {
-    /// Borrow the `ExecAction` payload of an [`Action::Exec`] node.
-    /// Future variants (`Parallel`, `Pipeline`, `Conditional`) return
-    /// `None`; the actuator dispatches on this distinction.
-    #[must_use]
-    pub const fn as_exec(&self) -> Option<&ExecAction> {
-        match self {
-            Self::Exec(e) => Some(e),
-        }
-    }
-
-    /// `true` iff this node's leaves reference any diff-derived
-    /// placeholder. Recurses through future tree variants.
+impl Instruction {
+    /// `true` iff any leaf in this instruction references a diff-derived
+    /// placeholder. Recurses through all variants — fork-additive in
+    /// future opcodes.
     #[must_use]
     pub fn references_diff_derived(&self) -> bool {
         match self {
-            Self::Exec(e) => e.references_diff_derived(),
+            Self::SpawnExec(e) | Self::SpawnPredicate { exec: e, .. } => {
+                e.references_diff_derived()
+            }
+            Self::SpawnPipe(stages) => stages.iter().any(ExecAction::references_diff_derived),
+            Self::Jump { .. } => false,
         }
     }
 }
 
-/// Single argv-spawn leaf inside an [`ActionPlan`].
+/// One leaf-process specification.
 ///
 /// `argv` is frozen `Box<[ArgTemplate]>` — once a config is validated,
-/// the per-step argv shape is fixed and `Vec`'s capacity slot is dead
-/// weight; `Box` saves the two extra words per leaf and prevents
-/// accidental push paths.
+/// the argv shape is fixed and `Vec`'s capacity slot is dead weight;
+/// `Box` saves the two extra words per leaf and prevents accidental
+/// push paths.
+///
+/// `timeout` is the deadline applied to the spawned process. `None` ⇒
+/// no timeout. `Some(d)` ⇒ SIGTERM at `now + d`; if still alive after
+/// the actuator's shutdown grace, SIGKILL. Reaped as
+/// `EffectOutcome::Failed { exit_code: None, signal: Some(15 | 9) }`.
+/// PR1 carries the field on the type but the actuator does not yet
+/// arm a timer — validation only produces `timeout = None`. The field
+/// is in place so PR2 can light up per-step timers without re-shaping
+/// the type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecAction {
-    /// argv template for this exec step. Renders to one or more argv
-    /// slots at spawn time.
     pub argv: Box<[ArgTemplate]>,
+    pub timeout: Option<Duration>,
 }
 
 impl ExecAction {
@@ -382,7 +434,15 @@ impl ExecAction {
     pub fn new(argv: impl IntoIterator<Item = ArgTemplate>) -> Self {
         Self {
             argv: argv.into_iter().collect::<Vec<_>>().into_boxed_slice(),
+            timeout: None,
         }
+    }
+
+    /// Builder-style setter for the per-step timeout.
+    #[must_use]
+    pub const fn with_timeout(mut self, d: Duration) -> Self {
+        self.timeout = Some(d);
+        self
     }
 
     /// `true` iff any argv part references a diff-derived placeholder.
@@ -412,6 +472,16 @@ impl ArgTemplate {
 pub enum ArgPart {
     Literal(CompactString),
     Placeholder(Placeholder),
+    /// `${env.<NAME>}` or `${env.<NAME>:-default}`. The default is a
+    /// frozen literal — nested placeholders are rejected at the lexer.
+    /// Strict resolution: `default = None` AND env unset ⇒
+    /// `EffectOutcome::Failed`. PR1 keeps the variant in the type but
+    /// the template lexer does not yet emit it; the resolver treats it
+    /// as `unreachable!()` until the lexer expansion lands.
+    EnvVar {
+        name: CompactString,
+        default: Option<CompactString>,
+    },
 }
 
 impl ArgPart {
@@ -423,22 +493,25 @@ impl ArgPart {
     /// True iff this part is a multi-value [`Placeholder`]. Thin
     /// delegator over [`Placeholder::is_multivalue`] for ergonomic
     /// `iter().any(ArgPart::is_multivalue)` use at call sites that need
-    /// to inspect mixed `Literal` / `Placeholder` parts.
+    /// to inspect mixed `Literal` / `Placeholder` parts. `EnvVar` is
+    /// single-value by construction.
     #[must_use]
     pub const fn is_multivalue(&self) -> bool {
         match self {
             Self::Placeholder(p) => p.is_multivalue(),
-            Self::Literal(_) => false,
+            Self::Literal(_) | Self::EnvVar { .. } => false,
         }
     }
 
     /// True iff this part is a diff-derived [`Placeholder`]. See
     /// [`Placeholder::is_diff_derived`] for the precise predicate.
+    /// `EnvVar` reads the actuator's captured environment snapshot,
+    /// never the burst's `Diff`, so it never flips this predicate.
     #[must_use]
     pub const fn is_diff_derived(&self) -> bool {
         match self {
             Self::Placeholder(p) => p.is_diff_derived(),
-            Self::Literal(_) => false,
+            Self::Literal(_) | Self::EnvVar { .. } => false,
         }
     }
 }
@@ -529,7 +602,7 @@ pub struct Sub {
     pub id: SubId,
     pub name: CompactString,
     pub profile: ProfileId,
-    pub plan: Arc<ActionPlan>,
+    pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
     pub settle: Duration,
     pub max_settle: Duration,
@@ -552,20 +625,20 @@ pub struct Sub {
 
 impl Sub {
     /// Construct a Sub. `needs_diff` is derived: true iff
-    /// `scope == PerStableFile` OR the plan references any diff-derived
+    /// `scope == PerStableFile` OR the program references any diff-derived
     /// placeholder. Pre-computed once; never re-evaluated.
     ///
-    /// The caller passes a plain [`ActionPlan`]; the constructor wraps
-    /// it in an [`Arc`] so [`crate::Effect`] emission can hand the plan
-    /// to the actuator by Arc clone rather than by deep-cloning the
-    /// step tree.
+    /// `program` is taken as `Arc<ActionProgram>` so the Arc minted by
+    /// the config layer's `lower_to_program` flows through unchanged —
+    /// the constructor does not re-wrap. One Arc per Sub, refcount-bumped
+    /// on each emitted [`crate::Effect`].
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: SubId,
         name: impl Into<CompactString>,
         profile: ProfileId,
-        plan: ActionPlan,
+        program: Arc<ActionProgram>,
         scope: EffectScope,
         settle: Duration,
         max_settle: Duration,
@@ -573,12 +646,12 @@ impl Sub {
         log_output: bool,
         source_promoter: Option<PromoterId>,
     ) -> Self {
-        let needs_diff = scope == EffectScope::PerStableFile || plan.references_diff_derived();
+        let needs_diff = scope == EffectScope::PerStableFile || program.references_diff_derived();
         Self {
             id,
             name: name.into(),
             profile,
-            plan: Arc::new(plan),
+            program,
             scope,
             settle,
             max_settle,
@@ -665,8 +738,8 @@ impl SubRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, ActionPlan, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Placeholder,
-        Sub, SubRegistry,
+        ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Instruction,
+        Placeholder, Sub, SubRegistry,
     };
     use crate::ids::{ProfileId, SubId};
     use std::sync::Arc;
@@ -676,17 +749,19 @@ mod tests {
     const MAX_SETTLE: Duration = Duration::from_secs(6);
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-    fn anchor_only_plan() -> ActionPlan {
-        ActionPlan::new([Action::Exec(ExecAction::new([ArgTemplate::new([
-            ArgPart::literal("/bin/build"),
-            ArgPart::Placeholder(Placeholder::Path),
-        ])]))])
+    fn anchor_only_program() -> Arc<ActionProgram> {
+        Arc::new(ActionProgram::new([Instruction::SpawnExec(
+            ExecAction::new([ArgTemplate::new([
+                ArgPart::literal("/bin/build"),
+                ArgPart::Placeholder(Placeholder::Path),
+            ])]),
+        )]))
     }
 
-    fn plan_with(p: Placeholder) -> ActionPlan {
-        ActionPlan::new([Action::Exec(ExecAction::new([ArgTemplate::new([
-            ArgPart::Placeholder(p),
-        ])]))])
+    fn program_with(p: Placeholder) -> Arc<ActionProgram> {
+        Arc::new(ActionProgram::new([Instruction::SpawnExec(
+            ExecAction::new([ArgTemplate::new([ArgPart::Placeholder(p)])]),
+        )]))
     }
 
     #[test]
@@ -699,15 +774,15 @@ mod tests {
             Placeholder::RenamedTo,
         ] {
             assert!(
-                plan_with(p).references_diff_derived(),
+                program_with(p).references_diff_derived(),
                 "references_diff_derived must be true for {p:?}"
             );
         }
     }
 
     #[test]
-    fn references_diff_derived_false_for_anchor_only_plan() {
-        assert!(!anchor_only_plan().references_diff_derived());
+    fn references_diff_derived_false_for_anchor_only_program() {
+        assert!(!anchor_only_program().references_diff_derived());
         // The full non-diff-derived set: every single-value placeholder
         // PLUS `Excluded` (multi-value but not diff-derived). Including
         // `Excluded` here is the load-bearing assertion of the
@@ -724,10 +799,34 @@ mod tests {
             Placeholder::Excluded,
         ] {
             assert!(
-                !plan_with(p).references_diff_derived(),
+                !program_with(p).references_diff_derived(),
                 "references_diff_derived must be false for non-diff-derived {p:?}"
             );
         }
+    }
+
+    /// `ArgPart::EnvVar` never flips `references_diff_derived` — the
+    /// resolver reads the actuator's captured snapshot, not the burst's
+    /// diff. Pinning this prevents future refactors from silently
+    /// ratcheting `Sub.needs_diff` on env-only argv.
+    #[test]
+    fn env_var_arg_part_is_not_diff_derived() {
+        let part = ArgPart::EnvVar {
+            name: "HOME".into(),
+            default: None,
+        };
+        assert!(!part.is_diff_derived());
+        assert!(!part.is_multivalue());
+    }
+
+    /// `ExecAction::with_timeout` sets the per-step deadline. The
+    /// actuator's timer wiring lands in PR2; PR1 only carries the field
+    /// shape.
+    #[test]
+    fn exec_action_with_timeout_records_duration() {
+        let exec = ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
+            .with_timeout(Duration::from_secs(2));
+        assert_eq!(exec.timeout, Some(Duration::from_secs(2)));
     }
 
     #[test]
@@ -736,7 +835,7 @@ mod tests {
             SubId::default(),
             "fmt",
             ProfileId::default(),
-            anchor_only_plan(),
+            anchor_only_program(),
             EffectScope::PerStableFile,
             SETTLE,
             MAX_SETTLE,
@@ -753,7 +852,7 @@ mod tests {
             SubId::default(),
             "report",
             ProfileId::default(),
-            plan_with(Placeholder::Created),
+            program_with(Placeholder::Created),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
@@ -770,7 +869,7 @@ mod tests {
             SubId::default(),
             "build",
             ProfileId::default(),
-            anchor_only_plan(),
+            anchor_only_program(),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
@@ -790,7 +889,7 @@ mod tests {
                 id,
                 "build",
                 pid,
-                anchor_only_plan(),
+                anchor_only_program(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -815,7 +914,7 @@ mod tests {
                 id,
                 "a",
                 pid,
-                anchor_only_plan(),
+                anchor_only_program(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -829,7 +928,7 @@ mod tests {
                 id,
                 "b",
                 pid,
-                anchor_only_plan(),
+                anchor_only_program(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -861,7 +960,7 @@ mod tests {
                 id,
                 "build",
                 pid,
-                anchor_only_plan(),
+                anchor_only_program(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -888,7 +987,7 @@ mod tests {
                 id,
                 "build",
                 pid,
-                anchor_only_plan(),
+                anchor_only_program(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -910,7 +1009,7 @@ mod tests {
                 id,
                 "shared",
                 pid,
-                anchor_only_plan(),
+                anchor_only_program(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -924,7 +1023,7 @@ mod tests {
                 id,
                 "shared",
                 pid,
-                anchor_only_plan(),
+                anchor_only_program(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -946,7 +1045,7 @@ mod tests {
                 id,
                 "build",
                 pid,
-                anchor_only_plan(),
+                anchor_only_program(),
                 EffectScope::SubtreeRoot,
                 SETTLE,
                 MAX_SETTLE,
@@ -1017,15 +1116,15 @@ mod tests {
         }
     }
 
-    /// `Sub.plan` is reference-counted: cloning the field bumps the
-    /// strong count without copying the inner [`ActionPlan`].
+    /// `Sub.program` is reference-counted: cloning the field bumps the
+    /// strong count without copying the inner [`ActionProgram`].
     #[test]
-    fn sub_plan_is_arc_wrapped() {
+    fn sub_program_is_arc_wrapped() {
         let sub = Sub::new(
             SubId::default(),
             "build",
             ProfileId::default(),
-            anchor_only_plan(),
+            anchor_only_program(),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
@@ -1034,16 +1133,41 @@ mod tests {
             None,
         );
 
-        let initial = Arc::strong_count(&sub.plan);
-        let bumped = Arc::clone(&sub.plan);
+        let initial = Arc::strong_count(&sub.program);
+        let bumped = Arc::clone(&sub.program);
         assert_eq!(
-            Arc::strong_count(&sub.plan),
+            Arc::strong_count(&sub.program),
             initial + 1,
             "Arc::clone increments strong_count on the field",
         );
         assert!(
-            Arc::ptr_eq(&bumped, &sub.plan),
+            Arc::ptr_eq(&bumped, &sub.program),
             "the clone and the field point at the same allocation",
+        );
+    }
+
+    /// `Sub::new` does not re-wrap the program: the caller's Arc is the
+    /// same allocation the Sub stores. The minted Arc from the config
+    /// layer's `lower_to_program` flows through without churn.
+    #[test]
+    fn sub_new_does_not_rewrap_program_arc() {
+        let program = anchor_only_program();
+        let before = Arc::as_ptr(&program);
+        let sub = Sub::new(
+            SubId::default(),
+            "build",
+            ProfileId::default(),
+            Arc::clone(&program),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            MAX_SETTLE,
+            NO_EVENTS,
+            false,
+            None,
+        );
+        assert!(
+            std::ptr::eq(before, Arc::as_ptr(&sub.program)),
+            "Sub::new must not allocate a new ActionProgram",
         );
     }
 
@@ -1054,7 +1178,7 @@ mod tests {
             SubId::default(),
             "x",
             ProfileId::default(),
-            anchor_only_plan(),
+            anchor_only_program(),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,

@@ -29,11 +29,12 @@
 use crate::engine::FS_ROOT_SEG;
 use crate::{Engine, SubAttachRequest};
 use compact_str::CompactString;
+use specter_core::testkit::single_exec_program;
 use specter_core::{
-    AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, FsEvent, Input, LeafEntry, PatternSpec, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, PromoterAttachRequest, PromoterId, PromoterState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, SubId,
+    ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
+    EffectScope, EntryKind, FsEvent, Input, LeafEntry, PatternSpec, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeResponse, PromoterAttachRequest, PromoterId, PromoterState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, SubId,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -46,10 +47,10 @@ fn cfg() -> ScanConfig {
     ScanConfig::builder().recursive(true).build()
 }
 
-fn empty_plan() -> specter_core::ActionPlan {
-    specter_core::ActionPlan::new([specter_core::Action::Exec(specter_core::ExecAction::new([
-        specter_core::ArgTemplate::new([specter_core::ArgPart::literal("/bin/true")]),
-    ]))])
+fn empty_program() -> Arc<ActionProgram> {
+    single_exec_program([specter_core::ArgTemplate::new([
+        specter_core::ArgPart::literal("/bin/true"),
+    ])])
 }
 
 /// Build a `PromoterAttachRequest` with a freshly parsed `PatternSpec`.
@@ -60,7 +61,7 @@ fn req_for(name: &str, pattern: &str) -> PromoterAttachRequest {
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -1398,7 +1399,7 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -1469,7 +1470,7 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,
@@ -1515,7 +1516,7 @@ fn anchor_terminal_predicate_static_sub_makes_mixed() {
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
-        plan: empty_plan(),
+        program: empty_program(),
         scope: EffectScope::SubtreeRoot,
         events: ClassSet::EMPTY,
         log_output: false,

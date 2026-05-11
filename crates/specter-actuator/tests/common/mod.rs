@@ -16,8 +16,8 @@ use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
 use specter_actuator::{OsSpawner, SubprocessActuator};
 use specter_core::{
-    Action, ActionPlan, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, ExecAction, Input,
-    ProfileId, ResourceId, ResourceKind, SubId,
+    ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, ExecAction, Input,
+    Instruction, ProfileId, ResourceId, ResourceKind, SubId,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -129,48 +129,49 @@ impl Drop for Harness {
     }
 }
 
-/// Wrap a `Vec<String>` argv as a literal-only single-step [`ActionPlan`].
+/// Wrap a `Vec<String>` argv as a literal-only single-instruction
+/// [`ActionProgram`].
 ///
 /// The resolver renders each `ArgTemplate(Literal(s))` as the slot `s`,
-/// so `literal_plan(["foo", "bar"])` resolves to `argv = ["foo",
+/// so `literal_program(["foo", "bar"])` resolves to `argv = ["foo",
 /// "bar"]` byte-for-byte. Used by the integration helpers below to
-/// satisfy `Effect.plan: Arc<ActionPlan>` while keeping fixture call
-/// sites' `Vec<String>` ergonomics intact.
-fn literal_plan(argv: Vec<String>) -> Arc<ActionPlan> {
+/// satisfy `Effect.program: Arc<ActionProgram>` while keeping fixture
+/// call sites' `Vec<String>` ergonomics intact.
+fn literal_program(argv: Vec<String>) -> Arc<ActionProgram> {
     let exec = ExecAction::new(
         argv.into_iter()
             .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
     );
-    Arc::new(ActionPlan::new([Action::Exec(exec)]))
+    Arc::new(ActionProgram::new([Instruction::SpawnExec(exec)]))
 }
 
-/// Wrap a sequence of literal argvs as a multi-step [`ActionPlan`] —
-/// one `Action::Exec` per inner vec. The actuator walks them
-/// sequentially with stop-on-failure semantics.
-pub fn literal_multi_plan(steps: Vec<Vec<String>>) -> Arc<ActionPlan> {
-    let actions: Vec<Action> = steps
+/// Wrap a sequence of literal argvs as a multi-instruction
+/// [`ActionProgram`] — one `Instruction::SpawnExec` per inner vec.
+/// The actuator walks them sequentially with stop-on-failure semantics.
+pub fn literal_multi_program(steps: Vec<Vec<String>>) -> Arc<ActionProgram> {
+    let instructions: Vec<Instruction> = steps
         .into_iter()
         .map(|argv| {
-            Action::Exec(ExecAction::new(
+            Instruction::SpawnExec(ExecAction::new(
                 argv.into_iter()
                     .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
             ))
         })
         .collect();
-    Arc::new(ActionPlan::new(actions))
+    Arc::new(ActionProgram::new(instructions))
 }
 
-/// PerFile Effect with an arbitrary (possibly multi-step) plan. Mirrors
-/// [`perfile_effect`] but lets the caller supply a pre-built
-/// `Arc<ActionPlan>` directly — needed for tests that need to assert
-/// plan-snapshot invariants by re-using the same `Arc` across multiple
-/// fixtures.
-pub fn perfile_effect_with_plan(
+/// PerFile Effect with an arbitrary (possibly multi-instruction)
+/// program. Mirrors [`perfile_effect`] but lets the caller supply a
+/// pre-built `Arc<ActionProgram>` directly — needed for tests that
+/// need to assert program-snapshot invariants by re-using the same
+/// `Arc` across multiple fixtures.
+pub fn perfile_effect_with_program(
     sub_seed: u64,
     profile_seed: u64,
     res_seed: u64,
     corr: u64,
-    plan: Arc<ActionPlan>,
+    program: Arc<ActionProgram>,
     cwd: PathBuf,
 ) -> Effect {
     let resource = unique_resource_id(res_seed);
@@ -186,7 +187,7 @@ pub fn perfile_effect_with_plan(
         diff: None,
         capture_output: false,
         sub_name: CompactString::new(""),
-        plan,
+        program,
         anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
         target_relative: CompactString::new(""),
@@ -227,7 +228,7 @@ pub fn perfile_effect(
         diff: None,
         capture_output: false,
         sub_name: CompactString::new(""),
-        plan: literal_plan(argv),
+        program: literal_program(argv),
         anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
         target_relative: CompactString::new(""),
@@ -259,7 +260,7 @@ pub fn subtree_effect(
         diff: None,
         capture_output: false,
         sub_name: CompactString::new(""),
-        plan: literal_plan(argv),
+        program: literal_program(argv),
         anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
         target_relative: CompactString::new(""),

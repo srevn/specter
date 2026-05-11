@@ -22,11 +22,12 @@
 )]
 
 use compact_str::CompactString;
+use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionPlan, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta,
-    DirSnapshot, EffectScope, EntryKind, ExecAction, FsEvent, Input, LeafEntry, ProbeCorrelation,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
+    ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta,
+    DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProfileState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -36,10 +37,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 
-fn empty_plan() -> ActionPlan {
-    ActionPlan::new([specter_core::Action::Exec(ExecAction::new([
-        ArgTemplate::new([ArgPart::literal("/bin/true")]),
-    ]))])
+fn empty_program() -> Arc<ActionProgram> {
+    single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
 fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
@@ -105,7 +104,7 @@ fn attach_at(
         ScanConfig::builder().recursive(true).build(),
         max_settle,
         SETTLE,
-        empty_plan(),
+        empty_program(),
         EffectScope::SubtreeRoot,
         events,
         false,

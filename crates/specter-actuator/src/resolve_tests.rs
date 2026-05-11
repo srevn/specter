@@ -10,10 +10,11 @@
 use crate::spawner::EnvVar;
 use compact_str::CompactString;
 use smallvec::smallvec;
+use specter_core::testkit::single_exec_program;
 use specter_core::{
-    Action, ActionPlan, ArgPart, ArgTemplate, CommandResolved, CorrelationId, DedupKey, Diff,
-    Effect, EffectScope, EntryKind, EntryRef, ExecAction, Placeholder, ProfileId, Rename,
-    ResourceId, ResourceKind, SubId,
+    ArgPart, ArgTemplate, CommandResolved, CorrelationId, DedupKey, Diff, Effect, EffectScope,
+    EntryKind, EntryRef, ExecAction, Instruction, Placeholder, ProfileId, Rename, ResourceId,
+    ResourceKind, SubId,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -29,12 +30,13 @@ fn resolve(e: &Effect) -> (CommandResolved, Vec<EnvVar<'_>>) {
     super::resolve_step(e, exec, SystemTime::UNIX_EPOCH, None)
 }
 
-/// Borrow the single [`ExecAction`] inside an [`Effect`]'s plan. Tests
-/// build effects with exactly one `Action::Exec` step; this is a
-/// fixture-side accessor, not a production API.
+/// Borrow the single [`ExecAction`] inside an [`Effect`]'s program. Tests
+/// build effects with exactly one `Instruction::SpawnExec` instruction;
+/// this is a fixture-side accessor, not a production API.
 fn exec_of(e: &Effect) -> &ExecAction {
-    match &e.plan.steps[0] {
-        Action::Exec(exec) => exec,
+    match &e.program.instructions[0] {
+        Instruction::SpawnExec(exec) => exec,
+        _ => panic!("test fixtures use only SpawnExec"),
     }
 }
 
@@ -74,7 +76,7 @@ fn make_effect(
         diff,
         capture_output: false,
         sub_name: CompactString::from(sub_name),
-        plan: Arc::new(ActionPlan::new([Action::Exec(ExecAction::new(argv))])),
+        program: single_exec_program(argv),
         anchor_path: Arc::from(anchor_path.to_path_buf()),
         anchor_kind: ResourceKind::Dir,
         target_relative: CompactString::from(target_relative),

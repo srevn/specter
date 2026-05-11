@@ -46,6 +46,7 @@ use specter_core::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Threshold beyond which the engine emits a one-shot
@@ -151,7 +152,7 @@ impl Engine {
             config: req.config.clone(),
             max_settle: req.max_settle,
             settle: req.settle,
-            plan: req.plan.clone(),
+            program: Arc::clone(&req.program),
             scope: req.scope,
             events: req.events,
             log_output: req.log_output,
@@ -870,16 +871,16 @@ impl Engine {
 
         // Capture spec fields BEFORE the &mut borrow chain on
         // attach_sub_inner. Cloning the heavy fields once (config /
-        // plan) is cheaper than re-borrowing the registry across
-        // each access.
-        let Some((promoter_name, config, max_settle, settle, plan, scope, events, log_output)) =
+        // program) is cheaper than re-borrowing the registry across
+        // each access. `program` Arc-clones — refcount bump only.
+        let Some((promoter_name, config, max_settle, settle, program, scope, events, log_output)) =
             self.promoters.get(promoter_id).map(|q| {
                 (
                     q.name.clone(),
                     q.config.clone(),
                     q.max_settle,
                     q.settle,
-                    q.plan.clone(),
+                    Arc::clone(&q.program),
                     q.scope,
                     q.events,
                     q.log_output,
@@ -897,7 +898,7 @@ impl Engine {
             config,
             max_settle,
             settle,
-            plan,
+            program,
             scope,
             events,
             log_output,

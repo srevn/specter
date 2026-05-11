@@ -221,8 +221,8 @@ mod tests {
     use compact_str::CompactString;
     use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
     use specter_core::{
-        Action, ActionPlan, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
-        ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
+        ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
+        ExecAction, Input, Instruction, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -246,34 +246,35 @@ mod tests {
         ProfileId::from(KeyData::from_ffi(seed))
     }
 
-    fn literal_plan() -> Arc<ActionPlan> {
-        n_step_plan(1)
+    fn literal_program() -> Arc<ActionProgram> {
+        n_step_program(1)
     }
 
-    /// Build an `n`-step plan whose every step is a literal
-    /// `/bin/true`. Used by multi-step tests to drive the actuator's
-    /// advance / terminate path without caring about argv shape.
-    fn n_step_plan(n: usize) -> Arc<ActionPlan> {
-        let steps: Vec<Action> = (0..n)
+    /// Build an `n`-instruction program whose every instruction is a
+    /// literal `/bin/true` `SpawnExec`. Used by multi-instruction tests
+    /// to drive the actuator's advance / terminate path without caring
+    /// about argv shape.
+    fn n_step_program(n: usize) -> Arc<ActionProgram> {
+        let instructions: Vec<Instruction> = (0..n)
             .map(|_| {
-                Action::Exec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
                     "/bin/true",
                 )])]))
             })
             .collect();
-        Arc::new(ActionPlan::new(steps))
+        Arc::new(ActionProgram::new(instructions))
     }
 
     fn make_effect_perfile(sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64) -> Effect {
-        make_effect_perfile_with_plan(sub_seed, profile_seed, res_seed, corr, literal_plan())
+        make_effect_perfile_with_program(sub_seed, profile_seed, res_seed, corr, literal_program())
     }
 
-    fn make_effect_perfile_with_plan(
+    fn make_effect_perfile_with_program(
         sub_seed: u64,
         profile_seed: u64,
         res_seed: u64,
         corr: u64,
-        plan: Arc<ActionPlan>,
+        program: Arc<ActionProgram>,
     ) -> Effect {
         let resource = unique_resource_id(res_seed);
         Effect {
@@ -288,7 +289,7 @@ mod tests {
             diff: None,
             capture_output: false,
             sub_name: CompactString::new(""),
-            plan,
+            program,
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
             target_relative: CompactString::new(""),
@@ -308,7 +309,7 @@ mod tests {
             diff: None,
             capture_output: false,
             sub_name: CompactString::new(""),
-            plan: literal_plan(),
+            program: literal_program(),
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
             target_relative: CompactString::new(""),
@@ -913,8 +914,8 @@ mod tests {
     #[test]
     fn three_step_plan_runs_steps_sequentially_and_emits_one_complete() {
         let mut h = Harness::new(4);
-        let plan = n_step_plan(3);
-        h.submit(make_effect_perfile_with_plan(1, 1, 1, 1, plan));
+        let plan = n_step_program(3);
+        h.submit(make_effect_perfile_with_program(1, 1, 1, 1, plan));
 
         // Step 0 spawns, reaps Ok → step 1 spawns, reaps Ok → step 2
         // spawns, reaps Ok → terminal EffectComplete.
@@ -952,8 +953,8 @@ mod tests {
     #[test]
     fn three_step_plan_stops_on_first_failure() {
         let mut h = Harness::new(4);
-        let plan = n_step_plan(3);
-        h.submit(make_effect_perfile_with_plan(2, 2, 2, 1, plan));
+        let plan = n_step_program(3);
+        h.submit(make_effect_perfile_with_program(2, 2, 2, 1, plan));
 
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
         h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
@@ -1004,8 +1005,8 @@ mod tests {
             }],
             ..Default::default()
         });
-        let plan = n_step_plan(2);
-        let mut e = make_effect_perfile_with_plan(3, 3, 3, 7, plan);
+        let plan = n_step_program(2);
+        let mut e = make_effect_perfile_with_program(3, 3, 3, 7, plan);
         e.diff = Some(Arc::clone(&diff));
         h.submit(e);
 
@@ -1059,19 +1060,19 @@ mod tests {
     #[test]
     fn submit_during_running_plan_replaces_pending_runs_after_terminal() {
         let mut h = Harness::new(4);
-        let plan_a = n_step_plan(2);
-        let effect_a = make_effect_perfile_with_plan(4, 4, 4, 100, plan_a);
+        let plan_a = n_step_program(2);
+        let effect_a = make_effect_perfile_with_program(4, 4, 4, 100, plan_a);
         h.submit(effect_a);
 
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
         // While step 0 is running, submit a fresh effect for the same
         // key. Latest-coalesce stores it as pending; plan_a continues.
-        let plan_b = n_step_plan(1);
-        let effect_b = make_effect_perfile_with_plan(4, 4, 4, 200, plan_b);
+        let plan_b = n_step_program(1);
+        let effect_b = make_effect_perfile_with_program(4, 4, 4, 200, plan_b);
         h.submit(effect_b);
         // Also submit a third same-key effect — should replace pending.
-        let plan_c = n_step_plan(1);
-        let effect_c = make_effect_perfile_with_plan(4, 4, 4, 300, plan_c);
+        let plan_c = n_step_program(1);
+        let effect_c = make_effect_perfile_with_program(4, 4, 4, 300, plan_c);
         h.submit(effect_c);
 
         thread::sleep(Duration::from_millis(50));
@@ -1115,8 +1116,8 @@ mod tests {
     fn multi_step_plan_runs_to_terminus_before_concurrent_sub_starts() {
         let mut h = Harness::new(1); // cap=1: one global permit
         // Sub A: 2-step plan. Step 0 spawns, holding the only permit.
-        let plan = n_step_plan(2);
-        h.submit(make_effect_perfile_with_plan(5, 5, 5, 1, plan));
+        let plan = n_step_program(2);
+        h.submit(make_effect_perfile_with_program(5, 5, 5, 1, plan));
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
 
         // Sub B: 1-step plan submitted concurrently. Has to wait for
@@ -1159,8 +1160,8 @@ mod tests {
     #[test]
     fn shutdown_mid_plan_abandons_remaining_steps() {
         let mut h = Harness::new(4);
-        let plan = n_step_plan(3);
-        h.submit(make_effect_perfile_with_plan(7, 7, 7, 1, plan));
+        let plan = n_step_program(3);
+        h.submit(make_effect_perfile_with_program(7, 7, 7, 1, plan));
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
 
         // Trigger shutdown; complete step 0 mid-shutdown.

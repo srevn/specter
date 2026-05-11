@@ -16,10 +16,14 @@
 //!
 //! Per-Effect-stable values live on [`Effect`] (`anchor_path`,
 //! `target_relative`, `sub_name`, `exclude`, `diff`, `key`, `forced`,
-//! `correlation`); the per-step argv template lives on [`ExecAction`].
-//! The caller extracts the step from `effect.plan.steps[i]` and passes
-//! both references in. v1 always passes `steps[0]`; future multi-step
-//! plans pass each step's `ExecAction` in turn.
+//! `correlation`); the per-instruction argv template lives on
+//! [`ExecAction`]. The caller extracts the instruction from
+//! `effect.program.instructions[cursor]`, projects out the
+//! `ExecAction` payload of the `SpawnExec` variant, and passes both
+//! references in. v1 always carries `cursor = 0` for the active
+//! instruction set (`SpawnExec`-only); future variants
+//! (`SpawnPredicate`, multi-stage `SpawnPipe`) pass each leaf
+//! `ExecAction` in turn.
 //!
 //! # `target_path` is derived, not stored
 //!
@@ -263,6 +267,15 @@ fn substitute_one(
                     prefix.clear();
                 }
             },
+            ArgPart::EnvVar { .. } => {
+                // PR1 carries the variant in core but the template
+                // lexer doesn't yet emit it (Slice 2 of the
+                // action-types expansion). Validation cannot produce
+                // `EnvVar`, so the resolver never sees one in PR1.
+                unreachable!(
+                    "ArgPart::EnvVar unreachable until lexer ${{env.<NAME>}} support lands",
+                );
+            }
         }
     }
     // If a multi-value placeholder emitted at least one slot, a non-empty

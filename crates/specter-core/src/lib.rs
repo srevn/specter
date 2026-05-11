@@ -54,8 +54,8 @@ pub use snapshot::tree::{
     splice,
 };
 pub use sub::{
-    Action, ActionPlan, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Placeholder, Sub,
-    SubAttachRequest, SubRegistry, SubRegistryDiff,
+    ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Instruction,
+    Placeholder, Sub, SubAttachRequest, SubRegistry, SubRegistryDiff,
 };
 pub use time::{Clock, SystemClock};
 pub use tree::Tree;

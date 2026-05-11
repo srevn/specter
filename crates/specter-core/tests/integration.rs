@@ -7,10 +7,11 @@
 //! seam.
 
 use specter_core::{
-    Action, ActionPlan, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    Placeholder, Profile, ProfileMap, ResourceRole, ScanConfig, Sub, SubRegistry, Tree,
-    compute_config_hash,
+    ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
+    Instruction, Placeholder, Profile, ProfileMap, ResourceRole, ScanConfig, Sub, SubRegistry,
+    Tree, compute_config_hash,
 };
+use std::sync::Arc;
 use std::time::Duration;
 
 const SETTLE: Duration = Duration::from_millis(100);
@@ -21,11 +22,13 @@ fn bare_cfg() -> ScanConfig {
     ScanConfig::builder().build()
 }
 
-fn build_plan() -> ActionPlan {
-    ActionPlan::new([Action::Exec(ExecAction::new([ArgTemplate::new([
-        ArgPart::literal("/bin/build"),
-        ArgPart::Placeholder(Placeholder::Path),
-    ])]))])
+fn build_program() -> Arc<ActionProgram> {
+    Arc::new(ActionProgram::new([Instruction::SpawnExec(
+        ExecAction::new([ArgTemplate::new([
+            ArgPart::literal("/bin/build"),
+            ArgPart::Placeholder(Placeholder::Path),
+        ])]),
+    )]))
 }
 
 #[test]
@@ -51,7 +54,7 @@ fn shared_profile_via_config_hash() {
             id,
             "build-a",
             pid_a,
-            build_plan(),
+            build_program(),
             EffectScope::SubtreeRoot,
             SETTLE,
             MAX_SETTLE,
