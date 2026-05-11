@@ -50,11 +50,22 @@ pub enum TemplateError {
     /// identifier (`[A-Za-z_][A-Za-z0-9_]*`). The first offending
     /// character is reported.
     InvalidEnvName { name: String, ch: char },
-    /// `${env.<NAME>:-<default>}` whose default contains `$` or `{`.
-    /// Nested substitution inside defaults isn't supported in v1 — the
-    /// default is taken verbatim up to the first closing `}`. Operators
-    /// wanting composition wrap with shell.
+    /// `${env.<NAME>:-<default>}` whose default contains a reserved
+    /// single character (`$`, `{`) or any ASCII / Unicode control
+    /// character (`is_control()`). Nested substitution inside defaults
+    /// isn't supported in v1 — the default is a literal byte sequence
+    /// up to the first closing `}`. Operators wanting composition wrap
+    /// with shell. Control chars are rejected so an unintended newline
+    /// or tab in a default doesn't silently make it into argv.
     InvalidEnvDefault { default: String, ch: char },
+    /// `${env.<NAME>:-<default>}` whose default contains the literal
+    /// `:-` separator substring. The separator is reserved for the
+    /// name/default split itself; allowing it inside defaults would
+    /// invite ambiguity (`${env.X:-a:-b}` could read as name=X /
+    /// default=`a:-b` or name=X / default=`a` / trailing). v1 rejects
+    /// the case outright. Operators wanting `:-` literal wrap with
+    /// shell.
+    EnvDefaultContainsSeparator { default: String },
 }
 
 impl fmt::Display for TemplateError {
@@ -84,10 +95,26 @@ impl fmt::Display for TemplateError {
                 )
             }
             Self::InvalidEnvDefault { default, ch } => {
+                // Render both the offending char and the surrounding
+                // default via `escape_default` so control chars (e.g.,
+                // `\n`, `\t`, DEL) appear as readable escapes rather
+                // than literal bytes that would wreck the log line.
+                // Printable chars like `$` / `{` pass through unchanged.
+                let ch_repr: String = ch.escape_default().collect();
+                let default_repr: String = default.escape_default().collect();
                 write!(
                     f,
-                    "invalid character `{ch}` in `${{env.<NAME>:-<default>}}` literal `{default}` \
-                     (defaults are literal-only; `$` and `{{` are reserved)",
+                    "invalid character `{ch_repr}` in `${{env.<NAME>:-<default>}}` literal `{default_repr}` \
+                     (defaults are literal-only; `$`, `{{`, and control characters are reserved)",
+                )
+            }
+            Self::EnvDefaultContainsSeparator { default } => {
+                let default_repr: String = default.escape_default().collect();
+                write!(
+                    f,
+                    "default `{default_repr}` contains reserved separator `:-` \
+                     in `${{env.<NAME>:-<default>}}` (defaults containing `:-` are \
+                     unrepresentable in v1; wrap with shell for composition)",
                 )
             }
         }
@@ -233,11 +260,14 @@ fn parse_specter_name(name: &str) -> Result<Placeholder, TemplateError> {
 /// an optional literal default, validate each side, and produce
 /// [`ArgPart::EnvVar`].
 ///
-/// `:-` is recognised on its first occurrence; defaults containing
-/// `:-` themselves are unrepresentable in v1 (operators wrap with
-/// shell). `}` cannot appear inside a default because the closing brace
+/// `:-` is recognised on its first occurrence and consumed as the
+/// name/default split. A default body containing a second `:-` is
+/// rejected by [`validate_env_default`] as
+/// [`TemplateError::EnvDefaultContainsSeparator`] — defaults are
+/// representable as a literal byte sequence with `:-` reserved.
+/// `}` cannot appear inside a default because the closing brace
 /// terminates the placeholder before this function ever sees it; a
-/// default that wants `}` is also unrepresentable in v1.
+/// default that wants `}` is unrepresentable in v1.
 fn parse_env_body(body: &str) -> Result<ArgPart, TemplateError> {
     let (name, default) = match body.find(ENV_DEFAULT_SEP) {
         Some(idx) => (&body[..idx], Some(&body[idx + ENV_DEFAULT_SEP.len()..])),
@@ -279,13 +309,32 @@ fn validate_env_name(name: &str) -> Result<(), TemplateError> {
     Ok(())
 }
 
-/// Defaults are literal-only in v1. Reject `$` (would suggest nested
-/// substitution) and `{` (would suggest a stray opener that confuses
-/// the operator's reading of the template). The closing `}` cannot
-/// appear inside the default because the placeholder lexer terminates
-/// on the first one — this branch never sees it.
+/// Defaults are literal-only in v1. Three reject classes:
+///
+/// 1. The literal `:-` separator substring. The first `:-` is already
+///    consumed by `parse_env_body` as the name/default split. A second
+///    occurrence anywhere in the default body would invite the ambiguity
+///    "is that part of the default or did the operator mean to split
+///    again?", so we reject outright. `${env.X:-a:-b}` ⇒
+///    [`TemplateError::EnvDefaultContainsSeparator`].
+/// 2. `$` and `{`. Both hint at nested substitution / a stray opener —
+///    feedback to the operator that defaults are literal-only.
+/// 3. Any control character (`is_control()`). An unintended `\n` or
+///    `\t` would silently make it into argv and (worse) into log
+///    lines if the default ever appears in a diagnostic; rendering as
+///    a Rust-source escape (via Display's `escape_default`) keeps the
+///    operator-facing error readable.
+///
+/// The closing `}` cannot appear inside the default because the
+/// placeholder lexer terminates on the first one — this branch never
+/// sees it.
 fn validate_env_default(d: &str) -> Result<(), TemplateError> {
-    if let Some(ch) = d.chars().find(|c| matches!(c, '$' | '{')) {
+    if d.contains(ENV_DEFAULT_SEP) {
+        return Err(TemplateError::EnvDefaultContainsSeparator {
+            default: d.to_owned(),
+        });
+    }
+    if let Some(ch) = d.chars().find(|c| matches!(c, '$' | '{') || c.is_control()) {
         return Err(TemplateError::InvalidEnvDefault {
             default: d.to_owned(),
             ch,
@@ -756,6 +805,64 @@ mod tests {
         );
     }
 
+    /// `${env.X:-a:-b}` — the first `:-` consumed as the name/default
+    /// split leaves `default = "a:-b"`. A second `:-` inside the default
+    /// body invites ambiguity ("was `b` meant as a trailing field?"),
+    /// rejected outright by the strict v1 grammar.
+    #[test]
+    fn env_var_default_rejects_separator_substring() {
+        let err = parse_arg("${env.X:-a:-b}").unwrap_err();
+        assert_eq!(
+            err,
+            TemplateError::EnvDefaultContainsSeparator {
+                default: "a:-b".to_owned(),
+            }
+        );
+    }
+
+    /// Control characters in defaults would silently end up in argv and
+    /// (worse) corrupt log lines if surfaced in diagnostics. Strict v1
+    /// rejects every `is_control()` char; newline and tab are the cases
+    /// an operator is most likely to typo.
+    #[test]
+    fn env_var_default_rejects_control_chars() {
+        for (input, expected_ch) in [
+            ("${env.X:-line\nbreak}", '\n'),
+            ("${env.X:-col\tumn}", '\t'),
+            ("${env.X:-\x00null}", '\0'),
+        ] {
+            let err = parse_arg(input).unwrap_err();
+            match err {
+                TemplateError::InvalidEnvDefault { ch, .. } => assert_eq!(
+                    ch, expected_ch,
+                    "input `{input}` should reject `{expected_ch:?}`"
+                ),
+                other => panic!("input `{input}`: expected InvalidEnvDefault, got {other:?}"),
+            }
+        }
+    }
+
+    /// Display rendering for control chars uses `escape_default` so the
+    /// error message stays readable in a log stream. A literal newline
+    /// in the message would otherwise wreck downstream line-oriented
+    /// parsing.
+    #[test]
+    fn invalid_env_default_display_escapes_control_chars() {
+        let msg = TemplateError::InvalidEnvDefault {
+            default: "x\ny".to_owned(),
+            ch: '\n',
+        }
+        .to_string();
+        assert!(
+            msg.contains(r"\n"),
+            "Display should escape `\\n` literally, got `{msg}`"
+        );
+        assert!(
+            !msg.contains('\n'),
+            "Display message must not contain a raw newline, got `{msg}`"
+        );
+    }
+
     #[test]
     fn env_var_default_allows_slash_dot_colon_etc() {
         // Common default-path/value shapes survive: `/tmp`, `.cache`,
@@ -877,13 +984,19 @@ mod tests {
         }
 
         /// Every `${env.<NAME>:-<default>}` whose default avoids the
-        /// reserved chars (`$`, `{`, `}`) round-trips with the default
+        /// reserved chars (`$`, `{`, `}`), control characters, and the
+        /// `:-` separator substring round-trips with the default
         /// preserved verbatim.
         #[test]
         fn prop_env_var_with_safe_default_round_trips(
             name in "[A-Za-z_][A-Za-z0-9_]{0,15}",
             default in "[A-Za-z0-9_/.:= -]{0,32}",
         ) {
+            // Strict v1: defaults containing `:-` are rejected by
+            // `validate_env_default` (the separator must occur exactly
+            // once between name and default, never inside the default
+            // body). Filter generated cases that violate the invariant.
+            prop_assume!(!default.contains(":-"));
             let s = format!("${{env.{name}:-{default}}}");
             let parsed = parse_arg(&s).unwrap();
             prop_assert_eq!(

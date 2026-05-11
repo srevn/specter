@@ -71,28 +71,67 @@ enum ReapPolicy {
 }
 
 /// Outcome of an attempted instruction spawn. Returned by
-/// [`ActuatorState::try_spawn_step`] (which acquires a permit) and
-/// [`ActuatorState::spawn_step_with_permit`] (which receives a
-/// pre-acquired permit).
+/// [`ActuatorState::try_spawn_step`] (which acquires a permit).
 ///
-/// Both failure variants carry no detail: a deferred attempt has no
-/// outcome to report (nothing happened), and an OS-level spawn / wait-
-/// thread spawn failure is uniformly surfaced as
-/// `EffectOutcome::Failed { exit_code: None, signal: None }` at the
-/// caller, which then routes through [`ActuatorState::advance_or_terminate`]
-/// — predicate spawn-failures still get their no-propagation
-/// semantics through that dispatch.
+/// The `Failed` variant carries a typed [`SpawnFailureCause`]
+/// discriminant: the synth-Failed dispatch sites log it alongside the
+/// synthesised `EffectOutcome::Failed { exit_code: None, signal: None }`
+/// so an operator triaging "this predicate took the else-branch
+/// unexpectedly" can match against the cause-side `error!` log line
+/// (resolver, OS spawn, wait-thread) and tell "predicate binary
+/// missing" from "predicate exited 1 cleanly".
+///
+/// The cause is **internal-only**: the engine never sees this type. The
+/// wire format remains `EffectOutcome::Failed { exit_code: None,
+/// signal: None }` regardless of cause — the semantic change (cause-
+/// aware routing via a future `EffectOutcome::Aborted` variant) is
+/// reserved for the foundation rework (R1). Phase 3 is telemetry-only.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SpawnError {
     /// Permit semaphore at capacity. The caller defers the instruction
     /// into [`Slot::plan_continue`] and re-queues the slot.
     Deferred,
-    /// OS-level process spawn, resolver error, or wait-thread spawn
-    /// failed. The caller routes through
-    /// [`ActuatorState::advance_or_terminate`] with a synthesised
-    /// `EffectOutcome::Failed`; the dispatch then decides terminate vs
-    /// continue based on the instruction variant at the failing cursor.
-    Failed,
+    /// Spawn (or pre-spawn) failure with a typed cause. The caller
+    /// routes through [`ActuatorState::advance_or_terminate`] with a
+    /// synthesised `EffectOutcome::Failed`; the dispatch then decides
+    /// terminate vs continue based on the op's `on_failed` edge at
+    /// the failing cursor — predicate spawn-failures still get their
+    /// no-propagation semantics through that dispatch.
+    Failed(SpawnFailureCause),
+}
+
+/// Why a spawn attempt failed. Surfaces at three synthesis sites
+/// ([`ActuatorState::start_plan`], [`ActuatorState::spawn_continuation`],
+/// [`ActuatorState::advance_or_terminate`]); each site emits a
+/// `tracing::warn!` carrying this discriminant so the synthesised
+/// `EffectOutcome::Failed { exit_code: None, signal: None }` can be
+/// correlated against the cause-side `error!` log line.
+///
+/// **Not part of the engine wire format.** `EffectOutcome::Failed`
+/// carries no cause discriminant today; the engine's dispatch reads only
+/// the op's `on_failed` edge. Cause-aware semantics belong to the R1
+/// foundation rework (the audit's `EffectOutcome::Aborted` proposal).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SpawnFailureCause {
+    /// Argv / env substitution failed before any child or wait thread
+    /// was spawned. Today the only resolver error is
+    /// [`crate::resolve::ResolveError::UnsetEnvVar`] — a strict
+    /// `${env.<NAME>}` reference against an unset key with no `:-`
+    /// default. Future resolver-time errors (e.g., path canonicalisation)
+    /// would land here.
+    Resolver,
+    /// OS-level process spawn failed —
+    /// [`crate::spawner::Spawner::spawn`] / `spawn_pipe` returned an
+    /// error (ENOENT on the binary, EAGAIN, EMFILE, …). For pipes the
+    /// spawner has already rolled back any partially-spawned stages
+    /// before the error reaches this discriminant.
+    OsSpawn,
+    /// `thread::Builder::spawn` for the wait thread failed. The
+    /// spawned child is alive but its paired
+    /// [`crate::spawner::ChildWaiter`] was dropped; the recovery branch
+    /// SIGKILLs and synchronously reaps the orphan before this
+    /// discriminant surfaces.
+    WaitThread,
 }
 
 /// Parameter bundle for arming a per-step timer thread. Bundled as an
@@ -482,7 +521,7 @@ impl ActuatorState {
                             );
                             return;
                         }
-                        Err(SpawnError::Failed) => {
+                        Err(SpawnError::Failed(cause)) => {
                             // Synthesise Failed for `next` and loop.
                             // The next iteration reads `next`'s
                             // `on_failed` edge — for a predicate-Failed
@@ -490,6 +529,18 @@ impl ActuatorState {
                             // (Continue) or to Escape (no-else); for an
                             // Exec/Pipe synth it walks to Terminate
                             // (stop-on-failure propagation).
+                            //
+                            // Log at warn with the typed cause so the
+                            // operator can correlate this dispatch
+                            // decision against the cause-side error log
+                            // line emitted at the spawn boundary
+                            // (resolver / OS spawn / wait thread).
+                            tracing::warn!(
+                                ?key,
+                                cursor = next,
+                                ?cause,
+                                "synthesised EffectOutcome::Failed (no clean exit); dispatching on op's on_failed edge",
+                            );
                             cursor = next;
                             outcome = EffectOutcome::Failed {
                                 exit_code: None,
@@ -735,11 +786,20 @@ impl ActuatorState {
             reap_tx,
         ) {
             Ok(()) => {}
-            Err(_) => {
+            Err(cause) => {
                 // OS spawn / resolver / wait-thread failure at the
                 // first instruction. Hand off to the dispatch loop
                 // with synthesised Failed — a predicate at cursor 0
-                // still jumps to its else-branch via this path.
+                // still jumps to its else-branch via this path. The
+                // typed `cause` discriminant accompanies the synth in
+                // the operator log so triage can correlate this
+                // decision with the cause-side error line above.
+                tracing::warn!(
+                    ?key,
+                    cursor = 0,
+                    ?cause,
+                    "synthesised EffectOutcome::Failed at plan start; dispatching on op 0's on_failed edge",
+                );
                 self.advance_or_terminate(
                     key,
                     sub,
@@ -796,7 +856,13 @@ impl ActuatorState {
             reap_tx,
         ) {
             Ok(()) => {}
-            Err(_) => {
+            Err(cause) => {
+                tracing::warn!(
+                    ?key,
+                    cursor,
+                    ?cause,
+                    "synthesised EffectOutcome::Failed at plan continuation; dispatching on op's on_failed edge",
+                );
                 self.advance_or_terminate(
                     key,
                     sub,
@@ -822,13 +888,18 @@ impl ActuatorState {
     ///   wait thread alive).
     /// - `Err(SpawnError::Deferred)` — permit semaphore was at capacity;
     ///   caller defers via [`Slot::plan_continue`].
-    /// - `Err(SpawnError::Failed)` — OS-level spawn or wait-thread
-    ///   startup failed; caller terminates the plan with synthesised
-    ///   `EffectOutcome::Failed`.
+    /// - `Err(SpawnError::Failed(cause))` — OS-level spawn, resolver,
+    ///   or wait-thread startup failed; caller terminates the plan with
+    ///   synthesised `EffectOutcome::Failed` and logs `cause` at the
+    ///   synth site.
     ///
     /// The Deferred branch returns before consuming any of the borrowed
     /// inputs — caller-owned values stay live for the
-    /// `PlanContinuation` hand-off.
+    /// `PlanContinuation` hand-off. `SpawnFailureCause` is lifted into
+    /// the wider [`SpawnError::Failed`] variant via `map_err` — the
+    /// inner [`Self::spawn_step_with_permit`] cannot defer (its permit
+    /// is already acquired), so its return type is the tighter
+    /// `Result<(), SpawnFailureCause>`.
     fn try_spawn_step(
         &mut self,
         key: &DedupKey,
@@ -845,6 +916,7 @@ impl ActuatorState {
         self.spawn_step_with_permit(
             key, sub, effect, cursor, diff_path, permit, spawner, reap_tx,
         )
+        .map_err(SpawnError::Failed)
     }
 
     /// Spawn one op of a plan with a pre-acquired permit. Installs
@@ -880,7 +952,7 @@ impl ActuatorState {
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
-    ) -> Result<(), SpawnError> {
+    ) -> Result<(), SpawnFailureCause> {
         let now = std::time::SystemTime::now();
         let cwd: &Path = resolve::compute_cwd(&effect.anchor_path, effect.anchor_kind);
         let correlation = effect.correlation;
@@ -971,7 +1043,7 @@ impl ActuatorState {
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
-    ) -> Result<(), SpawnError> {
+    ) -> Result<(), SpawnFailureCause> {
         let (CommandResolved { argv }, env) =
             match resolve::resolve_step(effect, exec, now, diff_path, &self.env_snapshot) {
                 Ok(resolved) => resolved,
@@ -983,7 +1055,7 @@ impl ActuatorState {
                     // `EffectOutcome::Failed`.
                     tracing::error!(?key, cursor, %e, "resolver error; aborting step");
                     drop(permit);
-                    return Err(SpawnError::Failed);
+                    return Err(SpawnFailureCause::Resolver);
                 }
             };
 
@@ -992,7 +1064,7 @@ impl ActuatorState {
             Err(e) => {
                 tracing::error!(?key, cursor, ?cwd, ?e, "spawn failed");
                 drop(permit);
-                return Err(SpawnError::Failed);
+                return Err(SpawnFailureCause::OsSpawn);
             }
         };
         let crate::spawner::SpawnHandles {
@@ -1118,7 +1190,7 @@ impl ActuatorState {
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
-    ) -> Result<(), SpawnError> {
+    ) -> Result<(), SpawnFailureCause> {
         debug_assert!(
             stages.len() >= 2,
             "validation rejects empty / single-stage pipes",
@@ -1141,7 +1213,7 @@ impl ActuatorState {
             Err(e) => {
                 tracing::error!(?key, cursor, %e, "resolver error in pipe stage; aborting step");
                 drop(permit);
-                return Err(SpawnError::Failed);
+                return Err(SpawnFailureCause::Resolver);
             }
         };
         let stage_specs: Vec<StageSpec<'_>> = resolved
@@ -1160,7 +1232,7 @@ impl ActuatorState {
                 // every pipe fd closed in the parent).
                 tracing::error!(?key, cursor, ?cwd, ?e, "pipe spawn failed");
                 drop(permit);
-                return Err(SpawnError::Failed);
+                return Err(SpawnFailureCause::OsSpawn);
             }
         };
         // We're done with `stage_specs` and `resolved` — let them
@@ -1257,9 +1329,10 @@ impl ActuatorState {
     /// Spawn the wait thread for an already-installed
     /// [`Slot::running`]. On `thread::Builder::spawn` failure, take
     /// the running job back via the slot, recover the orphan child
-    /// (SIGKILL + `reap_blocking`), and return [`SpawnError::Failed`]
-    /// so the caller routes through `terminate_plan` with a
-    /// synthesised `EffectOutcome::Failed`.
+    /// (SIGKILL + `reap_blocking`), and return
+    /// [`SpawnFailureCause::WaitThread`] so the caller routes through
+    /// `advance_or_terminate` with a synthesised
+    /// `EffectOutcome::Failed`.
     ///
     /// `pid` is used only for the wait-thread's OS name
     /// (`act-wait-{pid}`); for single-process steps it's the spawned
@@ -1283,7 +1356,7 @@ impl ActuatorState {
         waiter: Box<dyn ChildWaiter>,
         permit: Permit,
         reap_tx: &Sender<super::Reaped>,
-    ) -> Result<(), SpawnError> {
+    ) -> Result<(), SpawnFailureCause> {
         let reap_tx_for_thread = reap_tx.clone();
         let wait_key = key.clone();
         if let Err(e) = std::thread::Builder::new()
@@ -1318,7 +1391,7 @@ impl ActuatorState {
                 .take()
                 .expect("slot.running installed unconditionally above");
             recover_orphan_after_wait_thread_failure(job);
-            return Err(SpawnError::Failed);
+            return Err(SpawnFailureCause::WaitThread);
         }
         Ok(())
     }

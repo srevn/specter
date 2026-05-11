@@ -29,12 +29,15 @@
 //! need to swap this for a `dyn EnvSource` and propagate re-captures
 //! through the actuator's existing `Arc<EnvSnapshot>` swap point.
 //!
-//! Non-UTF-8 entries are silently dropped at capture time. The lexer
-//! [`crate::spawner`]'s upstream grammar guarantees placeholder names
-//! are ASCII (`[A-Za-z_][A-Za-z0-9_]*`), and the resolver compares the
-//! placeholder name byte-for-byte against the captured key — UTF-8 lossy
-//! keys would never match a well-formed placeholder, so dropping them
-//! costs nothing.
+//! Non-UTF-8 entries are dropped at capture time and logged at
+//! `tracing::warn!`. The lexer [`crate::spawner`]'s upstream grammar
+//! guarantees placeholder names are ASCII (`[A-Za-z_][A-Za-z0-9_]*`),
+//! and the resolver compares the placeholder name byte-for-byte against
+//! the captured key — UTF-8 lossy keys would never match a well-formed
+//! placeholder, so dropping them costs no behaviour. The warn ensures
+//! an operator with a non-UTF-8 `LANG` (or similar) sees one diagnostic
+//! line at startup rather than chasing an opaque `UnsetEnvVar` resolver
+//! failure later.
 
 use compact_str::CompactString;
 use std::collections::BTreeMap;
@@ -60,7 +63,10 @@ impl EnvSnapshot {
 
     /// Build a snapshot from any iterator of `(OsString, OsString)`
     /// pairs — the same shape `std::env::vars_os` yields. Non-UTF-8
-    /// keys or values are dropped silently.
+    /// keys or values are dropped, with one `tracing::warn!` line per
+    /// dropped entry naming the offending key (rendered lossily for the
+    /// key-side drop; UTF-8 key + non-UTF-8 value renders the key as-is).
+    /// One-shot at startup; bounded by env size.
     ///
     /// Production [`Self::capture`] delegates here; tests reach for
     /// this directly when they need to exercise the UTF-8 filter
@@ -76,8 +82,29 @@ impl EnvSnapshot {
     {
         let mut map = BTreeMap::new();
         for (k, v) in vars {
-            if let (Ok(k), Ok(v)) = (k.into_string(), v.into_string()) {
-                map.insert(CompactString::from(k), CompactString::from(v));
+            // Consume the key first; on success keep the owned `String`
+            // alive across the value check so a value-side drop still
+            // names the key.
+            let k_str = match k.into_string() {
+                Ok(s) => s,
+                Err(bad_key) => {
+                    tracing::warn!(
+                        key = %bad_key.to_string_lossy(),
+                        "env entry dropped: key is not valid UTF-8",
+                    );
+                    continue;
+                }
+            };
+            match v.into_string() {
+                Ok(v_str) => {
+                    map.insert(CompactString::from(k_str), CompactString::from(v_str));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        key = %k_str,
+                        "env entry dropped: value is not valid UTF-8",
+                    );
+                }
             }
         }
         Self { map }

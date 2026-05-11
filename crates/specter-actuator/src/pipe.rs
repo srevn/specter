@@ -242,7 +242,7 @@ impl ChildWaiter for PipeWaiter {
         let mut reports: Vec<Option<EffectOutcome>> = (0..n).map(|_| None).collect();
         let mut cascade_fired = false;
         while let Ok(StageReport { idx, outcome }) = rx.recv() {
-            debug_assert!(reports[idx].is_none(), "duplicate report for stage {idx}",);
+            debug_assert!(reports[idx].is_none(), "duplicate report for stage {idx}");
             let is_failed = matches!(&outcome, EffectOutcome::Failed { .. });
             reports[idx] = Some(outcome);
 

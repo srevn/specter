@@ -89,11 +89,10 @@ impl ResourceKind {
     /// - `engine::transitions::fs_event_to_class` (terminal events on
     ///   Unknown classify as CONTENT).
     ///
-    /// Inotify's analogue (when the port lands) shares it. Note that
-    /// `compute_cwd` deliberately treats Unknown as Dir-shape (anchor
-    /// path itself, not its parent) — that's a different concern
-    /// (subprocess working directory), not a backend-mask decision, and
-    /// stays out of this helper.
+    /// The inotify backend shares the same convention. The actuator's
+    /// `compute_cwd` is a different concern (subprocess working
+    /// directory) and does not consume Unknown: emitted Effects carry
+    /// `anchor_kind ∈ { File, Dir }` by construction.
     #[must_use]
     pub const fn effective(self) -> Self {
         match self {

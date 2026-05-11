@@ -131,16 +131,20 @@ use std::path::Path;
 use std::time::SystemTime;
 
 /// Resolver-side failure. Surfaces only causes the resolver can detect
-/// without spawning a process; OS-level spawn failures are still
-/// signalled by [`super::pool::state::SpawnError::Failed`] at the
-/// `spawner.spawn` boundary.
+/// without spawning a process; OS-level spawn failures take the
+/// `SpawnFailureCause::OsSpawn` route at the `spawner.spawn` boundary
+/// in `pool::state`. Resolver errors surface as
+/// `SpawnFailureCause::Resolver` at the same boundary, distinguishing
+/// "argv could not be rendered" from "binary could not be exec'd".
 ///
 /// v1 has one variant — strict `${env.<NAME>}` references that found
 /// neither an entry in the captured snapshot nor a `:-default` literal.
 /// The caller maps every variant to
 /// `EffectOutcome::Failed { exit_code: None, signal: None }` after a
 /// `tracing::error!` log line; the operator sees a clear "Specter could
-/// not satisfy a required env reference" message in their journal.
+/// not satisfy a required env reference" message in their journal,
+/// followed by a `tracing::warn!` at the synth-Failed dispatch site
+/// carrying the `Resolver` cause discriminant.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum ResolveError {
     /// `${env.<NAME>}` references an unset env var with no default
@@ -212,13 +216,21 @@ pub(crate) fn resolve_step<'a>(
 /// `Command::current_dir` requires a directory; spawn fails with `ENOTDIR`
 /// otherwise. For File-anchored Profiles the parent directory is the
 /// natural cwd (user scripts use `$SPECTER_PATH` to locate the file).
-/// `Dir` and `Unknown` (rare; pending paths) anchor at the path itself —
-/// for `Unknown`, this may not exist on disk; the actuator surfaces such
-/// failures as `EffectOutcome::Failed`.
+/// `Dir`-anchored Profiles anchor at the path itself.
 ///
 /// Every branch is structurally a borrow of `anchor_path` (the path
 /// itself, or its parent), so the function returns `&Path` and the
 /// caller passes it straight to `Spawner::spawn` without an owning hop.
+///
+/// **`ResourceKind::Unknown` is unreachable.** The engine's `emit_effects`
+/// reads `Profile.kind` via `unwrap_or(ResourceKind::Dir)` (see
+/// `transitions.rs::emit_effects`); Pending Profiles whose anchor has not
+/// classified are additionally filtered at `covering_profiles` before any
+/// Effect is constructed. Together these guarantee that every Effect
+/// reaching the actuator carries `anchor_kind ∈ { File, Dir }`. The
+/// `Unknown` arm of this match exists as a typed tripwire — a future
+/// emit path that forgets the `unwrap_or` will panic here in dev rather
+/// than surface as an opaque `ENOTDIR` at spawn time.
 #[must_use]
 pub(crate) fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> &Path {
     match kind {
@@ -226,7 +238,13 @@ pub(crate) fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> &Path {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(anchor_path),
-        ResourceKind::Dir | ResourceKind::Unknown => anchor_path,
+        ResourceKind::Dir => anchor_path,
+        ResourceKind::Unknown => unreachable!(
+            "Effect.anchor_kind is structurally constrained to File or Dir: \
+             emit_effects defaults the Profile's kind via unwrap_or(Dir), and \
+             Pending Profiles are filtered at covering_profiles before any \
+             Effect is constructed",
+        ),
     }
 }
 
@@ -462,10 +480,19 @@ fn env_multivalue(p: Placeholder, effect: &Effect, diff: Option<&Diff>) -> Strin
 /// `humantime::format_rfc3339_seconds` panics on pre-epoch `SystemTime`.
 /// Production `SystemTime::now()` never returns pre-epoch on a sane Unix
 /// host, but a hostile clock or a test fixture can construct one — clamp
-/// to the Unix epoch so the spawn path can't panic.
+/// to the Unix epoch so the spawn path can't panic. The clamp emits a
+/// `tracing::warn!` at the moment it fires so a wedged clock surfaces in
+/// the operator's journal instead of silently rendering `1970-01-01T00:00:00Z`
+/// for every spawn.
 fn format_now(now: SystemTime) -> String {
-    let now = now.max(SystemTime::UNIX_EPOCH);
-    humantime::format_rfc3339_seconds(now).to_string()
+    let clamped = now.max(SystemTime::UNIX_EPOCH);
+    if clamped != now {
+        tracing::warn!(
+            ?now,
+            "system clock pre-epoch; clamping SPECTER_TIME to UNIX_EPOCH",
+        );
+    }
+    humantime::format_rfc3339_seconds(clamped).to_string()
 }
 
 /// Build the standard `SPECTER_*` env-var set. Keys land in alphabetical

@@ -1998,9 +1998,9 @@ mod tests {
     }
 
     /// Pipe spawn fails: the actuator routes through the standard
-    /// SpawnError::Failed path and emits one Failed completion.
-    /// No spawns are recorded against the mock (the injected error
-    /// short-circuits before stages are minted).
+    /// `SpawnError::Failed(SpawnFailureCause::OsSpawn)` path and emits
+    /// one Failed completion. No spawns are recorded against the mock
+    /// (the injected error short-circuits before stages are minted).
     #[test]
     fn pipe_spawn_failure_terminates_plan_failed() {
         let stages: Arc<[ExecAction]> = Arc::from(vec![
