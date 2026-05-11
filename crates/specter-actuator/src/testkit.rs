@@ -8,7 +8,9 @@
 //! shutdown logic be tested deterministically without forking real
 //! children.
 
-use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
+use crate::spawner::{
+    ChildSignaler, ChildWaiter, EnvVar, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
+};
 use crossbeam::channel::{Receiver, Sender, bounded};
 use specter_core::EffectOutcome;
 use std::collections::BTreeMap;
@@ -117,6 +119,47 @@ impl MockSpawner {
     }
 }
 
+impl MockSpawner {
+    /// Allocate one spawn slot: mint a pid, register the completion
+    /// channel, record the [`SpawnRecord`]. Returns the primitives the
+    /// caller assembles into per-stage waiter + signaler pair shapes
+    /// — `Box<dyn>` for single-spawn (`Self::spawn`) or
+    /// `Arc<dyn ChildSignaler>` for pipe stages (`Self::spawn_pipe`).
+    ///
+    /// Centralising the id minting / channel bookkeeping here keeps
+    /// `MockSpawner::complete(pid, outcome)` a single contract: any
+    /// pid returned from `take_spawns()` / `spawns()` is wired into
+    /// exactly one in-flight completion channel.
+    fn allocate_spawn(
+        &self,
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+        cwd: PathBuf,
+        capture_output: bool,
+    ) -> (u32, Receiver<EffectOutcome>, Arc<AtomicBool>) {
+        let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = bounded::<EffectOutcome>(1);
+        self.completions.lock().unwrap().insert(pid, tx);
+        self.spawns.lock().unwrap().push(SpawnRecord {
+            pid,
+            argv,
+            env,
+            cwd,
+            capture_output,
+        });
+        (pid, rx, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Owned `Vec<(String, String)>` mirror of the spawner's
+    /// borrowed env slice. Shared by [`Self::spawn`] and
+    /// [`Self::spawn_pipe`] so the recorded env shape is stable.
+    fn env_to_owned(env: &[EnvVar<'_>]) -> Vec<(String, String)> {
+        env.iter()
+            .map(|e| (e.key.to_owned(), e.value.as_ref().to_owned()))
+            .collect()
+    }
+}
+
 impl Spawner for MockSpawner {
     fn spawn(
         &self,
@@ -131,25 +174,12 @@ impl Spawner for MockSpawner {
         if let Some(kind) = injected {
             return Err(io::Error::from(kind));
         }
-        let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = bounded::<EffectOutcome>(1);
-        self.completions.lock().unwrap().insert(pid, tx);
-        // SpawnRecord stores owned `(String, String)` so existing test
-        // assertions compare against literal keys/values without
-        // tracking the borrow lifetime; one owning hop at the test
-        // boundary is the price of preserving the trait's borrow shape.
-        let env_owned: Vec<(String, String)> = env
-            .iter()
-            .map(|e| (e.key.to_owned(), e.value.as_ref().to_owned()))
-            .collect();
-        self.spawns.lock().unwrap().push(SpawnRecord {
-            pid,
-            argv: argv.to_vec(),
-            env: env_owned,
-            cwd: cwd.to_owned(),
+        let (pid, rx, dead) = self.allocate_spawn(
+            argv.to_vec(),
+            Self::env_to_owned(env),
+            cwd.to_owned(),
             capture_output,
-        });
-        let dead = Arc::new(AtomicBool::new(false));
+        );
         Ok(SpawnHandles {
             pid,
             waiter: Box::new(MockChildWaiter {
@@ -161,6 +191,60 @@ impl Spawner for MockSpawner {
                 dead,
                 signals: Arc::clone(&self.signals),
             }),
+        })
+    }
+
+    fn spawn_pipe(
+        &self,
+        stages: &[StageSpec<'_>],
+        cwd: &Path,
+        capture_output: bool,
+    ) -> io::Result<PipeSpawnHandles> {
+        // Same injection point as `spawn` — tests can flip the flag
+        // and observe a pipe spawn failure as a stage-0 failure.
+        let injected = *self.inject_spawn_error.lock().unwrap();
+        if let Some(kind) = injected {
+            return Err(io::Error::from(kind));
+        }
+        if stages.len() < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MockSpawner::spawn_pipe requires at least two stages",
+            ));
+        }
+        let mut stage_waiters: Vec<Box<dyn ChildWaiter>> = Vec::with_capacity(stages.len());
+        let mut stage_signalers: Vec<Arc<dyn ChildSignaler>> = Vec::with_capacity(stages.len());
+        let mut last_pid: u32 = 0;
+        for stage in stages {
+            let (pid, rx, dead) = self.allocate_spawn(
+                stage.argv.to_vec(),
+                Self::env_to_owned(stage.env),
+                cwd.to_owned(),
+                capture_output,
+            );
+            last_pid = pid;
+            stage_waiters.push(Box::new(MockChildWaiter {
+                rx,
+                dead: Arc::clone(&dead),
+            }));
+            stage_signalers.push(Arc::new(MockChildSignaler {
+                pid,
+                dead,
+                signals: Arc::clone(&self.signals),
+            }));
+        }
+        let stage_signalers: Box<[Arc<dyn ChildSignaler>]> = stage_signalers.into_boxed_slice();
+        let combined: Arc<dyn ChildSignaler> =
+            Arc::new(crate::pipe::CombinedSignaler::new(stage_signalers.clone()));
+        let waiter: Box<dyn ChildWaiter> = Box::new(crate::pipe::PipeWaiter::new(
+            stage_waiters,
+            stage_signalers.clone(),
+        ));
+        Ok(PipeSpawnHandles {
+            last_pid,
+            waiter,
+            combined_signaler: combined,
+            stage_signalers,
         })
     }
 }

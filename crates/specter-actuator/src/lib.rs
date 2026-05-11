@@ -36,6 +36,8 @@ mod os;
 #[cfg(unix)]
 mod permits;
 #[cfg(unix)]
+mod pipe;
+#[cfg(unix)]
 mod pool;
 #[cfg(unix)]
 mod resolve;

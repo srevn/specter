@@ -13,6 +13,7 @@ use specter_core::EffectOutcome;
 use std::borrow::Cow;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 /// One `(name, value)` env-var pair the spawner passes to the child.
 ///
@@ -62,6 +63,89 @@ pub trait Spawner: Send + Sync {
         cwd: &Path,
         capture_output: bool,
     ) -> io::Result<SpawnHandles>;
+
+    /// Spawn N stages wired stdout→stdin. The producer-side of stage
+    /// K writes to a pipe whose read-end is the consumer-side stdin of
+    /// stage K+1; the kernel handles the SIGPIPE chain when an
+    /// upstream stage exits.
+    ///
+    /// Returns paired handles:
+    /// - `waiter` — single aggregating waiter that drains every stage
+    ///   sequentially and applies pipefail-on semantics (any non-zero
+    ///   stage exit ⇒ aggregated `Failed`; aggregated `exit_code` is
+    ///   the last non-zero in spawn order, aggregated `signal` is the
+    ///   first observed).
+    /// - `combined_signaler` — fans SIGTERM/SIGKILL out to every stage.
+    ///   Used by the controller's shutdown path.
+    /// - `stage_signalers` — parallel-indexed with the input stage
+    ///   slice; the controller hands each one to its per-stage timer
+    ///   thread (if the stage's [`specter_core::ExecAction::timeout`]
+    ///   is set).
+    ///
+    /// On partial-spawn failure (stage K's spawn raises
+    /// [`io::Error`]), implementations must roll back: SIGKILL +
+    /// `reap_blocking` every prior stage and close every pipe fd in
+    /// the parent before returning the error. Returning leaves no
+    /// zombies and no orphan pipe fds.
+    ///
+    /// `capture_output` controls the **last** stage's stdout: `true` ⇒
+    /// inherit Specter's stdout; `false` ⇒ route to `/dev/null`.
+    /// Earlier stages' stdouts are always plumbed to the next stage's
+    /// stdin. Every stage's stderr follows the `capture_output`
+    /// policy (inherit vs `/dev/null`). Stage 0's stdin is always
+    /// `/dev/null` (a pipe never reads from the parent's tty).
+    fn spawn_pipe(
+        &self,
+        stages: &[StageSpec<'_>],
+        cwd: &Path,
+        capture_output: bool,
+    ) -> io::Result<PipeSpawnHandles>;
+}
+
+/// One stage of a pipe spawn. Borrow shape mirrors
+/// [`Spawner::spawn`]: argv as `&[String]` (the resolver's owning
+/// slice), env as `&[EnvVar<'_>]` (resolver borrows from the Effect /
+/// diff-tmp path / time string).
+#[derive(Debug)]
+pub struct StageSpec<'a> {
+    pub argv: &'a [String],
+    pub env: &'a [EnvVar<'a>],
+}
+
+/// Paired handles for a freshly-spawned pipe of N stages.
+///
+/// See [`Spawner::spawn_pipe`] for the contract. The `combined_signaler`
+/// is `Arc<dyn>` because it's shared between the controller's shutdown
+/// path and (in the aggregating waiter) the SIGTERM-cascade-on-first-
+/// failure path; `stage_signalers` are `Arc<dyn>` so the per-stage
+/// timer threads can co-own with the waiter without ceremony.
+pub struct PipeSpawnHandles {
+    /// Pid of the *last* stage — what an operator inspecting the
+    /// pipe via `ps` would call "the pid of this pipe". The actuator
+    /// surfaces this via [`crate::pool::state::RunningJob::pid`] and
+    /// uses it only for log lines; the per-stage signalers carry
+    /// their own pids internally for syscall routing.
+    pub last_pid: u32,
+    /// Aggregating waiter: drains every stage sequentially and
+    /// applies pipefail-on semantics. Consumed once via
+    /// `Box<dyn ChildWaiter>::wait`.
+    pub waiter: Box<dyn ChildWaiter>,
+    /// Shutdown signaler: fans SIGTERM/SIGKILL out to every stage.
+    pub combined_signaler: Arc<dyn ChildSignaler>,
+    /// Per-stage signalers, parallel-indexed with the input stage
+    /// slice. The controller hands each one to its per-stage timer
+    /// thread; not all stages need a timer (only those whose
+    /// `ExecAction.timeout` is set).
+    pub stage_signalers: Box<[Arc<dyn ChildSignaler>]>,
+}
+
+impl std::fmt::Debug for PipeSpawnHandles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipeSpawnHandles")
+            .field("last_pid", &self.last_pid)
+            .field("stages", &self.stage_signalers.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Paired handles for a freshly-spawned child.

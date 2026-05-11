@@ -102,7 +102,12 @@ settle       = "200ms"                # debounce window after the last event
                                       # If `actions` has multiple steps, `max_settle * 4` is
                                       # the recovery budget for the whole plan — tune up for
                                       # long sequences (a 5-step plan that legitimately runs
-                                      # 25 min would otherwise trip the hatch).
+                                      # 25 min would otherwise trip the hatch). The same budget
+                                      # bounds the sum of per-step `timeout`s plus the
+                                      # SIGTERM→SIGKILL grace (5s by default per step); a plan
+                                      # whose timeouts can collectively exceed `max_settle * 4`
+                                      # will see the engine force a rebase before every timer
+                                      # has had a chance to fire.
 # scope      = "subtree-root"         # subtree-root | per-stable-file
 # events     = ["structure", "content"]  # default mask depends on scope
 # pattern    = "**/*.rs"              # glob filter
@@ -133,13 +138,79 @@ path = "/srv/repo/docs"
 exec = ["prettier", "--write", "${specter.path}"]
 ```
 
+### Pipelines
+
+A `pipe` action wires `N` processes stdout→stdin, the same shape as a
+shell pipeline (`a | b | c`). Each stage is a `{ exec = [...] }` table
+with its own argv and optional per-stage `timeout`:
+
+```toml
+[[watch]]
+name = "find-and-format"
+path = "/srv/repo/src"
+
+[[watch.actions]]
+pipe = [
+  { exec = ["find", "${specter.path}", "-name", "*.rs"] },
+  { exec = ["xargs", "rustfmt", "--check"], timeout = "30s" },
+]
+```
+
+Semantics:
+
+- Stages spawn in parallel; the kernel's SIGPIPE chain wires their
+  I/O together.
+- **Pipefail-on:** any stage's non-zero exit fails the whole pipe.
+  Aggregated outcome: `exit_code` is the *last* non-zero exit in
+  spawn order (matches `set -o pipefail`); `signal` is the *first*
+  signal observed (a per-stage timeout's SIGTERM dominates a later
+  natural exit).
+- A failing stage triggers SIGTERM cascade to every alive sibling,
+  so a hung downstream stage can't keep the pipe alive after an
+  upstream failure.
+- Pipes require **at least two stages** — `pipe = [{...}]` is
+  rejected as `single-stage-pipe`; use top-level `exec` directly.
+- Top-level `timeout` on a pipe action is rejected — set the
+  deadline per-stage on the nested `exec`.
+
+### Conditionals
+
+A `when` / `then` / `else` action runs a predicate first and branches
+on its outcome. The predicate's outcome does **not** propagate to the
+plan's terminus — `when` is a branch, not a guard:
+
+```toml
+[[watch]]
+name = "test-then-deploy"
+path = "/srv/repo"
+
+[[watch.actions]]
+when = { exec = ["cargo", "test", "--quiet"], timeout = "5m" }
+then = [{ exec = ["./scripts/deploy.sh"] }]
+else = [{ exec = ["notify-send", "tests failed"] }]
+```
+
+- Predicate `Ok` ⇒ run the `then` body in order with stop-on-failure.
+- Predicate `Failed` (non-zero exit, signal, spawn failure, or
+  predicate timeout) ⇒ run the `else` body (if present); otherwise
+  skip past the conditional entirely.
+- `else` is optional. Without it, predicate `Failed` is a no-op and
+  the plan continues with the next action (or terminates `Ok` if
+  this was the last action).
+- The predicate carries its own `timeout` inside `when`; the action
+  itself does not accept a top-level `timeout`.
+- `then` and `else` are full recursive `[[watch.actions]]` arrays —
+  nested conditionals and pipes are both legal.
+
 ### Placeholders
 
-`exec` argv slots reference Specter's substitution catalog through the
-`${specter.<name>}` namespace. Anything else `$`-shaped — bare
-`$NAME`, `${VAR}`, `$5` — passes through to the spawned process
-verbatim, so shell, awk, perl, or make idioms inside an `sh -c` slot
-keep working.
+`exec` argv slots reference Specter's substitution catalog through two
+namespaces: `${specter.<name>}` for runtime-derived values and
+`${env.<NAME>}` for operator environment variables. Anything else
+`$`-shaped — bare `$NAME`, `${VAR}`, `$5`, or an unrecognised namespace
+like `${capture.foo}` — passes through to the spawned process verbatim,
+so shell, awk, perl, or make idioms inside an `sh -c` slot keep
+working.
 
 Single-value placeholders render one string into the surrounding argv
 slot:
@@ -178,18 +249,37 @@ is not appended to each emitted value — when at least one value emits, the tra
 literal becomes its own standalone argv slot. Place per-value suffixes inside the
 prefix or use a wrapper script.
 
+**Environment variables.** `${env.<NAME>}` substitutes the operator's
+own environment (sampled once at startup, not per spawn). The reference
+is **strict**: a missing variable with no default fails the plan with
+a clear log line — Specter never silently renders the empty string for
+a misconfigured TOML. Opt into lenient explicitly with a `:-` default:
+
+| Form                          | Behaviour                                                 |
+|-------------------------------|-----------------------------------------------------------|
+| `${env.HOME}`                 | strict: unset ⇒ plan fails                                |
+| `${env.HOME:-/tmp}`           | unset ⇒ render `/tmp`                                     |
+| `${env.HOME:-}`               | unset ⇒ render empty string (explicit lenient opt-in)     |
+
+Names must match `[A-Za-z_][A-Za-z0-9_]*`; defaults are frozen literals
+(no nested placeholders). The captured snapshot is immutable for the
+actuator's lifetime — `SIGHUP` does **not** re-read the environment.
+Use `${env.<NAME>}` only when the operator-side env genuinely doesn't
+change at runtime.
+
 Two escape rules round out the grammar:
 
 - `$$` — a literal `$`. Use `$$$$` to pass `$$` through to a shell that
   wants to expand its PID.
-- `${specter.<unknown>}` — a typo guard fires (fail-loud) only inside
-  the explicit namespace. `${specter.PATH}`, `${specter.}`, and
-  unterminated `${specter.path` likewise error during config validation.
+- `${specter.<unknown>}` and `${env.<INVALID>}` — typo guards fire
+  (fail-loud) only inside the explicit namespaces. `${specter.PATH}`,
+  `${specter.}`, `${env.1FOO}` (digit-first), and unterminated
+  `${specter.path` likewise error during config validation.
 
-Anything that doesn't match `${specter.<name>}` exactly — `$path`,
-`${specter}` (no dot), `${SPECTER.path}` (uppercase prefix),
-`${HOME}` — is literal pass-through. The shell, if any, sees those
-bytes unchanged.
+Anything that doesn't match `${specter.<name>}` or `${env.<NAME>}`
+exactly — `$path`, `${specter}` (no dot), `${SPECTER.path}` (uppercase
+prefix), `${HOME}` (no namespace) — is literal pass-through. The shell,
+if any, sees those bytes unchanged.
 
 ### Environment variables
 

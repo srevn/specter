@@ -37,12 +37,24 @@ use std::sync::Arc;
 /// `Arc<ActionProgram>`; the tree is dropped at the function boundary.
 ///
 /// `pub(crate)` because the tree never escapes this crate. Future
-/// variants (`Pipe`) land here as additional arms; the runtime stays
-/// oblivious.
+/// variants land here as additional arms; the runtime stays oblivious.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Action {
     /// Spawn a single process with this argv template.
     Exec(ExecAction),
+    /// Spawn N processes wired stdout→stdin. `stages` is the spawn
+    /// order — stage 0's stdout feeds stage 1's stdin, etc. Each
+    /// stage carries its own [`specter_core::ExecAction::timeout`];
+    /// the actuator's per-stage timer thread enforces them
+    /// independently.
+    ///
+    /// `stages: Arc<[ExecAction]>` (not `Box<[…]>`) so lowering can
+    /// `Arc::clone` directly into [`Instruction::SpawnPipe`] without
+    /// re-allocating the leaf vector. Validation guarantees
+    /// `stages.len() >= 2` (single-stage pipes are rejected as
+    /// [`crate::error::IssueKind::SingleStagePipe`] — use top-level
+    /// `exec` instead).
+    Pipe { stages: Arc<[ExecAction]> },
     /// Predicate + then-branch + optional else-branch.
     ///
     /// `when` runs first; on Ok the `then` body runs to completion (in
@@ -81,6 +93,9 @@ pub(crate) fn lower_to_program(tree: &[Action]) -> Arc<ActionProgram> {
 ///
 /// `Action::Exec` lowers to a single [`Instruction::SpawnExec`].
 ///
+/// `Action::Pipe` lowers to a single [`Instruction::SpawnPipe`]
+/// carrying the stages `Arc` by clone — no per-leaf re-allocation.
+///
 /// `Action::Conditional` lowers to a [`Instruction::SpawnPredicate`]
 /// whose `jump_target` is backpatched to the start of the else-branch
 /// (or to one past the then-branch when no else exists). When an
@@ -92,6 +107,10 @@ fn lower_actions(actions: &[Action], out: &mut Vec<Instruction>) {
     for action in actions {
         match action {
             Action::Exec(e) => out.push(Instruction::SpawnExec(e.clone())),
+
+            Action::Pipe { stages } => {
+                out.push(Instruction::SpawnPipe(Arc::clone(stages)));
+            }
 
             Action::Conditional {
                 when,
@@ -170,6 +189,7 @@ fn u32_or_program_overflow(len: usize) -> u32 {
 mod tests {
     use super::{Action, lower_to_program};
     use specter_core::{ArgPart, ArgTemplate, ExecAction, Instruction};
+    use std::sync::Arc;
 
     fn exec_with_literal(literal: &str) -> ExecAction {
         ExecAction::new([ArgTemplate::new([ArgPart::literal(literal)])])
@@ -222,6 +242,50 @@ mod tests {
     fn empty_tree_lowers_to_empty_program() {
         let program = lower_to_program(&[]);
         assert_eq!(program.instructions.len(), 0);
+    }
+
+    /// `Action::Pipe` lowers to a single `Instruction::SpawnPipe`
+    /// carrying the same `Arc` — no per-leaf re-allocation.
+    #[test]
+    fn pipe_lowers_to_one_spawn_pipe_sharing_arc() {
+        let stages: Arc<[ExecAction]> = Arc::from(vec![
+            exec_with_literal("/bin/a"),
+            exec_with_literal("/bin/b"),
+        ]);
+        let stages_for_assert = Arc::clone(&stages);
+        let tree = [Action::Pipe { stages }];
+        let program = lower_to_program(&tree);
+        assert_eq!(program.instructions.len(), 1);
+        match &program.instructions[0] {
+            Instruction::SpawnPipe(s) => {
+                assert_eq!(s.len(), 2);
+                assert!(
+                    Arc::ptr_eq(s, &stages_for_assert),
+                    "lowering must Arc::clone the stages slice, not re-allocate",
+                );
+            }
+            other => panic!("expected SpawnPipe, got {other:?}"),
+        }
+    }
+
+    /// Pipe and Exec mix freely in a single tree — each lowers to one
+    /// instruction; order is preserved.
+    #[test]
+    fn pipe_and_exec_mixed_lowers_preserving_order() {
+        let stages: Arc<[ExecAction]> = Arc::from(vec![
+            exec_with_literal("/bin/pipe-a"),
+            exec_with_literal("/bin/pipe-b"),
+        ]);
+        let tree = [
+            Action::Exec(exec_with_literal("/bin/pre")),
+            Action::Pipe { stages },
+            Action::Exec(exec_with_literal("/bin/post")),
+        ];
+        let program = lower_to_program(&tree);
+        assert_eq!(program.instructions.len(), 3);
+        assert!(matches!(program.instructions[0], Instruction::SpawnExec(_)));
+        assert!(matches!(program.instructions[1], Instruction::SpawnPipe(_)));
+        assert!(matches!(program.instructions[2], Instruction::SpawnExec(_)));
     }
 
     /// Conditional with no else-branch lowers to predicate + then

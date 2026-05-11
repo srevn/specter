@@ -1742,4 +1742,309 @@ mod tests {
             h.shutdown();
         }
     }
+
+    // ---------- pipe dispatch (SpawnPipe) ----------
+    //
+    // The pipe variant is the heaviest behavioural slice of PR4: a
+    // single `Instruction::SpawnPipe` triggers N spawns, an
+    // aggregating waiter, a combined signaler for shutdown, and
+    // optional per-stage timers. These tests exercise the dispatcher
+    // wiring against the testkit `MockSpawner::spawn_pipe`.
+
+    /// Two-stage pipe with both stages Ok: aggregated outcome is Ok;
+    /// the actuator emits exactly one EffectComplete (the engine's
+    /// per-Effect accounting is unchanged under pipe vs single-exec).
+    #[test]
+    fn pipe_two_stages_both_ok_emits_single_ok_completion() {
+        let stages: Arc<[ExecAction]> = Arc::from(vec![
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
+        ]);
+        let program = Arc::new(ActionProgram::new([Instruction::SpawnPipe(stages)]));
+
+        let mut h = Harness::new(4);
+        h.submit(make_effect_perfile_with_program(50, 50, 50, 1, program));
+        // Both stages spawn at once.
+        let spawns = h.wait_for_spawns(2, Duration::from_secs(1));
+        assert_eq!(spawns.len(), 2);
+        assert_eq!(spawns[0].argv, vec!["/bin/a".to_string()]);
+        assert_eq!(spawns[1].argv, vec!["/bin/b".to_string()]);
+        // The mock's per-stage completion channels are independent;
+        // the aggregating waiter drains in spawn order, so completing
+        // stage 0 first matches the production sequence.
+        h.spawner
+            .complete(spawns[0].pid, EffectOutcome::Ok)
+            .unwrap();
+        h.spawner
+            .complete(spawns[1].pid, EffectOutcome::Ok)
+            .unwrap();
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        assert_eq!(completions.len(), 1, "exactly one EffectComplete per pipe");
+        assert!(matches!(
+            completions[0],
+            Input::EffectComplete {
+                result: EffectOutcome::Ok,
+                ..
+            }
+        ));
+        h.shutdown();
+    }
+
+    /// Two-stage pipe with stage 0 Failed: aggregated outcome is
+    /// Failed; the cascade SIGTERMs stage 1 before its mock
+    /// completion lands (so the test records the signal). After the
+    /// cascade, the test completes stage 1 with a Failed-by-signal
+    /// outcome to unblock the aggregator.
+    #[test]
+    fn pipe_first_stage_failed_cascades_sigterm_to_siblings() {
+        let stages: Arc<[ExecAction]> = Arc::from(vec![
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
+        ]);
+        let program = Arc::new(ActionProgram::new([Instruction::SpawnPipe(stages)]));
+
+        let mut h = Harness::new(4);
+        h.submit(make_effect_perfile_with_program(51, 51, 51, 1, program));
+        let spawns = h.wait_for_spawns(2, Duration::from_secs(1));
+        let stage0_pid = spawns[0].pid;
+        let stage1_pid = spawns[1].pid;
+
+        // Complete stage 0 Failed; the aggregating waiter will
+        // observe this and cascade SIGTERM to stage 1.
+        h.spawner
+            .complete(
+                stage0_pid,
+                EffectOutcome::Failed {
+                    exit_code: Some(7),
+                    signal: None,
+                },
+            )
+            .unwrap();
+        // Wait for the cascade SIGTERM to land. The mock signaler
+        // records Term(pid) on `signal_term`. Poll briefly.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let signals = h.spawner.signals();
+            if signals.contains(&SignalRecord::Term(stage1_pid)) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected SIGTERM cascade to stage 1; signals={signals:?}",
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Complete stage 1 (as if SIGTERM took effect) so the
+        // aggregator's wait finishes and the EffectComplete arrives.
+        h.spawner
+            .complete(
+                stage1_pid,
+                EffectOutcome::Failed {
+                    exit_code: None,
+                    signal: Some(15),
+                },
+            )
+            .unwrap();
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        match &completions[0] {
+            Input::EffectComplete { result, .. } => {
+                assert!(matches!(
+                    result,
+                    EffectOutcome::Failed {
+                        exit_code: Some(7),
+                        signal: Some(15),
+                    }
+                ));
+            }
+            other => panic!("expected EffectComplete::Failed; got {other:?}"),
+        }
+        h.shutdown();
+    }
+
+    /// Pipe spawn fails: the actuator routes through the standard
+    /// SpawnError::Failed path and emits one Failed completion.
+    /// No spawns are recorded against the mock (the injected error
+    /// short-circuits before stages are minted).
+    #[test]
+    fn pipe_spawn_failure_terminates_plan_failed() {
+        let stages: Arc<[ExecAction]> = Arc::from(vec![
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
+        ]);
+        let program = Arc::new(ActionProgram::new([Instruction::SpawnPipe(stages)]));
+
+        let mut h = Harness::new(4);
+        h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
+        h.submit(make_effect_perfile_with_program(52, 52, 52, 1, program));
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        assert!(matches!(
+            completions[0],
+            Input::EffectComplete {
+                result: EffectOutcome::Failed {
+                    exit_code: None,
+                    signal: None,
+                },
+                ..
+            }
+        ));
+        // No stages recorded — the inject_spawn_error path short-
+        // circuits MockSpawner::spawn_pipe before allocate_spawn.
+        assert_eq!(
+            h.spawner.spawns().len(),
+            0,
+            "no stages recorded when pipe spawn fails",
+        );
+        h.shutdown();
+    }
+
+    /// Pipe followed by another action in the same program: pipe
+    /// Ok ⇒ next action runs; pipe Failed ⇒ next action is skipped
+    /// (stop-on-failure semantics, same as SpawnExec).
+    #[test]
+    fn pipe_followed_by_exec_runs_only_on_pipe_ok() {
+        let pipe_stages: Arc<[ExecAction]> = Arc::from(vec![
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
+        ]);
+        let program = Arc::new(ActionProgram::new([
+            Instruction::SpawnPipe(pipe_stages),
+            Instruction::SpawnExec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
+                "/bin/after",
+            )])])),
+        ]));
+
+        // Path 1: pipe Ok → /bin/after runs.
+        {
+            let mut h = Harness::new(4);
+            h.submit(make_effect_perfile_with_program(
+                53,
+                53,
+                53,
+                1,
+                Arc::clone(&program),
+            ));
+            let pipe_spawns = h.wait_for_spawns(2, Duration::from_secs(1));
+            h.spawner
+                .complete(pipe_spawns[0].pid, EffectOutcome::Ok)
+                .unwrap();
+            h.spawner
+                .complete(pipe_spawns[1].pid, EffectOutcome::Ok)
+                .unwrap();
+            let after_spawns = h.wait_for_spawns(3, Duration::from_secs(1));
+            assert_eq!(after_spawns[2].argv, vec!["/bin/after".to_string()]);
+            h.spawner
+                .complete(after_spawns[2].pid, EffectOutcome::Ok)
+                .unwrap();
+            let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+            assert!(matches!(
+                completions[0],
+                Input::EffectComplete {
+                    result: EffectOutcome::Ok,
+                    ..
+                }
+            ));
+            h.shutdown();
+        }
+
+        // Path 2: pipe Failed → /bin/after must NOT run.
+        {
+            let mut h = Harness::new(4);
+            h.submit(make_effect_perfile_with_program(54, 54, 54, 1, program));
+            let pipe_spawns = h.wait_for_spawns(2, Duration::from_secs(1));
+            h.spawner
+                .complete(
+                    pipe_spawns[0].pid,
+                    EffectOutcome::Failed {
+                        exit_code: Some(1),
+                        signal: None,
+                    },
+                )
+                .unwrap();
+            h.spawner
+                .complete(pipe_spawns[1].pid, EffectOutcome::Ok)
+                .unwrap();
+            let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+            assert!(matches!(
+                completions[0],
+                Input::EffectComplete {
+                    result: EffectOutcome::Failed { .. },
+                    ..
+                }
+            ));
+            // /bin/after must not have spawned. Recorded spawns = 2
+            // (the two pipe stages); a third would mean stop-on-fail
+            // broke for SpawnPipe.
+            thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                h.spawner.spawns().len(),
+                2,
+                "post-pipe SpawnExec must not run when pipe Failed",
+            );
+            h.shutdown();
+        }
+    }
+
+    /// Per-stage timeout: the pipe carries a stage whose
+    /// `ExecAction.timeout` is set. The per-stage timer thread fires
+    /// at the deadline and signals SIGTERM. The test verifies the
+    /// recorded signal lands on the right pid.
+    #[test]
+    fn pipe_stage_timeout_sigterms_unfinished_stage() {
+        let timeout = Duration::from_millis(60);
+        let stages: Arc<[ExecAction]> = Arc::from(vec![
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]).with_timeout(timeout),
+        ]);
+        let program = Arc::new(ActionProgram::new([Instruction::SpawnPipe(stages)]));
+
+        // Short shutdown_grace so the SIGKILL escalation also lands
+        // inside the test window if SIGTERM doesn't take effect.
+        let mut h = Harness::new_with_grace(4, Duration::from_millis(20));
+        h.submit(make_effect_perfile_with_program(55, 55, 55, 1, program));
+        let spawns = h.wait_for_spawns(2, Duration::from_secs(1));
+        let stage0_pid = spawns[0].pid;
+        let stage1_pid = spawns[1].pid;
+
+        // Wait for the per-stage timer to deliver SIGTERM to stage 1.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let signals = h.spawner.signals();
+            if signals.contains(&SignalRecord::Term(stage1_pid)) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected SIGTERM from per-stage timer on stage 1; signals={signals:?}",
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Stage 0 has no timeout — must not receive a SIGTERM from
+        // the per-stage timer. The cascade-on-failure path also
+        // doesn't reach stage 0 (idx 0 → siblings idx+1..n, which
+        // doesn't include stage 0 itself).
+        let signals = h.spawner.signals();
+        assert!(
+            !signals.contains(&SignalRecord::Term(stage0_pid)),
+            "stage 0 (no timeout) must not receive timer-driven SIGTERM",
+        );
+
+        // Complete both stages so the aggregator finishes.
+        // Stage 1 reports as Failed-by-signal (the timeout took effect).
+        h.spawner
+            .complete(
+                stage1_pid,
+                EffectOutcome::Failed {
+                    exit_code: None,
+                    signal: Some(15),
+                },
+            )
+            .unwrap();
+        // The aggregator on stage 1's failure cascades SIGTERM to
+        // *later* siblings (none here), then continues draining.
+        // Stage 0 hasn't completed yet — drain it so the wait
+        // finishes.
+        h.spawner.complete(stage0_pid, EffectOutcome::Ok).unwrap();
+        h.wait_for_effect_completes(1, Duration::from_secs(2));
+        h.shutdown();
+    }
 }

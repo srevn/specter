@@ -54,22 +54,31 @@ pub(crate) struct RawWatch {
 }
 
 /// One entry in `actions = [...]`. Variants light up additively as
-/// sibling `Option<…>` fields: `exec` for a single process, the
-/// `when` / `then` / `else` triple for conditionals, and (future)
-/// `pipe` for piped stages. `deny_unknown_fields` catches typos at
-/// the variant tag level (e.g., `exce`, `paralel`).
+/// sibling `Option<…>` fields: `exec` for a single process, `pipe`
+/// for a chain of processes wired stdout→stdin, and the
+/// `when` / `then` / `else` triple for conditionals.
+/// `deny_unknown_fields` catches typos at the variant tag level
+/// (e.g., `exce`, `paralel`).
 ///
 /// Validation enforces "exactly one variant set" — the variant tags
-/// `exec`, `when` and (future) `pipe` are mutually exclusive on a
-/// single `[[watch.actions]]` entry. Inside a conditional, `when` is
-/// the predicate and `then` / `else` carry nested `RawAction` arrays
-/// (full recursive grammar).
+/// `exec`, `pipe`, and `when` are mutually exclusive on a single
+/// `[[watch.actions]]` entry. Inside a conditional, `when` is the
+/// predicate and `then` / `else` carry nested `RawAction` arrays
+/// (full recursive grammar). Inside a pipe, each stage is a
+/// [`RawExec`] — `exec` argv plus an optional per-stage `timeout`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawAction {
     /// `Some(argv)` for `{ exec = [...] }` actions. Mutually exclusive
-    /// with `when` (and future `pipe`).
+    /// with `when` and `pipe`.
     pub exec: Option<Vec<String>>,
+    /// `Some(stages)` for `{ pipe = [{ exec = [...] }, ...] }`
+    /// actions. Each stage is one [`RawExec`] (its own argv + optional
+    /// per-stage `timeout`); the actuator wires their stdouts to the
+    /// next stage's stdin via `pipe(2)` and aggregates outcomes with
+    /// pipefail-on semantics. Validation rejects empty arrays and
+    /// single-stage pipes (use top-level `exec` directly).
+    pub pipe: Option<Vec<RawExec>>,
     /// Predicate of a conditional action. `Some(predicate)` opens the
     /// `when` / `then` / `else` group; the validator requires `then`
     /// alongside it. The predicate carries its own per-step `timeout`
@@ -88,26 +97,28 @@ pub(crate) struct RawAction {
     #[serde(default, rename = "else")]
     pub otherwise: Option<Vec<Self>>,
     /// Per-step deadline in humantime format (`"500ms"`, `"30s"`,
-    /// `"5m"`). Valid only on `exec`-bearing actions; validation rejects
-    /// it on non-exec variants (predicates carry their own per-step
-    /// `timeout` inside the `when` table; future `pipe` stages will
-    /// each carry their own). `None` ⇒ no deadline. Threaded onto
-    /// [`specter_core::ExecAction::timeout`] and enforced by the
-    /// actuator's per-step timer thread: SIGTERM at `now + timeout`,
-    /// SIGKILL after the actuator's `shutdown_grace`.
+    /// `"5m"`). Valid only on `exec`-bearing actions; validation
+    /// rejects it on non-exec variants. Pipe stages each set their
+    /// own `timeout` on the nested [`RawExec`]; the conditional
+    /// predicate sets it inside the `when` table. `None` ⇒ no
+    /// deadline. Threaded onto [`specter_core::ExecAction::timeout`]
+    /// and enforced by the actuator's per-step timer thread: SIGTERM
+    /// at `now + timeout`, SIGKILL after the actuator's
+    /// `shutdown_grace`.
     #[serde(default, with = "humantime_serde")]
     pub timeout: Option<Duration>,
 }
 
 /// Nested-exec table used inside the predicate slot of a conditional
-/// action (`when = { exec = [...], timeout = "5s" }`). Future `pipe`
-/// stages will reuse this same shape — one `RawExec` per stage.
+/// action (`when = { exec = [...], timeout = "5s" }`) and inside each
+/// stage of a `pipe = [...]` action.
 ///
 /// The shape is intentionally tighter than [`RawAction`]: only the
 /// `exec` and `timeout` fields are allowed, no variant tags. A
-/// predicate cannot itself be a pipe or a nested conditional. A
-/// future relaxation would swap this for a `Box<RawAction>` and let
-/// the validator recurse.
+/// predicate cannot itself be a pipe or a nested conditional, and a
+/// pipe stage cannot itself be a pipe or a conditional. A future
+/// relaxation would swap this for a `Box<RawAction>` and let the
+/// validator recurse.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawExec {
@@ -128,6 +139,7 @@ impl RawWatch {
             path,
             actions: vec![RawAction {
                 exec: Some(exec),
+                pipe: None,
                 when: None,
                 then: None,
                 otherwise: None,

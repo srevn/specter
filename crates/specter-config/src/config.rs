@@ -646,14 +646,15 @@ fn validate_one_action(
     errors: &mut Vec<ValidationIssue>,
 ) -> Option<Action> {
     let is_exec = raw.exec.is_some();
+    let is_pipe = raw.pipe.is_some();
     let is_conditional = raw.when.is_some() || raw.then.is_some() || raw.otherwise.is_some();
-    let variants_set = usize::from(is_exec) + usize::from(is_conditional);
+    let variants_set = usize::from(is_exec) + usize::from(is_pipe) + usize::from(is_conditional);
     if variants_set == 0 {
         errors.push(ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::ActionMissingVariant,
-            format!("{path}: must specify a variant (`exec` or `when`/`then`)"),
+            format!("{path}: must specify a variant (`exec`, `pipe`, or `when`/`then`)"),
         ));
         return None;
     }
@@ -664,14 +665,15 @@ fn validate_one_action(
             IssueKind::ActionAmbiguousVariant,
             format!(
                 "{path}: must specify exactly one variant \
-                 (`exec` and `when`/`then` are mutually exclusive)",
+                 (`exec`, `pipe`, and `when`/`then` are mutually exclusive)",
             ),
         ));
         return None;
     }
     // `timeout` at the action level applies only to `exec`. Predicates
     // (`when`) carry their own per-step `timeout` inside the nested
-    // `RawExec`; future `pipe` stages will each carry their own.
+    // `RawExec`; `pipe` stages each carry their own on the nested
+    // `RawExec` of each stage.
     if raw.timeout.is_some() && !is_exec {
         errors.push(ValidationIssue::new(
             Some(watch_idx),
@@ -679,7 +681,7 @@ fn validate_one_action(
             IssueKind::TimeoutNotApplicable,
             format!(
                 "{path}: top-level `timeout` requires `exec` \
-                 (the predicate of a conditional sets `when.timeout` instead)",
+                 (predicates set `when.timeout`; pipe stages each set their own `timeout`)",
             ),
         ));
         return None;
@@ -688,10 +690,71 @@ fn validate_one_action(
         return validate_exec_argv(watch_idx, path, "exec", argv, raw.timeout, errors)
             .map(Action::Exec);
     }
+    if let Some(stages) = raw.pipe.as_deref() {
+        return validate_pipe(watch_idx, path, stages, errors);
+    }
     if is_conditional {
         return validate_conditional(watch_idx, path, raw, errors);
     }
-    unreachable!("variants_set ∈ {{1}} and exec/conditional are exhaustive in v1")
+    unreachable!("variants_set ∈ {{1}} and exec/pipe/conditional are exhaustive in v1")
+}
+
+/// Validate the `pipe = [{ exec = [...], timeout = "..." }, ...]`
+/// variant of a [`RawAction`].
+///
+/// Structural rules:
+/// - `pipe = []` ⇒ [`IssueKind::EmptyPipe`] (no stages to wire).
+/// - `pipe = [solo]` ⇒ [`IssueKind::SingleStagePipe`] (degenerate;
+///   use top-level `exec` directly).
+/// - Each stage's argv goes through [`validate_exec_argv`] under the
+///   path label `"<path>.pipe[i].exec"` so per-stage errors are
+///   unambiguous; stage-local errors don't short-circuit later stages.
+///
+/// Stages are stored as `Arc<[ExecAction]>` so lowering can
+/// `Arc::clone` into [`specter_core::Instruction::SpawnPipe`] without
+/// re-allocating.
+fn validate_pipe(
+    watch_idx: usize,
+    path: &str,
+    stages: &[RawExec],
+    errors: &mut Vec<ValidationIssue>,
+) -> Option<Action> {
+    if stages.is_empty() {
+        errors.push(ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::EmptyPipe,
+            format!("{path}.pipe must have at least two stages (got 0)"),
+        ));
+        return None;
+    }
+    if stages.len() < 2 {
+        errors.push(ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::SingleStagePipe,
+            format!(
+                "{path}.pipe must have at least two stages \
+                 (single stages should use top-level `exec` directly)",
+            ),
+        ));
+        return None;
+    }
+    let mut validated: Vec<ExecAction> = Vec::with_capacity(stages.len());
+    let mut any_failed = false;
+    for (idx, stage) in stages.iter().enumerate() {
+        let stage_path = format!("{path}.pipe[{idx}]");
+        match validate_raw_exec(watch_idx, &stage_path, stage, errors) {
+            Some(exec) => validated.push(exec),
+            None => any_failed = true,
+        }
+    }
+    if any_failed {
+        return None;
+    }
+    Some(Action::Pipe {
+        stages: Arc::from(validated),
+    })
 }
 
 /// Validate the `when` / `then` / `else` triple on a [`RawAction`].

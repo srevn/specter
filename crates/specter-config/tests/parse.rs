@@ -488,3 +488,142 @@ fn conditional_explicit_empty_else_normalises_to_no_else() {
     ));
     assert!(matches!(p.instructions[1], Instruction::SpawnExec(_)));
 }
+
+/// Two-stage pipe lowers to a single `Instruction::SpawnPipe` with
+/// the same number of stages as the TOML array. Each stage's argv
+/// is preserved verbatim.
+#[test]
+fn pipe_two_stages_lowers_to_single_instruction() {
+    let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
+                actions = [\n\
+                  { pipe = [\n\
+                    { exec = [\"grep\", \"foo\"] },\n\
+                    { exec = [\"sort\"] },\n\
+                  ] },\n\
+                ]";
+    let cfg = Config::from_str(toml).unwrap();
+    let p = &cfg.watches[0].program;
+    assert_eq!(p.instructions.len(), 1);
+    match &p.instructions[0] {
+        Instruction::SpawnPipe(stages) => {
+            assert_eq!(stages.len(), 2);
+            assert_eq!(stages[0].argv.len(), 2);
+            assert_eq!(stages[1].argv.len(), 1);
+            assert_eq!(stages[0].argv[0].parts[0], ArgPart::literal("grep"));
+            assert_eq!(stages[1].argv[0].parts[0], ArgPart::literal("sort"));
+        }
+        other => panic!("expected SpawnPipe; got {other:?}"),
+    }
+}
+
+/// Each pipe stage carries its own per-stage `timeout`. Validation
+/// threads the Duration onto the `ExecAction.timeout` field of the
+/// corresponding stage. Stages without a timeout have `None`.
+#[test]
+fn pipe_stage_timeouts_threaded_per_stage() {
+    let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
+                actions = [\n\
+                  { pipe = [\n\
+                    { exec = [\"a\"], timeout = \"500ms\" },\n\
+                    { exec = [\"b\"] },\n\
+                    { exec = [\"c\"], timeout = \"2s\" },\n\
+                  ] },\n\
+                ]";
+    let cfg = Config::from_str(toml).unwrap();
+    let Instruction::SpawnPipe(stages) = &cfg.watches[0].program.instructions[0] else {
+        panic!("expected SpawnPipe");
+    };
+    assert_eq!(stages[0].timeout, Some(Duration::from_millis(500)));
+    assert_eq!(stages[1].timeout, None);
+    assert_eq!(stages[2].timeout, Some(Duration::from_secs(2)));
+}
+
+/// Empty pipe is rejected as `IssueKind::EmptyPipe`.
+#[test]
+fn pipe_empty_rejected() {
+    let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
+                actions = [{ pipe = [] }]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors.iter().any(|e| e.kind == IssueKind::EmptyPipe),
+        "expected EmptyPipe; got {errors:?}",
+    );
+}
+
+/// Single-stage pipe is rejected as `IssueKind::SingleStagePipe` —
+/// degenerate, the operator should use top-level `exec` directly.
+#[test]
+fn pipe_single_stage_rejected() {
+    let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
+                actions = [{ pipe = [{ exec = [\"solo\"] }] }]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors.iter().any(|e| e.kind == IssueKind::SingleStagePipe),
+        "expected SingleStagePipe; got {errors:?}",
+    );
+}
+
+/// Top-level `timeout` on a pipe action is rejected — pipe stages
+/// each set their own `timeout` on the nested `RawExec`.
+#[test]
+fn pipe_top_level_timeout_rejected() {
+    let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
+                actions = [\n\
+                  { pipe = [\n\
+                    { exec = [\"a\"] },\n\
+                    { exec = [\"b\"] },\n\
+                  ], timeout = \"5s\" },\n\
+                ]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.kind == IssueKind::TimeoutNotApplicable),
+        "expected TimeoutNotApplicable; got {errors:?}",
+    );
+}
+
+/// `exec` and `pipe` set simultaneously is rejected as
+/// `IssueKind::ActionAmbiguousVariant`.
+#[test]
+fn pipe_with_exec_simultaneously_rejected() {
+    let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
+                actions = [\n\
+                  { exec = [\"a\"], pipe = [\n\
+                    { exec = [\"b\"] },\n\
+                    { exec = [\"c\"] },\n\
+                  ] },\n\
+                ]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.kind == IssueKind::ActionAmbiguousVariant),
+        "expected ActionAmbiguousVariant; got {errors:?}",
+    );
+}
+
+/// An empty `exec` argv inside a pipe stage surfaces as
+/// `IssueKind::EmptyArgv` with a path label that locates the offending
+/// stage. The structural pipe check (>=2 stages) still passes — the
+/// per-stage validation catches the empty argv.
+#[test]
+fn pipe_stage_with_empty_argv_rejected() {
+    let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
+                actions = [\n\
+                  { pipe = [\n\
+                    { exec = [\"a\"] },\n\
+                    { exec = [] },\n\
+                  ] },\n\
+                ]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors.iter().any(|e| e.kind == IssueKind::EmptyArgv),
+        "expected EmptyArgv on stage 1; got {errors:?}",
+    );
+}

@@ -95,6 +95,17 @@ pub enum IssueKind {
     /// Empty `then` with a non-empty `else` is allowed (equivalent to
     /// a negated predicate).
     EmptyConditional,
+    /// `actions[i].pipe = []` — an empty pipe has no stages to wire,
+    /// so the actuator has nothing to spawn. Almost certainly an
+    /// operator-side typo; the validator surfaces it as a distinct
+    /// kind from [`Self::EmptyArgv`] (which refers to an empty `exec`
+    /// argv inside one slot).
+    EmptyPipe,
+    /// `actions[i].pipe = [{ exec = [...] }]` — a single-stage pipe
+    /// degenerates to a plain `exec` with extra TOML structure. The
+    /// validator rejects it so the operator's intent is unambiguous;
+    /// `exec = [...]` at the action's top level is the right shape.
+    SingleStagePipe,
 }
 
 impl ConfigError {
@@ -202,5 +213,7 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::TimeoutZero => "timeout-zero",
         IssueKind::ConditionalIncomplete => "conditional-incomplete",
         IssueKind::EmptyConditional => "empty-conditional",
+        IssueKind::EmptyPipe => "empty-pipe",
+        IssueKind::SingleStagePipe => "single-stage-pipe",
     }
 }
