@@ -573,8 +573,14 @@ fn validate_name(idx: usize, raw_name: &str, errors: &mut Vec<ValidationIssue>) 
 /// argv slot. The function returns `None` when *any* part of the
 /// program failed validation — partial programs are not handed back,
 /// since a half-built program in the engine would be observably worse
-/// than none at all (the `expect` at the success path call site
-/// enforces the all-or-nothing contract).
+/// than none at all.
+///
+/// Returns `Ok(Arc<ActionProgram>)` on success, `Err(Vec<ValidationIssue>)`
+/// on any failure — the [`Result`] shape ties the validated program to
+/// the absence of errors at the type level, so callers cannot reach for
+/// the `Arc` without first resolving the failure case. This rules out
+/// the historical "validator returned `None` without pushing an issue
+/// ⇒ caller `.expect()` panics" foot-gun.
 ///
 /// The returned Arc is the same allocation the engine's `Sub.program`
 /// and every emitted `Effect.program` references — one shared
@@ -582,28 +588,37 @@ fn validate_name(idx: usize, raw_name: &str, errors: &mut Vec<ValidationIssue>) 
 fn validate_actions(
     idx: usize,
     raw_actions: &[RawAction],
-    errors: &mut Vec<ValidationIssue>,
-) -> Option<Arc<ActionProgram>> {
+) -> Result<Arc<ActionProgram>, Vec<ValidationIssue>> {
     if raw_actions.is_empty() {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(idx),
             "actions",
             IssueKind::EmptyActions,
             "actions must have at least one entry".to_owned(),
-        ));
-        return None;
+        )]);
     }
 
-    let tree = validate_action_list(idx, "actions", raw_actions, errors)?;
+    let mut errors: Vec<ValidationIssue> = Vec::new();
+    let Some(tree) = validate_action_list(idx, "actions", raw_actions, &mut errors) else {
+        // `validate_action_list` populated `errors` for every failed
+        // element; the empty case is the caller-side bug we're
+        // type-protecting against — assert to surface a regression
+        // loudly in debug, then return whatever was collected.
+        debug_assert!(
+            !errors.is_empty(),
+            "validate_action_list returned None without pushing an issue",
+        );
+        return Err(errors);
+    };
     match lower_to_program(&tree) {
-        Ok(program) => Some(program),
+        Ok(program) => Ok(program),
         Err(e) => {
             errors.push(ValidationIssue::from_program_error(
                 &e,
                 Some(idx),
                 "actions",
             ));
-            None
+            Err(errors)
         }
     }
 }
@@ -1004,27 +1019,64 @@ fn validate_settle(
     (settle, max_settle)
 }
 
-/// Validate `scope`. Returns `Some(EffectScope)` on success; `None`
-/// on parse failure with the issue collected. The events helper
-/// gracefully degrades on `None` via `unwrap_or_default()`.
-fn validate_scope(
-    idx: usize,
-    raw_scope: Option<&str>,
-    errors: &mut Vec<ValidationIssue>,
-) -> Option<EffectScope> {
+/// Validate `scope`. Returns `Ok(EffectScope)` on success; `Err` with
+/// the parse failure issue. Scope failures are single-issue by
+/// construction (one input string, one valid set), so the error path
+/// is a single [`ValidationIssue`] rather than a `Vec`.
+///
+/// The caller forwards a copied [`EffectScope`] to the events parser
+/// even when validation fails — the default ([`EffectScope::default`])
+/// is used solely to keep `parse_events_field` from cascading a
+/// phantom error against an unresolved scope.
+fn validate_scope(idx: usize, raw_scope: Option<&str>) -> Result<EffectScope, ValidationIssue> {
     match raw_scope.unwrap_or("subtree-root") {
-        "subtree-root" => Some(EffectScope::SubtreeRoot),
-        "per-stable-file" => Some(EffectScope::PerStableFile),
-        other => {
-            errors.push(ValidationIssue::new(
-                Some(idx),
-                "scope",
-                IssueKind::InvalidEnum,
-                format!("unknown scope `{other}` (expected `subtree-root` or `per-stable-file`)"),
-            ));
-            None
-        }
+        "subtree-root" => Ok(EffectScope::SubtreeRoot),
+        "per-stable-file" => Ok(EffectScope::PerStableFile),
+        other => Err(ValidationIssue::new(
+            Some(idx),
+            "scope",
+            IssueKind::InvalidEnum,
+            format!("unknown scope `{other}` (expected `subtree-root` or `per-stable-file`)"),
+        )),
     }
+}
+
+/// Validate a static watch's `path`: absolute, lenient-canonicalisable.
+/// Returns `Ok(PathBuf)` on success; `Err(ValidationIssue)` on either
+/// "not absolute" or "canonicalisation failed" — single-issue by
+/// construction.
+fn validate_static_path(idx: usize, raw_path: &str) -> Result<PathBuf, ValidationIssue> {
+    if !Path::new(raw_path).is_absolute() {
+        return Err(ValidationIssue::new(
+            Some(idx),
+            "path",
+            IssueKind::NonAbsolute,
+            format!("path `{raw_path}` must be absolute"),
+        ));
+    }
+    canonicalize_lenient(Path::new(raw_path)).map_err(|e| {
+        ValidationIssue::new(
+            Some(idx),
+            "path",
+            IssueKind::NotCanonical,
+            format!("`{raw_path}`: {e}"),
+        )
+    })
+}
+
+/// Validate a dynamic watch's `path` as a [`PatternSpec`]. The parser
+/// itself enforces structural invariants (absolute, no `**`, no
+/// `.`/`..`, no empty segments, no Windows prefix); a parse failure
+/// surfaces as [`IssueKind::InvalidPattern`].
+fn validate_dynamic_pattern(idx: usize, raw_path: &str) -> Result<PatternSpec, ValidationIssue> {
+    PatternSpec::parse(raw_path).map_err(|e| {
+        ValidationIssue::new(
+            Some(idx),
+            "path",
+            IssueKind::InvalidPattern,
+            format!("`{raw_path}`: {e}"),
+        )
+    })
 }
 
 /// Validate the `[[watch]]` block's scan-config knobs (`recursive`,
@@ -1088,6 +1140,13 @@ fn validate_scan(idx: usize, raw: &RawWatch, errors: &mut Vec<ValidationIssue>) 
 /// [`PatternSpec::is_dynamic`] before invoking this; the inner
 /// `is_dynamic` check is defense-in-depth for direct test callers
 /// that bypass the dispatcher.
+///
+/// Validation runs every sub-validator unconditionally and collects
+/// every issue before returning. The success path destructures the
+/// per-field [`Result`]s via a tuple match — there is no `.expect`
+/// on a validated field, so a future regression that produces a
+/// `None`/`Err` without a corresponding issue surfaces as an `Err`,
+/// not a panic.
 fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
     let issue = |field: &'static str, kind: IssueKind, detail: String| {
@@ -1115,59 +1174,55 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
 
     validate_name(idx, &raw.name, &mut errors);
 
-    let path: Option<PathBuf> = if Path::new(&raw.path).is_absolute() {
-        match canonicalize_lenient(Path::new(&raw.path)) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                errors.push(issue(
-                    "path",
-                    IssueKind::NotCanonical,
-                    format!("`{}`: {e}", raw.path),
-                ));
-                None
-            }
-        }
-    } else {
-        errors.push(issue(
-            "path",
-            IssueKind::NonAbsolute,
-            format!("path `{}` must be absolute", raw.path),
-        ));
-        None
-    };
-
-    let program = validate_actions(idx, &raw.actions, &mut errors);
+    let path_r = validate_static_path(idx, &raw.path);
+    let program_r = validate_actions(idx, &raw.actions);
+    let scope_r = validate_scope(idx, raw.scope.as_deref());
     let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
-    let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
     // Parse `events` after scope so the default resolver can read
     // scope. If scope itself failed validation, fall back to the
-    // default scope (SubtreeRoot) for the events default — this
-    // avoids a cascade of phantom errors; the scope error is already
-    // collected above.
+    // default scope for the events default — this avoids a cascade
+    // of phantom errors; the scope error is already pending in
+    // `scope_r`.
     let events = parse_events_field(
         raw.events.as_deref(),
-        scope.unwrap_or_default(),
+        scope_r.as_ref().copied().unwrap_or_default(),
         idx,
         &mut errors,
     );
     let scan = validate_scan(idx, raw, &mut errors);
 
-    if !errors.is_empty() {
-        return Err(errors);
+    // Applicative collection: the Ok arm destructures all three
+    // per-field Results into their values directly — no .expect()
+    // and no panic site. The guard catches the case where the Result-
+    // returning validators all succeeded but a side-effect validator
+    // (validate_name, validate_settle, validate_scan, parse_events_field,
+    // the glob-char guard above) pushed an issue.
+    match (path_r, program_r, scope_r) {
+        (Ok(path), Ok(program), Ok(scope)) if errors.is_empty() => Ok(SubSpec {
+            name: CompactString::new(&raw.name),
+            path,
+            program,
+            scope,
+            settle,
+            max_settle,
+            scan,
+            events,
+            log_output: raw.log_output.unwrap_or(false),
+            enabled: raw.enabled.unwrap_or(true),
+        }),
+        (path_r, program_r, scope_r) => {
+            if let Err(e) = path_r {
+                errors.push(e);
+            }
+            if let Err(es) = program_r {
+                errors.extend(es);
+            }
+            if let Err(e) = scope_r {
+                errors.push(e);
+            }
+            Err(errors)
+        }
     }
-
-    Ok(SubSpec {
-        name: CompactString::new(&raw.name),
-        path: path.expect("path validated"),
-        program: program.expect("program validated"),
-        scope: scope.expect("scope validated"),
-        settle,
-        max_settle,
-        scan,
-        events,
-        log_output: raw.log_output.unwrap_or(false),
-        enabled: raw.enabled.unwrap_or(true),
-    })
 }
 
 /// Validator for `[[watch]]` blocks whose `path` carries at least one
@@ -1175,56 +1230,56 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
 /// [`PatternSpec::is_dynamic`]; the parser itself enforces the
 /// pattern's structural invariants (absolute, no `**`, no `.`/`..`,
 /// no empty segments, no Windows prefix).
+///
+/// Validation shape mirrors [`validate_static_watch`]: every sub-
+/// validator runs, results are collected via tuple match, and the
+/// success path destructures without `.expect()`.
 fn validate_dynamic_watch(
     idx: usize,
     raw: &RawWatch,
 ) -> Result<PromoterSpec, Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
-    let issue = |field: &'static str, kind: IssueKind, detail: String| {
-        ValidationIssue::new(Some(idx), field, kind, detail)
-    };
 
     validate_name(idx, &raw.name, &mut errors);
 
-    let pattern: Option<PatternSpec> = match PatternSpec::parse(&raw.path) {
-        Ok(spec) => Some(spec),
-        Err(e) => {
-            errors.push(issue(
-                "path",
-                IssueKind::InvalidPattern,
-                format!("`{}`: {e}", raw.path),
-            ));
-            None
-        }
-    };
-
-    let program = validate_actions(idx, &raw.actions, &mut errors);
+    let pattern_r = validate_dynamic_pattern(idx, &raw.path);
+    let program_r = validate_actions(idx, &raw.actions);
+    let scope_r = validate_scope(idx, raw.scope.as_deref());
     let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
-    let scope = validate_scope(idx, raw.scope.as_deref(), &mut errors);
     let events = parse_events_field(
         raw.events.as_deref(),
-        scope.unwrap_or_default(),
+        scope_r.as_ref().copied().unwrap_or_default(),
         idx,
         &mut errors,
     );
     let scan = validate_scan(idx, raw, &mut errors);
 
-    if !errors.is_empty() {
-        return Err(errors);
+    match (pattern_r, program_r, scope_r) {
+        (Ok(pattern), Ok(program), Ok(scope)) if errors.is_empty() => Ok(PromoterSpec {
+            name: CompactString::new(&raw.name),
+            pattern,
+            program,
+            scope,
+            settle,
+            max_settle,
+            scan,
+            events,
+            log_output: raw.log_output.unwrap_or(false),
+            enabled: raw.enabled.unwrap_or(true),
+        }),
+        (pattern_r, program_r, scope_r) => {
+            if let Err(e) = pattern_r {
+                errors.push(e);
+            }
+            if let Err(es) = program_r {
+                errors.extend(es);
+            }
+            if let Err(e) = scope_r {
+                errors.push(e);
+            }
+            Err(errors)
+        }
     }
-
-    Ok(PromoterSpec {
-        name: CompactString::new(&raw.name),
-        pattern: pattern.expect("pattern validated"),
-        program: program.expect("program validated"),
-        scope: scope.expect("scope validated"),
-        settle,
-        max_settle,
-        scan,
-        events,
-        log_output: raw.log_output.unwrap_or(false),
-        enabled: raw.enabled.unwrap_or(true),
-    })
 }
 
 /// Parse the optional TOML `events = [...]` array into a [`ClassSet`].

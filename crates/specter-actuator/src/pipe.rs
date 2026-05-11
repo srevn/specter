@@ -15,9 +15,12 @@
 //! [`MockSpawner`]: crate::testkit::MockSpawner
 
 use crate::spawner::{ChildSignaler, ChildWaiter};
+use crossbeam::channel::{Receiver, unbounded};
 use specter_core::EffectOutcome;
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::thread;
 
 /// Combined signaler — fans SIGTERM/SIGKILL out to every stage.
 ///
@@ -33,7 +36,10 @@ use std::sync::Arc;
 /// still get the signal (best-effort). This matches the controller's
 /// "log and continue" stance — a shutdown signal is best-effort by
 /// nature, and one stage's `ESRCH` shouldn't suppress the next
-/// stage's SIGTERM.
+/// stage's SIGTERM. Every per-stage error is logged at
+/// `tracing::debug!` with the stage index and the call kind so an
+/// operator triaging "some stages didn't terminate" sees every cause,
+/// not just the first.
 pub(crate) struct CombinedSignaler {
     stages: Box<[Arc<dyn ChildSignaler>]>,
 }
@@ -44,41 +50,47 @@ impl CombinedSignaler {
     }
 }
 
-impl ChildSignaler for CombinedSignaler {
-    fn signal_term(&self) -> io::Result<()> {
-        let mut first_err: Option<io::Error> = None;
-        for s in &self.stages {
-            if let Err(e) = s.signal_term()
-                && first_err.is_none()
-            {
+/// Fan a single signal call out to every stage, log every error, and
+/// return the first non-`Ok` (if any) as the aggregated result. Used
+/// by [`CombinedSignaler`]'s three methods — the only thing that
+/// varies is the per-stage method invoked, so the fan-out + log-then-
+/// retain-first shape lives in one place.
+fn fan_out<F>(
+    stages: &[Arc<dyn ChildSignaler>],
+    call_kind: &'static str,
+    mut call: F,
+) -> io::Result<()>
+where
+    F: FnMut(&Arc<dyn ChildSignaler>) -> io::Result<()>,
+{
+    let mut first_err: Option<io::Error> = None;
+    for (idx, s) in stages.iter().enumerate() {
+        if let Err(e) = call(s) {
+            tracing::debug!(
+                stage = idx,
+                call = call_kind,
+                ?e,
+                "CombinedSignaler: per-stage call failed",
+            );
+            if first_err.is_none() {
                 first_err = Some(e);
             }
         }
-        first_err.map_or(Ok(()), Err)
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+impl ChildSignaler for CombinedSignaler {
+    fn signal_term(&self) -> io::Result<()> {
+        fan_out(&self.stages, "signal_term", |s| s.signal_term())
     }
 
     fn signal_kill(&self) -> io::Result<()> {
-        let mut first_err: Option<io::Error> = None;
-        for s in &self.stages {
-            if let Err(e) = s.signal_kill()
-                && first_err.is_none()
-            {
-                first_err = Some(e);
-            }
-        }
-        first_err.map_or(Ok(()), Err)
+        fan_out(&self.stages, "signal_kill", |s| s.signal_kill())
     }
 
     fn reap_blocking(&self) -> io::Result<()> {
-        let mut first_err: Option<io::Error> = None;
-        for s in &self.stages {
-            if let Err(e) = s.reap_blocking()
-                && first_err.is_none()
-            {
-                first_err = Some(e);
-            }
-        }
-        first_err.map_or(Ok(()), Err)
+        fan_out(&self.stages, "reap_blocking", |s| s.reap_blocking())
     }
 
     fn is_dead(&self) -> bool {
@@ -93,13 +105,22 @@ impl ChildSignaler for CombinedSignaler {
 
 /// Aggregating waiter for a pipe.
 ///
-/// Drains every stage's waiter sequentially in spawn order. On the
-/// first non-Ok stage, cascades SIGTERM to every alive sibling
-/// (`idx+1..n`) so a hung downstream stage doesn't keep the pipe
-/// alive after an upstream failure — the kernel's SIGPIPE chain
-/// handles the happy case, but a stage that's not reading from
-/// stdin (or that's blocked on something else) needs an explicit
-/// signal.
+/// On `wait`, spawns one OS thread per stage and watches every stage's
+/// waiter concurrently. The first stage that reports `Failed` triggers
+/// a SIGTERM cascade to every other still-alive stage, so a hung
+/// stage doesn't keep the pipe alive after another stage fails — the
+/// kernel's SIGPIPE chain handles the happy case, but a stage that's
+/// not reading from stdin (or that's blocked on something else) needs
+/// an explicit signal.
+///
+/// **Why parallel.** A sequential drain of N stage waiters head-of-
+/// lines on stage 0: if stage 0 blocks indefinitely (infinite sleep,
+/// blocked read), the cascade can't fire until stage 0 returns, and a
+/// downstream stage's per-step timeout can never propagate back. The
+/// parallel shape eliminates that hazard at the cost of one OS thread
+/// per stage; the per-stage timer threads (one per stage with a
+/// `timeout`) already grow O(N), so the thread budget is the same
+/// order.
 ///
 /// Aggregated outcome:
 /// - **all Ok** ⇒ [`EffectOutcome::Ok`].
@@ -107,12 +128,19 @@ impl ChildSignaler for CombinedSignaler {
 ///   `exit_code` = the *last* non-zero exit in spawn order
 ///   (pipefail-on: the last failure observable from a shell's
 ///   perspective dominates) and `signal` = the *first* signal seen
-///   (so timer-driven SIGTERMs surface in the reported outcome).
+///   in spawn order (so timer-driven SIGTERMs surface in the reported
+///   outcome).
 ///
-/// `signalers` is parallel-indexed with `waiters`; the cascade
-/// iterates `signalers[idx+1..]` after observing `waiters[idx]` non-
-/// `Ok`. `is_dead` short-circuits already-reaped siblings (their
-/// waiter has already returned and set the shared flag).
+/// The spawn-order aggregation is preserved by collecting reports
+/// into a stage-indexed `Vec<Option<EffectOutcome>>` and iterating
+/// `0..n` at fold time — completion order doesn't bleed into the
+/// reported outcome.
+///
+/// `signalers` is parallel-indexed with `waiters`. The cascade
+/// iterates every signaler whose index differs from the first-Failed
+/// stage and whose paired waiter hasn't reported yet (`is_dead` short-
+/// circuits already-reaped stages — their waiter set the shared flag
+/// before returning).
 pub(crate) struct PipeWaiter {
     waiters: Vec<Box<dyn ChildWaiter>>,
     signalers: Box<[Arc<dyn ChildSignaler>]>,
@@ -132,61 +160,239 @@ impl PipeWaiter {
     }
 }
 
+/// One per-stage report carried over the aggregator channel.
+struct StageReport {
+    idx: usize,
+    outcome: EffectOutcome,
+}
+
 impl ChildWaiter for PipeWaiter {
     fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
-        let signalers = self.signalers;
-        let mut last_failed_exit: Option<i32> = None;
-        let mut first_signal: Option<i32> = None;
-        let mut any_failed = false;
+        let Self { waiters, signalers } = *self;
+        let n = signalers.len();
+        debug_assert_eq!(waiters.len(), n);
 
-        for (idx, w) in self.waiters.into_iter().enumerate() {
-            // A waiter that errors out (e.g. mock's BrokenPipe when
-            // the test never delivers a completion) is folded into
-            // an unspecified `Failed` — same as the single-process
-            // `wait_loop` does for the engine-side outcome.
-            let outcome = w.wait().unwrap_or(EffectOutcome::Failed {
-                exit_code: None,
-                signal: None,
-            });
-            match outcome {
-                EffectOutcome::Ok => {}
-                EffectOutcome::Failed { exit_code, signal } => {
-                    if !any_failed {
-                        any_failed = true;
-                        // Cascade SIGTERM to alive siblings `idx+1..`.
-                        // `is_dead` short-circuits already-reaped
-                        // ones; errors are logged inside the signaler
-                        // and collapsed at this call site.
-                        for s in signalers.iter().skip(idx + 1) {
-                            if !s.is_dead()
-                                && let Err(e) = s.signal_term()
-                            {
-                                tracing::debug!(?e, "PipeWaiter: cascade SIGTERM failed");
-                            }
-                        }
-                    }
-                    if let Some(c) = exit_code {
-                        // Pipefail-on: the *last* non-zero exit
-                        // dominates (matches `set -o pipefail` for
-                        // the user-facing result, the last-pipeline
-                        // exit semantics in a shell).
-                        last_failed_exit = Some(c);
-                    }
-                    if first_signal.is_none() && signal.is_some() {
-                        first_signal = signal;
-                    }
+        // Empty pipes are rejected by the builder/lowering; guard
+        // anyway so a degenerate value (e.g. tests constructing
+        // `PipeWaiter::new` with zero stages) collapses to Ok rather
+        // than blocking on an empty channel below.
+        if n == 0 {
+            return Ok(EffectOutcome::Ok);
+        }
+
+        let (tx, rx) = unbounded::<StageReport>();
+        let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(n);
+        let mut spawn_failed: Option<(usize, io::Error)> = None;
+        let mut leftover: Vec<Box<dyn ChildWaiter>> = Vec::new();
+
+        for (idx, w) in waiters.into_iter().enumerate() {
+            if spawn_failed.is_some() {
+                // After the first spawn failure we keep collecting
+                // remaining waiters so the recovery path can drain
+                // them synchronously (SIGKILL above makes wait fast).
+                leftover.push(w);
+                continue;
+            }
+            let tx_stage = tx.clone();
+            let spawn_result = thread::Builder::new()
+                // pthread_setname_np on Linux truncates at 15+null;
+                // "act-pipe-NN" is 11 chars even at idx=99, leaving
+                // headroom for triple-digit stage counts (unreachable
+                // in v1 — pipes top out far below).
+                .name(format!("act-pipe-{idx}"))
+                .spawn(move || {
+                    let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| w.wait())) {
+                        Ok(Ok(o)) => o,
+                        Ok(Err(_)) | Err(_) => EffectOutcome::Failed {
+                            exit_code: None,
+                            signal: None,
+                        },
+                    };
+                    // Channel is unbounded and owned by the
+                    // aggregator (this function); send cannot block,
+                    // and a Disconnected error here would only happen
+                    // if the aggregator panicked — we drop the report
+                    // silently in that case.
+                    let _ = tx_stage.send(StageReport { idx, outcome });
+                });
+            match spawn_result {
+                Ok(h) => handles.push(h),
+                Err(e) => {
+                    // Closure (and waiter `w`) was dropped along with
+                    // the failed spawn attempt; the child process is
+                    // alive but has no paired waiter. Subsequent loop
+                    // iterations route into the leftover branch.
+                    spawn_failed = Some((idx, e));
                 }
             }
         }
+        // Drop our local sender so `rx.recv()` returns Disconnected
+        // once every spawned thread completes its send. The cloned
+        // senders inside the threads keep the channel alive in the
+        // meantime.
+        drop(tx);
 
-        if any_failed {
-            Ok(EffectOutcome::Failed {
-                exit_code: last_failed_exit,
-                signal: first_signal,
-            })
-        } else {
-            Ok(EffectOutcome::Ok)
+        if let Some((failed_idx, e)) = spawn_failed {
+            return Ok(recover_from_spawn_failure(
+                failed_idx, &e, &signalers, leftover, handles, &rx,
+            ));
         }
+
+        // Aggregate.
+        let mut reports: Vec<Option<EffectOutcome>> = (0..n).map(|_| None).collect();
+        let mut cascade_fired = false;
+        while let Ok(StageReport { idx, outcome }) = rx.recv() {
+            debug_assert!(reports[idx].is_none(), "duplicate report for stage {idx}",);
+            let is_failed = matches!(&outcome, EffectOutcome::Failed { .. });
+            reports[idx] = Some(outcome);
+
+            if is_failed && !cascade_fired {
+                cascade_fired = true;
+                cascade_sigterm(&signalers, idx);
+            }
+        }
+
+        // All senders dropped ⇒ every spawned thread finished its
+        // send; joining is bounded by stack-unwind time (no syscall).
+        for h in handles {
+            let _ = h.join();
+        }
+
+        Ok(fold_reports(reports))
+    }
+}
+
+/// Fan SIGTERM out to every stage other than `failed_idx` whose
+/// paired waiter hasn't yet returned. `is_dead` short-circuits
+/// already-reaped stages — without it we'd queue stale signals
+/// against pids that have already been recycled by the kernel.
+/// Per-stage failures are logged at `tracing::debug!` and otherwise
+/// collapsed — the cascade is best-effort and one stage's ESRCH
+/// should not stop the next stage from receiving its signal.
+fn cascade_sigterm(signalers: &[Arc<dyn ChildSignaler>], failed_idx: usize) {
+    for (s_idx, s) in signalers.iter().enumerate() {
+        if s_idx == failed_idx {
+            continue;
+        }
+        if s.is_dead() {
+            continue;
+        }
+        if let Err(e) = s.signal_term() {
+            tracing::debug!(stage = s_idx, ?e, "PipeWaiter: cascade SIGTERM failed",);
+        }
+    }
+}
+
+/// Aggregate stage-indexed reports into the pipe's [`EffectOutcome`].
+///
+/// Iterates `0..n` (spawn order) so the outcome is independent of
+/// completion order: `exit_code = last non-zero in spawn order`,
+/// `signal = first observed in spawn order`. A `None` entry is the
+/// "thread panicked before send" case, captured as a silent Failed.
+fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
+    let mut last_failed_exit: Option<i32> = None;
+    let mut first_signal: Option<i32> = None;
+    let mut any_failed = false;
+    for outcome_opt in reports {
+        let outcome = outcome_opt.unwrap_or(EffectOutcome::Failed {
+            exit_code: None,
+            signal: None,
+        });
+        match outcome {
+            EffectOutcome::Ok => {}
+            EffectOutcome::Failed { exit_code, signal } => {
+                any_failed = true;
+                if let Some(c) = exit_code {
+                    last_failed_exit = Some(c);
+                }
+                if first_signal.is_none() && signal.is_some() {
+                    first_signal = signal;
+                }
+            }
+        }
+    }
+    if any_failed {
+        EffectOutcome::Failed {
+            exit_code: last_failed_exit,
+            signal: first_signal,
+        }
+    } else {
+        EffectOutcome::Ok
+    }
+}
+
+/// Cleanup path when a stage's wait-thread `Builder::spawn` failed.
+/// The child process for `failed_idx` is alive but its waiter was
+/// dropped along with the failed spawn closure, so the controller
+/// must SIGKILL + sync-reap it via the signaler — same shape as
+/// [`crate::pool::state::recover_orphan_after_wait_thread_failure`]
+/// for the single-process path.
+///
+/// SIGKILLing every stage before draining serves two purposes:
+/// 1. The already-spawned waiter threads' children exit promptly so
+///    their threads return.
+/// 2. The leftover (unspawned) waiters' children exit promptly so the
+///    synchronous `wait()` in this function doesn't reintroduce the
+///    F1 deadlock.
+///
+/// Returns the synthesised aggregate outcome `Failed { exit_code:
+/// None, signal: None }` — semantically equivalent to a wait-thread
+/// spawn failure on a single-process step.
+fn recover_from_spawn_failure(
+    failed_idx: usize,
+    err: &io::Error,
+    signalers: &[Arc<dyn ChildSignaler>],
+    leftover: Vec<Box<dyn ChildWaiter>>,
+    spawned_handles: Vec<thread::JoinHandle<()>>,
+    rx: &Receiver<StageReport>,
+) -> EffectOutcome {
+    tracing::error!(
+        failed_idx,
+        ?err,
+        "pipe stage wait-thread spawn failed; SIGKILL + sync reap orphan",
+    );
+
+    // SIGKILL every stage that's still alive. Already-reaped stages
+    // (their waiter set the dead flag) short-circuit. Errors are
+    // logged inside the signaler impls.
+    for (s_idx, s) in signalers.iter().enumerate() {
+        if s.is_dead() {
+            continue;
+        }
+        if let Err(e) = s.signal_kill() {
+            tracing::debug!(stage = s_idx, ?e, "PipeWaiter recovery: SIGKILL failed",);
+        }
+    }
+
+    // Reap the orphan whose waiter was lost — without this the
+    // kernel keeps the zombie until process exit.
+    if let Err(e) = signalers[failed_idx].reap_blocking() {
+        tracing::warn!(
+            stage = failed_idx,
+            ?e,
+            "PipeWaiter recovery: orphan reap_blocking failed",
+        );
+    }
+
+    // Synchronously drain the unspawned waiters. SIGKILL above
+    // ensures wait returns quickly; the outcome is discarded because
+    // the aggregate is unconditionally Failed below.
+    for w in leftover {
+        let _ = w.wait();
+    }
+
+    // Drain the spawned threads' channel and join their handles.
+    while rx.recv().is_ok() {
+        // Discard reports — the recovery path returns Failed
+        // regardless of which stages reported what.
+    }
+    for h in spawned_handles {
+        let _ = h.join();
+    }
+
+    EffectOutcome::Failed {
+        exit_code: None,
+        signal: None,
     }
 }
 
@@ -198,10 +404,12 @@ mod tests {
     //! the aggregation rules.
     use super::{CombinedSignaler, PipeWaiter};
     use crate::spawner::{ChildSignaler, ChildWaiter};
+    use crossbeam::channel::{Receiver, Sender, bounded};
     use specter_core::EffectOutcome;
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
 
     /// Per-stage probe: counts every signal call so the cascade
     /// assertions can pin which stages received SIGTERM.
@@ -263,6 +471,98 @@ mod tests {
             .collect()
     }
 
+    /// Probe paired with a [`BlockingWaiter`]: the waiter blocks on a
+    /// crossbeam channel until any signal method runs, mirroring a
+    /// real child process that exits when SIGTERM/SIGKILL is delivered.
+    ///
+    /// Used to deterministically exercise the parallel cascade: an
+    /// "alive sibling" (still running when the cascade fires) is
+    /// modeled as a `BlockingProbe`/`BlockingWaiter` pair, where the
+    /// waiter's `wait` returns only after the controller's
+    /// `signal_term` writes to the unblock channel. This is the
+    /// shape no purely-static fixture can give us — without it the
+    /// in-process race between "stage 0 reports Failed" and
+    /// "stage 1 reports Ok" would make cascade assertions
+    /// nondeterministic.
+    struct BlockingProbe {
+        dead: AtomicBool,
+        term: AtomicU32,
+        kill: AtomicU32,
+        return_outcome: EffectOutcome,
+        unblock: Sender<()>,
+    }
+
+    impl BlockingProbe {
+        /// Build a (probe, waiter) pair. The waiter consumes the
+        /// receiver; the probe owns the sender so signal methods
+        /// can unblock the paired waiter. The waiter returns
+        /// `return_outcome` after unblock.
+        fn new(return_outcome: EffectOutcome) -> (Arc<Self>, BlockingWaiter) {
+            // bounded(1) + try_send: the unblock is one-shot. If
+            // multiple signal calls land before the waiter consumes,
+            // the second send drops silently — the receiver only
+            // needs one.
+            let (tx, rx) = bounded::<()>(1);
+            let probe = Arc::new(Self {
+                dead: AtomicBool::new(false),
+                term: AtomicU32::new(0),
+                kill: AtomicU32::new(0),
+                return_outcome,
+                unblock: tx,
+            });
+            let waiter = BlockingWaiter {
+                rx,
+                probe: Arc::clone(&probe),
+            };
+            (probe, waiter)
+        }
+    }
+
+    impl ChildSignaler for BlockingProbe {
+        fn signal_term(&self) -> io::Result<()> {
+            self.term.fetch_add(1, Ordering::SeqCst);
+            // Non-blocking: dropping the message on a full slot
+            // (already unblocked) is the right behaviour for a
+            // one-shot ready signal.
+            let _ = self.unblock.try_send(());
+            Ok(())
+        }
+        fn signal_kill(&self) -> io::Result<()> {
+            self.kill.fetch_add(1, Ordering::SeqCst);
+            let _ = self.unblock.try_send(());
+            Ok(())
+        }
+        fn reap_blocking(&self) -> io::Result<()> {
+            self.dead.store(true, Ordering::SeqCst);
+            let _ = self.unblock.try_send(());
+            Ok(())
+        }
+        fn is_dead(&self) -> bool {
+            self.dead.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Waiter half of [`BlockingProbe`] — blocks on `rx.recv()` until
+    /// any signal arrives, then returns the configured outcome and
+    /// marks the probe dead.
+    struct BlockingWaiter {
+        rx: Receiver<()>,
+        probe: Arc<BlockingProbe>,
+    }
+
+    impl ChildWaiter for BlockingWaiter {
+        fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
+            // recv returns Err iff the sender drops without sending;
+            // in tests we always send through a signaler before
+            // dropping the probe, so a Disconnected here is a fixture
+            // bug. Collapse rather than panic so the surrounding
+            // PipeWaiter still aggregates a Failed outcome.
+            let _ = self.rx.recv();
+            self.probe.dead.store(true, Ordering::SeqCst);
+            Ok(self.probe.return_outcome.clone())
+        }
+    }
+
     /// All Ok ⇒ aggregated Ok; no cascade SIGTERMs.
     #[test]
     fn all_ok_outcome_is_ok_no_cascade() {
@@ -295,13 +595,32 @@ mod tests {
     }
 
     /// First stage Failed ⇒ aggregated Failed; SIGTERM cascade to
-    /// alive siblings (idx 1, 2).
+    /// alive siblings.
+    ///
+    /// Siblings are modeled with [`BlockingWaiter`] so the cascade
+    /// fires against stages that are still running — a static
+    /// "returns Ok and immediately marks dead" waiter would race the
+    /// aggregator's cascade decision and skip the SIGTERM under
+    /// `is_dead`. The blocking shape pins the parallel cascade
+    /// invariant: a sibling that hasn't yet returned receives
+    /// SIGTERM and aborts.
     #[test]
     fn first_failed_cascades_sigterm_to_alive_siblings() {
         let p0 = Arc::new(Probe::new());
-        let p1 = Arc::new(Probe::new());
-        let p2 = Arc::new(Probe::new());
-        let signalers = boxed_probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]);
+        let (p1, p1_waiter) = BlockingProbe::new(EffectOutcome::Failed {
+            exit_code: None,
+            signal: Some(15),
+        });
+        let (p2, p2_waiter) = BlockingProbe::new(EffectOutcome::Failed {
+            exit_code: None,
+            signal: Some(15),
+        });
+        let signalers: Box<[Arc<dyn ChildSignaler>]> = vec![
+            Arc::clone(&p0) as Arc<dyn ChildSignaler>,
+            Arc::clone(&p1) as Arc<dyn ChildSignaler>,
+            Arc::clone(&p2) as Arc<dyn ChildSignaler>,
+        ]
+        .into_boxed_slice();
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(StaticWaiter {
@@ -311,14 +630,8 @@ mod tests {
                 }),
                 dead: Arc::clone(&p0),
             }),
-            Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Ok),
-                dead: Arc::clone(&p1),
-            }),
-            Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Ok),
-                dead: Arc::clone(&p2),
-            }),
+            Box::new(p1_waiter),
+            Box::new(p2_waiter),
         ];
         let outcome = Box::new(PipeWaiter::new(waiters, signalers))
             .wait()
@@ -326,7 +639,11 @@ mod tests {
         match outcome {
             EffectOutcome::Failed { exit_code, signal } => {
                 assert_eq!(exit_code, Some(7), "last non-zero exit propagates");
-                assert_eq!(signal, None, "no signal seen");
+                assert_eq!(
+                    signal,
+                    Some(15),
+                    "first observed signal in spawn order (from cascaded siblings)",
+                );
             }
             EffectOutcome::Ok => panic!("expected Failed; got Ok"),
         }
@@ -335,6 +652,128 @@ mod tests {
         assert_eq!(p0.term.load(Ordering::SeqCst), 0, "stage 0 not cascaded");
         assert_eq!(p1.term.load(Ordering::SeqCst), 1, "stage 1 cascaded");
         assert_eq!(p2.term.load(Ordering::SeqCst), 1, "stage 2 cascaded");
+    }
+
+    /// Last stage Failed ⇒ cascade fires *backward* to alive earlier
+    /// stages. The sequential design's `idx+1..n` skip was sound only
+    /// because earlier stages had already been drained by the time
+    /// cascade fired; under parallel drain, earlier stages may still
+    /// be alive, so cascade must visit them.
+    ///
+    /// This case is impossible to express under the old sequential
+    /// PipeWaiter — the test pins the parallel-only invariant.
+    #[test]
+    fn last_failed_cascades_backward_to_alive_earlier_stages() {
+        let (p0, p0_waiter) = BlockingProbe::new(EffectOutcome::Failed {
+            exit_code: None,
+            signal: Some(15),
+        });
+        let (p1, p1_waiter) = BlockingProbe::new(EffectOutcome::Failed {
+            exit_code: None,
+            signal: Some(15),
+        });
+        let p2 = Arc::new(Probe::new());
+        let signalers: Box<[Arc<dyn ChildSignaler>]> = vec![
+            Arc::clone(&p0) as Arc<dyn ChildSignaler>,
+            Arc::clone(&p1) as Arc<dyn ChildSignaler>,
+            Arc::clone(&p2) as Arc<dyn ChildSignaler>,
+        ]
+        .into_boxed_slice();
+        let waiters: Vec<Box<dyn ChildWaiter>> = vec![
+            Box::new(p0_waiter),
+            Box::new(p1_waiter),
+            Box::new(StaticWaiter {
+                outcome: Ok(EffectOutcome::Failed {
+                    exit_code: Some(9),
+                    signal: None,
+                }),
+                dead: Arc::clone(&p2),
+            }),
+        ];
+        let outcome = Box::new(PipeWaiter::new(waiters, signalers))
+            .wait()
+            .unwrap();
+        match outcome {
+            EffectOutcome::Failed { exit_code, signal } => {
+                // exit_code = last non-zero in spawn order = 9 (stage 2);
+                // signal = first observed in spawn order = 15 (stage 0).
+                assert_eq!(exit_code, Some(9));
+                assert_eq!(signal, Some(15));
+            }
+            EffectOutcome::Ok => panic!("expected Failed; got Ok"),
+        }
+        assert_eq!(
+            p0.term.load(Ordering::SeqCst),
+            1,
+            "stage 0 cascaded (backward)"
+        );
+        assert_eq!(
+            p1.term.load(Ordering::SeqCst),
+            1,
+            "stage 1 cascaded (backward)"
+        );
+        assert_eq!(
+            p2.term.load(Ordering::SeqCst),
+            0,
+            "stage 2 (failing) not cascaded"
+        );
+    }
+
+    /// F1 regression guard. Stage 0's waiter blocks indefinitely
+    /// (modelled as [`BlockingWaiter`]); stage 1 reports Failed
+    /// promptly. Under the sequential design this would deadlock —
+    /// the aggregator can't reach stage 1 until stage 0 returns.
+    /// Under the parallel design, stage 1's report fires the cascade
+    /// SIGTERM, which unblocks stage 0's waiter via its
+    /// [`BlockingProbe`]'s `signal_term`.
+    ///
+    /// The timing bound (under 5 seconds) is a generous proxy: a
+    /// deadlock manifests as the test hanging until nextest's
+    /// per-test timeout fires.
+    #[test]
+    fn blocked_first_stage_unblocked_by_cascade_does_not_deadlock() {
+        let (p0, p0_waiter) = BlockingProbe::new(EffectOutcome::Failed {
+            exit_code: None,
+            signal: Some(15),
+        });
+        let p1 = Arc::new(Probe::new());
+        let signalers: Box<[Arc<dyn ChildSignaler>]> = vec![
+            Arc::clone(&p0) as Arc<dyn ChildSignaler>,
+            Arc::clone(&p1) as Arc<dyn ChildSignaler>,
+        ]
+        .into_boxed_slice();
+        let waiters: Vec<Box<dyn ChildWaiter>> = vec![
+            Box::new(p0_waiter),
+            Box::new(StaticWaiter {
+                outcome: Ok(EffectOutcome::Failed {
+                    exit_code: Some(3),
+                    signal: None,
+                }),
+                dead: Arc::clone(&p1),
+            }),
+        ];
+        let start = Instant::now();
+        let outcome = Box::new(PipeWaiter::new(waiters, signalers))
+            .wait()
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "parallel waiter must not block on stage 0 (elapsed = {elapsed:?})",
+        );
+        match outcome {
+            EffectOutcome::Failed { exit_code, signal } => {
+                assert_eq!(exit_code, Some(3));
+                assert_eq!(signal, Some(15));
+            }
+            EffectOutcome::Ok => panic!("expected Failed; got Ok"),
+        }
+        assert_eq!(p0.term.load(Ordering::SeqCst), 1, "stage 0 cascaded");
+        assert_eq!(
+            p1.term.load(Ordering::SeqCst),
+            0,
+            "stage 1 (failing) not cascaded"
+        );
     }
 
     /// Multiple failures: aggregated exit_code is the LAST non-zero
