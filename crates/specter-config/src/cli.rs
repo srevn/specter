@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[command(
     name = "specter",
     version,
-    about = "Prove the absence of filesystem change.",
+    about = "Prove the absence of change",
     long_about = None,
 )]
 pub struct Cli {

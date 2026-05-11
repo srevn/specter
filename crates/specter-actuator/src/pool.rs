@@ -1640,10 +1640,10 @@ mod tests {
     /// at cursor 0 sees the predicate op's synth-Failed outcome and
     /// reads `op.target(&Failed) = on_failed = Escape` (the no-else
     /// "branch, not guard" elision), so the plan terminates with
-    /// `EffectOutcome::Ok`. If predicate spawn-failure had short-
-    /// circuited to terminate directly (the pre-PR3 behaviour), this
-    /// would emit `EffectComplete::Failed`. The Ok outcome is the
-    /// no-propagation invariant in observable form.
+    /// `EffectOutcome::Ok`. Short-circuiting spawn-failure straight
+    /// to terminus would emit `EffectComplete::Failed` instead; the
+    /// Ok outcome here is the no-propagation invariant in observable
+    /// form.
     ///
     /// Zero spawns are recorded — the injection short-circuits
     /// `MockSpawner::spawn` before the `SpawnRecord` push.
@@ -1871,8 +1871,7 @@ mod tests {
 
     // ---------- pipe dispatch (Pipe body) ----------
     //
-    // The pipe variant is the heaviest behavioural slice of PR4: a
-    // single op with `SpawnBody::Pipe` triggers N spawns, an
+    // A single op with `SpawnBody::Pipe` triggers N spawns, an
     // aggregating waiter, a combined signaler for shutdown, and
     // optional per-stage timers. These tests exercise the dispatcher
     // wiring against the testkit `MockSpawner::spawn_pipe`.

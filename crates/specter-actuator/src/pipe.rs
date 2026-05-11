@@ -332,8 +332,8 @@ fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
 /// 1. The already-spawned waiter threads' children exit promptly so
 ///    their threads return.
 /// 2. The leftover (unspawned) waiters' children exit promptly so the
-///    synchronous `wait()` in this function doesn't reintroduce the
-///    F1 deadlock.
+///    synchronous `wait()` in this function doesn't reintroduce a
+///    head-of-line block on a still-running stage.
 ///
 /// Returns the synthesised aggregate outcome `Failed { exit_code:
 /// None, signal: None }` — semantically equivalent to a wait-thread
@@ -719,13 +719,12 @@ mod tests {
         );
     }
 
-    /// F1 regression guard. Stage 0's waiter blocks indefinitely
-    /// (modelled as [`BlockingWaiter`]); stage 1 reports Failed
-    /// promptly. Under the sequential design this would deadlock —
-    /// the aggregator can't reach stage 1 until stage 0 returns.
-    /// Under the parallel design, stage 1's report fires the cascade
-    /// SIGTERM, which unblocks stage 0's waiter via its
-    /// [`BlockingProbe`]'s `signal_term`.
+    /// Stage 0's waiter blocks indefinitely (modelled as
+    /// [`BlockingWaiter`]); stage 1 reports Failed promptly. The
+    /// parallel waiter design must let stage 1's report fire the
+    /// cascade SIGTERM, which unblocks stage 0's waiter via its
+    /// [`BlockingProbe`]'s `signal_term`. A sequential waiter would
+    /// head-of-line block on stage 0 and never see stage 1's report.
     ///
     /// The timing bound (under 5 seconds) is a generous proxy: a
     /// deadlock manifests as the test hanging until nextest's

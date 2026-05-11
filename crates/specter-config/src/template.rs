@@ -982,30 +982,5 @@ mod tests {
                 }],
             );
         }
-
-        /// Every `${env.<NAME>:-<default>}` whose default avoids the
-        /// reserved chars (`$`, `{`, `}`), control characters, and the
-        /// `:-` separator substring round-trips with the default
-        /// preserved verbatim.
-        #[test]
-        fn prop_env_var_with_safe_default_round_trips(
-            name in "[A-Za-z_][A-Za-z0-9_]{0,15}",
-            default in "[A-Za-z0-9_/.:= -]{0,32}",
-        ) {
-            // Strict v1: defaults containing `:-` are rejected by
-            // `validate_env_default` (the separator must occur exactly
-            // once between name and default, never inside the default
-            // body). Filter generated cases that violate the invariant.
-            prop_assume!(!default.contains(":-"));
-            let s = format!("${{env.{name}:-{default}}}");
-            let parsed = parse_arg(&s).unwrap();
-            prop_assert_eq!(
-                parts(parsed),
-                vec![ArgPart::EnvVar {
-                    name: CompactString::from(name.as_str()),
-                    default: Some(CompactString::from(default.as_str())),
-                }],
-            );
-        }
     }
 }

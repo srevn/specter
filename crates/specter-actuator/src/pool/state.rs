@@ -83,9 +83,9 @@ enum ReapPolicy {
 ///
 /// The cause is **internal-only**: the engine never sees this type. The
 /// wire format remains `EffectOutcome::Failed { exit_code: None,
-/// signal: None }` regardless of cause — the semantic change (cause-
-/// aware routing via a future `EffectOutcome::Aborted` variant) is
-/// reserved for the foundation rework (R1). Phase 3 is telemetry-only.
+/// signal: None }` regardless of cause. Splitting cause from outcome
+/// here is telemetry-only — it lets the synth-Failed log carry a
+/// discriminant without changing engine-side dispatch.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SpawnError {
     /// Permit semaphore at capacity. The caller defers the instruction
@@ -108,9 +108,10 @@ enum SpawnError {
 /// correlated against the cause-side `error!` log line.
 ///
 /// **Not part of the engine wire format.** `EffectOutcome::Failed`
-/// carries no cause discriminant today; the engine's dispatch reads only
-/// the op's `on_failed` edge. Cause-aware semantics belong to the R1
-/// foundation rework (the audit's `EffectOutcome::Aborted` proposal).
+/// carries no cause discriminant; the engine's dispatch reads only the
+/// op's `on_failed` edge. Predicate spawn-failure and predicate
+/// non-zero-exit are observationally identical to the engine, by design
+/// (the op's edge decides routing without inspecting cause).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SpawnFailureCause {
     /// Argv / env substitution failed before any child or wait thread
@@ -267,6 +268,14 @@ pub(crate) struct ActuatorState {
     /// Pinned in one place so the two paths can't drift on the
     /// constant.
     pub shutdown_grace: Duration,
+    /// Scratch deque reused across [`Self::pump`] calls to hold keys
+    /// blocked this round on permit / per-Sub gate unavailability.
+    /// Restored to the ready queue at the end of `pump`. Living on the
+    /// state (rather than allocated fresh inside `pump`) amortises the
+    /// `VecDeque::new()` heap allocation across high-frequency
+    /// same-Sub submit bursts. Empty between pump calls; the
+    /// `debug_assert!` at pump entry pins the invariant.
+    pub blocked_scratch: VecDeque<DedupKey>,
 }
 
 impl ActuatorState {
@@ -282,6 +291,7 @@ impl ActuatorState {
             permits: Permits::new(concurrency),
             env_snapshot,
             shutdown_grace,
+            blocked_scratch: VecDeque::new(),
         }
     }
 
@@ -494,8 +504,9 @@ impl ActuatorState {
                 BranchTarget::Continue(next_idx) => {
                     let next = next_idx.get();
                     // Forward-only-and-in-bounds is structurally
-                    // enforced at builder patch time (the F4 tripwire
-                    // is kept against future regressions).
+                    // enforced at builder patch time. Defensive assert
+                    // here as a tripwire if a future variant addition
+                    // bypasses the builder's edge validation.
                     debug_assert!(
                         next > cursor && (next as usize) < effect.program.ops().len(),
                         "forward-only + in-bounds (builder invariant)",
@@ -601,7 +612,13 @@ impl ActuatorState {
             result: outcome,
         });
         if let Some(c) = self.running_per_sub.get_mut(&sub) {
-            *c = c.saturating_sub(1);
+            // The counter bump at `start_plan` precedes every spawn
+            // attempt for this Sub, including spawn-failure paths that
+            // route through `advance_or_terminate` → `terminate_plan`.
+            // A decrement without a prior bump would be a controller
+            // accounting bug; debug_assert tripwires it in tests.
+            debug_assert!(*c > 0, "running_per_sub decrement without prior bump");
+            *c -= 1;
             if *c == 0 {
                 self.running_per_sub.remove(&sub);
             }
@@ -651,7 +668,10 @@ impl ActuatorState {
         reap_tx: &Sender<super::Reaped>,
         engine_in: &Sender<Input>,
     ) {
-        let mut blocked: VecDeque<DedupKey> = VecDeque::new();
+        debug_assert!(
+            self.blocked_scratch.is_empty(),
+            "blocked_scratch must be empty at pump entry; previous call must have drained it",
+        );
         while let Some(key) = self.ready_queue.pop_front() {
             let sub = sub_of_key(&key);
             let Some(slot) = self.slots.get_mut(&key) else {
@@ -661,9 +681,9 @@ impl ActuatorState {
             // Plan-continue: bypass per-Sub gate.
             if slot.plan_continue.is_some() {
                 let Some(permit) = self.permits.try_acquire() else {
-                    blocked.push_back(key);
+                    self.blocked_scratch.push_back(key);
                     while let Some(k) = self.ready_queue.pop_front() {
-                        blocked.push_back(k);
+                        self.blocked_scratch.push_back(k);
                     }
                     break;
                 };
@@ -678,16 +698,16 @@ impl ActuatorState {
 
             // Fresh plan: per-Sub gate.
             if self.running_per_sub.get(&sub).copied().unwrap_or(0) > 0 {
-                blocked.push_back(key);
+                self.blocked_scratch.push_back(key);
                 continue;
             }
             // Global gate.
             let Some(permit) = self.permits.try_acquire() else {
                 // No more permits this round; defer this and the
                 // remaining queued items (FIFO preserved).
-                blocked.push_back(key);
+                self.blocked_scratch.push_back(key);
                 while let Some(k) = self.ready_queue.pop_front() {
-                    blocked.push_back(k);
+                    self.blocked_scratch.push_back(k);
                 }
                 break;
             };
@@ -706,9 +726,10 @@ impl ActuatorState {
                 engine_in,
             );
         }
-        for k in blocked {
-            // The flag is already true (we set it when we pushed and only
-            // cleared it on successful spawn). Defensive: ensure it.
+        // Drain (don't consume) so the deque retains its capacity for the
+        // next pump. The flag is already true (we set it when we pushed
+        // and only cleared it on successful spawn). Defensive: ensure it.
+        while let Some(k) = self.blocked_scratch.pop_front() {
             if let Some(slot) = self.slots.get_mut(&k) {
                 slot.in_ready_queue = true;
             }
@@ -774,7 +795,13 @@ impl ActuatorState {
             }
         });
 
-        *self.running_per_sub.entry(sub).or_insert(0) += 1;
+        // Counter bump symmetric with `terminate_plan`'s decrement;
+        // overflow would require billions of concurrent plans per Sub,
+        // which is structurally impossible (concurrency cap +
+        // per-Sub gate hold at most `permits.cap()` Subs at once).
+        let counter = self.running_per_sub.entry(sub).or_insert(0);
+        debug_assert!(*counter < u32::MAX, "running_per_sub counter overflow");
+        *counter += 1;
         match self.spawn_step_with_permit(
             &key,
             sub,
@@ -1256,14 +1283,26 @@ impl ActuatorState {
         // when this function returns, leaving the timer threads (and
         // the aggregating PipeWaiter, which has its own per-stage
         // clones) as the per-stage signaler co-owners.
-        let timer_specs: Vec<Option<TimerSpec>> = stages
+        //
+        // `filter_map` collects only the stages that carry a timeout —
+        // most pipes don't, and reserving slot space for absent specs
+        // would waste a `Vec<Option<…>>` over `Vec<(usize, …)>`. The
+        // `usize` is the stage index so the consumer loop can name
+        // threads by stage.
+        let timer_specs: Vec<(usize, TimerSpec)> = stages
             .iter()
+            .zip(stage_signalers.iter())
             .enumerate()
-            .map(|(idx, stage)| {
-                stage.timeout.map(|deadline| TimerSpec {
-                    deadline,
-                    grace: self.shutdown_grace,
-                    signaler: Arc::clone(&stage_signalers[idx]),
+            .filter_map(|(idx, (stage, signaler))| {
+                stage.timeout.map(|deadline| {
+                    (
+                        idx,
+                        TimerSpec {
+                            deadline,
+                            grace: self.shutdown_grace,
+                            signaler: Arc::clone(signaler),
+                        },
+                    )
                 })
             })
             .collect();
@@ -1299,20 +1338,18 @@ impl ActuatorState {
         // Per-stage timers. Best-effort: a spawn-failure for one
         // stage's timer leaves that stage without a deadline but the
         // rest of the pipe and the other timers are unaffected.
-        for (idx, spec_opt) in timer_specs.into_iter().enumerate() {
-            if let Some(spec) = spec_opt {
-                let timer_name = format!("pipe-c{cursor}-s{idx}-pid{last_pid}");
-                if let Err(e) =
-                    timer::spawn_timer(&timer_name, spec.deadline, spec.grace, spec.signaler)
-                {
-                    tracing::error!(
-                        ?key,
-                        cursor,
-                        stage = idx,
-                        ?e,
-                        "per-stage timer thread spawn failed; deadline not enforced",
-                    );
-                }
+        for (idx, spec) in timer_specs {
+            let timer_name = format!("pipe-c{cursor}-s{idx}-pid{last_pid}");
+            if let Err(e) =
+                timer::spawn_timer(&timer_name, spec.deadline, spec.grace, spec.signaler)
+            {
+                tracing::error!(
+                    ?key,
+                    cursor,
+                    stage = idx,
+                    ?e,
+                    "per-stage timer thread spawn failed; deadline not enforced",
+                );
             }
         }
 
@@ -1385,7 +1422,7 @@ impl ActuatorState {
             let slot = self
                 .slots
                 .get_mut(key)
-                .expect("slot present at wait-thread-spawn-failure recovery");
+                .expect("slot installed by this call; controller is single-threaded");
             let job = slot
                 .running
                 .take()

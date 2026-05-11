@@ -116,57 +116,70 @@ impl Spawner for OsSpawner {
             }
         }
 
-        // 1) Create N-1 pipes, all CLOEXEC. `nix::unistd::pipe` returns
-        //    `OwnedFd`s; we set FD_CLOEXEC explicitly because macOS lacks
-        //    `pipe2`. CLOEXEC prevents the pipe fds from leaking into
-        //    later child processes (other than via the explicit
-        //    `Stdio::from(dup)` we route into stdin/stdout, which clears
-        //    CLOEXEC on the dup2'd target fd in the child).
-        let mut pipes: Vec<(OwnedFd, OwnedFd)> = Vec::with_capacity(n - 1);
-        for _ in 0..(n - 1) {
-            pipes.push(create_cloexec_pipe()?);
-        }
-
-        // 2) Spawn each stage. On any failure roll back: SIGKILL +
-        //    reap_blocking the previously-spawned stages, drop the
-        //    pipes Vec (closes both ends of every pipe in the parent),
-        //    and return the error.
+        // Pipe layout: interleave pipe(2) creation with each stage's
+        // spawn so the parent holds at most one pipe pair's fds at any
+        // moment, rather than all N-1 pairs up front. Caps the parent-
+        // side fd footprint at ~3 fds even for deep pipes — relevant on
+        // hosts under fd pressure (kqueue watchers already consume one
+        // O_EVTONLY fd per watched directory).
+        //
+        // `prev_read` carries pipe K-1's read end (whose write end was
+        // moved into stage K-1's stdout on the prior iter) into iter K
+        // as stage K's stdin. After each non-last iter sets it; the next
+        // iter consumes it via `take()`. The OwnedFds are *moved* (not
+        // cloned) into `Stdio::from`, which consumes them — parent's
+        // copy closes as soon as `cmd` is dropped at end of iter. The
+        // child's dup'd fd (stdin fd 0 / stdout fd 1) carries forward
+        // the pipe through fork+exec; CLOEXEC on the OwnedFd is cleared
+        // by dup2 on the dup target only (the source keeps CLOEXEC and
+        // closes anyway when the parent drops it).
+        //
+        // Producer write-end timing: by moving pipe K-1's write end
+        // into stage K-1's stdout (rather than holding a parent copy
+        // until end of function), the kernel sees zero parent-side
+        // writers from the moment iter K-1 returns. When stage K-1
+        // exits, its dup of pipe K-1's write end is the only remaining
+        // writer; closing it gives stage K a prompt EOF rather than
+        // hanging waiting for an end-of-function `drop(pipes)`.
+        let mut prev_read: Option<OwnedFd> = None;
         let mut stage_waiters: Vec<Box<dyn ChildWaiter>> = Vec::with_capacity(n);
         let mut stage_signalers: Vec<Arc<dyn ChildSignaler>> = Vec::with_capacity(n);
         let mut last_pid: u32 = 0;
 
-        for idx in 0..n {
+        for (idx, stage) in stages.iter().enumerate() {
+            let is_last = idx == n - 1;
+
             let stdin = if idx == 0 {
                 Stdio::null()
             } else {
-                // `OwnedFd::try_clone` uses `F_DUPFD_CLOEXEC` on Unix
-                // (Linux + macOS), so the clone is also CLOEXEC.
-                // `Stdio::from(clone)` consumes the clone; std's spawn
-                // dup2's it into the child's stdin (fd 0), clearing
-                // CLOEXEC on that target in the child only. The original
-                // in our `pipes` Vec stays put — dropped after the loop.
-                match pipes[idx - 1].0.try_clone() {
-                    Ok(fd) => Stdio::from(fd),
-                    Err(e) => {
-                        rollback_partial_pipe(&stage_signalers);
-                        return Err(e);
-                    }
-                }
+                let read = prev_read
+                    .take()
+                    .expect("prev_read set by the previous non-last iter");
+                Stdio::from(read)
             };
-            let stdout = if idx == n - 1 {
+
+            let stdout = if is_last {
                 if capture_output {
                     Stdio::inherit()
                 } else {
                     Stdio::null()
                 }
             } else {
-                match pipes[idx].1.try_clone() {
-                    Ok(fd) => Stdio::from(fd),
+                // `create_cloexec_pipe` returns `(read, write)`. The
+                // write end becomes this stage's stdout (moved into
+                // Stdio::from). The read end is parked in `prev_read`
+                // for the next iter's stdin. On failure here, prior
+                // stages roll back; the just-taken stdin OwnedFd (if
+                // any) drops via Stdio's OwnedFd Drop.
+                let (read, write) = match create_cloexec_pipe() {
+                    Ok(p) => p,
                     Err(e) => {
                         rollback_partial_pipe(&stage_signalers);
                         return Err(e);
                     }
-                }
+                };
+                prev_read = Some(read);
+                Stdio::from(write)
             };
             let stderr = if capture_output {
                 Stdio::inherit()
@@ -174,7 +187,6 @@ impl Spawner for OsSpawner {
                 Stdio::null()
             };
 
-            let stage = &stages[idx];
             let mut cmd = build_command(
                 &stage.argv[0],
                 &stage.argv[1..],
@@ -187,6 +199,11 @@ impl Spawner for OsSpawner {
             let child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {
+                    // `cmd` drops on early return, closing the Stdio-
+                    // held OwnedFds (this iter's stdin/stdout pipe
+                    // ends) in the parent. `prev_read` (if Some — this
+                    // iter parked the new pipe's read end before
+                    // calling spawn) drops at function exit.
                     rollback_partial_pipe(&stage_signalers);
                     return Err(e);
                 }
@@ -196,17 +213,14 @@ impl Spawner for OsSpawner {
             stage_waiters.push(Box::new(waiter));
             stage_signalers.push(Arc::new(signaler));
         }
+        debug_assert!(
+            prev_read.is_none(),
+            "last iter does not create a pipe; prev_read must be consumed by the loop",
+        );
 
-        // 3) Drop pipes in the parent. Each child holds its own dup'd
-        //    fd as its stdin/stdout; the parent's copies are no longer
-        //    needed and must close so that when an upstream stage exits
-        //    the downstream stage observes EOF on its stdin (the kernel
-        //    SIGPIPE chain depends on every writer being dropped).
-        drop(pipes);
-
-        // 4) Build the aggregating waiter and combined signaler.
-        //    Per-stage signalers ride out to the PipeSpawnHandles so the
-        //    controller can arm per-stage timers.
+        // Build the aggregating waiter and combined signaler. Per-stage
+        // signalers ride out to the PipeSpawnHandles so the controller
+        // can arm per-stage timers.
         let combined: Arc<dyn ChildSignaler> = Arc::new(CombinedSignaler::new(
             stage_signalers.clone().into_boxed_slice(),
         ));

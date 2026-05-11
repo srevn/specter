@@ -267,7 +267,21 @@ fn compute_target_path(effect: &Effect) -> Cow<'_, Path> {
     }
 }
 
+/// Initial capacity for the resolver's per-resolve scratch buffer
+/// ([`substitute_argv`]). Sized for "typical short argv slot" — long
+/// enough that most slots accumulate in-place without growth, small
+/// enough that the per-resolve baseline isn't wasteful. Slots longer
+/// than this grow scratch's allocation once; the grown capacity persists
+/// across subsequent slot renders within the same resolve.
+const SUBSTITUTE_SCRATCH_CAPACITY: usize = 64;
+
 /// Substitute placeholders into argv slots for one step.
+///
+/// Threads a single [`String`] scratch buffer through
+/// [`substitute_one`]. The buffer's allocation is reused across slot
+/// renders within this call: short slots accumulate without growth, and
+/// the slot pushed to `out` is a `clone` of scratch's current content
+/// (exact-size allocation, no over-reserved trailing capacity).
 fn substitute_argv(
     exec: &ExecAction,
     effect: &Effect,
@@ -278,6 +292,7 @@ fn substitute_argv(
 ) -> Result<Vec<String>, ResolveError> {
     let template = &exec.argv;
     let mut argv = Vec::with_capacity(template.len());
+    let mut scratch = String::with_capacity(SUBSTITUTE_SCRATCH_CAPACITY);
     for arg in template {
         substitute_one(
             arg,
@@ -288,6 +303,7 @@ fn substitute_argv(
             effect.diff.as_deref(),
             env_snapshot,
             &mut argv,
+            &mut scratch,
         )?;
     }
     Ok(argv)
@@ -297,6 +313,14 @@ fn substitute_argv(
 /// `out`. Returns `Err` on the first [`ArgPart::EnvVar`] that resolves
 /// to neither a snapshot entry nor a `:-` default literal — short-
 /// circuits to the caller, which fails the plan with `EffectOutcome::Failed`.
+///
+/// `scratch` is a caller-owned [`String`] reused across calls. Cleared at
+/// the top; built up via `push_str`; cloned (not moved) into `out` at
+/// slot emission so the buffer's allocation survives for the next call.
+/// The multi-value arm allocates a fresh slot per emitted entry — the
+/// shared scratch prefix and the per-entry suffix are sized exactly so
+/// no growth pass is needed.
+#[allow(clippy::too_many_arguments)]
 fn substitute_one(
     arg: &ArgTemplate,
     effect: &Effect,
@@ -306,44 +330,51 @@ fn substitute_one(
     diff: Option<&Diff>,
     env_snapshot: &EnvSnapshot,
     out: &mut Vec<String>,
+    scratch: &mut String,
 ) -> Result<(), ResolveError> {
-    let mut prefix = String::new();
+    scratch.clear();
     let mut emitted_any = false;
     for part in &arg.parts {
         match part {
-            ArgPart::Literal(s) => prefix.push_str(s),
+            ArgPart::Literal(s) => scratch.push_str(s),
             ArgPart::Placeholder(p) => match p {
-                Placeholder::Path => prefix.push_str(&target_path.to_string_lossy()),
-                Placeholder::Relative => prefix.push_str(&effect.target_relative),
-                Placeholder::Anchor => prefix.push_str(&effect.anchor_path.to_string_lossy()),
-                Placeholder::Watch => prefix.push_str(&effect.sub_name),
-                Placeholder::Parent => prefix.push_str(parent_str),
-                Placeholder::Time => prefix.push_str(time_str),
+                Placeholder::Path => scratch.push_str(&target_path.to_string_lossy()),
+                Placeholder::Relative => scratch.push_str(&effect.target_relative),
+                Placeholder::Anchor => scratch.push_str(&effect.anchor_path.to_string_lossy()),
+                Placeholder::Watch => scratch.push_str(&effect.sub_name),
+                Placeholder::Parent => scratch.push_str(parent_str),
+                Placeholder::Time => scratch.push_str(time_str),
                 Placeholder::Created
                 | Placeholder::Deleted
                 | Placeholder::Modified
                 | Placeholder::RenamedFrom
                 | Placeholder::RenamedTo
                 | Placeholder::Excluded => {
+                    // Exact-size allocation per emitted entry. The
+                    // scratch prefix is the accumulated literal+single-
+                    // value content up to this point; `v` is the
+                    // per-entry suffix. Sizing precisely here is one
+                    // alloc per emitted slot, no growth.
                     for_each_multivalue(*p, effect, diff, |v| {
-                        let mut slot = prefix.clone();
+                        let mut slot = String::with_capacity(scratch.len() + v.len());
+                        slot.push_str(scratch);
                         slot.push_str(v);
                         out.push(slot);
                         emitted_any = true;
                     });
-                    prefix.clear();
+                    scratch.clear();
                 }
             },
             ArgPart::EnvVar { name, default } => {
-                // Single-value substitution: append to `prefix`,
+                // Single-value substitution: append to `scratch`,
                 // identical to `Literal` / single-value placeholder
                 // semantics. The lexer's grammar guarantees `name` is
                 // a byte-identical match candidate against the
                 // snapshot's `BTreeMap` keys.
                 match env_snapshot.get(name) {
-                    Some(value) => prefix.push_str(value),
+                    Some(value) => scratch.push_str(value),
                     None => match default {
-                        Some(d) => prefix.push_str(d),
+                        Some(d) => scratch.push_str(d),
                         None => {
                             return Err(ResolveError::UnsetEnvVar { name: name.clone() });
                         }
@@ -353,18 +384,19 @@ fn substitute_one(
         }
     }
     // If a multi-value placeholder emitted at least one slot, a non-empty
-    // trailing prefix becomes its own standalone slot. Otherwise the
-    // prefix is the single slot for this ArgTemplate.
+    // trailing scratch becomes its own standalone slot. Otherwise the
+    // scratch is the single slot for this ArgTemplate. The clone keeps
+    // scratch's capacity alive for the next ArgTemplate.
     if emitted_any {
-        if !prefix.is_empty() {
-            out.push(prefix);
+        if !scratch.is_empty() {
+            out.push(scratch.clone());
         }
     } else if has_multivalue(arg) {
         // A multi-value placeholder consumed but yielded zero entries:
         // drop the entire ArgTemplate (zero argv slots). Empty-diff /
         // empty-exclude case.
     } else {
-        out.push(prefix);
+        out.push(scratch.clone());
     }
     Ok(())
 }

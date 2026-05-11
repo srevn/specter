@@ -1,11 +1,10 @@
-//! F1 regression: pipe drain must not deadlock when stage 0's child
+//! End-to-end pin: pipe drain must not deadlock when stage 0's child
 //! blocks indefinitely.
 //!
 //! The parallel `PipeWaiter` (one OS thread per stage) lets stage 1's
-//! prompt failure fire the cascade SIGTERM that unblocks stage 0.
-//! Under the prior sequential design, this test would hang until
-//! stage 0's `sleep 60` finished — effectively forever for any
-//! per-test timeout.
+//! prompt failure fire the cascade SIGTERM that unblocks stage 0. A
+//! sequential waiter would head-of-line block on stage 0 and hang
+//! indefinitely waiting for its `sleep 60` to return.
 //!
 //! Pairs with the in-crate unit test
 //! `pipe::tests::blocked_first_stage_unblocked_by_cascade_does_not_deadlock`,
@@ -44,9 +43,10 @@ fn pipe_program(stages: Vec<Vec<String>>) -> Arc<ActionProgram> {
     Arc::new(b.build().unwrap())
 }
 
-/// F1 regression: stage 0 blocks (`sleep 60`); stage 1 fails after
-/// ~2s. The parallel `PipeWaiter` must report `Failed` well under the
-/// 60-second sleep window.
+/// Stage 0 blocks (`sleep 60`); stage 1 fails after ~2s. The parallel
+/// `PipeWaiter` must report `Failed` well under the 60-second sleep
+/// window, demonstrating that cascade SIGTERM from stage 1's report
+/// reaches stage 0's still-running child.
 ///
 /// **Outcome aggregation pins.** Stage 0 (sleep, no stdout) ignores
 /// SIGPIPE — it exits only because the cascade SIGTERM lands on it,

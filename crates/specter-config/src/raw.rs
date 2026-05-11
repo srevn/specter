@@ -119,12 +119,89 @@ pub(crate) struct RawAction {
 /// pipe stage cannot itself be a pipe or a conditional. A future
 /// relaxation would swap this for a `Box<RawAction>` and let the
 /// validator recurse.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// `Deserialize` is hand-rolled (rather than derived with
+/// `deny_unknown_fields`) so the common operator mistake of putting a
+/// `pipe`/`when`/`then`/`else` tag inside a predicate or pipe stage
+/// surfaces with a hint pointing at the top-level form, instead of an
+/// opaque "unknown field" message.
+#[derive(Debug)]
 pub(crate) struct RawExec {
     pub exec: Vec<String>,
-    #[serde(default, with = "humantime_serde")]
     pub timeout: Option<Duration>,
+}
+
+impl<'de> serde::Deserialize<'de> for RawExec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(RawExecVisitor)
+    }
+}
+
+struct RawExecVisitor;
+
+impl<'de> serde::de::Visitor<'de> for RawExecVisitor {
+    type Value = RawExec;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a table with `exec` (and optional `timeout`)")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<RawExec, A::Error> {
+        let mut exec: Option<Vec<String>> = None;
+        let mut timeout: Option<Duration> = None;
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "exec" => {
+                    if exec.is_some() {
+                        return Err(serde::de::Error::duplicate_field("exec"));
+                    }
+                    exec = Some(map.next_value()?);
+                }
+                "timeout" => {
+                    if timeout.is_some() {
+                        return Err(serde::de::Error::duplicate_field("timeout"));
+                    }
+                    // Wrapper adapts humantime_serde::deserialize (which
+                    // takes a Deserializer) to MapAccess::next_value
+                    // (which takes a Deserialize impl).
+                    timeout = Some(map.next_value::<HumantimeDuration>()?.0);
+                }
+                // Variant tags valid at the top-level
+                // `[[watch.actions]]` row but rejected inside a nested
+                // exec slot (predicate `when`, pipe stage). The
+                // `deny_unknown_fields` default would surface this as
+                // "unknown field `pipe`, expected one of `exec`,
+                // `timeout`" — true but unhelpful. Emit a hint that
+                // names the structural rule instead.
+                "pipe" | "when" | "then" | "else" => {
+                    return Err(serde::de::Error::custom(format!(
+                        "`{key}` not allowed inside a nested exec table — only \
+                         `exec` and `timeout` are valid here. Conditionals and \
+                         pipes must appear at the top level of `[[watch.actions]]`."
+                    )));
+                }
+                _ => {
+                    return Err(serde::de::Error::unknown_field(&key, &["exec", "timeout"]));
+                }
+            }
+        }
+
+        let exec = exec.ok_or_else(|| serde::de::Error::missing_field("exec"))?;
+        Ok(RawExec { exec, timeout })
+    }
+}
+
+/// Adapter that routes `Duration` through `humantime_serde` for use
+/// inside `MapAccess::next_value::<T>()` calls where `T: Deserialize`.
+/// Equivalent to `#[serde(with = "humantime_serde")]` on a derived
+/// field, but usable from the hand-rolled visitor above.
+struct HumantimeDuration(Duration);
+
+impl<'de> serde::Deserialize<'de> for HumantimeDuration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        humantime_serde::deserialize(deserializer).map(HumantimeDuration)
+    }
 }
 
 #[cfg(test)]
