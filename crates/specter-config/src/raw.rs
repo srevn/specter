@@ -65,6 +65,16 @@ pub(crate) struct RawAction {
     /// requires exactly one variant set per action; once future variants
     /// land, the `exactly_one` check stays the same shape.
     pub exec: Option<Vec<String>>,
+    /// Per-step deadline in humantime format (`"500ms"`, `"30s"`,
+    /// `"5m"`). Valid only on `exec`-bearing actions; validation rejects
+    /// it on future non-exec variants (pipe stages will carry their own
+    /// per-stage `timeout` once that variant lands). `None` ⇒ no
+    /// deadline. Threaded onto [`specter_core::ExecAction::timeout`]
+    /// and enforced by the actuator's per-step timer thread:
+    /// SIGTERM at `now + timeout`, SIGKILL after the actuator's
+    /// `shutdown_grace`.
+    #[serde(default, with = "humantime_serde")]
+    pub timeout: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -77,7 +87,10 @@ impl RawWatch {
         Self {
             name,
             path,
-            actions: vec![RawAction { exec: Some(exec) }],
+            actions: vec![RawAction {
+                exec: Some(exec),
+                timeout: None,
+            }],
             recursive: None,
             pattern: None,
             exclude: None,

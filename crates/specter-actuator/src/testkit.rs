@@ -224,4 +224,7 @@ impl ChildSignaler for MockChildSignaler {
         self.dead.store(true, Ordering::SeqCst);
         Ok(())
     }
+    fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::SeqCst)
+    }
 }

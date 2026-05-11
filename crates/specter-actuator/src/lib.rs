@@ -30,6 +30,8 @@
 #![warn(unsafe_code)]
 
 #[cfg(unix)]
+mod env;
+#[cfg(unix)]
 mod os;
 #[cfg(unix)]
 mod permits;
@@ -39,6 +41,8 @@ mod pool;
 mod resolve;
 #[cfg(unix)]
 mod spawner;
+#[cfg(unix)]
+mod timer;
 #[cfg(unix)]
 mod tmp;
 

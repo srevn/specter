@@ -119,7 +119,9 @@
 //! risk of one surface formatting differently from the other under
 //! future edits.
 
+use crate::env::EnvSnapshot;
 use crate::spawner::EnvVar;
+use compact_str::CompactString;
 use specter_core::{
     ArgPart, ArgTemplate, CommandResolved, DedupKey, Diff, Effect, ExecAction, Placeholder,
     ResourceKind,
@@ -127,6 +129,41 @@ use specter_core::{
 use std::borrow::Cow;
 use std::path::Path;
 use std::time::SystemTime;
+
+/// Resolver-side failure. Surfaces only causes the resolver can detect
+/// without spawning a process; OS-level spawn failures are still
+/// signalled by [`super::pool::state::SpawnError::Failed`] at the
+/// `spawner.spawn` boundary.
+///
+/// v1 has one variant — strict `${env.<NAME>}` references that found
+/// neither an entry in the captured snapshot nor a `:-default` literal.
+/// The caller maps every variant to
+/// `EffectOutcome::Failed { exit_code: None, signal: None }` after a
+/// `tracing::error!` log line; the operator sees a clear "Specter could
+/// not satisfy a required env reference" message in their journal.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum ResolveError {
+    /// `${env.<NAME>}` references an unset env var with no default
+    /// literal. The captured snapshot returned `None` and the template
+    /// carries `default: None`. Strict mode: a misconfigured TOML must
+    /// not silently render the empty string — operators opt into
+    /// lenient explicitly with `${env.NAME:-}` (empty default) or
+    /// `${env.NAME:-fallback}` (literal default).
+    UnsetEnvVar { name: CompactString },
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsetEnvVar { name } => write!(
+                f,
+                "env var `{name}` is unset and the placeholder has no `:-` default",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
 
 /// Resolve one [`ExecAction`] step against its owning [`Effect`] —
 /// rendering argv plus the standard `SPECTER_*` env-var set. See module
@@ -143,24 +180,31 @@ use std::time::SystemTime;
 /// otherwise `None`. The resolver emits `SPECTER_DIFF_PATH` in
 /// alphabetical position iff this is `Some`, keeping env order total
 /// across the spawn-time set the child observes.
-#[must_use]
 pub(crate) fn resolve_step<'a>(
     effect: &'a Effect,
     exec: &'a ExecAction,
     now: SystemTime,
     diff_path: Option<&'a Path>,
-) -> (CommandResolved, Vec<EnvVar<'a>>) {
+    env_snapshot: &EnvSnapshot,
+) -> Result<(CommandResolved, Vec<EnvVar<'a>>), ResolveError> {
     // Materialise once, share with both surfaces.
     let target_path = compute_target_path(effect);
     let parent_str = parent_string(&target_path);
     let time_str = format_now(now);
 
-    let argv = substitute_argv(exec, effect, &target_path, &parent_str, &time_str);
+    let argv = substitute_argv(
+        exec,
+        effect,
+        &target_path,
+        &parent_str,
+        &time_str,
+        env_snapshot,
+    )?;
     // Argv done with `parent_str` / `time_str` — move them into the env
     // vec as `Cow::Owned` instead of cloning at the SPECTER_PARENT /
     // SPECTER_TIME push sites.
     let env = build_env(effect, &target_path, parent_str, time_str, diff_path);
-    (CommandResolved { argv }, env)
+    Ok((CommandResolved { argv }, env))
 }
 
 /// Choose the spawn cwd for `effect`.
@@ -212,7 +256,8 @@ fn substitute_argv(
     target_path: &Path,
     parent_str: &str,
     time_str: &str,
-) -> Vec<String> {
+    env_snapshot: &EnvSnapshot,
+) -> Result<Vec<String>, ResolveError> {
     let template = &exec.argv;
     let mut argv = Vec::with_capacity(template.len());
     for arg in template {
@@ -223,14 +268,17 @@ fn substitute_argv(
             parent_str,
             time_str,
             effect.diff.as_deref(),
+            env_snapshot,
             &mut argv,
-        );
+        )?;
     }
-    argv
+    Ok(argv)
 }
 
 /// Render one [`ArgTemplate`] into zero or more argv slots, appending to
-/// `out`.
+/// `out`. Returns `Err` on the first [`ArgPart::EnvVar`] that resolves
+/// to neither a snapshot entry nor a `:-` default literal — short-
+/// circuits to the caller, which fails the plan with `EffectOutcome::Failed`.
 fn substitute_one(
     arg: &ArgTemplate,
     effect: &Effect,
@@ -238,8 +286,9 @@ fn substitute_one(
     parent_str: &str,
     time_str: &str,
     diff: Option<&Diff>,
+    env_snapshot: &EnvSnapshot,
     out: &mut Vec<String>,
-) {
+) -> Result<(), ResolveError> {
     let mut prefix = String::new();
     let mut emitted_any = false;
     for part in &arg.parts {
@@ -267,14 +316,21 @@ fn substitute_one(
                     prefix.clear();
                 }
             },
-            ArgPart::EnvVar { .. } => {
-                // PR1 carries the variant in core but the template
-                // lexer doesn't yet emit it (Slice 2 of the
-                // action-types expansion). Validation cannot produce
-                // `EnvVar`, so the resolver never sees one in PR1.
-                unreachable!(
-                    "ArgPart::EnvVar unreachable until lexer ${{env.<NAME>}} support lands",
-                );
+            ArgPart::EnvVar { name, default } => {
+                // Single-value substitution: append to `prefix`,
+                // identical to `Literal` / single-value placeholder
+                // semantics. The lexer's grammar guarantees `name` is
+                // a byte-identical match candidate against the
+                // snapshot's `BTreeMap` keys.
+                match env_snapshot.get(name) {
+                    Some(value) => prefix.push_str(value),
+                    None => match default {
+                        Some(d) => prefix.push_str(d),
+                        None => {
+                            return Err(ResolveError::UnsetEnvVar { name: name.clone() });
+                        }
+                    },
+                }
             }
         }
     }
@@ -292,6 +348,7 @@ fn substitute_one(
     } else {
         out.push(prefix);
     }
+    Ok(())
 }
 
 fn has_multivalue(arg: &ArgTemplate) -> bool {

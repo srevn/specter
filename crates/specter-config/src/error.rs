@@ -72,6 +72,17 @@ pub enum IssueKind {
     /// directly). Distinct from [`Self::InvalidPattern`] so the
     /// dispatcher's contract is observable in error output.
     PathContainsGlobChars,
+    /// `actions[i].timeout` is set on an action variant that doesn't
+    /// support a top-level timeout. v1: only `exec` accepts it. Future
+    /// variants (`pipe`, `conditional`) set timeouts on their stages /
+    /// predicate, not on the action itself; this kind catches the
+    /// "operator misread the schema" case at config-load time.
+    TimeoutNotApplicable,
+    /// `actions[i].timeout` is `Some(Duration::ZERO)`. A zero-duration
+    /// timeout would SIGTERM the child before it makes any progress,
+    /// which is almost certainly a typo. Operators wanting "no
+    /// deadline" omit the field entirely.
+    TimeoutZero,
 }
 
 impl ConfigError {
@@ -175,5 +186,7 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::InvalidName => "invalid-name",
         IssueKind::InvalidPattern => "invalid-pattern",
         IssueKind::PathContainsGlobChars => "path-contains-glob-chars",
+        IssueKind::TimeoutNotApplicable => "timeout-not-applicable",
+        IssueKind::TimeoutZero => "timeout-zero",
     }
 }

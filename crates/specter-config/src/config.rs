@@ -642,20 +642,47 @@ fn validate_one_action(
         ));
         return None;
     }
+    // `timeout` is exec-only in v1. Future non-exec variants
+    // (`pipe`, `conditional`) carry timeouts on their stages /
+    // predicate, not on the top-level action. The variant-applicability
+    // check stays here so the rule is co-located with the dispatch.
+    if raw.timeout.is_some() && raw.exec.is_none() {
+        errors.push(ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::TimeoutNotApplicable,
+            format!(
+                "actions[{action_idx}]: top-level `timeout` requires `exec` \
+                 (other action variants set their own per-stage timeouts)",
+            ),
+        ));
+        return None;
+    }
     if let Some(argv) = raw.exec.as_deref() {
-        return validate_exec_argv(watch_idx, action_idx, argv, errors).map(Action::Exec);
+        return validate_exec_argv(watch_idx, action_idx, argv, raw.timeout, errors)
+            .map(Action::Exec);
     }
     // Unreachable in v1: variants_set ≥ 1 with `exec` the only field.
     None
 }
 
-/// Validate one `exec = [...]` argv. Each empty slot or parse failure
-/// yields one [`ValidationIssue`]; the function returns `None` on any
-/// failure so the partial argv can't reach the engine.
+/// Validate one `exec = [...]` argv plus its optional `timeout`. Each
+/// empty slot or parse failure yields one [`ValidationIssue`]; the
+/// function returns `None` on any failure so the partial argv can't
+/// reach the engine.
+///
+/// `timeout` is the operator-supplied per-step deadline (humantime
+/// at the TOML layer; [`Duration`] here). When `Some`, the validated
+/// duration is also checked for `> 0` — a zero-duration timeout is
+/// rejected as a configuration error: the SIGTERM would fire before
+/// the child has any chance to make progress, which is almost
+/// certainly a typo (`"0s"`, `"0ms"`). Operators wanting "no timeout"
+/// omit the field entirely.
 fn validate_exec_argv(
     watch_idx: usize,
     action_idx: usize,
     raw_argv: &[String],
+    timeout: Option<Duration>,
     errors: &mut Vec<ValidationIssue>,
 ) -> Option<ExecAction> {
     if raw_argv.is_empty() {
@@ -693,10 +720,28 @@ fn validate_exec_argv(
             }
         }
     }
+    if let Some(d) = timeout
+        && d.is_zero()
+    {
+        errors.push(ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::TimeoutZero,
+            format!(
+                "actions[{action_idx}].timeout must be > 0 \
+                 (omit the field for `no deadline`)",
+            ),
+        ));
+        any_failed = true;
+    }
     if any_failed {
         None
     } else {
-        Some(ExecAction::new(argv))
+        let exec = ExecAction::new(argv);
+        Some(match timeout {
+            Some(d) => exec.with_timeout(d),
+            None => exec,
+        })
     }
 }
 

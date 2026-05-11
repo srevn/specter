@@ -172,6 +172,9 @@ impl ChildSignaler for OsChildSignaler {
         self.dead.store(true, Ordering::SeqCst);
         Ok(())
     }
+    fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::SeqCst)
+    }
 }
 
 #[allow(clippy::cast_possible_wrap)]

@@ -14,17 +14,32 @@
 //! SIGKILL stragglers, drain remaining reaps.
 
 mod state;
+use crate::env::EnvSnapshot;
 use crate::spawner::Spawner;
 use crossbeam::channel::{Receiver, Sender};
 use specter_core::{CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId};
 use state::ActuatorState;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Sentinel for "default concurrency" passed to [`SubprocessActuator::new`].
 /// Resolved to `2 * num_cpus` (or `4` if `num_cpus` is unavailable). The
 /// bin's CLI flag passes a non-zero value when set.
 pub const DEFAULT_CONCURRENCY: usize = 0;
+
+/// SIGTERM → SIGKILL grace, pinned in one place so the shutdown drain
+/// and per-step timer threads can't drift apart.
+///
+/// Read by:
+/// - [`SubprocessActuator::shutdown`] (the SIGTERM → grace → SIGKILL
+///   sequence).
+/// - [`crate::timer::spawn_timer`] (per-step deadline enforcement).
+///
+/// Default for production; tests may override via
+/// [`SubprocessActuator::new_with_grace`] /
+/// [`SubprocessActuator::new_with_grace_and_env`].
+pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Signal from a wait thread back to the controller.
 #[derive(Debug)]
@@ -35,6 +50,20 @@ pub struct Reaped {
     pub outcome: EffectOutcome,
 }
 
+/// Resolve a `concurrency: usize` knob into a [`NonZeroUsize`]:
+/// `0` ⇒ `2 × available_parallelism()` (fallback `4`); non-zero ⇒
+/// pass-through. Shared between [`SubprocessActuator::new`] and the
+/// test constructors so the resolution logic stays single-source.
+fn resolve_concurrency(concurrency: usize) -> NonZeroUsize {
+    let fallback = NonZeroUsize::new(4).expect("4 is non-zero");
+    NonZeroUsize::new(concurrency).unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .ok()
+            .and_then(|n| NonZeroUsize::new(n.get().saturating_mul(2)))
+            .unwrap_or(fallback)
+    })
+}
+
 /// The actuator's controller. One per process. Owns the slot map, ready
 /// queue, per-Sub counter, and global semaphore. Blocks in [`Self::run`]
 /// for the lifetime of the bin process.
@@ -43,7 +72,6 @@ pub struct SubprocessActuator {
     state: ActuatorState,
     reap_tx: Sender<Reaped>,
     reap_rx: Receiver<Reaped>,
-    shutdown_grace: Duration,
 }
 
 impl SubprocessActuator {
@@ -52,35 +80,44 @@ impl SubprocessActuator {
     /// values pass through. The `0`-sentinel is the only place this
     /// crate resolves "default concurrency"; everything below
     /// [`ActuatorState::new`] receives a [`NonZeroUsize`] and trusts it.
+    ///
+    /// Captures the current process env via [`EnvSnapshot::capture`] —
+    /// invoked exactly once per actuator. The snapshot is shared by
+    /// `Arc` across the resolver's per-step calls.
     #[must_use]
     pub fn new(concurrency: usize) -> Self {
-        let fallback = NonZeroUsize::new(4).expect("4 is non-zero");
-        let resolved = NonZeroUsize::new(concurrency).unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .ok()
-                .and_then(|n| NonZeroUsize::new(n.get().saturating_mul(2)))
-                .unwrap_or(fallback)
-        });
+        let resolved = resolve_concurrency(concurrency);
         let (reap_tx, reap_rx) = crossbeam::channel::bounded::<Reaped>(64);
         Self {
-            state: ActuatorState::new(resolved),
+            state: ActuatorState::new(resolved, Arc::new(EnvSnapshot::capture()), SHUTDOWN_GRACE),
             reap_tx,
             reap_rx,
-            shutdown_grace: Duration::from_secs(5),
         }
     }
 
-    /// Test-only constructor with a custom shutdown grace.
+    /// Test-only constructor with both a custom shutdown grace and a
+    /// preconstructed env snapshot. Used by tests that need to assert
+    /// shutdown timing or `${env.<NAME>}` resolution (strict-unset →
+    /// Failed, default rendering, etc.) without depending on the
+    /// ambient process env.
     ///
     /// Gated to match the test module (`cfg(all(test, feature = "testkit"))`)
     /// — without `testkit`, the test module that consumes this constructor
     /// is excluded too, so the function would otherwise be flagged as
     /// dead code under `cargo test --lib` (no features).
     #[cfg(all(test, feature = "testkit"))]
-    pub(crate) fn new_with_grace(concurrency: usize, grace: Duration) -> Self {
-        let mut s = Self::new(concurrency);
-        s.shutdown_grace = grace;
-        s
+    pub(crate) fn new_with_grace_and_env(
+        concurrency: usize,
+        grace: Duration,
+        env: Arc<EnvSnapshot>,
+    ) -> Self {
+        let resolved = resolve_concurrency(concurrency);
+        let (reap_tx, reap_rx) = crossbeam::channel::bounded::<Reaped>(64);
+        Self {
+            state: ActuatorState::new(resolved, env, grace),
+            reap_tx,
+            reap_rx,
+        }
     }
 
     /// Block until shutdown. Drains effects, dispatches to spawner,
@@ -151,7 +188,7 @@ impl SubprocessActuator {
         // when we entered shutdown (operator double-Ctrl-C), skip the
         // grace entirely. Otherwise the loop also watches
         // `hard_shutdown_rx` and breaks early if it fires mid-grace.
-        let deadline = Instant::now() + self.shutdown_grace;
+        let deadline = Instant::now() + self.state.shutdown_grace;
         let mut grace = !hard;
         while self.has_running() && grace {
             let now = Instant::now();
@@ -183,7 +220,7 @@ impl SubprocessActuator {
         // eventually. Cap with a wall-clock guard to avoid hanging on
         // misbehaving mocks; in production this loop terminates within
         // microseconds of phase 3.
-        let final_deadline = Instant::now() + self.shutdown_grace;
+        let final_deadline = Instant::now() + self.state.shutdown_grace;
         while self.has_running() {
             let now = Instant::now();
             if now >= final_deadline {
@@ -217,6 +254,7 @@ impl SubprocessActuator {
 )]
 mod tests {
     use crate::SubprocessActuator;
+    use crate::env::EnvSnapshot;
     use crate::testkit::{MockSpawner, SignalRecord};
     use compact_str::CompactString;
     use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
@@ -328,12 +366,26 @@ mod tests {
         join: Option<thread::JoinHandle<()>>,
     }
 
+    /// Empty env snapshot — convenience for the majority of tests that
+    /// don't exercise `${env.<NAME>}` resolution.
+    fn empty_env() -> Arc<EnvSnapshot> {
+        Arc::new(EnvSnapshot::from_map::<_, &str, &str>([]))
+    }
+
     impl Harness {
         fn new(concurrency: usize) -> Self {
-            Self::new_with_grace(concurrency, Duration::from_secs(5))
+            Self::new_with_grace_and_env(concurrency, Duration::from_secs(5), empty_env())
         }
 
         fn new_with_grace(concurrency: usize, grace: Duration) -> Self {
+            Self::new_with_grace_and_env(concurrency, grace, empty_env())
+        }
+
+        fn new_with_grace_and_env(
+            concurrency: usize,
+            grace: Duration,
+            env: Arc<EnvSnapshot>,
+        ) -> Self {
             let (effects_tx, effects_rx) = bounded::<Effect>(1024);
             let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
             let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);
@@ -343,7 +395,7 @@ mod tests {
             let join = thread::Builder::new()
                 .name("test-actuator-controller".into())
                 .spawn(move || {
-                    let mut a = SubprocessActuator::new_with_grace(concurrency, grace);
+                    let mut a = SubprocessActuator::new_with_grace_and_env(concurrency, grace, env);
                     a.run(
                         effects_rx,
                         shutdown_rx,
@@ -1195,5 +1247,199 @@ mod tests {
         }
         // Total spawns: 1 (only step 0 — no step 1 under Drop).
         assert_eq!(h.spawner.spawns().len(), 1);
+    }
+
+    // ---------- ${env.<NAME>} strict + default ----------
+
+    /// Build a single-instruction program whose argv is the one given
+    /// [`ArgPart`]. The actuator-level env tests need to inject precise
+    /// `EnvVar` placeholders without routing through the config layer.
+    fn env_var_program(name: &str, default: Option<&str>) -> Arc<ActionProgram> {
+        Arc::new(ActionProgram::new([Instruction::SpawnExec(
+            ExecAction::new([ArgTemplate::new([ArgPart::EnvVar {
+                name: name.into(),
+                default: default.map(CompactString::from),
+            }])]),
+        )]))
+    }
+
+    /// Strict-unset: an Effect that references an unset env var with
+    /// no default terminates the plan with `EffectOutcome::Failed`
+    /// before any spawn happens — the resolver fails fast.
+    #[test]
+    fn env_var_unset_no_default_terminates_plan_failed_before_spawn() {
+        let mut h = Harness::new(4);
+        h.submit(make_effect_perfile_with_program(
+            1,
+            1,
+            1,
+            1,
+            env_var_program("UNSET_VAR_AVOID_AMBIENT_COLLISION", None),
+        ));
+        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
+        match &completions[0] {
+            Input::EffectComplete { result, .. } => assert!(matches!(
+                result,
+                EffectOutcome::Failed {
+                    exit_code: None,
+                    signal: None,
+                }
+            )),
+            other => panic!("expected EffectComplete::Failed; got {other:?}"),
+        }
+        // Resolver failed before the spawner was reached.
+        assert!(
+            h.spawner.spawns().is_empty(),
+            "no spawn recorded for unresolved env",
+        );
+        h.shutdown();
+    }
+
+    /// Default-bearing form renders the default literal into argv —
+    /// the spawn proceeds normally and reaps Ok.
+    #[test]
+    fn env_var_unset_with_default_renders_default_in_argv() {
+        let mut h = Harness::new_with_grace_and_env(4, Duration::from_secs(5), empty_env());
+        h.submit(make_effect_perfile_with_program(
+            2,
+            2,
+            2,
+            2,
+            env_var_program("UNSET_VAR_AVOID_AMBIENT_COLLISION", Some("/tmp")),
+        ));
+        let spawns = h.wait_for_spawns(1, Duration::from_secs(1));
+        assert_eq!(spawns[0].argv, vec!["/tmp".to_string()]);
+        h.spawner
+            .complete(spawns[0].pid, EffectOutcome::Ok)
+            .unwrap();
+        h.wait_for_effect_completes(1, Duration::from_secs(1));
+        h.shutdown();
+    }
+
+    /// Snapshot-present: env value substitutes into argv. Confirms the
+    /// resolver reads from the injected snapshot, not the ambient
+    /// process env.
+    #[test]
+    fn env_var_present_substitutes_from_injected_snapshot() {
+        let mut h = Harness::new_with_grace_and_env(
+            4,
+            Duration::from_secs(5),
+            Arc::new(EnvSnapshot::from_map([("SPECTER_TEST_X", "value-x")])),
+        );
+        h.submit(make_effect_perfile_with_program(
+            3,
+            3,
+            3,
+            3,
+            env_var_program("SPECTER_TEST_X", None),
+        ));
+        let spawns = h.wait_for_spawns(1, Duration::from_secs(1));
+        assert_eq!(spawns[0].argv, vec!["value-x".to_string()]);
+        h.spawner
+            .complete(spawns[0].pid, EffectOutcome::Ok)
+            .unwrap();
+        h.wait_for_effect_completes(1, Duration::from_secs(1));
+        h.shutdown();
+    }
+
+    // ---------- per-step timeout ----------
+
+    /// Build a single-instruction program with `timeout` set. Mirrors
+    /// what the config layer would emit for
+    /// `{ exec = ["..."], timeout = "..." }`.
+    fn timeout_program(d: Duration) -> Arc<ActionProgram> {
+        Arc::new(ActionProgram::new([Instruction::SpawnExec(
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])]).with_timeout(d),
+        )]))
+    }
+
+    /// A child that doesn't complete within `timeout` receives SIGTERM
+    /// from the per-step timer thread. The `MockSpawner` tracks the
+    /// signal; the test confirms SIGTERM arrives by the time we
+    /// observe it (poll-with-deadline since the timer is a separate
+    /// thread).
+    #[test]
+    fn step_timeout_sigterms_unfinished_child_after_deadline() {
+        let mut h = Harness::new(4);
+        h.submit(make_effect_perfile_with_program(
+            10,
+            10,
+            10,
+            10,
+            timeout_program(Duration::from_millis(50)),
+        ));
+        let spawns = h.wait_for_spawns(1, Duration::from_secs(1));
+        let pid = spawns[0].pid;
+
+        // Wait for the timer to fire — at most deadline+slack. The
+        // signal lands asynchronously from a detached thread.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if h.spawner
+                .signals()
+                .iter()
+                .any(|s| matches!(s, SignalRecord::Term(p) if *p == pid))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timer never delivered SIGTERM; got {:?}",
+                h.spawner.signals(),
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        // Complete the child so the wait thread can shut down and
+        // reap. The signaler's MockChildSignaler::signal_term path
+        // recorded `Term`; completing here drains the engine channel
+        // so the harness's shutdown drop is clean.
+        h.spawner
+            .complete(
+                pid,
+                EffectOutcome::Failed {
+                    exit_code: None,
+                    signal: Some(15),
+                },
+            )
+            .unwrap();
+        h.wait_for_effect_completes(1, Duration::from_secs(1));
+        h.shutdown();
+    }
+
+    /// Natural completion before the deadline short-circuits the
+    /// timer's signal path via `ChildSignaler::is_dead`. No SIGTERM
+    /// observed.
+    #[test]
+    fn step_timeout_short_circuits_when_child_completes_before_deadline() {
+        // Long deadline; complete the child immediately.
+        let mut h = Harness::new(4);
+        h.submit(make_effect_perfile_with_program(
+            11,
+            11,
+            11,
+            11,
+            timeout_program(Duration::from_mins(1)),
+        ));
+        let spawns = h.wait_for_spawns(1, Duration::from_secs(1));
+        h.spawner
+            .complete(spawns[0].pid, EffectOutcome::Ok)
+            .unwrap();
+        h.wait_for_effect_completes(1, Duration::from_secs(1));
+
+        // Allow the controller a moment in case the timer thread is
+        // still in flight (sleep racing the dead flag). Even with a
+        // generous 100ms window we expect zero signals: 60s deadline
+        // dominates.
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !h.spawner
+                .signals()
+                .iter()
+                .any(|s| matches!(s, SignalRecord::Term(_) | SignalRecord::Kill(_))),
+            "timer must not signal a naturally-completed child; got {:?}",
+            h.spawner.signals(),
+        );
+        h.shutdown();
     }
 }

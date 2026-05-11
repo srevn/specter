@@ -163,3 +163,93 @@ fn enabled_string_value_yields_parse_error() {
     let err = Config::from_str(toml).unwrap_err();
     assert!(matches!(err, ConfigError::Parse { .. }), "got {err:?}");
 }
+
+/// Per-action `timeout` (humantime at the TOML layer) round-trips
+/// through validation into [`ExecAction::timeout`]. Pinned in one
+/// test: humantime mapping, per-action threading, AND
+/// omitted-as-`None` are all observable in the same program — the
+/// middle step carries `None`, the outer steps carry distinct
+/// durations.
+#[test]
+fn exec_timeout_threads_per_action_via_humantime_serde() {
+    let toml = "[[watch]]\nname = \"t\"\npath = \"/\"\n\
+                actions = [\n\
+                  { exec = [\"a\"], timeout = \"500ms\" },\n\
+                  { exec = [\"b\"] },\n\
+                  { exec = [\"c\"], timeout = \"30s\" },\n\
+                ]";
+    let cfg = Config::from_str(toml).unwrap();
+    let timeouts: Vec<Option<Duration>> = cfg.watches[0]
+        .program
+        .instructions
+        .iter()
+        .map(|i| match i {
+            Instruction::SpawnExec(e) => e.timeout,
+            other => panic!("expected SpawnExec, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        timeouts,
+        vec![
+            Some(Duration::from_millis(500)),
+            None,
+            Some(Duration::from_secs(30)),
+        ],
+    );
+}
+
+/// Zero-duration timeouts (`"0s"`, `"0ms"`) are a near-certain typo —
+/// the SIGTERM would fire before the child can make progress. Surface
+/// as [`IssueKind::TimeoutZero`] rather than silently parsing.
+#[test]
+fn exec_zero_timeout_is_validation_error() {
+    let toml = "[[watch]]\nname = \"t\"\npath = \"/\"\n\
+                actions = [{ exec = [\"echo\"], timeout = \"0s\" }]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors.iter().any(|e| e.kind == IssueKind::TimeoutZero),
+        "got {errors:?}"
+    );
+}
+
+/// `${env.HOME:-/tmp}` lowers through validation into
+/// [`ArgPart::EnvVar`] inside the program. Confirms the lexer + lowering
+/// path is wired end-to-end; the default-bearing form covers both the
+/// `${env.NAME}` and `${env.NAME:-default}` lexer branches in one test.
+#[test]
+fn exec_env_placeholder_lowers_into_program() {
+    let toml = "[[watch]]\nname = \"e\"\npath = \"/\"\n\
+                actions = [{ exec = [\"echo\", \"${env.HOME:-/tmp}\"] }]";
+    let cfg = Config::from_str(toml).unwrap();
+    let exec = match &cfg.watches[0].program.instructions[0] {
+        Instruction::SpawnExec(e) => e,
+        other => panic!("expected SpawnExec, got {other:?}"),
+    };
+    match &exec.argv[1].parts[0] {
+        ArgPart::EnvVar { name, default } => {
+            assert_eq!(name, "HOME");
+            assert_eq!(default.as_deref(), Some("/tmp"));
+        }
+        other => panic!("expected ArgPart::EnvVar, got {other:?}"),
+    }
+}
+
+/// Malformed env-var name (`1HOME`) surfaces as a validation issue
+/// rather than panicking. The template layer's `InvalidEnvName` is
+/// collapsed onto [`IssueKind::UnknownPlaceholder`] so operator-facing
+/// output stays consistent across both namespaces; the detail message
+/// carries the specific cause.
+#[test]
+fn exec_env_invalid_name_yields_validation_error() {
+    let toml = "[[watch]]\nname = \"e\"\npath = \"/\"\n\
+                actions = [{ exec = [\"echo\", \"${env.1HOME}\"] }]";
+    let err = Config::from_str(toml).unwrap_err();
+    let errors = validation_errors(err);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.kind == IssueKind::UnknownPlaceholder && e.detail.contains("1HOME")),
+        "got {errors:?}",
+    );
+}

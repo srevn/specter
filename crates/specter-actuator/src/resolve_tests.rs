@@ -7,6 +7,7 @@
     clippy::too_many_lines
 )]
 
+use crate::env::EnvSnapshot;
 use crate::spawner::EnvVar;
 use compact_str::CompactString;
 use smallvec::smallvec;
@@ -20,14 +21,23 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+/// Empty env snapshot used by tests that don't exercise `${env.<NAME>}`
+/// resolution. Constructed once via `OnceLock` and threaded through the
+/// `resolve` helper.
+fn empty_env() -> EnvSnapshot {
+    EnvSnapshot::from_map::<_, &str, &str>([])
+}
+
 /// Convenience wrapper for tests that don't exercise `${specter.time}` /
-/// `SPECTER_TIME` rendering — pins `now` to the Unix epoch and omits the
-/// diff tmp file. Time-sensitive tests call [`super::resolve_step`]
-/// directly with the instant they want; diff-tmp-aware tests pass
-/// `diff_path: Some(_)` directly.
+/// `SPECTER_TIME` rendering — pins `now` to the Unix epoch, omits the
+/// diff tmp file, and uses an empty env snapshot. Time-sensitive tests
+/// call [`super::resolve_step`] directly with the instant they want;
+/// diff-tmp-aware tests pass `diff_path: Some(_)` directly; env-aware
+/// tests build a fresh snapshot inline.
 fn resolve(e: &Effect) -> (CommandResolved, Vec<EnvVar<'_>>) {
     let exec = exec_of(e);
-    super::resolve_step(e, exec, SystemTime::UNIX_EPOCH, None)
+    super::resolve_step(e, exec, SystemTime::UNIX_EPOCH, None, &empty_env())
+        .expect("test fixtures don't exercise the strict-env failure path")
 }
 
 /// Borrow the single [`ExecAction`] inside an [`Effect`]'s program. Tests
@@ -312,7 +322,8 @@ fn resolve_time_uses_injected_now() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _) = super::resolve_step(&e, exec_of(&e), now, None);
+    let (cmd, _) = super::resolve_step(&e, exec_of(&e), now, None, &empty_env())
+        .expect("test fixtures don\'t exercise the strict-env failure path");
     assert_eq!(cmd.argv, vec![FIXED_NOW_RFC3339.to_owned()]);
 }
 
@@ -329,7 +340,8 @@ fn env_specter_time_uses_injected_now() {
         CorrelationId(1),
         None,
     );
-    let (_, env) = super::resolve_step(&e, exec_of(&e), now, None);
+    let (_, env) = super::resolve_step(&e, exec_of(&e), now, None, &empty_env())
+        .expect("test fixtures don\'t exercise the strict-env failure path");
     assert_eq!(
         env.iter().find(|e| e.key == "SPECTER_TIME").unwrap().value,
         FIXED_NOW_RFC3339
@@ -353,7 +365,8 @@ fn format_now_clamps_pre_epoch() {
         CorrelationId(1),
         None,
     );
-    let (cmd, _) = super::resolve_step(&e, exec_of(&e), pre, None);
+    let (cmd, _) = super::resolve_step(&e, exec_of(&e), pre, None, &empty_env())
+        .expect("test fixtures don\'t exercise the strict-env failure path");
     assert_eq!(cmd.argv, vec!["1970-01-01T00:00:00Z".to_owned()]);
 }
 
@@ -1203,7 +1216,14 @@ fn env_order_with_diff_path_is_alphabetical() {
         None,
     );
     let diff_path = Path::new("/tmp/specter-1234-deadbeef.diff");
-    let (_, env) = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, Some(diff_path));
+    let (_, env) = super::resolve_step(
+        &e,
+        exec_of(&e),
+        SystemTime::UNIX_EPOCH,
+        Some(diff_path),
+        &empty_env(),
+    )
+    .expect("test fixtures don\'t exercise the strict-env failure path");
     let keys: Vec<&str> = env.iter().map(|e| e.key).collect();
     assert_eq!(
         keys,
@@ -1233,4 +1253,88 @@ fn env_order_with_diff_path_is_alphabetical() {
             .value,
         "/tmp/specter-1234-deadbeef.diff"
     );
+}
+
+// ---------- ${env.<NAME>} ----------
+
+/// `${env.NAME}` resolves to the snapshot's value when present.
+/// Default-bearing form is exercised below; together they cover both
+/// lexer branches in the resolver pass.
+#[test]
+fn resolve_env_var_substitutes_from_snapshot() {
+    let env = EnvSnapshot::from_map([("HOME", "/home/op")]);
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![ArgPart::EnvVar {
+            name: "HOME".into(),
+            default: None,
+        }])],
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (cmd, _) = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
+        .expect("HOME present in snapshot");
+    assert_eq!(cmd.argv, vec!["/home/op".to_string()]);
+}
+
+/// Strict default: unset env var with no `:-` default fails the resolve
+/// — the caller maps `ResolveError::UnsetEnvVar` to
+/// `EffectOutcome::Failed`.
+#[test]
+fn resolve_env_var_unset_without_default_returns_unset_env_var_error() {
+    let env = EnvSnapshot::from_map::<_, &str, &str>([]);
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![ArgPart::EnvVar {
+            name: "MISSING".into(),
+            default: None,
+        }])],
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let err = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
+        .expect_err("unset env var must fail strict resolve");
+    assert_eq!(
+        err,
+        crate::resolve::ResolveError::UnsetEnvVar {
+            name: "MISSING".into(),
+        }
+    );
+}
+
+/// Unset env var with a `:-default` renders the default literal —
+/// explicit lenient opt-in. Empty default (`${env.X:-}`) renders empty.
+#[test]
+fn resolve_env_var_unset_with_default_renders_default() {
+    let env = EnvSnapshot::from_map::<_, &str, &str>([]);
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![
+            arg(vec![ArgPart::EnvVar {
+                name: "MISSING".into(),
+                default: Some("/tmp".into()),
+            }]),
+            arg(vec![ArgPart::EnvVar {
+                name: "ALSO_MISSING".into(),
+                default: Some(CompactString::new("")),
+            }]),
+        ],
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId(1),
+        None,
+    );
+    let (cmd, _) = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
+        .expect("default rendered when env unset");
+    assert_eq!(cmd.argv, vec!["/tmp".to_string(), String::new()]);
 }

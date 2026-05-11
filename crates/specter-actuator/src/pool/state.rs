@@ -37,9 +37,11 @@
 //! continuation work bypasses the per-Sub gate (it's the same program,
 //! already admitted) but still respects the global permit cap.
 
+use crate::env::EnvSnapshot;
 use crate::permits::{Permit, Permits};
 use crate::resolve;
 use crate::spawner::{ChildSignaler, ChildWaiter, Spawner};
+use crate::timer;
 use crossbeam::channel::Sender;
 use specter_core::{CommandResolved, DedupKey, Effect, EffectOutcome, Input, Instruction, SubId};
 use std::collections::{BTreeMap, VecDeque};
@@ -47,6 +49,7 @@ use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Policy for [`ActuatorState::handle_reap_inner`]: during normal
 /// operation we re-queue pending and let the pump dispatch the next
@@ -135,7 +138,17 @@ pub(crate) struct Slot {
 /// can't see "is this the last instruction".
 pub(crate) struct RunningJob {
     pub pid: u32,
-    pub signaler: Box<dyn ChildSignaler>,
+    /// Shared with the per-step timer thread (when [`ExecAction::timeout`]
+    /// is set) — the timer needs its own handle to deliver SIGTERM /
+    /// SIGKILL when the deadline elapses. The controller holds the
+    /// install-side clone; the timer thread holds another; either may
+    /// outlive the other (the timer thread can fire after the
+    /// controller has dropped the job; the controller's shutdown can
+    /// fire before the timer wakes). `Arc<dyn>` over `Box<dyn>` is the
+    /// minimum-cost expression of "two co-owners, neither dominates";
+    /// `Box → Arc` is allocation-free at the install boundary via
+    /// `Arc::from`.
+    pub signaler: Arc<dyn ChildSignaler>,
     pub effect: Arc<Effect>,
     pub cursor: u32,
     pub diff_tmp_path: Option<PathBuf>,
@@ -169,15 +182,34 @@ pub(crate) struct ActuatorState {
     pub ready_queue: VecDeque<DedupKey>,
     pub running_per_sub: BTreeMap<SubId, u32>,
     pub permits: Permits,
+    /// Captured operator env, threaded into every resolver call for
+    /// `${env.<NAME>}` substitution. Shared by `Arc` because the
+    /// snapshot is immutable for the actuator's lifetime; the rare
+    /// test override case constructs a fresh snapshot rather than
+    /// mutating the existing one.
+    pub env_snapshot: Arc<EnvSnapshot>,
+    /// SIGTERM → SIGKILL grace. Reads:
+    /// - shutdown drain ([`super::SubprocessActuator::shutdown`]);
+    /// - per-step timer thread grace ([`crate::timer::spawn_timer`]).
+    ///
+    /// Pinned in one place so the two paths can't drift on the
+    /// constant.
+    pub shutdown_grace: Duration,
 }
 
 impl ActuatorState {
-    pub fn new(concurrency: NonZeroUsize) -> Self {
+    pub fn new(
+        concurrency: NonZeroUsize,
+        env_snapshot: Arc<EnvSnapshot>,
+        shutdown_grace: Duration,
+    ) -> Self {
         Self {
             slots: BTreeMap::new(),
             ready_queue: VecDeque::new(),
             running_per_sub: BTreeMap::new(),
             permits: Permits::new(concurrency),
+            env_snapshot,
+            shutdown_grace,
         }
     }
 
@@ -742,7 +774,19 @@ impl ActuatorState {
                 unreachable!("PR1 lowering only emits SpawnExec; pipe/predicate/jump lands in PR2",)
             }
         };
-        let (CommandResolved { argv }, env) = resolve::resolve_step(effect, exec, now, diff_path);
+        let (CommandResolved { argv }, env) =
+            match resolve::resolve_step(effect, exec, now, diff_path, &self.env_snapshot) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    // Strict `${env.<NAME>}` failure: no spawn, no
+                    // wait thread, no timer. Permit drops at the end
+                    // of this scope; caller terminates the plan with
+                    // synthesised `EffectOutcome::Failed`.
+                    tracing::error!(?key, cursor, %e, "resolver error; aborting step");
+                    drop(permit);
+                    return Err(SpawnError::Failed);
+                }
+            };
 
         let handles = match spawner.spawn(&argv, &env, cwd, capture_output) {
             Ok(h) => h,
@@ -762,7 +806,18 @@ impl ActuatorState {
         // the race where a fast-completing waiter could send Reaped
         // before the controller knows about it. PathBuf is allocated
         // here (one per instruction transition); `effect` is
-        // Arc-cloned (cheap).
+        // Arc-cloned (cheap). `Arc::from(box)` reuses the box's
+        // allocation — no second heap hop relative to the prior `Box`
+        // field shape.
+        //
+        // The Arc is also handed to the optional per-step timer thread
+        // below; cloning before the move into RunningJob keeps the
+        // controller's installed-side reference live regardless of
+        // whether the timer is armed.
+        let signaler: Arc<dyn ChildSignaler> = Arc::from(signaler);
+        let timer_signaler = exec.timeout.is_some().then(|| Arc::clone(&signaler));
+        let timeout = exec.timeout;
+        let timer_grace = self.shutdown_grace;
         let diff_tmp_path: Option<PathBuf> = diff_path.map(Path::to_path_buf);
         let slot = self
             .slots
@@ -811,6 +866,27 @@ impl ActuatorState {
                 .expect("slot.running installed unconditionally above");
             recover_orphan_after_wait_thread_failure(job);
             return Err(SpawnError::Failed);
+        }
+
+        // Per-step timer: spawn AFTER the wait thread is alive so the
+        // wait thread's `dead` flag is the natural-completion signal
+        // the timer short-circuits on. Best-effort — see
+        // [`crate::timer`] module docs for the spawn-failure policy.
+        if let (Some(d), Some(sig)) = (timeout, timer_signaler) {
+            // `pid` is unique within the actuator process; cursor
+            // distinguishes steps within an Effect. Sub is implied by
+            // the wait thread's `act-wait-{pid}` name visible alongside.
+            let timer_name = format!("c{cursor}-pid{pid}");
+            if let Err(e) = timer::spawn_timer(&timer_name, d, timer_grace, sig) {
+                tracing::error!(
+                    ?key,
+                    cursor,
+                    pid,
+                    timeout = ?d,
+                    ?e,
+                    "per-step timer thread spawn failed; deadline not enforced",
+                );
+            }
         }
 
         tracing::debug!(?key, cursor, pid, "spawned instruction");
@@ -926,8 +1002,9 @@ mod tests {
     //!
     //! The PR2 multi-step advance/terminate tests are in the dedicated
     //! `multi_step` submodule below.
-    use super::super::Reaped;
+    use super::super::{Reaped, SHUTDOWN_GRACE};
     use super::{ActuatorState, PlanContinuation, ReapPolicy, RunningJob, Slot};
+    use crate::env::EnvSnapshot;
     use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
     use compact_str::CompactString;
     use crossbeam::channel::{Sender, unbounded};
@@ -943,6 +1020,20 @@ mod tests {
 
     fn nz(n: usize) -> NonZeroUsize {
         NonZeroUsize::new(n).expect("test setup: n must be non-zero")
+    }
+
+    /// Construct an [`ActuatorState`] with an empty env snapshot and the
+    /// shared `SHUTDOWN_GRACE`. The tests in this module exercise state-
+    /// machine transitions, not env resolution or timeout enforcement,
+    /// so a single empty snapshot covers every call site. Env-aware
+    /// tests live in the higher-level pool harness and inject snapshots
+    /// explicitly via [`super::SubprocessActuator::new_with_grace_and_env`].
+    fn test_state(concurrency: NonZeroUsize) -> ActuatorState {
+        ActuatorState::new(
+            concurrency,
+            Arc::new(EnvSnapshot::from_map::<_, &str, &str>([])),
+            SHUTDOWN_GRACE,
+        )
     }
 
     fn unique_sub_id(seed: u64) -> SubId {
@@ -1127,6 +1218,9 @@ mod tests {
             self.dead.store(true, Ordering::SeqCst);
             Ok(())
         }
+        fn is_dead(&self) -> bool {
+            self.dead.load(Ordering::SeqCst)
+        }
     }
 
     /// Counts SIGTERM / SIGKILL / reap_blocking invocations; never
@@ -1153,27 +1247,23 @@ mod tests {
             self.reap.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+        fn is_dead(&self) -> bool {
+            // The counted fixture has no `dead` flag: tests using it
+            // never exercise paths that probe completion. Returning
+            // `false` keeps the per-step timer's `is_dead` short-
+            // circuit inert under these tests — the timer's signal
+            // path is what's being asserted, not the short-circuit.
+            false
+        }
     }
 
     /// Build a stub `RunningJob` that mimics a freshly-spawned step of
     /// a single-step plan. Counted signaler shared so tests can assert
     /// no SIGTERM/SIGKILL during pure-state teardown.
     fn stub_running_job(effect: Arc<Effect>, signaler: Arc<CountingSignaler>) -> RunningJob {
-        struct Adapter(Arc<CountingSignaler>);
-        impl ChildSignaler for Adapter {
-            fn signal_term(&self) -> io::Result<()> {
-                self.0.signal_term()
-            }
-            fn signal_kill(&self) -> io::Result<()> {
-                self.0.signal_kill()
-            }
-            fn reap_blocking(&self) -> io::Result<()> {
-                self.0.reap_blocking()
-            }
-        }
         RunningJob {
             pid: 99_999,
-            signaler: Box::new(Adapter(signaler)),
+            signaler,
             effect,
             cursor: 0,
             diff_tmp_path: None,
@@ -1233,7 +1323,7 @@ mod tests {
     /// the reaped outcome, removes the slot, and leaves counters intact.
     #[test]
     fn handle_reap_inner_stale_for_unspawned_slot_clears_state() {
-        let mut state = ActuatorState::new(nz(2));
+        let mut state = test_state(nz(2));
         let key = perfile_key(1, 1, 1);
         let sub = unique_sub_id(1);
         state.slots.insert(key.clone(), Slot::default());
@@ -1289,7 +1379,7 @@ mod tests {
     /// removed.
     #[test]
     fn handle_reap_inner_failed_single_step_decrements_and_removes() {
-        let mut state = ActuatorState::new(nz(2));
+        let mut state = test_state(nz(2));
         let key = perfile_key(2, 2, 2);
         let sub = unique_sub_id(2);
         let res = unique_resource_id(2);
@@ -1341,7 +1431,7 @@ mod tests {
     /// so handle_submit's Latest coalesce continues to work.
     #[test]
     fn handle_reap_inner_pump_with_pending_requeues_for_respawn() {
-        let mut state = ActuatorState::new(nz(2));
+        let mut state = test_state(nz(2));
         let key = perfile_key(3, 3, 3);
         let sub = unique_sub_id(3);
         let res = unique_resource_id(3);
@@ -1391,7 +1481,7 @@ mod tests {
     /// `handle_reap_no_pump` shutdown contract.
     #[test]
     fn handle_reap_inner_drop_policy_removes_slot_even_with_pending() {
-        let mut state = ActuatorState::new(nz(2));
+        let mut state = test_state(nz(2));
         let key = perfile_key(4, 4, 4);
         let sub = unique_sub_id(4);
         let res = unique_resource_id(4);
@@ -1438,7 +1528,7 @@ mod tests {
     /// per instruction); no EffectComplete is emitted.
     #[test]
     fn step_ok_not_last_advances_to_next_step() {
-        let mut state = ActuatorState::new(nz(2));
+        let mut state = test_state(nz(2));
         let key = perfile_key(10, 10, 10);
         let sub = unique_sub_id(10);
         let res = unique_resource_id(10);
@@ -1447,21 +1537,7 @@ mod tests {
         let slot = Slot {
             running: Some(RunningJob {
                 pid: 100,
-                signaler: {
-                    struct A(Arc<CountingSignaler>);
-                    impl ChildSignaler for A {
-                        fn signal_term(&self) -> io::Result<()> {
-                            self.0.signal_term()
-                        }
-                        fn signal_kill(&self) -> io::Result<()> {
-                            self.0.signal_kill()
-                        }
-                        fn reap_blocking(&self) -> io::Result<()> {
-                            self.0.reap_blocking()
-                        }
-                    }
-                    Box::new(A(Arc::clone(&signaler)))
-                },
+                signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,
@@ -1509,7 +1585,7 @@ mod tests {
     /// emitted; slot removed.
     #[test]
     fn step_failed_mid_plan_terminates_without_advance() {
-        let mut state = ActuatorState::new(nz(2));
+        let mut state = test_state(nz(2));
         let key = perfile_key(11, 11, 11);
         let sub = unique_sub_id(11);
         let res = unique_resource_id(11);
@@ -1518,21 +1594,7 @@ mod tests {
         let slot = Slot {
             running: Some(RunningJob {
                 pid: 200,
-                signaler: {
-                    struct A(Arc<CountingSignaler>);
-                    impl ChildSignaler for A {
-                        fn signal_term(&self) -> io::Result<()> {
-                            self.0.signal_term()
-                        }
-                        fn signal_kill(&self) -> io::Result<()> {
-                            self.0.signal_kill()
-                        }
-                        fn reap_blocking(&self) -> io::Result<()> {
-                            self.0.reap_blocking()
-                        }
-                    }
-                    Box::new(A(Arc::clone(&signaler)))
-                },
+                signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,
@@ -1579,7 +1641,7 @@ mod tests {
     /// decrements; EffectComplete emitted with Ok.
     #[test]
     fn last_step_ok_terminates() {
-        let mut state = ActuatorState::new(nz(2));
+        let mut state = test_state(nz(2));
         let key = perfile_key(12, 12, 12);
         let sub = unique_sub_id(12);
         let res = unique_resource_id(12);
@@ -1588,21 +1650,7 @@ mod tests {
         let slot = Slot {
             running: Some(RunningJob {
                 pid: 300,
-                signaler: {
-                    struct A(Arc<CountingSignaler>);
-                    impl ChildSignaler for A {
-                        fn signal_term(&self) -> io::Result<()> {
-                            self.0.signal_term()
-                        }
-                        fn signal_kill(&self) -> io::Result<()> {
-                            self.0.signal_kill()
-                        }
-                        fn reap_blocking(&self) -> io::Result<()> {
-                            self.0.reap_blocking()
-                        }
-                    }
-                    Box::new(A(Arc::clone(&signaler)))
-                },
+                signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 2, // last instruction (0-indexed) of a 3-instruction program
                 diff_tmp_path: None,
@@ -1645,7 +1693,7 @@ mod tests {
     #[test]
     fn step_ok_not_last_with_no_permit_defers_via_plan_continue() {
         // cap=1 with another job already holding the only permit.
-        let mut state = ActuatorState::new(nz(1));
+        let mut state = test_state(nz(1));
         let _hold = state
             .permits
             .try_acquire()
@@ -1658,21 +1706,7 @@ mod tests {
         let slot = Slot {
             running: Some(RunningJob {
                 pid: 400,
-                signaler: {
-                    struct A(Arc<CountingSignaler>);
-                    impl ChildSignaler for A {
-                        fn signal_term(&self) -> io::Result<()> {
-                            self.0.signal_term()
-                        }
-                        fn signal_kill(&self) -> io::Result<()> {
-                            self.0.signal_kill()
-                        }
-                        fn reap_blocking(&self) -> io::Result<()> {
-                            self.0.reap_blocking()
-                        }
-                    }
-                    Box::new(A(Arc::clone(&signaler)))
-                },
+                signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,
@@ -1719,7 +1753,7 @@ mod tests {
     /// plan_continue is left intact (plan-atomicity invariant).
     #[test]
     fn submit_during_plan_continue_replaces_pending_only() {
-        let mut state = ActuatorState::new(nz(1));
+        let mut state = test_state(nz(1));
         let _hold = state.permits.try_acquire().expect("acquire");
         let key = perfile_key(14, 14, 14);
         let sub = unique_sub_id(14);
@@ -1764,7 +1798,7 @@ mod tests {
     /// steps are abandoned.
     #[test]
     fn step_ok_not_last_under_drop_policy_skips_advance() {
-        let mut state = ActuatorState::new(nz(2));
+        let mut state = test_state(nz(2));
         let key = perfile_key(15, 15, 15);
         let sub = unique_sub_id(15);
         let res = unique_resource_id(15);
@@ -1773,21 +1807,7 @@ mod tests {
         let slot = Slot {
             running: Some(RunningJob {
                 pid: 500,
-                signaler: {
-                    struct A(Arc<CountingSignaler>);
-                    impl ChildSignaler for A {
-                        fn signal_term(&self) -> io::Result<()> {
-                            self.0.signal_term()
-                        }
-                        fn signal_kill(&self) -> io::Result<()> {
-                            self.0.signal_kill()
-                        }
-                        fn reap_blocking(&self) -> io::Result<()> {
-                            self.0.reap_blocking()
-                        }
-                    }
-                    Box::new(A(Arc::clone(&signaler)))
-                },
+                signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,
@@ -1828,7 +1848,7 @@ mod tests {
     /// slot removed.
     #[test]
     fn step_ok_not_last_with_spawn_failure_synthesises_failed() {
-        let mut state = ActuatorState::new(nz(2));
+        let mut state = test_state(nz(2));
         let key = perfile_key(16, 16, 16);
         let sub = unique_sub_id(16);
         let res = unique_resource_id(16);
@@ -1837,21 +1857,7 @@ mod tests {
         let slot = Slot {
             running: Some(RunningJob {
                 pid: 600,
-                signaler: {
-                    struct A(Arc<CountingSignaler>);
-                    impl ChildSignaler for A {
-                        fn signal_term(&self) -> io::Result<()> {
-                            self.0.signal_term()
-                        }
-                        fn signal_kill(&self) -> io::Result<()> {
-                            self.0.signal_kill()
-                        }
-                        fn reap_blocking(&self) -> io::Result<()> {
-                            self.0.reap_blocking()
-                        }
-                    }
-                    Box::new(A(Arc::clone(&signaler)))
-                },
+                signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
                 diff_tmp_path: None,

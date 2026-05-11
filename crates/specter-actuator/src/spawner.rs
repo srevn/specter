@@ -140,4 +140,13 @@ pub trait ChildSignaler: Send + Sync {
     /// short-circuits at the protocol layer — same guarantee the
     /// paired waiter provides on the normal path.
     fn reap_blocking(&self) -> io::Result<()>;
+    /// `true` once the paired waiter has reported completion (or
+    /// [`Self::reap_blocking`] has run). Lets co-owning threads short-
+    /// circuit on natural completion — used by the per-step timer
+    /// thread to skip SIGTERM/SIGKILL when a child finishes within its
+    /// deadline. Mirrors the same `dead` flag the existing
+    /// short-circuits in `signal_term` / `signal_kill` consult; exposed
+    /// as its own method so callers don't have to issue a no-op signal
+    /// to probe the state.
+    fn is_dead(&self) -> bool;
 }
