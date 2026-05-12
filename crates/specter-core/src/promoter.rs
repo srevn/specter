@@ -278,7 +278,7 @@ mod tests {
     };
     use crate::ids::{PromoterId, ResourceId, SubId};
     use crate::pattern::PatternSpec;
-    use crate::profile::DescentState;
+    use crate::profile::{DescentRemaining, DescentState};
     use crate::program::{
         ActionProgram, ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder,
         SpawnBody,
@@ -415,7 +415,11 @@ mod tests {
     fn promoter_state_prefix_pending_carries_descent_state() {
         let state = PromoterState::PrefixPending(DescentState {
             current_prefix: ResourceId::default(),
-            remaining_components: vec![CompactString::from("var"), CompactString::from("log")],
+            remaining_components: DescentRemaining::from_vec(vec![
+                CompactString::from("var"),
+                CompactString::from("log"),
+            ])
+            .expect("non-empty by test construction"),
         });
         let PromoterState::PrefixPending(d) = state else {
             panic!("expected PrefixPending");

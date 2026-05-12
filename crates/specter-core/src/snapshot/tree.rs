@@ -545,9 +545,38 @@ fn subtree_at_impl(
     target: ResourceId,
     tree: &Tree,
 ) -> Option<Arc<DirSnapshot>> {
-    let TreeSnapshot::Dir(root) = snap else {
-        return None;
-    };
+    match snap {
+        TreeSnapshot::Dir(root) => subtree_at_dir(root, target, tree),
+        TreeSnapshot::File(_) => None,
+    }
+}
+
+/// Descend from `root` (a Dir-shaped anchor snapshot) by following the
+/// segment chain to `target` and return the matching subtree (or
+/// `None` if navigation cannot reach `target`).
+///
+/// Same semantics as [`TreeSnapshot::subtree_at`] but typed for the
+/// Dir-only call sites — graft / splice plumbing — so they avoid the
+/// `TreeSnapshot::Dir(Arc::clone(root))` wrapper required to reach the
+/// `&TreeSnapshot`-keyed entry point. The `Arc::clone` at `chain.len()
+/// == 1` (target == anchor's root_resource) is intrinsic: the return
+/// type owns an `Arc<DirSnapshot>`, and at depth 1 we can either clone
+/// the input or have a degenerate path that consumes it. Cloning keeps
+/// the helper non-consuming.
+///
+/// `None` arms:
+/// - `target` is outside the anchor's tree subtree (ancestor walk
+///   bottoms out).
+/// - The chain crosses a [`ChildEntry::Leaf`] (snapshot identity flip
+///   at an intermediate segment).
+/// - The chain crosses an uncovered [`DirChild`] (`subtree: None`).
+/// - Any segment fails to resolve via [`Tree::name`] (slot reaped).
+#[must_use]
+pub fn subtree_at_dir(
+    root: &Arc<DirSnapshot>,
+    target: ResourceId,
+    tree: &Tree,
+) -> Option<Arc<DirSnapshot>> {
     let chain = ancestor_chain(target, root.root_resource, tree)?;
 
     // Descend from `root` by following segment names. `chain[0] == anchor`
@@ -596,10 +625,12 @@ fn ancestor_chain(
 
 /// Outcome of [`splice`].
 ///
-/// The carried view is always what the caller should adopt as the new
-/// current — the variants only differentiate whether the splice path
-/// encountered a contract violation the caller should surface as a
-/// diagnostic.
+/// On `Spliced` the caller adopts the carried view as the new current;
+/// on `CrossedUncovered` the caller surfaces a diagnostic and leaves
+/// its own prior handle untouched. The variant carries no payload —
+/// `splice` consumes the caller's `prior` Arc, but `Profile.current`'s
+/// own handle is independent of that (the engine always clones before
+/// calling), so the caller already owns the unchanged prior view.
 #[derive(Debug)]
 pub enum SpliceResult {
     /// Splice succeeded. The new view integrates `replacement` at
@@ -608,29 +639,14 @@ pub enum SpliceResult {
     Spliced(TreeSnapshot),
     /// Splice could not navigate from the prior anchor down to `target`
     /// (target outside anchor's tree subtree, or path crossed a
-    /// `subtree: None` intermediate). The carried `Arc<DirSnapshot>`
-    /// is the prior unchanged — `replacement` was not integrated.
-    /// Caller emits [`crate::Diagnostic::SpliceCrossedUncovered`] so
-    /// the contract violation is visible in operator logs.
+    /// `subtree: None` intermediate). The caller leaves its prior view
+    /// in place and emits [`crate::Diagnostic::SpliceCrossedUncovered`]
+    /// so the contract violation is visible in operator logs.
     ///
     /// Engine contract: "graft only into observed subtrees". Reaching
     /// this variant in v1 implies a state-machine bug; the variant
     /// exists to surface it without crashing the engine.
-    CrossedUncovered(Arc<DirSnapshot>),
-}
-
-impl SpliceResult {
-    /// Consume the result and return its carried [`TreeSnapshot`].
-    /// Equivalent for the caller in both variants — the variant tag is
-    /// the only difference, and is consulted before this call to decide
-    /// whether to emit a Diagnostic.
-    #[must_use]
-    pub fn into_snapshot(self) -> TreeSnapshot {
-        match self {
-            Self::Spliced(s) => s,
-            Self::CrossedUncovered(arc) => TreeSnapshot::Dir(arc),
-        }
-    }
+    CrossedUncovered,
 }
 
 /// Tree-zipper splice that replaces the subtree at `target` within a
@@ -663,17 +679,17 @@ impl SpliceResult {
 /// - The recursive splice short-circuited at every level via `Arc::ptr_eq`
 ///   or `dir_hash` equality (G7 propagation).
 ///
-/// Returns [`SpliceResult::CrossedUncovered`] carrying the prior unchanged
-/// when the engine's "graft only into observed subtrees" contract is
-/// violated:
+/// Returns [`SpliceResult::CrossedUncovered`] when the engine's "graft
+/// only into observed subtrees" contract is violated:
 /// - `target` is outside the anchor's tree subtree (parent walk bottoms
 ///   out before reaching `anchor`).
 /// - The path from anchor to target crosses a `subtree: None` intermediate
 ///   (snapshot coverage gap), a missing entry, or a slot reaped mid-graft.
 ///
-/// Structurally unreachable in v1. The CrossedUncovered fallback preserves
-/// the prior view (no integration); the caller emits a Diagnostic so the
-/// contract breach is observable.
+/// Structurally unreachable in v1. The caller's prior handle stays alive
+/// across the breach (it's an independent Arc clone), so no integration
+/// occurs; the caller emits a Diagnostic so the contract breach is
+/// observable.
 #[must_use]
 pub fn splice(
     prior: Option<Arc<DirSnapshot>>,
@@ -710,13 +726,13 @@ fn splice_dir_prior(
     }
 
     let Some(chain) = ancestor_chain(target, anchor, tree) else {
-        // Target outside anchor's tree subtree. Keep prior unchanged;
-        // surface the contract violation. Pre-PR behaviour was to
-        // wholesale-replace with `replacement`, leaving
-        // `Profile.current` rooted at `target` (not anchor) and
-        // violating the snapshot navigation invariants. Keeping prior
-        // preserves the invariant and lets the next observation converge.
-        return SpliceResult::CrossedUncovered(root);
+        // Target outside anchor's tree subtree. The caller keeps its
+        // prior view (independent Arc clone) and surfaces the contract
+        // violation. Pre-PR behaviour was to wholesale-replace with
+        // `replacement`, leaving `Profile.current` rooted at `target`
+        // (not anchor) and violating the snapshot navigation
+        // invariants.
+        return SpliceResult::CrossedUncovered;
     };
 
     // chain is [anchor, mid_1, ..., mid_k, target]; we already consumed
@@ -729,7 +745,7 @@ fn splice_dir_prior(
                 SpliceResult::Spliced(TreeSnapshot::Dir(new_root))
             }
         }
-        None => SpliceResult::CrossedUncovered(root),
+        None => SpliceResult::CrossedUncovered,
     }
 }
 
@@ -796,7 +812,8 @@ fn splice_dir(
 // diff_tree
 // ---------------------------------------------------------------------------
 
-/// [`Diff`] over two parallel [`TreeSnapshot`] trees.
+/// [`Diff`] over two parallel [`DirSnapshot`] trees rooted at the
+/// same anchor / target.
 ///
 /// Walks in lock-step, pruning equal-`dir_hash` subtrees. Output ordering
 /// is lex-by-segment within each list — depth-first lex traversal happens
@@ -805,26 +822,47 @@ fn splice_dir(
 /// Cross-level rename detection: the per-level walk collects deltas
 /// keyed by `(device, inode)`; a post-pass pairs `Created` and `Deleted`
 /// across the entire walk into `Renamed`.
+///
+/// Sole hot-path consumer is `specter_engine::reconcile::graft`, which
+/// holds a typed Dir prior + Dir response by construction. The
+/// [`TreeSnapshot`]-keyed entry point [`diff_tree`] is retained for
+/// test fixtures that diff over both anchor shapes; production paths
+/// call this helper directly to avoid the wrapper-Arc clone.
+#[must_use]
+pub fn diff_dir_pair(baseline: &DirSnapshot, current: &DirSnapshot) -> Diff {
+    let mut out = Diff::default();
+    if baseline.dir_hash() == current.dir_hash() {
+        return out; // O(1) prune at root
+    }
+    let mut staged_created: Vec<StagedEntry> = Vec::new();
+    let mut staged_deleted: Vec<StagedEntry> = Vec::new();
+    collect_dir_pair(
+        baseline,
+        current,
+        "",
+        &mut out.modified,
+        &mut staged_created,
+        &mut staged_deleted,
+    );
+    pair_renames(staged_created, staged_deleted, &mut out);
+    out
+}
+
+/// [`Diff`] over two parallel [`TreeSnapshot`] trees.
+///
+/// Test-facing entry point: dispatches on the anchor's shape to either
+/// [`diff_dir_pair`] (Dir/Dir) or the private File/File walker. Engine
+/// callers go through [`diff_dir_pair`] / [`diff_file_pair`] (via
+/// `dispatch_*_ok`'s inline path) so they avoid the variant dispatch
+/// and the type-shape contract is encoded at the call site.
 #[must_use]
 pub fn diff_tree(baseline: &TreeSnapshot, current: &TreeSnapshot) -> Diff {
-    let mut out = Diff::default();
     match (baseline, current) {
-        (TreeSnapshot::File(b), TreeSnapshot::File(c)) => diff_file_pair(b, c, &mut out),
-        (TreeSnapshot::Dir(b), TreeSnapshot::Dir(c)) => {
-            if b.dir_hash() == c.dir_hash() {
-                return out; // O(1) prune at root
-            }
-            let mut staged_created: Vec<StagedEntry> = Vec::new();
-            let mut staged_deleted: Vec<StagedEntry> = Vec::new();
-            collect_dir_pair(
-                b,
-                c,
-                "",
-                &mut out.modified,
-                &mut staged_created,
-                &mut staged_deleted,
-            );
-            pair_renames(staged_created, staged_deleted, &mut out);
+        (TreeSnapshot::Dir(b), TreeSnapshot::Dir(c)) => diff_dir_pair(b, c),
+        (TreeSnapshot::File(b), TreeSnapshot::File(c)) => {
+            let mut out = Diff::default();
+            diff_file_pair(b, c, &mut out);
+            out
         }
         // Kind mismatch (File vs Dir) at the anchor: structurally
         // unreachable in v1 — Profile kind is fixed at attach time and
@@ -837,9 +875,9 @@ pub fn diff_tree(baseline: &TreeSnapshot, current: &TreeSnapshot) -> Diff {
                 "diff_tree: File↔Dir mismatch at the anchor is unreachable in v1; \
                  anchor kind changes are reported via Vanished, not diff",
             );
+            Diff::default()
         }
     }
-    out
 }
 
 #[derive(Clone, Debug)]

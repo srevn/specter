@@ -741,7 +741,7 @@ fn subtree_at_file_snapshot_returns_none() {
 fn unwrap_spliced(r: SpliceResult) -> TreeSnapshot {
     match r {
         SpliceResult::Spliced(s) => s,
-        SpliceResult::CrossedUncovered(_) => panic!("expected Spliced, got CrossedUncovered"),
+        SpliceResult::CrossedUncovered => panic!("expected Spliced, got CrossedUncovered"),
     }
 }
 
@@ -985,18 +985,21 @@ fn splice_replacement_changes_dir_hash_uncached_recompute_correct() {
 }
 
 #[test]
-fn splice_target_outside_observed_returns_crossed_uncovered_keeping_prior() {
+fn splice_target_outside_observed_returns_crossed_uncovered() {
     // Target is in the Tree but outside the prior anchor's subtree.
     // Pre-PR behavior: wholesale-replace with `replacement` (corrupted
-    // root). New behavior: SpliceResult::CrossedUncovered carrying the
-    // prior unchanged — preserves Profile.current's anchor-rooted
-    // invariant. Caller (graft) emits Diagnostic::SpliceCrossedUncovered.
+    // root). New behavior: SpliceResult::CrossedUncovered — the caller
+    // keeps its own Arc handle to the prior view (this test cloned it
+    // before passing to splice), preserving Profile.current's anchor-
+    // rooted invariant. Caller (graft) emits
+    // Diagnostic::SpliceCrossedUncovered.
     let mut tree = Tree::new();
     let ids = ensure_chain(&mut tree, &["anchor"]);
     let anchor = ids[0];
     let stranger = tree.ensure(None, "stranger", ResourceRole::User);
     let prior = make_dir(anchor, meta(1, 1, 0), 0, BTreeMap::new());
     let replacement = make_dir(stranger, meta(2, 2, 0), 0, BTreeMap::new());
+    let prior_strong_before = Arc::strong_count(&prior);
     let s = splice(
         Some(Arc::clone(&prior)),
         anchor,
@@ -1004,22 +1007,27 @@ fn splice_target_outside_observed_returns_crossed_uncovered_keeping_prior() {
         Arc::clone(&replacement),
         &tree,
     );
-    let SpliceResult::CrossedUncovered(d) = s else {
-        panic!("expected CrossedUncovered with Dir snapshot");
-    };
     assert!(
-        Arc::ptr_eq(&d, &prior),
-        "target outside observed subtree ⇒ keep prior unchanged",
+        matches!(s, SpliceResult::CrossedUncovered),
+        "target outside observed subtree ⇒ CrossedUncovered",
+    );
+    // splice consumed its Arc on the failure path; the caller's handle
+    // (`prior`) survives at its pre-call strong count.
+    assert_eq!(
+        Arc::strong_count(&prior),
+        prior_strong_before,
+        "caller's prior Arc handle survives the splice consume",
     );
 }
 
 #[test]
-fn splice_target_chain_through_uncovered_returns_crossed_uncovered_keeping_prior() {
+fn splice_target_chain_through_uncovered_returns_crossed_uncovered() {
     // Snapshot has anchor → a, but a's subtree is None (uncovered). The
     // splice path reaches the uncovered intermediate and cannot navigate
-    // further. New behavior: SpliceResult::CrossedUncovered with the
-    // prior unchanged. Caller emits Diagnostic so the contract violation
-    // is observable.
+    // further. New behavior: SpliceResult::CrossedUncovered. The caller
+    // keeps its own Arc handle to the prior view, so the engine can
+    // preserve Profile.current across the breach; caller emits
+    // Diagnostic so the contract violation is observable.
     let mut tree = Tree::new();
     let ids = ensure_chain(&mut tree, &["anchor", "a", "b"]);
     let anchor = ids[0];
@@ -1030,13 +1038,16 @@ fn splice_target_chain_through_uncovered_returns_crossed_uncovered_keeping_prior
     let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
 
     let replacement_b = make_dir(b, meta(3, 3, 0), 0, BTreeMap::new());
+    let root_strong_before = Arc::strong_count(&root);
     let s = splice(Some(Arc::clone(&root)), anchor, b, replacement_b, &tree);
-    let SpliceResult::CrossedUncovered(d) = s else {
-        panic!("expected CrossedUncovered with Dir snapshot");
-    };
     assert!(
-        Arc::ptr_eq(&d, &root),
-        "uncovered intermediate ⇒ keep prior unchanged",
+        matches!(s, SpliceResult::CrossedUncovered),
+        "uncovered intermediate ⇒ CrossedUncovered",
+    );
+    assert_eq!(
+        Arc::strong_count(&root),
+        root_strong_before,
+        "caller's prior Arc handle survives the splice consume",
     );
 }
 

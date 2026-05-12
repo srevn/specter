@@ -266,10 +266,9 @@ pub enum ProfileState {
 /// - `current_prefix` carries a `+1` `watch_demand` contribution from this
 ///   Profile (added at descent registration / advancement; dropped at
 ///   descent end or rewind).
-/// - `remaining_components` is non-empty (the anchor itself is the last
-///   component). Empty `remaining_components` is a state-machine bug; the
-///   defensive check in the descent dispatch transitions the Profile back
-///   to `Idle`.
+/// - [`DescentRemaining`] is non-empty by type construction — the anchor
+///   itself is the last component, and descent transitions Pending → Idle
+///   on materialization rather than emptying the path.
 ///
 /// I5 ("at most one outstanding probe per Profile") for the Pending
 /// lifecycle is enforced by the per-Profile probe channel slot
@@ -282,10 +281,118 @@ pub struct DescentState {
     /// contributes `+1` to this Resource's `watch_demand`.
     pub current_prefix: ResourceId,
     /// Path components from `current_prefix` (exclusive) down to the
-    /// anchor (inclusive). Single-component segments (no `/`).
-    /// `CompactString` keeps typical-length names (≤24 bytes) inline,
-    /// so advance / rewind clones avoid the heap.
-    pub remaining_components: Vec<CompactString>,
+    /// anchor (inclusive). Non-empty by type construction;
+    /// single-component segments (no `/`).
+    pub remaining_components: DescentRemaining,
+}
+
+/// Path-component chain from a descent's `current_prefix` (exclusive)
+/// down to the anchor (inclusive). The non-empty invariant is encoded
+/// at the type level — the sole constructor [`DescentRemaining::from_vec`]
+/// rejects empty inputs, and the two mutators ([`advance`](Self::advance)
+/// and [`prepend`](Self::prepend)) preserve non-emptiness by construction.
+///
+/// `CompactString` keeps typical-length names (≤24 bytes) inline, so the
+/// per-element advance / rewind avoids the heap for the common path.
+///
+/// **API discipline.**
+/// - [`head`](Self::head) is the next segment under consideration —
+///   always present by invariant.
+/// - [`is_terminal`](Self::is_terminal) is `true` when only the head
+///   remains; the descent dispatcher routes through anchor materialization
+///   on this edge and never calls [`advance`](Self::advance).
+/// - [`advance`](Self::advance) consumes the head and is debug-asserted
+///   non-terminal at call time. The terminal arm has already routed
+///   through anchor materialization in production, which replaces the
+///   `Pending` lifecycle entirely; advance is structurally never
+///   reachable there.
+/// - [`prepend`](Self::prepend) is the rewind path's mutator: a
+///   `Vanished` response on `current_prefix` re-injects the prefix's own
+///   segment as the new head while the prefix shifts up one level.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DescentRemaining {
+    inner: Vec<CompactString>,
+}
+
+impl DescentRemaining {
+    /// Construct from a `Vec`. Returns `None` iff `v` is empty,
+    /// preserving the non-empty invariant. Sole intended producer is
+    /// `materialize_path_or_pending`'s Pending branch, where the
+    /// `prefix_idx + 1 < components.len()` gate already guarantees
+    /// non-empty; the `None` arm is defense-in-depth against future
+    /// callers.
+    #[must_use]
+    pub fn from_vec(v: Vec<CompactString>) -> Option<Self> {
+        if v.is_empty() {
+            None
+        } else {
+            Some(Self { inner: v })
+        }
+    }
+
+    /// First (next-to-consume) segment. Always present by invariant.
+    #[must_use]
+    pub fn head(&self) -> &CompactString {
+        // Indexing rather than `first().unwrap()` to encode the invariant
+        // at the access site — a future maintainer can't accidentally
+        // weaken `head` to a defensive `Option` without also adjusting
+        // the type's construction discipline.
+        &self.inner[0]
+    }
+
+    /// Number of remaining segments. Always `>= 1` by invariant.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// True iff only the head remains (`len() == 1`). The descent
+    /// dispatcher's terminal arm consumes the head via anchor
+    /// materialization on this edge and never calls [`advance`].
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        self.inner.len() == 1
+    }
+
+    /// Consume the head, shifting the tail forward by one. Preserves
+    /// the non-empty invariant by debug-asserting non-terminal at entry;
+    /// release builds clamp on terminal (no-op) rather than violating
+    /// the invariant.
+    ///
+    /// Production callers (`advance_descent` in
+    /// `specter-engine::descent`) guard the call with
+    /// [`is_terminal`](Self::is_terminal) — `dispatch_descent_ok` routes
+    /// the terminal edge through anchor materialization, which replaces
+    /// the `Pending` lifecycle before this method would ever be
+    /// reachable on a single-element remaining.
+    pub fn advance(&mut self) {
+        debug_assert!(
+            self.inner.len() >= 2,
+            "DescentRemaining::advance called at terminal — caller must \
+             check is_terminal() and route to materialization instead",
+        );
+        if self.inner.len() >= 2 {
+            self.inner.remove(0);
+        }
+    }
+
+    /// Rewind by one segment: insert `segment` as the new head. Used by
+    /// `dispatch_descent_vanished`'s rewind branch, where a `Vanished`
+    /// response on `current_prefix` shifts the descent up one level and
+    /// the vanished prefix's own segment becomes the next-to-consume
+    /// component on the way back down.
+    pub fn prepend(&mut self, segment: CompactString) {
+        self.inner.insert(0, segment);
+    }
+
+    /// Borrow the components for read-only iteration (test assertions,
+    /// diagnostics). Production code uses [`head`](Self::head) /
+    /// [`len`](Self::len) / [`is_terminal`](Self::is_terminal) — direct
+    /// slice access is for fixture / assertion use only.
+    #[must_use]
+    pub fn as_slice(&self) -> &[CompactString] {
+        &self.inner
+    }
 }
 
 /// `Standard` — event-driven burst; preserves baseline; fires Effect on stable.

@@ -74,7 +74,7 @@ use specter_core::{ClassSet, ContribKey, ResourceId, StepOutput, Tree, WatchOp};
 /// resolve — unreachable for live slots), the op carries
 /// `PathBuf::new()` and the Sensor reports `WatchOpRejected` on
 /// attempt.
-pub fn add_watch(
+pub(crate) fn add_watch(
     tree: &mut Tree,
     r: ResourceId,
     key: ContribKey,
@@ -88,12 +88,15 @@ pub fn add_watch(
     let prev_union = res.events_union();
     res.contributions.insert(key, mask);
     let new_union = res.events_union();
-    let kind = res.kind_raw();
 
     let emit = was_empty || new_union != prev_union;
     if emit {
+        // Sample `kind` and resolve the path only when actually
+        // emitting — saves the `kind_raw` field read and `path_of`
+        // walk for every idempotent re-insert (same key, same mask).
         // Reborrow `tree` for `path_of` once the `res` borrow ends
-        // (the line above is the last use).
+        // (the `kind_raw` read above is the last `res` use).
+        let kind = res.kind_raw();
         let path = tree.path_of(r).unwrap_or_default();
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
@@ -120,7 +123,7 @@ pub fn add_watch(
 /// **Idempotent.** Absent key ⇒ silent no-op. Reachable post-vacate
 /// ([`crate::Tree::vacate`] cleared the map) or post-prior-sub-walk
 /// (a sister helper drained this slot earlier in the same step).
-pub fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &mut StepOutput) {
+pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &mut StepOutput) {
     let Some(res) = tree.get_mut(r) else {
         return;
     };
@@ -151,7 +154,7 @@ pub fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &mut Step
 ///
 /// Suppression is orthogonal to the events mask — it gates kernel event
 /// *delivery* on an existing FD, not registration. The mask is unaffected.
-pub fn add_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
+pub(crate) fn add_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
     let Some(res) = tree.get_mut(r) else {
         return;
     };
@@ -170,7 +173,7 @@ pub fn add_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
 /// `on_watch_op_rejected` on kernel-watch failure), so the eventual
 /// symmetric `sub_suppress` from `finish_burst_to_idle`'s drain enters
 /// here on a zero counter and short-circuits without emission.
-pub fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
+pub(crate) fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
     let Some(res) = tree.get_mut(r) else {
         return;
     };
@@ -230,7 +233,7 @@ pub fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
 ///   caller's responsibility — see the `debug_assert!`s on the
 ///   higher-level `release_*_claim` helpers in [`crate::claims`] and
 ///   [`crate::promoter_claims`].
-pub fn sub_watch_then_try_reap(
+pub(crate) fn sub_watch_then_try_reap(
     tree: &mut Tree,
     r: ResourceId,
     key: ContribKey,

@@ -124,8 +124,8 @@ fn descent_one_level_advances_on_created_entry() {
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("first probe in flight");
     assert_eq!(
-        descent.remaining_components,
-        vec![CompactString::from("bar")]
+        descent.remaining_components.as_slice(),
+        &[CompactString::from("bar")][..],
     );
 
     // Inject a probe response showing `bar` now exists.
@@ -183,8 +183,8 @@ fn descent_two_levels_advances_progressively() {
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     let corr1 = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
-        descent.remaining_components,
-        vec![CompactString::from("bar"), CompactString::from("baz")]
+        descent.remaining_components.as_slice(),
+        &[CompactString::from("bar"), CompactString::from("baz")][..],
     );
 
     let snap1 = dir_snap_with(foo, vec![("bar", EntryKind::Dir, 1)]);
@@ -202,8 +202,8 @@ fn descent_two_levels_advances_progressively() {
         .descent_state(ProbeOwner::Profile(pid))
         .expect("still pending");
     assert_eq!(
-        descent.remaining_components,
-        vec![CompactString::from("baz")]
+        descent.remaining_components.as_slice(),
+        &[CompactString::from("baz")][..],
     );
     let bar = e.tree().lookup(Some(foo), "bar").expect("bar materialized");
     let corr2 = e
@@ -246,8 +246,8 @@ fn descent_no_progress_keeps_pending() {
     // Still pending; no new probe.
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
-        descent.remaining_components,
-        vec![CompactString::from("bar")]
+        descent.remaining_components.as_slice(),
+        &[CompactString::from("bar")][..],
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
@@ -337,8 +337,8 @@ fn descent_failed_retains_state() {
     // Still pending; no probe in flight.
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
-        descent.remaining_components,
-        vec![CompactString::from("bar")]
+        descent.remaining_components.as_slice(),
+        &[CompactString::from("bar")][..],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_none());
 }
@@ -441,8 +441,8 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         .expect("absolute attach against empty Tree is pending");
     assert_eq!(descent.current_prefix, root);
     assert_eq!(
-        descent.remaining_components,
-        vec![CompactString::from("tmp")]
+        descent.remaining_components.as_slice(),
+        &[CompactString::from("tmp")][..],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
 
@@ -541,12 +541,12 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(descent.current_prefix, root);
     assert_eq!(
-        descent.remaining_components,
-        vec![
+        descent.remaining_components.as_slice(),
+        &[
             CompactString::from("var"),
             CompactString::from("log"),
-            CompactString::from("myapp")
-        ],
+            CompactString::from("myapp"),
+        ][..],
     );
 }
 
@@ -754,8 +754,8 @@ fn descent_state_helper_returns_some_for_pending() {
         .descent_state(ProbeOwner::Profile(pid))
         .expect("Pending state populated");
     assert_eq!(
-        descent.remaining_components,
-        vec![CompactString::from("bar")]
+        descent.remaining_components.as_slice(),
+        &[CompactString::from("bar")][..],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
 }
@@ -959,77 +959,10 @@ fn on_watch_op_rejected_clears_pending_state() {
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
 }
 
-// Descent empty-remaining defensive arm
 #[test]
-fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
-    use specter_core::{DescentState, ProfileState};
-    // Build the engine with a Pending Profile, then poke
-    // `remaining_components` to empty to construct the
-    // invariant-violating state directly. (`materialize_path_or_pending`
-    // is the canonical producer of Pending Profiles and never produces
-    // empty remaining; the only way to test the defensive arm is via
-    // direct fixture construction, which is the point — the arm exists
-    // for future-proofing, and we want the test to lock in its
-    // benign-failure contract.)
-    let (mut e, _sid, pid) = setup_pending_one_level();
-    let foo = lookup_foo(&e);
-    let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
-
-    // Snapshot pre-state.
-    let prefix = e
-        .descent_state(ProbeOwner::Profile(pid))
-        .unwrap()
-        .current_prefix;
-    assert_eq!(prefix, foo);
-    assert_eq!(
-        e.tree().get(foo).unwrap().watch_demand(),
-        1,
-        "descent prefix carries +1 STRUCTURE",
-    );
-
-    // Direct mutation to construct the invariant-violating state.
-    // descent_tests.rs is a sibling crate module (not an integration
-    // test), so `pub(crate)` engine fields are reachable. The probe
-    // channel slot (`pending_probe`) keeps its value across the state
-    // mutation, so the in-flight probe correlation matches `corr` for
-    // the response below.
-    e.profiles.get_mut(pid).unwrap().state = ProfileState::Pending(DescentState {
-        current_prefix: prefix,
-        remaining_components: Vec::new(),
-    });
-
-    // Dispatch the probe response — descent_ok hits the defensive arm.
-    let snap = dir_snap_with(prefix, vec![]);
-    let out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
-        }),
-        Instant::now(),
-    );
-
-    // Profile transitioned to Idle.
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
-        ProfileState::Idle
-    ));
-    // Prefix's watch_demand released
-    assert_eq!(
-        e.tree()
-            .get(foo)
-            .map_or(0, specter_core::Resource::watch_demand),
-        0,
-        "prefix watch_demand released by defensive arm",
-    );
-    // Diagnostic surfaces.
-    assert!(
-        out.diagnostics.iter().any(|d| matches!(d,
-            Diagnostic::DescentInvariantViolation { profile, prefix: pfx }
-                if *profile == pid && *pfx == foo)),
-        "DescentInvariantViolation emitted; got {:?}",
-        out.diagnostics,
-    );
+fn descent_remaining_from_empty_vec_is_none() {
+    use specter_core::DescentRemaining;
+    assert!(DescentRemaining::from_vec(Vec::<CompactString>::new()).is_none());
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1176,7 +1109,13 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     // `start_pending_recovery` re-entry path. The helper's debug_assert
     // pins Profile=Idle + closed-channel; both hold.
     let mut out = specter_core::StepOutput::default();
-    e.enter_pending_descent(pid, foo, vec![CompactString::from("bar")], &mut out);
+    e.enter_pending_descent(
+        pid,
+        foo,
+        specter_core::DescentRemaining::from_vec(vec![CompactString::from("bar")])
+            .expect("non-empty by test construction"),
+        &mut out,
+    );
 
     // Recovery overlap: foo's watch_demand is now +2 (watch_root_parent
     // STRUCTURE + descent STRUCTURE). The helper opened the channel and

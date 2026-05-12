@@ -871,11 +871,6 @@ pub fn log_diagnostic(d: &Diagnostic) {
                 "attach path invalid; request dropped",
             );
         }
-        Diagnostic::DescentInvariantViolation { profile, prefix } => tracing::error!(
-            ?profile,
-            ?prefix,
-            "descent invariant violation: remaining_components empty",
-        ),
         Diagnostic::SpliceCrossedUncovered { profile, target } => tracing::warn!(
             ?profile,
             ?target,
@@ -946,11 +941,6 @@ pub fn log_diagnostic(d: &Diagnostic) {
             "promoter attached",
         ),
         Diagnostic::PromoterReaped { promoter } => tracing::info!(?promoter, "promoter reaped",),
-        Diagnostic::PromoterDescentInvariantViolation { promoter, prefix } => tracing::error!(
-            ?promoter,
-            ?prefix,
-            "promoter descent invariant violation: remaining_components empty",
-        ),
         Diagnostic::PromoterDescentVanished { promoter, prefix } => tracing::debug!(
             ?promoter,
             ?prefix,

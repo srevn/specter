@@ -231,19 +231,6 @@ pub enum Diagnostic {
     /// multi-path attach batches (hot reload `ConfigDiff::added`) can
     /// identify which entry failed without re-scanning the config.
     AttachPathInvalid { path: PathBuf, hint: &'static str },
-    /// A descent dispatch ran with `DescentState.remaining_components`
-    /// empty. The invariant on `DescentState` (see `core/profile.rs`)
-    /// says this can't happen: the anchor itself is the last remaining
-    /// component, and descent transitions Pending → Idle on
-    /// materialization rather than emptying the vec. If it ever fires,
-    /// it's a state-machine bug — the diagnostic surfaces the breach
-    /// and the engine takes the conservative recovery path
-    /// (`release_descent_prefix_claim`, returning the Profile to Idle
-    /// without leaking the prefix's `watch_demand` contribution).
-    DescentInvariantViolation {
-        profile: ProfileId,
-        prefix: ResourceId,
-    },
     /// A probe response's snapshot shape (`File` from `AnchorOk(_)` vs
     /// `Dir` from `SubtreeOk(_)`) disagrees with the Profile's cached
     /// [`crate::Profile::kind`].
@@ -383,16 +370,6 @@ pub enum Diagnostic {
     /// [`Self::PromoterAttached`]; the bin removes the entry from its
     /// `name → PromoterId` map on receipt.
     PromoterReaped { promoter: PromoterId },
-    /// A Promoter's literal-prefix descent ran with
-    /// `DescentState.remaining_components` empty — analogue of
-    /// [`Self::DescentInvariantViolation`] for the Promoter side.
-    /// Should be unreachable per the invariant on `DescentState`; the
-    /// engine surfaces the breach + retains state without leaking the
-    /// prefix watch.
-    PromoterDescentInvariantViolation {
-        promoter: PromoterId,
-        prefix: ResourceId,
-    },
     /// Promoter literal-prefix descent probe returned `Vanished` for
     /// `prefix`. The engine rewinds descent to the next-existing
     /// ancestor of `prefix`. Repeated occurrences during scaffold

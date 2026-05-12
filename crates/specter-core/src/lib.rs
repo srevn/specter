@@ -38,8 +38,8 @@ pub use op::{
 pub use output::StepOutput;
 pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use profile::{
-    AnchorClaim, Burst, BurstIntent, BurstPhase, DescentState, Profile, ProfileMap, ProfileState,
-    TimerKind,
+    AnchorClaim, Burst, BurstIntent, BurstPhase, DescentRemaining, DescentState, Profile,
+    ProfileMap, ProfileState, TimerKind,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{
@@ -52,8 +52,8 @@ pub use scan_config::{
 };
 pub use snapshot::EntryKind;
 pub use snapshot::tree::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot, diff_tree,
-    splice,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot,
+    diff_dir_pair, diff_tree, splice, subtree_at_dir,
 };
 pub use sub::{ClassSet, EffectScope, Sub, SubAttachRequest, SubRegistry, SubRegistryDiff};
 pub use time::{Clock, SystemClock};

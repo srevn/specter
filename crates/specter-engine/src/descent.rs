@@ -50,8 +50,9 @@
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind,
-    ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput,
+    AnchorClaim, ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, DirSnapshot,
+    EntryKind, ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
+    StepOutput,
 };
 use std::time::Instant;
 
@@ -65,10 +66,14 @@ pub(crate) enum MaterializeResult {
     /// Descent is needed. The leaf `ResourceId` is the anchor's
     /// (currently `DescentScaffold`-roled) slot; the engine registers
     /// `DescentState` keyed by the Profile's id once it's been minted.
+    /// `remaining` is non-empty by [`DescentRemaining`]'s type
+    /// invariant — `materialize_path_or_pending` reaches this variant
+    /// only when `prefix_idx + 1 < components.len()`, guaranteeing
+    /// `from_vec` succeeds.
     Pending {
         anchor: ResourceId,
         prefix: ResourceId,
-        remaining: Vec<CompactString>,
+        remaining: DescentRemaining,
     },
 }
 
@@ -180,10 +185,19 @@ impl crate::Engine {
             let prefix = self
                 .resolve_components(&components[..=prefix_idx])
                 .expect("ensure_path created every component; prefix slice must resolve");
-            let remaining: Vec<CompactString> = components[prefix_idx + 1..]
+            let remaining_vec: Vec<CompactString> = components[prefix_idx + 1..]
                 .iter()
                 .map(|&s| CompactString::from(s))
                 .collect();
+            // `prefix_idx + 1 < components.len()` is structurally
+            // guaranteed by the outer `if`, so `from_vec` always
+            // succeeds here; `expect` documents the contract and gives
+            // a precise panic message if a future refactor weakens the
+            // outer guard.
+            let remaining = DescentRemaining::from_vec(remaining_vec).expect(
+                "materialize_path_or_pending: Pending branch with empty remaining is \
+                 structurally impossible (prefix_idx + 1 < components.len())",
+            );
             MaterializeResult::Pending {
                 anchor,
                 prefix,
@@ -242,7 +256,7 @@ impl crate::Engine {
         &mut self,
         profile_id: ProfileId,
         prefix: ResourceId,
-        remaining: Vec<CompactString>,
+        remaining: DescentRemaining,
         out: &mut StepOutput,
     ) {
         debug_assert!(
@@ -332,24 +346,13 @@ impl crate::Engine {
             snapshot.root_resource, prefix,
             "walker stamp diverges from emitted target_resource (owner = {owner:?})",
         );
-        let Some(next_segment) = descent.remaining_components.first().cloned() else {
-            // The DescentState invariant (core/profile.rs) says
-            // `remaining_components` is non-empty: the descent target is
-            // the last component, and descent leaves the in-descent state
-            // on materialization rather than emptying the vec. If we
-            // ever reach this arm, it's a state-machine bug. Take the
-            // conservative recovery path: surface the breach via a
-            // per-owner Diagnostic and release the prefix claim
-            // symmetrically (clears descent state AND releases the +1
-            // watch_demand contribution, matching
-            // `dispatch_descent_vanished`'s root branch). Without the
-            // release, the prefix's counter would leak.
-            out.diagnostics
-                .push(descent_invariant_diagnostic(owner, prefix));
-            self.release_owner_descent_prefix(owner, out);
-            return;
-        };
-        let is_terminal = descent.remaining_components.len() == 1;
+        // `DescentRemaining` is non-empty by type invariant — the prior
+        // defensive empty-arm + `descent_invariant_diagnostic` /
+        // `release_owner_descent_prefix` recovery is no longer
+        // reachable (and the corresponding `Diagnostic` variants have
+        // been retired).
+        let next_segment = descent.remaining_components.head().clone();
+        let is_terminal = descent.remaining_components.is_terminal();
 
         // Descent probes ship `recursive=false`, so the response is a
         // single-level Dir snapshot — look up the next segment by name in
@@ -440,7 +443,12 @@ impl crate::Engine {
         };
         if let Some(d) = self.descent_state_mut(owner) {
             d.current_prefix = new_prefix;
-            d.remaining_components.remove(0);
+            // Non-terminal by caller contract — `dispatch_descent_ok`
+            // routes terminal descents through anchor materialization
+            // before reaching `advance_descent`. The debug_assert
+            // inside `DescentRemaining::advance` pins this for
+            // regression detection.
+            d.remaining_components.advance();
         }
 
         let key = descent_key(owner);
@@ -640,7 +648,7 @@ impl crate::Engine {
                 if let Some(d) = self.descent_state_mut(owner) {
                     d.current_prefix = parent_id;
                     if let Some(name) = prefix_name {
-                        d.remaining_components.insert(0, name);
+                        d.remaining_components.prepend(name);
                     }
                 }
 
@@ -734,21 +742,6 @@ const fn descent_key(owner: ProbeOwner) -> ContribKey {
     match owner {
         ProbeOwner::Profile(pid) => ContribKey::ProfileDescent(pid),
         ProbeOwner::Promoter(qid) => ContribKey::PromoterPrefix(qid),
-    }
-}
-
-/// Per-owner diagnostic emitted when the descent dispatcher observes
-/// `DescentState.remaining_components.is_empty()` — a state-machine
-/// invariant breach. Profile and Promoter ship distinct variants
-/// (`DescentInvariantViolation` vs `PromoterDescentInvariantViolation`)
-/// so operator logs disambiguate the source without parsing the carried
-/// id type.
-const fn descent_invariant_diagnostic(owner: ProbeOwner, prefix: ResourceId) -> Diagnostic {
-    match owner {
-        ProbeOwner::Profile(profile) => Diagnostic::DescentInvariantViolation { profile, prefix },
-        ProbeOwner::Promoter(promoter) => {
-            Diagnostic::PromoterDescentInvariantViolation { promoter, prefix }
-        }
     }
 }
 

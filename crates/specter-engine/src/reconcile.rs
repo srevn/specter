@@ -67,7 +67,7 @@ use smallvec::SmallVec;
 use specter_core::{
     ContribKey, DedupKey, Diagnostic, Diff, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
     ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot,
-    diff_tree, splice,
+    diff_dir_pair, splice, subtree_at_dir,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -127,19 +127,31 @@ pub(crate) fn ensure_descendant(
 }
 
 /// Walk `rel_path` component-by-component to find an existing slot. Returns
-/// `None` if any segment fails to resolve.
+/// `None` if any segment fails to resolve OR if `rel_path` contains no
+/// non-empty segments (symmetric with [`ensure_descendant`] — neither
+/// helper degrades to "return the anchor" for an empty relative path).
 ///
 /// `pub(crate)` so descendant-aware sites outside reconcile (e.g.,
 /// `transitions::emit_effects_per_stable_file`,
 /// `descent::dispatch_descent_ok`) can resolve a relative path under an
 /// anchor without duplicating the component-walk.
+///
+/// **Empty-`rel_path` discipline.** `Diff` entry segments
+/// (`EntryRef.segment: CompactString`) are non-empty by walker
+/// construction in v1, but the type admits empty. Returning `Some(anchor)`
+/// on the empty case would cascade into [`apply_diff_to_tree`]'s Phase 1
+/// issuing a `sub_watch + try_reap` at the anchor itself — risking anchor
+/// reap from a malformed diff entry. The `peek` short-circuit removes
+/// that hazard at the entry gate.
 pub(crate) fn lookup_descendant(
     tree: &Tree,
     anchor: ResourceId,
     rel_path: &str,
 ) -> Option<ResourceId> {
+    let mut comps = rel_path.split('/').filter(|s| !s.is_empty()).peekable();
+    comps.peek()?;
     let mut cur = anchor;
-    for comp in rel_path.split('/').filter(|s| !s.is_empty()) {
+    for comp in comps {
         cur = tree.lookup(Some(cur), comp)?;
     }
     Some(cur)
@@ -304,75 +316,68 @@ pub(crate) fn apply_diff_to_tree(
 
 /// Splice a probe response into `Profile.current` at `target`, then
 /// apply the resulting [`Diff`] to the engine's `Tree`. Emits Watch ops
-/// via [`apply_diff_to_tree`].
+/// via [`apply_diff_to_tree`] and commits the new view atomically via
+/// [`specter_core::Profile::install_dir_current`].
 ///
-/// Single source of truth for "engine just received an Ok response;
-/// integrate it into the Profile's view." Used by `dispatch_seed_ok` and
-/// `dispatch_standard_ok` alike. Caller handles `baseline` rebasing
-/// (different rules for Seed vs Standard).
+/// Single source of truth for "engine just received an Ok Dir response;
+/// integrate it into the Profile's view." The Dir/File dispatch lives
+/// one layer up in [`crate::Engine::apply_snapshot`], which extracts the
+/// typed `prior` from `Profile.current` and forwards Dir snapshots
+/// here. File-anchored Profiles never reach this helper — their
+/// `Profile.current` is `TreeSnapshot::File(leaf)`, integrated by an
+/// inline `install_file_current` call at `apply_snapshot`'s File arm.
+/// The typed [`crate::ProbeRequest`] dispatch chain plus
+/// [`crate::Engine::kind_agrees_or_finalize`] together guarantee no
+/// File-prior + Dir-response pair survives to this call site.
 ///
 /// **Splice-first ordering.** The splice runs *before* any Tree
 /// mutation. A [`SpliceResult::CrossedUncovered`] verdict (a
 /// v1-unreachable contract breach) surfaces a [`Diagnostic`] and
-/// short-circuits without touching Tree state — `Profile.current` and
-/// `Tree` stay coherent across the breach. The pre-refactor ordering
-/// (`walk_pair` then `splice`) would have committed Tree mutations
-/// before splice's failure was known.
+/// short-circuits without touching Tree state. `Profile.current` is
+/// untouched across the breach: the `prior` arg was an Arc clone the
+/// caller (`apply_snapshot`) made from `Profile.current`'s handle, so
+/// dropping it on the failure path leaves the Profile's own handle
+/// alive at its pre-call shape.
 ///
 /// **Diff at TARGET.** The Diff is built between `prior_at_target`
-/// (extracted via `subtree_at(target)`) and `response_arc`, so its
-/// rel-paths are relative to `target` — [`apply_diff_to_tree`] then
-/// passes `target` as the `base`. Diffing at the anchor instead would
-/// thread a path-to-target prefix into every entry and force
+/// (descended from `prior` via [`subtree_at_dir`]) and `response_arc`,
+/// so its rel-paths are relative to `target` — [`apply_diff_to_tree`]
+/// then passes `target` as the `base`. Diffing at the anchor instead
+/// would thread a path-to-target prefix into every entry and force
 /// [`ensure_descendant`] / [`lookup_descendant`] to re-walk the prefix
 /// per entry.
-///
-/// **Dir-only contract.** This helper is reachable only with a
-/// `TreeSnapshot::Dir(_)` `Profile.current` (or `None` for the first
-/// graft). File-anchored Profiles never call `graft` — their
-/// `Profile.current` is `TreeSnapshot::File(leaf)`, integrated by an
-/// inline write at `dispatch_*_ok`. The [`crate::ProbeRequest`] variant
-/// (`AnchorFile` vs `Subtree`) is the structural guarantee. A `File`
-/// prior reaching `splice` is a routing breach: `debug_assert!` in
-/// dev/CI, drop through to `None` in release so the next observation
-/// converges.
 ///
 /// **Borrow shape.** Takes `profile_id: ProfileId` (not `&mut Profile`)
 /// because the splice write and the immutable Profile read for the
 /// `apply_diff_to_tree` argument live on opposite sides of a borrow
 /// boundary. Threading the id through lets graft re-borrow under
-/// whichever shape each step needs.
+/// whichever shape each step needs. `prior` arrives typed
+/// (`Option<Arc<DirSnapshot>>`) — the caller already extracted it
+/// under one Profile borrow, lifting the File-shape detection out of
+/// graft's body.
 pub(crate) fn graft(
     profile_id: ProfileId,
     target: ResourceId,
+    prior: Option<Arc<DirSnapshot>>,
     response_arc: Arc<DirSnapshot>,
     tree: &mut Tree,
     profiles: &mut ProfileMap,
     out: &mut StepOutput,
 ) {
-    // Head extract: anchor + prior_at_target + prior_arc, all under one
-    // immutable Profile borrow. `prior_at_target` is reused for the
-    // equal-hash early-out and as the diff's baseline. `prior_arc` is
-    // the full anchor-rooted snapshot consumed by `splice`.
-    let (anchor, prior_at_target, prior_arc) = {
-        let Some(p) = profiles.get(profile_id) else {
-            return;
-        };
-        let prior_at_target = p.current.as_ref().and_then(|s| s.subtree_at(target, tree));
-        let prior_arc = match &p.current {
-            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
-            Some(TreeSnapshot::File(_)) => {
-                debug_assert!(
-                    false,
-                    "graft: File-shaped Profile.current reached splice; \
-                     dispatch routing breach (profile = {profile_id:?})",
-                );
-                None
-            }
-            None => None,
-        };
-        (p.resource, prior_at_target, prior_arc)
+    let anchor = match profiles.get(profile_id) {
+        Some(p) => p.resource,
+        None => return,
     };
+
+    // Navigate the typed Dir prior down to `target`. Reused for the
+    // equal-hash early-out and as the diff's baseline; cheap Arc::clone
+    // at depth 1 (target == anchor's root) — same shape as the prior
+    // call through `subtree_at_impl`, but without the
+    // `TreeSnapshot::Dir(Arc::clone(...))` wrapper allocation the
+    // `&TreeSnapshot`-keyed entry point required.
+    let prior_at_target = prior
+        .as_ref()
+        .and_then(|arc| subtree_at_dir(arc, target, tree));
 
     // O(1) early-out: response equals prior at this target ⇒ no Watch
     // ops, no graft, no allocation.
@@ -389,42 +394,34 @@ pub(crate) fn graft(
     // first-graft / freshly-covered-target case;
     // `Diff::all_created(&response)` is the empty-prior shorthand.
     //
-    // Cloning the response Arc here (Some arm) is the cheaper of two
-    // disposals: it keeps `response_arc` available for `splice`'s
-    // consume below — the alternative would be two clones (one each
-    // for diff and splice) under the splice-first ordering. Diff and
-    // splice are independent computations; reordering "build diff
-    // first" preserves the splice-then-apply guarantee for Tree
-    // mutations because `apply_diff_to_tree` still runs only after
-    // `splice` succeeds.
-    let diff = match prior_at_target {
-        Some(prior) => diff_tree(
-            &TreeSnapshot::Dir(prior),
-            &TreeSnapshot::Dir(Arc::clone(&response_arc)),
-        ),
+    // `diff_dir_pair` takes `&DirSnapshot` directly (Arc derefs in the
+    // call coerce), so neither prior nor response needs to be cloned
+    // wholesale for the diff — `response_arc` stays available for
+    // `splice`'s consume below.
+    let diff = match &prior_at_target {
+        Some(p) => diff_dir_pair(p, &response_arc),
         None => Diff::all_created(&response_arc),
     };
 
-    // Splice — pure, no Tree mutation. `CrossedUncovered` carries the
-    // prior unchanged; we surface the diagnostic and short-circuit
-    // before any `apply_diff_to_tree` work, so `Profile.current` and
-    // `Tree` stay coherent across the breach. Even when (a future
-    // regression makes) `CrossedUncovered` reachable, the engine
-    // cannot diverge. This is the splice-then-apply ordering that
-    // closed the pre-refactor F-MED-3 hazard.
+    // Splice — pure, no Tree mutation. `CrossedUncovered` short-
+    // circuits before any `apply_diff_to_tree` work, so
+    // `Profile.current` and `Tree` stay coherent across the breach.
+    // Even when (a future regression makes) `CrossedUncovered`
+    // reachable, the engine cannot diverge. This is the splice-then-
+    // apply ordering that closed the pre-refactor F-MED-3 hazard.
     //
-    // Consumes `response_arc` (move) — the diff above already cloned
-    // the Arc when it needed a second handle.
-    let new_current = match splice(prior_arc, anchor, target, response_arc, tree) {
+    // Consumes `prior` and `response_arc`. The caller (apply_snapshot)
+    // held an independent Arc handle in `Profile.current`, so dropping
+    // our `prior` on the CrossedUncovered failure path leaves the
+    // Profile's own handle alive at its pre-call shape — no
+    // `install_dir_current` rebind needed.
+    let new_current = match splice(prior, anchor, target, response_arc, tree) {
         SpliceResult::Spliced(snap) => snap,
-        SpliceResult::CrossedUncovered(prior) => {
+        SpliceResult::CrossedUncovered => {
             out.diagnostics.push(Diagnostic::SpliceCrossedUncovered {
                 profile: profile_id,
                 target,
             });
-            if let Some(p) = profiles.get_mut(profile_id) {
-                p.install_dir_current(prior);
-            }
             return;
         }
     };
@@ -519,11 +516,7 @@ pub(crate) fn current_target_hash(
     tree: &Tree,
 ) -> Option<u128> {
     match profile.current.as_ref()? {
-        TreeSnapshot::Dir(_) => profile
-            .current
-            .as_ref()
-            .and_then(|s| s.subtree_at(target, tree))
-            .map(|s| s.dir_hash()),
+        TreeSnapshot::Dir(root) => subtree_at_dir(root, target, tree).map(|s| s.dir_hash()),
         TreeSnapshot::File(leaf) => Some(leaf.leaf_hash()),
     }
 }
@@ -837,10 +830,15 @@ mod tests {
 
         let prior_arc_count = Arc::strong_count(&snap_a);
 
+        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
+            _ => None,
+        };
         let mut out = StepOutput::default();
         graft(
             pid,
             root,
+            prior,
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
@@ -862,10 +860,15 @@ mod tests {
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let response = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
+        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
+            _ => None,
+        };
         let mut out = StepOutput::default();
         graft(
             pid,
             root,
+            prior,
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
@@ -933,10 +936,15 @@ mod tests {
         // Probe response: a.rs is gone.
         let response = dir_snap(root, 200, vec![]);
 
+        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
+            _ => None,
+        };
         let mut out = StepOutput::default();
         graft(
             pid,
             root,
+            prior,
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
@@ -982,10 +990,15 @@ mod tests {
         // forces graft to walk the level rather than equal-hash early-out.
         let response = dir_snap(root, 200, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
+        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
+            _ => None,
+        };
         let mut out = StepOutput::default();
         graft(
             pid,
             root,
+            prior,
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
@@ -1034,10 +1047,15 @@ mod tests {
         // the Subtree entry should survive.
         let response = dir_snap(root, 200, vec![]);
 
+        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
+            _ => None,
+        };
         let mut out = StepOutput::default();
         graft(
             pid,
             root,
+            prior,
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
@@ -1106,10 +1124,15 @@ mod tests {
 
         let response = dir_snap(root, 200, vec![]);
 
+        let prior = match profiles.get(pid_a).and_then(|p| p.current.as_ref()) {
+            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
+            _ => None,
+        };
         let mut out = StepOutput::default();
         graft(
             pid_a,
             root,
+            prior,
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
@@ -1175,10 +1198,15 @@ mod tests {
 
         let response = dir_snap(b_id, 200, vec![]);
 
+        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
+            _ => None,
+        };
         let mut out = StepOutput::default();
         graft(
             pid,
             b_id,
+            prior,
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
@@ -1204,7 +1232,8 @@ mod tests {
         };
         assert!(
             Arc::ptr_eq(current_arc, &prior_current),
-            "graft kept prior current unchanged on CrossedUncovered",
+            "graft leaves Profile.current's Arc handle untouched on CrossedUncovered \
+             (splice consumed our typed prior clone; Profile.current's own handle is independent)",
         );
     }
 
@@ -1287,10 +1316,15 @@ mod tests {
             "regression invariant: prior File + new Dir at the same inode",
         );
 
+        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
+            _ => None,
+        };
         let mut out = StepOutput::default();
         graft(
             pid,
             root,
+            prior,
             Arc::clone(&response),
             &mut tree,
             &mut profiles,

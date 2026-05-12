@@ -204,8 +204,8 @@ fn attach_pending_when_literal_prefix_missing() {
     let fs_root = e.tree().lookup(None, FS_ROOT_SEG).expect("FS-root exists");
     assert_eq!(d.current_prefix, fs_root, "descent at FS-root");
     assert_eq!(
-        d.remaining_components,
-        vec![CompactString::from("var"), CompactString::from("log")],
+        d.remaining_components.as_slice(),
+        &[CompactString::from("var"), CompactString::from("log")][..],
         "two literal segments to descend",
     );
 
@@ -554,8 +554,8 @@ fn descent_vanished_rewinds_to_parent() {
     let fs_root = e.tree().lookup(None, FS_ROOT_SEG).unwrap();
     assert_eq!(d.current_prefix, fs_root, "rewind landed at FS-root");
     assert_eq!(
-        d.remaining_components,
-        vec![CompactString::from("var"), CompactString::from("log")],
+        d.remaining_components.as_slice(),
+        &[CompactString::from("var"), CompactString::from("log")][..],
         "vanished prefix's segment prepended; original remaining preserved",
     );
 

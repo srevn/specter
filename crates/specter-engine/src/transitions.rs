@@ -16,11 +16,11 @@ use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
-    AnchorClaim, BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey, Diagnostic,
-    Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, Resource,
-    ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure,
-    WatchOp, WatchRegistryDiff,
+    AnchorClaim, BurstIntent, BurstPhase, ClaimKind, ClassSet, CorrelationId, DedupKey,
+    DescentRemaining, Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, PromoterClaimKind,
+    PromoterId, PromoterState, Resource, ResourceId, ResourceKind, StepOutput, SubId, TimerId,
+    TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -206,7 +206,12 @@ impl Engine {
         let Some(anchor_name) = self.tree.name(anchor).map(CompactString::from) else {
             return;
         };
-        self.enter_pending_descent(profile_id, parent, vec![anchor_name], out);
+        // `vec![anchor_name]` is non-empty by construction, so the
+        // `from_vec` discriminant is structurally `Some`. `expect`
+        // documents the contract.
+        let remaining = DescentRemaining::from_vec(vec![anchor_name])
+            .expect("start_pending_recovery: single-segment remaining is non-empty");
+        self.enter_pending_descent(profile_id, parent, remaining, out);
     }
 
     /// Dispatch a [`ProbeResponse`].
@@ -463,6 +468,14 @@ impl Engine {
     /// inline through [`specter_core::Profile::install_file_current`]
     /// (a Leaf has no descendants to materialise).
     ///
+    /// **Typed prior extraction.** On the Dir arm this helper extracts
+    /// the Dir prior from `Profile.current` under one immutable
+    /// borrow and threads it to [`graft`] as a typed
+    /// `Option<Arc<DirSnapshot>>`. Lifting the extraction here keeps
+    /// graft's body Dir-typed end-to-end and centralises the
+    /// File-shaped-prior detection at the single boundary that already
+    /// owns the Profile borrow shape.
+    ///
     /// **Kind agreement is a caller responsibility.** Callers MUST
     /// invoke [`Engine::kind_agrees_or_finalize`] before this helper.
     /// The setters' debug_assert is a defensive backstop for any
@@ -478,9 +491,34 @@ impl Engine {
     ) {
         match snapshot {
             TreeSnapshot::Dir(arc) => {
+                // Extract typed prior under one Profile borrow. The
+                // `File` arm is structurally unreachable when the
+                // dispatcher honoured `kind_agrees_or_finalize` (a Dir
+                // response on a `Some(File)`-kinded Profile would have
+                // routed through `finalize_anchor_lost` first); the
+                // `debug_assert!` is defense-in-depth against a future
+                // caller bypassing that boundary.
+                let prior = match self
+                    .profiles
+                    .get(profile_id)
+                    .and_then(|p| p.current.as_ref())
+                {
+                    Some(TreeSnapshot::Dir(prior_arc)) => Some(Arc::clone(prior_arc)),
+                    None => None,
+                    Some(TreeSnapshot::File(_)) => {
+                        debug_assert!(
+                            false,
+                            "apply_snapshot: File-shaped Profile.current paired with \
+                             Dir response — kind_agrees_or_finalize boundary breached \
+                             (profile = {profile_id:?})",
+                        );
+                        None
+                    }
+                };
                 graft(
                     profile_id,
                     target,
+                    prior,
                     arc,
                     &mut self.tree,
                     &mut self.profiles,
