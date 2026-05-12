@@ -1,71 +1,75 @@
-//! Newly-discovered descendants reconciliation.
+//! Covered-descendants reconciliation via `Diff`.
 //!
-//! Every `ProbeResponse(Ok(snapshot))` runs `reconcile_descendants` *before*
-//! the transition body. The pass diffs `snapshot` against the Profile's
-//! prior snapshot (`current` first, falling back to `baseline`); for each
-//! delta entry it ensures the Resource exists, sets its `kind`, and
-//! installs or releases the per-Resource [`ContribKey::ProfileDescendant`]
-//! contribution via `add_watch` / `sub_watch` (see
-//! `specter-engine::refcounts`). The Watch ops appear in
+//! Every `ProbeResponse(Ok(snapshot))` for a Dir-shaped Profile flows
+//! through [`graft`]: splice the response into `Profile.current`, then
+//! apply the resulting [`Diff`](specter_core::Diff) to the engine's
+//! `Tree` via [`apply_diff_to_tree`]. The Diff is the **single
+//! representation of a snapshot change** consumed inside the engine —
+//! the same `diff_tree` algorithm core uses for Effect dispatch is the
+//! only classifier that mutates Tree state.
+//!
+//! For each delta entry, [`apply_diff_to_tree`] ensures (or releases)
+//! the Tree slot, sets its kind, and installs or releases the
+//! per-Resource [`ContribKey::ProfileDescendant`] contribution via
+//! [`add_watch`] / [`sub_watch`] for covered Dirs (always) and covered
+//! Leaves under `Profile.has_per_file_fds`. The Watch ops appear in
 //! `StepOutput.watch_ops` alongside any suppress edges from the burst
 //! lifecycle.
 //!
-//! **Empty-prior synthesis.** When neither `current` nor `baseline` is set —
-//! the Seed burst's first probe — a naive diff loop would skip the body
-//! and leave descendants Unwatched. We synthesize a `Diff` whose `created`
-//! list is the entire `snapshot.entries`; the same code path then runs
-//! uniformly. Equivalent to diffing against an empty `TreeSnapshot`, no extra
-//! allocation cost beyond the `EntryRef` copies.
+//! **Empty-prior path.** When `Profile.current` is `None` — the Seed
+//! burst's first probe — [`graft`] synthesises the Diff via
+//! [`Diff::all_created`](specter_core::Diff::all_created) on the
+//! response. Equivalent to diffing against an empty `DirSnapshot`, no
+//! empty-snapshot allocation.
 //!
-//! **Multi-component segments.** Entry segments like `subdir/file.txt` for
-//! recursive scans are supported. `Tree::ensure` is single-component by
-//! design (`(parent, segment)` is the slot). We walk components within
-//! reconcile via `ensure_descendant` / `lookup_descendant`; the lex sort over
-//! `(segment_str, kind)` ensures a parent like `subdir` sorts before any
-//! descendant `subdir/...`, so intermediate slots exist before their
-//! descendants are processed.
+//! **Splice-first ordering.** [`graft`] runs `splice` *before* any Tree
+//! mutation. [`SpliceResult::CrossedUncovered`] (a contract breach in
+//! v1) surfaces a [`Diagnostic`] and short-circuits without touching
+//! Tree state — `Profile.current` and `Tree` stay coherent across the
+//! breach.
 //!
-//! **Reaping and ordering.** The two-phase order is:
-//! 1. Deletions (`delta.deleted` then `delta.renamed.from`), in reverse
-//!    lex order — leaves before parents. `try_reap` checks
-//!    `has_anchors`; processing leaves first lets parents reap once
-//!    their last child is gone.
-//! 2. Creations (`delta.created` then `delta.renamed.to`), in forward lex
-//!    order — parents before descendants. `ensure_descendant` walks
-//!    intermediate components; the parent slot must exist before the
-//!    child entry is processed.
+//! **Two-phase reaping and ordering.** [`apply_diff_to_tree`] runs:
+//! 1. Phase 1 — `diff.deleted` and `diff.renamed.from`, in reverse
+//!    iteration. Releases this Profile's contribution at each slot;
+//!    [`Tree::try_reap`] reclaims any slot left with no anchors.
+//!    Reverse-lex within each list is **performance / cleanliness**,
+//!    not correctness — `try_reap` cascades upward through any
+//!    parent that loses its last anchor, so leaf-before-parent only
+//!    avoids the cascade work, it does not enable the reap.
+//! 2. Phase 2 — `diff.created` and `diff.renamed.to`, in forward
+//!    iteration. Ensures each slot under its rel-path, sets the kind,
+//!    and installs the contribution if covered.
 //!
-//! Deletions-before-creations is load-bearing for the **same-segment
-//! kind change** case (`rm foo (File)` then `mkdir foo (Dir)`): the diff
-//! reports `Deleted(foo, File, inode_A)` + `Created(foo, Dir, inode_B)`,
-//! and the Tree slot at `(parent, "foo")` is shared between them. If we
-//! processed creations first, the slot would be re-typed to Dir and
-//! Watched; then the deletion pass would look up the same slot (now
-//! Dir) and emit Unwatch — silently breaking the new directory's watch.
-//! Deletions-first vacates the slot (the file's slot has no Watch
-//! contribution to release), and the create pass then
-//! `tree.ensure`s a fresh `ResourceId` (generation-incremented) for the
-//! new directory, emitting a single Watch.
+//! Phase-1-before-Phase-2 is load-bearing for the **same-segment kind
+//! change** case (`rm foo (File)` then `mkdir foo (Dir)`): `diff_tree`
+//! stages both delete and create with `pair_eligible: false`. Phase 1
+//! reaps the prior slot (generation-incremented on remove); Phase 2's
+//! `Tree::ensure` returns a fresh slot at the new generation. If we
+//! processed creations first, the slot would be re-typed to Dir, and
+//! the deletion pass would look up the same slot (now Dir) and emit
+//! Unwatch — silently breaking the new directory's watch.
 //!
-//! **Reap discipline.** `try_reap` is gated by an empty contributions
-//! map so the multi-Profile case (where another Profile still
-//! contributes) does not prematurely tear down a still-live slot.
+//! **Reap discipline.** [`Tree::try_reap`] is gated by the slot's
+//! `has_anchors`, so the multi-Profile case (where another Profile
+//! still contributes) does not prematurely tear down a still-live slot.
 //!
-//! **File materialization vs Watch.** All covered diff entries get a Tree
-//! slot — `ensure_descendant` runs unconditionally — so
-//! `DedupKey::PerFile { sub, resource }` always carries a real `ResourceId`.
-//! The Watch op (`add_watch`) is gated to **Dirs only**: v1 doesn't
-//! put per-file FDs in the Sensor; pattern matching on
-//! `EffectScope::PerStableFile` is at the Profile level and walks the Diff
-//! at burst end. Files get Resources, no FDs.
+//! **File materialization vs Watch.** Every covered diff entry gets a
+//! Tree slot — [`ensure_descendant`] runs unconditionally — so
+//! `DedupKey::PerFile { sub, resource }` always carries a real
+//! `ResourceId`. The Watch op (`add_watch`) is gated: covered Dirs
+//! always; covered Leaves only when `Profile.has_per_file_fds == true`.
+//! Per-file Effect dispatch (`EffectScope::PerStableFile`) walks the
+//! same Diff at burst end via `emit_effects_per_stable_file`.
 
 use crate::coverage::covers;
 use crate::refcounts::{add_watch, sub_watch};
+use smallvec::SmallVec;
 use specter_core::{
-    ChildEntry, ContribKey, DedupKey, Diagnostic, DirSnapshot, EntryKind, Profile, ProfileId,
-    ProfileMap, ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree,
-    TreeSnapshot, splice,
+    ContribKey, DedupKey, Diagnostic, Diff, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
+    ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot,
+    diff_tree, splice,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Walk `rel_path` component-by-component beneath `anchor`, ensuring each
@@ -73,6 +77,26 @@ use std::sync::Arc;
 /// default to `ResourceKind::Dir` only when freshly created (kind was
 /// `Unknown`). Returns `None` if `rel_path` is empty (a degenerate case
 /// reachable only via spec-violating inputs).
+///
+/// **Multi-component segments.** `Diff` entries may carry multi-segment
+/// rel-paths like `subdir/file.txt` for recursive Profiles. `Tree::ensure`
+/// is single-component by design (`(parent, segment)` is the slot identity);
+/// this helper walks each segment in lock-step. The Diff's depth-first
+/// lex order over `parent/child` segments ensures parents are processed
+/// before their descendants in Phase 2, so intermediate slots typically
+/// exist before their descendants are touched — but the helper is robust
+/// to out-of-order entries (e.g. `renamed.to` segments) because each
+/// component is `ensure`d on the way through.
+///
+/// **Kind refresh.** The leaf is unconditionally `set_kind`-ed to
+/// `leaf_kind` even on a pre-existing slot. The same-segment kind-flip
+/// case (a `File` becoming a `Dir` under kernel inode reuse) is handled
+/// upstream by `diff_tree`'s `_ =>` arm in `diff_same_name`: both the
+/// prior File and the new Dir are staged with `pair_eligible: false`,
+/// Phase 1 reaps the prior slot (generation increment), and Phase 2's
+/// `Tree::ensure` returns a fresh-generation slot whose kind this call
+/// then sets to `Dir`. The leaf-kind write is idempotent for the common
+/// (kind-stable) case and load-bearing for the kind-flip case.
 ///
 /// `pub(crate)` so `transitions::emit_effects_per_stable_file` can reuse
 /// the same materialization rules — the diff-entry-to-Resource mapping
@@ -90,9 +114,6 @@ pub(crate) fn ensure_descendant(
         cur = tree.ensure(Some(cur), comp, ResourceRole::User);
         let is_leaf = comps.peek().is_none();
         if is_leaf {
-            // Refresh leaf kind to the snapshot's value — covers create
-            // and the rare "kind tracked stale" case (kind change at the
-            // same slot is a Vanished → fresh-slot path, not this one).
             tree.set_kind(cur, leaf_kind);
         } else if tree.get(cur).is_some_and(|r| r.kind().is_none()) {
             // Intermediate path component: default to Dir when first
@@ -125,149 +146,183 @@ pub(crate) fn lookup_descendant(
 }
 
 // ---------------------------------------------------------------------------
-// reconcile: walk_pair + graft + delete_child
+// reconcile: apply_diff_to_tree + graft + scoped purge
 // ---------------------------------------------------------------------------
 
-/// Recursive parallel walk over `(prior_subtree, new_subtree)` at
-/// the same logical position in the tree. For each delta entry the pass
-/// ensures (or releases) the Tree slot, sets its kind, and installs or
-/// releases the per-Resource [`ContribKey::ProfileDescendant`]
-/// contribution via `add_watch` / `sub_watch` for **covered Dirs**
-/// (always) and **covered Leaves under
-/// `Profile.has_per_file_fds == true`**.
+/// Predicate: this Profile holds a [`ContribKey::ProfileDescendant`]
+/// contribution at `r` that the entry's `kind` says should be released.
 ///
-/// Each contribution is keyed by [`ContribKey::ProfileDescendant`]
-/// carrying this Profile's id; the per-Resource union is the OR over
-/// every Profile's (and Promoter's) contribution to that slot. No
-/// `&ProfileMap` / `&PromoterRegistry` arguments — refcount work is
-/// purely Resource-local.
+/// - **Dir**: covered Dirs always carry the contribution.
+/// - **Leaf** (File / Symlink / Other): covered Leaves carry the
+///   contribution iff `profile.has_per_file_fds` is true.
 ///
-/// Two-phase order:
-/// 1. Deletions in reverse-lex (leaves before parents) so `try_reap`'s
-///    `has_anchors` gate sees a vacated child set when it processes the
-///    parent.
-/// 2. Creations / inode-stable Dir-pair recursion in forward-lex order so
-///    intermediate ancestors exist before their descendants are processed.
-///
-/// `prior == None` ⇒ first observation here (Seed first probe, or a path
-/// that became covered between probes). The "Phase 2 / pure create" arm
-/// fires for every entry of `new` — same code path for all first-probe
-/// scenarios.
-///
-/// O(1) prune at every level: equal `dir_hash` ⇒ no descendant work.
-pub(crate) fn walk_pair(
-    prior: Option<&DirSnapshot>,
-    new: &DirSnapshot,
-    current_id: ResourceId,
-    profile: &Profile,
-    profile_id: ProfileId,
-    tree: &mut Tree,
-    out: &mut StepOutput,
-) {
-    // O(1) identity prune at this level.
-    if let Some(p) = prior
-        && p.dir_hash() == new.dir_hash()
-    {
-        return;
-    }
-
-    // Phase 1 — deletions (reverse lex). A name absent in `new` or
-    // present-but-different-(inode, device) is a delete here; the same
-    // name + new identity reappears as a create in Phase 2.
-    if let Some(p) = prior {
-        for (name, prior_child) in p.entries.iter().rev() {
-            let delete = match new.entries.get(name) {
-                None => true,
-                Some(new_child) => !same_inode_device(prior_child, new_child),
-            };
-            if delete {
-                delete_child(
-                    tree,
-                    profile,
-                    profile_id,
-                    current_id,
-                    name.as_str(),
-                    prior_child,
-                    out,
-                );
-            }
+/// Mirrors the gating used by [`apply_diff_to_tree`]'s Phase 2 `add_watch`
+/// site, so a contribution installed during a prior probe response is
+/// released by the symmetric `sub_watch` on this one.
+fn releases_watch(profile: &Profile, r: ResourceId, kind: EntryKind, tree: &Tree) -> bool {
+    match kind {
+        EntryKind::Dir => covers(profile, r, tree),
+        EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
+            covers(profile, r, tree) && profile.has_per_file_fds
         }
-    }
-
-    // Phase 2 — creates and inode-stable Dir-pair recursion (forward lex).
-    let prior_entries = prior.map(|p| &p.entries);
-    for (name, new_child) in &new.entries {
-        let prior_child = prior_entries.and_then(|m| m.get(name));
-        let identity_match = prior_child.is_some_and(|p| same_inode_device(p, new_child));
-
-        if !identity_match {
-            // Pure create OR delete-then-create (Phase 1 deleted the prior).
-            create_child(
-                tree,
-                profile,
-                profile_id,
-                current_id,
-                name.as_str(),
-                new_child,
-                out,
-            );
-            continue;
-        }
-
-        // Identity matches; recurse on Dir-Dir, no-op on Leaf-Leaf.
-        if let (Some(ChildEntry::Dir(p_dc)), ChildEntry::Dir(n_dc)) = (prior_child, new_child) {
-            // Same inode/device on both sides ⇒ same Tree slot. Look it up
-            // (it must be live: the prior was observed and inode hasn't
-            // flipped). Slot reaped mid-burst is rare; skip gracefully.
-            let Some(child_id) = tree.lookup(Some(current_id), name.as_str()) else {
-                continue;
-            };
-            match (p_dc.subtree.as_deref(), n_dc.subtree.as_deref()) {
-                (Some(ps), Some(ns)) if ps.dir_hash() != ns.dir_hash() => {
-                    walk_pair(Some(ps), ns, child_id, profile, profile_id, tree, out);
-                }
-                (Some(_), Some(_)) | (None, None) => {
-                    // Hashes match (covered both sides) or both sides
-                    // uncovered: no delta to emit at this Dir slot.
-                }
-                (Some(_), None) | (None, Some(_)) => {
-                    // Coverage flip on the same Dir slot. Structurally
-                    // unreachable in v1: a Profile's coverage rule is
-                    // pinned by `config_hash`, so a scope change forks a
-                    // new Profile rather than flipping subtree presence
-                    // at the same slot for the same Profile. The
-                    // debug_assert pins the invariant; if a future change
-                    // makes it reachable, tests shout.
-                    debug_assert!(
-                        false,
-                        "walk_pair: coverage flip on same Dir slot is unreachable in v1",
-                    );
-                }
-            }
-        }
-        // Same-inode Leaf-Leaf: content may have changed (caller's diff
-        // path emits the per-leaf Effect); no Watch delta because file FDs
-        // are bound to slot identity, which is stable across content
-        // modifications.
     }
 }
 
-/// Splice a probe response subtree into `Profile.current` at `target`,
-/// rebuilding `DirSnapshot`s along the path-to-anchor. Emits Watch ops via
-/// `walk_pair` against the pre-graft prior. O(1) early-out when hashes
-/// match — the post-Effect Seed common case (Effect produced no observable
-/// drift) hits this path with zero allocations.
+/// Apply a [`Diff`] to the engine's `Tree` for one Profile, returning
+/// the list of `ResourceId`s whose slots were reaped by Phase 1.
+///
+/// The `base` parameter is the Tree node the diff's rel-paths are
+/// relative to. For [`graft`], `base == target` (the probe's target).
+/// For `Engine::release_descendant_claim`, `base == profile.resource`
+/// (the anchor) and the diff is [`Diff::all_deleted`].
+///
+/// **Two phases.**
+///
+/// 1. **Phase 1 — deletes.** Iterates `diff.deleted` and
+///    `diff.renamed.from` in reverse (via
+///    `DoubleEndedIterator::rev`). For each entry the helper looks up
+///    the slot under `base`, releases this Profile's
+///    [`ContribKey::ProfileDescendant`] if [`releases_watch`] says
+///    so, and — when the slot has no remaining anchors — vacates and
+///    reaps it. [`Tree::try_reap`] cascades up through any parent that
+///    loses its last anchor on the way; reverse iteration here is
+///    performance / cleanliness (avoids the cascade work and the
+///    intermediate "parent holds reaped child id" states), not a
+///    correctness requirement.
+///
+/// 2. **Phase 2 — creates.** Iterates `diff.created` and
+///    `diff.renamed.to` forward. For each entry the helper ensures
+///    the slot under `base` (creating intermediate components as
+///    needed), sets its kind, and installs the per-Resource
+///    [`ContribKey::ProfileDescendant`] contribution via
+///    [`add_watch`] for covered Dirs (always) and covered Leaves
+///    under `Profile.has_per_file_fds`.
+///
+/// `diff.modified` entries are Tree-side no-ops — the slot exists and
+/// kind is unchanged. Per-file Effect dispatch
+/// (`emit_effects_per_stable_file`) consumes them via the same Diff.
+///
+/// Returns the slots Phase 1 reaped directly. Used by [`graft`] and
+/// `Engine::release_descendant_claim` to drive the scoped
+/// [`purge_per_file_fired_subs_for_resources`]. Cascade-reaped
+/// ancestors (Dirs) are intentionally not collected — Dir slots are
+/// never `DedupKey::PerFile` targets, so they cannot stale a dedup
+/// entry.
+pub(crate) fn apply_diff_to_tree(
+    diff: &Diff,
+    profile: &Profile,
+    profile_id: ProfileId,
+    base: ResourceId,
+    tree: &mut Tree,
+    out: &mut StepOutput,
+) -> SmallVec<[ResourceId; 4]> {
+    let mut reaped: SmallVec<[ResourceId; 4]> = SmallVec::new();
+    let key = ContribKey::ProfileDescendant(profile_id);
+
+    // Phase 1 — deletes + renamed.from, reverse iteration.
+    //
+    // `slice::Iter` is `DoubleEndedIterator`; `Map<DoubleEnded, _>` is
+    // `DoubleEndedIterator`; `Chain<DE, DE>` is `DoubleEndedIterator`.
+    // So `.chain(...).rev()` is well-defined and avoids materialising
+    // the chain into a buffer just to reverse-iterate. Per Chain's
+    // `next_back` semantics the reversed chain yields all `renamed.from`
+    // entries first (reverse-lex within that list) followed by all
+    // `deleted` entries (reverse-lex within that list); cross-list
+    // ordering is not load-bearing.
+    let phase_1 = diff
+        .deleted
+        .iter()
+        .chain(diff.renamed.iter().map(|r| &r.from));
+    for entry in phase_1.rev() {
+        let Some(resource) = lookup_descendant(tree, base, entry.segment.as_str()) else {
+            continue;
+        };
+        if releases_watch(profile, resource, entry.kind, tree) {
+            sub_watch(tree, resource, key, out);
+        }
+        // Multi-Profile gate: another Profile's contribution still keeps
+        // the slot live → skip vacate/reap and let that Profile's own
+        // release path handle it.
+        if tree.get(resource).is_some_and(|r| !r.is_watched()) {
+            tree.vacate(resource, out);
+            if tree.try_reap(resource) {
+                reaped.push(resource);
+            }
+        }
+    }
+
+    // Phase 2 — creates + renamed.to, forward iteration.
+    //
+    // `diff.created` is in depth-first lex order (parents before
+    // descendants). `diff.renamed.to` is in `from`-sorted order, which
+    // is not necessarily descendant-aware, but `ensure_descendant`
+    // walks each component via `Tree::ensure` (idempotent on existing
+    // slots), so any out-of-order entry only triggers extra slot
+    // materialisation up front — the eventual `add_watch` for each
+    // explicit entry still lands correctly because contributions are
+    // per-`(slot, key)` and disjoint between unrelated slots.
+    let phase_2 = diff
+        .created
+        .iter()
+        .chain(diff.renamed.iter().map(|r| &r.to));
+    for entry in phase_2 {
+        let res_kind = match entry.kind {
+            EntryKind::Dir => ResourceKind::Dir,
+            EntryKind::File | EntryKind::Symlink | EntryKind::Other => ResourceKind::File,
+        };
+        let Some(resource) = ensure_descendant(tree, base, entry.segment.as_str(), res_kind) else {
+            continue;
+        };
+        let want_watch = covers(profile, resource, tree)
+            && (matches!(entry.kind, EntryKind::Dir) || profile.has_per_file_fds);
+        if want_watch {
+            add_watch(tree, resource, key, profile.events_union, out);
+        }
+    }
+
+    reaped
+}
+
+/// Splice a probe response into `Profile.current` at `target`, then
+/// apply the resulting [`Diff`] to the engine's `Tree`. Emits Watch ops
+/// via [`apply_diff_to_tree`].
 ///
 /// Single source of truth for "engine just received an Ok response;
 /// integrate it into the Profile's view." Used by `dispatch_seed_ok` and
 /// `dispatch_standard_ok` alike. Caller handles `baseline` rebasing
 /// (different rules for Seed vs Standard).
 ///
+/// **Splice-first ordering.** The splice runs *before* any Tree
+/// mutation. A [`SpliceResult::CrossedUncovered`] verdict (a
+/// v1-unreachable contract breach) surfaces a [`Diagnostic`] and
+/// short-circuits without touching Tree state — `Profile.current` and
+/// `Tree` stay coherent across the breach. The pre-refactor ordering
+/// (`walk_pair` then `splice`) would have committed Tree mutations
+/// before splice's failure was known.
+///
+/// **Diff at TARGET.** The Diff is built between `prior_at_target`
+/// (extracted via `subtree_at(target)`) and `response_arc`, so its
+/// rel-paths are relative to `target` — [`apply_diff_to_tree`] then
+/// passes `target` as the `base`. Diffing at the anchor instead would
+/// thread a path-to-target prefix into every entry and force
+/// [`ensure_descendant`] / [`lookup_descendant`] to re-walk the prefix
+/// per entry.
+///
+/// **Dir-only contract.** This helper is reachable only with a
+/// `TreeSnapshot::Dir(_)` `Profile.current` (or `None` for the first
+/// graft). File-anchored Profiles never call `graft` — their
+/// `Profile.current` is `TreeSnapshot::File(leaf)`, integrated by an
+/// inline write at `dispatch_*_ok`. The [`crate::ProbeRequest`] variant
+/// (`AnchorFile` vs `Subtree`) is the structural guarantee. A `File`
+/// prior reaching `splice` is a routing breach: `debug_assert!` in
+/// dev/CI, drop through to `None` in release so the next observation
+/// converges.
+///
 /// **Borrow shape.** Takes `profile_id: ProfileId` (not `&mut Profile`)
 /// because the splice write and the immutable Profile read for the
-/// `walk_pair` argument live on opposite sides of a borrow boundary.
-/// Threading the id through lets graft re-borrow under whichever shape
-/// each step needs.
+/// `apply_diff_to_tree` argument live on opposite sides of a borrow
+/// boundary. Threading the id through lets graft re-borrow under
+/// whichever shape each step needs.
 pub(crate) fn graft(
     profile_id: ProfileId,
     target: ResourceId,
@@ -276,90 +331,17 @@ pub(crate) fn graft(
     profiles: &mut ProfileMap,
     out: &mut StepOutput,
 ) {
-    // Anchor threads through `splice` to lock the navigation invariant.
-    //
-    // **Dir-only contract.** This helper is reachable only with a
-    // `TreeSnapshot::Dir(_)` `Profile.current` (or `None` for the first
-    // graft). File-anchored Profiles never call `graft` — their
-    // `Profile.current` is `TreeSnapshot::File(leaf)`, integrated by an
-    // inline write at `dispatch_*_ok`. The [`crate::ProbeRequest`] variant
-    // (`AnchorFile` vs `Subtree`) is the structural guarantee. The match
-    // below treats any `File` prior as a routing breach: `debug_assert!` in
-    // dev/CI, fall through to `None` in release so the next observation
-    // converges.
-    let anchor = match profiles.get(profile_id) {
-        Some(p) => p.resource,
-        None => return,
-    };
-
-    // Identify the prior subtree at this target. None ⇒ Seed first probe,
-    // or a path that became covered between probes. Read-only borrow of
-    // the Profile; released at the end of the let-block.
-    let prior = match profiles.get(profile_id) {
-        Some(p) => p.current.as_ref().and_then(|s| s.subtree_at(target, tree)),
-        None => return,
-    };
-
-    // O(1) early-out: response equals prior at this target ⇒ no Watch
-    // ops, no graft, no allocation.
-    if let Some(p) = &prior
-        && p.dir_hash() == response_arc.dir_hash()
-    {
-        return;
-    }
-
-    // Emit Watch ops + materialise / reap Tree slots. The Profile
-    // borrow is immutable and disjoint from `&mut tree`.
-    {
-        let Some(profile) = profiles.get(profile_id) else {
+    // Head extract: anchor + prior_at_target + prior_arc, all under one
+    // immutable Profile borrow. `prior_at_target` is reused for the
+    // equal-hash early-out and as the diff's baseline. `prior_arc` is
+    // the full anchor-rooted snapshot consumed by `splice`.
+    let (anchor, prior_at_target, prior_arc) = {
+        let Some(p) = profiles.get(profile_id) else {
             return;
         };
-        walk_pair(
-            prior.as_deref(),
-            &response_arc,
-            target,
-            profile,
-            profile_id,
-            tree,
-            out,
-        );
-    }
-
-    // walk_pair may have reaped covered descendants via delete_child.
-    // PerFile dedup entries keyed at reaped slots become stale — slotmap
-    // generations make stale ids non-resolving, so the entries never
-    // affect correctness, but they accumulate as memory for the
-    // Profile's lifetime. Run the hygiene purge across every Profile
-    // (one bursts's deletes can stale entries in *any* covering
-    // Profile's map, not just `profile_id`'s).
-    purge_per_file_fired_subs_for_reaped_slots(profiles, tree);
-
-    // Splice the response into current. Rebuilds DirSnapshots along the
-    // path from anchor to target, Arc-shares everything off-path,
-    // short-circuits when per-level hashes match. Mutable borrow now —
-    // the prior and the walk_pair borrow are released.
-    //
-    // The `take` extracts the prior `Arc<DirSnapshot>` if it was a Dir
-    // (the contract case); `None` is the first-graft case. A `File`
-    // prior is a routing breach: `debug_assert!` in dev/CI, drop through
-    // to `None` in release. The `SpliceResult` write below
-    // unconditionally overwrites `Profile.current` with the response's
-    // Dir shape, so the breach self-corrects on this very step — the
-    // dropped leaf is observationally indistinguishable from a normal
-    // Dir-shape transition (the next AnchorFile probe response would
-    // reset `Profile.current` to `TreeSnapshot::File(leaf)` anyway).
-    //
-    // `SpliceResult::CrossedUncovered` flags "graft only into observed
-    // subtrees" violations (target outside anchor's tree subtree, or
-    // coverage gap on the path-to-target). The carrier is the prior
-    // unchanged; the response is intentionally dropped on the floor and
-    // the next probe converges. Surface the breach via Diagnostic so
-    // operator logs see it instead of a silent information loss.
-    let prior_arc = profiles
-        .get_mut(profile_id)
-        .and_then(|p| match p.current.take() {
-            Some(TreeSnapshot::Dir(arc)) => Some(arc),
-            None => None,
+        let prior_at_target = p.current.as_ref().and_then(|s| s.subtree_at(target, tree));
+        let prior_arc = match &p.current {
+            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
             Some(TreeSnapshot::File(_)) => {
                 debug_assert!(
                     false,
@@ -368,50 +350,128 @@ pub(crate) fn graft(
                 );
                 None
             }
-        });
+            None => None,
+        };
+        (p.resource, prior_at_target, prior_arc)
+    };
 
-    let result = splice(prior_arc, anchor, target, response_arc, tree);
-    if matches!(result, SpliceResult::CrossedUncovered(_)) {
-        out.diagnostics.push(Diagnostic::SpliceCrossedUncovered {
-            profile: profile_id,
-            target,
-        });
+    // O(1) early-out: response equals prior at this target ⇒ no Watch
+    // ops, no graft, no allocation.
+    if let Some(p) = &prior_at_target
+        && p.dir_hash() == response_arc.dir_hash()
+    {
+        return;
     }
+
+    // Build the Diff first — pure, no side effects. At TARGET level so
+    // `apply_diff_to_tree`'s `lookup_descendant` / `ensure_descendant`
+    // walks start at `target` rather than re-walking the path-to-target
+    // prefix for every entry. `prior_at_target == None` is the
+    // first-graft / freshly-covered-target case;
+    // `Diff::all_created(&response)` is the empty-prior shorthand.
+    //
+    // Cloning the response Arc here (Some arm) is the cheaper of two
+    // disposals: it keeps `response_arc` available for `splice`'s
+    // consume below — the alternative would be two clones (one each
+    // for diff and splice) under the splice-first ordering. Diff and
+    // splice are independent computations; reordering "build diff
+    // first" preserves the splice-then-apply guarantee for Tree
+    // mutations because `apply_diff_to_tree` still runs only after
+    // `splice` succeeds.
+    let diff = match prior_at_target {
+        Some(prior) => diff_tree(
+            &TreeSnapshot::Dir(prior),
+            &TreeSnapshot::Dir(Arc::clone(&response_arc)),
+        ),
+        None => Diff::all_created(&response_arc),
+    };
+
+    // Splice — pure, no Tree mutation. `CrossedUncovered` carries the
+    // prior unchanged; we surface the diagnostic and short-circuit
+    // before any `apply_diff_to_tree` work, so `Profile.current` and
+    // `Tree` stay coherent across the breach. Even when (a future
+    // regression makes) `CrossedUncovered` reachable, the engine
+    // cannot diverge. This is the splice-then-apply ordering that
+    // closed the pre-refactor F-MED-3 hazard.
+    //
+    // Consumes `response_arc` (move) — the diff above already cloned
+    // the Arc when it needed a second handle.
+    let new_current = match splice(prior_arc, anchor, target, response_arc, tree) {
+        SpliceResult::Spliced(snap) => snap,
+        SpliceResult::CrossedUncovered(prior) => {
+            out.diagnostics.push(Diagnostic::SpliceCrossedUncovered {
+                profile: profile_id,
+                target,
+            });
+            if let Some(p) = profiles.get_mut(profile_id) {
+                p.current = Some(TreeSnapshot::Dir(prior));
+            }
+            return;
+        }
+    };
+    debug_assert!(
+        matches!(new_current, TreeSnapshot::Dir(_)),
+        "graft: splice over a Dir prior must yield a Dir output (profile = {profile_id:?})",
+    );
+
+    // Apply to Tree. Returns the slots Phase 1 reaped directly; cascade-
+    // reaped ancestors (Dirs) are not collected because Dir slots are
+    // never `DedupKey::PerFile` targets.
+    let reaped = {
+        let Some(profile) = profiles.get(profile_id) else {
+            return;
+        };
+        apply_diff_to_tree(&diff, profile, profile_id, target, tree, out)
+    };
+
+    // Scoped purge: only when reaping actually occurred. Replaces the
+    // pre-refactor registry-wide `Tree::get(resource).is_some()` scan
+    // with a small-set membership check.
+    if !reaped.is_empty() {
+        purge_per_file_fired_subs_for_resources(profiles, &reaped);
+    }
+
+    // Commit the new current.
     if let Some(p) = profiles.get_mut(profile_id) {
-        p.current = Some(result.into_snapshot());
+        p.current = Some(new_current);
     }
 }
 
-/// Drop `fired_subs` entries keyed by reaped Resource slots. `Subtree`-
-/// keyed entries are unaffected — their `(SubId, ProfileId)` key is bounded
-/// by Profile lifecycle (the whole set drops at `reap_profile`); only
-/// `PerFile` keys carry a Resource reference and only the Resource level
-/// has a natural lifecycle hook for them.
+/// Drop `fired_subs` entries keyed by any `ResourceId` in `reaped`.
 ///
-/// `PerFile` entries become stale when [`delete_child`] reaps a covered
-/// leaf via `tree.try_reap`. Slotmap increments the slot's generation on
-/// removal, so a stale `ResourceId` never resolves and the stale entry
-/// can never collide with a future allocation — this purge is hygiene,
-/// not a correctness fix. Without it, the set accumulates unreachable
-/// entries proportional to the file-churn rate over the Profile's
-/// lifetime.
+/// **Why scoped.** Pre-refactor `graft` / `Engine::release_descendant_claim`
+/// ran a registry-wide `tree.get(resource).is_some()` scan over every
+/// Profile's `fired_subs`. Slotmap generation guarantees stale
+/// `ResourceId`s never resolve, so the scan was hygiene — not a
+/// correctness fix — but cost `O(profiles × fired_subs_per_profile)`
+/// **on every graft**, even bursts that didn't reap a single covered
+/// descendant. With Diff-driven reconcile we know which slots reaped;
+/// purge only those.
 ///
-/// Call sites: [`graft`] after `walk_pair` runs, and
-/// [`Engine::release_descendant_claim`] after the take-and-walk teardown.
-/// Both paths can reap covered leaves; other reap paths (descent rewind,
-/// watch-root parent release) target Dir / scaffold slots which are never
-/// `PerFile` targets, so those paths don't need this hook.
+/// **Cross-Profile preservation.** One burst's deletes can stale entries
+/// in *any* covering Profile's `fired_subs` map (cross-Profile dedup
+/// sharing under `DedupKey::PerFile`). The loop iterates every Profile;
+/// only the membership check is scoped to the reaped set.
 ///
-/// Cost: `O(profiles × fired_subs_per_profile)` per call. Typical v1
-/// configs are 1–2 profiles with small fire-history sets; the cost is
-/// negligible compared to the rest of the graft work.
-pub(crate) fn purge_per_file_fired_subs_for_reaped_slots(profiles: &mut ProfileMap, tree: &Tree) {
+/// `Subtree`-keyed entries are unaffected — their `(SubId, ProfileId)`
+/// key is bounded by Profile lifecycle (the whole set drops at
+/// `reap_profile`); only `PerFile` keys carry a `ResourceId`.
+pub(crate) fn purge_per_file_fired_subs_for_resources(
+    profiles: &mut ProfileMap,
+    reaped: &[ResourceId],
+) {
+    if reaped.is_empty() {
+        return;
+    }
+    // BTreeSet for O(log k) membership; reaped is typically tiny (k ≤ 4
+    // for the SmallVec inline cap, single-digit in worst-cases).
+    let set: BTreeSet<ResourceId> = reaped.iter().copied().collect();
     for (_, p) in profiles.iter_mut() {
         if p.fired_subs.is_empty() {
             continue;
         }
         p.fired_subs.retain(|k| match *k {
-            DedupKey::PerFile { resource, .. } => tree.get(resource).is_some(),
+            DedupKey::PerFile { resource, .. } => !set.contains(&resource),
             DedupKey::Subtree { .. } => true,
         });
     }
@@ -440,152 +500,16 @@ pub(crate) fn current_target_hash(
     }
 }
 
-/// Reap the Tree slot at `(parent, name)` — and, recursively, every
-/// descendant of `prior_child` if it's a Dir. Releases the per-slot
-/// [`ContribKey::ProfileDescendant`] contribution for covered Dirs
-/// (always) and covered Leaves under `profile.has_per_file_fds`.
-/// Idempotent on missing slots.
-///
-/// Reverse-lex within each Dir's children (leaves before parents) so the
-/// `try_reap`-after-`vacate` gate sees a fully-drained slot at every
-/// level.
-///
-/// `sub_watch` removes the contribution by explicit key —
-/// [`ContribKey::ProfileDescendant`] carrying `profile_id`. The
-/// take-and-walk shape of `release_descendant_claim` may converge on a
-/// slot a prior sub-walk already drained; `sub_watch` silently skips
-/// the absent key.
-///
-/// `pub(crate)` so [`Engine::release_descendant_claim`] can reuse the
-/// walk for whole-snapshot teardown — single source of truth for
-/// "walk covered descendants and release their descendant
-/// contribution."
-pub(crate) fn delete_child(
-    tree: &mut Tree,
-    profile: &Profile,
-    profile_id: ProfileId,
-    parent: ResourceId,
-    name: &str,
-    prior_child: &ChildEntry,
-    out: &mut StepOutput,
-) {
-    let Some(resource) = tree.lookup(Some(parent), name) else {
-        return;
-    };
-
-    // Phase 1: recurse into the Dir's prior subtree first to reap leaf
-    // slots before the parent's slot. Leaf-only `prior_child`s skip the
-    // recurse.
-    if let ChildEntry::Dir(dc) = prior_child
-        && let Some(sub) = dc.subtree.as_deref()
-    {
-        for (cname, cchild) in sub.entries.iter().rev() {
-            delete_child(
-                tree,
-                profile,
-                profile_id,
-                resource,
-                cname.as_str(),
-                cchild,
-                out,
-            );
-        }
-    }
-
-    // Phase 2: release this slot's watch contribution if we hold one.
-    // `sub_watch` is safe in any post-vacate state — the
-    // take-then-walk path of `release_descendant_claim` may converge
-    // on a slot a prior sub-walk already drained, and the helper
-    // silently skips an absent key (see [`crate::refcounts`] module
-    // rustdoc).
-    let releases_watch = match prior_child.kind() {
-        EntryKind::Dir => covers(profile, resource, tree),
-        EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
-            covers(profile, resource, tree) && profile.has_per_file_fds
-        }
-    };
-    if releases_watch {
-        sub_watch(
-            tree,
-            resource,
-            ContribKey::ProfileDescendant(profile_id),
-            out,
-        );
-    }
-
-    // Reap only when fully drained — preserves multi-Profile contributions.
-    // The `is_watched` gate is load-bearing: a co-resident contributor
-    // (e.g., another Profile anchored at this slot, or a Promoter proxy)
-    // keeps the kernel watch live, and `vacate`'s defensive `Unwatch` branch
-    // would otherwise tear it down. With the gate in place, vacate runs only
-    // on slots that this Profile was the last contributor to.
-    if tree.get(resource).is_some_and(|r| !r.is_watched()) {
-        tree.vacate(resource, out);
-        tree.try_reap(resource);
-    }
-}
-
-/// Materialise the Tree slot at `(parent, name)` — and, recursively,
-/// every descendant of `new_child` when it's a Dir whose subtree was
-/// observed. Installs the per-slot [`ContribKey::ProfileDescendant`]
-/// contribution (with mask `profile.events_union`) for covered Dirs
-/// (always) and covered Leaves under `profile.has_per_file_fds`.
-///
-/// The recursive `walk_pair` call into the new Dir's subtree carries
-/// the same `(profile, profile_id, tree)` so its own `delete_child` /
-/// `create_child` recursion is well-formed.
-fn create_child(
-    tree: &mut Tree,
-    profile: &Profile,
-    profile_id: ProfileId,
-    parent: ResourceId,
-    name: &str,
-    new_child: &ChildEntry,
-    out: &mut StepOutput,
-) {
-    let res_kind = match new_child.kind() {
-        EntryKind::Dir => ResourceKind::Dir,
-        _ => ResourceKind::File,
-    };
-    let resource = tree.ensure(Some(parent), name, ResourceRole::User);
-    tree.set_kind(resource, res_kind);
-
-    if covers(profile, resource, tree) {
-        let need_watch = matches!(new_child, ChildEntry::Dir(_)) || profile.has_per_file_fds;
-        if need_watch {
-            add_watch(
-                tree,
-                resource,
-                ContribKey::ProfileDescendant(profile_id),
-                profile.events_union,
-                out,
-            );
-        }
-    }
-
-    // Recurse into the freshly-created Dir's subtree if the walker
-    // observed one. `prior=None` ⇒ every descendant is a creation; the
-    // same `walk_pair` call.
-    if let ChildEntry::Dir(dc) = new_child
-        && let Some(sub) = dc.subtree.as_deref()
-    {
-        walk_pair(None, sub, resource, profile, profile_id, tree, out);
-    }
-}
-
-const fn same_inode_device(a: &ChildEntry, b: &ChildEntry) -> bool {
-    a.inode() == b.inode() && a.device() == b.device()
-}
-
 #[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
 mod tests {
-    use super::{graft, walk_pair};
+    use super::{apply_diff_to_tree, graft};
     use compact_str::CompactString;
+    use smallvec::smallvec;
     use specter_core::{
-        ChildEntry, ClassSet, DedupKey, DirChild, DirMeta, DirSnapshot, EntryKind, LeafEntry,
-        Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubId,
-        Tree, TreeSnapshot, WatchOp,
+        ChildEntry, ClassSet, DedupKey, Diff, DirChild, DirMeta, DirSnapshot, EntryKind, EntryRef,
+        LeafEntry, Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+        StepOutput, SubId, Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -676,15 +600,16 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // walk_pair — empty-prior synthesis
+    // apply_diff_to_tree — empty-prior creations via Diff::all_created
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn walk_pair_prior_none_creates_dir_and_leaf_entries() {
-        // prior=None ⇒ every entry of `new` is a creation. Subtree-only
-        // Profile (has_per_file_fds=false) ⇒ Dir gets Watch, Leaf does not.
+    fn apply_diff_subtree_only_profile_watches_dir_creates_only() {
+        // Diff::all_created over a fresh response ⇒ every entry is a
+        // creation. Subtree-only Profile (has_per_file_fds=false) ⇒ Dir
+        // gets Watch, Leaf does not.
         let (mut tree, profiles, root, pid) = anchor(false);
-        let new = dir_snap(
+        let response = dir_snap(
             root,
             100,
             vec![
@@ -692,14 +617,14 @@ mod tests {
                 ("sub", dir_child(2, None)),
             ],
         );
+        let diff = Diff::all_created(&response);
 
         let mut out = StepOutput::default();
-        walk_pair(
-            None,
-            &new,
-            root,
+        apply_diff_to_tree(
+            &diff,
             profiles.get(pid).unwrap(),
             pid,
+            root,
             &mut tree,
             &mut out,
         );
@@ -709,10 +634,10 @@ mod tests {
     }
 
     #[test]
-    fn walk_pair_per_file_profile_emits_watch_for_leaf_create() {
+    fn apply_diff_per_file_profile_emits_watch_for_leaf_create() {
         // has_per_file_fds=true ⇒ Leaf creates *also* get Watch.
         let (mut tree, profiles, root, pid) = anchor(true);
-        let new = dir_snap(
+        let response = dir_snap(
             root,
             100,
             vec![
@@ -720,14 +645,14 @@ mod tests {
                 ("sub", dir_child(2, None)),
             ],
         );
+        let diff = Diff::all_created(&response);
 
         let mut out = StepOutput::default();
-        walk_pair(
-            None,
-            &new,
-            root,
+        apply_diff_to_tree(
+            &diff,
             profiles.get(pid).unwrap(),
             pid,
+            root,
             &mut tree,
             &mut out,
         );
@@ -739,43 +664,18 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // walk_pair — equal-hash short-circuit
+    // apply_diff_to_tree — deletions release Watch on covered Dir
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn walk_pair_equal_dir_hash_short_circuits() {
-        // Identical prior and new ⇒ no Watch ops, no Tree mutations.
-        let (mut tree, profiles, root, pid) = anchor(false);
-        let prior = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        let new = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        assert_eq!(prior.dir_hash(), new.dir_hash());
-
-        let mut out = StepOutput::default();
-        walk_pair(
-            Some(&prior),
-            &new,
-            root,
-            profiles.get(pid).unwrap(),
-            pid,
-            &mut tree,
-            &mut out,
-        );
-        assert_eq!(count_watch(&out), 0);
-        assert_eq!(count_unwatch(&out), 0);
-    }
-
-    // ---------------------------------------------------------------------------
-    // walk_pair — deletions release Watch on covered Dir
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn walk_pair_dir_deletion_releases_watch() {
-        // Set up: prior has a covered Dir; new doesn't. Delete should release
-        // Watch on the Dir.
+    fn apply_diff_dir_deletion_releases_watch() {
+        // Diff carries a single `deleted` entry for a covered Dir; the
+        // helper must release the Profile's contribution and emit one
+        // Unwatch op.
         let (mut tree, profiles, root, pid) = anchor(false);
         // Materialise the Dir slot first so the delete path has
         // something to `sub_watch` against. Pre-populate with the
-        // same contribution walk_pair will drop on delete (the
+        // same contribution apply_diff_to_tree will drop on delete (the
         // Profile's events_union, here STRUCTURE).
         let sub_id = tree.ensure(Some(root), "sub", ResourceRole::User);
         tree.set_kind(sub_id, ResourceKind::Dir);
@@ -787,16 +687,21 @@ mod tests {
             &mut StepOutput::default(),
         );
 
-        let prior = dir_snap(root, 100, vec![("sub", dir_child(2, None))]);
-        let new = dir_snap(root, 200, vec![]); // bumped root meta to force descent
+        let diff = Diff {
+            deleted: smallvec![EntryRef {
+                segment: CompactString::new("sub"),
+                kind: EntryKind::Dir,
+                inode: 2,
+            }],
+            ..Default::default()
+        };
 
         let mut out = StepOutput::default();
-        walk_pair(
-            Some(&prior),
-            &new,
-            root,
+        apply_diff_to_tree(
+            &diff,
             profiles.get(pid).unwrap(),
             pid,
+            root,
             &mut tree,
             &mut out,
         );
@@ -804,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn walk_pair_per_file_leaf_deletion_releases_watch() {
+    fn apply_diff_per_file_leaf_deletion_releases_watch() {
         // PerStableFile Profile (has_per_file_fds=true): covered Leaf
         // carries a Watch contribution; delete should release it
         // (symmetric to create).
@@ -819,16 +724,21 @@ mod tests {
             &mut StepOutput::default(),
         );
 
-        let prior = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        let new = dir_snap(root, 200, vec![]);
+        let diff = Diff {
+            deleted: smallvec![EntryRef {
+                segment: CompactString::new("a.rs"),
+                kind: EntryKind::File,
+                inode: 1,
+            }],
+            ..Default::default()
+        };
 
         let mut out = StepOutput::default();
-        walk_pair(
-            Some(&prior),
-            &new,
-            root,
+        apply_diff_to_tree(
+            &diff,
             profiles.get(pid).unwrap(),
             pid,
+            root,
             &mut tree,
             &mut out,
         );
@@ -836,14 +746,15 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // walk_pair — same-name different-inode is delete-then-create
+    // apply_diff_to_tree — same-name different-inode is delete-then-create
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn walk_pair_inode_change_deletes_then_creates() {
-        // `prior.entries["foo"]` has inode 1; `new.entries["foo"]` has inode
-        // 2 (delete-then-create). Both Dirs ⇒ Watch released for the deleted,
-        // re-emitted for the created. Net: one Unwatch + one Watch.
+    fn apply_diff_inode_change_deletes_then_creates() {
+        // Diff carries both a `deleted` and a `created` entry for "foo"
+        // (delete-then-create across an inode change). Both Dirs ⇒ Watch
+        // released for the deleted, re-emitted for the created. Net: one
+        // Unwatch + one Watch.
         let (mut tree, profiles, root, pid) = anchor(false);
         // Pre-materialise the prior Dir slot with the matching mask.
         let foo_id = tree.ensure(Some(root), "foo", ResourceRole::User);
@@ -856,16 +767,26 @@ mod tests {
             &mut StepOutput::default(),
         );
 
-        let prior = dir_snap(root, 100, vec![("foo", dir_child(1, None))]);
-        let new = dir_snap(root, 200, vec![("foo", dir_child(2, None))]);
+        let diff = Diff {
+            deleted: smallvec![EntryRef {
+                segment: CompactString::new("foo"),
+                kind: EntryKind::Dir,
+                inode: 1,
+            }],
+            created: smallvec![EntryRef {
+                segment: CompactString::new("foo"),
+                kind: EntryKind::Dir,
+                inode: 2,
+            }],
+            ..Default::default()
+        };
 
         let mut out = StepOutput::default();
-        walk_pair(
-            Some(&prior),
-            &new,
-            root,
+        apply_diff_to_tree(
+            &diff,
             profiles.get(pid).unwrap(),
             pid,
+            root,
             &mut tree,
             &mut out,
         );
@@ -941,9 +862,9 @@ mod tests {
         // a covered descendant `a.rs`. Pre-populate `fired_subs`
         // with a PerFile entry keyed at `a.rs`'s ResourceId — simulates a
         // prior PerStableFile Effect having fired against the leaf.
-        // Probe response deletes `a.rs`. graft's walk_pair → delete_child
-        // reaps the slot; the new purge hook drops the now-stale
-        // PerFile entry.
+        // Probe response deletes `a.rs`. graft's `apply_diff_to_tree`
+        // Phase 1 reaps the slot; the scoped purge hook drops the
+        // now-stale PerFile entry.
         let (mut tree, mut profiles, root, pid) = anchor(true);
         let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
         tree.set_kind(a_rs_id, ResourceKind::File);
@@ -1256,6 +1177,153 @@ mod tests {
         assert!(
             Arc::ptr_eq(current_arc, &prior_current),
             "graft kept prior current unchanged on CrossedUncovered",
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // graft — kind-flip + inode-reuse (F-HIGH-1 regression)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn graft_kind_flip_inode_reuse_retypes_slot_and_installs_watch() {
+        // F-HIGH-1 regression. Failing lifecycle:
+        // 1. Prior: `/root/foo` is a covered Leaf (File, inode=42, has
+        //    per-file watch contribution under a per-file Profile).
+        // 2. Probe response: `/root/foo` is now a covered Dir at the
+        //    SAME inode (kernel inode reuse across the kind flip). The
+        //    response's dir entry carries an observed subtree.
+        // 3. Expected post-graft state:
+        //    - The old File slot is reaped (generation incremented).
+        //    - A fresh-generation Tree slot at `(root, "foo")` exists
+        //      with kind = Dir.
+        //    - The new slot's contributions include
+        //      `ContribKey::ProfileDescendant(pid)` for the per-file
+        //      Profile's events_union.
+        //    - `out.watch_ops` contains a Watch op at the new slot.
+        //
+        // The pre-refactor `walk_pair` keyed entity identity on
+        // `(inode, device)` alone, ignoring `kind`. Under inode reuse
+        // it concluded "same identity ⇒ no Tree-side delta" and
+        // silently skipped both the reap of the old File slot and the
+        // creation of the new Dir slot. `diff_tree::diff_same_name`
+        // routes kind flips through its `_ =>` arm (pair_eligible:
+        // false), which `apply_diff_to_tree` Phase 1 / Phase 2 then
+        // applies symmetrically.
+        let (mut tree, mut profiles, root, pid) = anchor(true);
+
+        // Pre-materialise the prior File slot at `(root, "foo")` with
+        // a watch contribution matching the per-file Profile's mask.
+        let prior_foo_id = tree.ensure(Some(root), "foo", ResourceRole::User);
+        tree.set_kind(prior_foo_id, ResourceKind::File);
+        crate::refcounts::add_watch(
+            &mut tree,
+            prior_foo_id,
+            specter_core::ContribKey::ProfileDescendant(pid),
+            ClassSet::CONTENT,
+            &mut StepOutput::default(),
+        );
+
+        // Prior snapshot: root with covered Leaf `foo` (inode 42).
+        let prior_current = dir_snap(root, 100, vec![("foo", leaf(EntryKind::File, 42))]);
+        profiles.get_mut(pid).unwrap().current =
+            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+
+        // Build response: root has covered Dir `foo` at the SAME inode
+        // (42), with one descendant File `nested.rs` under it.
+        let nested_subtree = {
+            let mut entries: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
+            entries.insert(CompactString::new("nested.rs"), leaf(EntryKind::File, 99));
+            // root_resource on a sub-snapshot is advisory only; tests
+            // can use any ResourceId for it. Use the prior_foo_id —
+            // the slot will reap during graft but the snapshot doesn't
+            // resolve through tree, so the stale id is fine.
+            Arc::new(DirSnapshot::new(prior_foo_id, meta(7), 0, entries))
+        };
+        let response = dir_snap(
+            root,
+            200,
+            vec![("foo", dir_child(42, Some(nested_subtree)))],
+        );
+
+        // Sanity: prior and new "foo" entries share `(inode, device)`
+        // ⇒ this is the kind-flip-with-inode-reuse case that
+        // `walk_pair` mishandled. Confirms the regression's failing
+        // pre-condition.
+        let prior_foo_child = prior_current.entries.get("foo").unwrap();
+        let new_foo_child = response.entries.get("foo").unwrap();
+        assert_eq!(prior_foo_child.inode(), new_foo_child.inode());
+        assert_eq!(prior_foo_child.device(), new_foo_child.device());
+        assert_ne!(
+            prior_foo_child.kind(),
+            new_foo_child.kind(),
+            "regression invariant: prior File + new Dir at the same inode",
+        );
+
+        let mut out = StepOutput::default();
+        graft(
+            pid,
+            root,
+            Arc::clone(&response),
+            &mut tree,
+            &mut profiles,
+            &mut out,
+        );
+
+        // 1. Old File slot was reaped — its id is stale on a fresh
+        //    lookup. `tree.lookup(root, "foo")` should now resolve to
+        //    a NEW slot with a different id (generation increment).
+        let new_foo_id = tree
+            .lookup(Some(root), "foo")
+            .expect("graft must materialise a Tree slot at the post-graft target");
+        assert_ne!(
+            new_foo_id, prior_foo_id,
+            "kind-flip must reap the prior slot and allocate a fresh-generation one",
+        );
+        assert!(
+            tree.get(prior_foo_id).is_none(),
+            "prior File slot must be reaped after kind flip",
+        );
+
+        // 2. New slot's kind is Dir.
+        let kind = tree
+            .get(new_foo_id)
+            .and_then(specter_core::Resource::kind)
+            .expect("post-graft slot must have a recorded kind");
+        assert_eq!(kind, ResourceKind::Dir, "new slot must be re-typed to Dir");
+
+        // 3. New slot carries the Profile's descendant contribution.
+        let has_contribution = tree
+            .get(new_foo_id)
+            .is_some_and(specter_core::Resource::is_watched);
+        assert!(
+            has_contribution,
+            "new Dir slot must carry the Profile's descendant contribution \
+             (kind-flip didn't install Watch — F-HIGH-1 regression)",
+        );
+
+        // 4. `out.watch_ops` contains a Watch op at the new slot.
+        let watched_new_slot = out
+            .watch_ops
+            .iter()
+            .any(|op| matches!(op, WatchOp::Watch { resource, .. } if *resource == new_foo_id));
+        assert!(
+            watched_new_slot,
+            "out.watch_ops must contain a Watch op at the new Dir slot",
+        );
+
+        // 5. The descendant `nested.rs` was materialised under the new
+        //    Dir slot. Per-file Profile ⇒ covered Leaf carries a watch
+        //    contribution too.
+        let nested_id = tree
+            .lookup(Some(new_foo_id), "nested.rs")
+            .expect("descendant `nested.rs` must be materialised");
+        let nested_watched = tree
+            .get(nested_id)
+            .is_some_and(specter_core::Resource::is_watched);
+        assert!(
+            nested_watched,
+            "covered descendant of the new Dir must carry its own watch \
+             contribution under a per-file Profile",
         );
     }
 }

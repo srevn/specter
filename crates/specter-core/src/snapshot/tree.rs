@@ -1100,6 +1100,90 @@ fn stage_created(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Diff single-snapshot constructors
+// ---------------------------------------------------------------------------
+//
+// `all_created` / `all_deleted` are the snapshot ↔ empty transformations.
+// They exist as named methods (rather than `diff_tree(empty, snap)` calls)
+// to avoid allocating an empty `DirSnapshot` per invocation; both reuse
+// the same depth-first lex staging recursion as `diff_tree`.
+//
+// **Asymmetry vs `modified` / `renamed`.** The four `Diff` categories do
+// not have symmetric single-snapshot reductions:
+//
+// - `created` / `deleted`: snapshot ↔ empty has a natural meaning
+//   (every entry appeared / disappeared relative to the empty state).
+// - `modified`: pairs entries across two non-empty snapshots by identity
+//   (same `(inode, device)`, different `leaf_hash`). One snapshot alone
+//   cannot express "modified relative to what" — there is no implicit
+//   prior identity.
+// - `renamed`: pairs entries across two non-empty snapshots by both
+//   `(inode, device)` and `segment`. Requires both endpoints.
+//
+// So `all_modified` / `all_renamed` have no semantically grounded
+// definition, only an arbitrary one (e.g. "every entry as Modified
+// relative to itself") that no engine path would need. They are omitted
+// by design.
+
+impl Diff {
+    /// Construct a [`Diff`] where every entry of `snap` (recursively, into
+    /// covered subtrees) appears as a `Created` entry, in depth-first lex
+    /// order.
+    ///
+    /// Equivalent to `diff_tree(empty_dirsnapshot, snap)` without the empty
+    /// `DirSnapshot` allocation. Sole intended caller is
+    /// `specter_engine::reconcile::graft`'s first-graft path
+    /// (`Profile.current == None` ⇒ every entry of the response is new
+    /// from the engine's perspective).
+    ///
+    /// `modified` / `renamed` are empty by construction — there is no
+    /// prior snapshot to pair entries against; see the module-level
+    /// asymmetry rationale.
+    #[must_use]
+    pub fn all_created(snap: &DirSnapshot) -> Self {
+        let mut staged: Vec<StagedEntry> = Vec::new();
+        for (name, child) in &snap.entries {
+            stage_created(name, child, "", &mut staged);
+        }
+        let mut out = Self::default();
+        out.created.reserve(staged.len());
+        for s in staged {
+            out.created.push(EntryRef {
+                segment: s.rel,
+                kind: s.kind,
+                inode: s.inode,
+            });
+        }
+        out
+    }
+
+    /// Symmetric counterpart of [`Diff::all_created`]: every entry of `snap`
+    /// appears as a `Deleted` entry, in depth-first lex order. Used by
+    /// `specter_engine::Engine::release_descendant_claim` for
+    /// whole-snapshot teardown.
+    ///
+    /// See [`Diff::all_created`] for the modified/renamed asymmetry
+    /// rationale.
+    #[must_use]
+    pub fn all_deleted(snap: &DirSnapshot) -> Self {
+        let mut staged: Vec<StagedEntry> = Vec::new();
+        for (name, child) in &snap.entries {
+            stage_deleted(name, child, "", &mut staged);
+        }
+        let mut out = Self::default();
+        out.deleted.reserve(staged.len());
+        for s in staged {
+            out.deleted.push(EntryRef {
+                segment: s.rel,
+                kind: s.kind,
+                inode: s.inode,
+            });
+        }
+        out
+    }
+}
+
 /// Pair Created/Deleted entries by `(device, inode)` to recover Renames.
 ///
 /// The index uses `BTreeMap::insert` semantics, so when a `(device, inode)`

@@ -1872,6 +1872,228 @@ fn diff_tree_recursive_three_levels_deep_change() {
 }
 
 // ---------------------------------------------------------------------------
+// Diff::all_created / Diff::all_deleted
+// ---------------------------------------------------------------------------
+
+#[test]
+fn diff_all_created_empty_snapshot_yields_empty_diff() {
+    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, BTreeMap::new());
+    let d = Diff::all_created(&snap);
+    assert!(d.is_empty());
+}
+
+#[test]
+fn diff_all_deleted_empty_snapshot_yields_empty_diff() {
+    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, BTreeMap::new());
+    let d = Diff::all_deleted(&snap);
+    assert!(d.is_empty());
+}
+
+#[test]
+fn diff_all_created_single_leaf_emits_one_created_entry() {
+    let mut entries = BTreeMap::new();
+    entries.insert(
+        name("a.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 42, 0)),
+    );
+    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+
+    let d = Diff::all_created(&snap);
+    assert_eq!(d.created.len(), 1);
+    assert_eq!(d.created[0].segment.as_str(), "a.rs");
+    assert_eq!(d.created[0].kind, EntryKind::File);
+    assert_eq!(d.created[0].inode, 42);
+    assert!(d.deleted.is_empty());
+    assert!(d.modified.is_empty());
+    assert!(d.renamed.is_empty());
+}
+
+#[test]
+fn diff_all_deleted_single_leaf_emits_one_deleted_entry() {
+    let mut entries = BTreeMap::new();
+    entries.insert(
+        name("a.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 42, 0)),
+    );
+    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+
+    let d = Diff::all_deleted(&snap);
+    assert_eq!(d.deleted.len(), 1);
+    assert_eq!(d.deleted[0].segment.as_str(), "a.rs");
+    assert_eq!(d.deleted[0].kind, EntryKind::File);
+    assert_eq!(d.deleted[0].inode, 42);
+    assert!(d.created.is_empty());
+    assert!(d.modified.is_empty());
+    assert!(d.renamed.is_empty());
+}
+
+#[test]
+fn diff_all_created_uncovered_dir_emits_dir_only_no_descendants() {
+    // DirChild with subtree=None ⇒ "uncovered" — the walker stored the
+    // entry but didn't recurse. all_created emits the Dir entry itself
+    // but cannot synthesise descendants it never saw.
+    let mut entries = BTreeMap::new();
+    entries.insert(name("sub"), dir(7, 0, None));
+    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+
+    let d = Diff::all_created(&snap);
+    assert_eq!(d.created.len(), 1);
+    assert_eq!(d.created[0].segment.as_str(), "sub");
+    assert_eq!(d.created[0].kind, EntryKind::Dir);
+    assert_eq!(d.created[0].inode, 7);
+}
+
+#[test]
+fn diff_all_created_covered_dir_emits_recursive_entries_depth_first_lex() {
+    // Structure: root/{a (Dir, covered)/{b.rs}, c.rs}.
+    // Expected depth-first lex order in `created`:
+    //   "a", "a/b.rs", "c.rs".
+    let mut inner = BTreeMap::new();
+    inner.insert(
+        name("b.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 11, 0)),
+    );
+    let inner_snap = make_dir(ResourceId::default(), meta(1, 7, 0), 0, inner);
+
+    let mut entries = BTreeMap::new();
+    entries.insert(name("a"), dir(7, 0, Some(Arc::clone(&inner_snap))));
+    entries.insert(
+        name("c.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 22, 0)),
+    );
+    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+
+    let d = Diff::all_created(&snap);
+    let segments: Vec<&str> = d.created.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(segments, vec!["a", "a/b.rs", "c.rs"]);
+}
+
+#[test]
+fn diff_all_deleted_covered_dir_emits_recursive_entries_depth_first_lex() {
+    // Symmetric to `diff_all_created_covered_dir_emits_recursive_entries_depth_first_lex`.
+    let mut inner = BTreeMap::new();
+    inner.insert(
+        name("b.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 11, 0)),
+    );
+    let inner_snap = make_dir(ResourceId::default(), meta(1, 7, 0), 0, inner);
+
+    let mut entries = BTreeMap::new();
+    entries.insert(name("a"), dir(7, 0, Some(Arc::clone(&inner_snap))));
+    entries.insert(
+        name("c.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 22, 0)),
+    );
+    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+
+    let d = Diff::all_deleted(&snap);
+    let segments: Vec<&str> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(segments, vec!["a", "a/b.rs", "c.rs"]);
+}
+
+#[test]
+fn diff_all_created_deep_nesting() {
+    // Three-level deep nesting: r/{x (Dir)/{y (Dir)/{leaf.rs}}}.
+    let mut l3 = BTreeMap::new();
+    l3.insert(
+        name("leaf.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 13, 0)),
+    );
+    let l3_snap = make_dir(ResourceId::default(), meta(1, 12, 0), 0, l3);
+
+    let mut l2 = BTreeMap::new();
+    l2.insert(name("y"), dir(12, 0, Some(l3_snap)));
+    let l2_snap = make_dir(ResourceId::default(), meta(1, 11, 0), 0, l2);
+
+    let mut l1 = BTreeMap::new();
+    l1.insert(name("x"), dir(11, 0, Some(l2_snap)));
+    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 10, 0), 0, l1);
+
+    let d = Diff::all_created(&snap);
+    let segments: Vec<&str> = d.created.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(segments, vec!["x", "x/y", "x/y/leaf.rs"]);
+}
+
+#[test]
+fn diff_all_created_matches_diff_against_empty_baseline() {
+    // Equivalence with the canonical form: diff_tree(empty, snap).created
+    // should equal Diff::all_created(snap).created (segment + kind + inode
+    // tuples, ignoring SmallVec capacity differences).
+    let mut inner = BTreeMap::new();
+    inner.insert(
+        name("file.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 11, 0)),
+    );
+    let inner_snap = make_dir(ResourceId::default(), meta(1, 7, 0), 0, inner);
+
+    let mut entries = BTreeMap::new();
+    entries.insert(name("sub"), dir(7, 0, Some(inner_snap)));
+    entries.insert(
+        name("top.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 22, 0)),
+    );
+    let snap = make_dir(ResourceId::default(), meta(1, 100, 0), 0, entries);
+
+    let empty = make_dir(ResourceId::default(), meta(1, 100, 0), 0, BTreeMap::new());
+    let canonical = diff_tree(
+        &TreeSnapshot::Dir(empty),
+        &TreeSnapshot::Dir(Arc::clone(&snap)),
+    );
+    let shorthand = Diff::all_created(&snap);
+
+    let canon_tuples: Vec<(String, EntryKind, u64)> = canonical
+        .created
+        .iter()
+        .map(|e| (e.segment.to_string(), e.kind, e.inode))
+        .collect();
+    let short_tuples: Vec<(String, EntryKind, u64)> = shorthand
+        .created
+        .iter()
+        .map(|e| (e.segment.to_string(), e.kind, e.inode))
+        .collect();
+    assert_eq!(canon_tuples, short_tuples);
+
+    // Modified/renamed/deleted must be empty on both sides.
+    assert!(canonical.deleted.is_empty());
+    assert!(canonical.modified.is_empty());
+    assert!(canonical.renamed.is_empty());
+    assert!(shorthand.deleted.is_empty());
+    assert!(shorthand.modified.is_empty());
+    assert!(shorthand.renamed.is_empty());
+}
+
+#[test]
+fn diff_all_deleted_matches_diff_from_empty_target() {
+    // Symmetric equivalence: diff_tree(snap, empty).deleted should match
+    // Diff::all_deleted(snap).deleted.
+    let mut entries = BTreeMap::new();
+    entries.insert(
+        name("top.rs"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 22, 0)),
+    );
+    let snap = make_dir(ResourceId::default(), meta(1, 100, 0), 0, entries);
+    let empty = make_dir(ResourceId::default(), meta(1, 100, 0), 0, BTreeMap::new());
+
+    let canonical = diff_tree(
+        &TreeSnapshot::Dir(Arc::clone(&snap)),
+        &TreeSnapshot::Dir(empty),
+    );
+    let shorthand = Diff::all_deleted(&snap);
+
+    let canon_tuples: Vec<(String, EntryKind, u64)> = canonical
+        .deleted
+        .iter()
+        .map(|e| (e.segment.to_string(), e.kind, e.inode))
+        .collect();
+    let short_tuples: Vec<(String, EntryKind, u64)> = shorthand
+        .deleted
+        .iter()
+        .map(|e| (e.segment.to_string(), e.kind, e.inode))
+        .collect();
+    assert_eq!(canon_tuples, short_tuples);
+}
+
+// ---------------------------------------------------------------------------
 // TreeSnapshot::hash
 // ---------------------------------------------------------------------------
 

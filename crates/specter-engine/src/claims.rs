@@ -32,10 +32,10 @@
 //!   [`specter_core::Tree::vacate`] cleared the map.
 
 use crate::Engine;
-use crate::reconcile::{delete_child, purge_per_file_fired_subs_for_reaped_slots};
+use crate::reconcile::{apply_diff_to_tree, purge_per_file_fired_subs_for_resources};
 use crate::refcounts::{sub_watch, sub_watch_then_try_reap};
 use specter_core::{
-    AnchorClaim, ContribKey, ProbeOwner, ProfileId, ProfileState, StepOutput, TreeSnapshot,
+    AnchorClaim, ContribKey, Diff, ProbeOwner, ProfileId, ProfileState, StepOutput, TreeSnapshot,
 };
 
 impl Engine {
@@ -141,15 +141,13 @@ impl Engine {
     /// the fourth member of the claim quartet, completing the
     /// symmetry with the three single-resource helpers above.
     ///
-    /// **Take-and-walk.** Atomically takes `Profile.current` (sets to
-    /// `None`), then walks the taken snapshot in reverse-lex order
-    /// calling [`crate::reconcile::delete_child`] on each top-level
-    /// entry. The helper recurses leaf-before-parent and releases
-    /// each slot's [`ContribKey::ProfileDescendant`] contribution by
-    /// explicit key. The contribution map is keyed by
-    /// `(resource, key)`, so removal is unambiguous regardless of
-    /// `Profile.current`'s mid-walk visibility (the lazy-derivation
-    /// `releasing_descendant` parameter is gone).
+    /// **Take-and-apply.** Atomically takes `Profile.current` (sets to
+    /// `None`), synthesises a wholesale-deletion [`Diff`] over the
+    /// taken snapshot via [`Diff::all_deleted`], and feeds it to
+    /// [`crate::reconcile::apply_diff_to_tree`] (which releases each
+    /// slot's [`ContribKey::ProfileDescendant`] contribution by
+    /// explicit key, then vacates and reaps any slot left with no
+    /// remaining anchors).
     ///
     /// **Idempotent.** `current.is_none()` ⇒ no-op. A second invocation
     /// in the same step finds `None` after the first call's `take`.
@@ -158,19 +156,19 @@ impl Engine {
     /// the dispatch.
     ///
     /// **Safe in any post-vacate state.**
-    /// [`crate::reconcile::delete_child`] calls
+    /// [`crate::reconcile::apply_diff_to_tree`] calls
     /// [`crate::refcounts::sub_watch`] unconditionally; the helper
     /// silently skips absent keys (post-vacate slots, or slots a prior
-    /// sub-walk in this take-and-walk pass already drained — see the
+    /// sub-walk in this take-and-apply pass already drained — see the
     /// [`crate::refcounts`] module rustdoc).
     ///
-    /// **Per-file dedup hygiene.** The walk reaps covered Leaves; their
-    /// `ResourceId`s may key entries in OTHER Profiles' (or this one's)
-    /// `fired_subs` set. Mirror [`graft`]'s post-walk purge across the
-    /// whole registry to drop the now-stale entries. Cross-Profile
-    /// sharing makes the registry-wide scan necessary — a per-Profile
-    /// purge would miss entries other Profiles wrote against the same
-    /// descendant slot.
+    /// **Per-file dedup hygiene.** The Diff-driven pass reaps covered
+    /// Leaves; their `ResourceId`s may key entries in OTHER Profiles'
+    /// (or this one's) `fired_subs` set. Mirror [`graft`](crate::reconcile::graft)'s
+    /// post-apply purge via the scoped
+    /// [`crate::reconcile::purge_per_file_fired_subs_for_resources`].
+    /// Cross-Profile sharing means the loop iterates every Profile;
+    /// the membership check is scoped to the reaped set.
     ///
     /// **Sole call sites.** [`Engine::reap_profile`] and the seven
     /// `dispatch_*_vanished/failed` + `finalize_anchor_lost` sites in
@@ -192,37 +190,29 @@ impl Engine {
             return;
         };
 
-        // Dispatch the walk under a co-existing immutable borrow of
-        // the Profile (for `delete_child`'s `&Profile` arg).
+        // Synthesise the wholesale-deletion Diff outside the Profile
+        // borrow scope — `Diff::all_deleted` reads only the snapshot
+        // and is `&self` on the Diff side.
+        let diff = Diff::all_deleted(&arc);
+
+        // Apply the Diff under a co-existing immutable borrow of the
+        // Profile (for `apply_diff_to_tree`'s `&Profile` arg).
         // `&mut self.tree` is a disjoint-field borrow.
-        {
+        let reaped = {
             let Some(profile) = self.profiles.get(pid) else {
                 return;
             };
             let anchor = profile.resource;
-            // Reverse-lex per level — `delete_child` handles its own
-            // internal reverse-lex within Dir children; this loop
-            // covers the top-level entries of the snapshot. Together
-            // they yield strict leaf-before-parent reap order, so
-            // `try_reap` sees a vacated child set when it processes
-            // each parent.
-            for (name, child) in arc.entries.iter().rev() {
-                delete_child(
-                    &mut self.tree,
-                    profile,
-                    pid,
-                    anchor,
-                    name.as_str(),
-                    child,
-                    out,
-                );
-            }
-        }
+            apply_diff_to_tree(&diff, profile, pid, anchor, &mut self.tree, out)
+        };
 
         // Cross-Profile dedup hygiene: covered Leaves reaped above may
         // appear in any Profile's `fired_subs` set keyed at their
-        // `ResourceId`. Mirrors graft's post-walk_pair purge.
-        purge_per_file_fired_subs_for_reaped_slots(&mut self.profiles, &self.tree);
+        // `ResourceId`. Scoped to the small reaped set, but iterates
+        // every Profile to handle cross-Profile sharing.
+        if !reaped.is_empty() {
+            purge_per_file_fired_subs_for_resources(&mut self.profiles, &reaped);
+        }
     }
 
     /// Discard every anchor-derived state when the anchor is lost or

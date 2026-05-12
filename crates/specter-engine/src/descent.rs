@@ -204,11 +204,20 @@ impl crate::Engine {
     }
 
     /// Enter `ProfileState::Pending` against `prefix` with `remaining`
-    /// path components (single-component segments, anchor last). Bumps the
-    /// prefix's `STRUCTURE` `watch_demand` contribution, opens the
-    /// probe channel, writes the descent state, and emits the descent
-    /// probe — the four-step Idle → Pending entry sequence as a single
-    /// helper.
+    /// path components (single-component segments, anchor last). Mints
+    /// the probe correlation, flips the Profile to `Pending`, bumps the
+    /// prefix's `STRUCTURE` `watch_demand` contribution, and emits the
+    /// descent probe — the four-step Idle → Pending entry sequence as
+    /// a single helper.
+    ///
+    /// **Ordering: mint → state-flip → add_watch → emit.** Symmetric with
+    /// [`Self::materialize_profile_anchor`]'s state-before-refcount
+    /// pattern. The mint runs *first* so a precondition violation
+    /// (correlation slot already busy) leaves the engine with no side
+    /// effects: no leaked `+1 STRUCTURE` contribution at the prefix, no
+    /// state flip, no probe emission. State-flip *then* refcount keeps
+    /// the contribution attribution coherent with the Profile's claim
+    /// shape at the moment of the refcount edge.
     ///
     /// **Pre-condition.** Profile must be `Idle` with a closed probe
     /// channel. The debug_assert below catches any caller passing a
@@ -245,6 +254,25 @@ impl crate::Engine {
              and release prior state before re-entering descent (profile = {profile_id:?})",
         );
 
+        // Step 1: mint correlation. Failure path is clean — no side
+        // effects yet, no leaked refcount.
+        let owner = ProbeOwner::Profile(profile_id);
+        let Some(correlation) = self.mint_owner_correlation(owner) else {
+            return;
+        };
+
+        // Step 2: state-flip Idle → Pending. Done before the refcount
+        // edge so any reader between this point and step 3 sees the
+        // Profile's claim shape that the contribution will attribute
+        // to (matches `materialize_profile_anchor`'s sequencing).
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.state = ProfileState::Pending(DescentState {
+                current_prefix: prefix,
+                remaining_components: remaining,
+            });
+        }
+
+        // Step 3: install the prefix's STRUCTURE contribution.
         add_watch(
             &mut self.tree,
             prefix,
@@ -253,18 +281,7 @@ impl crate::Engine {
             out,
         );
 
-        let owner = ProbeOwner::Profile(profile_id);
-        let Some(correlation) = self.mint_owner_correlation(owner) else {
-            return;
-        };
-
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.state = ProfileState::Pending(DescentState {
-                current_prefix: prefix,
-                remaining_components: remaining,
-            });
-        }
-
+        // Step 4: emit the descent probe at the prefix.
         let target_path = self.tree.path_of(prefix).unwrap_or_default();
         Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
     }
