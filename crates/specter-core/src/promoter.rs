@@ -81,7 +81,7 @@ pub struct PromoterAttachRequest {
 pub struct Promoter {
     pub id: PromoterId,
     pub name: CompactString,
-    pub pattern: PatternSpec,
+    pub pattern: Arc<PatternSpec>,
     pub config: ScanConfig,
     pub max_settle: Duration,
     pub settle: Duration,
@@ -309,7 +309,7 @@ mod tests {
         Promoter {
             id,
             name: CompactString::from(name),
-            pattern: PatternSpec::parse(pattern).expect("valid pattern"),
+            pattern: Arc::new(PatternSpec::parse(pattern).expect("valid pattern")),
             config: ScanConfig::builder().recursive(true).build(),
             max_settle: MAX_SETTLE,
             settle: SETTLE,

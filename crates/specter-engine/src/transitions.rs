@@ -22,7 +22,7 @@ use specter_core::{
     PromoterId, PromoterState, Resource, ResourceId, ResourceKind, StepOutput, SubId, TimerId,
     TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1412,21 +1412,44 @@ impl Engine {
         // in flight. Idempotent on a closed channel.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
 
-        // 2. Notify each source Promoter; remove each dynamic Sub from
+        // 2. Resolve the anchor path ONCE for the per-Sub loop. Every
+        // dynamic Sub on this Profile shares the same anchor resource by
+        // the `(resource, config_hash)` find-or-create dedup in
+        // `attach_sub_inner`; this path is precisely the key
+        // `try_promote` stored into each source Promoter's
+        // `dynamic_subs` map. The anchor slot is alive at this point —
+        // the Profile is not yet reaped (the slot's anchor_claim
+        // contribution is released only by `reap_profile` below) — so
+        // `path_of` returns `Some(_)`. The fallback is
+        // defense-in-depth.
+        let anchor_path: PathBuf = self
+            .profiles
+            .get(profile_id)
+            .and_then(|p| self.tree.path_of(p.resource))
+            .unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "on_anchor_terminal_all_dynamic: tree.path_of returned None for live Profile \
+                     anchor (profile = {profile_id:?})",
+                );
+                PathBuf::new()
+            });
+
+        // 3. Notify each source Promoter; remove each dynamic Sub from
         // SubRegistry. SubRegistry's `by_profile` index drops the
         // entry on the last remove, so the post-loop registry has no
         // back-references for this Profile.
         let dynamic_subs: SmallVec<[SubId; 2]> = self.subs.at(profile_id).iter().copied().collect();
         for sid in dynamic_subs.iter().copied() {
             if let Some(pid) = self.subs.get(sid).and_then(|s| s.source_promoter) {
-                self.on_dynamic_sub_reaped(pid, sid, out);
+                self.on_dynamic_sub_reaped(pid, sid, &anchor_path, out);
             }
         }
         for sid in dynamic_subs {
             let _ = self.subs.remove(sid);
         }
 
-        // 3. Reap the Profile. Active Profiles need their burst force-
+        // 4. Reap the Profile. Active Profiles need their burst force-
         // ended via `finish_burst_to_idle`; Idle / Pending Profiles
         // reap synchronously. We set `reap_pending = true` for the
         // Active branch so `finish_burst_to_idle` runs `reap_profile`

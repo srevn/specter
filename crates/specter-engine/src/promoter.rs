@@ -144,10 +144,15 @@ impl Engine {
 
         // 6. Mint the Promoter with the final state. `insert_with_key`
         // closure embeds the freshly-minted id into the value.
+        // `pattern_spec` moves into a fresh `Arc` — the hot dispatcher
+        // bumps the refcount per enumeration response to release the
+        // registry's read borrow before the forward pass takes `&mut
+        // self`. Cloning the `PatternSpec` here (rather than moving)
+        // would allocate per `Glob` component on every attach.
         let promoter_id = self.promoters.insert(|id| Promoter {
             id,
             name: CompactString::from(req.name.as_str()),
-            pattern: req.pattern_spec.clone(),
+            pattern: Arc::new(req.pattern_spec),
             config: req.config.clone(),
             max_settle: req.max_settle,
             settle: req.settle,
@@ -694,16 +699,21 @@ impl Engine {
             return;
         };
 
-        // Snapshot the components vec under a read borrow so the
-        // forward pass below can take `&mut self`. The clone walks
-        // `PatternComponent`s including `Glob` source strings — not
-        // free; a follow-up holds `Arc<PatternSpec>` on `Promoter` to
-        // collapse this to a single refcount bump.
-        let components: Vec<PatternComponent> = self
+        // Bump the Promoter's pattern Arc to release the read borrow on
+        // `self.promoters` before the forward pass takes `&mut self` via
+        // `try_promote` / `register_proxy`. The refcount bump replaces
+        // the prior per-response `components().to_vec()` clone — every
+        // `Glob` component cloned three `String`s, so the cost scaled
+        // with pattern depth × glob count. The auto-deref `Arc<T> → &T`
+        // lets the loop body read components without further ceremony.
+        let Some(pattern) = self
             .promoters
             .get(promoter_id)
-            .map(|q| q.pattern.components().to_vec())
-            .unwrap_or_default();
+            .map(|q| Arc::clone(&q.pattern))
+        else {
+            return;
+        };
+        let components = pattern.components();
         if pattern_component_index >= components.len() {
             debug_assert!(
                 false,
@@ -718,8 +728,9 @@ impl Engine {
         let is_final = pattern_component_index + 1 == components.len();
 
         // Forward pass: walk snapshot.entries, register matches.
-        // We borrow `next_component` from the cloned `components`,
-        // which has a lifetime `'_` tied to the `components` local.
+        // `next_component` borrows from `pattern` (an Arc held for the
+        // duration of the dispatcher), so the per-entry loop below can
+        // freely re-borrow `&mut self`.
         let next_component = &components[pattern_component_index];
         for (name, child) in &snapshot.entries {
             let name_str: &str = name.as_str();
@@ -1031,32 +1042,46 @@ impl Engine {
     /// Sub's anchor disappeared, and the all-dynamic teardown branch of
     /// [`Engine::on_anchor_terminal_event`] is unwinding the Profile).
     ///
-    /// Removes the `(path → sub_id)` entry from `Promoter.dynamic_subs`
-    /// and emits [`Diagnostic::DynamicSubReaped`]. This is one of three
-    /// documented mutators of `dynamic_subs` (alongside
-    /// [`Self::try_promote`] for inserts and
-    /// [`Self::reap_promoter_inner`] for full drains).
+    /// Removes the `(anchor_path → sub_id)` entry from
+    /// `Promoter.dynamic_subs` and emits
+    /// [`Diagnostic::DynamicSubReaped`]. This is one of three documented
+    /// mutators of `dynamic_subs` (alongside [`Self::try_promote`] for
+    /// inserts and [`Self::reap_promoter_inner`] for full drains).
+    ///
+    /// `anchor_path` is the resolved path the Sub was attached at — by
+    /// construction, the same path that `try_promote` registered into
+    /// `dynamic_subs`. The caller
+    /// ([`Engine::on_anchor_terminal_all_dynamic`]) computes it once via
+    /// `tree.path_of(profile.resource)` before the per-Sub loop because
+    /// every dynamic Sub on a Profile shares the same anchor by the
+    /// `(resource, config_hash)` attach dedup; threading it through
+    /// turns the lookup into an O(log N) `remove_entry` and moves the
+    /// owned key into the diagnostic without a fresh allocation.
     ///
     /// **Stale notification.** A concurrent
     /// [`Self::reap_promoter_inner`] (e.g., reload removing the
     /// Promoter in the same step) may have already cleared the
-    /// dynamic_subs map, in which case the lookup-by-`sub_id` returns
+    /// dynamic_subs map, in which case the `remove_entry` returns
     /// `None` and the call is a benign no-op (no diagnostic emitted).
     pub(crate) fn on_dynamic_sub_reaped(
         &mut self,
         promoter_id: PromoterId,
         sub_id: SubId,
+        anchor_path: &Path,
         out: &mut StepOutput,
     ) {
-        let removed = self.promoters.get_mut(promoter_id).and_then(|q| {
-            let path = q
-                .dynamic_subs
-                .iter()
-                .find(|&(_, sid)| *sid == sub_id)
-                .map(|(p, _)| p.clone());
-            path.and_then(|p| q.dynamic_subs.remove(&p).map(|_| p))
-        });
-        if let Some(path) = removed {
+        let removed = self
+            .promoters
+            .get_mut(promoter_id)
+            .and_then(|q| q.dynamic_subs.remove_entry(anchor_path));
+        if let Some((path, stored_sub_id)) = removed {
+            debug_assert_eq!(
+                stored_sub_id,
+                sub_id,
+                "on_dynamic_sub_reaped: dynamic_subs entry's SubId disagrees with caller's \
+                 (promoter = {promoter_id:?}, anchor_path = {})",
+                anchor_path.display(),
+            );
             out.diagnostics.push(Diagnostic::DynamicSubReaped {
                 promoter: promoter_id,
                 sub: sub_id,
@@ -1097,15 +1122,20 @@ impl Engine {
     ///    detach each via [`Engine::detach_sub_inner`]; each detach
     ///    runs the standard deferred-reap-or-immediate-reap branch
     ///    on the corresponding Profile.
-    /// 3. State-branch on `Promoter.state`:
-    ///    - `PrefixPending`: flip state to `Active{empty}` for owner
-    ///      bookkeeping, then release the prefix's
-    ///      [`specter_core::ContribKey::PromoterPrefix`] contribution
-    ///      and try-reap the slot via [`sub_watch_then_try_reap`].
-    ///    - `Active`: snapshot the proxies and call
-    ///      [`Self::unregister_proxy`] on each — which removes the
+    /// 3. Release the per-Resource claims by sequencing the two
+    ///    idempotent release helpers — `PromoterState` is
+    ///    `PrefixPending` XOR `Active`, and each helper is a no-op
+    ///    against the wrong arm, so the unconditional sequence
+    ///    handles both cases without a discriminant projection:
+    ///    - [`Self::release_promoter_descent_prefix_claim`] releases
+    ///      the [`specter_core::ContribKey::PromoterPrefix`]
+    ///      contribution (PrefixPending arm); side-effects a state
+    ///      flip to `Active{empty}` so the proxy iteration that
+    ///      follows sees a uniform shape.
+    ///    - [`Self::unregister_proxy`] (per snapshot of
+    ///      `state.proxies.keys()`) clears the back-ref, drops the
     ///      [`specter_core::ContribKey::PromoterProxy`] contribution,
-    ///      clears the back-ref, and try-reaps the slot.
+    ///      and try-reaps the slot.
     /// 4. Remove the Promoter from the registry. Emit
     ///    [`Diagnostic::PromoterReaped`].
     pub(crate) fn reap_promoter_inner(
@@ -1126,15 +1156,11 @@ impl Engine {
         // 1. Close the probe channel. `cancel_owner_probe` clears
         // both `pending_probe` and `pending_enumeration_target` for
         // Promoter owners and emits `ProbeOp::Cancel` iff the channel
-        // was open.
+        // was open. `pending_enumerations` drains as a side effect of
+        // the proxy-release pass below: every queued entry corresponds
+        // to a registered proxy, and `release_promoter_proxy_claim`
+        // removes its own queue entry inside `unregister_proxy`.
         self.cancel_owner_probe(ProbeOwner::Promoter(promoter_id), out);
-        // Drain `pending_enumerations` for hygiene during the reap
-        // window. The BTreeSet drops with the Promoter at step 4, so
-        // this is defensive against any future mid-reap reader (and
-        // matches the plan's explicit drain).
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.pending_enumerations.clear();
-        }
 
         // 2. Detach every dynamic Sub. Pre-clear `dynamic_subs` so
         // cascading paths observe an empty map; then iterate the
@@ -1153,61 +1179,39 @@ impl Engine {
             self.detach_sub_inner(sub_id, now, out);
         }
 
-        // 3. State-branch on the per-Resource cleanup.
-        let state_kind = self.promoters.get(promoter_id).map(|q| match &q.state {
-            PromoterState::PrefixPending(_) => PromoterReapStateKind::PrefixPending,
-            PromoterState::Active { .. } => PromoterReapStateKind::Active,
-        });
-        match state_kind {
-            Some(PromoterReapStateKind::PrefixPending) => {
-                // Capture the prefix BEFORE flipping state. The
-                // contribution map's [`ContribKey::PromoterPrefix`]
-                // key is removed below; the state-flip is for owner
-                // bookkeeping only.
-                let prefix = self.promoters.get(promoter_id).and_then(|q| {
-                    if let PromoterState::PrefixPending(d) = &q.state {
-                        Some(d.current_prefix)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(q) = self.promoters.get_mut(promoter_id) {
-                    q.state = PromoterState::Active {
-                        proxies: BTreeMap::new(),
-                    };
-                }
-                if let Some(prefix) = prefix {
-                    sub_watch_then_try_reap(
-                        &mut self.tree,
-                        prefix,
-                        ContribKey::PromoterPrefix(promoter_id),
-                        out,
-                    );
-                }
-            }
-            Some(PromoterReapStateKind::Active) => {
-                // Snapshot the proxy keys; `unregister_proxy` is
-                // idempotent and clears its own back-refs,
-                // watch_demand, and slot. Order doesn't matter: each
-                // proxy's cleanup is self-contained.
-                let proxy_list: Vec<ResourceId> = self
-                    .promoters
-                    .get(promoter_id)
-                    .map(|q| match &q.state {
-                        PromoterState::Active { proxies } => proxies.keys().copied().collect(),
-                        PromoterState::PrefixPending(_) => Vec::new(),
-                    })
-                    .unwrap_or_default();
-                for r in proxy_list {
-                    self.unregister_proxy(promoter_id, r, out);
-                }
-            }
-            None => {
-                // Promoter vanished mid-reap (a detach_sub_inner
-                // cascade reached `reap_promoter_inner` again — which
-                // it shouldn't, but defense-in-depth). Skip the
-                // per-Resource cleanup.
-            }
+        // 3. Release the per-Resource claims. Both helpers are
+        // idempotent against the wrong state arm, so the unconditional
+        // sequence handles `PrefixPending` and `Active` uniformly
+        // without a discriminant projection.
+        //
+        // `release_promoter_descent_prefix_claim` no-ops when state is
+        // already `Active`; when state is `PrefixPending` it captures
+        // `current_prefix`, flips state to `Active{empty}`, and releases
+        // the [`ContribKey::PromoterPrefix`] contribution + try-reaps
+        // the slot. The cancel-first precondition
+        // (`pending_probe.is_none()`) is satisfied by the cancel above.
+        self.release_promoter_descent_prefix_claim(promoter_id, out);
+
+        // Snapshot the proxy keys post-release: state is now
+        // `Active` for both input arms — empty for the
+        // PrefixPending-input case (zero iterations), populated for the
+        // Active-input case. The `PrefixPending` match arm is
+        // unreachable at this point and present for defensive shape
+        // only. `unregister_proxy` (delegating to
+        // `release_promoter_proxy_claim`) clears the back-ref, drops
+        // the contribution, removes the queue entry, and try-reaps the
+        // slot. Order doesn't matter — each proxy's cleanup is
+        // self-contained.
+        let proxy_list: Vec<ResourceId> = self
+            .promoters
+            .get(promoter_id)
+            .map(|q| match &q.state {
+                PromoterState::Active { proxies } => proxies.keys().copied().collect(),
+                PromoterState::PrefixPending(_) => Vec::new(),
+            })
+            .unwrap_or_default();
+        for r in proxy_list {
+            self.unregister_proxy(promoter_id, r, out);
         }
 
         // 4. Remove the Promoter from the registry and emit the
@@ -1245,18 +1249,6 @@ fn render_literal_prefix(spec: &PatternSpec) -> PathBuf {
 enum PromoterDispatch {
     Descent,
     Enumerate,
-}
-
-/// State-discriminant projection used by
-/// [`Engine::reap_promoter_inner`]. The branch logic mutates
-/// `Promoter.state` (PrefixPending → Active{empty} flip) and walks
-/// proxies under separate borrows; this projection captures the
-/// pre-mutation discriminant so the dispatcher doesn't hold a
-/// `&PromoterState` across the mutation window.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum PromoterReapStateKind {
-    PrefixPending,
-    Active,
 }
 
 #[cfg(test)]
