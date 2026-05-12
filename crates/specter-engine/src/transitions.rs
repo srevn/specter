@@ -13,7 +13,6 @@
 
 use crate::Engine;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
-use crate::refcounts::clamp_watch_demand_to_zero;
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
@@ -765,13 +764,13 @@ impl Engine {
     /// The Sensor failed to install a kernel watch (typically `EMFILE` /
     /// `ENFILE` on FD exhaustion). Three things must happen:
     ///
-    /// 1. Clamp `watch_demand := 0` and `events_union := EMPTY` on
-    ///    `resource` so the engine's view of "is this slot watched?"
-    ///    matches reality.
+    /// 1. [`specter_core::Tree::vacate`] the rejected slot — clear
+    ///    every contribution and zero `suppress_count` atomically, so
+    ///    the engine's view of "is this slot watched?" matches reality.
     /// 2. Walk every Profile that holds a per-Profile claim on
     ///    `resource` (anchor / watch-root parent / descent prefix) and
     ///    clean up its bookkeeping — otherwise the Profile flag
-    ///    contradicts the post-clamp counter, and any subsequent
+    ///    contradicts the post-vacate counter, and any subsequent
     ///    Profile-driven release path would either see the wrong union
     ///    on recompute or silently drift further out of sync.
     /// 3. Emit one `ProfileClaimPurged` Diagnostic per affected
@@ -840,18 +839,23 @@ impl Engine {
             }
         }
 
-        // Atomic clear of the contributions map. Helpers below see
-        // an empty map ⇒ `sub_watch` silently skips each absent key;
-        // only the owner-bookkeeping flag-clears run.
-        clamp_watch_demand_to_zero(&mut self.tree, resource, out);
+        // Atomic terminus for the rejected slot: clear the
+        // contributions map AND zero `suppress_count`, emitting the
+        // closing `Unwatch` / `Unsuppress` pair. The per-claimer loops
+        // below run their owner-bookkeeping and call `sub_watch` /
+        // `sub_suppress`, which short-circuit on the post-vacate state
+        // (absent key / zero counter). One slot, one terminus — and
+        // the suppress balance is preserved by short-circuit, not by
+        // deferring the closing emission.
+        self.tree.vacate(resource, out);
 
         // Anchor claimers: synthesise an anchor-loss. `finalize_anchor_lost`
         // cancels any in-flight Active probe, releases the anchor flag
-        // (counter-aware no-op on the post-clamp counter), and finishes
-        // the burst to Idle. `finish_burst_to_idle` decrements
-        // `suppress_count`; the clamp deliberately does NOT zero
-        // `suppress_count` so this decrement balances the burst-start's
-        // `add_suppress`.
+        // (silent no-op on the post-vacate contributions map), and
+        // finishes the burst to Idle. `finish_burst_to_idle` runs
+        // `sub_suppress` against the now-zero counter — silent no-op,
+        // because `vacate` already emitted the closing `Unsuppress`
+        // above. Net Sensor ops match the pre-vacate accounting.
         for pid in anchor_claimers {
             self.finalize_anchor_lost(pid, out);
             out.diagnostics.push(Diagnostic::ProfileClaimPurged {

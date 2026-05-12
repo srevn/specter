@@ -493,7 +493,7 @@ pub(crate) fn delete_child(
     }
 
     // Phase 2: release this slot's watch contribution if we hold one.
-    // `sub_watch` is safe in any post-clamp / post-vacate state — the
+    // `sub_watch` is safe in any post-vacate state — the
     // take-then-walk path of `release_descendant_claim` may converge
     // on a slot a prior sub-walk already drained, and the helper
     // silently skips an absent key (see [`crate::refcounts`] module

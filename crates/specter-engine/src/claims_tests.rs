@@ -1,6 +1,6 @@
 //! Unit tests for `Engine::discard_anchor_state` — pins the helper's
 //! contract: which Profile fields are cleared, which are preserved,
-//! idempotence, post-clamp safety, and invariance of the
+//! idempotence, post-vacate safety, and invariance of the
 //! lifetime-fixed fields (`events_union`, `has_per_file_fds`).
 //!
 //! Co-located via `#[path]` on `claims.rs`. Goes hand-in-hand with the
@@ -17,7 +17,6 @@
 )]
 
 use crate::Engine;
-use crate::refcounts::clamp_watch_demand_to_zero;
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
@@ -274,36 +273,35 @@ fn discard_anchor_state_idempotent() {
 }
 
 #[test]
-fn discard_anchor_state_safe_after_clamp() {
+fn discard_anchor_state_safe_after_vacate() {
     // anchor contributions were cleared (e.g., by WatchOpRejected
-    // → `clamp_watch_demand_to_zero`); `release_anchor_claim`'s
-    // `sub_watch` must silently skip the absent
-    // `ContribKey::ProfileAnchor(pid)` key and skip emitting a second
-    // Unwatch (the clamp already emitted one).
+    // → `Tree::vacate`); `release_anchor_claim`'s `sub_watch` must
+    // silently skip the absent `ContribKey::ProfileAnchor(pid)` key
+    // and skip emitting a second Unwatch (vacate already emitted one).
     let (mut e, _sid, pid, anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
 
-    // Capture the pre-clamp counter to make sure clamp actually fired.
+    // Capture the pre-vacate counter to make sure vacate actually fires.
     assert!(e.tree().get(anchor).is_some_and(|r| r.watch_demand() > 0));
 
-    let mut clamp_out = StepOutput::default();
-    clamp_watch_demand_to_zero(e.tree_mut(), anchor, &mut clamp_out);
+    let mut vacate_out = StepOutput::default();
+    e.tree_mut().vacate(anchor, &mut vacate_out);
     assert_eq!(
         e.tree()
             .get(anchor)
             .map_or(0, specter_core::Resource::watch_demand),
         0,
-        "clamp zeroed the counter",
+        "vacate zeroed the counter",
     );
 
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
-    // Anchor's edge already fired during the clamp; the helper must
-    // not emit a second Unwatch on the post-clamp counter.
+    // Anchor's edge already fired during vacate; the helper must
+    // not emit a second Unwatch on the post-vacate counter.
     assert!(
         !out.watch_ops
             .iter()
             .any(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == anchor)),
-        "no stray Unwatch on post-clamp anchor; got {:?}",
+        "no stray Unwatch on post-vacate anchor; got {:?}",
         out.watch_ops,
     );
     // Profile state still cleared correctly.

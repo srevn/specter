@@ -148,15 +148,29 @@ impl Tree {
     /// `sub_suppress` calls from co-resident bookkeeping short-circuit
     /// on the post-clear / post-zero state (absent key / counter 0).
     ///
-    /// **Production caller discipline.** The sole production caller
-    /// ([`crate::Tree`]'s consumer in `reconcile::delete_child`) only
-    /// invokes `vacate` once the contributions map is empty —
-    /// co-resident contributions keep the slot alive via the
-    /// `is_watched()` guard at the call site. The `Unwatch` branch is
-    /// therefore dormant under that caller, but emitting it (rather
-    /// than asserting on the contract) makes any future caller correct
-    /// by construction: misuse degrades to "one extra closing op"
-    /// rather than to a panic / silent orphan.
+    /// **Two production callers, two roles for the defensive branches:**
+    ///
+    /// - `reconcile::delete_child` invokes `vacate` only when the
+    ///   contributions map is already empty (gated by `is_watched()`
+    ///   at the call site). The `Unwatch` branch is dormant under this
+    ///   caller; the `Unsuppress` branch fires for non-anchor
+    ///   descendants whose burst-batching `add_suppress` is owed a
+    ///   closing op before slot reap.
+    /// - The engine's kernel-watch rejection path
+    ///   (`on_watch_op_rejected`) invokes `vacate` to atomically tear
+    ///   down every contribution at the rejected slot. Both branches
+    ///   are load-bearing here: the `Unwatch` closes the kernel-watch
+    ///   protocol, and the `Unsuppress` closes the burst-suppress
+    ///   protocol — the per-claimer cleanup loops that follow run
+    ///   `sub_watch` / `sub_suppress`, which short-circuit on the
+    ///   post-vacate state and rely on `vacate` to have emitted both
+    ///   closing ops.
+    ///
+    /// Emitting both ops unconditionally (rather than asserting on
+    /// preconditions) makes any future caller correct by construction:
+    /// misuse degrades to "one extra closing op" — the Sensor's
+    /// idempotence absorbs the duplicate — rather than to a panic or
+    /// a silent kernel-watch leak.
     ///
     /// **What survives.** Children, profiles, role, and the
     /// `proxy_promoters` back-ref are retention anchors and stay

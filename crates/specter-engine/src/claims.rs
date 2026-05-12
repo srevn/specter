@@ -27,22 +27,21 @@
 //! Each helper is:
 //! - **Idempotent.** Flag-already-cleared ⇒ no-op. Safe to call from any
 //!   site without first checking the claim's presence.
-//! - **Safe in any post-clamp / post-vacate state.** [`crate::refcounts::sub_watch`]
+//! - **Safe in any post-vacate state.** [`crate::refcounts::sub_watch`]
 //!   silently skips an absent key — reachable after
-//!   [`crate::refcounts::clamp_watch_demand_to_zero`] or
 //!   [`specter_core::Tree::vacate`] cleared the map.
 
 use crate::Engine;
 use crate::reconcile::{delete_child, purge_per_file_fired_subs_for_reaped_slots};
-use crate::refcounts::sub_watch;
+use crate::refcounts::{sub_watch, sub_watch_then_try_reap};
 use specter_core::{
     AnchorClaim, ContribKey, ProbeOwner, ProfileId, ProfileState, StepOutput, TreeSnapshot,
 };
 
 impl Engine {
     /// Release the Profile's anchor contribution if held. Idempotent
-    /// (flag-false ⇒ no-op). Safe on a post-clamp / post-vacate slot
-    /// — [`crate::refcounts::sub_watch`] silently skips an absent key
+    /// (flag-false ⇒ no-op). Safe on a post-vacate slot —
+    /// [`crate::refcounts::sub_watch`] silently skips an absent key
     /// (see the [`crate::refcounts`] module rustdoc).
     ///
     /// Does NOT call `try_reap` on the anchor — the Profile's own
@@ -70,7 +69,7 @@ impl Engine {
     }
 
     /// Release the Profile's watch-root parent contribution if held.
-    /// Idempotent; safe in any post-clamp / post-vacate state. Calls
+    /// Idempotent; safe in any post-vacate state. Calls
     /// `try_reap` on the parent slot — the parent's `WatchRootParent`
     /// role is the only thing keeping it alive when no User Profile is
     /// anchored at or below it, and that's now stale.
@@ -86,9 +85,7 @@ impl Engine {
             p.watch_root_parent = None;
         }
 
-        sub_watch(&mut self.tree, parent, ContribKey::ProfileParent(pid), out);
-
-        self.tree.try_reap(parent);
+        sub_watch_then_try_reap(&mut self.tree, parent, ContribKey::ProfileParent(pid), out);
     }
 
     /// Release the Profile's descent prefix `watch_demand` contribution if
@@ -125,9 +122,7 @@ impl Engine {
             p.state = ProfileState::Idle;
         }
 
-        sub_watch(&mut self.tree, prefix, ContribKey::ProfileDescent(pid), out);
-
-        self.tree.try_reap(prefix);
+        sub_watch_then_try_reap(&mut self.tree, prefix, ContribKey::ProfileDescent(pid), out);
     }
 
     /// Release every per-descendant contribution this Profile holds —
@@ -150,10 +145,10 @@ impl Engine {
     /// Profiles (`TreeSnapshot::File`, no descendants) short-circuit on
     /// the dispatch.
     ///
-    /// **Safe in any post-clamp / post-vacate state.**
+    /// **Safe in any post-vacate state.**
     /// [`crate::reconcile::delete_child`] calls
     /// [`crate::refcounts::sub_watch`] unconditionally; the helper
-    /// silently skips absent keys (post-clamp slots, or slots a prior
+    /// silently skips absent keys (post-vacate slots, or slots a prior
     /// sub-walk in this take-and-walk pass already drained — see the
     /// [`crate::refcounts`] module rustdoc).
     ///
@@ -281,11 +276,11 @@ impl Engine {
     /// already-`None` fields; `release_anchor_claim` sees
     /// `AnchorClaim::None` and short-circuits.
     ///
-    /// **Safe in any post-clamp / post-vacate state.** Inherits from
+    /// **Safe in any post-vacate state.** Inherits from
     /// [`Engine::release_anchor_claim`]'s tolerance —
     /// [`crate::refcounts::sub_watch`] silently skips an absent key
-    /// (`clamp_watch_demand_to_zero` from `Input::WatchOpRejected` is
-    /// the dominant source of this state).
+    /// ([`specter_core::Tree::vacate`] from `Input::WatchOpRejected`
+    /// is the dominant source of this state).
     ///
     /// **Snapshot-shape invariant.**
     /// [`specter_core::Profile::kind`]'s rustdoc pins

@@ -22,7 +22,7 @@
 //!
 //! - **Idempotent.** State already in the post-release shape ⇒ no-op. Safe
 //!   to call from any site without first checking the claim's presence.
-//! - **Safe in any post-clamp / post-vacate state.**
+//! - **Safe in any post-vacate state.**
 //!   [`crate::refcounts::sub_watch`] silently skips an absent key (the
 //!   map's [`ContribKey::PromoterPrefix`] /
 //!   [`ContribKey::PromoterProxy`] entry has already been cleared by a
@@ -34,7 +34,7 @@
 //!   "always cancel before release" is the safe default.
 
 use crate::Engine;
-use crate::refcounts::sub_watch;
+use crate::refcounts::sub_watch_then_try_reap;
 use specter_core::{ContribKey, PromoterId, PromoterState, ResourceId, StepOutput};
 use std::collections::BTreeMap;
 
@@ -42,8 +42,8 @@ impl Engine {
     /// Release the Promoter's literal-prefix
     /// [`ContribKey::PromoterPrefix`] contribution if `PrefixPending`.
     /// Transitions the Promoter to `Active{empty}`. Idempotent
-    /// (non-`PrefixPending` ⇒ no-op); safe in any post-clamp /
-    /// post-vacate state — `sub_watch` silently skips an absent key.
+    /// (non-`PrefixPending` ⇒ no-op); safe in any post-vacate state
+    /// — `sub_watch` silently skips an absent key.
     /// Calls `try_reap` on the prefix slot — its `DescentScaffold`
     /// role is no longer load-bearing once no descent claims it.
     ///
@@ -86,9 +86,7 @@ impl Engine {
             };
         }
 
-        sub_watch(&mut self.tree, prefix, ContribKey::PromoterPrefix(qid), out);
-
-        self.tree.try_reap(prefix);
+        sub_watch_then_try_reap(&mut self.tree, prefix, ContribKey::PromoterPrefix(qid), out);
     }
 
     /// Release the Promoter's `Active` proxy claim at `resource`.
@@ -143,26 +141,27 @@ impl Engine {
             q.pending_enumerations.remove(&resource);
         }
 
-        // 2. Decrement by explicit key. `sub_watch` silently skips an
-        // absent key — safe against post-clamp / post-vacate slots.
-        sub_watch(
+        // 2. Clear back-ref before the release+reap helper so the
+        // helper's `try_reap` sees `has_anchors() == false` for
+        // promoter-only slots. `retain` leaves co-resident Promoters'
+        // entries undisturbed; reordering to here from after
+        // `sub_watch` is safe because `sub_watch` only reads /writes
+        // `contributions`.
+        if let Some(res) = self.tree.get_mut(resource) {
+            res.proxy_promoters.retain(|id| *id != qid);
+        }
+
+        // 3. Release the [`ContribKey::PromoterProxy`] contribution
+        // and try-reap. With the back-ref cleared (above) and the
+        // `User` role (set by `enter_active`'s `set_role` demotion),
+        // `has_anchors` returns false for promoter-only slots — they
+        // reap. Slots shared with a Profile descent / anchor or
+        // another Promoter's proxy stay.
+        sub_watch_then_try_reap(
             &mut self.tree,
             resource,
             ContribKey::PromoterProxy(qid),
             out,
         );
-
-        // 3. Clear back-ref. retain in place to avoid disturbing
-        // co-resident Promoters' entries.
-        if let Some(res) = self.tree.get_mut(resource) {
-            res.proxy_promoters.retain(|id| *id != qid);
-        }
-
-        // 4. try_reap. With the back-ref cleared and the `User` role
-        // (set by `enter_active`'s `set_role` demotion), `has_anchors`
-        // returns false for promoter-only slots — they reap. Slots
-        // shared with a Profile descent / anchor or another Promoter's
-        // proxy stay.
-        self.tree.try_reap(resource);
     }
 }

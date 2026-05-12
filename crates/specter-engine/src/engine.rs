@@ -716,7 +716,7 @@ impl Engine {
 
         // Release every claim this Profile may hold. Helpers are
         // idempotent — no-op when the corresponding flag / snapshot is
-        // unset (or counter is zero, post-clamp). Order is by claim
+        // unset (or counter is zero, post-vacate). Order is by claim
         // cardinality: 1-to-1 prefixed claims first, then the 1-to-N
         // descendant walk, then the 1-to-1 anchor and parent. The
         // descendant walk relies on `Profile.current` being intact, so

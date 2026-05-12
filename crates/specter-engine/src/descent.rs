@@ -47,7 +47,7 @@
 //!    `StructureChanged` at `current_prefix`. I5: drops the event if a
 //!    probe is already in flight (`Profile.pending_probe.is_some()`).
 
-use crate::refcounts::{add_watch, sub_watch};
+use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind,
@@ -453,9 +453,9 @@ impl crate::Engine {
     /// - [`Self::on_watch_op_rejected`]'s descent-prefix purge loops
     ///   (Profile and Promoter sides).
     ///
-    /// Tolerant of any post-clamp / post-vacate state — `sub_watch`
-    /// silently skips an absent key, so the state-flip alone is the
-    /// observable cleanup in those degenerate paths.
+    /// Tolerant of any post-vacate state — `sub_watch` silently
+    /// skips an absent key, so the state-flip alone is the observable
+    /// cleanup in those degenerate paths.
     fn release_owner_descent_prefix(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
         match owner {
             ProbeOwner::Profile(pid) => self.release_descent_prefix_claim(pid, out),
@@ -621,13 +621,7 @@ impl crate::Engine {
                 }
 
                 let key = descent_key(owner);
-                sub_watch(&mut self.tree, prefix, key, out);
-                // No `vacate` — `sub_watch` cleared the union iff this
-                // owner was the last contributor; remaining
-                // contributors (co-resident Profile / Promoter claims)
-                // keep theirs. `try_reap` removes the slot iff
-                // `has_anchors()` returns false.
-                self.tree.try_reap(prefix);
+                sub_watch_then_try_reap(&mut self.tree, prefix, key, out);
 
                 add_watch(&mut self.tree, parent_id, key, ClassSet::STRUCTURE, out);
 

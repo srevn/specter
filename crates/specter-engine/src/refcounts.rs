@@ -11,7 +11,7 @@
 //!   the map's values.
 //! - **`suppress_count`** gates event delivery — silenced iff `> 0`.
 //!
-//! Each helper emits `WatchOp` ops as follows:
+//! Each primitive emits `WatchOp` ops as follows:
 //! - [`add_watch`]: `Watch` on the empty → non-empty edge OR on any
 //!   union change at non-empty.
 //! - [`sub_watch`]: `Unwatch` on the non-empty → empty edge; `Watch`
@@ -20,13 +20,22 @@
 //!   the 0↔1 edge only — suppression is binary and orthogonal to the
 //!   events mask.
 //!
+//! **Two release paths.**
+//! - [`sub_watch_then_try_reap`] is the **routine per-key release** —
+//!   drop one contributor at `(r, key)` and free the slot iff this
+//!   release zeroed `Resource::has_anchors()`. Co-resident
+//!   contributions at other keys keep the slot watched.
+//! - [`crate::Tree::vacate`] is the **protocol terminus** — clear the
+//!   whole contributions map atomically and zero `suppress_count`,
+//!   emitting both closing ops in one step. Used when every
+//!   contribution at the slot is being abandoned at once (kernel-watch
+//!   rejection, or `reconcile::delete_child` on a fully-drained slot).
+//!
 //! **Idempotent absent-key sub.** Calling [`sub_watch`] for a key that
 //! is not in the map is a silent no-op. This makes the helper safe to
-//! invoke against post-clamp slots ([`clamp_watch_demand_to_zero`]
-//! cleared the whole map), post-vacate slots
-//! ([`crate::Tree::vacate`] is the protocol terminus), and slots
-//! drained by a prior sub-walk in the same step (e.g.,
-//! [`Engine::release_descendant_claim`]'s take-and-walk pass).
+//! invoke against post-vacate slots ([`crate::Tree::vacate`] cleared
+//! the map) and slots drained by a prior sub-walk in the same step
+//! (e.g., [`Engine::release_descendant_claim`]'s take-and-walk pass).
 //!
 //! **Source of truth.** Contribution attribution is **data**: each
 //! caller passes the explicit [`ContribKey`] for the role it owns.
@@ -42,7 +51,7 @@
 //! stale id here means a logic bug elsewhere; the silent return is
 //! defence-in-depth.
 
-use specter_core::{ClassSet, ContribKey, ResourceId, ResourceKind, StepOutput, Tree, WatchOp};
+use specter_core::{ClassSet, ContribKey, ResourceId, StepOutput, Tree, WatchOp};
 
 /// Install or update the contribution at `(r, key)` with `mask`,
 /// emitting `WatchOp::Watch` on the existence edge or when the
@@ -108,9 +117,8 @@ pub fn add_watch(
 /// order relative to this call — the contribution map is the source
 /// of truth for refcounting, independent of owner state.
 ///
-/// **Idempotent.** Absent key ⇒ silent no-op. Reachable post-clamp
-/// ([`clamp_watch_demand_to_zero`] cleared the map), post-vacate
-/// ([`crate::Tree::vacate`] cleared the map), or post-prior-sub-walk
+/// **Idempotent.** Absent key ⇒ silent no-op. Reachable post-vacate
+/// ([`crate::Tree::vacate`] cleared the map) or post-prior-sub-walk
 /// (a sister helper drained this slot earlier in the same step).
 pub fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &mut StepOutput) {
     let Some(res) = tree.get_mut(r) else {
@@ -156,10 +164,12 @@ pub fn add_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
 
 /// `-suppress_count` on `r`. Emits `WatchOp::Unsuppress` on the 1→0
 /// edge. Safe in any counter state, including `prev == 0` —
-/// [`crate::Tree::vacate`] (the protocol-closer) can legitimately zero
-/// `suppress_count` mid-burst, so the eventual symmetric `sub_suppress`
-/// from `finish_burst_to_idle`'s drain enters here on a zero counter
-/// and short-circuits without emission.
+/// [`crate::Tree::vacate`] (the protocol terminus) can legitimately
+/// zero `suppress_count` mid-burst (via either of its two production
+/// callers: `reconcile::delete_child` on a drained slot, or
+/// `on_watch_op_rejected` on kernel-watch failure), so the eventual
+/// symmetric `sub_suppress` from `finish_burst_to_idle`'s drain enters
+/// here on a zero counter and short-circuits without emission.
 pub fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
     let Some(res) = tree.get_mut(r) else {
         return;
@@ -174,48 +184,58 @@ pub fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
     }
 }
 
-/// Clear every contribution at `r` atomically, dropping every
-/// kernel-watch contribution at once. Sole legitimate use:
-/// `Input::WatchOpRejected` recovery — the Sensor failed to install
-/// the kernel watch, so the Engine has to revert to "this Resource
-/// is not watched at all". The matching per-Profile claim cleanup is
-/// the caller's responsibility (see `Engine::on_watch_op_rejected`'s
-/// fan-out).
+/// Remove the contribution at `(r, key)` and try-reap the slot.
+/// Returns `true` iff the slot was reaped.
 ///
-/// Emits `WatchOp::Unwatch` iff the contributions map was non-empty;
-/// the Sensor's idempotence guards repeats. The contributions map
-/// becomes empty so the next 0→1 contribution starts a fresh union.
-/// `kind` is reset to `Unknown` so the next probe can stamp it from
-/// the response.
+/// Composes the two halves of the **routine per-key release**:
+/// [`sub_watch`] drains the contribution from
+/// `Resource.contributions` (idempotent on absent key — safe against
+/// post-vacate slots and slots a prior sub-walk in this step already
+/// drained); [`Tree::try_reap`] then removes the slot iff
+/// `Resource::has_anchors() == false`.
 ///
-/// **`suppress_count` is deliberately preserved.** Suppression is
-/// in-engine bookkeeping for in-flight burst phases; it tracks
-/// `start_*_burst` ↔ `finish_burst_to_idle` symmetry on the Profile
-/// side, not the kernel-watch existence. Zeroing it would emit an
-/// `Unsuppress` that the burst-end machinery would skip on the
-/// `prev == 0` short-circuit; the caller's per-claim fan-out drives
-/// the burst-end machinery, and suppress decrements come for free
-/// from there.
+/// **Anchors vs. contributions.** `has_anchors` checks the
+/// retention fields only — `children`, `profiles` back-ref,
+/// `proxy_promoters`, and the `WatchRootParent` / `DescentScaffold`
+/// infrastructure roles. The contributions map is *not* a retention
+/// anchor; it tracks kernel-watch demand, independent of slot
+/// lifetime. In every production call site, a structural anchor
+/// (typically the slot's role) holds the slot alive across the
+/// release — so the inner `try_reap` is a no-op in the steady state
+/// and only fires when the last sibling structural anchor was
+/// cleared earlier in the same step (e.g., the proxy-back-ref clear
+/// preceding [`Engine::release_promoter_proxy_claim`]'s call).
 ///
-/// A stale `ResourceId` (slot already reaped) is a no-op + no
-/// emission; the caller emits the corresponding `Diagnostic` at the
-/// call site.
-pub fn clamp_watch_demand_to_zero(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
-    let Some(res) = tree.get_mut(r) else {
-        return;
-    };
-    if res.contributions.is_empty() {
-        return;
-    }
-    res.contributions.clear();
-    // The mutable borrow on `res` ends here; `set_kind` reborrows.
-    tree.set_kind(r, ResourceKind::Unknown);
-    out.watch_ops.push(WatchOp::Unwatch { resource: r });
+/// **Distinct from [`Tree::vacate`].** Vacate is the protocol
+/// terminus: it clears the entire contribution map AND zeros
+/// `suppress_count` in one atomic step, emitting both closing ops
+/// together. Use vacate when every contribution at the slot is being
+/// abandoned at once (kernel-watch rejection routed through
+/// `on_watch_op_rejected`, or `reconcile::delete_child` on a
+/// fully-drained slot). Use this helper for the **routine per-key
+/// release path** where one contributor releases its single key.
+///
+/// Caller discipline:
+/// - Owner-side bookkeeping (state flag, snapshot field, etc.) is
+///   the caller's responsibility — this helper only mutates the
+///   contributions map and the slot lifecycle.
+/// - Cancel-first preconditions (probe-channel closed) are the
+///   caller's responsibility — see the `debug_assert!`s on the
+///   higher-level `release_*_claim` helpers in [`crate::claims`] and
+///   [`crate::promoter_claims`].
+pub fn sub_watch_then_try_reap(
+    tree: &mut Tree,
+    r: ResourceId,
+    key: ContribKey,
+    out: &mut StepOutput,
+) -> bool {
+    sub_watch(tree, r, key, out);
+    tree.try_reap(r)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{add_suppress, add_watch, clamp_watch_demand_to_zero, sub_suppress, sub_watch};
+    use super::{add_suppress, add_watch, sub_suppress, sub_watch, sub_watch_then_try_reap};
     use specter_core::{ClassSet, ContribKey, ProfileId, ResourceRole, StepOutput, Tree, WatchOp};
 
     fn fresh() -> (Tree, specter_core::ResourceId) {
@@ -376,7 +396,8 @@ mod tests {
     #[test]
     fn sub_watch_absent_key_is_silent_noop() {
         // Map missing the key: no underflow, no emission. Reachable
-        // post-clamp / post-vacate / post-prior-sub-walk.
+        // post-vacate or after a prior sub-walk drained this slot in
+        // the same step.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         sub_watch(
@@ -492,29 +513,20 @@ mod tests {
     }
 
     #[test]
-    fn clamp_watch_demand_to_zero_emits_unwatch_and_clears_contributions() {
+    fn sub_watch_then_try_reap_last_contributor_reaps_slot() {
+        // Sole contributor drops: the sub_watch step empties the
+        // contributions map, the try_reap step frees the slot.
+        // Returns true.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
-        let key_a = ContribKey::ProfileAnchor(ProfileId::default());
-        let key_b = ContribKey::ProfileParent(ProfileId::default());
-        let key_c = ContribKey::ProfileDescent(ProfileId::default());
-        add_watch(&mut tree, r, key_a, ClassSet::CONTENT, &mut out);
-        add_watch(&mut tree, r, key_b, ClassSet::METADATA, &mut out);
-        add_watch(&mut tree, r, key_c, ClassSet::STRUCTURE, &mut out);
-        assert_eq!(tree.get(r).unwrap().watch_demand(), 3);
-        assert_eq!(
-            tree.get(r).unwrap().events_union(),
-            ClassSet::CONTENT | ClassSet::METADATA | ClassSet::STRUCTURE,
-        );
+        let key = ContribKey::ProfileAnchor(ProfileId::default());
+        add_watch(&mut tree, r, key, ClassSet::CONTENT, &mut out);
         out.watch_ops.clear();
 
-        clamp_watch_demand_to_zero(&mut tree, r, &mut out);
+        let reaped = sub_watch_then_try_reap(&mut tree, r, key, &mut out);
 
-        let res = tree.get(r).unwrap();
-        assert_eq!(res.watch_demand(), 0);
-        assert_eq!(res.suppress_count, 0);
-        assert!(res.kind().is_none(), "clamp resets kind to Unknown");
-        assert_eq!(res.events_union(), ClassSet::EMPTY);
+        assert!(reaped, "slot reaped on the empty → reapable edge");
+        assert!(tree.get(r).is_none(), "slot is gone");
         assert_eq!(out.watch_ops.len(), 1);
         assert!(matches!(
             out.watch_ops[0],
@@ -523,66 +535,83 @@ mod tests {
     }
 
     #[test]
-    fn clamp_watch_demand_to_zero_already_empty_is_noop() {
-        let (mut tree, r) = fresh();
-        let mut out = StepOutput::default();
-        clamp_watch_demand_to_zero(&mut tree, r, &mut out);
-        assert!(out.watch_ops.is_empty());
-        assert_eq!(tree.get(r).unwrap().watch_demand(), 0);
-        assert_eq!(tree.get(r).unwrap().events_union(), ClassSet::EMPTY);
-    }
-
-    #[test]
-    fn clamp_watch_demand_to_zero_stale_resource_is_noop() {
+    fn sub_watch_then_try_reap_role_anchored_slot_emits_unwatch_but_stays() {
+        // Production parallel to `release_watch_root_parent_claim` and
+        // the `release_*_descent_prefix_claim` family: the slot is
+        // anchored by its infrastructure role
+        // (`WatchRootParent` / `DescentScaffold`), so `has_anchors()`
+        // stays `true` even after the helper drains the contribution
+        // map. The `sub_watch` step emits `Unwatch` on the empty edge;
+        // `try_reap` returns `false` and the slot survives.
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "ghost", ResourceRole::User);
-        assert!(tree.try_reap(r));
+        let r = tree.ensure(None, "parent", ResourceRole::WatchRootParent);
         let mut out = StepOutput::default();
-        clamp_watch_demand_to_zero(&mut tree, r, &mut out);
-        assert!(out.watch_ops.is_empty());
+        let key = ContribKey::ProfileParent(ProfileId::default());
+        add_watch(&mut tree, r, key, ClassSet::STRUCTURE, &mut out);
+        out.watch_ops.clear();
+
+        let reaped = sub_watch_then_try_reap(&mut tree, r, key, &mut out);
+
+        assert!(!reaped, "WatchRootParent role held the slot");
+        assert!(
+            tree.get(r).is_some(),
+            "slot survives; role anchors it past contribution drop",
+        );
+        assert_eq!(tree.get(r).unwrap().watch_demand(), 0);
+        assert_eq!(out.watch_ops.len(), 1);
+        assert!(matches!(
+            out.watch_ops[0],
+            WatchOp::Unwatch { resource } if resource == r,
+        ));
     }
 
     #[test]
-    fn clamp_watch_demand_to_zero_preserves_suppress_count() {
-        // Suppression is in-engine bookkeeping for in-flight burst
-        // phases; clamp tracks the kernel-watch existence (FD
-        // lifetime) only. Zeroing suppress_count would break the
-        // start_*_burst ↔ finish_burst_to_idle symmetry on the
-        // Profile side; the eventual sub_suppress from
-        // `finalize_anchor_lost` decrements it cleanly.
+    fn sub_watch_then_try_reap_narrows_union_with_coresident_key() {
+        // Two distinct contributors at a role-anchored slot: dropping
+        // one narrows the events union but the slot's role anchors it
+        // through the release. `sub_watch` emits the narrowing `Watch`
+        // (not `Unwatch`) since the map stays non-empty; `try_reap` is
+        // a no-op because the role anchors the slot.
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "prefix", ResourceRole::DescentScaffold);
+        let mut out = StepOutput::default();
+        let key_a = ContribKey::ProfileDescent(ProfileId::default());
+        let key_b = ContribKey::ProfileParent(ProfileId::default());
+        add_watch(&mut tree, r, key_a, ClassSet::CONTENT, &mut out);
+        add_watch(&mut tree, r, key_b, ClassSet::METADATA, &mut out);
+        out.watch_ops.clear();
+
+        let reaped = sub_watch_then_try_reap(&mut tree, r, key_a, &mut out);
+
+        assert!(!reaped, "DescentScaffold role held the slot");
+        assert_eq!(tree.get(r).unwrap().watch_demand(), 1);
+        assert_eq!(
+            last_watch_events(&out),
+            Some(ClassSet::METADATA),
+            "narrowed Watch emitted; no Unwatch",
+        );
+        assert!(
+            !out.watch_ops
+                .iter()
+                .any(|op| matches!(op, WatchOp::Unwatch { .. })),
+        );
+    }
+
+    #[test]
+    fn sub_watch_then_try_reap_absent_key_is_silent_release() {
+        // Absent key: sub_watch is a silent no-op (no emission).
+        // try_reap still runs and frees the slot iff has_anchors() is
+        // false. Reachable post-vacate or after a prior sub-walk in
+        // the same step.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
-        add_watch(
+        let reaped = sub_watch_then_try_reap(
             &mut tree,
             r,
             ContribKey::ProfileAnchor(ProfileId::default()),
-            ClassSet::CONTENT,
             &mut out,
         );
-        add_suppress(&mut tree, r, &mut out);
-        add_suppress(&mut tree, r, &mut out);
-        assert_eq!(tree.get(r).unwrap().suppress_count, 2);
-        out.watch_ops.clear();
-
-        clamp_watch_demand_to_zero(&mut tree, r, &mut out);
-
-        assert_eq!(
-            tree.get(r).unwrap().suppress_count,
-            2,
-            "clamp leaves suppress_count untouched — the Profile's burst-end \
-             machinery decrements it symmetrically",
-        );
-        let unwatch_count = out
-            .watch_ops
-            .iter()
-            .filter(|op| matches!(op, WatchOp::Unwatch { .. }))
-            .count();
-        assert_eq!(unwatch_count, 1);
-        let unsuppress_count = out
-            .watch_ops
-            .iter()
-            .filter(|op| matches!(op, WatchOp::Unsuppress { .. }))
-            .count();
-        assert_eq!(unsuppress_count, 0);
+        assert!(reaped, "no anchors at all → slot reaps");
+        assert!(out.watch_ops.is_empty());
     }
 }

@@ -28,7 +28,8 @@
 //! the syscall entirely, and a re-`watch()` with a widened/narrowed mask
 //! re-registers via `EV_ADD` (which overwrites the prior fflags) without
 //! closing or reopening the fd. The cache is invalidated only on
-//! `unwatch` and `clamp_watch_demand_to_zero`-driven Unwatch ops.
+//! `unwatch` (the engine-side `Unwatch` op, sourced from `sub_watch`'s
+//! non-empty → empty edge or `Tree::vacate`'s terminus emission).
 
 use crate::kqueue::wake::KqueueWakeHandle;
 use crate::kqueue::{fd, ffi, normalize, translate};
