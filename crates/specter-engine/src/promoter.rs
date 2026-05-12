@@ -45,7 +45,7 @@ use specter_core::{
     PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole, StepOutput, SubAttachRequest,
     SubId,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -446,29 +446,56 @@ impl Engine {
     /// here — they reap via their own anchor-terminal events through the
     /// recovery-split path. The decoupling preserves the contract that
     /// only enumeration adds, only anchor-terminal removes.
+    ///
+    /// **Cost.** BFS from `r` over the Tree's children, gated on the
+    /// per-Resource [`specter_core::Resource::proxy_promoters`]
+    /// back-ref. Cost is O(subtree_size) — the prior shape iterated
+    /// the Promoter's full `proxies` map and walked
+    /// `tree.ancestors(p)` per entry (O(total_proxies × depth)),
+    /// scaling with fan-out elsewhere in the tree.
+    /// `SmallVec::contains` on the back-ref is constant for the
+    /// typical single-Promoter fan-out (inline cap 1).
     pub(crate) fn unregister_proxy_subtree(
         &mut self,
         promoter_id: PromoterId,
         r: ResourceId,
         out: &mut StepOutput,
     ) {
-        // Collect the set of proxies to unregister (the proxy at `r`
-        // plus any descendant proxies of this Promoter). Snapshot
-        // under a read borrow so the per-proxy unregister loop below
-        // can take `&mut self`.
-        let to_unregister: Vec<ResourceId> = self
-            .promoters
-            .get(promoter_id)
-            .map(|q| match &q.state {
-                PromoterState::Active { proxies } => proxies
-                    .keys()
-                    .copied()
-                    .filter(|&p| p == r || self.tree.ancestors(p).any(|a| a == r))
-                    .collect(),
-                PromoterState::PrefixPending(_) => Vec::new(),
-            })
-            .unwrap_or_default();
+        // BFS-collect every Tree descendant of `r` (inclusive) that
+        // carries a back-ref to this Promoter. The lockstep invariant
+        // (`Resource.proxy_promoters` ↔ `Promoter.state.proxies`)
+        // means the back-ref is the right-side projection of the join
+        // and yields exactly the same set as the prior
+        // ancestor-filter approach. A stale `r` (already reaped) is
+        // a benign no-op: `tree.get` returns None on the first
+        // iteration, `children_ids` returns the empty iterator, and
+        // the BFS terminates with `to_unregister` empty.
+        let mut to_unregister: Vec<ResourceId> = Vec::new();
+        let mut queue: VecDeque<ResourceId> = VecDeque::from([r]);
+        while let Some(node) = queue.pop_front() {
+            let has_back_ref = self
+                .tree
+                .get(node)
+                .is_some_and(|res| res.proxy_promoters.contains(&promoter_id));
+            if has_back_ref {
+                to_unregister.push(node);
+            }
+            // Enqueue children. `children_ids` returns an empty
+            // iterator for a stale `node`, so the defensive case is
+            // structurally absorbed.
+            queue.extend(self.tree.children_ids(node));
+        }
 
+        // Order is order-independent for correctness:
+        // `release_promoter_proxy_claim` (delegate of
+        // `unregister_proxy`) is self-contained — back-ref clear,
+        // contribution release, then `try_reap`. BFS order keeps
+        // cleanup parent-before-child, but ancestor cascades inside
+        // `try_reap` reach the same end state from any iteration
+        // order (a parent whose proxy still contributes
+        // [`specter_core::ContribKey::PromoterProxy`] survives the
+        // first reap of its child; the parent's later release closes
+        // the cascade).
         for proxy in to_unregister {
             self.unregister_proxy(promoter_id, proxy, out);
         }
@@ -725,89 +752,123 @@ impl Engine {
             return;
         }
 
-        let is_final = pattern_component_index + 1 == components.len();
+        let next_index = pattern_component_index + 1;
+        let is_final = next_index == components.len();
 
-        // Forward pass: walk snapshot.entries, register matches.
-        // `next_component` borrows from `pattern` (an Arc held for the
-        // duration of the dispatcher), so the per-entry loop below can
-        // freely re-borrow `&mut self`.
+        // Lift `path_of(target)` outside the per-entry loop. Every
+        // final-position match below joins `name_str` against the same
+        // proxy path, so amortising the Tree walk across N matches
+        // turns a per-match O(depth) ancestor crawl into a single
+        // dispatch-level allocation. `None` is the defensive
+        // target-was-reaped path — within a single step the
+        // `proxy_state` lookup above already proved the slot live, so
+        // it is unreachable under normal operation; the `as_deref()
+        // map().unwrap_or_default()` chain below degrades to an empty
+        // `PathBuf` (rejected by `decompose_attach_path` downstream)
+        // rather than panicking.
+        let target_path = self.tree.path_of(target);
+
+        // Forward pass: state-keyed dispatch on the next pattern
+        // component. The Literal arm matches at most one entry by
+        // `BTreeMap` uniqueness — O(log N) `get_key_value` — so the
+        // surrounding loop collapses to an `if let`. The Glob arm
+        // retains the O(N) scan; each entry must be matcher-tested.
+        // The per-match body is duplicated inline rather than
+        // extracted into a helper: the two iteration shapes
+        // structurally differ (no loop, no `continue` in the Literal
+        // arm), and a `(&mut self, ...)` helper would carry nine
+        // arguments for ten lines of body.
         let next_component = &components[pattern_component_index];
-        for (name, child) in &snapshot.entries {
-            let name_str: &str = name.as_str();
-            let matches = match next_component {
-                PatternComponent::Literal(s) => name_str == s.as_str(),
-                PatternComponent::Glob(g) => g.matches_path(Path::new(name_str)),
-            };
-            if !matches {
-                continue;
-            }
-
-            let child_kind = child.kind();
-            let child_is_dir = matches!(child_kind, EntryKind::Dir);
-
-            if is_final {
-                // Final: try_promote. The synthesised Sub's anchor is
-                // the matched path; the Sub joins (or creates) a
-                // Profile via `(resource, config_hash)` dedup.
-                let promote_path = self
-                    .tree
-                    .path_of(target)
-                    .map(|p| p.join(name_str))
-                    .unwrap_or_default();
-                self.try_promote(promoter_id, &promote_path, child_kind, now, out);
-            } else {
-                // Non-final: only descend into Dir matches. A literal
-                // or glob matching a Leaf at a non-final position
-                // can't lead anywhere; the engine drops without
-                // diagnostic (the user's pattern was malformed for
-                // the actual filesystem state).
-                if !child_is_dir {
-                    continue;
+        match next_component {
+            PatternComponent::Literal(lit) => {
+                if let Some((name, child)) = snapshot.entries.get_key_value(lit.as_str()) {
+                    let name_str: &str = name.as_str();
+                    let child_kind = child.kind();
+                    if is_final {
+                        // Final: try_promote. The synthesised Sub's
+                        // anchor is the matched path; the Sub joins
+                        // (or creates) a Profile via
+                        // `(resource, config_hash)` dedup.
+                        let promote_path = target_path
+                            .as_deref()
+                            .map(|p| p.join(name_str))
+                            .unwrap_or_default();
+                        self.try_promote(promoter_id, promote_path, child_kind, now, out);
+                    } else if matches!(child_kind, EntryKind::Dir) {
+                        // Non-final: only descend into Dir matches.
+                        // A literal matching a Leaf at a non-final
+                        // position can't lead anywhere; the engine
+                        // drops without diagnostic (the user's
+                        // pattern was malformed for the actual
+                        // filesystem state).
+                        //
+                        // [S-8] Use User role for promoter sub-proxy
+                        // slots. The back-ref (proxy_promoters) is
+                        // the retention signal; DescentScaffold would
+                        // leak after unregister.
+                        let child_resource =
+                            self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
+                                self.tree.ensure(Some(target), name_str, ResourceRole::User)
+                            });
+                        self.tree
+                            .set_kind(child_resource, kind_from_entry(child_kind));
+                        self.register_proxy(promoter_id, child_resource, next_index, out);
+                    }
                 }
-
-                // [S-8] Use User role for promoter sub-proxy slots.
-                // The back-ref (proxy_promoters) is the retention
-                // signal; DescentScaffold would leak after
-                // unregister.
-                let child_resource =
-                    self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
-                        self.tree.ensure(Some(target), name_str, ResourceRole::User)
-                    });
-                self.tree
-                    .set_kind(child_resource, kind_from_entry(child_kind));
-                self.register_proxy(
-                    promoter_id,
-                    child_resource,
-                    pattern_component_index + 1,
-                    out,
-                );
+            }
+            PatternComponent::Glob(g) => {
+                for (name, child) in &snapshot.entries {
+                    let name_str: &str = name.as_str();
+                    if !g.matches_path(Path::new(name_str)) {
+                        continue;
+                    }
+                    let child_kind = child.kind();
+                    if is_final {
+                        let promote_path = target_path
+                            .as_deref()
+                            .map(|p| p.join(name_str))
+                            .unwrap_or_default();
+                        self.try_promote(promoter_id, promote_path, child_kind, now, out);
+                    } else if matches!(child_kind, EntryKind::Dir) {
+                        let child_resource =
+                            self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
+                                self.tree.ensure(Some(target), name_str, ResourceRole::User)
+                            });
+                        self.tree
+                            .set_kind(child_resource, kind_from_entry(child_kind));
+                        self.register_proxy(promoter_id, child_resource, next_index, out);
+                    }
+                }
             }
         }
 
         // Reverse pass: unwind proxies whose underlying entry is gone.
-        // Scope: direct children of `target` only — deeper proxies
-        // cascade through `unregister_proxy_subtree`'s ancestor
-        // filter when this list lands on their parent.
+        // Walking the Tree from `target` down (rather than iterating
+        // the Promoter's full `proxies` map and filtering by
+        // `parent == target`) scales with `target.fanout` instead of
+        // `Promoter.total_proxies` — symmetric with the BFS in
+        // [`Self::unregister_proxy_subtree`] (both replace
+        // "iterate Promoter.proxies" with "walk the Tree's right side
+        // of the join via `proxy_promoters` back-ref"). Deeper proxies
+        // cascade through the BFS inside `unregister_proxy_subtree`.
         let snapshot_names: BTreeSet<&str> =
             snapshot.entries.keys().map(CompactString::as_str).collect();
         let stale: Vec<ResourceId> = self
-            .promoters
-            .get(promoter_id)
-            .map(|q| match &q.state {
-                PromoterState::Active { proxies } => proxies
-                    .keys()
-                    .copied()
-                    .filter(|&r| {
-                        self.tree.parent(r) == Some(target)
-                            && self
-                                .tree
-                                .name(r)
-                                .is_some_and(|n| !snapshot_names.contains(n))
-                    })
-                    .collect(),
-                PromoterState::PrefixPending(_) => Vec::new(),
+            .tree
+            .children_ids(target)
+            .filter(|&child| {
+                let has_back_ref = self
+                    .tree
+                    .get(child)
+                    .is_some_and(|res| res.proxy_promoters.contains(&promoter_id));
+                if !has_back_ref {
+                    return false;
+                }
+                self.tree
+                    .name(child)
+                    .is_some_and(|n| !snapshot_names.contains(n))
             })
-            .unwrap_or_default();
+            .collect();
         for stale_proxy in stale {
             self.unregister_proxy_subtree(promoter_id, stale_proxy, out);
         }
@@ -906,10 +967,18 @@ impl Engine {
     /// the rest of the step; reading the system clock here would let
     /// time advance silently between caller and callee within a single
     /// `step` invocation.
+    ///
+    /// **Owned `promote_path`.** Three downstream consumers each need
+    /// an owned `PathBuf` (the `SubAttachRequest`, the diagnostic, and
+    /// the dedup-map key). Taking it by value lets the final use —
+    /// the `dynamic_subs` insert — move rather than clone. Net: two
+    /// `PathBuf` allocations inside this helper (was three), and the
+    /// caller's existing `target_path.join(name)` becomes the source
+    /// rather than feeding a `to_path_buf()` chain.
     pub(crate) fn try_promote(
         &mut self,
         promoter_id: PromoterId,
-        promote_path: &Path,
+        promote_path: PathBuf,
         observed_kind: EntryKind,
         now: Instant,
         out: &mut StepOutput,
@@ -918,7 +987,7 @@ impl Engine {
         let already_present = self
             .promoters
             .get(promoter_id)
-            .is_some_and(|q| q.dynamic_subs.contains_key(promote_path));
+            .is_some_and(|q| q.dynamic_subs.contains_key(&promote_path));
         if already_present {
             return;
         }
@@ -946,9 +1015,10 @@ impl Engine {
 
         let synthesized = format!("{promoter_name}@{}", promote_path.display());
 
+        // First consumer: the request. Clone (consumes owned).
         let req = SubAttachRequest::for_dynamic(
             synthesized,
-            promote_path.to_path_buf(),
+            promote_path.clone(),
             config,
             max_settle,
             settle,
@@ -966,27 +1036,30 @@ impl Engine {
             return;
         }
 
-        // Register in dedup map (enumeration ADD).
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.dynamic_subs.insert(promote_path.to_path_buf(), sub_id);
-        }
-
+        // Second consumer: the diagnostic. Clone (consumes owned).
+        // Emitted BEFORE the dedup-map insert so the final use of
+        // `promote_path` below is a move.
         out.diagnostics.push(Diagnostic::PromotionKindObserved {
             promoter: promoter_id,
-            path: promote_path.to_path_buf(),
+            path: promote_path.clone(),
             kind: kind_from_entry(observed_kind),
         });
 
-        // Fanout warning. One-shot per Promoter lifetime.
-        let count = self
-            .promoters
-            .get(promoter_id)
-            .map_or(0, |q| q.dynamic_subs.len());
-        let warned = self
-            .promoters
-            .get(promoter_id)
-            .is_some_and(|q| q.warned_at_threshold);
-        if count > FANOUT_WARNING_THRESHOLD && !warned {
+        // Third consumer: the dedup map. Last use — move.
+        if let Some(q) = self.promoters.get_mut(promoter_id) {
+            q.dynamic_subs.insert(promote_path, sub_id);
+        }
+
+        // Fanout warning. One-shot per Promoter lifetime. Single read
+        // of the Promoter — within this `&mut self` step nothing else
+        // can mutate `dynamic_subs.len()` or `warned_at_threshold`
+        // between two reads, so the fused projection makes the
+        // no-races contract locally visible.
+        let crossed = self.promoters.get(promoter_id).and_then(|q| {
+            let count = q.dynamic_subs.len();
+            (count > FANOUT_WARNING_THRESHOLD && !q.warned_at_threshold).then_some(count)
+        });
+        if let Some(count) = crossed {
             out.diagnostics.push(Diagnostic::PromoterFanoutThreshold {
                 promoter: promoter_id,
                 count,
