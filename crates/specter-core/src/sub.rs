@@ -182,6 +182,33 @@ impl SubAttachRequest {
         req.source_promoter = Some(source_promoter);
         req
     }
+
+    /// Build a request for a dynamic Sub spawned by a Promoter, anchored
+    /// at a pre-materialized [`ResourceId`]. Resource-anchored counterpart
+    /// to [`Self::for_dynamic`]: the typical promoter forward-pass already
+    /// holds the proxy's target slot and matched child name in hand, so
+    /// the engine reads `req.resource` directly without re-decomposing a
+    /// path string. `path` stays `None`; `source_promoter` is stamped.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn for_resource_dynamic(
+        name: String,
+        resource: ResourceId,
+        config: ScanConfig,
+        max_settle: Duration,
+        settle: Duration,
+        program: Arc<ActionProgram>,
+        scope: EffectScope,
+        events: ClassSet,
+        log_output: bool,
+        source_promoter: PromoterId,
+    ) -> Self {
+        let mut req = Self::for_resource(
+            name, resource, config, max_settle, settle, program, scope, events, log_output,
+        );
+        req.source_promoter = Some(source_promoter);
+        req
+    }
 }
 
 /// Hot-reload diff. Computed by the TOML loader; consumed by

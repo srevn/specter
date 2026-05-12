@@ -785,15 +785,33 @@ impl Engine {
                     let name_str: &str = name.as_str();
                     let child_kind = child.kind();
                     if is_final {
-                        // Final: try_promote. The synthesised Sub's
-                        // anchor is the matched path; the Sub joins
-                        // (or creates) a Profile via
-                        // `(resource, config_hash)` dedup.
+                        // Final: resource-anchored try_promote.
+                        // Lookup-or-ensure the slot at (target,
+                        // name_str), stamp the observed kind (so
+                        // Profile.kind cache populates at attach
+                        // instead of waiting for the first Seed
+                        // probe), then mint. `User` role is what
+                        // attach_sub_inner promotes DescentScaffold
+                        // to — pre-ensuring with `User` short-circuits
+                        // that path.
+                        let anchor_resource =
+                            self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
+                                self.tree.ensure(Some(target), name_str, ResourceRole::User)
+                            });
+                        self.tree
+                            .set_kind(anchor_resource, kind_from_entry(child_kind));
                         let promote_path = target_path
                             .as_deref()
                             .map(|p| p.join(name_str))
                             .unwrap_or_default();
-                        self.try_promote(promoter_id, promote_path, child_kind, now, out);
+                        self.try_promote(
+                            promoter_id,
+                            anchor_resource,
+                            promote_path,
+                            child_kind,
+                            now,
+                            out,
+                        );
                     } else if matches!(child_kind, EntryKind::Dir) {
                         // Non-final: only descend into Dir matches.
                         // A literal matching a Leaf at a non-final
@@ -824,11 +842,24 @@ impl Engine {
                     }
                     let child_kind = child.kind();
                     if is_final {
+                        let anchor_resource =
+                            self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
+                                self.tree.ensure(Some(target), name_str, ResourceRole::User)
+                            });
+                        self.tree
+                            .set_kind(anchor_resource, kind_from_entry(child_kind));
                         let promote_path = target_path
                             .as_deref()
                             .map(|p| p.join(name_str))
                             .unwrap_or_default();
-                        self.try_promote(promoter_id, promote_path, child_kind, now, out);
+                        self.try_promote(
+                            promoter_id,
+                            anchor_resource,
+                            promote_path,
+                            child_kind,
+                            now,
+                            out,
+                        );
                     } else if matches!(child_kind, EntryKind::Dir) {
                         let child_resource =
                             self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
@@ -954,11 +985,11 @@ impl Engine {
         });
     }
 
-    /// Mint a dynamic Sub at `promote_path` for `promoter_id`.
+    /// Mint a dynamic Sub at `anchor_resource` for `promoter_id`.
     ///
     /// Enumeration ADDS; only anchor-terminal removes. At most one
-    /// dynamic Sub per `(promoter_id, resolved_path)` — the contains
-    /// check below gates re-promotion of a path the engine already
+    /// dynamic Sub per `(promoter_id, anchor_resource)` — the contains
+    /// check below gates re-promotion at an anchor the engine already
     /// minted a Sub for.
     ///
     /// **`now` is load-bearing.** `attach_sub_inner` schedules the
@@ -968,26 +999,37 @@ impl Engine {
     /// time advance silently between caller and callee within a single
     /// `step` invocation.
     ///
-    /// **Owned `promote_path`.** Three downstream consumers each need
-    /// an owned `PathBuf` (the `SubAttachRequest`, the diagnostic, and
-    /// the dedup-map key). Taking it by value lets the final use —
-    /// the `dynamic_subs` insert — move rather than clone. Net: two
-    /// `PathBuf` allocations inside this helper (was three), and the
-    /// caller's existing `target_path.join(name)` becomes the source
-    /// rather than feeding a `to_path_buf()` chain.
+    /// **Resource-anchored attach.** `anchor_resource` is the live
+    /// Tree slot id for the matched entry — the forward-pass call site
+    /// either looked it up or freshly ensured it (with
+    /// [`specter_core::ResourceRole::User`]) before invoking
+    /// `try_promote`. The request is built via
+    /// [`SubAttachRequest::for_resource_dynamic`], which routes
+    /// `attach_sub_inner` through its resource-anchored branch
+    /// (`req.path.is_none()`); the path-decomposition failure mode is
+    /// structurally unreachable, hence the `debug_assert_ne!` rather
+    /// than a soft early-return.
+    ///
+    /// **`promote_path` is diagnostic-only.** The caller's
+    /// `target_path.join(name_str)` flows through as an owned
+    /// `PathBuf` so the [`Diagnostic::PromotionKindObserved`] payload
+    /// can move it (last use, no clone). The dedup-map insert keys on
+    /// `anchor_resource: Copy` — no consumption-ordering constraint
+    /// between the insert and the diagnostic.
     pub(crate) fn try_promote(
         &mut self,
         promoter_id: PromoterId,
+        anchor_resource: ResourceId,
         promote_path: PathBuf,
         observed_kind: EntryKind,
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // Dedup gate: one dynamic Sub per `(promoter_id, resolved_path)`.
+        // Dedup gate: one dynamic Sub per `(promoter_id, anchor_resource)`.
         let already_present = self
             .promoters
             .get(promoter_id)
-            .is_some_and(|q| q.dynamic_subs.contains_key(&promote_path));
+            .is_some_and(|q| q.dynamic_subs.contains_key(&anchor_resource));
         if already_present {
             return;
         }
@@ -1015,10 +1057,13 @@ impl Engine {
 
         let synthesized = format!("{promoter_name}@{}", promote_path.display());
 
-        // First consumer: the request. Clone (consumes owned).
-        let req = SubAttachRequest::for_dynamic(
+        // Build the request via the resource-anchored constructor —
+        // `attach_sub_inner` reads `req.resource` directly when
+        // `req.path.is_none()` and bypasses `decompose_attach_path`
+        // entirely. No `PathBuf` clone on the request side.
+        let req = SubAttachRequest::for_resource_dynamic(
             synthesized,
-            promote_path.clone(),
+            anchor_resource,
             config,
             max_settle,
             settle,
@@ -1030,25 +1075,27 @@ impl Engine {
         );
 
         let sub_id = self.attach_sub_inner(req, now, out);
-        if sub_id == SubId::default() {
-            // attach_sub_inner emitted AttachPathInvalid. No
-            // bookkeeping — the Sub never registered.
-            return;
+        debug_assert_ne!(
+            sub_id,
+            SubId::default(),
+            "for_resource_dynamic bypasses decompose_attach_path; attach_sub_inner cannot \
+             fail on the resource-anchored path (promoter = {promoter_id:?}, \
+             anchor = {anchor_resource:?})",
+        );
+
+        // Dedup map. `anchor_resource: Copy` — no consumption
+        // constraint against the diagnostic move below.
+        if let Some(q) = self.promoters.get_mut(promoter_id) {
+            q.dynamic_subs.insert(anchor_resource, sub_id);
         }
 
-        // Second consumer: the diagnostic. Clone (consumes owned).
-        // Emitted BEFORE the dedup-map insert so the final use of
-        // `promote_path` below is a move.
+        // Diagnostic. Last use of `promote_path` — move into the
+        // variant.
         out.diagnostics.push(Diagnostic::PromotionKindObserved {
             promoter: promoter_id,
-            path: promote_path.clone(),
+            path: promote_path,
             kind: kind_from_entry(observed_kind),
         });
-
-        // Third consumer: the dedup map. Last use — move.
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.dynamic_subs.insert(promote_path, sub_id);
-        }
 
         // Fanout warning. One-shot per Promoter lifetime. Single read
         // of the Promoter — within this `&mut self` step nothing else
@@ -1115,50 +1162,50 @@ impl Engine {
     /// Sub's anchor disappeared, and the all-dynamic teardown branch of
     /// [`Engine::on_anchor_terminal_event`] is unwinding the Profile).
     ///
-    /// Removes the `(anchor_path → sub_id)` entry from
+    /// Removes the `(anchor_resource → sub_id)` entry from
     /// `Promoter.dynamic_subs` and emits
     /// [`Diagnostic::DynamicSubReaped`]. This is one of three documented
     /// mutators of `dynamic_subs` (alongside [`Self::try_promote`] for
     /// inserts and [`Self::reap_promoter_inner`] for full drains).
     ///
-    /// `anchor_path` is the resolved path the Sub was attached at — by
-    /// construction, the same path that `try_promote` registered into
-    /// `dynamic_subs`. The caller
-    /// ([`Engine::on_anchor_terminal_all_dynamic`]) computes it once via
-    /// `tree.path_of(profile.resource)` before the per-Sub loop because
-    /// every dynamic Sub on a Profile shares the same anchor by the
-    /// `(resource, config_hash)` attach dedup; threading it through
-    /// turns the lookup into an O(log N) `remove_entry` and moves the
-    /// owned key into the diagnostic without a fresh allocation.
+    /// `anchor_resource` is the dedup-map key — by construction, the
+    /// same `Profile.resource` `try_promote` stamped into the map.
+    /// `anchor_path` is the operator-facing diagnostic payload (the
+    /// `Diagnostic` variant is path-keyed for log readability).
+    ///
+    /// The caller ([`Engine::on_anchor_terminal_all_dynamic`]) captures
+    /// both once before the per-Sub loop because every dynamic Sub on
+    /// a Profile shares the same anchor by the
+    /// `(resource, config_hash)` attach dedup; threading them through
+    /// avoids re-walking the ancestor chain inside the inner loop.
     ///
     /// **Stale notification.** A concurrent
     /// [`Self::reap_promoter_inner`] (e.g., reload removing the
     /// Promoter in the same step) may have already cleared the
-    /// dynamic_subs map, in which case the `remove_entry` returns
-    /// `None` and the call is a benign no-op (no diagnostic emitted).
+    /// dynamic_subs map, in which case the `remove` returns `None` and
+    /// the call is a benign no-op (no diagnostic emitted).
     pub(crate) fn on_dynamic_sub_reaped(
         &mut self,
         promoter_id: PromoterId,
         sub_id: SubId,
+        anchor_resource: ResourceId,
         anchor_path: &Path,
         out: &mut StepOutput,
     ) {
         let removed = self
             .promoters
             .get_mut(promoter_id)
-            .and_then(|q| q.dynamic_subs.remove_entry(anchor_path));
-        if let Some((path, stored_sub_id)) = removed {
+            .and_then(|q| q.dynamic_subs.remove(&anchor_resource));
+        if let Some(stored_sub_id) = removed {
             debug_assert_eq!(
-                stored_sub_id,
-                sub_id,
+                stored_sub_id, sub_id,
                 "on_dynamic_sub_reaped: dynamic_subs entry's SubId disagrees with caller's \
-                 (promoter = {promoter_id:?}, anchor_path = {})",
-                anchor_path.display(),
+                 (promoter = {promoter_id:?}, anchor = {anchor_resource:?})",
             );
             out.diagnostics.push(Diagnostic::DynamicSubReaped {
                 promoter: promoter_id,
                 sub: sub_id,
-                path,
+                path: anchor_path.to_path_buf(),
             });
         }
     }

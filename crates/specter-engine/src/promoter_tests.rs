@@ -283,12 +283,22 @@ fn enumeration_ok_promotes_final_match() {
         Instant::now(),
     );
 
-    // dynamic_subs contains the matched path; bar.txt is absent.
-    let q = e.promoters.get(pid).unwrap();
-    let promoted_paths: Vec<_> = q.dynamic_subs.keys().cloned().collect();
-    assert_eq!(promoted_paths.len(), 1);
+    // dynamic_subs contains the matched anchor; bar.txt is absent.
+    let promoted_resources: Vec<ResourceId> = e
+        .promoters
+        .get(pid)
+        .unwrap()
+        .dynamic_subs
+        .keys()
+        .copied()
+        .collect();
+    assert_eq!(promoted_resources.len(), 1);
+    let promoted_path = e
+        .tree()
+        .path_of(promoted_resources[0])
+        .expect("anchor path resolves");
     assert_eq!(
-        promoted_paths[0].to_string_lossy(),
+        promoted_path.to_string_lossy(),
         "/var/log/foo.log",
         "single dynamic Sub at the matched path",
     );

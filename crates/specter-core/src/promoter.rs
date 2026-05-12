@@ -30,11 +30,18 @@
 //!
 //! ## Dynamic Sub deduplication
 //!
-//! `dynamic_subs: BTreeMap<PathBuf, SubId>` enforces at most one dynamic
-//! Sub per `(promoter_id, resolved_path)`. Mutators are three sites:
-//! `try_promote` (insert with contains check), `on_dynamic_sub_reaped`
-//! (remove on anchor-terminal), and `reap_promoter_inner` (full drain on
-//! Promoter teardown).
+//! `dynamic_subs: BTreeMap<ResourceId, SubId>` enforces at most one
+//! dynamic Sub per `(promoter_id, anchor_resource)`. Resource-keying is
+//! structurally equivalent to path-keying: Tree slot identity is
+//! `(parent, segment)`, bijective with the resolved path while the slot
+//! is live, and the Sub's `AnchorClaim::Held` contribution keeps the
+//! slot from reaping for the dedup entry's lifetime. The dedup entry
+//! drops at `on_dynamic_sub_reaped` *before* `reap_profile` releases
+//! the anchor contribution, so a re-mint after the slot reaps lands at
+//! a fresh `ResourceId` and never collides with stale state. Mutators
+//! are three sites: `try_promote` (insert with contains check),
+//! `on_dynamic_sub_reaped` (remove on anchor-terminal), and
+//! `reap_promoter_inner` (full drain on Promoter teardown).
 
 use crate::ids::{PromoterId, ResourceId, SubId};
 use crate::op::ProbeCorrelation;
@@ -46,7 +53,6 @@ use crate::sub::{ClassSet, EffectScope};
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -118,11 +124,14 @@ pub struct Promoter {
     /// structurally idempotent on the queue and the per-Resource counter.
     pub pending_enumerations: BTreeSet<ResourceId>,
 
-    /// `(resolved_path) → SubId`. Three documented mutators —
-    /// `try_promote` (insert with contains check),
+    /// `anchor_resource → SubId`. Resource identity is `(parent, segment)`
+    /// — bijective with the resolved path while the slot is live; the
+    /// Sub's `AnchorClaim::Held` contribution keeps the slot from
+    /// reaping for the dedup entry's lifetime. Three documented
+    /// mutators — `try_promote` (insert with contains check),
     /// `on_dynamic_sub_reaped` (remove on anchor-terminal), and
     /// `reap_promoter_inner` (full drain).
-    pub dynamic_subs: BTreeMap<PathBuf, SubId>,
+    pub dynamic_subs: BTreeMap<ResourceId, SubId>,
 
     /// Fanout-warning latch. Set on the first crossing of the threshold;
     /// suppresses repeats so pathological patterns warn once per Promoter
@@ -287,7 +296,6 @@ mod tests {
     use crate::sub::{ClassSet, EffectScope};
     use compact_str::CompactString;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -447,14 +455,17 @@ mod tests {
         assert_eq!(proxies.len(), 1);
     }
 
-    /// Dynamic Sub dedup map round-trips path → SubId. The map is the
-    /// unique-key store.
+    /// Dynamic Sub dedup map round-trips `ResourceId → SubId`. The map
+    /// is the unique-key store for the per-(promoter, anchor) dedup;
+    /// path-keying was replaced with resource-keying because Tree slot
+    /// identity already encodes a path-bijective key for live slots
+    /// (cheaper to store, no path-string allocation per entry).
     #[test]
     fn promoter_dynamic_subs_round_trip() {
         let mut p = build_promoter(PromoterId::default(), "logs", "/var/log/*.log");
-        let path = PathBuf::from("/var/log/foo.log");
+        let resource = ResourceId::default();
         let sid = SubId::default();
-        p.dynamic_subs.insert(path.clone(), sid);
-        assert_eq!(p.dynamic_subs.get(&path), Some(&sid));
+        p.dynamic_subs.insert(resource, sid);
+        assert_eq!(p.dynamic_subs.get(&resource), Some(&sid));
     }
 }

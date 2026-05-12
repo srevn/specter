@@ -153,12 +153,17 @@ fn pre_place_file(e: &mut Engine, dir_segments: &[&str], file_name: &str) -> Res
 /// Phases:
 /// 1. Attach (immediate-Active mode; no PrefixPending).
 /// 2. Initial enumeration → promote a single match → mint dynamic Sub.
-/// 3. Dynamic Sub's anchor descent (`foo.log` slot didn't pre-exist).
-/// 4. Seed-burst baseline at the materialised File anchor (no fire
-///    on no-drift fresh attach).
-/// 5. Reap Promoter → cascade detach + DynamicSubReaped + PromoterReaped.
+/// 3. Seed-burst baseline at the matched File anchor (no fire on
+///    no-drift fresh attach). The dynamic Sub's Profile attaches in
+///    Idle and goes immediately to Active(Seed): the enumeration
+///    response already confirmed `foo.log` exists on disk, so the
+///    forward-pass pre-ensures the slot, stamps its kind, and
+///    `attach_sub_inner` takes its immediate-Seed branch — Pending
+///    descent for a dynamic Sub anchor would re-probe the same
+///    prefix only to confirm what enumeration already told us.
+/// 4. Reap Promoter → cascade detach + DynamicSubReaped + PromoterReaped.
 #[test]
-fn full_lifecycle_attach_promote_descend_seed_reap() {
+fn full_lifecycle_attach_promote_seed_reap() {
     let mut e = Engine::new();
 
     // Pre-place /var/log so attach lands in immediate-Active. The
@@ -220,11 +225,18 @@ fn full_lifecycle_attach_promote_descend_seed_reap() {
 
     // dynamic_subs records exactly one promotion; it's foo.log.
     let dynamic_sub_id = {
-        let q = e.promoters().get(pid).unwrap();
-        assert_eq!(q.dynamic_subs.len(), 1, "one promotion");
-        let (path, sid) = q.dynamic_subs.iter().next().unwrap();
+        let (anchor_resource, sid) = {
+            let q = e.promoters().get(pid).unwrap();
+            assert_eq!(q.dynamic_subs.len(), 1, "one promotion");
+            let (r, s) = q.dynamic_subs.iter().next().unwrap();
+            (*r, *s)
+        };
+        let path = e
+            .tree()
+            .path_of(anchor_resource)
+            .expect("anchor path resolves");
         assert_eq!(path.to_string_lossy(), "/var/log/foo.log");
-        *sid
+        sid
     };
     let dynamic_profile = e
         .subs()
@@ -263,42 +275,30 @@ fn full_lifecycle_attach_promote_descend_seed_reap() {
         promote_out.diagnostics,
     );
 
-    // ---- dynamic Sub's anchor descent ----
+    // ---- dynamic Sub's Seed burst (no descent) ----
     //
-    // The dynamic Sub's path `/var/log/foo.log` had its leaf slot
-    // freshly minted by `ensure_path` inside `attach_sub_inner`.
-    // Since the leaf didn't pre-exist, `materialize_path_or_pending`
-    // returned `Pending`, and the Profile starts in Pending(descent).
-    // The descent probe targets /var/log; the response carries the
-    // entry list at the prefix.
-    let descent_corr = e
-        .pending_probe_for(ProbeOwner::Profile(dynamic_profile))
-        .expect("dynamic Sub Profile descent probe in flight");
-    let snap_descent = dir_snap_with(var_log, vec![("foo.log", EntryKind::File, 10)]);
-    let materialize_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(dynamic_profile),
-            correlation: descent_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap_descent),
-        }),
-        now,
-    );
-
-    // Profile transitioned: state Idle → Active(Seed); kind = File;
-    // a fresh AnchorFile probe is in flight on the foo.log slot.
+    // The forward-pass FINAL branch pre-ensured the `foo.log` slot
+    // (via `tree.lookup -> tree.ensure(.., User)`) and stamped its
+    // kind from the enumeration's `EntryKind::File`. Then
+    // `for_resource_dynamic` routes `attach_sub_inner` through the
+    // resource-anchored branch (`req.path.is_none()`), so the new
+    // Profile lands in `Active(Seed)` directly — no Pending descent.
+    // Profile.kind = File (read from the freshly-stamped slot in
+    // attach_sub_inner) and the Seed burst mints an `AnchorFile`
+    // probe at the leaf.
     {
         let p = e.profiles().get(dynamic_profile).expect("Profile alive");
         assert_eq!(
             p.kind,
             Some(ResourceKind::File),
-            "anchor classified as File"
+            "anchor classified as File from enumeration-observed kind",
         );
     }
     let seed_corr = e
         .pending_probe_for(ProbeOwner::Profile(dynamic_profile))
         .expect("Seed-burst AnchorFile probe in flight");
     assert!(
-        materialize_out.probe_ops.iter().any(|op| matches!(
+        promote_out.probe_ops.iter().any(|op| matches!(
             op,
             ProbeOp::Probe {
                 request: specter_core::ProbeRequest::AnchorFile { .. }
