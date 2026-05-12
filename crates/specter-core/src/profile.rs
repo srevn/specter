@@ -107,12 +107,21 @@ pub struct PreFireBurst {
     /// `transition_to_verifying` consumes and clears via `mem::take`.
     pub force_walk_resources: BTreeSet<ResourceId>,
     /// Latest probe target. Initialised to the Profile's anchor at
-    /// burst start. Overwritten by `transition_to_verifying` (LCA for
-    /// Standard / anchor for Seed) and `transition_to_rebasing`
-    /// (anchor). The Draining → Verifying reconfirm path reads this
-    /// value (rather than recomputing LCA) because `dirty_resources` is
-    /// empty in Draining; recomputing would degenerate to anchor and
-    /// lose the correct subtree.
+    /// burst start. Overwritten by `transition_to_verifying` to the
+    /// `pre_fire_target` result (File anchor → anchor; Seed → anchor;
+    /// Standard → LCA of `dirty_resources`). `transition_to_rebasing`
+    /// targets the anchor unconditionally but does not write this
+    /// field (the post-fire phases live on `PostFireBurst`, which has
+    /// no `probe_target` — Rebasing's target is structurally fixed).
+    ///
+    /// **Draining → Verifying reconfirm.** Recomputed via the same
+    /// `pre_fire_target` rule because `dirty_resources` is preserved
+    /// across the burst's pre-fire lifetime: production code mutates
+    /// it only by `insert`, so the LCA basis is identical at the
+    /// reconfirm to what it was at the original Verifying entry.
+    /// Slot reaping during Draining only narrows the result —
+    /// `lca_target` filters reaped slots and falls back to anchor on
+    /// an empty live set.
     pub probe_target: ResourceId,
     /// Non-anchor resources whose `suppress_count` was bumped 0→1 by
     /// `event_drives_batching` during this burst's pre-fire phases.
