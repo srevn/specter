@@ -1216,7 +1216,7 @@ impl Engine {
                             qmut.pending_enumerations.insert(r);
                         }
                     }
-                    self.dispatch_next_enumeration(qid, now, out);
+                    self.dispatch_next_enumeration(qid, out);
                 }
                 PromoterReseedAction::Skip => {}
             }

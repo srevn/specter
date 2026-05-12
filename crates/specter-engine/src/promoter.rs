@@ -201,6 +201,17 @@ impl Engine {
                 );
                 let owner = ProbeOwner::Promoter(promoter_id);
                 let Some(correlation) = self.mint_owner_correlation(owner) else {
+                    // `mint_owner_correlation` only fails for a stale
+                    // owner; the Promoter was inserted three statements
+                    // above and is live. Assert loudly so a future
+                    // change to mint's semantics surfaces here rather
+                    // than stranding a registered Promoter with no
+                    // descent probe.
+                    debug_assert!(
+                        false,
+                        "mint_owner_correlation returned None for just-inserted Promoter \
+                         (promoter = {promoter_id:?})",
+                    );
                     return promoter_id;
                 };
                 let target_path = self.tree.path_of(prefix).unwrap_or_default();
@@ -248,7 +259,7 @@ impl Engine {
         prior_prefix_to_release: Option<ResourceId>,
         new_proxy_resource: ResourceId,
         pattern_component_index: usize,
-        now: Instant,
+        _now: Instant,
         out: &mut StepOutput,
     ) {
         // [S-8] Promoter-fresh slots demote to `User` role for
@@ -308,7 +319,7 @@ impl Engine {
 
         // 4. Drain initial enumeration (single-slot: no probe in
         // flight here, so this dispatches immediately).
-        self.dispatch_next_enumeration(promoter_id, now, out);
+        self.dispatch_next_enumeration(promoter_id, out);
     }
 
     /// Register a proxy at `resource` for `promoter_id`.
@@ -571,7 +582,7 @@ impl Engine {
         // Drain the next queued enumeration (if any). No-op if a probe
         // is in flight (descent advance reopened the slot) or the
         // queue is empty.
-        self.dispatch_next_enumeration(promoter_id, now, out);
+        self.dispatch_next_enumeration(promoter_id, out);
     }
 
     /// Drain one queued enumeration target into a probe. No-op if a
@@ -588,7 +599,6 @@ impl Engine {
     pub(crate) fn dispatch_next_enumeration(
         &mut self,
         promoter_id: PromoterId,
-        _now: Instant,
         out: &mut StepOutput,
     ) {
         // At most one outstanding probe per Promoter.
@@ -612,6 +622,17 @@ impl Engine {
 
         let owner = ProbeOwner::Promoter(promoter_id);
         let Some(correlation) = self.mint_owner_correlation(owner) else {
+            // `mint_owner_correlation` only fails for a stale owner;
+            // `pop_first` succeeded above on the same Promoter within
+            // this `&mut self` window, so the registry id is live.
+            // Assert loudly so a future change to mint's semantics
+            // surfaces here rather than silently dropping the popped
+            // enumeration target.
+            debug_assert!(
+                false,
+                "mint_owner_correlation returned None mid-step for live Promoter \
+                 (promoter = {promoter_id:?}, target = {target:?})",
+            );
             return;
         };
 
@@ -646,7 +667,7 @@ impl Engine {
         &mut self,
         promoter_id: PromoterId,
         snapshot: &DirSnapshot,
-        _now: Instant,
+        now: Instant,
         out: &mut StepOutput,
     ) {
         // [C-1] target is the walker's stamp — the proxy id we
@@ -674,8 +695,10 @@ impl Engine {
         };
 
         // Snapshot the components vec under a read borrow so the
-        // forward pass below can take `&mut self`. Cloning is cheap
-        // — pattern.components() is a small Vec.
+        // forward pass below can take `&mut self`. The clone walks
+        // `PatternComponent`s including `Glob` source strings — not
+        // free; a follow-up holds `Arc<PatternSpec>` on `Promoter` to
+        // collapse this to a single refcount bump.
         let components: Vec<PatternComponent> = self
             .promoters
             .get(promoter_id)
@@ -720,7 +743,7 @@ impl Engine {
                     .path_of(target)
                     .map(|p| p.join(name_str))
                     .unwrap_or_default();
-                self.try_promote(promoter_id, &promote_path, child_kind, out);
+                self.try_promote(promoter_id, &promote_path, child_kind, now, out);
             } else {
                 // Non-final: only descend into Dir matches. A literal
                 // or glob matching a Leaf at a non-final position
@@ -865,11 +888,19 @@ impl Engine {
     /// dynamic Sub per `(promoter_id, resolved_path)` — the contains
     /// check below gates re-promotion of a path the engine already
     /// minted a Sub for.
+    ///
+    /// **`now` is load-bearing.** `attach_sub_inner` schedules the
+    /// new Profile's `BurstDeadline` at `now + max_settle`. Threading
+    /// the step's `now` keeps the dynamic Sub's clock coherent with
+    /// the rest of the step; reading the system clock here would let
+    /// time advance silently between caller and callee within a single
+    /// `step` invocation.
     pub(crate) fn try_promote(
         &mut self,
         promoter_id: PromoterId,
         promote_path: &Path,
         observed_kind: EntryKind,
+        now: Instant,
         out: &mut StepOutput,
     ) {
         // Dedup gate: one dynamic Sub per `(promoter_id, resolved_path)`.
@@ -917,7 +948,7 @@ impl Engine {
             promoter_id,
         );
 
-        let sub_id = self.attach_sub_inner(req, Instant::now(), out);
+        let sub_id = self.attach_sub_inner(req, now, out);
         if sub_id == SubId::default() {
             // attach_sub_inner emitted AttachPathInvalid. No
             // bookkeeping — the Sub never registered.
@@ -970,7 +1001,7 @@ impl Engine {
         &mut self,
         promoter_id: PromoterId,
         resource: ResourceId,
-        now: Instant,
+        _now: Instant,
         out: &mut StepOutput,
     ) {
         let has_proxy = self
@@ -993,7 +1024,7 @@ impl Engine {
         if let Some(q) = self.promoters.get_mut(promoter_id) {
             q.pending_enumerations.insert(resource);
         }
-        self.dispatch_next_enumeration(promoter_id, now, out);
+        self.dispatch_next_enumeration(promoter_id, out);
     }
 
     /// Notify a Promoter that one of its dynamic Subs has reaped (the

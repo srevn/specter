@@ -128,6 +128,24 @@ fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     r
 }
 
+/// Pre-place a File leaf at `dir_segments / file_name`. The leaf is
+/// `ResourceKind::File`-typed; intermediate segments materialise as
+/// `User`-roled Dirs via `ensure_path`. Returns the leaf id.
+///
+/// The companion to [`pre_place_dir`] for tests that need the dynamic
+/// Sub's anchor to materialise immediately (skipping descent),
+/// putting the Sub straight into `Active(Seed)` with a `BurstDeadline`
+/// timer scheduled at the engine's `now + max_settle`.
+fn pre_place_file(e: &mut Engine, dir_segments: &[&str], file_name: &str) -> ResourceId {
+    let mut comps = Vec::with_capacity(dir_segments.len() + 2);
+    comps.push(FS_ROOT_SEG);
+    comps.extend_from_slice(dir_segments);
+    comps.push(file_name);
+    let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
+    e.tree_mut().set_kind(r, ResourceKind::File);
+    r
+}
+
 /// Full Promoter lifecycle composition with pre-placed literal
 /// prefix. Validates that every phase composes correctly through
 /// one Engine, with diagnostic ordering pinned at each transition.
@@ -928,5 +946,82 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
         e.pending_probe_for(ProbeOwner::Promoter(qid)),
         Some(in_flight_corr),
         "in-flight correlation preserved",
+    );
+}
+
+/// Regression for the dynamic-Sub burst-clock divergence: `try_promote`
+/// MUST consume the step's `now`, not read `Instant::now()` directly.
+///
+/// Reading the system clock inside `try_promote` desynchronises the
+/// minted dynamic Sub's `BurstDeadline` from the engine's step clock.
+/// To make the divergence trivially observable, the test fixes a
+/// far-future `frozen` instant as `now`; any wall-clock leak inside
+/// the promote path would schedule a `BurstDeadline` near the system
+/// time rather than `frozen + MAX_SETTLE`. With the fix in place,
+/// exact equality holds.
+///
+/// Setup pre-places both `/var/log` (so the Promoter lands in
+/// immediate-`Active`) and `/var/log/foo.log` (so `attach_sub_inner`
+/// materialises and runs `start_seed_burst` synchronously, scheduling
+/// the only `BurstDeadline` in flight after the step).
+#[test]
+fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
+    let mut e = Engine::new();
+
+    let var_log = pre_place_dir(&mut e, &["var", "log"]);
+    let _ = pre_place_file(&mut e, &["var", "log"], "foo.log");
+
+    // Far enough into the future that any accidental `Instant::now()`
+    // read produces a `BurstDeadline` thousands of seconds before
+    // `frozen + MAX_SETTLE`. The exact-equality check below catches
+    // sub-second clock skew too — the divergence between engine `now`
+    // and system `now` is the failure signature, regardless of
+    // magnitude.
+    let frozen = Instant::now() + Duration::from_secs(1_000_000);
+
+    let (pid, _attach_out) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), frozen);
+    let enum_corr = e
+        .pending_probe_for(ProbeOwner::Promoter(pid))
+        .expect("enumeration probe in flight");
+
+    // Drive the enumeration response containing `foo.log`. The
+    // pre-placed leaf makes `attach_sub_inner` go immediate-Materialize,
+    // which calls `start_seed_burst(now)` — scheduling the
+    // `BurstDeadline` we assert against below.
+    let snap = dir_snap_with(var_log, vec![("foo.log", EntryKind::File, 10)]);
+    let _promote_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: enum_corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        frozen,
+    );
+
+    // The new dynamic Sub registered and its Profile is `Active(Seed)`
+    // with the `BurstDeadline` timer scheduled.
+    let dynamic_sub_id = {
+        let q = e.promoters().get(pid).expect("promoter alive");
+        assert_eq!(q.dynamic_subs.len(), 1, "exactly one dynamic Sub minted");
+        *q.dynamic_subs.values().next().unwrap()
+    };
+    assert_ne!(
+        dynamic_sub_id,
+        specter_core::SubId::default(),
+        "dynamic Sub minted, not a sentinel",
+    );
+
+    // The only timer in flight is the `BurstDeadline` for the dynamic
+    // Sub's Profile. Its deadline must be exactly `frozen + MAX_SETTLE`;
+    // before the fix it was `Instant::now() + MAX_SETTLE` (near real
+    // time, ~1_000_000 s earlier than the assertion expects).
+    let next_deadline = e
+        .next_deadline()
+        .expect("BurstDeadline scheduled by start_seed_burst");
+    assert_eq!(
+        next_deadline,
+        frozen + MAX_SETTLE,
+        "dynamic Sub's BurstDeadline must derive from the step's `now`, \
+         not from the system clock",
     );
 }
