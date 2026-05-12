@@ -393,21 +393,31 @@ impl Engine {
 
     /// Dispatch a Verifying-phase [`ProbeOutcome`] for `profile_id`.
     ///
-    /// Centralises two responsibilities:
-    /// 1. **First-classify fallback for `Profile.kind`.** Resource-based
-    ///    attach against an `Unknown` slot leaves `Profile.kind = None`
-    ///    until the first probe response classifies the anchor. The
-    ///    outcome variant is the canonical witness — `AnchorOk(_)` ⇒
-    ///    `File`, `SubtreeOk(_)` ⇒ `Dir`, `Vanished` / `Failed` carry no
-    ///    kind. Set only when None to keep the "first observation wins"
-    ///    invariant on the field. Sharing this fallback across Seed and
-    ///    Standard burst arms is strictly more consistent than the
-    ///    Seed-only write at the prior `dispatch_seed_ok`.
-    /// 2. **Outcome → TreeSnapshot routing.** The two `*Ok` outcomes
-    ///    convert to a `TreeSnapshot` (`AnchorOk → TreeSnapshot::File`,
-    ///    `SubtreeOk → TreeSnapshot::Dir`) which the per-intent helpers
-    ///    consume; `Vanished` / `Failed` route to the per-intent failure
-    ///    helpers.
+    /// Routes the outcome variant to its per-intent dispatch helper:
+    /// `AnchorOk → TreeSnapshot::File`, `SubtreeOk → TreeSnapshot::Dir`,
+    /// `Vanished` / `Failed` to the per-intent failure helpers.
+    ///
+    /// **First-classify is delegated.** `Profile.kind` is set
+    /// atomically with `Profile.current` by
+    /// [`specter_core::Profile::install_dir_current`] /
+    /// [`specter_core::Profile::install_file_current`] — the per-intent
+    /// dispatchers call these setters (directly or through
+    /// [`Engine::apply_snapshot`]) at the snapshot commit point, so the
+    /// fallback's `if p.kind.is_none()` write is structurally
+    /// redundant. Removing it removes the cross-field invariant
+    /// hazard: any read site between the dispatch entry and the
+    /// setter call now sees either both fields set or neither, never
+    /// a torn write.
+    ///
+    /// **Boundary kind-mismatch check.** The walker is contracted to
+    /// return a `ProbeOutcome` whose variant matches the request's
+    /// kind (typed [`crate::ProbeRequest`]). Each per-intent
+    /// dispatcher (`dispatch_seed_ok` / `dispatch_standard_ok` /
+    /// `dispatch_rebase_ok`) invokes
+    /// [`Engine::kind_agrees_or_finalize`] BEFORE the snapshot commit
+    /// to catch any future regression and route through
+    /// `finalize_anchor_lost` rather than misroute a Dir snapshot
+    /// onto a File-kinded Profile (or vice versa).
     fn dispatch_burst_outcome(
         &mut self,
         profile_id: ProfileId,
@@ -417,18 +427,6 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // First-classify fallback. Idempotent: only writes when None.
-        let response_kind = match &outcome {
-            ProbeOutcome::AnchorOk(_) => Some(ResourceKind::File),
-            ProbeOutcome::SubtreeOk(_) => Some(ResourceKind::Dir),
-            ProbeOutcome::Vanished | ProbeOutcome::Failed { .. } => None,
-        };
-        if let (Some(k), Some(p)) = (response_kind, self.profiles.get_mut(profile_id))
-            && p.kind.is_none()
-        {
-            p.kind = Some(k);
-        }
-
         let snapshot = match outcome {
             ProbeOutcome::AnchorOk(leaf) => Some(TreeSnapshot::File(leaf)),
             ProbeOutcome::SubtreeOk(arc) => Some(TreeSnapshot::Dir(arc)),
@@ -451,6 +449,100 @@ impl Engine {
         match intent {
             BurstIntent::Seed => self.dispatch_seed_ok(profile_id, snap, now, out),
             BurstIntent::Standard => self.dispatch_standard_ok(profile_id, snap, forced, now, out),
+        }
+    }
+
+    /// Apply a successful probe response's `TreeSnapshot` to the
+    /// Profile's `current`. Single home for the "Dir → graft / File →
+    /// inline write" dispatch shared by the three `dispatch_*_ok`
+    /// helpers.
+    ///
+    /// `TreeSnapshot::Dir` flows through [`crate::reconcile::graft`]
+    /// (splice + reconcile + commit via
+    /// `Profile::install_dir_current`); `TreeSnapshot::File` writes
+    /// inline through [`specter_core::Profile::install_file_current`]
+    /// (a Leaf has no descendants to materialise).
+    ///
+    /// **Kind agreement is a caller responsibility.** Callers MUST
+    /// invoke [`Engine::kind_agrees_or_finalize`] before this helper.
+    /// The setters' debug_assert is a defensive backstop for any
+    /// future caller bypassing the boundary; production paths through
+    /// the dispatchers always pass the agreement check before
+    /// reaching here.
+    pub(crate) fn apply_snapshot(
+        &mut self,
+        profile_id: ProfileId,
+        target: ResourceId,
+        snapshot: TreeSnapshot,
+        out: &mut StepOutput,
+    ) {
+        match snapshot {
+            TreeSnapshot::Dir(arc) => {
+                graft(
+                    profile_id,
+                    target,
+                    arc,
+                    &mut self.tree,
+                    &mut self.profiles,
+                    out,
+                );
+            }
+            TreeSnapshot::File(leaf) => {
+                if let Some(p) = self.profiles.get_mut(profile_id) {
+                    p.install_file_current(leaf);
+                }
+            }
+        }
+    }
+
+    /// Validate that the response's `TreeSnapshot` shape agrees with
+    /// `Profile.kind`. Returns `true` on agreement (or on
+    /// `kind == None`, the first-classify case).
+    ///
+    /// On disagreement — a walker-contract violation, structurally
+    /// unreachable in v1 under the typed [`crate::ProbeRequest`]
+    /// dispatch chain — emit a
+    /// [`Diagnostic::AnchorKindMismatch`] diagnostic and route the
+    /// Profile through [`Engine::finalize_anchor_lost`]. The prior
+    /// baseline / current become invalid under the new on-disk shape,
+    /// the anchor watch is released, and the parent watch is preserved
+    /// for descent re-recovery via `Profile.watch_root_parent`.
+    ///
+    /// Choosing `finalize_anchor_lost` over a `debug_assert! + drop`
+    /// is deliberate: the symmetric path with `dispatch_*_vanished`
+    /// re-uses a well-tested cleanup chain rather than introducing a
+    /// fresh "discard then graft" composition (which leaks watch
+    /// contributions and breaks the cross-field invariant — the
+    /// original-plan hazard the boundary check exists to prevent).
+    pub(crate) fn kind_agrees_or_finalize(
+        &mut self,
+        profile_id: ProfileId,
+        snapshot: &TreeSnapshot,
+        out: &mut StepOutput,
+    ) -> bool {
+        let prior = self.profiles.get(profile_id).and_then(|p| p.kind);
+        let response_kind = match snapshot {
+            TreeSnapshot::Dir(_) => ResourceKind::Dir,
+            TreeSnapshot::File(_) => ResourceKind::File,
+        };
+        match prior {
+            None => true,
+            Some(prior_kind) if prior_kind == response_kind => true,
+            Some(prior_kind) => {
+                debug_assert!(
+                    false,
+                    "walker contract violated: response {:?} for kind {:?} \
+                     (profile = {profile_id:?})",
+                    response_kind, prior_kind,
+                );
+                out.diagnostics.push(Diagnostic::AnchorKindMismatch {
+                    profile: profile_id,
+                    prior_kind,
+                    response_kind,
+                });
+                self.finalize_anchor_lost(profile_id, out);
+                false
+            }
         }
     }
 
@@ -1414,9 +1506,9 @@ impl Engine {
     ) {
         // Seed always targets anchor — `probe_target` was set to the
         // anchor at `start_seed_burst` / `transition_to_verifying`.
-        // The First-Seed-Ok fallback for `Profile.kind` runs once, in
-        // `dispatch_burst_outcome`, before any per-intent dispatcher;
-        // see that helper for the rationale.
+        // First-classify of `Profile.kind` happens atomically with
+        // `Profile.current` inside `apply_snapshot`'s `install_*_current`
+        // call (see those setters' rustdoc).
         let target = match self.profiles.get(profile_id) {
             Some(p) => match &p.state {
                 ProfileState::Active(b) => b.probe_target.unwrap_or(p.resource),
@@ -1425,26 +1517,15 @@ impl Engine {
             None => return,
         };
 
-        match snapshot {
-            TreeSnapshot::Dir(arc) => {
-                graft(
-                    profile_id,
-                    target,
-                    arc,
-                    &mut self.tree,
-                    &mut self.profiles,
-                    out,
-                );
-            }
-            TreeSnapshot::File(leaf) => {
-                // File-anchored Profile: the leaf *is* the snapshot. No
-                // graft, no walk_pair (a Leaf has no descendants to
-                // materialise).
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.current = Some(TreeSnapshot::File(leaf));
-                }
-            }
+        // Boundary check: a walker-contract violation (Dir response for
+        // a File-kinded Profile, or symmetric) routes through
+        // `finalize_anchor_lost`. Structurally unreachable in v1; the
+        // boundary exists as defense-in-depth.
+        if !self.kind_agrees_or_finalize(profile_id, &snapshot, out) {
+            return;
         }
+
+        self.apply_snapshot(profile_id, target, snapshot, out);
 
         // Fire Effects only for the Subtree subset of `fired_subs` when
         // drift is observed (post-graft current.hash() differs from the
@@ -1637,26 +1718,19 @@ impl Engine {
             _ => false,
         };
 
-        // Graft AFTER computing stability — the verdict needs the
-        // pre-update prior. graft calls walk_pair (Watch ops) + splice
-        // (current update). For File anchors, replace wholesale.
-        match snapshot {
-            TreeSnapshot::Dir(arc) => {
-                graft(
-                    profile_id,
-                    target,
-                    arc,
-                    &mut self.tree,
-                    &mut self.profiles,
-                    out,
-                );
-            }
-            TreeSnapshot::File(leaf) => {
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.current = Some(TreeSnapshot::File(leaf));
-                }
-            }
+        // Boundary check before any snapshot commit. A walker-contract
+        // violation (Dir response on a File-kinded Profile, or
+        // symmetric) routes through `finalize_anchor_lost` — the
+        // verdict computed above is irrelevant on that branch.
+        if !self.kind_agrees_or_finalize(profile_id, &snapshot, out) {
+            return;
         }
+
+        // Apply AFTER computing stability — the verdict needs the
+        // pre-update prior. `apply_snapshot` routes Dir through `graft`
+        // (splice + reconcile + atomic kind/current commit) and File
+        // through the inline `install_file_current` setter.
+        self.apply_snapshot(profile_id, target, snapshot, out);
 
         if is_stable && dirty_zero {
             // Stable + dirty=0 → fire Effect. Awaiting on count > 0;
@@ -1771,23 +1845,10 @@ impl Engine {
             },
             None => return,
         };
-        match snapshot {
-            TreeSnapshot::Dir(arc) => {
-                graft(
-                    profile_id,
-                    target,
-                    arc,
-                    &mut self.tree,
-                    &mut self.profiles,
-                    out,
-                );
-            }
-            TreeSnapshot::File(leaf) => {
-                if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.current = Some(TreeSnapshot::File(leaf));
-                }
-            }
+        if !self.kind_agrees_or_finalize(profile_id, &snapshot, out) {
+            return;
         }
+        self.apply_snapshot(profile_id, target, snapshot, out);
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.rebase_baseline();
         }

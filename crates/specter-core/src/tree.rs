@@ -93,6 +93,18 @@ impl Tree {
     /// Get-or-create a Resource at `(parent, segment)`. Idempotent: returns
     /// the existing slot if one is present at this `(parent, segment)`,
     /// regardless of `role`. The `role` argument applies *only* on creation.
+    ///
+    /// A stale `parent` id (`Some(p)` where the slot was reaped) is a
+    /// caller bug: every production path that reaches `ensure` has a
+    /// live parent by construction (descent materialisation, reconcile's
+    /// `ensure_descendant`, attach-time `ensure_path`). The graceful
+    /// fallback returns the default `ResourceId` sentinel — symmetric
+    /// with [`Tree::ensure_path`]'s empty-input degradation and with
+    /// every other mutator's stale-id contract (`set_role`, `set_kind`,
+    /// `vacate`, `try_reap`, refcount helpers all silently no-op on
+    /// stale ids). The `debug_assert!` pins the contract for tests /
+    /// fuzzers; release builds degrade rather than panic so a single
+    /// upstream regression doesn't abort the daemon.
     pub fn ensure(
         &mut self,
         parent: Option<ResourceId>,
@@ -101,6 +113,10 @@ impl Tree {
     ) -> ResourceId {
         let sym = self.interner.get_or_intern(segment);
         if let Some(p) = parent {
+            if self.nodes.get(p).is_none() {
+                debug_assert!(false, "Tree::ensure: stale parent id ({p:?})");
+                return ResourceId::default();
+            }
             if let Some(child_id) = self.nodes[p].children.get(&sym).copied() {
                 return child_id;
             }
@@ -150,21 +166,26 @@ impl Tree {
     ///
     /// **Two production callers, two roles for the defensive branches:**
     ///
-    /// - `reconcile::delete_child` invokes `vacate` only when the
-    ///   contributions map is already empty (gated by `is_watched()`
-    ///   at the call site). The `Unwatch` branch is dormant under this
-    ///   caller; the `Unsuppress` branch fires for non-anchor
-    ///   descendants whose burst-batching `add_suppress` is owed a
-    ///   closing op before slot reap.
+    /// - [`Tree::try_reap`] folds `vacate` into the slot lifecycle
+    ///   terminus, calling it for every slot entering the cascade.
+    ///   The reap precondition (`has_anchors() == false`) guarantees
+    ///   `contributions` is empty here, so the `Unwatch` branch is
+    ///   dormant; the `Unsuppress` branch fires for slots that still
+    ///   owe burst-suppress accounting (e.g., a descendant whose
+    ///   `suppress_count` was bumped `0→1` by
+    ///   `event_drives_batching` and is being torn down by
+    ///   reconcile's Phase 1).
     /// - The engine's kernel-watch rejection path
-    ///   (`on_watch_op_rejected`) invokes `vacate` to atomically tear
-    ///   down every contribution at the rejected slot. Both branches
-    ///   are load-bearing here: the `Unwatch` closes the kernel-watch
-    ///   protocol, and the `Unsuppress` closes the burst-suppress
-    ///   protocol — the per-claimer cleanup loops that follow run
-    ///   `sub_watch` / `sub_suppress`, which short-circuit on the
-    ///   post-vacate state and rely on `vacate` to have emitted both
-    ///   closing ops.
+    ///   (`on_watch_op_rejected`) invokes `vacate` directly to
+    ///   atomically tear down every contribution at the rejected slot.
+    ///   Both branches are load-bearing here: the `Unwatch` closes the
+    ///   kernel-watch protocol, and the `Unsuppress` closes the
+    ///   burst-suppress protocol — the per-claimer cleanup loops that
+    ///   follow run `sub_watch` / `sub_suppress`, which short-circuit
+    ///   on the post-vacate state and rely on `vacate` to have emitted
+    ///   both closing ops. This is the only standalone-clamp call
+    ///   site; every other reap path flows through `try_reap`'s
+    ///   folded-in vacate.
     ///
     /// Emitting both ops unconditionally (rather than asserting on
     /// preconditions) makes any future caller correct by construction:
@@ -204,6 +225,18 @@ impl Tree {
     /// hygiene); the caller's `ResourceId` becomes stale on a `true`
     /// return.
     ///
+    /// **Slot lifecycle terminus.** Each cascade iteration calls
+    /// [`Tree::vacate`] as the closing-emission step before unlinking
+    /// and removing the slot. The slot is reapable here by definition
+    /// (`has_anchors() == false`), so the contributions map is empty by
+    /// invariant — `vacate`'s `Unwatch` branch is dormant. The
+    /// `Unsuppress` branch fires for slots that still owe burst-suppress
+    /// accounting (e.g., a descendant whose `suppress_count` was bumped
+    /// `0→1` by `event_drives_batching` and is being torn down by
+    /// reconcile's Phase 1). Folding `vacate` into the terminus
+    /// guarantees the per-slot protocol owed at reap time is emitted
+    /// before the slot leaves the Tree, regardless of caller.
+    ///
     /// **Why cascade.** Reaping a slot unlinks it from its parent's
     /// `children` map. If the parent now has no anchors of its own —
     /// no remaining children, no profiles, no Promoter back-refs, no
@@ -221,7 +254,7 @@ impl Tree {
     /// sibling child, a co-resident Profile / Promoter, or another
     /// contribution keeps it alive) or reaches a root (parent =
     /// `None`).
-    pub fn try_reap(&mut self, id: ResourceId) -> bool {
+    pub fn try_reap(&mut self, id: ResourceId, out: &mut StepOutput) -> bool {
         let Some(r) = self.nodes.get(id) else {
             return false;
         };
@@ -235,6 +268,14 @@ impl Tree {
             // false`. The first iteration enters here from the gate
             // above; subsequent iterations enter after the cascade
             // check below.
+            //
+            // `vacate` is the closing-emission step of the slot
+            // lifecycle terminus. `contributions` is empty here
+            // (has_anchors's contract), so the `Unwatch` branch is
+            // dormant; the `Unsuppress` branch fires when this slot
+            // still owes a burst-suppress closing op.
+            self.vacate(current, out);
+
             let node = &self.nodes[current];
             let parent = node.parent;
             let segment = node.segment;
@@ -395,8 +436,7 @@ mod tests {
         fn prop_reap_invalidates(seg in any_segment()) {
             let mut tree = Tree::new();
             let id = tree.ensure(None, &seg, ResourceRole::User);
-            tree.vacate(id, &mut discard());
-            prop_assert!(tree.try_reap(id));
+            prop_assert!(tree.try_reap(id, &mut discard()));
             prop_assert!(tree.get(id).is_none());
             prop_assert!(tree.lookup(None, &seg).is_none());
             prop_assert!(tree.is_empty());
@@ -413,8 +453,7 @@ mod tests {
             let parent = tree.ensure(None, "p", ResourceRole::User);
             let _sibling = tree.ensure(Some(parent), "sibling", ResourceRole::User);
             let id_old = tree.ensure(Some(parent), &s_old, ResourceRole::User);
-            tree.vacate(id_old, &mut discard());
-            prop_assert!(tree.try_reap(id_old));
+            prop_assert!(tree.try_reap(id_old, &mut discard()));
             let id_new = tree.ensure(Some(parent), &s_new, ResourceRole::User);
             prop_assert_ne!(id_old, id_new);
         }
@@ -449,9 +488,8 @@ mod tests {
     fn try_reap_succeeds_for_role_only_slot_post_vacate() {
         let mut tree = Tree::new();
         let id = tree.ensure(None, "watch-root", ResourceRole::WatchRootParent);
-        tree.vacate(id, &mut discard());
         assert!(
-            tree.try_reap(id),
+            tree.try_reap(id, &mut discard()),
             "role is metadata; vacated slot with no structural anchors reaps",
         );
         assert!(tree.get(id).is_none());
@@ -462,8 +500,10 @@ mod tests {
         let mut tree = Tree::new();
         let parent = tree.ensure(None, "parent", ResourceRole::User);
         let _child = tree.ensure(Some(parent), "child", ResourceRole::User);
-        tree.vacate(parent, &mut discard());
-        assert!(!tree.try_reap(parent), "parent with child must not reap");
+        assert!(
+            !tree.try_reap(parent, &mut discard()),
+            "parent with child must not reap",
+        );
         assert!(tree.get(parent).is_some());
     }
 
@@ -488,8 +528,10 @@ mod tests {
             ResourceRole::DescentScaffold,
         ));
 
-        tree.vacate(leaf, &mut discard());
-        assert!(tree.try_reap(leaf), "leaf reaps on the empty edge");
+        assert!(
+            tree.try_reap(leaf, &mut discard()),
+            "leaf reaps on the empty edge",
+        );
 
         assert!(tree.get(leaf).is_none());
         assert!(tree.get(b).is_none(), "b cascaded — only the leaf held it");
@@ -508,8 +550,10 @@ mod tests {
         let a = tree.ensure(Some(mid), "a", ResourceRole::User);
         let _b = tree.ensure(Some(mid), "b", ResourceRole::User);
 
-        tree.vacate(a, &mut discard());
-        assert!(tree.try_reap(a), "a reaps — no anchors of its own");
+        assert!(
+            tree.try_reap(a, &mut discard()),
+            "a reaps — no anchors of its own",
+        );
 
         assert!(tree.get(a).is_none());
         assert!(
@@ -531,7 +575,7 @@ mod tests {
             crate::sub::ClassSet::STRUCTURE,
         );
         assert!(
-            !tree.try_reap(id),
+            !tree.try_reap(id, &mut discard()),
             "live contribution is itself a retention anchor",
         );
         assert!(tree.get(id).is_some());
@@ -632,6 +676,67 @@ mod tests {
         ));
     }
 
+    /// `Tree::try_reap` folds in `Tree::vacate` as its closing-emission
+    /// step. The reap precondition (`has_anchors() == false`) guarantees
+    /// `contributions` is empty here, so the `Unwatch` branch is
+    /// dormant; the `Unsuppress` branch fires for slots that still owe
+    /// burst-suppress accounting at reap time (e.g., a descendant whose
+    /// `suppress_count` was bumped `0→1` by `event_drives_batching` and
+    /// is being torn down by reconcile's Phase 1). Pin the fire path so
+    /// the folding contract is regression-protected.
+    #[test]
+    fn try_reap_emits_unsuppress_for_drained_slot_with_residual_suppress() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "x", ResourceRole::User);
+        tree.get_mut(r).unwrap().suppress_count = 1;
+        // Slot is reapable: contributions empty, no children / profiles /
+        // proxies, but suppress_count > 0 ⇒ vacate's Unsuppress branch
+        // fires from inside the terminus.
+
+        let mut out = StepOutput::default();
+        assert!(
+            tree.try_reap(r, &mut out),
+            "drained slot with residual suppress is reapable",
+        );
+        assert!(tree.get(r).is_none(), "slot was reaped");
+        assert_eq!(out.watch_ops.len(), 1);
+        assert!(matches!(
+            out.watch_ops[0],
+            WatchOp::Unsuppress { resource } if resource == r,
+        ));
+    }
+
+    /// Cascade variant of the above: a child slot reaps and orphans its
+    /// parent; the parent then enters the cascade with its own pending
+    /// `suppress_count > 0`. Both slots emit `Unsuppress` from inside
+    /// `try_reap`'s folded-in vacate, in cascade order (leaf first,
+    /// parent second).
+    #[test]
+    fn try_reap_cascade_emits_unsuppress_for_each_drained_slot() {
+        let mut tree = Tree::new();
+        let parent = tree.ensure(None, "parent", ResourceRole::DescentScaffold);
+        let child = tree.ensure(Some(parent), "child", ResourceRole::User);
+        tree.get_mut(child).unwrap().suppress_count = 1;
+        tree.get_mut(parent).unwrap().suppress_count = 1;
+
+        let mut out = StepOutput::default();
+        assert!(tree.try_reap(child, &mut out));
+        assert!(tree.get(child).is_none());
+        assert!(
+            tree.get(parent).is_none(),
+            "cascade reaped the now-orphaned parent",
+        );
+        assert_eq!(out.watch_ops.len(), 2, "one Unsuppress per cascaded slot");
+        assert!(matches!(
+            out.watch_ops[0],
+            WatchOp::Unsuppress { resource } if resource == child,
+        ));
+        assert!(matches!(
+            out.watch_ops[1],
+            WatchOp::Unsuppress { resource } if resource == parent,
+        ));
+    }
+
     #[test]
     fn vacate_emits_both_closing_ops_when_both_counters_nonzero() {
         // Combined branch: both protocols owed at vacate time. Order
@@ -701,8 +806,7 @@ mod tests {
     fn path_of_returns_none_for_stale_id() {
         let mut tree = Tree::new();
         let id = tree.ensure(None, "x", ResourceRole::User);
-        tree.vacate(id, &mut discard());
-        assert!(tree.try_reap(id));
+        assert!(tree.try_reap(id, &mut discard()));
         assert!(tree.path_of(id).is_none());
     }
 
@@ -767,11 +871,29 @@ mod tests {
         assert!(matches!(tree.get(id).unwrap().role, ResourceRole::User));
     }
 
+    /// `Tree::ensure` with a stale `parent` returns the default
+    /// `ResourceId` sentinel rather than panicking. Pre-refactor the
+    /// helper indexed `self.nodes[p]` directly and would panic on a
+    /// stale id; the graceful fallback brings it into line with every
+    /// other mutator's stale-id contract. Test is `#[cfg(not(debug_assertions))]`
+    /// because the helper's `debug_assert!` fires in dev / CI builds —
+    /// production paths must never reach it under normal operation.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn ensure_with_stale_parent_returns_default_and_does_not_panic() {
+        let mut tree = Tree::new();
+        let parent = tree.ensure(None, "p", ResourceRole::User);
+        let mut out = StepOutput::default();
+        assert!(tree.try_reap(parent, &mut out));
+        let id = tree.ensure(Some(parent), "child", ResourceRole::User);
+        assert_eq!(id, ResourceId::default());
+    }
+
     #[test]
     fn set_role_on_stale_id_is_noop() {
         let mut tree = Tree::new();
         let id = tree.ensure(None, "x", ResourceRole::User);
-        assert!(tree.try_reap(id));
+        assert!(tree.try_reap(id, &mut discard()));
         tree.set_role(id, ResourceRole::User);
         // No panic; lookups still return None.
         assert!(tree.get(id).is_none());

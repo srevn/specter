@@ -166,10 +166,12 @@ fn rename_after_detach_yields_fresh_id() {
         Profile::new(id_old, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
     );
 
-    // Rename: engine detaches the Profile, then vacates + try_reaps the slot.
+    // Rename: engine detaches the Profile, then try_reaps the slot.
     profiles.detach(&mut tree, pid);
-    tree.vacate(id_old, &mut StepOutput::default());
-    assert!(tree.try_reap(id_old), "post-detach reap must succeed");
+    assert!(
+        tree.try_reap(id_old, &mut StepOutput::default()),
+        "post-detach reap must succeed",
+    );
     assert!(
         tree.get(parent).is_none(),
         "cascade reaped the now-orphaned parent",
@@ -196,9 +198,11 @@ fn recreate_at_anchored_slot_keeps_id() {
         Profile::new(id, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
     );
 
-    // Vacate without detach: slot is anchored by Profile, try_reap refused.
-    tree.vacate(id, &mut StepOutput::default());
-    assert!(!tree.try_reap(id), "Profile-anchored slot must not reap");
+    // try_reap without detach: slot is anchored by Profile, refused.
+    assert!(
+        !tree.try_reap(id, &mut StepOutput::default()),
+        "Profile-anchored slot must not reap",
+    );
 
     // Same (parent, segment) returns the same id.
     let id_again = tree.ensure(Some(parent), "foo.c", ResourceRole::User);

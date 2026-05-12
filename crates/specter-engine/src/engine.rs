@@ -754,8 +754,11 @@ impl Engine {
         // [`Tree::try_reap`] cascades upward through any now-orphaned
         // ancestors — the watch-root parent slot whose only remaining
         // claim was *this* Profile's anchor as its sole child is freed
-        // in the same step.
-        self.tree.try_reap(anchor);
+        // in the same step. `try_reap` folds in `Tree::vacate` as its
+        // closing-emission step, so any residual per-slot protocol
+        // (kernel-watch / burst-suppress) is emitted before the slot
+        // leaves the Tree.
+        self.tree.try_reap(anchor, out);
 
         out.diagnostics.push(Diagnostic::ReapPendingResolved {
             profile: profile_id,

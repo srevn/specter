@@ -716,8 +716,7 @@ fn subtree_at_stale_target_returns_none() {
     let snap = TreeSnapshot::Dir(root);
 
     // Vacate a and try to reap (children=0, profiles=0 ⇒ reaps clean).
-    tree.vacate(a, &mut StepOutput::default());
-    let reaped = tree.try_reap(a);
+    let reaped = tree.try_reap(a, &mut StepOutput::default());
     assert!(reaped, "a is reapable in this fixture");
     // Now stale is a fresh-looking id with no live slot.
     assert!(snap.subtree_at(stale, &tree).is_none());

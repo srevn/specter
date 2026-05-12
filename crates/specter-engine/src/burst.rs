@@ -1484,8 +1484,7 @@ mod tests {
     fn lca_filters_stale_resource_ids() {
         let (mut e, pid, root, a, _b) = engine_with_two_children();
         // Reap `a` to make its id stale.
-        e.tree.vacate(a, &mut StepOutput::default());
-        e.tree.try_reap(a);
+        e.tree.try_reap(a, &mut StepOutput::default());
         // Stale id in the set; LCA must filter and return anchor (since the
         // remaining live entry is empty after the filter).
         let dirty: BTreeSet<_> = std::iter::once(a).collect();

@@ -882,6 +882,17 @@ pub fn log_diagnostic(d: &Diagnostic) {
             "splice crossed uncovered subtree (graft contract violation; \
              prior view kept, response dropped)",
         ),
+        Diagnostic::AnchorKindMismatch {
+            profile,
+            prior_kind,
+            response_kind,
+        } => tracing::error!(
+            ?profile,
+            ?prior_kind,
+            ?response_kind,
+            "probe response shape disagrees with cached Profile.kind \
+             (walker contract violation; routing through anchor-loss recovery)",
+        ),
         Diagnostic::EventAbsorbedByFireTail {
             profile,
             resource,

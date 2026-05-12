@@ -393,7 +393,7 @@ mod tests {
         mark(&mut tree, temp, ResourceKind::Dir);
         // Need to drop everything that anchors `temp`. `temp` has no children
         // and no profiles attached, role User — so try_reap should succeed.
-        assert!(tree.try_reap(temp));
+        assert!(tree.try_reap(temp, &mut specter_core::StepOutput::default()));
         assert!(tree.get(temp).is_none());
         assert!(!covers(&profile, temp, &tree));
     }

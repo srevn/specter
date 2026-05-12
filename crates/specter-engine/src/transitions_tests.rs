@@ -418,6 +418,98 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     );
 }
 
+/// `Engine::kind_agrees_or_finalize` boundary check: a `Profile.kind =
+/// Some(File)` receiving a Dir-shaped response is a structurally
+/// unreachable walker-contract violation (the typed `ProbeRequest`
+/// chain emits `AnchorFile` for File-kinded Profiles, and the walker's
+/// `ProbeOutcome` variant matches the request by construction). The
+/// boundary catches the case at dispatch time and routes through
+/// [`Engine::finalize_anchor_lost`] rather than misroute the Dir
+/// snapshot onto a File-kinded Profile (which would leak watch
+/// contributions and break the cross-field invariant).
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "debug_assert! is compiled out in release"
+)]
+#[should_panic(expected = "walker contract violated")]
+fn dispatch_standard_ok_with_kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
+    // Set up a File-kinded Profile in Active(Verifying) and inject a
+    // SubtreeOk (Dir) response.
+    let mut e = Engine::new();
+    let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+    e.tree.set_kind(r, ResourceKind::File);
+    let req = SubAttachRequest {
+        name: String::from("test-sub"),
+        resource: r,
+        path: None,
+        config: ScanConfig::builder().recursive(true).build(),
+        max_settle: MAX_SETTLE,
+        settle: SETTLE,
+        program: empty_program(),
+        scope: EffectScope::SubtreeRoot,
+        events: NO_EVENTS,
+        log_output: false,
+        source_promoter: None,
+    };
+    let now = Instant::now();
+    let (sid, _) = e.attach_sub(req, now);
+    let pid = e.subs.get(sid).unwrap().profile;
+    // Complete the Seed burst with an AnchorOk so the Profile lands at
+    // kind = Some(File).
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed verify probe in flight");
+    let leaf = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation,
+            outcome: ProbeOutcome::AnchorOk(leaf),
+        }),
+        now,
+    );
+    assert_eq!(
+        e.profiles.get(pid).and_then(|p| p.kind),
+        Some(ResourceKind::File),
+    );
+
+    // Drive a Standard burst (FsEvent at the anchor) and let the settle
+    // timer fire so a Verifying probe is in flight.
+    let _ = e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::MetadataChanged,
+        },
+        now,
+    );
+    while let Some(entry) = e.pop_expired(now + SETTLE) {
+        e.step(
+            Input::TimerExpired {
+                id: entry.id,
+                kind: entry.kind,
+                profile: entry.profile,
+            },
+            now + SETTLE,
+        );
+    }
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
+
+    // Inject the kind-mismatched response: a SubtreeOk (Dir) for a
+    // File-kinded Profile. The boundary check fires the debug_assert.
+    let dir = dir_tree_snap(r, vec![]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation,
+            outcome: ProbeOutcome::SubtreeOk(dir),
+        }),
+        now + SETTLE,
+    );
+}
+
 /// `Profile.kind = None` is the `(Some(Dir | Unknown) | None)` fallback
 /// arm in `transition_to_verifying`'s match: an unclassified anchor probes
 /// as `Subtree`, never as `AnchorFile`. The unified fallback collapses

@@ -237,7 +237,7 @@ pub fn sub_watch_then_try_reap(
     out: &mut StepOutput,
 ) -> bool {
     sub_watch(tree, r, key, out);
-    tree.try_reap(r)
+    tree.try_reap(r, out)
 }
 
 #[cfg(test)]
@@ -421,8 +421,8 @@ mod tests {
     fn add_watch_stale_resource_is_noop() {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "ghost", ResourceRole::User);
-        assert!(tree.try_reap(r));
         let mut out = StepOutput::default();
+        assert!(tree.try_reap(r, &mut out));
         add_watch(
             &mut tree,
             r,
@@ -437,8 +437,8 @@ mod tests {
     fn sub_watch_stale_resource_is_noop() {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "ghost", ResourceRole::User);
-        assert!(tree.try_reap(r));
         let mut out = StepOutput::default();
+        assert!(tree.try_reap(r, &mut out));
         sub_watch(
             &mut tree,
             r,

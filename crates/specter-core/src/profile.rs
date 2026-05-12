@@ -617,6 +617,74 @@ impl Profile {
         }
     }
 
+    /// Install a Dir-shaped `current`, atomically setting `kind =
+    /// Some(Dir)` alongside. Sole legitimate writer of
+    /// `(kind, current)` on the Dir arm — `grep -rnE 'p\.current
+    /// = '` on `crates/` should turn up only `Profile::*`
+    /// internals and this helper's call sites.
+    ///
+    /// Atomic write here means: callers that observe `current` as
+    /// `Some(Dir)` are guaranteed to observe `kind` as `Some(Dir)` in
+    /// the same step. The setter encodes the [`Profile::kind`]
+    /// rustdoc's snapshot-shape invariant —
+    /// `current = Some(TreeSnapshot::Dir(_)) ⇒ kind == Some(Dir)` —
+    /// at the write API, not just in prose.
+    ///
+    /// **Precondition.** `kind.is_none() || kind == Some(Dir)`. A
+    /// `File`-kinded Profile receiving a Dir install is a walker /
+    /// dispatcher routing breach; the engine's dispatcher boundary
+    /// (`Engine::kind_agrees_or_finalize`) catches this case and
+    /// routes through `finalize_anchor_lost`, so the setter's
+    /// `debug_assert!` is a defensive backstop against a future caller
+    /// bypassing the boundary.
+    ///
+    /// **Baseline shape.** Production paths preserve `baseline` /
+    /// `current` shape agreement automatically: `rebase_baseline`
+    /// clones `current` into `baseline` (shape matches by construction);
+    /// `Engine::discard_anchor_state` clears both atomically. The
+    /// `debug_assert!` on baseline shape catches any direct-write
+    /// regression in tests; production paths never trigger it.
+    pub fn install_dir_current(&mut self, snapshot: Arc<crate::snapshot::tree::DirSnapshot>) {
+        debug_assert!(
+            self.kind.is_none() || self.kind == Some(ResourceKind::Dir),
+            "install_dir_current: kind mismatch (existing = {:?})",
+            self.kind,
+        );
+        debug_assert!(
+            self.baseline
+                .as_ref()
+                .is_none_or(|b| matches!(b, TreeSnapshot::Dir(_))),
+            "install_dir_current: baseline shape disagrees with new current (Dir)",
+        );
+        self.kind = Some(ResourceKind::Dir);
+        self.current = Some(TreeSnapshot::Dir(snapshot));
+    }
+
+    /// Install a File-shaped `current`, atomically setting `kind =
+    /// Some(File)` alongside. Sole legitimate writer of `(kind,
+    /// current)` on the File arm — symmetric with
+    /// [`Self::install_dir_current`].
+    ///
+    /// **Precondition.** `kind.is_none() || kind == Some(File)`. A
+    /// `Dir`-kinded Profile receiving a File install is the symmetric
+    /// dispatcher routing breach; `Engine::kind_agrees_or_finalize`
+    /// catches it and routes through `finalize_anchor_lost`.
+    pub fn install_file_current(&mut self, leaf: crate::snapshot::tree::LeafEntry) {
+        debug_assert!(
+            self.kind.is_none() || self.kind == Some(ResourceKind::File),
+            "install_file_current: kind mismatch (existing = {:?})",
+            self.kind,
+        );
+        debug_assert!(
+            self.baseline
+                .as_ref()
+                .is_none_or(|b| matches!(b, TreeSnapshot::File(_))),
+            "install_file_current: baseline shape disagrees with new current (File)",
+        );
+        self.kind = Some(ResourceKind::File);
+        self.current = Some(TreeSnapshot::File(leaf));
+    }
+
     /// Reassert active mode after a rebase: lift `current` into `baseline`
     /// (Arc bump on `Dir`, copy on `File`) and clear the survival witness.
     /// Called from `dispatch_rebase_ok` and from both branches of
@@ -892,8 +960,10 @@ mod tests {
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
         );
 
-        tree.vacate(r, &mut StepOutput::default());
-        assert!(!tree.try_reap(r), "Profile-anchored resource must not reap");
+        assert!(
+            !tree.try_reap(r, &mut StepOutput::default()),
+            "Profile-anchored resource must not reap",
+        );
     }
 
     #[test]
@@ -922,8 +992,7 @@ mod tests {
         );
 
         profiles.detach(&mut tree, pid);
-        tree.vacate(r, &mut StepOutput::default());
-        assert!(tree.try_reap(r));
+        assert!(tree.try_reap(r, &mut StepOutput::default()));
         assert!(tree.get(r).is_none());
     }
 
@@ -1071,6 +1140,89 @@ mod tests {
         p.capture_witness_at_loss();
 
         assert_eq!(p.last_settled_hash_at_loss, Some(expected));
+    }
+
+    // -----------------------------------------------------------------------
+    // install_dir_current / install_file_current — atomic kind+current write
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn install_dir_current_sets_kind_and_current_atomically() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        assert!(p.kind.is_none(), "fresh Profile has unprobed kind");
+        assert!(p.current.is_none());
+
+        p.install_dir_current(empty_dir_snapshot(r));
+
+        assert_eq!(
+            p.kind,
+            Some(crate::resource::ResourceKind::Dir),
+            "kind set atomically with current",
+        );
+        assert!(matches!(p.current, Some(TreeSnapshot::Dir(_))));
+    }
+
+    #[test]
+    fn install_file_current_sets_kind_and_current_atomically() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "file", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+
+        p.install_file_current(empty_leaf_entry());
+
+        assert_eq!(p.kind, Some(crate::resource::ResourceKind::File));
+        assert!(matches!(p.current, Some(TreeSnapshot::File(_))));
+    }
+
+    /// Setter is idempotent on `kind`: re-installing a Dir current on a
+    /// Dir-kinded Profile keeps `kind = Some(Dir)` and updates `current`.
+    #[test]
+    fn install_dir_current_idempotent_on_dir_kind() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        p.install_dir_current(empty_dir_snapshot(r));
+
+        // Second install with a fresh snapshot.
+        p.install_dir_current(empty_dir_snapshot(r));
+
+        assert_eq!(p.kind, Some(crate::resource::ResourceKind::Dir));
+    }
+
+    /// Cross-arm misuse: installing a `Dir` on a `File`-kinded Profile
+    /// panics in debug builds. Production paths never reach this branch
+    /// — `Engine::kind_agrees_or_finalize` catches the routing breach
+    /// at the dispatcher boundary before any caller invokes the setter.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "install_dir_current: kind mismatch")]
+    fn install_dir_current_panics_on_file_kinded_profile_in_debug() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        p.install_file_current(empty_leaf_entry());
+        // Boundary-bypass: a future caller skips
+        // `kind_agrees_or_finalize`; the setter's debug_assert fires.
+        p.install_dir_current(empty_dir_snapshot(r));
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "install_file_current: kind mismatch")]
+    fn install_file_current_panics_on_dir_kinded_profile_in_debug() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        p.install_dir_current(empty_dir_snapshot(r));
+        p.install_file_current(empty_leaf_entry());
     }
 
     #[test]

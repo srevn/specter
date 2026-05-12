@@ -62,7 +62,7 @@
 //! same Diff at burst end via `emit_effects_per_stable_file`.
 
 use crate::coverage::covers;
-use crate::refcounts::{add_watch, sub_watch};
+use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use smallvec::SmallVec;
 use specter_core::{
     ContribKey, DedupKey, Diagnostic, Diff, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
@@ -229,6 +229,29 @@ pub(crate) fn apply_diff_to_tree(
     // entries first (reverse-lex within that list) followed by all
     // `deleted` entries (reverse-lex within that list); cross-list
     // ordering is not load-bearing.
+    //
+    // Two paths converge on the slot lifecycle terminus,
+    // [`Tree::try_reap`]:
+    //
+    // - When this Profile contributes a watch at the slot — covered Dir
+    //   under any events mask, or covered Leaf under
+    //   `has_per_file_fds` — [`sub_watch_then_try_reap`] removes the
+    //   contribution by key and try-reaps. The multi-Profile case
+    //   (another Profile still contributes) short-circuits inside
+    //   `try_reap` via `has_anchors()`.
+    // - When this Profile contributes nothing at the slot — uncovered
+    //   Leaf under a STRUCTURE-only Profile, where Phase 2's
+    //   `ensure_descendant` materialised the slot without an
+    //   `add_watch` — we still want to free a now-orphaned Tree slot
+    //   that this delete reaches. Call `try_reap` directly so the Tree
+    //   doesn't leak a never-watched slot.
+    //
+    // `try_reap` folds in `Tree::vacate` as the closing-emission step,
+    // so the per-slot protocol owed at reap time (the residual
+    // `Unsuppress` for a mid-burst descendant whose `suppress_count`
+    // was bumped `0→1` by `event_drives_batching`) is emitted from
+    // inside the terminus rather than the caller — single source per
+    // protocol-close edge.
     let phase_1 = diff
         .deleted
         .iter()
@@ -237,17 +260,13 @@ pub(crate) fn apply_diff_to_tree(
         let Some(resource) = lookup_descendant(tree, base, entry.segment.as_str()) else {
             continue;
         };
-        if releases_watch(profile, resource, entry.kind, tree) {
-            sub_watch(tree, resource, key, out);
-        }
-        // Multi-Profile gate: another Profile's contribution still keeps
-        // the slot live → skip vacate/reap and let that Profile's own
-        // release path handle it.
-        if tree.get(resource).is_some_and(|r| !r.is_watched()) {
-            tree.vacate(resource, out);
-            if tree.try_reap(resource) {
-                reaped.push(resource);
-            }
+        let did_reap = if releases_watch(profile, resource, entry.kind, tree) {
+            sub_watch_then_try_reap(tree, resource, key, out)
+        } else {
+            tree.try_reap(resource, out)
+        };
+        if did_reap {
+            reaped.push(resource);
         }
     }
 
@@ -404,15 +423,21 @@ pub(crate) fn graft(
                 target,
             });
             if let Some(p) = profiles.get_mut(profile_id) {
-                p.current = Some(TreeSnapshot::Dir(prior));
+                p.install_dir_current(prior);
             }
             return;
         }
     };
-    debug_assert!(
-        matches!(new_current, TreeSnapshot::Dir(_)),
-        "graft: splice over a Dir prior must yield a Dir output (profile = {profile_id:?})",
-    );
+    let new_arc = match new_current {
+        TreeSnapshot::Dir(arc) => arc,
+        TreeSnapshot::File(_) => {
+            debug_assert!(
+                false,
+                "graft: splice over a Dir prior yielded File (profile = {profile_id:?})",
+            );
+            return;
+        }
+    };
 
     // Apply to Tree. Returns the slots Phase 1 reaped directly; cascade-
     // reaped ancestors (Dirs) are not collected because Dir slots are
@@ -431,9 +456,12 @@ pub(crate) fn graft(
         purge_per_file_fired_subs_for_resources(profiles, &reaped);
     }
 
-    // Commit the new current.
+    // Atomic commit: `Profile.current` and `Profile.kind` are written
+    // together via the setter. The setter's debug_assert pins the
+    // cross-field invariant (`current = Some(Dir) ⇒ kind == Some(Dir)`)
+    // at the only Dir-current write site.
     if let Some(p) = profiles.get_mut(profile_id) {
-        p.current = Some(new_current);
+        p.install_dir_current(new_arc);
     }
 }
 

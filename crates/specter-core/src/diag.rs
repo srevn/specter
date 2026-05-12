@@ -244,6 +244,33 @@ pub enum Diagnostic {
         profile: ProfileId,
         prefix: ResourceId,
     },
+    /// A probe response's snapshot shape (`File` from `AnchorOk(_)` vs
+    /// `Dir` from `SubtreeOk(_)`) disagrees with the Profile's cached
+    /// [`crate::Profile::kind`].
+    ///
+    /// Structurally unreachable in v1: the engine emits a typed
+    /// [`crate::ProbeRequest::AnchorFile`] for `File`-kinded Profiles
+    /// and [`crate::ProbeRequest::Subtree`] for everything else, and
+    /// the walker's `ProbeOutcome` variant matches the request shape
+    /// by construction. The variant exists as a defensive backstop
+    /// against a future walker regression (e.g., a fresh probe shape
+    /// short-circuiting the request's typing). On observation, the
+    /// engine routes through `Engine::finalize_anchor_lost`: the
+    /// prior baseline / current become invalid under the new on-disk
+    /// shape, the anchor watch is released, and the parent watch is
+    /// preserved for descent re-recovery.
+    ///
+    /// Defense-in-depth — preferred over a `debug_assert!` that
+    /// panics in dev / CI but silently misroutes in release, because
+    /// kind mismatch is the kind of routing breach that compounds
+    /// (a Dir snapshot grafted onto a File-kinded Profile leaks watch
+    /// contributions and breaks the cross-field invariant before any
+    /// downstream observation surfaces it).
+    AnchorKindMismatch {
+        profile: ProfileId,
+        prior_kind: ResourceKind,
+        response_kind: ResourceKind,
+    },
     /// `splice` could not navigate from the prior snapshot's anchor down
     /// to `target`. Two structural causes:
     /// - `target` is outside the anchor's tree subtree (e.g., stale
