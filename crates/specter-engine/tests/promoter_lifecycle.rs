@@ -482,7 +482,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         PromoterState::Active { proxies } => assert!(proxies.contains_key(&a_b)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
-    assert_eq!(e.tree().get(a_b).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(a_b).unwrap().watch_demand(), 1);
 
     // Capture the Promoter's enumeration probe at /a/b (set by
     // `dispatch_next_enumeration` inside `enter_active`).
@@ -516,8 +516,11 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         first_probe_corr(&attach_p_out).expect("Profile descent probe at /a/b in flight");
 
     // Pre-vanish state: /a/b carries two STRUCTURE contributions.
-    assert_eq!(e.tree().get(a_b).unwrap().watch_demand, 2);
-    assert_eq!(e.tree().get(a_b).unwrap().events_union, ClassSet::STRUCTURE,);
+    assert_eq!(e.tree().get(a_b).unwrap().watch_demand(), 2);
+    assert_eq!(
+        e.tree().get(a_b).unwrap().events_union(),
+        ClassSet::STRUCTURE,
+    );
 
     // Send the Profile's descent probe `Vanished`. The rewind branch
     // moves Profile's `current_prefix` to /a, releases /a/b's STRUCTURE
@@ -534,12 +537,12 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     );
 
     assert_eq!(
-        e.tree().get(a_b).unwrap().watch_demand,
+        e.tree().get(a_b).unwrap().watch_demand(),
         1,
         "Promoter's STRUCTURE contribution survives the Profile vanish",
     );
     assert_eq!(
-        e.tree().get(a_b).unwrap().events_union,
+        e.tree().get(a_b).unwrap().events_union(),
         ClassSet::STRUCTURE,
         "events_union recomputed from Promoter (STRUCTURE), not zeroed",
     );
@@ -559,11 +562,9 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     }
 
     // Now the Promoter's enumeration probe at /a/b returns Vanished.
-    // `unregister_proxy` → `release_promoter_proxy_claim` releases the
-    // last contribution; `sub_watch_demand` emits Unwatch on the
-    // genuine 1 → 0 edge. Pre-fix this would have either panicked
-    // (debug: `sub_watch_demand` underflow on counter == 0) or silently
-    // leaked the kernel watch (release).
+    // `unregister_proxy` → `release_promoter_proxy_claim` removes the
+    // last contribution; `sub_watch` emits Unwatch on the non-empty
+    // → empty edge.
     let promoter_vanish_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
@@ -625,7 +626,7 @@ fn two_promoters_sharing_proxy_unwind_independently() {
     }
     // /shared.watch_demand == 2 (one contribution per Promoter), and
     // proxy_promoters carries both ids.
-    assert_eq!(e.tree().get(shared).unwrap().watch_demand, 2);
+    assert_eq!(e.tree().get(shared).unwrap().watch_demand(), 2);
     {
         let bv = &e.tree().get(shared).unwrap().proxy_promoters;
         assert!(bv.contains(&q1));
@@ -657,12 +658,12 @@ fn two_promoters_sharing_proxy_unwind_independently() {
     );
 
     assert_eq!(
-        e.tree().get(shared).unwrap().watch_demand,
+        e.tree().get(shared).unwrap().watch_demand(),
         1,
         "Q2's STRUCTURE contribution survives Q1's release",
     );
     assert_eq!(
-        e.tree().get(shared).unwrap().events_union,
+        e.tree().get(shared).unwrap().events_union(),
         ClassSet::STRUCTURE,
     );
     let unwatch_at_shared = q1_vanish_out

@@ -3,10 +3,12 @@
 //! Every `ProbeResponse(Ok(snapshot))` runs `reconcile_descendants` *before*
 //! the transition body. The pass diffs `snapshot` against the Profile's
 //! prior snapshot (`current` first, falling back to `baseline`); for each
-//! delta entry it ensures the Resource exists, sets its `kind`, and updates
-//! `watch_demand` via `add_watch_demand` / `sub_watch_demand` on the 0↔1
-//! edge. The Watch ops appear in `StepOutput.watch_ops` alongside any
-//! suppress edges from the burst lifecycle.
+//! delta entry it ensures the Resource exists, sets its `kind`, and
+//! installs or releases the per-Resource [`ContribKey::ProfileDescendant`]
+//! contribution via `add_watch` / `sub_watch` (see
+//! `specter-engine::refcounts`). The Watch ops appear in
+//! `StepOutput.watch_ops` alongside any suppress edges from the burst
+//! lifecycle.
 //!
 //! **Empty-prior synthesis.** When neither `current` nor `baseline` is set —
 //! the Seed burst's first probe — a naive diff loop would skip the body
@@ -45,23 +47,23 @@
 //! `tree.ensure`s a fresh `ResourceId` (generation-incremented) for the
 //! new directory, emitting a single Watch.
 //!
-//! **Reap discipline.** `try_reap` is gated by `watch_demand == 0` so that
-//! the multi-Profile case (where another Profile still contributes to
-//! `watch_demand`) does not prematurely tear down a still-live slot.
+//! **Reap discipline.** `try_reap` is gated by an empty contributions
+//! map so the multi-Profile case (where another Profile still
+//! contributes) does not prematurely tear down a still-live slot.
 //!
 //! **File materialization vs Watch.** All covered diff entries get a Tree
 //! slot — `ensure_descendant` runs unconditionally — so
 //! `DedupKey::PerFile { sub, resource }` always carries a real `ResourceId`.
-//! The Watch op (`add_watch_demand`) is gated to **Dirs only**: v1 doesn't
+//! The Watch op (`add_watch`) is gated to **Dirs only**: v1 doesn't
 //! put per-file FDs in the Sensor; pattern matching on
 //! `EffectScope::PerStableFile` is at the Profile level and walks the Diff
 //! at burst end. Files get Resources, no FDs.
 
 use crate::coverage::covers;
-use crate::refcounts::{add_watch_demand, sub_watch_demand};
+use crate::refcounts::{add_watch, sub_watch};
 use specter_core::{
-    ChildEntry, DedupKey, Diagnostic, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
-    PromoterRegistry, ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree,
+    ChildEntry, ContribKey, DedupKey, Diagnostic, DirSnapshot, EntryKind, Profile, ProfileId,
+    ProfileMap, ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree,
     TreeSnapshot, splice,
 };
 use std::sync::Arc;
@@ -128,18 +130,17 @@ pub(crate) fn lookup_descendant(
 
 /// Recursive parallel walk over `(prior_subtree, new_subtree)` at
 /// the same logical position in the tree. For each delta entry the pass
-/// ensures (or releases) the Tree slot, sets its kind, and updates
-/// `watch_demand` via `add_watch_demand` / `sub_watch_demand` on the 0↔1
-/// edge for **covered Dirs** (always) and **covered Leaves under
+/// ensures (or releases) the Tree slot, sets its kind, and installs or
+/// releases the per-Resource [`ContribKey::ProfileDescendant`]
+/// contribution via `add_watch` / `sub_watch` for **covered Dirs**
+/// (always) and **covered Leaves under
 /// `Profile.has_per_file_fds == true`**.
 ///
-/// `add_watch_demand` and `sub_watch_demand` thread the Profile's
-/// `events_union` as the per-Resource mask contribution; the
-/// per-Resource union is the OR of every covering Profile's contribution.
-/// `sub_watch_demand` requires `&ProfileMap` for the on-decrement
-/// recompute, and an explicit `releasing_descendant: Some(profile_id)`
-/// signal so the recompute skips this Profile's descendant contribution
-/// even though `Profile.current` is still `Some` mid-graft.
+/// Each contribution is keyed by [`ContribKey::ProfileDescendant`]
+/// carrying this Profile's id; the per-Resource union is the OR over
+/// every Profile's (and Promoter's) contribution to that slot. No
+/// `&ProfileMap` / `&PromoterRegistry` arguments — refcount work is
+/// purely Resource-local.
 ///
 /// Two-phase order:
 /// 1. Deletions in reverse-lex (leaves before parents) so `try_reap`'s
@@ -161,8 +162,6 @@ pub(crate) fn walk_pair(
     profile: &Profile,
     profile_id: ProfileId,
     tree: &mut Tree,
-    profiles: &ProfileMap,
-    promoters: &PromoterRegistry,
     out: &mut StepOutput,
 ) {
     // O(1) identity prune at this level.
@@ -184,8 +183,6 @@ pub(crate) fn walk_pair(
             if delete {
                 delete_child(
                     tree,
-                    profiles,
-                    promoters,
                     profile,
                     profile_id,
                     current_id,
@@ -207,8 +204,6 @@ pub(crate) fn walk_pair(
             // Pure create OR delete-then-create (Phase 1 deleted the prior).
             create_child(
                 tree,
-                profiles,
-                promoters,
                 profile,
                 profile_id,
                 current_id,
@@ -229,17 +224,7 @@ pub(crate) fn walk_pair(
             };
             match (p_dc.subtree.as_deref(), n_dc.subtree.as_deref()) {
                 (Some(ps), Some(ns)) if ps.dir_hash() != ns.dir_hash() => {
-                    walk_pair(
-                        Some(ps),
-                        ns,
-                        child_id,
-                        profile,
-                        profile_id,
-                        tree,
-                        profiles,
-                        promoters,
-                        out,
-                    );
+                    walk_pair(Some(ps), ns, child_id, profile, profile_id, tree, out);
                 }
                 (Some(_), Some(_)) | (None, None) => {
                     // Hashes match (covered both sides) or both sides
@@ -279,18 +264,16 @@ pub(crate) fn walk_pair(
 /// (different rules for Seed vs Standard).
 ///
 /// **Borrow shape.** Takes `profile_id: ProfileId` (not `&mut Profile`)
-/// because `walk_pair`'s `sub_watch_demand` calls need `&ProfileMap`
-/// alongside the Profile read. Splitting the &mut Profile borrow at the
-/// caller would require two `get_mut` round-trips per graft; threading
-/// the id through here lets graft re-borrow under whichever shape each
-/// step needs (immutable for `walk_pair`, mutable for the splice write).
+/// because the splice write and the immutable Profile read for the
+/// `walk_pair` argument live on opposite sides of a borrow boundary.
+/// Threading the id through lets graft re-borrow under whichever shape
+/// each step needs.
 pub(crate) fn graft(
     profile_id: ProfileId,
     target: ResourceId,
     response_arc: Arc<DirSnapshot>,
     tree: &mut Tree,
     profiles: &mut ProfileMap,
-    promoters: &PromoterRegistry,
     out: &mut StepOutput,
 ) {
     // Anchor threads through `splice` to lock the navigation invariant.
@@ -325,8 +308,8 @@ pub(crate) fn graft(
         return;
     }
 
-    // Emit Watch ops + materialise / reap Tree slots. The Profile borrow
-    // co-exists with the &ProfileMap shared borrow — both reads, both fine.
+    // Emit Watch ops + materialise / reap Tree slots. The Profile
+    // borrow is immutable and disjoint from `&mut tree`.
     {
         let Some(profile) = profiles.get(profile_id) else {
             return;
@@ -338,8 +321,6 @@ pub(crate) fn graft(
             profile,
             profile_id,
             tree,
-            profiles,
-            promoters,
             out,
         );
     }
@@ -460,28 +441,27 @@ pub(crate) fn current_target_hash(
 }
 
 /// Reap the Tree slot at `(parent, name)` — and, recursively, every
-/// descendant of `prior_child` if it's a Dir. Watch contributions are
-/// released on the 1→0 edge for covered Dirs (always) and covered Leaves
-/// under `profile.has_per_file_fds`. Idempotent on missing slots.
+/// descendant of `prior_child` if it's a Dir. Releases the per-slot
+/// [`ContribKey::ProfileDescendant`] contribution for covered Dirs
+/// (always) and covered Leaves under `profile.has_per_file_fds`.
+/// Idempotent on missing slots.
 ///
 /// Reverse-lex within each Dir's children (leaves before parents) so the
 /// `try_reap`-after-`vacate` gate sees a fully-drained slot at every
 /// level.
 ///
-/// `sub_watch_demand` threads `profile.events_union` as the contribution
-/// and `Some(profile_id)` as the explicit `releasing_descendant`
-/// signal: during graft `Profile.current` is still `Some` while this
-/// helper runs, so the recompute would otherwise count this Profile's
-/// own descendant claim toward the post-decrement union. The param
-/// skips that contribution precisely.
+/// `sub_watch` removes the contribution by explicit key —
+/// [`ContribKey::ProfileDescendant`] carrying `profile_id`. The
+/// take-and-walk shape of `release_descendant_claim` may converge on a
+/// slot a prior sub-walk already drained; `sub_watch` silently skips
+/// the absent key.
 ///
 /// `pub(crate)` so [`Engine::release_descendant_claim`] can reuse the
-/// walk for whole-snapshot teardown — single source of truth for "walk
-/// covered descendants and release their `watch_demand`."
+/// walk for whole-snapshot teardown — single source of truth for
+/// "walk covered descendants and release their descendant
+/// contribution."
 pub(crate) fn delete_child(
     tree: &mut Tree,
-    profiles: &ProfileMap,
-    promoters: &PromoterRegistry,
     profile: &Profile,
     profile_id: ProfileId,
     parent: ResourceId,
@@ -502,8 +482,6 @@ pub(crate) fn delete_child(
         for (cname, cchild) in sub.entries.iter().rev() {
             delete_child(
                 tree,
-                profiles,
-                promoters,
                 profile,
                 profile_id,
                 resource,
@@ -515,10 +493,11 @@ pub(crate) fn delete_child(
     }
 
     // Phase 2: release this slot's watch contribution if we hold one.
-    // `sub_watch_demand` is safe in any counter state — the take-then-walk
-    // path of `release_descendant_claim` may converge on a slot a prior
-    // sub-walk already drained, and the helper short-circuits silently
-    // on `prev == 0` (see [`crate::refcounts`] module rustdoc).
+    // `sub_watch` is safe in any post-clamp / post-vacate state — the
+    // take-then-walk path of `release_descendant_claim` may converge
+    // on a slot a prior sub-walk already drained, and the helper
+    // silently skips an absent key (see [`crate::refcounts`] module
+    // rustdoc).
     let releases_watch = match prior_child.kind() {
         EntryKind::Dir => covers(profile, resource, tree),
         EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
@@ -526,16 +505,21 @@ pub(crate) fn delete_child(
         }
     };
     if releases_watch {
-        sub_watch_demand(tree, profiles, promoters, resource, Some(profile_id), out);
+        sub_watch(
+            tree,
+            resource,
+            ContribKey::ProfileDescendant(profile_id),
+            out,
+        );
     }
 
     // Reap only when fully drained — preserves multi-Profile contributions.
-    // The `watch_demand == 0` gate is load-bearing: a co-resident contributor
+    // The `is_watched` gate is load-bearing: a co-resident contributor
     // (e.g., another Profile anchored at this slot, or a Promoter proxy)
     // keeps the kernel watch live, and `vacate`'s defensive `Unwatch` branch
     // would otherwise tear it down. With the gate in place, vacate runs only
     // on slots that this Profile was the last contributor to.
-    if tree.get(resource).is_some_and(|r| r.watch_demand == 0) {
+    if tree.get(resource).is_some_and(|r| !r.is_watched()) {
         tree.vacate(resource, out);
         tree.try_reap(resource);
     }
@@ -543,21 +527,15 @@ pub(crate) fn delete_child(
 
 /// Materialise the Tree slot at `(parent, name)` — and, recursively,
 /// every descendant of `new_child` when it's a Dir whose subtree was
-/// observed. Emits `add_watch_demand` on the 0→1 edge (or on a mask
-/// widening) for covered Dirs (always) and covered Leaves under
-/// `profile.has_per_file_fds`.
+/// observed. Installs the per-slot [`ContribKey::ProfileDescendant`]
+/// contribution (with mask `profile.events_union`) for covered Dirs
+/// (always) and covered Leaves under `profile.has_per_file_fds`.
 ///
-/// `add_watch_demand` threads `profile.events_union` as the per-Resource
-/// mask contribution. The recursive `walk_pair` call into the new
-/// Dir's subtree threads `profiles` through so its own `delete_child` /
-/// `create_child` recursion is well-formed; on a pure-create walk
-/// (`prior == None`) `delete_child` doesn't fire and the borrow is just
-/// a structural carrier, but threading it keeps the signature uniform
-/// across both `walk_pair` entry points.
+/// The recursive `walk_pair` call into the new Dir's subtree carries
+/// the same `(profile, profile_id, tree)` so its own `delete_child` /
+/// `create_child` recursion is well-formed.
 fn create_child(
     tree: &mut Tree,
-    profiles: &ProfileMap,
-    promoters: &PromoterRegistry,
     profile: &Profile,
     profile_id: ProfileId,
     parent: ResourceId,
@@ -575,7 +553,13 @@ fn create_child(
     if covers(profile, resource, tree) {
         let need_watch = matches!(new_child, ChildEntry::Dir(_)) || profile.has_per_file_fds;
         if need_watch {
-            add_watch_demand(tree, resource, profile.events_union, out);
+            add_watch(
+                tree,
+                resource,
+                ContribKey::ProfileDescendant(profile_id),
+                profile.events_union,
+                out,
+            );
         }
     }
 
@@ -585,9 +569,7 @@ fn create_child(
     if let ChildEntry::Dir(dc) = new_child
         && let Some(sub) = dc.subtree.as_deref()
     {
-        walk_pair(
-            None, sub, resource, profile, profile_id, tree, profiles, promoters, out,
-        );
+        walk_pair(None, sub, resource, profile, profile_id, tree, out);
     }
 }
 
@@ -602,8 +584,8 @@ mod tests {
     use compact_str::CompactString;
     use specter_core::{
         ChildEntry, ClassSet, DedupKey, DirChild, DirMeta, DirSnapshot, EntryKind, LeafEntry,
-        Profile, ProfileMap, PromoterRegistry, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-        StepOutput, SubId, Tree, TreeSnapshot, WatchOp,
+        Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubId,
+        Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -611,13 +593,6 @@ mod tests {
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
-
-    /// Empty promoter registry for `walk_pair` / `graft` test calls.
-    /// These reconciler tests exercise Profile-only behaviour;
-    /// Promoter-side coverage uses non-empty registries elsewhere.
-    fn empty_promoters() -> PromoterRegistry {
-        PromoterRegistry::new()
-    }
 
     // ---------------------------------------------------------------------------
     // Fixtures
@@ -717,7 +692,6 @@ mod tests {
                 ("sub", dir_child(2, None)),
             ],
         );
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         walk_pair(
@@ -727,8 +701,6 @@ mod tests {
             profiles.get(pid).unwrap(),
             pid,
             &mut tree,
-            &profiles,
-            &promoters,
             &mut out,
         );
         assert_eq!(count_watch(&out), 1, "one Watch for the Dir creation");
@@ -748,7 +720,6 @@ mod tests {
                 ("sub", dir_child(2, None)),
             ],
         );
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         walk_pair(
@@ -758,8 +729,6 @@ mod tests {
             profiles.get(pid).unwrap(),
             pid,
             &mut tree,
-            &profiles,
-            &promoters,
             &mut out,
         );
         assert_eq!(
@@ -780,7 +749,6 @@ mod tests {
         let prior = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         let new = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         assert_eq!(prior.dir_hash(), new.dir_hash());
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         walk_pair(
@@ -790,8 +758,6 @@ mod tests {
             profiles.get(pid).unwrap(),
             pid,
             &mut tree,
-            &profiles,
-            &promoters,
             &mut out,
         );
         assert_eq!(count_watch(&out), 0);
@@ -807,22 +773,22 @@ mod tests {
         // Set up: prior has a covered Dir; new doesn't. Delete should release
         // Watch on the Dir.
         let (mut tree, profiles, root, pid) = anchor(false);
-        // Materialise the Dir slot first so the delete path has something to
-        // sub_watch_demand against. Pre-populate with the same contribution
-        // walk_pair will drop on delete (the Profile's events_union, here
-        // STRUCTURE).
+        // Materialise the Dir slot first so the delete path has
+        // something to `sub_watch` against. Pre-populate with the
+        // same contribution walk_pair will drop on delete (the
+        // Profile's events_union, here STRUCTURE).
         let sub_id = tree.ensure(Some(root), "sub", ResourceRole::User);
         tree.set_kind(sub_id, ResourceKind::Dir);
-        crate::refcounts::add_watch_demand(
+        crate::refcounts::add_watch(
             &mut tree,
             sub_id,
+            specter_core::ContribKey::ProfileDescendant(pid),
             ClassSet::STRUCTURE,
             &mut StepOutput::default(),
         );
 
         let prior = dir_snap(root, 100, vec![("sub", dir_child(2, None))]);
         let new = dir_snap(root, 200, vec![]); // bumped root meta to force descent
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         walk_pair(
@@ -832,8 +798,6 @@ mod tests {
             profiles.get(pid).unwrap(),
             pid,
             &mut tree,
-            &profiles,
-            &promoters,
             &mut out,
         );
         assert_eq!(count_unwatch(&out), 1, "Unwatch for the deleted Dir");
@@ -847,16 +811,16 @@ mod tests {
         let (mut tree, profiles, root, pid) = anchor(true);
         let leaf_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
         tree.set_kind(leaf_id, ResourceKind::File);
-        crate::refcounts::add_watch_demand(
+        crate::refcounts::add_watch(
             &mut tree,
             leaf_id,
+            specter_core::ContribKey::ProfileDescendant(pid),
             ClassSet::CONTENT,
             &mut StepOutput::default(),
         );
 
         let prior = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         let new = dir_snap(root, 200, vec![]);
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         walk_pair(
@@ -866,8 +830,6 @@ mod tests {
             profiles.get(pid).unwrap(),
             pid,
             &mut tree,
-            &profiles,
-            &promoters,
             &mut out,
         );
         assert_eq!(count_unwatch(&out), 1);
@@ -886,16 +848,16 @@ mod tests {
         // Pre-materialise the prior Dir slot with the matching mask.
         let foo_id = tree.ensure(Some(root), "foo", ResourceRole::User);
         tree.set_kind(foo_id, ResourceKind::Dir);
-        crate::refcounts::add_watch_demand(
+        crate::refcounts::add_watch(
             &mut tree,
             foo_id,
+            specter_core::ContribKey::ProfileDescendant(pid),
             ClassSet::STRUCTURE,
             &mut StepOutput::default(),
         );
 
         let prior = dir_snap(root, 100, vec![("foo", dir_child(1, None))]);
         let new = dir_snap(root, 200, vec![("foo", dir_child(2, None))]);
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         walk_pair(
@@ -905,8 +867,6 @@ mod tests {
             profiles.get(pid).unwrap(),
             pid,
             &mut tree,
-            &profiles,
-            &promoters,
             &mut out,
         );
         assert_eq!(count_unwatch(&out), 1);
@@ -927,7 +887,6 @@ mod tests {
         let response = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
         let prior_arc_count = Arc::strong_count(&snap_a);
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         graft(
@@ -936,7 +895,6 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
-            &promoters,
             &mut out,
         );
         assert_eq!(count_watch(&out), 0);
@@ -954,7 +912,6 @@ mod tests {
         // No prior subtree at target ⇒ graft splices wholesale.
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let response = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         graft(
@@ -963,7 +920,6 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
-            &promoters,
             &mut out,
         );
         let p = profiles.get(pid).unwrap();
@@ -1013,21 +969,20 @@ mod tests {
             .fired_subs
             .insert(stale_key.clone());
 
-        // a.rs needs a watch_demand contribution so delete_child's
-        // sub_watch_demand path is reachable; the per-file Profile would
-        // have placed one there at attach via reconcile's create_child
-        // pass. Simulate that here directly.
-        crate::refcounts::add_watch_demand(
+        // a.rs needs a watch contribution so `delete_child`'s
+        // `sub_watch` path is reachable; the per-file Profile would
+        // have placed one there at attach via `create_child`.
+        // Simulate that here directly.
+        crate::refcounts::add_watch(
             &mut tree,
             a_rs_id,
+            specter_core::ContribKey::ProfileDescendant(pid),
             ClassSet::CONTENT,
             &mut StepOutput::default(),
         );
 
         // Probe response: a.rs is gone.
         let response = dir_snap(root, 200, vec![]);
-
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         graft(
@@ -1036,7 +991,6 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
-            &promoters,
             &mut out,
         );
 
@@ -1079,8 +1033,6 @@ mod tests {
         // forces graft to walk the level rather than equal-hash early-out.
         let response = dir_snap(root, 200, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
-        let promoters = empty_promoters();
-
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -1088,7 +1040,6 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
-            &promoters,
             &mut out,
         );
 
@@ -1133,7 +1084,6 @@ mod tests {
         // Probe response deletes a.rs. The reap fires; the purge runs;
         // the Subtree entry should survive.
         let response = dir_snap(root, 200, vec![]);
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         graft(
@@ -1142,7 +1092,6 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
-            &promoters,
             &mut out,
         );
 
@@ -1198,15 +1147,15 @@ mod tests {
         }
 
         // Match the per-file Profile's contribution on the slot.
-        crate::refcounts::add_watch_demand(
+        crate::refcounts::add_watch(
             &mut tree,
             a_rs_id,
+            specter_core::ContribKey::ProfileDescendant(pid_a),
             ClassSet::CONTENT,
             &mut StepOutput::default(),
         );
 
         let response = dir_snap(root, 200, vec![]);
-        let promoters = empty_promoters();
 
         let mut out = StepOutput::default();
         graft(
@@ -1215,7 +1164,6 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
-            &promoters,
             &mut out,
         );
 
@@ -1278,8 +1226,6 @@ mod tests {
 
         let response = dir_snap(b_id, 200, vec![]);
 
-        let promoters = empty_promoters();
-
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -1287,7 +1233,6 @@ mod tests {
             Arc::clone(&response),
             &mut tree,
             &mut profiles,
-            &promoters,
             &mut out,
         );
 

@@ -47,11 +47,11 @@
 //!    `StructureChanged` at `current_prefix`. I5: drops the event if a
 //!    probe is already in flight (`Profile.pending_probe.is_some()`).
 
-use crate::refcounts::{add_watch_demand, sub_watch_demand};
+use crate::refcounts::{add_watch, sub_watch};
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, ClassSet, DescentState, Diagnostic, DirSnapshot, EntryKind, ProbeOwner, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput,
+    AnchorClaim, ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind,
+    ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput,
 };
 use std::time::Instant;
 
@@ -241,7 +241,13 @@ impl crate::Engine {
              and release prior state before re-entering descent (profile = {profile_id:?})",
         );
 
-        add_watch_demand(&mut self.tree, prefix, ClassSet::STRUCTURE, out);
+        add_watch(
+            &mut self.tree,
+            prefix,
+            ContribKey::ProfileDescent(profile_id),
+            ClassSet::STRUCTURE,
+            out,
+        );
 
         let owner = ProbeOwner::Profile(profile_id);
         let Some(correlation) = self.mint_owner_correlation(owner) else {
@@ -389,16 +395,14 @@ impl crate::Engine {
     /// 1. Mint a fresh probe correlation for `owner` (opens channel).
     /// 2. Mutate descent state in place: advance `current_prefix` to
     ///    the new resource and drop the consumed head segment from
-    ///    `remaining_components`. State-flip BEFORE `sub_watch_demand`
-    ///    so the recompute attributes the contribution to the new
-    ///    prefix, not the old one.
+    ///    `remaining_components`.
     /// 3. Release the old prefix's STRUCTURE contribution; install the
     ///    new prefix's.
     /// 4. Emit the fresh descent probe at the new prefix.
     ///
     /// The old prefix retains its `DescentScaffold` role (set on its
     /// own `Tree::ensure` at descent's start) — the role survives
-    /// `sub_watch_demand`; reaping is deferred to a future state
+    /// `sub_watch`; reaping is deferred to a future state
     /// transition. No `try_reap` here.
     fn advance_descent(
         &mut self,
@@ -415,15 +419,9 @@ impl crate::Engine {
             d.remaining_components.remove(0);
         }
 
-        sub_watch_demand(
-            &mut self.tree,
-            &self.profiles,
-            &self.promoters,
-            old_prefix,
-            None,
-            out,
-        );
-        add_watch_demand(&mut self.tree, new_prefix, ClassSet::STRUCTURE, out);
+        let key = descent_key(owner);
+        sub_watch(&mut self.tree, old_prefix, key, out);
+        add_watch(&mut self.tree, new_prefix, key, ClassSet::STRUCTURE, out);
 
         let target_path = self.tree.path_of(new_prefix).unwrap_or_default();
         Self::emit_descent_probe(owner, correlation, new_prefix, target_path, out);
@@ -437,13 +435,15 @@ impl crate::Engine {
     /// Per-owner cleanup (parallel shape):
     ///
     /// - **Profile.** Delegates to [`Self::release_descent_prefix_claim`]:
-    ///   transitions `Pending → Idle`, releases the prefix's STRUCTURE
-    ///   contribution (counter-aware), and `try_reap`s the prefix slot.
+    ///   transitions `Pending → Idle`, releases the prefix's
+    ///   [`specter_core::ContribKey::ProfileDescent`] contribution,
+    ///   and `try_reap`s the prefix slot.
     /// - **Promoter.** Delegates to
     ///   [`Self::release_promoter_descent_prefix_claim`]: transitions
-    ///   `PrefixPending → Active{empty}` BEFORE `sub_watch_demand` so the
-    ///   recompute drops the 5a attribution; counter-aware sub on the
-    ///   prefix's STRUCTURE; `try_reap`.
+    ///   `PrefixPending → Active{empty}` for owner bookkeeping,
+    ///   removes the
+    ///   [`specter_core::ContribKey::PromoterPrefix`] contribution
+    ///   by key, and `try_reap`s.
     ///
     /// Three call sites:
     /// - [`Self::dispatch_descent_ok`]'s structurally-unreachable
@@ -453,10 +453,9 @@ impl crate::Engine {
     /// - [`Self::on_watch_op_rejected`]'s descent-prefix purge loops
     ///   (Profile and Promoter sides).
     ///
-    /// Tolerant of any counter state — the per-owner helpers fold the
-    /// "post-clamp / post-vacate counter is 0" case into
-    /// `sub_watch_demand`'s short-circuit, so the state-flip alone is
-    /// the observable cleanup in those degenerate paths.
+    /// Tolerant of any post-clamp / post-vacate state — `sub_watch`
+    /// silently skips an absent key, so the state-flip alone is the
+    /// observable cleanup in those degenerate paths.
     fn release_owner_descent_prefix(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
         match owner {
             ProbeOwner::Profile(pid) => self.release_descent_prefix_claim(pid, out),
@@ -516,15 +515,19 @@ impl crate::Engine {
             "descent anchor materialization: Profile.resource diverges from descent anchor",
         );
 
-        sub_watch_demand(
+        sub_watch(
             &mut self.tree,
-            &self.profiles,
-            &self.promoters,
             prefix,
-            None,
+            ContribKey::ProfileDescent(profile_id),
             out,
         );
-        add_watch_demand(&mut self.tree, new_resource, events_union, out);
+        add_watch(
+            &mut self.tree,
+            new_resource,
+            ContribKey::ProfileAnchor(profile_id),
+            events_union,
+            out,
+        );
 
         self.set_watch_root_parent(profile_id, new_resource, out);
         self.start_seed_burst(profile_id, now, out);
@@ -603,11 +606,6 @@ impl crate::Engine {
                 // *first* remaining component (we're descending into it
                 // from the parent again).
                 //
-                // Update descent state BEFORE sub_watch_demand so the
-                // recompute attributes this owner's STRUCTURE
-                // contribution to the new prefix (parent_id), not the
-                // vanished one.
-                //
                 // In-place mutation: prepend onto the existing
                 // `remaining_components` rather than cloning + rebuilding
                 // a fresh DescentState — saves both the whole-vec clone
@@ -622,22 +620,16 @@ impl crate::Engine {
                     }
                 }
 
-                sub_watch_demand(
-                    &mut self.tree,
-                    &self.profiles,
-                    &self.promoters,
-                    prefix,
-                    None,
-                    out,
-                );
-                // No `vacate` — `sub_watch_demand` cleared the union iff
-                // this owner was the last contributor; remaining
+                let key = descent_key(owner);
+                sub_watch(&mut self.tree, prefix, key, out);
+                // No `vacate` — `sub_watch` cleared the union iff this
+                // owner was the last contributor; remaining
                 // contributors (co-resident Profile / Promoter claims)
                 // keep theirs. `try_reap` removes the slot iff
                 // `has_anchors()` returns false.
                 self.tree.try_reap(prefix);
 
-                add_watch_demand(&mut self.tree, parent_id, ClassSet::STRUCTURE, out);
+                add_watch(&mut self.tree, parent_id, key, ClassSet::STRUCTURE, out);
 
                 let target_path = self.tree.path_of(parent_id).unwrap_or_default();
                 Self::emit_descent_probe(owner, correlation, parent_id, target_path, out);
@@ -711,6 +703,19 @@ pub(crate) const fn kind_from_entry(k: EntryKind) -> ResourceKind {
     match k {
         EntryKind::File | EntryKind::Symlink | EntryKind::Other => ResourceKind::File,
         EntryKind::Dir => ResourceKind::Dir,
+    }
+}
+
+/// Owner-polymorphic [`ContribKey`] for the descent-prefix
+/// contribution. Profiles in `Pending` claim
+/// [`ContribKey::ProfileDescent`]; Promoters in `PrefixPending` claim
+/// [`ContribKey::PromoterPrefix`]. Sole site that fans out the two
+/// arms — `advance_descent` and `dispatch_descent_vanished` both use
+/// the same key for sub-then-add on the descent state's prefix slot.
+const fn descent_key(owner: ProbeOwner) -> ContribKey {
+    match owner {
+        ProbeOwner::Profile(pid) => ContribKey::ProfileDescent(pid),
+        ProbeOwner::Promoter(qid) => ContribKey::PromoterPrefix(qid),
     }
 }
 

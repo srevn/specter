@@ -346,7 +346,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
         },
         t1,
     );
-    let watch_demand_before = e.tree().get(r).unwrap().watch_demand;
+    let watch_demand_before = e.tree().get(r).unwrap().watch_demand();
 
     // Mid-burst ConfigDiff: modify A → B (same config_hash; different
     // name + command). Internally: detach A (refcount→0, reap_pending),
@@ -381,7 +381,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
     assert!(!p.reap_pending, "reap_pending cleared by revival");
     assert_eq!(p.sub_refcount, 1, "exactly one live Sub (B)");
     assert_eq!(
-        e.tree().get(r).unwrap().watch_demand,
+        e.tree().get(r).unwrap().watch_demand(),
         watch_demand_before,
         "anchor watch_demand unchanged on hot-reload modify (no double-bump)",
     );

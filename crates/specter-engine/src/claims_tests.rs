@@ -153,7 +153,7 @@ fn discard_anchor_state_preserves_watch_root_parent() {
     // contribution — the recompute walks covering Profiles, finds this
     // one still claims the parent, and keeps the union.
     assert!(
-        e.tree().get(parent).is_some_and(|r| r.watch_demand >= 1),
+        e.tree().get(parent).is_some_and(|r| r.watch_demand() >= 1),
         "parent watch_demand preserved",
     );
 }
@@ -275,19 +275,22 @@ fn discard_anchor_state_idempotent() {
 
 #[test]
 fn discard_anchor_state_safe_after_clamp() {
-    // anchor watch_demand was clamped to 0 (e.g., by WatchOpRejected
-    // pre-helper); release_anchor_claim's `sub_watch_demand` must
-    // short-circuit on the post-clamp counter and skip emitting a
-    // second Unwatch (the clamp already emitted one).
+    // anchor contributions were cleared (e.g., by WatchOpRejected
+    // → `clamp_watch_demand_to_zero`); `release_anchor_claim`'s
+    // `sub_watch` must silently skip the absent
+    // `ContribKey::ProfileAnchor(pid)` key and skip emitting a second
+    // Unwatch (the clamp already emitted one).
     let (mut e, _sid, pid, anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
 
     // Capture the pre-clamp counter to make sure clamp actually fired.
-    assert!(e.tree().get(anchor).is_some_and(|r| r.watch_demand > 0));
+    assert!(e.tree().get(anchor).is_some_and(|r| r.watch_demand() > 0));
 
     let mut clamp_out = StepOutput::default();
     clamp_watch_demand_to_zero(e.tree_mut(), anchor, &mut clamp_out);
     assert_eq!(
-        e.tree().get(anchor).map_or(0, |r| r.watch_demand),
+        e.tree()
+            .get(anchor)
+            .map_or(0, specter_core::Resource::watch_demand),
         0,
         "clamp zeroed the counter",
     );
@@ -394,7 +397,9 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
     // Confirm the child slot is materialised + watched.
     let nested_id = e.tree().lookup(Some(anchor), "nested").expect("child slot");
     assert!(
-        e.tree().get(nested_id).is_some_and(|r| r.watch_demand >= 1),
+        e.tree()
+            .get(nested_id)
+            .is_some_and(|r| r.watch_demand() >= 1),
         "child watch_demand bumped by graft",
     );
 
@@ -404,7 +409,10 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
     // Child's contribution from this Profile released; the slot may
     // even have been reaped if no other claimers remain. Either way,
     // its watch_demand drops to 0.
-    let child_demand = e.tree().get(nested_id).map_or(0, |r| r.watch_demand);
+    let child_demand = e
+        .tree()
+        .get(nested_id)
+        .map_or(0, specter_core::Resource::watch_demand);
     assert_eq!(
         child_demand, 0,
         "descendant contribution released after discard_anchor_state",
@@ -434,8 +442,8 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
 /// 4. `WatchOpRejected` on the anchor ⇒ `on_watch_op_rejected` ⇒
 ///    clamp + `finalize_anchor_lost(P)` ⇒ `discard_anchor_state(P)`
 ///    ⇒ `release_descendant_claim(P)` walks the snapshot
-///    ⇒ `delete_child(b)` ⇒ `sub_watch_demand(b)` zeroes
-///    `b.watch_demand` ⇒ `tree.vacate(b, out)` emits
+///    ⇒ `delete_child(b)` ⇒ `sub_watch(b, ProfileDescendant(P))`
+///    empties `b.contributions` ⇒ `tree.vacate(b, out)` emits
 ///    `WatchOp::Unsuppress { resource: b }` and zeroes
 ///    `b.suppress_count`.
 /// 5. `finish_burst_to_idle(P)`'s defensive drain finds `b`'s slot
@@ -477,7 +485,7 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
     );
     let b_id = e.tree().lookup(Some(anchor), "b").expect("b materialised");
     assert_eq!(
-        e.tree().get(b_id).unwrap().watch_demand,
+        e.tree().get(b_id).unwrap().watch_demand(),
         1,
         "descendant b carries P's STRUCTURE contribution",
     );

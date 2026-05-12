@@ -46,7 +46,7 @@ pub use promoter::{
     Promoter, PromoterAttachRequest, PromoterRegistry, PromoterRegistryDiff, PromoterState,
     ProxyState,
 };
-pub use resource::{Resource, ResourceKind, ResourceRole};
+pub use resource::{ContribKey, Resource, ResourceKind, ResourceRole};
 pub use scan_config::{
     ConfigError, GlobPattern, ScanConfig, ScanConfigBuilder, compute_config_hash,
 };

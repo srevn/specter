@@ -37,12 +37,13 @@
 use crate::Engine;
 use crate::descent::{MaterializeResult, kind_from_entry};
 use crate::engine::decompose_attach_path;
-use crate::refcounts::{add_watch_demand, sub_watch_demand};
+use crate::refcounts::{add_watch, sub_watch};
 use compact_str::CompactString;
 use specter_core::{
-    ClassSet, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent, PatternSpec,
-    ProbeOutcome, ProbeOwner, ProbeResponse, Promoter, PromoterAttachRequest, PromoterId,
-    PromoterState, ProxyState, ResourceId, ResourceRole, StepOutput, SubAttachRequest, SubId,
+    ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
+    PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, Promoter, PromoterAttachRequest,
+    PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole, StepOutput, SubAttachRequest,
+    SubId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -101,8 +102,8 @@ impl Engine {
     /// initial `PromoterState` shape *before* the registry insert, so
     /// the Promoter is registered with its final state and never
     /// observed in a transient placeholder shape (no `Active{empty}`
-    /// stand-in for a `PrefixPending` Promoter that the
-    /// recompute_resource_events walk could see mid-mutation).
+    /// stand-in for a `PrefixPending` Promoter that downstream
+    /// owner-state readers could see mid-mutation).
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn attach_promoter_inner(
         &mut self,
@@ -190,11 +191,16 @@ impl Engine {
                 );
             }
             MaterializeResult::Pending { prefix, .. } => {
-                // PrefixPending: bump the prefix's STRUCTURE
-                // contribution (source 5a in
-                // recompute_resource_events) and emit the descent
-                // probe.
-                add_watch_demand(&mut self.tree, prefix, ClassSet::STRUCTURE, out);
+                // PrefixPending: install the
+                // [`ContribKey::PromoterPrefix`] STRUCTURE
+                // contribution and emit the descent probe.
+                add_watch(
+                    &mut self.tree,
+                    prefix,
+                    ContribKey::PromoterPrefix(promoter_id),
+                    ClassSet::STRUCTURE,
+                    out,
+                );
                 let owner = ProbeOwner::Promoter(promoter_id);
                 let Some(correlation) = self.mint_owner_correlation(owner) else {
                     return promoter_id;
@@ -261,10 +267,11 @@ impl Engine {
         }
 
         // 1. Flip state to `Active { proxies: empty }` BEFORE any
-        // refcount work. The state-flip is what tells
-        // recompute_resource_events to drop the 5a (PrefixPending)
-        // attribution if any — the prior prefix release below sees
-        // post-flip Promoter contribution attribution.
+        // refcount work. Owner-bookkeeping: the contribution-map
+        // entry for `prior_prefix_to_release` is keyed by
+        // [`ContribKey::PromoterPrefix`] and is removed by explicit
+        // key below; the state-flip aligns
+        // [`PromoterState`] readers with the post-release shape.
         if let Some(q) = self.promoters.get_mut(promoter_id) {
             q.state = PromoterState::Active {
                 proxies: BTreeMap::new(),
@@ -272,17 +279,17 @@ impl Engine {
         }
 
         // 2. Release the prior prefix's STRUCTURE contribution if any.
-        // Recompute walks Promoter (now Active{empty}, no contribution
-        // to prior prefix) → counter -1 cleanly. try_reap is
-        // idempotent — slot survives iff something else still holds
-        // it (children, profiles, role anchors).
+        // The contribution map's key was [`ContribKey::PromoterPrefix`]
+        // — the post-state-flip Active{empty} no longer holds this
+        // claim, but the contribution map is the source of truth and
+        // is removed by key here. `try_reap` is idempotent — the slot
+        // survives iff something else still holds it (children,
+        // profiles, role anchors).
         if let Some(prior) = prior_prefix_to_release {
-            sub_watch_demand(
+            sub_watch(
                 &mut self.tree,
-                &self.profiles,
-                &self.promoters,
                 prior,
-                None,
+                ContribKey::PromoterPrefix(promoter_id),
                 out,
             );
             self.tree.try_reap(prior);
@@ -350,10 +357,10 @@ impl Engine {
                     "register_proxy: state must be Active (promoter = {promoter_id:?})"
                 ),
             }
-            // [H-5] Only enqueue when NEWLY registered. Re-registration
-            // is structurally idempotent — both on the counter
-            // (`already_carries` skips add_watch_demand below) and on
-            // the queue (this gate).
+            // Only enqueue when NEWLY registered. Re-registration is
+            // structurally idempotent — both on the contribution map
+            // (`already_carries` skips `add_watch` below) and on the
+            // queue (this gate).
             if !already_carries {
                 q.pending_enumerations.insert(resource);
             }
@@ -370,7 +377,13 @@ impl Engine {
         }
 
         if !already_carries {
-            add_watch_demand(&mut self.tree, resource, ClassSet::STRUCTURE, out);
+            add_watch(
+                &mut self.tree,
+                resource,
+                ContribKey::PromoterProxy(promoter_id),
+                ClassSet::STRUCTURE,
+                out,
+            );
         }
     }
 
@@ -1054,12 +1067,14 @@ impl Engine {
     ///    runs the standard deferred-reap-or-immediate-reap branch
     ///    on the corresponding Profile.
     /// 3. State-branch on `Promoter.state`:
-    ///    - `PrefixPending`: flip state to `Active{empty}` BEFORE
-    ///      `sub_watch_demand` so the recompute drops the prefix's 5a
-    ///      contribution. Try-reap the prefix.
+    ///    - `PrefixPending`: flip state to `Active{empty}` for owner
+    ///      bookkeeping, then `sub_watch` the prefix by
+    ///      [`specter_core::ContribKey::PromoterPrefix`]. Try-reap the
+    ///      prefix.
     ///    - `Active`: snapshot the proxies and call
-    ///      [`Self::unregister_proxy`] on each (which sub_watch_demands,
-    ///      clears the back-ref, and try-reaps the slot).
+    ///      [`Self::unregister_proxy`] on each — which `sub_watch`es by
+    ///      [`specter_core::ContribKey::PromoterProxy`], clears the
+    ///      back-ref, and try-reaps the slot.
     /// 4. Remove the Promoter from the registry. Emit
     ///    [`Diagnostic::PromoterReaped`].
     pub(crate) fn reap_promoter_inner(
@@ -1114,9 +1129,10 @@ impl Engine {
         });
         match state_kind {
             Some(PromoterReapStateKind::PrefixPending) => {
-                // Capture the prefix BEFORE flipping state — the flip
-                // drops the recompute's attribution to this Promoter,
-                // and `sub_watch_demand` walks post-flip.
+                // Capture the prefix BEFORE flipping state. The
+                // contribution map's [`ContribKey::PromoterPrefix`]
+                // key is removed below; the state-flip is for owner
+                // bookkeeping only.
                 let prefix = self.promoters.get(promoter_id).and_then(|q| {
                     if let PromoterState::PrefixPending(d) = &q.state {
                         Some(d.current_prefix)
@@ -1130,12 +1146,10 @@ impl Engine {
                     };
                 }
                 if let Some(prefix) = prefix {
-                    sub_watch_demand(
+                    sub_watch(
                         &mut self.tree,
-                        &self.profiles,
-                        &self.promoters,
                         prefix,
-                        None,
+                        ContribKey::PromoterPrefix(promoter_id),
                         out,
                     );
                     self.tree.try_reap(prefix);

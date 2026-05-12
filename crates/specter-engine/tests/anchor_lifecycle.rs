@@ -161,7 +161,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         Some(ResourceKind::File),
     );
     // Both Profiles claim the anchor → watch_demand = 2.
-    assert_eq!(e.tree().get(anchor).unwrap().watch_demand, 2);
+    assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 2);
 
     // Drive P's probe to Vanished. discard_anchor_state clears
     // P.kind, P.current, P.baseline, P.anchor_claim.
@@ -180,7 +180,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     assert_eq!(p.anchor_claim, AnchorClaim::None);
     assert!(matches!(p.state, ProfileState::Idle));
     // Q's claim keeps the anchor alive.
-    assert_eq!(e.tree().get(anchor).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
     // Inject FsEvent at the anchor — Q is alive so the kernel watch
     // is still in place. drive_burst routes P (Idle, current=None) to

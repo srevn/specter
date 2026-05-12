@@ -13,8 +13,13 @@
 //! choice explicit at every call site. Writes go through
 //! [`crate::Tree::set_kind`], same pattern as `Tree::set_role`.
 //!
-//! The remaining pure-data fields (`watch_demand`, `suppress_count`,
-//! `events_union`, `role`) are `pub`; the engine writes them directly.
+//! `contributions` is `pub(crate)` — the engine's refcount helpers
+//! (`add_watch` / `sub_watch`) are the sole legitimate mutators. Read
+//! access for the per-Resource demand summary goes through
+//! [`Resource::watch_demand`] (number of contributors) and
+//! [`Resource::events_union`] (OR over contributions' masks).
+//!
+//! `suppress_count` and `role` are `pub`; the engine writes them directly.
 
 use crate::ids::{ProfileId, PromoterId, ResourceId};
 use crate::sub::ClassSet;
@@ -22,6 +27,56 @@ use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use string_interner::symbol::SymbolU32;
 use tinyvec::TinyVec;
+
+/// Identity of a single contributor to a Resource's contributions map.
+///
+/// Each `(Resource, ContribKey)` pair holds at most one entry — the
+/// value is the contributor's `ClassSet` mask, which the per-Resource
+/// union OR-folds for the kqueue / inotify fflags. The six variants
+/// partition the cross-layer "who claims me" graph by owner role: a
+/// Profile holds at most one claim of each kind per Resource (anchor
+/// / parent / descent / descendant); a Promoter holds at most one
+/// (`PrefixPending` XOR `Active`-proxy) per Resource.
+///
+/// Each variant carries the owner id so the contribution can be
+/// removed by key without re-deriving from owner state — contribution
+/// attribution is **data**, not a derivation. The engine's refcount
+/// helpers ([`crate::Tree::vacate`], `add_watch` / `sub_watch`) read
+/// and write the map directly; there is no walk-the-registry
+/// recompute.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum ContribKey {
+    /// Profile is anchored at this Resource —
+    /// `Profile.anchor_claim == AnchorClaim::Held` AND
+    /// `Profile.resource == resource`. Mask is `Profile.events_union`.
+    ProfileAnchor(ProfileId),
+    /// Profile's watch-root parent points at this Resource —
+    /// `Profile.watch_root_parent == Some(resource)`. Mask is
+    /// `STRUCTURE` (parent-edge watch is for anchor-reappearance
+    /// detection only).
+    ProfileParent(ProfileId),
+    /// Profile is in `Pending` descent with `current_prefix ==
+    /// resource`. Mask is `STRUCTURE` (descent prefix watch is for
+    /// next-segment materialisation only).
+    ProfileDescent(ProfileId),
+    /// Profile holds a covered-descendant claim at this Resource
+    /// (`resource != Profile.resource` AND
+    /// `covers(Profile, resource, tree) == true` for a covered Dir,
+    /// or under `Profile.has_per_file_fds` for a covered Leaf). Mask
+    /// is `Profile.events_union`. Per-resource fan-out is
+    /// 1-to-N across the snapshot but each (Resource, Profile) pair
+    /// contributes at most one entry.
+    ProfileDescendant(ProfileId),
+    /// Promoter is in `PrefixPending` descent with `current_prefix ==
+    /// resource`. Mask is `STRUCTURE`. Mutually exclusive with
+    /// [`Self::PromoterProxy`] for the same Promoter.
+    PromoterPrefix(PromoterId),
+    /// Promoter is in `Active` state with a proxy entry at this
+    /// Resource (`proxies.contains_key(&resource)`). Mask is
+    /// `STRUCTURE`. Mutually exclusive with [`Self::PromoterPrefix`]
+    /// for the same Promoter.
+    PromoterProxy(PromoterId),
+}
 
 #[derive(Debug)]
 pub struct Resource {
@@ -34,11 +89,6 @@ pub struct Resource {
     /// (`register_proxy` / `unregister_proxy`). Inline cap 1 covers
     /// the typical case: most Resources have zero proxies, and
     /// cross-Promoter sharing on the same slot is rare.
-    ///
-    /// `pub` (joining `watch_demand`, `suppress_count`,
-    /// `events_union`, `role`) — the engine mutates the back-ref
-    /// directly via the helpers above; the typed accessor
-    /// [`Resource::proxy_promoters`] is the public read surface.
     pub proxy_promoters: SmallVec<[PromoterId; 1]>,
     /// Probed kind of this slot. `ResourceKind::Unknown` is the
     /// pre-classification placeholder — fresh slots created by
@@ -50,20 +100,26 @@ pub struct Resource {
     /// [`Resource::kind_or_file`] (Unknown → File, the backend-mask
     /// convention).
     pub(crate) kind: ResourceKind,
-    pub watch_demand: u32,
-    pub suppress_count: u32,
-    /// Per-Resource OR of every covering Profile's contribution.
-    /// The kqueue translator (sensor side) reads this off
-    /// `WatchOp::Watch.events` to compute fflags. Maintained by the
-    /// engine's refcount helpers in lockstep with `watch_demand` — added
-    /// on +1, recomputed on −1 when the refcount stays non-zero, cleared
-    /// on 1→0 alongside the `Unwatch` op.
+    /// Per-Resource map of contributors to the kernel-watch demand.
+    /// `contributions.len()` is the refcount; `OR` over the values is
+    /// the per-Resource events mask passed to the sensor on
+    /// `WatchOp::Watch`. Maintained by the engine's `add_watch` /
+    /// `sub_watch` helpers (see `specter-engine::refcounts`) — direct
+    /// mutation outside those helpers (and [`crate::Tree::vacate`])
+    /// breaks the 0↔non-empty Watch / Unwatch invariant.
     ///
-    /// `pub` (not `pub(crate)`) — same visibility as `watch_demand` and
-    /// `suppress_count`. The engine reads it directly via
-    /// `tree.get(r).events_union`; the sensor never reads it (it sees the
-    /// per-resource mask through `WatchOp::Watch.events`).
-    pub events_union: ClassSet,
+    /// **Source of truth.** Coverage / Profile-state / Promoter-state
+    /// are no longer walked to recompute the union; the map is
+    /// directly read. Each call site that bumps or releases a
+    /// contribution passes the explicit [`ContribKey`], so removal is
+    /// O(log k) by key, not O(registry).
+    ///
+    /// `pub` joins `suppress_count` — the engine's refcount helpers
+    /// mutate the field directly. Outside the engine, the read surface
+    /// is [`Resource::watch_demand`] / [`Resource::events_union`] /
+    /// [`Resource::contributions`].
+    pub contributions: BTreeMap<ContribKey, ClassSet>,
+    pub suppress_count: u32,
     pub role: ResourceRole,
 }
 
@@ -114,10 +170,10 @@ impl ResourceKind {
     /// `open(path)` and `kevent(EV_ADD)` (kqueue).
     ///
     /// `Unknown` is the engine's sentinel for unclassified slots
-    /// (descent prefix placeholder, post-`add_watch_demand` before the
-    /// first probe). Treating it as a wildcard lets the watcher
-    /// proceed against whatever inode resolved and cache the observed
-    /// kind for downstream normalization / mask translation.
+    /// (descent prefix placeholder, post-`add_watch` before the first
+    /// probe). Treating it as a wildcard lets the watcher proceed
+    /// against whatever inode resolved and cache the observed kind
+    /// for downstream normalization / mask translation.
     #[must_use]
     pub const fn matches_or_unknown(self, observed: Self) -> bool {
         matches!(self, Self::Unknown) || self as u8 == observed as u8
@@ -141,9 +197,8 @@ impl Resource {
             profiles: TinyVec::new(),
             proxy_promoters: SmallVec::new(),
             kind: ResourceKind::Unknown,
-            watch_demand: 0,
+            contributions: BTreeMap::new(),
             suppress_count: 0,
-            events_union: ClassSet::EMPTY,
             role,
         }
     }
@@ -162,6 +217,43 @@ impl Resource {
                 self.role,
                 ResourceRole::WatchRootParent | ResourceRole::DescentScaffold
             )
+    }
+
+    /// Number of distinct contributors holding watch-demand at this
+    /// Resource. Derived from [`Self::contributions`]; `0` ⇔ the
+    /// Resource is not watched.
+    ///
+    /// Replaces the old `watch_demand: u32` field. Callers comparing
+    /// `> 0` should prefer [`Self::is_watched`] for clarity; the
+    /// numeric accessor exists for tests and diagnostic logs that
+    /// quote the count.
+    #[must_use]
+    pub fn watch_demand(&self) -> u32 {
+        // Typical fan-out is single-digit; cast is safe well below
+        // `u32::MAX`. Saturating cast as defence-in-depth.
+        u32::try_from(self.contributions.len()).unwrap_or(u32::MAX)
+    }
+
+    /// True iff this Resource has at least one contributor, i.e., the
+    /// kernel-watch refcount is `> 0`.
+    #[must_use]
+    pub fn is_watched(&self) -> bool {
+        !self.contributions.is_empty()
+    }
+
+    /// OR-fold of every contributor's `ClassSet` mask — the
+    /// per-Resource events mask the sensor sees on `WatchOp::Watch`.
+    /// `ClassSet::EMPTY` when the Resource has no contributors.
+    ///
+    /// Replaces the old `events_union: ClassSet` cached field. The
+    /// fold is O(k) over the contributions map; k is bounded by
+    /// typical multi-Profile fan-out (single-digit).
+    #[must_use]
+    pub fn events_union(&self) -> ClassSet {
+        self.contributions
+            .values()
+            .copied()
+            .fold(ClassSet::EMPTY, |a, b| a | b)
     }
 
     #[must_use]
@@ -244,8 +336,8 @@ impl Resource {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassSet, Resource, ResourceKind, ResourceRole};
-    use crate::ids::ResourceId;
+    use super::{ClassSet, ContribKey, Resource, ResourceKind, ResourceRole};
+    use crate::ids::{ProfileId, ResourceId};
     use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
 
     fn dummy_segment() -> SymbolU32 {
@@ -345,12 +437,51 @@ mod tests {
         assert!(!ResourceKind::Dir.matches_or_unknown(ResourceKind::Unknown));
     }
 
-    /// Fresh `Resource` initialises `events_union` to `EMPTY`. Refcount
-    /// helpers OR contributions onto this field as covering Profiles
-    /// attach.
+    /// Fresh `Resource` carries an empty contributions map ⇒
+    /// `events_union()` returns `EMPTY` and `watch_demand()` returns
+    /// `0`. Refcount helpers insert into the map as covering Profiles
+    /// / Promoters attach.
     #[test]
     fn fresh_resource_events_union_is_empty() {
         let r = Resource::new(None, dummy_segment(), ResourceRole::User);
-        assert_eq!(r.events_union, ClassSet::EMPTY);
+        assert_eq!(r.events_union(), ClassSet::EMPTY);
+        assert_eq!(r.watch_demand(), 0);
+        assert!(!r.is_watched());
+    }
+
+    /// `watch_demand()` counts distinct contributors; `events_union()`
+    /// OR-folds their masks. Two contributors with disjoint masks
+    /// produce a union containing both.
+    #[test]
+    fn contributions_map_yields_count_and_union() {
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        r.contributions.insert(
+            ContribKey::ProfileAnchor(ProfileId::default()),
+            ClassSet::CONTENT,
+        );
+        // A second `ProfileAnchor` from a different Profile would
+        // normally collide on the slotmap key; use a distinct
+        // [`ContribKey`] variant to keep the test free of slotmap
+        // setup boilerplate.
+        r.contributions.insert(
+            ContribKey::ProfileParent(ProfileId::default()),
+            ClassSet::STRUCTURE,
+        );
+        assert_eq!(r.watch_demand(), 2);
+        assert_eq!(r.events_union(), ClassSet::CONTENT | ClassSet::STRUCTURE);
+        assert!(r.is_watched());
+    }
+
+    /// Same-key re-insert overwrites the prior mask; the count and
+    /// the union reflect the freshest value.
+    #[test]
+    fn contributions_same_key_overwrites_mask() {
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let key = ContribKey::ProfileAnchor(ProfileId::default());
+        r.contributions.insert(key, ClassSet::CONTENT);
+        r.contributions
+            .insert(key, ClassSet::CONTENT | ClassSet::METADATA);
+        assert_eq!(r.watch_demand(), 1);
+        assert_eq!(r.events_union(), ClassSet::CONTENT | ClassSet::METADATA);
     }
 }

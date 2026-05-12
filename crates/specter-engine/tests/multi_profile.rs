@@ -127,7 +127,7 @@ fn two_profiles_one_resource_share_watch_demand() {
         .count();
     assert_eq!(watch_count_b, 0, "1→2 edge emits no Watch");
 
-    assert_eq!(e.tree().get(r).unwrap().watch_demand, 2);
+    assert_eq!(e.tree().get(r).unwrap().watch_demand(), 2);
 }
 
 #[test]

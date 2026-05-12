@@ -446,12 +446,12 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         "FS-root bootstrap separates prefix from anchor"
     );
     assert_eq!(
-        e.tree().get(prefix).unwrap().watch_demand,
+        e.tree().get(prefix).unwrap().watch_demand(),
         1,
         "descent prefix `/` carries the +1 STRUCTURE contribution",
     );
     assert_eq!(
-        e.tree().get(anchor).unwrap().watch_demand,
+        e.tree().get(anchor).unwrap().watch_demand(),
         0,
         "anchor scaffold is not yet bumped (descent hasn't materialized it)",
     );

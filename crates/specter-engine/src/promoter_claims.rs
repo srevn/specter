@@ -1,32 +1,32 @@
 //! Promoter-claim release helpers.
 //!
-//! A Promoter holds at most one Resource-side claim at a time, gated on
-//! `PromoterState`:
+//! A Promoter holds at most one Resource-side contribution per slot,
+//! gated on `PromoterState`:
 //!
-//! 1. **Descent prefix.** `Promoter.state == PrefixPending(d)` ⇒ Promoter
-//!    contributes `STRUCTURE` to `d.current_prefix.watch_demand` (source
-//!    5a in [`crate::refcounts::recompute_resource_events`]).
-//! 2. **Active proxy.** `Promoter.state == Active { proxies }` ⇒ Promoter
-//!    contributes `STRUCTURE` to each `proxies.keys()` slot's
-//!    `watch_demand` (source 5b).
+//! 1. **Descent prefix.** `Promoter.state == PrefixPending(d)` ⇒ the
+//!    Promoter contributes [`ContribKey::PromoterPrefix`] with
+//!    `STRUCTURE` at `d.current_prefix`.
+//! 2. **Active proxy.** `Promoter.state == Active { proxies }` ⇒ the
+//!    Promoter contributes [`ContribKey::PromoterProxy`] with
+//!    `STRUCTURE` at each `proxies.keys()` slot.
 //!
-//! The two states are mutually exclusive, so a Promoter contributes via 5a
-//! XOR 5b at any instant. The state-flip on `PrefixPending → Active`
-//! transfers contribution attribution: clear before refcount work, the
-//! recompute reads post-flip.
+//! The two state arms are mutually exclusive — a Promoter holds the
+//! prefix XOR proxy keys at any instant. The state-flip on
+//! `PrefixPending → Active` is owner-bookkeeping; the contribution
+//! map's source of truth changes via explicit `add_watch` / `sub_watch`
+//! calls keyed by [`ContribKey::PromoterPrefix`] /
+//! [`ContribKey::PromoterProxy`].
 //!
-//! This module is the Promoter-side mirror of [`crate::claims`]. The same
-//! two-side synchronisation discipline applies: clear the per-Promoter
-//! state field BEFORE `sub_watch_demand`, so the recompute models the
-//! post-release union. Each helper is:
+//! This module is the Promoter-side mirror of [`crate::claims`]. Each
+//! helper is:
 //!
 //! - **Idempotent.** State already in the post-release shape ⇒ no-op. Safe
 //!   to call from any site without first checking the claim's presence.
-//! - **Safe in any counter state.** `sub_watch_demand` short-circuits
-//!   silently on a zero counter (post-clamp slots, or slots reached
-//!   through `Tree::vacate`'s protocol-closer); see the
-//!   [`crate::refcounts`] module rustdoc. Only the state-flip persists
-//!   in those degenerate paths.
+//! - **Safe in any post-clamp / post-vacate state.**
+//!   [`crate::refcounts::sub_watch`] silently skips an absent key (the
+//!   map's [`ContribKey::PromoterPrefix`] /
+//!   [`ContribKey::PromoterProxy`] entry has already been cleared by a
+//!   prior path).
 //! - **Cancel-first.** A `debug_assert!` enforces the
 //!   probe-channel-closed precondition. Callers that may have an
 //!   in-flight probe MUST invoke [`Engine::cancel_owner_probe`]
@@ -34,18 +34,18 @@
 //!   "always cancel before release" is the safe default.
 
 use crate::Engine;
-use crate::refcounts::sub_watch_demand;
-use specter_core::{PromoterId, PromoterState, ResourceId, StepOutput};
+use crate::refcounts::sub_watch;
+use specter_core::{ContribKey, PromoterId, PromoterState, ResourceId, StepOutput};
 use std::collections::BTreeMap;
 
 impl Engine {
-    /// Release the Promoter's literal-prefix `watch_demand` contribution
-    /// if `PrefixPending`. Transitions the Promoter to `Active{empty}`.
-    /// Idempotent (non-`PrefixPending` ⇒ no-op); safe in any counter
-    /// state (a post-clamp `watch_demand == 0` short-circuits inside
-    /// `sub_watch_demand`). Calls `try_reap` on the prefix slot — its
-    /// `DescentScaffold` role is no longer load-bearing once no descent
-    /// claims it.
+    /// Release the Promoter's literal-prefix
+    /// [`ContribKey::PromoterPrefix`] contribution if `PrefixPending`.
+    /// Transitions the Promoter to `Active{empty}`. Idempotent
+    /// (non-`PrefixPending` ⇒ no-op); safe in any post-clamp /
+    /// post-vacate state — `sub_watch` silently skips an absent key.
+    /// Calls `try_reap` on the prefix slot — its `DescentScaffold`
+    /// role is no longer load-bearing once no descent claims it.
     ///
     /// **Cancel-first contract.** Callers with a possibly-in-flight
     /// descent probe (e.g., `on_watch_op_rejected`'s descent purge,
@@ -77,24 +77,16 @@ impl Engine {
              first to avoid losing the Cancel emission (promoter = {qid:?})",
         );
 
-        // State flip BEFORE sub. The recompute walks Promoter contributions
-        // post-flip — Active{empty} drops the 5a (PrefixPending) attribution
-        // to `prefix`, leaving only co-resident contributors (Profile
-        // descents, other Promoter proxies).
+        // State flip is owner-bookkeeping: the contribution map's
+        // [`ContribKey::PromoterPrefix`] key is removed below by
+        // explicit key, independent of state.
         if let Some(q) = self.promoters.get_mut(qid) {
             q.state = PromoterState::Active {
                 proxies: BTreeMap::new(),
             };
         }
 
-        sub_watch_demand(
-            &mut self.tree,
-            &self.profiles,
-            &self.promoters,
-            prefix,
-            None,
-            out,
-        );
+        sub_watch(&mut self.tree, prefix, ContribKey::PromoterPrefix(qid), out);
 
         self.tree.try_reap(prefix);
     }
@@ -141,9 +133,9 @@ impl Engine {
              (promoter = {qid:?}, proxy = {resource:?})",
         );
 
-        // 1. Clear map + queue entry FIRST. The recompute walk on
-        // `sub_watch_demand` below reads `proxies.contains_key(&r)`; we
-        // need it post-clear so the walk drops 5b on this resource.
+        // 1. Clear map + queue entry. Owner-bookkeeping only; the
+        // contribution map's [`ContribKey::PromoterProxy`] key is the
+        // refcount source of truth and is removed below.
         if let Some(q) = self.promoters.get_mut(qid) {
             if let PromoterState::Active { proxies } = &mut q.state {
                 proxies.remove(&resource);
@@ -151,15 +143,12 @@ impl Engine {
             q.pending_enumerations.remove(&resource);
         }
 
-        // 2. Decrement. `sub_watch_demand` is safe in any counter state —
-        // post-clamp paths land on `prev == 0` and the helper short-circuits
-        // silently (the Sensor is already Unwatched for this Resource).
-        sub_watch_demand(
+        // 2. Decrement by explicit key. `sub_watch` silently skips an
+        // absent key — safe against post-clamp / post-vacate slots.
+        sub_watch(
             &mut self.tree,
-            &self.profiles,
-            &self.promoters,
             resource,
-            None,
+            ContribKey::PromoterProxy(qid),
             out,
         );
 

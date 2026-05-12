@@ -251,12 +251,12 @@ pub enum WatchOp {
     /// rejecting installs where the path's on-disk kind diverges from
     /// the engine's expectation. `Unknown` is a wildcard: the engine
     /// emits it for slots it has not yet classified (descent prefix
-    /// placeholder, post-`add_watch_demand` before the first probe), and
-    /// the sensor accepts whatever inode resolves while caching the
+    /// placeholder, post-`add_watch` before the first probe), and the
+    /// sensor accepts whatever inode resolves while caching the
     /// observed kind for normalization / mask translation.
     ///
     /// `events` is the carrier for the per-Resource event-class union:
-    /// the engine ships `Resource.events_union` on every
+    /// the engine ships [`crate::Resource::events_union`] on every
     /// `Watch` op, the sensor diffs the cached per-FD mask, and
     /// re-registers iff different. `ClassSet::EMPTY` degrades to
     /// identity-floor-only delivery (kqueue: `NOTE_DELETE | NOTE_RENAME

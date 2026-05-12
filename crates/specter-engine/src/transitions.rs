@@ -59,7 +59,10 @@ impl Engine {
     ) {
         // Idempotence: an FsEvent for a Resource with `watch_demand == 0`
         // is a race between Unwatch and the Sensor's drain.
-        let watch_demand = self.tree.get(resource).map_or(0, |r| r.watch_demand);
+        let watch_demand = self
+            .tree
+            .get(resource)
+            .map_or(0, specter_core::Resource::watch_demand);
         if watch_demand == 0 {
             out.diagnostics
                 .push(Diagnostic::EventOnUnwatchedResource { resource });
@@ -837,8 +840,9 @@ impl Engine {
             }
         }
 
-        // Atomic counter zero. Helpers below see counter == 0 ⇒
-        // flag-clear only, no `sub_watch_demand` ⇒ no underflow.
+        // Atomic clear of the contributions map. Helpers below see
+        // an empty map ⇒ `sub_watch` silently skips each absent key;
+        // only the owner-bookkeeping flag-clears run.
         clamp_watch_demand_to_zero(&mut self.tree, resource, out);
 
         // Anchor claimers: synthesise an anchor-loss. `finalize_anchor_lost`
@@ -1324,16 +1328,16 @@ impl Engine {
     /// descendants, descent prefix — *are* released here; the asymmetry
     /// is by design.
     ///
-    /// **Ordering.** The anchor release runs BEFORE `finish_burst_to_idle`,
-    /// so any deferred `reap_profile` (`reap_pending`) sees an
-    /// `AnchorClaim::None` and skips its redundant release inside
-    /// `reap_profile::release_anchor_claim`. This mirrors the
-    /// `dispatch_*_vanished/failed` discipline.
+    /// **Ordering.** The anchor release runs BEFORE
+    /// `finish_burst_to_idle`, so any deferred `reap_profile`
+    /// (`reap_pending`) sees an `AnchorClaim::None` and skips its
+    /// redundant release inside `reap_profile::release_anchor_claim`.
+    /// This mirrors the `dispatch_*_vanished/failed` discipline.
     /// Reverse-ordering would have `finish_burst_to_idle` invoke
-    /// `reap_profile`, which would release the anchor; the post-`finish`
-    /// release would then see a counter that's already zero and (pre
-    /// counter-existence-check) underflow `sub_watch_demand`. The helper
-    /// + ordering combination removes both failure modes.
+    /// `reap_profile`, which would release the anchor; the
+    /// post-`finish` release would then see an absent contribution
+    /// and silently no-op — correct but redundant. The
+    /// "release-then-finish" ordering keeps the cleanup ordered.
     ///
     /// **Pending exclusion.** `ProfileState::Pending` is defensive here
     /// — `covering_profiles` already filters Pending Profiles at the
@@ -1425,7 +1429,6 @@ impl Engine {
                     arc,
                     &mut self.tree,
                     &mut self.profiles,
-                    &self.promoters,
                     out,
                 );
             }
@@ -1641,7 +1644,6 @@ impl Engine {
                     arc,
                     &mut self.tree,
                     &mut self.profiles,
-                    &self.promoters,
                     out,
                 );
             }
@@ -1773,7 +1775,6 @@ impl Engine {
                     arc,
                     &mut self.tree,
                     &mut self.profiles,
-                    &self.promoters,
                     out,
                 );
             }

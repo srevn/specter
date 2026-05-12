@@ -12,7 +12,6 @@ use crate::ids::ResourceId;
 use crate::op::WatchOp;
 use crate::output::StepOutput;
 use crate::resource::{Resource, ResourceKind, ResourceRole};
-use crate::sub::ClassSet;
 use slotmap::SlotMap;
 use std::path::PathBuf;
 use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
@@ -143,23 +142,21 @@ impl Tree {
     /// persist).
     ///
     /// `vacate` is the **protocol terminus** for the per-Resource
-    /// `watch_demand` and `suppress_count` counters: each branch acts
-    /// as the symmetric closer for the matching `add_watch_demand` /
-    /// `add_suppress` 0→1 emission. The branches mirror
-    /// `clamp_watch_demand_to_zero`'s "one closing op zeroes every
-    /// contributor at once" pattern; subsequent `sub_watch_demand` /
-    /// `sub_suppress` calls from co-resident bookkeeping
-    /// short-circuit on the post-zero counter.
+    /// contributions map and `suppress_count` counter: each branch
+    /// acts as the symmetric closer for the matching `add_watch` /
+    /// `add_suppress` 0→1 emission. Subsequent `sub_watch` /
+    /// `sub_suppress` calls from co-resident bookkeeping short-circuit
+    /// on the post-clear / post-zero state (absent key / counter 0).
     ///
     /// **Production caller discipline.** The sole production caller
     /// ([`crate::Tree`]'s consumer in `reconcile::delete_child`) only
-    /// invokes `vacate` once `watch_demand == 0` — co-resident watch
-    /// contributions keep the slot alive via the `watch_demand > 0`
-    /// guard at the call site. The `Unwatch` branch is therefore
-    /// dormant under that caller, but emitting it (rather than
-    /// asserting on the contract) makes any future caller correct by
-    /// construction: misuse degrades to "one extra closing op" rather
-    /// than to a panic / silent orphan.
+    /// invokes `vacate` once the contributions map is empty —
+    /// co-resident contributions keep the slot alive via the
+    /// `is_watched()` guard at the call site. The `Unwatch` branch is
+    /// therefore dormant under that caller, but emitting it (rather
+    /// than asserting on the contract) makes any future caller correct
+    /// by construction: misuse degrades to "one extra closing op"
+    /// rather than to a panic / silent orphan.
     ///
     /// **What survives.** Children, profiles, role, and the
     /// `proxy_promoters` back-ref are retention anchors and stay
@@ -169,10 +166,9 @@ impl Tree {
         let Some(r) = self.nodes.get_mut(id) else {
             return;
         };
-        if r.watch_demand > 0 {
+        if !r.contributions.is_empty() {
             out.watch_ops.push(WatchOp::Unwatch { resource: id });
-            r.watch_demand = 0;
-            r.events_union = ClassSet::EMPTY;
+            r.contributions.clear();
         }
         if r.suppress_count > 0 {
             out.watch_ops.push(WatchOp::Unsuppress { resource: id });
@@ -417,41 +413,48 @@ mod tests {
 
     #[test]
     fn vacate_clears_kind_keeps_children_on_drained_slot() {
-        // Drained slot (refcounts == 0): vacate's contract is "reset
-        // `kind` to Unknown on a slot whose refcounts have already
-        // been drained". Children, role, and back-refs survive.
+        // Drained slot (no contributions, suppress == 0): vacate's
+        // contract is "reset `kind` to Unknown on a slot whose
+        // refcounts have already been drained". Children, role, and
+        // back-refs survive.
         let mut tree = Tree::new();
         let parent = tree.ensure(None, "p", ResourceRole::User);
         let _child = tree.ensure(Some(parent), "c", ResourceRole::User);
         tree.set_kind(parent, crate::resource::ResourceKind::Dir);
-        // wd == 0 and suppress == 0 by construction (no refcount edges
-        // emitted) — vacate's precondition holds.
+        // `contributions` empty and `suppress == 0` by construction
+        // (no refcount edges emitted) — vacate's precondition holds.
 
         tree.vacate(parent, &mut discard());
 
         let r = tree.get(parent).unwrap();
         assert_eq!(r.kind, crate::resource::ResourceKind::Unknown);
-        assert_eq!(r.watch_demand, 0);
+        assert_eq!(r.watch_demand(), 0);
         assert_eq!(r.suppress_count, 0);
         assert_eq!(r.children().len(), 1, "children survive vacate");
     }
 
     #[test]
-    fn vacate_emits_unwatch_when_watch_demand_nonzero() {
-        // Defensive branch: a future caller that reaches vacate without
-        // first draining the kernel-watch counter would have left a
-        // live FD orphaned at the sensor. The protocol-closer contract
-        // emits the `Unwatch` and zeroes the counter atomically, so the
-        // misuse degrades to "one extra closing op" rather than a
-        // panic / silent kernel-watch leak.
+    fn vacate_emits_unwatch_when_contributions_nonempty() {
+        // Defensive branch: a future caller that reaches vacate
+        // without first draining the contributions map would have
+        // left a live FD orphaned at the sensor. The protocol-closer
+        // contract emits the `Unwatch` and clears the map atomically,
+        // so the misuse degrades to "one extra closing op" rather
+        // than a panic / silent kernel-watch leak.
         let mut tree = Tree::new();
         let r = tree.ensure(None, "x", ResourceRole::User);
-        tree.get_mut(r).unwrap().watch_demand = 1;
+        // Simulate a stranded contribution by inserting directly into
+        // the map — the production path goes through
+        // `engine::refcounts::add_watch`.
+        tree.get_mut(r).unwrap().contributions.insert(
+            crate::resource::ContribKey::ProfileAnchor(crate::ids::ProfileId::default()),
+            crate::sub::ClassSet::STRUCTURE,
+        );
 
         let mut out = StepOutput::default();
         tree.vacate(r, &mut out);
 
-        assert_eq!(tree.get(r).unwrap().watch_demand, 0);
+        assert_eq!(tree.get(r).unwrap().watch_demand(), 0);
         assert_eq!(out.watch_ops.len(), 1);
         assert!(matches!(
             out.watch_ops[0],
@@ -461,13 +464,13 @@ mod tests {
 
     #[test]
     fn vacate_emits_unsuppress_when_suppress_count_nonzero() {
-        // Load-bearing branch (closes F-CRIT-1): non-anchor descendants
-        // bumped during a Burst's `Batching` window have an outstanding
-        // `suppress_count` when `release_descendant_claim` reaches them
-        // through `delete_child` mid-anchor-loss. Vacate's emission
-        // pairs the prior `Suppress` with the closing `Unsuppress`
-        // before the slot reaps — keeps the sensor's per-Resource
-        // suppress bookkeeping balanced.
+        // Load-bearing branch: non-anchor descendants bumped during a
+        // Burst's `Batching` window have an outstanding
+        // `suppress_count` when `release_descendant_claim` reaches
+        // them through `delete_child` mid-anchor-loss. Vacate's
+        // emission pairs the prior `Suppress` with the closing
+        // `Unsuppress` before the slot reaps — keeps the sensor's
+        // per-Resource suppress bookkeeping balanced.
         let mut tree = Tree::new();
         let r = tree.ensure(None, "x", ResourceRole::User);
         tree.get_mut(r).unwrap().suppress_count = 1;
@@ -486,9 +489,7 @@ mod tests {
     #[test]
     fn vacate_emits_both_closing_ops_when_both_counters_nonzero() {
         // Combined branch: both protocols owed at vacate time. Order
-        // is `Unwatch` before `Unsuppress`, matching the symmetric
-        // construction order at `add_watch_demand` /
-        // `clamp_watch_demand_to_zero`. `StepOutput::sort_for_emission`
+        // is `Unwatch` before `Unsuppress`. `StepOutput::sort_for_emission`
         // ultimately re-orders by `ResourceId`; the relative order
         // within a single Resource's ops is preserved by the sort's
         // stability.
@@ -496,7 +497,15 @@ mod tests {
         let r = tree.ensure(None, "x", ResourceRole::User);
         {
             let res = tree.get_mut(r).unwrap();
-            res.watch_demand = 2;
+            // Two distinct contribution keys ⇒ refcount of 2.
+            res.contributions.insert(
+                crate::resource::ContribKey::ProfileAnchor(crate::ids::ProfileId::default()),
+                crate::sub::ClassSet::STRUCTURE,
+            );
+            res.contributions.insert(
+                crate::resource::ContribKey::ProfileParent(crate::ids::ProfileId::default()),
+                crate::sub::ClassSet::STRUCTURE,
+            );
             res.suppress_count = 3;
         }
 
@@ -504,7 +513,7 @@ mod tests {
         tree.vacate(r, &mut out);
 
         let res = tree.get(r).unwrap();
-        assert_eq!(res.watch_demand, 0);
+        assert_eq!(res.watch_demand(), 0);
         assert_eq!(res.suppress_count, 0);
         assert_eq!(out.watch_ops.len(), 2);
         assert!(matches!(

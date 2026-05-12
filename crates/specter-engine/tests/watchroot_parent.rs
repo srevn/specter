@@ -74,9 +74,13 @@ fn attach_sub_creates_watch_root_parent_contribution() {
     let (sid, _out) = e.attach_sub(req, Instant::now());
     let pid = e.subs().get(sid).unwrap().profile;
 
-    assert_eq!(e.tree().get(src).unwrap().watch_demand, 1, "anchor watched");
     assert_eq!(
-        e.tree().get(root).unwrap().watch_demand,
+        e.tree().get(src).unwrap().watch_demand(),
+        1,
+        "anchor watched"
+    );
+    assert_eq!(
+        e.tree().get(root).unwrap().watch_demand(),
         1,
         "watch_root_parent contributes",
     );
@@ -150,12 +154,12 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         }),
         now,
     );
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
 
     // Detach.
     let out = e.detach_sub(sid, now);
     // /root's watch_demand back to 0; Unwatch emitted.
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 0);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
     let unwatch_count = out
         .watch_ops
         .iter()
@@ -207,7 +211,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
         now,
     );
     assert_eq!(
-        e.tree().get(root).unwrap().watch_demand,
+        e.tree().get(root).unwrap().watch_demand(),
         2,
         "both Profiles contribute to /root's watch_demand",
     );
@@ -267,5 +271,5 @@ fn watch_root_parent_role_stays_user_when_already_user() {
         ResourceRole::User,
     ));
     // watch_demand has both contributions (root's own + inner's parent).
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 2);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 2);
 }

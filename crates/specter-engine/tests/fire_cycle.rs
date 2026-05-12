@@ -966,7 +966,7 @@ fn fire_cycle_event_at_unsuppressed_descendant_during_awaiting_absorbs() {
 
     // Confirm the child has watch_demand > 0 (Seed reconciler bumped it).
     assert!(
-        e.tree().get(child).unwrap().watch_demand > 0,
+        e.tree().get(child).unwrap().watch_demand() > 0,
         "Seed reconciler watched the descendant Dir",
     );
     // Confirm the child is NOT suppressed.

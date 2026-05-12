@@ -486,11 +486,12 @@ pub struct Profile {
     /// itself a root (no parent in the Tree) — root rename detection is then
     /// unavailable.
     pub watch_root_parent: Option<ResourceId>,
-    /// Tracks whether this Profile currently holds a `+1` contribution on
-    /// `resource.watch_demand` — [`AnchorClaim::Held`] on the path that
-    /// called `add_watch_demand(anchor)` (immediate-Seed in
-    /// `attach_sub_inner` or descent's anchor materialization), cleared
-    /// to [`AnchorClaim::None`] on the matching `sub_watch_demand(anchor)`
+    /// Tracks whether this Profile currently holds the anchor
+    /// contribution at `resource` — [`AnchorClaim::Held`] on the path
+    /// that called `add_watch(anchor, ContribKey::ProfileAnchor(pid), ...)`
+    /// (immediate-Seed in `attach_sub_inner` or descent's anchor
+    /// materialization), cleared to [`AnchorClaim::None`] on the
+    /// matching `sub_watch(anchor, ContribKey::ProfileAnchor(pid))`
     /// (anchor terminal event, reap, clamp purge).
     ///
     /// The claim distinguishes three reap-time lifecycle states that
@@ -499,14 +500,14 @@ pub struct Profile {
     /// (descent in flight ⇒ release descent prefix instead), and
     /// **purged** (`None`, descent already removed by
     /// `Input::WatchOpRejected` ⇒ no contribution to release; the clamp
-    /// already did it).
+    /// already cleared the contributions map).
     ///
     /// Without this field a heuristic like `baseline.is_some() ||
     /// current.is_some()` undercounts `dispatch_seed_vanished` paths
-    /// (which clear the snapshots while leaving the anchor's contribution
-    /// intact) and a heuristic like `tree.get(anchor).watch_demand > 0`
-    /// overcounts in multi-Profile sharing (would steal another
-    /// Profile's contribution).
+    /// (which clear the snapshots while leaving the anchor's
+    /// contribution intact) and a heuristic like
+    /// `tree.get(anchor).is_watched()` overcounts in multi-Profile
+    /// sharing (would steal another Profile's contribution).
     pub anchor_claim: AnchorClaim,
     /// Set of `DedupKey`s for which this Profile has emitted at least one
     /// Effect that has not been cleared by a `Failed` outcome,
@@ -553,10 +554,11 @@ pub struct Profile {
     /// Profile's lifetime (events are part of `config_hash`, so a mask
     /// change forks a new Profile rather than flipping this flag).
     ///
-    /// The walker-side reconciler reads this to decide whether covered
-    /// Leaf children get `add_watch_demand` (per-file FDs for in-place
-    /// edit detection — closes E2E #3 by default for `subtree-root` Subs
-    /// whose default mask includes CONTENT).
+    /// The walker-side reconciler reads this to decide whether
+    /// covered Leaf children get an
+    /// [`crate::ContribKey::ProfileDescendant`] contribution
+    /// installed via `add_watch` — per-file FDs for in-place edit
+    /// detection.
     pub has_per_file_fds: bool,
 }
 

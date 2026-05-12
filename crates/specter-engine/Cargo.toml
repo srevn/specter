@@ -13,6 +13,7 @@ smallvec.workspace    = true
 tinyvec.workspace     = true
 
 [dev-dependencies]
+specter-core = { path = "../specter-core", features = ["testkit"] }
 proptest.workspace = true
 
 [lints]

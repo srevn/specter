@@ -448,8 +448,8 @@ fn absolute_attach_bootstraps_fs_root_segment() {
 
     // The FS-root carries the descent's watch_demand contribution; the
     // anchor scaffold doesn't (descent hasn't materialized it yet).
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 1);
-    assert_eq!(e.tree().get(tmp).unwrap().watch_demand, 0);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
+    assert_eq!(e.tree().get(tmp).unwrap().watch_demand(), 0);
 
     // The emitted Watch op carries an *absolute* path — `Tree::path_of`
     // reconstructs `/` because `PathBuf::push("/")` resets to absolute.
@@ -515,7 +515,7 @@ fn second_absolute_attach_reuses_fs_root() {
     assert!(e.tree().lookup(Some(root), "foo").is_some());
     assert!(e.tree().lookup(Some(root), "bar").is_some());
     // FS-root carries one contribution from each pending descent.
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 2);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 2);
 }
 
 /// Deep absolute paths walk one segment at a time: the descent's
@@ -633,8 +633,8 @@ fn reap_pending_profile_releases_only_descent_prefix() {
 
     // Pre-conditions: descent contributes to `foo`, anchor `bar` is
     // unbumped.
-    assert_eq!(e.tree().get(foo).unwrap().watch_demand, 1);
-    assert_eq!(e.tree().get(bar).unwrap().watch_demand, 0);
+    assert_eq!(e.tree().get(foo).unwrap().watch_demand(), 1);
+    assert_eq!(e.tree().get(bar).unwrap().watch_demand(), 0);
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim,
         AnchorClaim::None,
@@ -648,7 +648,9 @@ fn reap_pending_profile_releases_only_descent_prefix() {
     // pre-existing User Resource — only the descent's contribution is
     // released.
     assert_eq!(
-        e.tree().get(foo).map_or(0, |r| r.watch_demand),
+        e.tree()
+            .get(foo)
+            .map_or(0, specter_core::Resource::watch_demand),
         0,
         "descent prefix watch_demand released",
     );
@@ -872,7 +874,7 @@ fn detach_sub_pending_profile_reaps_immediately() {
     let foo = lookup_foo(&e);
     // Pre-condition: Pending; descent contributes +1 to /foo.
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_some());
-    assert_eq!(e.tree().get(foo).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(foo).unwrap().watch_demand(), 1);
 
     let out = e.detach_sub(sid, Instant::now());
 
@@ -880,7 +882,9 @@ fn detach_sub_pending_profile_reaps_immediately() {
     // contribution released atomically.
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
     assert_eq!(
-        e.tree().get(foo).map_or(0, |r| r.watch_demand),
+        e.tree()
+            .get(foo)
+            .map_or(0, specter_core::Resource::watch_demand),
         0,
         "descent contribution released",
     );
@@ -978,7 +982,7 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
         .current_prefix;
     assert_eq!(prefix, foo);
     assert_eq!(
-        e.tree().get(foo).unwrap().watch_demand,
+        e.tree().get(foo).unwrap().watch_demand(),
         1,
         "descent prefix carries +1 STRUCTURE",
     );
@@ -1012,7 +1016,9 @@ fn descent_ok_with_empty_remaining_releases_prefix_and_emits_diagnostic() {
     ));
     // Prefix's watch_demand released
     assert_eq!(
-        e.tree().get(foo).map_or(0, |r| r.watch_demand),
+        e.tree()
+            .get(foo)
+            .map_or(0, specter_core::Resource::watch_demand),
         0,
         "prefix watch_demand released by defensive arm",
     );
@@ -1132,7 +1138,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         "watch_root_parent cached at foo on materialization",
     );
     assert!(
-        e.tree().get(foo).unwrap().watch_demand >= 1,
+        e.tree().get(foo).unwrap().watch_demand() >= 1,
         "foo carries STRUCTURE from watch_root_parent",
     );
 
@@ -1158,12 +1164,12 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
         "channel closed after Seed Vanished",
     );
-    let foo_demand_pre = e.tree().get(foo).unwrap().watch_demand;
+    let foo_demand_pre = e.tree().get(foo).unwrap().watch_demand();
     // Bar's anchor contribution was released; only watch_root_parent's
     // STRUCTURE on foo remains.
     assert_eq!(
         foo_demand_pre, 1,
-        "foo.watch_demand reflects only the watch_root_parent contribution",
+        "foo.watch_demand() reflects only the watch_root_parent contribution",
     );
 
     // Step 4: Call enter_pending_descent directly to simulate the
@@ -1176,7 +1182,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     // STRUCTURE + descent STRUCTURE). The helper opened the channel and
     // emitted a descent probe.
     assert_eq!(
-        e.tree().get(foo).unwrap().watch_demand,
+        e.tree().get(foo).unwrap().watch_demand(),
         foo_demand_pre + 1,
         "recovery overlap: descent +1 on top of watch_root_parent +1",
     );

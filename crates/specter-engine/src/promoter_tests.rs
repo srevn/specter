@@ -154,12 +154,12 @@ fn attach_immediate_active_at_existing_prefix() {
 
     // Watch_demand on /var/log: User Profile-less Dir starts at 0; the
     // proxy registration bumps to 1 with STRUCTURE.
-    assert_eq!(e.tree().get(var_log).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(var_log).unwrap().watch_demand(), 1);
     assert!(
         e.tree()
             .get(var_log)
             .unwrap()
-            .events_union
+            .events_union()
             .intersects(ClassSet::STRUCTURE),
         "STRUCTURE bit set on the proxy slot",
     );
@@ -210,7 +210,7 @@ fn attach_pending_when_literal_prefix_missing() {
     );
 
     // Watch_demand on FS-root bumped (STRUCTURE).
-    assert_eq!(e.tree().get(fs_root).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(fs_root).unwrap().watch_demand(), 1);
 
     // Descent probe in flight at FS-root.
     assert_eq!(last_probe_target(&out), Some(fs_root));
@@ -472,14 +472,20 @@ fn proxy_event_for_unregistered_promoter_emits_stale_diagnostic() {
     let r = e.tree_mut().ensure(None, "phantom", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
-    // Bump watch_demand so the on_fs_event head guard doesn't drop the
-    // event with EventOnUnwatchedResource.
-    let mut out = specter_core::StepOutput::default();
-    crate::refcounts::add_watch_demand(e.tree_mut(), r, ClassSet::STRUCTURE, &mut out);
-
     // Synthesise a Promoter id that's NOT in the registry; push it
     // onto the back-ref.
     let phantom = PromoterId::default();
+
+    // Bump watch_demand so the on_fs_event head guard doesn't drop the
+    // event with EventOnUnwatchedResource.
+    let mut out = specter_core::StepOutput::default();
+    crate::refcounts::add_watch(
+        e.tree_mut(),
+        r,
+        specter_core::ContribKey::PromoterProxy(phantom),
+        ClassSet::STRUCTURE,
+        &mut out,
+    );
     e.tree_mut()
         .get_mut(r)
         .unwrap()
@@ -566,7 +572,7 @@ fn descent_vanished_rewinds_to_parent() {
     // DescentScaffold the original descent created). Asserting on
     // vacate's observable effect:
     assert_eq!(
-        e.tree().get(var).unwrap().watch_demand,
+        e.tree().get(var).unwrap().watch_demand(),
         0,
         "vanished prefix had its watch_demand zeroed (vacate)",
     );
@@ -796,7 +802,7 @@ fn register_proxy_is_idempotent_on_re_registration() {
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
-    let watch_demand_after_attach = e.tree().get(var_log).unwrap().watch_demand;
+    let watch_demand_after_attach = e.tree().get(var_log).unwrap().watch_demand();
     let queue_after_attach = pending_enumerations(&e, pid).len();
 
     // Re-register: directly invoke the (pub(crate)) helper.
@@ -804,7 +810,7 @@ fn register_proxy_is_idempotent_on_re_registration() {
     e.register_proxy(pid, var_log, 3, &mut out);
 
     assert_eq!(
-        e.tree().get(var_log).unwrap().watch_demand,
+        e.tree().get(var_log).unwrap().watch_demand(),
         watch_demand_after_attach,
         "watch_demand unchanged on re-registration",
     );
@@ -942,7 +948,7 @@ fn enumeration_vanished_unregisters_proxy_and_emits_diagnostic() {
         "back-ref present pre-vanish",
     );
     assert!(
-        e.tree().get(var_log).unwrap().watch_demand >= 1,
+        e.tree().get(var_log).unwrap().watch_demand() >= 1,
         "watch_demand carries the proxy contribution pre-vanish",
     );
 
@@ -1109,7 +1115,7 @@ fn reap_promoter_active_with_proxy_unregisters_and_removes() {
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
-    assert_eq!(e.tree().get(var_log).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(var_log).unwrap().watch_demand(), 1);
 
     let out = e.reap_promoter(pid, Instant::now());
 
@@ -1129,7 +1135,10 @@ fn reap_promoter_active_with_proxy_unregisters_and_removes() {
     // The proxy slot's contribution was released. The slot itself
     // may have been reaped (User-roled with no other anchors) — read
     // both the surviving and reaped cases through `Option`.
-    let post_reap_demand = e.tree().get(var_log).map_or(0, |r| r.watch_demand);
+    let post_reap_demand = e
+        .tree()
+        .get(var_log)
+        .map_or(0, specter_core::Resource::watch_demand);
     assert_eq!(
         post_reap_demand, 0,
         "watch_demand dropped after unregister_proxy",
@@ -1161,7 +1170,7 @@ fn reap_promoter_prefix_pending_releases_prefix() {
         PromoterState::PrefixPending(_),
     ));
     assert_eq!(
-        e.tree().get(fs_root).unwrap().watch_demand,
+        e.tree().get(fs_root).unwrap().watch_demand(),
         1,
         "FS-root carries the prefix's STRUCTURE contribution",
     );
@@ -1177,7 +1186,7 @@ fn reap_promoter_prefix_pending_releases_prefix() {
     );
     assert!(e.promoters.get(pid).is_none(), "Promoter removed");
     assert_eq!(
-        e.tree().get(fs_root).unwrap().watch_demand,
+        e.tree().get(fs_root).unwrap().watch_demand(),
         0,
         "FS-root contribution released",
     );

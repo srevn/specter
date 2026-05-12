@@ -1,41 +1,49 @@
 //! Profile-claim release helpers.
 //!
-//! A Profile holds at most three Resource-side claims, each with a
-//! per-Profile bookkeeping field and a per-Resource refcount contribution:
+//! A Profile holds at most four Resource-side claims, each keyed by a
+//! distinct [`ContribKey`] variant in the per-Resource contributions
+//! map (`specter-core/resource.rs`):
 //!
-//! 1. **Anchor.** `Profile.anchor_claim == AnchorClaim::Held` ⇒ Profile
-//!    contributes `Profile.events_union` to `Profile.resource.watch_demand`.
-//! 2. **Watch-root parent.** `Profile.watch_root_parent = Some(parent)` ⇒
-//!    Profile contributes `STRUCTURE` to `parent.watch_demand`.
-//! 3. **Descent prefix.** `Profile.state = Pending(d)` ⇒ Profile contributes
-//!    `STRUCTURE` to `d.current_prefix.watch_demand`.
+//! 1. **Anchor.** `Profile.anchor_claim == AnchorClaim::Held` ⇒ the
+//!    Profile contributes [`ContribKey::ProfileAnchor`] at
+//!    `Profile.resource` with mask `Profile.events_union`.
+//! 2. **Watch-root parent.** `Profile.watch_root_parent =
+//!    Some(parent)` ⇒ the Profile contributes
+//!    [`ContribKey::ProfileParent`] at `parent` with mask `STRUCTURE`.
+//! 3. **Descent prefix.** `Profile.state = Pending(d)` ⇒ the Profile
+//!    contributes [`ContribKey::ProfileDescent`] at
+//!    `d.current_prefix` with mask `STRUCTURE`.
+//! 4. **Covered descendants.** Maintained per-slot inside `walk_pair` /
+//!    `release_descendant_claim`; each contribution is keyed by
+//!    [`ContribKey::ProfileDescendant`].
 //!
-//! The two sides must stay synchronised: the per-Resource `events_union`
-//! recompute in [`crate::refcounts::sub_watch_demand`] reads the Profile
-//! fields to attribute contributions, so the field MUST be cleared BEFORE
-//! `sub_watch_demand` for the recompute to model the post-release union.
-//! This module is the single source of truth for that discipline.
+//! The contribution map is the source of truth for refcounting;
+//! removal is by key, not by registry walk. The per-Profile state
+//! field (the matching flag from list above) can be cleared in either
+//! order relative to `sub_watch`. This module clears the flag *first*
+//! for consistency with the pre-existing call ordering and so that
+//! subsequent helpers reading owner state see the post-release shape.
 //!
 //! Each helper is:
 //! - **Idempotent.** Flag-already-cleared ⇒ no-op. Safe to call from any
 //!   site without first checking the claim's presence.
-//! - **Safe in any counter state.** Post-clamp slots
-//!   (`clamp_watch_demand_to_zero` from `Input::WatchOpRejected`) and
-//!   post-vacate slots both leave `watch_demand == 0`; the helper's
-//!   `sub_watch_demand` short-circuits silently in that case (see
-//!   [`crate::refcounts`] module rustdoc). The flag-clear runs
-//!   regardless.
+//! - **Safe in any post-clamp / post-vacate state.** [`crate::refcounts::sub_watch`]
+//!   silently skips an absent key — reachable after
+//!   [`crate::refcounts::clamp_watch_demand_to_zero`] or
+//!   [`specter_core::Tree::vacate`] cleared the map.
 
 use crate::Engine;
 use crate::reconcile::{delete_child, purge_per_file_fired_subs_for_reaped_slots};
-use crate::refcounts::sub_watch_demand;
-use specter_core::{AnchorClaim, ProbeOwner, ProfileId, ProfileState, StepOutput, TreeSnapshot};
+use crate::refcounts::sub_watch;
+use specter_core::{
+    AnchorClaim, ContribKey, ProbeOwner, ProfileId, ProfileState, StepOutput, TreeSnapshot,
+};
 
 impl Engine {
-    /// Release the Profile's anchor `watch_demand` contribution if held.
-    /// Idempotent (flag-false ⇒ no-op). Safe on a post-clamp counter
-    /// (`watch_demand == 0` ⇒ `sub_watch_demand` short-circuits without
-    /// emission; see the [`crate::refcounts`] module rustdoc).
+    /// Release the Profile's anchor contribution if held. Idempotent
+    /// (flag-false ⇒ no-op). Safe on a post-clamp / post-vacate slot
+    /// — [`crate::refcounts::sub_watch`] silently skips an absent key
+    /// (see the [`crate::refcounts`] module rustdoc).
     ///
     /// Does NOT call `try_reap` on the anchor — the Profile's own
     /// back-reference still anchors the slot. Callers that detach the
@@ -53,21 +61,19 @@ impl Engine {
             p.anchor_claim = AnchorClaim::None;
         }
 
-        sub_watch_demand(
+        sub_watch(
             &mut self.tree,
-            &self.profiles,
-            &self.promoters,
             resource,
-            None,
+            ContribKey::ProfileAnchor(pid),
             out,
         );
     }
 
-    /// Release the Profile's watch-root parent `watch_demand` contribution
-    /// if held. Idempotent; safe in any counter state. Calls `try_reap`
-    /// on the parent slot — the parent's `WatchRootParent` role is the
-    /// only thing keeping it alive when no User Profile is anchored at
-    /// or below it, and that's now stale.
+    /// Release the Profile's watch-root parent contribution if held.
+    /// Idempotent; safe in any post-clamp / post-vacate state. Calls
+    /// `try_reap` on the parent slot — the parent's `WatchRootParent`
+    /// role is the only thing keeping it alive when no User Profile is
+    /// anchored at or below it, and that's now stale.
     pub(crate) fn release_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(pid) else {
             return;
@@ -80,14 +86,7 @@ impl Engine {
             p.watch_root_parent = None;
         }
 
-        sub_watch_demand(
-            &mut self.tree,
-            &self.profiles,
-            &self.promoters,
-            parent,
-            None,
-            out,
-        );
+        sub_watch(&mut self.tree, parent, ContribKey::ProfileParent(pid), out);
 
         self.tree.try_reap(parent);
     }
@@ -126,31 +125,24 @@ impl Engine {
             p.state = ProfileState::Idle;
         }
 
-        sub_watch_demand(
-            &mut self.tree,
-            &self.profiles,
-            &self.promoters,
-            prefix,
-            None,
-            out,
-        );
+        sub_watch(&mut self.tree, prefix, ContribKey::ProfileDescent(pid), out);
 
         self.tree.try_reap(prefix);
     }
 
-    /// Release every per-descendant `watch_demand` contribution this
-    /// Profile holds — the fourth member of the claim quartet, completing
-    /// the symmetry with the three single-resource helpers above.
+    /// Release every per-descendant contribution this Profile holds —
+    /// the fourth member of the claim quartet, completing the
+    /// symmetry with the three single-resource helpers above.
     ///
     /// **Take-and-walk.** Atomically takes `Profile.current` (sets to
     /// `None`), then walks the taken snapshot in reverse-lex order
-    /// calling [`reconcile::delete_child`] on each top-level entry. The
-    /// helper recurses leaf-before-parent and releases the per-slot
-    /// `watch_demand` contribution with an explicit
-    /// `releasing_descendant: Some(profile_id)` signal, so the recompute
-    /// (multi-contributor case) skips this Profile's own descendant
-    /// contribution even though `current` was still observable mid-walk
-    /// (closes F-MED-4 by construction).
+    /// calling [`crate::reconcile::delete_child`] on each top-level
+    /// entry. The helper recurses leaf-before-parent and releases
+    /// each slot's [`ContribKey::ProfileDescendant`] contribution by
+    /// explicit key. The contribution map is keyed by
+    /// `(resource, key)`, so removal is unambiguous regardless of
+    /// `Profile.current`'s mid-walk visibility (the lazy-derivation
+    /// `releasing_descendant` parameter is gone).
     ///
     /// **Idempotent.** `current.is_none()` ⇒ no-op. A second invocation
     /// in the same step finds `None` after the first call's `take`.
@@ -158,9 +150,10 @@ impl Engine {
     /// Profiles (`TreeSnapshot::File`, no descendants) short-circuit on
     /// the dispatch.
     ///
-    /// **Safe in any counter state.** [`reconcile::delete_child`] calls
-    /// `sub_watch_demand` unconditionally; the helper short-circuits
-    /// silently on a zero counter (post-clamp slots, or slots a prior
+    /// **Safe in any post-clamp / post-vacate state.**
+    /// [`crate::reconcile::delete_child`] calls
+    /// [`crate::refcounts::sub_watch`] unconditionally; the helper
+    /// silently skips absent keys (post-clamp slots, or slots a prior
     /// sub-walk in this take-and-walk pass already drained — see the
     /// [`crate::refcounts`] module rustdoc).
     ///
@@ -174,11 +167,10 @@ impl Engine {
     ///
     /// **Sole call sites.** [`Engine::reap_profile`] and the seven
     /// `dispatch_*_vanished/failed` + `finalize_anchor_lost` sites in
-    /// `transitions.rs`. Closes F-CRIT-1 by completing the four-claim
-    /// release symmetry — every prior teardown path released the three
-    /// 1-to-1 claims (anchor / watch-root parent / descent prefix) but
-    /// left the 1-to-N descendant claims encoded in `Profile.current`
-    /// stranded in the Tree.
+    /// `transitions.rs`. Completes the four-claim release symmetry:
+    /// the three 1-to-1 claims (anchor / watch-root parent / descent
+    /// prefix) plus the 1-to-N descendant claims encoded in
+    /// `Profile.current`.
     pub(crate) fn release_descendant_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Take the snapshot atomically. Idempotent: subsequent calls
         // find `None` and short-circuit without further work.
@@ -193,9 +185,8 @@ impl Engine {
             return;
         };
 
-        // Dispatch the walk under a co-existing immutable borrow of the
-        // Profile (for `delete_child`'s `&Profile` arg) and the
-        // ProfileMap (for the recompute path's registry walk).
+        // Dispatch the walk under a co-existing immutable borrow of
+        // the Profile (for `delete_child`'s `&Profile` arg).
         // `&mut self.tree` is a disjoint-field borrow.
         {
             let Some(profile) = self.profiles.get(pid) else {
@@ -211,8 +202,6 @@ impl Engine {
             for (name, child) in arc.entries.iter().rev() {
                 delete_child(
                     &mut self.tree,
-                    &self.profiles,
-                    &self.promoters,
                     profile,
                     pid,
                     anchor,
@@ -292,9 +281,9 @@ impl Engine {
     /// already-`None` fields; `release_anchor_claim` sees
     /// `AnchorClaim::None` and short-circuits.
     ///
-    /// **Safe in any counter state.** Inherits from
-    /// [`Engine::release_anchor_claim`]'s post-clamp tolerance —
-    /// `sub_watch_demand` short-circuits silently on a zero counter
+    /// **Safe in any post-clamp / post-vacate state.** Inherits from
+    /// [`Engine::release_anchor_claim`]'s tolerance —
+    /// [`crate::refcounts::sub_watch`] silently skips an absent key
     /// (`clamp_watch_demand_to_zero` from `Input::WatchOpRejected` is
     /// the dominant source of this state).
     ///

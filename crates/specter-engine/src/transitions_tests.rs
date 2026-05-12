@@ -166,7 +166,7 @@ fn attach_sub_fresh_profile_emits_watch_suppress_probe() {
     let (e, _pid, _sid, r, _now) = engine_with_attached_sub();
     // After attach: anchor watch_demand=1, suppress_count=1, Profile is
     // Active(Seed Verifying).
-    assert_eq!(e.tree.get(r).unwrap().watch_demand, 1);
+    assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
     assert_eq!(e.tree.get(r).unwrap().suppress_count, 1);
 }
 
@@ -1221,7 +1221,9 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
 
     // (4) The anchor's `watch_demand` is exactly 1 (Profile claim only).
     assert_eq!(
-        e.tree.get(file_anchor).map(|r| r.watch_demand),
+        e.tree
+            .get(file_anchor)
+            .map(specter_core::Resource::watch_demand),
         Some(1),
         "no spurious watch_demand bump on the anchor",
     );
@@ -1457,7 +1459,10 @@ fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
     // is satisfied.
     let child = e.tree.ensure(Some(root), "child.txt", ResourceRole::User);
     e.tree.set_kind(child, ResourceKind::File);
-    e.tree.get_mut(child).unwrap().watch_demand = 1;
+    e.tree.get_mut(child).unwrap().contributions.insert(
+        specter_core::ContribKey::ProfileDescendant(pid),
+        ClassSet::CONTENT,
+    );
 
     let out = e.step(
         Input::FsEvent {
@@ -1518,7 +1523,10 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
 
     let child = e.tree.ensure(Some(r), "f.txt", ResourceRole::User);
     e.tree.set_kind(child, ResourceKind::File);
-    e.tree.get_mut(child).unwrap().watch_demand = 1;
+    e.tree.get_mut(child).unwrap().contributions.insert(
+        specter_core::ContribKey::ProfileDescendant(pid),
+        ClassSet::STRUCTURE,
+    );
 
     let out = e.step(
         Input::FsEvent {
@@ -1623,7 +1631,10 @@ fn fs_event_at_watched_resource_with_no_consumer_emits_event_no_consumer_not_unw
     // routed through the `EventOnUnwatchedResource` path.
     let r = e.tree.ensure(None, "lonely", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
-    e.tree.get_mut(r).unwrap().watch_demand = 1;
+    e.tree.get_mut(r).unwrap().contributions.insert(
+        specter_core::ContribKey::ProfileAnchor(specter_core::ProfileId::default()),
+        ClassSet::STRUCTURE,
+    );
 
     let out = e.step(
         Input::FsEvent {
@@ -1678,7 +1689,7 @@ fn fs_event_removed_at_anchor_active_terminates() {
     assert!(p.baseline.is_none());
     assert!(p.current.is_none());
     // watch_demand on anchor → 0; one Unwatch op emitted.
-    assert_eq!(e.tree.get(root).unwrap().watch_demand, 0);
+    assert_eq!(e.tree.get(root).unwrap().watch_demand(), 0);
     let unwatches = out
         .watch_ops
         .iter()
@@ -1697,7 +1708,7 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
     // via `current.is_none()`.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid, root);
-    assert_eq!(e.tree.get(root).unwrap().watch_demand, 1);
+    assert_eq!(e.tree.get(root).unwrap().watch_demand(), 1);
     assert!(e.profiles.get(pid).unwrap().current.is_some());
 
     let _out = e.step(
@@ -1714,7 +1725,7 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
         ProfileState::Idle,
     ));
     // watch_demand released; baseline/current cleared.
-    assert_eq!(e.tree.get(root).unwrap().watch_demand, 0);
+    assert_eq!(e.tree.get(root).unwrap().watch_demand(), 0);
     let p = e.profiles.get(pid).unwrap();
     assert!(p.baseline.is_none());
     assert!(p.current.is_none());
@@ -2021,9 +2032,22 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
     let r = e.tree.ensure(None, "x", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
     let mut out = StepOutput::default();
-    crate::refcounts::add_watch_demand(&mut e.tree, r, NO_EVENTS, &mut out);
-    crate::refcounts::add_watch_demand(&mut e.tree, r, NO_EVENTS, &mut out);
-    assert_eq!(e.tree.get(r).unwrap().watch_demand, 2);
+    let pid = specter_core::ProfileId::default();
+    crate::refcounts::add_watch(
+        &mut e.tree,
+        r,
+        specter_core::ContribKey::ProfileAnchor(pid),
+        NO_EVENTS,
+        &mut out,
+    );
+    crate::refcounts::add_watch(
+        &mut e.tree,
+        r,
+        specter_core::ContribKey::ProfileParent(pid),
+        NO_EVENTS,
+        &mut out,
+    );
+    assert_eq!(e.tree.get(r).unwrap().watch_demand(), 2);
 
     let result = e.step(
         Input::WatchOpRejected {
@@ -2039,7 +2063,7 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
         Instant::now(),
     );
 
-    assert_eq!(e.tree.get(r).unwrap().watch_demand, 0);
+    assert_eq!(e.tree.get(r).unwrap().watch_demand(), 0);
     assert!(
         result
             .watch_ops
@@ -2106,7 +2130,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     let initial_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("first probe in flight");
-    let initial_demand = e.tree.get(foo).unwrap().watch_demand;
+    let initial_demand = e.tree.get(foo).unwrap().watch_demand();
     assert_eq!(initial_demand, 1);
 
     // Inject WatchOpRejected (e.g., EMFILE) for the descent prefix.
@@ -2125,7 +2149,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     );
 
     // The clamp zeroed watch_demand; the descent has been purged.
-    assert_eq!(e.tree.get(foo).unwrap().watch_demand, 0);
+    assert_eq!(e.tree.get(foo).unwrap().watch_demand(), 0);
     assert!(
         e.descent_state(ProbeOwner::Profile(pid)).is_none(),
         "descent purged on rejection",
@@ -2252,7 +2276,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     // Both descents at /foo (different anchors).
     assert!(e.descent_state(ProbeOwner::Profile(pid_a)).is_some());
     assert!(e.descent_state(ProbeOwner::Profile(pid_b)).is_some());
-    assert_eq!(e.tree.get(foo).unwrap().watch_demand, 2);
+    assert_eq!(e.tree.get(foo).unwrap().watch_demand(), 2);
 
     let result = e.step(
         Input::WatchOpRejected {
@@ -2509,7 +2533,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
 fn seed_vanished_then_reap_releases_anchor_via_claim() {
     let (mut e, pid, sid, r, _now) = engine_with_attached_sub();
     // Anchor watch_demand is 1, anchor_claim is Held.
-    assert_eq!(e.tree.get(r).unwrap().watch_demand, 1);
+    assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
     assert_eq!(e.profiles.get(pid).unwrap().anchor_claim, AnchorClaim::Held,);
 
     // Detach the Sub mid-burst → reap_pending = true.
@@ -2564,7 +2588,7 @@ fn anchor_terminal_event_clears_anchor_claim() {
         "anchor_claim cleared by terminal event",
     );
     assert_eq!(
-        e.tree.get(r).unwrap().watch_demand,
+        e.tree.get(r).unwrap().watch_demand(),
         0,
         "anchor's watch_demand released",
     );
@@ -4155,7 +4179,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         .lookup(Some(root), "a.rs")
         .expect("standard burst's reconcile created a.rs");
     assert!(
-        e.tree.get(descendant).is_some_and(|r| r.watch_demand > 0),
+        e.tree.get(descendant).is_some_and(|r| r.watch_demand() > 0),
         "per-file FD must be wired up for the descendant — otherwise \
          the Modified event drops at on_fs_event's watch_demand gate \
          before reaching the absorb arm",

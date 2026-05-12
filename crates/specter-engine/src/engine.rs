@@ -13,13 +13,13 @@
 //! corresponding `on_*` handler. `attach_sub` is the engine's public
 //! Sub-attachment API.
 
-use crate::refcounts::add_watch_demand;
+use crate::refcounts::add_watch;
 use crate::timer::{TimerEntry, TimerHeap};
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, BurstPhase, ClassSet, DedupKey, DescentState, Diagnostic, Input, ProbeOwner,
-    Profile, ProfileId, ProfileMap, ProfileState, PromoterRegistry, PromoterState, ResourceId,
-    StepOutput, Sub, SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree,
+    AnchorClaim, BurstPhase, ClassSet, ContribKey, DedupKey, DescentState, Diagnostic, Input,
+    ProbeOwner, Profile, ProfileId, ProfileMap, ProfileState, PromoterRegistry, PromoterState,
+    ResourceId, StepOutput, Sub, SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree,
     compute_config_hash,
 };
 use std::path::Component;
@@ -48,10 +48,12 @@ pub struct Engine {
     pub(crate) tree: Tree,
     pub(crate) profiles: ProfileMap,
     pub(crate) subs: SubRegistry,
-    /// Engine-resident dynamic-watch sources.
-    /// `recompute_resource_events` accepts a borrow of this field so
-    /// Promoter contributions to per-Resource `events_union` join the
-    /// recompute alongside Profile contributions.
+    /// Engine-resident dynamic-watch sources. Promoter-side
+    /// contributions to per-Resource watch demand are tracked in the
+    /// per-Resource [`specter_core::Resource::contributions`] map via
+    /// [`specter_core::ContribKey::PromoterPrefix`] /
+    /// [`specter_core::ContribKey::PromoterProxy`]; this field is the
+    /// registry the Promoter helpers mutate.
     pub(crate) promoters: PromoterRegistry,
     pub(crate) timers: TimerHeap,
     pub(crate) next_correlation: u64,
@@ -386,17 +388,23 @@ impl Engine {
             // Parent-edge work runs ahead of `enter_pending_descent` — the
             // helper deliberately omits it (the recovery path's call site
             // doesn't need it) and the Idle → Pending refcount sequence
-            // (add_watch_demand → mint → state → emit) lives inside the
+            // (add_watch → mint → state → emit) lives inside the
             // helper.
             self.compute_and_set_parent_edge(profile_id);
             self.recompute_dependent_parent_edges(profile_id);
             self.enter_pending_descent(profile_id, prefix, remaining, out);
         } else {
-            // Immediate-Seed path. Anchor exists; bump its watch_demand
-            // with the Profile's events_union (the user-declared mask),
-            // set up the watch-root parent (STRUCTURE), compute parent
-            // edges, start the Seed burst.
-            add_watch_demand(&mut self.tree, anchor, events_union, out);
+            // Immediate-Seed path. Anchor exists; install the Profile's
+            // anchor contribution (events_union as the mask), set up
+            // the watch-root parent (STRUCTURE), compute parent edges,
+            // start the Seed burst.
+            add_watch(
+                &mut self.tree,
+                anchor,
+                ContribKey::ProfileAnchor(profile_id),
+                events_union,
+                out,
+            );
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.anchor_claim = AnchorClaim::Held;
             }
@@ -464,9 +472,14 @@ impl Engine {
         // anchor reappearance after a `rm -rf` of the anchor).
         // Contribution is `STRUCTURE` regardless of the Sub's user mask.
         // The corresponding bookkeeping flag is `Profile.watch_root_parent
-        // == Some(parent_id)`, written below; the recompute path reads
-        // that flag to attribute this contribution back to the Profile.
-        add_watch_demand(&mut self.tree, parent_id, ClassSet::STRUCTURE, out);
+        // == Some(parent_id)`, written below.
+        add_watch(
+            &mut self.tree,
+            parent_id,
+            ContribKey::ProfileParent(profile_id),
+            ClassSet::STRUCTURE,
+            out,
+        );
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.watch_root_parent = Some(parent_id);
@@ -1572,14 +1585,14 @@ mod tests {
         // First call: bumps parent's watch_demand and caches it on Profile.
         let mut out = StepOutput::default();
         e.set_watch_root_parent(pid, anchor, &mut out);
-        let after_first = e.tree.get(parent).unwrap().watch_demand;
+        let after_first = e.tree.get(parent).unwrap().watch_demand();
         assert_eq!(after_first, 1, "first call bumps parent watch_demand");
         assert_eq!(e.profiles.get(pid).unwrap().watch_root_parent, Some(parent));
 
         // Second call with the same anchor: must be a no-op (no bump).
         let mut out2 = StepOutput::default();
         e.set_watch_root_parent(pid, anchor, &mut out2);
-        let after_second = e.tree.get(parent).unwrap().watch_demand;
+        let after_second = e.tree.get(parent).unwrap().watch_demand();
         assert_eq!(after_second, 1, "second call does NOT double-bump");
         assert!(
             out2.watch_ops.is_empty(),
@@ -1626,7 +1639,7 @@ mod tests {
 
         let (sid_a, _) = e.attach_sub(revival_attach_req(r, "A", Duration::from_millis(50)), now);
         let pid = e.subs().get(sid_a).unwrap().profile;
-        let watch_demand_after_attach = e.tree.get(r).unwrap().watch_demand;
+        let watch_demand_after_attach = e.tree.get(r).unwrap().watch_demand();
         assert_eq!(watch_demand_after_attach, 1, "anchor watch_demand from A");
 
         // Pre-populate a `fired_subs` entry keyed by A so we can verify
@@ -1644,7 +1657,7 @@ mod tests {
         // unchanged; `fired_subs` survives the deferred-reap branch.
         let _ = e.detach_sub(sid_a, now);
         assert!(e.profiles().get(pid).unwrap().reap_pending);
-        assert_eq!(e.tree.get(r).unwrap().watch_demand, 1);
+        assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
         assert_eq!(e.profiles().get(pid).unwrap().fired_subs.len(), 1);
 
         // Revive with B (settle=200ms; deliberately larger than A's stale
@@ -1655,7 +1668,7 @@ mod tests {
 
         assert_eq!(pid_b, pid, "B reuses A's Profile");
         assert_eq!(
-            e.tree.get(r).unwrap().watch_demand,
+            e.tree.get(r).unwrap().watch_demand(),
             1,
             "anchor watch_demand unchanged on revival (no double-bump)",
         );

@@ -123,7 +123,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
         e.profiles().get(pid).unwrap().anchor_claim,
         AnchorClaim::Held,
     );
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
 
     // Reject the kernel watch on the anchor.
     let purge_out = e.step(
@@ -145,7 +145,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
         e.profiles().get(pid).unwrap().anchor_claim,
         AnchorClaim::None,
     );
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 0);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
     // ProfileClaimPurged{Anchor} surfaces.
     assert!(
         purge_out
@@ -227,7 +227,7 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
         e.profiles().get(pid_q).unwrap().anchor_claim,
         AnchorClaim::None,
     );
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 0);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
     let (sid_p, pid_p, out_p) = attach_subtree_root(&mut e, "P", root, MAX_SETTLE);
     let (_sid_q, pid_q, out_q) =
         attach_subtree_root(&mut e, "Q", root, MAX_SETTLE + Duration::from_secs(1));
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 2);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 2);
     complete_seed_burst(&mut e, pid_p, &out_p, dir_snap(root, vec![]));
     complete_seed_burst(&mut e, pid_q, &out_q, dir_snap(root, vec![]));
 
@@ -267,7 +267,7 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
         e.profiles().get(pid_q).unwrap().anchor_claim,
         AnchorClaim::None,
     );
-    assert_eq!(e.tree().get(root).unwrap().watch_demand, 0);
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
 
     // Two anchor purge diagnostics surface.
     let anchor_purge_count = purge_out
@@ -324,8 +324,8 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
         e.profiles().get(pid).unwrap().watch_root_parent,
         Some(parent),
     );
-    assert_eq!(e.tree().get(parent).unwrap().watch_demand, 1);
-    assert_eq!(e.tree().get(anchor).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(parent).unwrap().watch_demand(), 1);
+    assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
     // Reject the kernel watch on the parent (not the anchor).
     let purge_out = e.step(
@@ -344,8 +344,13 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
 
     // Parent's flag cleared on the Profile; anchor stays watched.
     assert_eq!(e.profiles().get(pid).unwrap().watch_root_parent, None);
-    assert_eq!(e.tree().get(parent).map_or(0, |r| r.watch_demand), 0);
-    assert_eq!(e.tree().get(anchor).unwrap().watch_demand, 1);
+    assert_eq!(
+        e.tree()
+            .get(parent)
+            .map_or(0, specter_core::Resource::watch_demand),
+        0
+    );
+    assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
     // Diagnostic surfaces.
     assert!(
@@ -527,7 +532,7 @@ fn watch_op_rejected_purges_promoter_descent_prefix() {
         PromoterState::Active { .. },
     ));
     assert!(e.pending_probe_for(ProbeOwner::Promoter(qid)).is_none());
-    assert_eq!(e.tree().get(a).unwrap().watch_demand, 0);
+    assert_eq!(e.tree().get(a).unwrap().watch_demand(), 0);
 
     // Cancel emitted for the in-flight descent probe.
     let cancel_emitted = purge_out
@@ -581,7 +586,7 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
         PromoterState::Active { proxies } => assert!(proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active at /a, got {s:?}"),
     }
-    assert_eq!(e.tree().get(a).unwrap().watch_demand, 1);
+    assert_eq!(e.tree().get(a).unwrap().watch_demand(), 1);
 
     // Drain the initial enumeration probe so `pending_enumeration_target`
     // is None — keeps the WatchOpRejected purge's cancel-first
@@ -608,7 +613,12 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
         PromoterState::Active { proxies } => assert!(!proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
-    assert_eq!(e.tree().get(a).map_or(0, |r| r.watch_demand), 0);
+    assert_eq!(
+        e.tree()
+            .get(a)
+            .map_or(0, specter_core::Resource::watch_demand),
+        0
+    );
     let still_back_refed = e
         .tree()
         .get(a)
@@ -680,7 +690,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         e.profiles().get(pid).unwrap().state,
         ProfileState::Pending(_),
     ));
-    assert_eq!(e.tree().get(a).unwrap().watch_demand, 2);
+    assert_eq!(e.tree().get(a).unwrap().watch_demand(), 2);
 
     // Reject the kernel watch at /a — co-claimed by Profile descent
     // (ClaimKind::DescentPrefix) and Promoter active proxy
@@ -688,7 +698,12 @@ fn watch_op_rejected_purges_co_claimed_resource() {
     let purge_out = e.step(watch_op_rejected_input(a, "/a"), now);
 
     // Counter zeroed; both claims released.
-    assert_eq!(e.tree().get(a).map_or(0, |r| r.watch_demand), 0);
+    assert_eq!(
+        e.tree()
+            .get(a)
+            .map_or(0, specter_core::Resource::watch_demand),
+        0
+    );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
         ProfileState::Idle,
