@@ -37,7 +37,7 @@
 use crate::Engine;
 use crate::descent::{MaterializeResult, kind_from_entry};
 use crate::engine::decompose_attach_path;
-use crate::refcounts::{add_watch, sub_watch};
+use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
     ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
@@ -65,20 +65,18 @@ impl Engine {
     /// minted [`PromoterId`] alongside a sorted [`StepOutput`].
     ///
     /// **Two materialisation paths** branched inside
-    /// [`Self::attach_promoter_inner`]:
+    /// `attach_promoter_inner`:
     ///
     /// - **Immediate `Active`** — the literal-prefix path resolved to a
     ///   live Tree slot. The Promoter is constructed with empty
-    ///   `Active { proxies: {} }`; [`Self::enter_active`] then
-    ///   registers the first proxy at the prefix and queues the
-    ///   initial enumeration.
+    ///   `Active { proxies: {} }`; `enter_active` then registers the
+    ///   first proxy at the prefix and queues the initial enumeration.
     /// - **`PrefixPending`** — the literal prefix doesn't yet exist.
     ///   The Promoter is constructed with `PrefixPending(d)`; the
     ///   prefix's STRUCTURE `watch_demand` bumps and a descent probe
     ///   emits at `d.current_prefix`. The descent dispatcher walks the
     ///   prefix segment-by-segment as each materialises, ending in a
-    ///   single [`Self::enter_active`] call when the last literal
-    ///   resolves.
+    ///   single `enter_active` call when the last literal resolves.
     ///
     /// On a malformed `pattern_spec` (defense-in-depth — `PatternSpec`
     /// parse should have rejected the same shape upstream), the engine
@@ -253,13 +251,15 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // [S-8] Promoter-fresh slots use User role: the back-ref
-        // (`proxy_promoters`) is the retention signal, not
-        // DescentScaffold. For a fresh slot the descent created
-        // (DescentScaffold role from `Tree::ensure(_, _, DescentScaffold)`),
-        // demote to User; for a previously-User slot (shared with a
-        // prior Profile / Promoter), `set_role` is a no-op when the
-        // role is unchanged.
+        // [S-8] Promoter-fresh slots demote to `User` role for
+        // diagnostic clarity: the proxy is functionally a User
+        // anchorage for the dynamic Sub family this Promoter is about
+        // to mint. The role is metadata only — retention runs through
+        // the `proxy_promoters` back-ref and the proxy contribution,
+        // independent of role. The demotion is informational; preserve
+        // it so observers (logs, future tracing) read the slot's role
+        // as its current functional purpose rather than its descent
+        // origin.
         if let Some(res) = self.tree.get(new_proxy_resource)
             && matches!(res.role, ResourceRole::DescentScaffold)
         {
@@ -284,15 +284,15 @@ impl Engine {
         // claim, but the contribution map is the source of truth and
         // is removed by key here. `try_reap` is idempotent — the slot
         // survives iff something else still holds it (children,
-        // profiles, role anchors).
+        // profiles, co-resident contributions, proxy_promoters
+        // back-refs); role is metadata and never gates retention.
         if let Some(prior) = prior_prefix_to_release {
-            sub_watch(
+            sub_watch_then_try_reap(
                 &mut self.tree,
                 prior,
                 ContribKey::PromoterPrefix(promoter_id),
                 out,
             );
-            self.tree.try_reap(prior);
         }
 
         // 3. Register the proxy at new_proxy_resource. `register_proxy`
@@ -1068,13 +1068,13 @@ impl Engine {
     ///    on the corresponding Profile.
     /// 3. State-branch on `Promoter.state`:
     ///    - `PrefixPending`: flip state to `Active{empty}` for owner
-    ///      bookkeeping, then `sub_watch` the prefix by
-    ///      [`specter_core::ContribKey::PromoterPrefix`]. Try-reap the
-    ///      prefix.
+    ///      bookkeeping, then release the prefix's
+    ///      [`specter_core::ContribKey::PromoterPrefix`] contribution
+    ///      and try-reap the slot via [`sub_watch_then_try_reap`].
     ///    - `Active`: snapshot the proxies and call
-    ///      [`Self::unregister_proxy`] on each — which `sub_watch`es by
-    ///      [`specter_core::ContribKey::PromoterProxy`], clears the
-    ///      back-ref, and try-reaps the slot.
+    ///      [`Self::unregister_proxy`] on each — which removes the
+    ///      [`specter_core::ContribKey::PromoterProxy`] contribution,
+    ///      clears the back-ref, and try-reaps the slot.
     /// 4. Remove the Promoter from the registry. Emit
     ///    [`Diagnostic::PromoterReaped`].
     pub(crate) fn reap_promoter_inner(
@@ -1146,13 +1146,12 @@ impl Engine {
                     };
                 }
                 if let Some(prefix) = prefix {
-                    sub_watch(
+                    sub_watch_then_try_reap(
                         &mut self.tree,
                         prefix,
                         ContribKey::PromoterPrefix(promoter_id),
                         out,
                     );
-                    self.tree.try_reap(prefix);
                 }
             }
             Some(PromoterReapStateKind::Active) => {

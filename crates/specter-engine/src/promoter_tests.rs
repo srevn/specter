@@ -1280,16 +1280,20 @@ fn reap_promoter_active_with_subproxies_clears_all() {
     let _out = e.reap_promoter(pid, Instant::now());
 
     assert!(e.promoters.get(pid).is_none(), "Promoter removed");
-    assert!(
-        e.tree().get(srv).unwrap().proxy_promoters().is_empty(),
-        "/srv back-ref cleared",
-    );
-    assert!(
-        e.tree()
-            .get(alpha)
-            .is_none_or(|r| !r.proxy_promoters().contains(&pid)),
-        "/srv/alpha back-ref cleared (or slot reaped)",
-    );
+    // With the Promoter as their sole claim, both `/srv` and
+    // `/srv/alpha` cascade-reap when `unregister_proxy` drops the last
+    // proxy contribution and back-ref at each slot. Assert the
+    // back-ref is cleared (or the slot is gone) at every involved
+    // resource — the production contract is "no live `proxy_promoters`
+    // entry naming this Promoter survives the reap."
+    for r in [srv, alpha] {
+        assert!(
+            e.tree()
+                .get(r)
+                .is_none_or(|node| !node.proxy_promoters().contains(&pid)),
+            "{r:?} back-ref cleared (or slot reaped)",
+        );
+    }
 }
 
 // ---- recovery split (on_anchor_terminal_event dispatcher) ----

@@ -44,8 +44,12 @@ impl Engine {
     /// Transitions the Promoter to `Active{empty}`. Idempotent
     /// (non-`PrefixPending` ⇒ no-op); safe in any post-vacate state
     /// — `sub_watch` silently skips an absent key.
-    /// Calls `try_reap` on the prefix slot — its `DescentScaffold`
-    /// role is no longer load-bearing once no descent claims it.
+    /// Calls `try_reap` on the prefix slot — with this Promoter's
+    /// prefix contribution just removed, the slot reaps unless another
+    /// claim still holds it (a child Promoter / Profile slot below the
+    /// prefix, a peer descent at the same level, or a sibling-anchored
+    /// User Profile that promoted the slot earlier). The role tag is
+    /// metadata; it does not affect this reap.
     ///
     /// **Cancel-first contract.** Callers with a possibly-in-flight
     /// descent probe (e.g., `on_watch_op_rejected`'s descent purge,
@@ -93,9 +97,10 @@ impl Engine {
     /// Idempotent (non-`Active` or proxy-not-present ⇒ no-op); safe in
     /// any counter state. Clears the per-Resource back-ref. Calls
     /// `try_reap` on the proxy slot — with the back-ref cleared and
-    /// the `User`-roled slot, `has_anchors` returns false for
+    /// the proxy contribution released, `has_anchors` returns false for
     /// promoter-only slots; shared slots (Profile descent prefix, other
-    /// Promoter proxies) survive.
+    /// Promoter proxies, an anchored User Profile, surviving children)
+    /// survive. The role tag is metadata; it does not affect this reap.
     ///
     /// **Cancel-first contract for in-flight enumeration probes
     /// targeting this proxy.** Callers MUST cancel the probe first; the

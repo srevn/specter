@@ -157,11 +157,12 @@ impl std::fmt::Debug for PipeSpawnHandles {
 /// post-reap signals are no-ops (closes the PID-reuse race).
 ///
 /// `signaler` is `Arc<dyn>` because the controller installs the signaler
-/// into [`crate::pool::state::RunningJob::signaler`] and *also* clones it
-/// into the per-step timer thread (when [`super::ExecAction::timeout`]
-/// is set) — both paths need to outlive each other independently. The
-/// pipe path's `PipeSpawnHandles::stage_signalers` are likewise `Arc`,
-/// so the spawn surface speaks a single signaler-ownership shape.
+/// into the per-job `RunningJob::signaler` slot and *also* clones it
+/// into the per-step timer thread (when [`specter_core::ExecAction`]'s
+/// `timeout` is set) — both paths need to outlive each other
+/// independently. The pipe path's `PipeSpawnHandles::stage_signalers`
+/// are likewise `Arc`, so the spawn surface speaks a single
+/// signaler-ownership shape.
 pub struct SpawnHandles {
     pub pid: u32,
     pub waiter: Box<dyn ChildWaiter>,

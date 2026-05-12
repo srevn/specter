@@ -172,10 +172,17 @@ impl Tree {
     /// idempotence absorbs the duplicate — rather than to a panic or
     /// a silent kernel-watch leak.
     ///
-    /// **What survives.** Children, profiles, role, and the
-    /// `proxy_promoters` back-ref are retention anchors and stay
-    /// untouched. Vacated-but-anchored slots are recreated by
-    /// [`Tree::ensure`] returning the same [`ResourceId`].
+    /// **What survives.** Children, profiles, the `proxy_promoters`
+    /// back-ref, `role`, `parent`, and `segment` all stay untouched.
+    /// Of those, children, profiles, and `proxy_promoters` (alongside
+    /// the contributions map, which `vacate` itself just cleared)
+    /// drive [`Resource::has_anchors`] — i.e., they decide whether a
+    /// follow-on [`Tree::try_reap`] keeps the slot alive. Role is
+    /// metadata: it records *what* the slot is (User anchor /
+    /// watch-root parent / descent scaffold) for diagnostic clarity,
+    /// but does not anchor the slot. Vacated-but-anchored slots are
+    /// recreated by [`Tree::ensure`] returning the same
+    /// [`ResourceId`].
     pub fn vacate(&mut self, id: ResourceId, out: &mut StepOutput) {
         let Some(r) = self.nodes.get_mut(id) else {
             return;
@@ -191,9 +198,29 @@ impl Tree {
         r.kind = ResourceKind::Unknown;
     }
 
-    /// Remove the slot iff `Resource::has_anchors()` is `false`. Returns
-    /// `true` iff the slot was removed; the caller's `ResourceId` then
-    /// becomes stale (lookups return `None`).
+    /// Remove the slot iff [`Resource::has_anchors`] is `false`, then
+    /// cascade the same check up the parent chain. Returns `true` iff the
+    /// **caller's** slot was removed (the cascade past it is best-effort
+    /// hygiene); the caller's `ResourceId` becomes stale on a `true`
+    /// return.
+    ///
+    /// **Why cascade.** Reaping a slot unlinks it from its parent's
+    /// `children` map. If the parent now has no anchors of its own —
+    /// no remaining children, no profiles, no Promoter back-refs, no
+    /// contributions — it is also orphaned and should reap. Without the
+    /// cascade, every release helper that targets a leaf slot would
+    /// silently leave its now-orphaned ancestor chain behind, since
+    /// `try_reap` is a local op. The cascade is structurally bounded by
+    /// the tree depth from `id` to its root (filesystem path depth,
+    /// single-digit in practice) and gated at every step by
+    /// `has_anchors`, so it never tears down a slot still claimed by
+    /// some live owner.
+    ///
+    /// **Cascade stop conditions.** The walk halts as soon as it
+    /// encounters a parent that still has anchors (the normal case — a
+    /// sibling child, a co-resident Profile / Promoter, or another
+    /// contribution keeps it alive) or reaches a root (parent =
+    /// `None`).
     pub fn try_reap(&mut self, id: ResourceId) -> bool {
         let Some(r) = self.nodes.get(id) else {
             return false;
@@ -201,20 +228,45 @@ impl Tree {
         if r.has_anchors() {
             return false;
         }
-        let parent = r.parent;
-        let segment = r.segment;
-        match parent {
-            Some(p) => {
-                if let Some(parent_node) = self.nodes.get_mut(p) {
-                    parent_node.children.remove(&segment);
+
+        let mut current = id;
+        loop {
+            // Invariant: `nodes[current]` is live and `has_anchors() ==
+            // false`. The first iteration enters here from the gate
+            // above; subsequent iterations enter after the cascade
+            // check below.
+            let node = &self.nodes[current];
+            let parent = node.parent;
+            let segment = node.segment;
+
+            // Unlink from parent's `children` map or `roots` vector
+            // before removing the slot itself. Both operations are
+            // cheap (BTreeMap by-key remove / Vec retain).
+            match parent {
+                Some(p) => {
+                    if let Some(parent_node) = self.nodes.get_mut(p) {
+                        parent_node.children.remove(&segment);
+                    }
+                }
+                None => {
+                    self.roots.retain(|x| *x != current);
                 }
             }
-            None => {
-                self.roots.retain(|x| *x != id);
+            self.nodes.remove(current);
+
+            // Advance to the parent and re-test. Stop on roots or when
+            // the parent still carries an anchor.
+            let Some(parent_id) = parent else {
+                return true;
+            };
+            let Some(parent_node) = self.nodes.get(parent_id) else {
+                return true;
+            };
+            if parent_node.has_anchors() {
+                return true;
             }
+            current = parent_id;
         }
-        self.nodes.remove(id);
-        true
     }
 
     #[must_use]
@@ -356,8 +408,10 @@ mod tests {
             s_new in any_segment(),
         ) {
             prop_assume!(s_old != s_new);
+            prop_assume!(s_old != "sibling" && s_new != "sibling");
             let mut tree = Tree::new();
             let parent = tree.ensure(None, "p", ResourceRole::User);
+            let _sibling = tree.ensure(Some(parent), "sibling", ResourceRole::User);
             let id_old = tree.ensure(Some(parent), &s_old, ResourceRole::User);
             tree.vacate(id_old, &mut discard());
             prop_assert!(tree.try_reap(id_old));
@@ -386,13 +440,21 @@ mod tests {
         }
     }
 
+    /// Role is metadata: a vacated `WatchRootParent` slot with no
+    /// structural anchors (children, profiles, proxy back-refs,
+    /// contributions) is reapable. The previous behavior — role alone
+    /// pinning the slot — leaked watch-root parent slots after every
+    /// Profile reap. See `has_anchors`'s rustdoc for the contract.
     #[test]
-    fn try_reap_refused_with_anchor_role() {
+    fn try_reap_succeeds_for_role_only_slot_post_vacate() {
         let mut tree = Tree::new();
         let id = tree.ensure(None, "watch-root", ResourceRole::WatchRootParent);
         tree.vacate(id, &mut discard());
-        assert!(!tree.try_reap(id), "infrastructure role must not reap");
-        assert!(tree.get(id).is_some());
+        assert!(
+            tree.try_reap(id),
+            "role is metadata; vacated slot with no structural anchors reaps",
+        );
+        assert!(tree.get(id).is_none());
     }
 
     #[test]
@@ -403,6 +465,76 @@ mod tests {
         tree.vacate(parent, &mut discard());
         assert!(!tree.try_reap(parent), "parent with child must not reap");
         assert!(tree.get(parent).is_some());
+    }
+
+    /// Reaping a leaf unlinks it from its parent's `children`, which may
+    /// orphan the parent. The cascade walks up and reaps each ancestor
+    /// that no longer has any anchors, stopping at the first ancestor
+    /// that still does. With `ensure_path`'s `DescentScaffold`
+    /// intermediates anchored only by the chain to a now-reaped leaf, the
+    /// cascade frees the whole prefix on a single `try_reap` of the leaf.
+    #[test]
+    fn try_reap_cascades_through_role_only_ancestors() {
+        let mut tree = Tree::new();
+        let leaf = tree.ensure_path(&["a", "b", "c"], ResourceRole::User);
+        let a = tree.lookup(None, "a").unwrap();
+        let b = tree.lookup(Some(a), "b").unwrap();
+        assert!(matches!(
+            tree.get(a).unwrap().role,
+            ResourceRole::DescentScaffold,
+        ));
+        assert!(matches!(
+            tree.get(b).unwrap().role,
+            ResourceRole::DescentScaffold,
+        ));
+
+        tree.vacate(leaf, &mut discard());
+        assert!(tree.try_reap(leaf), "leaf reaps on the empty edge");
+
+        assert!(tree.get(leaf).is_none());
+        assert!(tree.get(b).is_none(), "b cascaded — only the leaf held it");
+        assert!(tree.get(a).is_none(), "a cascaded — only b held it");
+        assert!(tree.is_empty());
+    }
+
+    /// The cascade stops at the first ancestor that still has any
+    /// anchor — here, a sibling subtree. The intermediate ancestor
+    /// shared by the reaped leaf and the surviving sibling stays alive.
+    #[test]
+    fn try_reap_cascade_halts_at_anchored_ancestor() {
+        let mut tree = Tree::new();
+        let root = tree.ensure(None, "root", ResourceRole::User);
+        let mid = tree.ensure(Some(root), "mid", ResourceRole::DescentScaffold);
+        let a = tree.ensure(Some(mid), "a", ResourceRole::User);
+        let _b = tree.ensure(Some(mid), "b", ResourceRole::User);
+
+        tree.vacate(a, &mut discard());
+        assert!(tree.try_reap(a), "a reaps — no anchors of its own");
+
+        assert!(tree.get(a).is_none());
+        assert!(
+            tree.get(mid).is_some(),
+            "mid still has sibling `b` as a child — cascade halts",
+        );
+        assert!(tree.get(root).is_some());
+    }
+
+    /// Multi-claimant retention: a slot anchored only by a co-resident
+    /// contribution survives the reap of one claim. The cascade does not
+    /// fire because the slot itself never becomes empty.
+    #[test]
+    fn try_reap_refused_with_live_contribution() {
+        let mut tree = Tree::new();
+        let id = tree.ensure(None, "root", ResourceRole::User);
+        tree.get_mut(id).unwrap().contributions.insert(
+            crate::resource::ContribKey::ProfileAnchor(crate::ids::ProfileId::default()),
+            crate::sub::ClassSet::STRUCTURE,
+        );
+        assert!(
+            !tree.try_reap(id),
+            "live contribution is itself a retention anchor",
+        );
+        assert!(tree.get(id).is_some());
     }
 
     #[test]

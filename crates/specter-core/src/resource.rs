@@ -203,20 +203,44 @@ impl Resource {
         }
     }
 
-    /// Slot retention rule: `Tree::try_reap` removes the slot iff this returns `false`.
+    /// Slot retention rule: `Tree::try_reap` removes the slot iff this
+    /// returns `false`.
     ///
-    /// `proxy_promoters` joins `children`, `profiles`, and the two anchored
-    /// roles as a retention signal: a Resource that backs a live Promoter
-    /// proxy must outlive the proxy.
+    /// Retention is **structural** — a slot stays alive while *something*
+    /// claims it. Four canonical claimants:
+    ///
+    /// - `children` — a descendant slot's `parent` edge points here.
+    /// - `profiles` — one or more Profiles are anchored at this slot.
+    /// - `proxy_promoters` — one or more Promoter proxies are pinned here.
+    /// - `contributions` — at least one [`ContribKey`] entry holds a
+    ///   kernel-watch demand here (Profile anchor / parent / descent /
+    ///   descendant, or Promoter prefix / proxy).
+    ///
+    /// [`ResourceRole`] is **metadata, not retention**. The role tag
+    /// records *what* the slot is (User anchor / watch-root parent /
+    /// descent scaffold) for diagnostic clarity; whether the slot
+    /// *survives* is a question for the structural claimants above. The
+    /// canonical retention question is "does any owner still hold this
+    /// slot?", and the contributions map (in lockstep with owner state
+    /// via [`crate::Tree::vacate`] and the engine's refcount helpers)
+    /// answers it directly.
+    ///
+    /// **Why all four fields, not just contributions.** The three
+    /// back-ref vectors (`children`, `profiles`, `proxy_promoters`)
+    /// describe live ownership *without* implying a kernel-watch demand:
+    /// a Pending Profile's User-roled leaf carries `profiles` but no
+    /// contribution at the leaf (the leaf's only contribution arrives
+    /// at materialization); a non-leaf descent scaffold carries
+    /// `children` but no contribution of its own (its descent
+    /// contribution belongs to its deepest-existing descendant). The
+    /// union of all four is "anything reaches into this slot from
+    /// somewhere."
     #[must_use]
     pub fn has_anchors(&self) -> bool {
         !self.children.is_empty()
             || !self.profiles.is_empty()
             || !self.proxy_promoters.is_empty()
-            || matches!(
-                self.role,
-                ResourceRole::WatchRootParent | ResourceRole::DescentScaffold
-            )
+            || !self.contributions.is_empty()
     }
 
     /// Number of distinct contributors holding watch-demand at this
@@ -345,21 +369,34 @@ mod tests {
         interner.get_or_intern("seg")
     }
 
+    /// Role is metadata; a fresh slot with no children, no profiles, no
+    /// proxy back-refs, and no contributions has no anchors regardless
+    /// of its role tag.
     #[test]
-    fn fresh_resource_has_no_anchors_when_user() {
-        let r = Resource::new(None, dummy_segment(), ResourceRole::User);
-        assert!(!r.has_anchors());
+    fn fresh_resource_has_no_anchors_regardless_of_role() {
+        for role in [
+            ResourceRole::User,
+            ResourceRole::WatchRootParent,
+            ResourceRole::DescentScaffold,
+        ] {
+            let r = Resource::new(None, dummy_segment(), role);
+            assert!(
+                !r.has_anchors(),
+                "role-only retention was dropped; fresh {role:?} slot is not anchored",
+            );
+        }
     }
 
+    /// A live contribution is itself a retention anchor — paired with
+    /// the slot's owner-side bookkeeping, it is the canonical "this
+    /// slot is claimed" signal that drives the kernel-watch lifetime.
     #[test]
-    fn fresh_resource_anchored_when_watch_root_parent() {
-        let r = Resource::new(None, dummy_segment(), ResourceRole::WatchRootParent);
-        assert!(r.has_anchors());
-    }
-
-    #[test]
-    fn fresh_resource_anchored_when_descent_scaffold() {
-        let r = Resource::new(None, dummy_segment(), ResourceRole::DescentScaffold);
+    fn anchored_when_contribution_present() {
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        r.contributions.insert(
+            ContribKey::ProfileAnchor(ProfileId::default()),
+            ClassSet::STRUCTURE,
+        );
         assert!(r.has_anchors());
     }
 

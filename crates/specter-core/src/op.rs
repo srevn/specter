@@ -193,9 +193,10 @@ impl ProbeRequest {
         }
     }
 
-    /// Correlation token. Used by the bin's expectation-map insertion in
-    /// [`crate::Prober::submit`] (via `WorkerProber`) and by the worker's
-    /// post-run cleanup. Never read by the engine after emit.
+    /// Correlation token. Used by the bin's expectation-map insertion
+    /// in the sensor's `Prober::submit` (via `WorkerProber`) and by
+    /// the worker's post-run cleanup. Never read by the engine after
+    /// emit.
     #[must_use]
     pub const fn correlation(&self) -> ProbeCorrelation {
         match self {

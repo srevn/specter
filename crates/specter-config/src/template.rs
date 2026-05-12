@@ -135,7 +135,7 @@ impl std::error::Error for TemplateError {}
 ///   `excluded`); anything else inside the namespace returns an error.
 /// - `${env.<NAME>}` or `${env.<NAME>:-<default>}` — operator-env
 ///   reference resolved at spawn time against the actuator's captured
-///   [`crate::EnvSnapshot`]. `<NAME>` must be a `[A-Za-z_][A-Za-z0-9_]*`
+///   `EnvSnapshot`. `<NAME>` must be a `[A-Za-z_][A-Za-z0-9_]*`
 ///   identifier. Strict by default: missing env var with no default ⇒
 ///   the plan fails (`EffectOutcome::Failed`). Explicit lenient opt-in
 ///   via `${env.HOME:-}` (empty default) or `${env.HOME:-/tmp}`.

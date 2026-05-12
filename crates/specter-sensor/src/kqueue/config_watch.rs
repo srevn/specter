@@ -189,8 +189,8 @@ impl KqueueConfigWatcher {
     ///    paths (`/`, names with no file component) yield `InvalidInput`.
     /// 3. Create a fresh kqueue fd; register `EVFILT_USER` for the
     ///    wake ident.
-    /// 4. Open the parent dir; register vnode with [`PARENT_FFLAGS`].
-    /// 5. Open the config file; register vnode with [`FILE_FFLAGS`].
+    /// 4. Open the parent dir; register vnode with `PARENT_FFLAGS`.
+    /// 5. Open the config file; register vnode with `FILE_FFLAGS`.
     ///    `ENOENT` here (TOCTOU after canonicalize) is non-fatal — we
     ///    leave `file_fd = None` and re-open on the next parent event.
     pub fn new(path: &Path) -> io::Result<Self> {
@@ -305,14 +305,14 @@ impl ConfigWatcher for KqueueConfigWatcher {
     ///   file fd is dropped. The kernel auto-removes the vnode
     ///   registration on close.
     /// - **`PARENT_UDATA`** — `real_seen = true`. If `file_fd` is
-    ///   currently `None`, attempt [`Self::try_reopen`] in the same
-    ///   pass — coalesced delete-recreate bursts therefore restore the
-    ///   watch within a single drain.
+    ///   currently `None`, attempt `try_reopen` in the same pass —
+    ///   coalesced delete-recreate bursts therefore restore the watch
+    ///   within a single drain.
     /// - **Other udata** — logged at `trace!`. Should not occur given
     ///   we only register the two known idents on this kqueue, but the
     ///   defensive arm beats a panic on a future kernel surprise.
     ///
-    /// `EINTR` is retried inside [`ffi::kevent_drain`]. Any other
+    /// `EINTR` is retried inside `ffi::kevent_drain`. Any other
     /// `io::Error` propagates verbatim — the bin's wrapper logs at
     /// `error!` and exits the watcher thread; SIGHUP-only operation
     /// continues.

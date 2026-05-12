@@ -79,9 +79,9 @@ impl SubprocessActuator {
     /// [`DEFAULT_CONCURRENCY`] (`0`) to resolve to `2 * num_cpus`; non-zero
     /// values pass through. The `0`-sentinel is the only place this
     /// crate resolves "default concurrency"; everything below
-    /// [`ActuatorState::new`] receives a [`NonZeroUsize`] and trusts it.
+    /// `ActuatorState::new` receives a [`NonZeroUsize`] and trusts it.
     ///
-    /// Captures the current process env via [`EnvSnapshot::capture`] —
+    /// Captures the current process env via `EnvSnapshot::capture` —
     /// invoked exactly once per actuator. The snapshot is shared by
     /// `Arc` across the resolver's per-step calls.
     #[must_use]

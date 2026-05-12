@@ -69,10 +69,16 @@ impl Engine {
     }
 
     /// Release the Profile's watch-root parent contribution if held.
-    /// Idempotent; safe in any post-vacate state. Calls
-    /// `try_reap` on the parent slot — the parent's `WatchRootParent`
-    /// role is the only thing keeping it alive when no User Profile is
-    /// anchored at or below it, and that's now stale.
+    /// Idempotent; safe in any post-vacate state. Calls `try_reap` on
+    /// the parent slot — with this Profile's [`ContribKey::ProfileParent`]
+    /// just removed, the slot reaps unless some other claim still
+    /// holds it (a sibling child, another Profile parented here, a
+    /// Promoter proxy / prefix). The reap is a no-op at the call moment
+    /// when [`Engine::reap_profile`] runs this helper before the
+    /// anchor's own `try_reap` — the anchor is still a child of the
+    /// parent — but the cascading `try_reap` performed by [`Tree::try_reap`]
+    /// on the eventual anchor reap walks back up and frees the parent
+    /// in that same step.
     pub(crate) fn release_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(pid) else {
             return;
@@ -91,8 +97,14 @@ impl Engine {
     /// Release the Profile's descent prefix `watch_demand` contribution if
     /// `Pending`. Transitions the Profile to `Idle`. Idempotent (non-Pending
     /// ⇒ no-op); safe in any counter state. Calls `try_reap` on the
-    /// prefix slot — its `DescentScaffold` role is no longer
-    /// load-bearing once no descent claims it.
+    /// prefix slot — with this Profile's
+    /// [`ContribKey::ProfileDescent`] just removed, the slot reaps
+    /// unless something else still claims it (most often a child slot
+    /// in the descent chain toward the anchor, or another descent's
+    /// contribution at the shared prefix). The prefix's role tag
+    /// (`DescentScaffold` from initial `ensure_path`, or `User` /
+    /// `WatchRootParent` if a peer Profile previously promoted it) is
+    /// metadata; it does not affect this reap.
     ///
     /// **Cancel-first contract.** Callers that may have an in-flight probe
     /// (e.g., `reap_profile`, `on_watch_op_rejected` descent purge) MUST

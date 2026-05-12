@@ -173,14 +173,14 @@ impl ProgramBuilder {
         OpHandle(index)
     }
 
-    /// Patch the `on_ok` edge of `h`. See [`Self::patch_target_check`]
-    /// for the patch-time invariants.
+    /// Patch the `on_ok` edge of `h`. The internal `patch_target_check`
+    /// helper enforces the patch-time invariants.
     pub fn patch_on_ok(&mut self, h: OpHandle, target: BranchTarget) -> Result<(), ProgramError> {
         self.patch(h, Edge::OnOk, target)
     }
 
-    /// Patch the `on_failed` edge of `h`. See [`Self::patch_target_check`]
-    /// for the patch-time invariants.
+    /// Patch the `on_failed` edge of `h`. The internal
+    /// `patch_target_check` helper enforces the patch-time invariants.
     pub fn patch_on_failed(
         &mut self,
         h: OpHandle,

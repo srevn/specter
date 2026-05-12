@@ -151,7 +151,11 @@ fn detach_clears_back_references_on_both_sides() {
 #[test]
 fn rename_after_detach_yields_fresh_id() {
     // Mimics the engine's rename handling: detach Profile → vacate +
-    // try_reap → ensure with a new segment.
+    // try_reap → ensure with a new segment. The cascade in `try_reap`
+    // also frees the now-orphaned `/dir` parent (no other claims), so
+    // the post-reap re-attach re-creates the full path — the engine's
+    // own `attach_sub_inner` does exactly this via
+    // `materialize_path_or_pending`.
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
     let parent = tree.ensure(None, "/dir", ResourceRole::User);
@@ -166,8 +170,16 @@ fn rename_after_detach_yields_fresh_id() {
     profiles.detach(&mut tree, pid);
     tree.vacate(id_old, &mut StepOutput::default());
     assert!(tree.try_reap(id_old), "post-detach reap must succeed");
+    assert!(
+        tree.get(parent).is_none(),
+        "cascade reaped the now-orphaned parent",
+    );
 
-    let id_new = tree.ensure(Some(parent), "bar.c", ResourceRole::User);
+    // Re-ensure the path (the engine's own re-attach flow). The fresh
+    // `/dir` slot gets a new id; the renamed `bar.c` under it likewise.
+    let parent_fresh = tree.ensure(None, "/dir", ResourceRole::User);
+    let id_new = tree.ensure(Some(parent_fresh), "bar.c", ResourceRole::User);
+    assert_ne!(parent, parent_fresh, "parent slot was reaped and re-minted");
     assert_ne!(id_old, id_new, "renamed slot yields fresh id");
 }
 

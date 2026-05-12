@@ -228,9 +228,14 @@ impl Engine {
             None => (req.resource, None),
         };
 
-        // If the anchor was a DescentScaffold and now becomes the
-        // anchor of a User Profile, promote its role. Pending case is
-        // handled at materialization time inside descent dispatch.
+        // If the anchor was a DescentScaffold (created by an earlier
+        // attach's `ensure_path` intermediate, or by the FS-root
+        // bootstrap) and now becomes the anchor of a User Profile,
+        // promote its role to `User` for diagnostic clarity. The role
+        // is metadata — retention has always run through the profile
+        // back-ref the [`ProfileMap::attach`] call below installs.
+        // Pending case is handled at materialization time inside
+        // descent dispatch.
         if pending_components.is_none()
             && let Some(res) = self.tree.get(anchor)
             && matches!(res.role, specter_core::ResourceRole::DescentScaffold)
@@ -423,7 +428,8 @@ impl Engine {
     /// it exists) carries a `+1` `watch_demand` contribution from P. The
     /// parent's role is promoted to `WatchRootParent` only if it was
     /// previously a bare `DescentScaffold`; `User` parents stay `User`
-    /// (never demote User).
+    /// (never demote User). The role tag is metadata — retention runs
+    /// through the [`ContribKey::ProfileParent`] entry installed below.
     ///
     /// Caches the parent id on `Profile.watch_root_parent` so
     /// `reap_profile` can release the contribution without re-deriving.
@@ -741,8 +747,14 @@ impl Engine {
             profile_id,
         );
 
-        // Try to reap the anchor's slot. No-op if it still has children,
-        // other Profiles, or an infrastructure role.
+        // Try to reap the anchor's slot. No-op if it still has
+        // children (a descendant Profile / Promoter / scaffold survives
+        // here), other Profiles attached at the same slot, a Promoter
+        // back-ref, or any co-resident contribution. On success,
+        // [`Tree::try_reap`] cascades upward through any now-orphaned
+        // ancestors — the watch-root parent slot whose only remaining
+        // claim was *this* Profile's anchor as its sole child is freed
+        // in the same step.
         self.tree.try_reap(anchor);
 
         out.diagnostics.push(Diagnostic::ReapPendingResolved {

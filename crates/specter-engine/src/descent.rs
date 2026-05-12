@@ -85,12 +85,16 @@ impl crate::Engine {
     /// deepest existing ancestor as `prefix` and the remaining components
     /// as the descent path.
     ///
-    /// "Deepest existing ancestor" is determined by walking up from the
-    /// leaf and asking the `ResourceRole`: the first ancestor whose role
-    /// is **not** `DescentScaffold` is the prefix. (A `User` or
-    /// `WatchRootParent` ancestor is fine — the watch state is owned by
-    /// some other Profile in the case of `User`, or by the engine's
-    /// infrastructure in the case of `WatchRootParent`.)
+    /// "Deepest existing ancestor" is determined by Tree-side
+    /// pre-existence: each component is `lookup`'d before the walk;
+    /// the deepest `i` for which `lookup(components[..=i])` succeeded
+    /// before the materialising `ensure_path` call is the prefix index.
+    /// The FS-root bootstrap guarantees `i >= 0` for every absolute
+    /// attach. Role plays no part in this decision — a slot that
+    /// existed before the walk may be a `User` peer anchor, a
+    /// `WatchRootParent` of some other Profile, or a `DescentScaffold`
+    /// retained from an earlier Pending Profile's descent chain; any
+    /// of those count as "pre-existing".
     ///
     /// **Pre-condition.** `components` is non-empty and `components[0] ==
     /// FS_ROOT_SEG`. [`crate::engine::decompose_attach_path`] is the
@@ -400,10 +404,13 @@ impl crate::Engine {
     ///    new prefix's.
     /// 4. Emit the fresh descent probe at the new prefix.
     ///
-    /// The old prefix retains its `DescentScaffold` role (set on its
-    /// own `Tree::ensure` at descent's start) — the role survives
-    /// `sub_watch`; reaping is deferred to a future state
-    /// transition. No `try_reap` here.
+    /// The old prefix stays alive because the freshly-advanced
+    /// `new_prefix` is still its `children` entry — the structural
+    /// anchor holds the slot across `sub_watch`. No `try_reap` here:
+    /// the routine release helper would see a non-empty `children` map
+    /// and short-circuit anyway, so we skip the call. (Role is metadata
+    /// throughout — its tag stays `DescentScaffold` from the initial
+    /// `Tree::ensure` but does not affect retention.)
     fn advance_descent(
         &mut self,
         owner: ProbeOwner,

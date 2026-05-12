@@ -193,7 +193,7 @@ impl SubSpec {
 /// Validated dynamic-watch entry — the config-layer mirror of the
 /// engine's [`specter_core::Promoter`].
 ///
-/// Materialised by [`validate_dynamic_watch`] when the dispatcher
+/// Materialised by `validate_dynamic_watch` when the dispatcher
 /// observes a glob discriminator character (`*?[{`) in `path`. Each
 /// `PromoterSpec` translates to one [`PromoterAttachRequest`] via
 /// [`Self::to_attach_request`]; the engine assigns a `PromoterId` at

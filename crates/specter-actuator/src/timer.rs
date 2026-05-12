@@ -186,13 +186,14 @@ mod tests {
         let probe = Probe::new();
         std::thread::scope(|s| {
             s.spawn(|| {
-                // SIGTERM races out at ~5ms; this thread marks dead at
-                // ~10ms, well inside the 30ms grace. The timer's
-                // post-grace is_dead check then short-circuits SIGKILL.
-                std::thread::sleep(Duration::from_millis(10));
+                // Wait for the observable SIGTERM before marking dead —
+                // racing two wall-clock sleeps flakes under scheduler skew.
+                while probe.term_calls() == 0 {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 probe.mark_dead();
             });
-            run_timer(Duration::from_millis(5), Duration::from_millis(30), &probe);
+            run_timer(Duration::from_millis(5), Duration::from_millis(50), &probe);
         });
         assert_eq!(probe.term_calls(), 1, "SIGTERM fired");
         assert_eq!(

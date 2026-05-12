@@ -108,9 +108,9 @@ pub enum BranchTarget {
 
 /// Validated index into an [`super::ActionProgram`]'s `ops` slice.
 ///
-/// The inner field is private; the only constructor —
-/// [`Self::new`] — is `pub(super)` so only `program::*` can mint
-/// values. External code can construct [`BranchTarget::Terminate`]
+/// The inner field is private; the only constructor — `new` — is
+/// `pub(super)` so only `program::*` can mint values. External code
+/// can construct [`BranchTarget::Terminate`]
 /// and [`BranchTarget::Escape`] directly, but cannot construct
 /// [`BranchTarget::Continue`] without going through the builder. This
 /// is the type-level enforcement of the forward-only-and-in-bounds

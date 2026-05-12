@@ -194,17 +194,24 @@ pub fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
 /// drained); [`Tree::try_reap`] then removes the slot iff
 /// `Resource::has_anchors() == false`.
 ///
-/// **Anchors vs. contributions.** `has_anchors` checks the
-/// retention fields only — `children`, `profiles` back-ref,
-/// `proxy_promoters`, and the `WatchRootParent` / `DescentScaffold`
-/// infrastructure roles. The contributions map is *not* a retention
-/// anchor; it tracks kernel-watch demand, independent of slot
-/// lifetime. In every production call site, a structural anchor
-/// (typically the slot's role) holds the slot alive across the
-/// release — so the inner `try_reap` is a no-op in the steady state
-/// and only fires when the last sibling structural anchor was
-/// cleared earlier in the same step (e.g., the proxy-back-ref clear
-/// preceding [`Engine::release_promoter_proxy_claim`]'s call).
+/// **Anchors and contributions.** [`specter_core::Resource::has_anchors`]
+/// reads four retention sources: `children`, `profiles` back-ref,
+/// `proxy_promoters`, and the contributions map itself. The map is
+/// canonical for "this slot holds a live kernel-watch claim";
+/// removing the last contribution at a slot zeroes that source, and
+/// the slot reaps iff none of the three back-ref vectors still
+/// reaches into it. The role tag (`User` / `WatchRootParent` /
+/// `DescentScaffold`) is metadata and never gates retention.
+///
+/// In every production call site, at least one *other* claim is
+/// structurally certain to keep the slot alive across this release —
+/// for the descent-prefix release, the prefix's child chain toward the
+/// anchor; for the watch-root parent release, the anchor child slot;
+/// for the proxy release, the contribution's own removal is gated by
+/// `proxy_promoters` having been cleared by the caller first.
+/// [`specter_core::Tree::try_reap`] cascades upward when its own
+/// reap orphans a parent, so a single release helper at a leaf-most
+/// slot transparently frees the whole prefix chain it owned.
 ///
 /// **Distinct from [`Tree::vacate`].** Vacate is the protocol
 /// terminus: it clears the entire contribution map AND zeros
@@ -535,14 +542,13 @@ mod tests {
     }
 
     #[test]
-    fn sub_watch_then_try_reap_role_anchored_slot_emits_unwatch_but_stays() {
+    fn sub_watch_then_try_reap_role_only_slot_emits_unwatch_and_reaps() {
         // Production parallel to `release_watch_root_parent_claim` and
-        // the `release_*_descent_prefix_claim` family: the slot is
-        // anchored by its infrastructure role
-        // (`WatchRootParent` / `DescentScaffold`), so `has_anchors()`
-        // stays `true` even after the helper drains the contribution
-        // map. The `sub_watch` step emits `Unwatch` on the empty edge;
-        // `try_reap` returns `false` and the slot survives.
+        // the `release_*_descent_prefix_claim` family: the role tag is
+        // metadata, so a slot whose only retention claim was the just-
+        // dropped contribution reaps in the same step. `sub_watch`
+        // emits `Unwatch` on the empty edge; `try_reap` returns `true`
+        // and the slot is gone.
         let mut tree = Tree::new();
         let r = tree.ensure(None, "parent", ResourceRole::WatchRootParent);
         let mut out = StepOutput::default();
@@ -552,12 +558,11 @@ mod tests {
 
         let reaped = sub_watch_then_try_reap(&mut tree, r, key, &mut out);
 
-        assert!(!reaped, "WatchRootParent role held the slot");
         assert!(
-            tree.get(r).is_some(),
-            "slot survives; role anchors it past contribution drop",
+            reaped,
+            "role is metadata; slot reaps once contributions drain"
         );
-        assert_eq!(tree.get(r).unwrap().watch_demand(), 0);
+        assert!(tree.get(r).is_none(), "slot is gone");
         assert_eq!(out.watch_ops.len(), 1);
         assert!(matches!(
             out.watch_ops[0],
@@ -567,11 +572,13 @@ mod tests {
 
     #[test]
     fn sub_watch_then_try_reap_narrows_union_with_coresident_key() {
-        // Two distinct contributors at a role-anchored slot: dropping
-        // one narrows the events union but the slot's role anchors it
-        // through the release. `sub_watch` emits the narrowing `Watch`
-        // (not `Unwatch`) since the map stays non-empty; `try_reap` is
-        // a no-op because the role anchors the slot.
+        // Two distinct contributors at the same slot: dropping one
+        // narrows the events union but the surviving co-resident
+        // contribution itself anchors the slot. `sub_watch` emits the
+        // narrowing `Watch` (not `Unwatch`) since the map stays
+        // non-empty; `try_reap` is a no-op because the slot still has
+        // a live contribution (one of `has_anchors`'s four retention
+        // sources).
         let mut tree = Tree::new();
         let r = tree.ensure(None, "prefix", ResourceRole::DescentScaffold);
         let mut out = StepOutput::default();
@@ -583,7 +590,7 @@ mod tests {
 
         let reaped = sub_watch_then_try_reap(&mut tree, r, key_a, &mut out);
 
-        assert!(!reaped, "DescentScaffold role held the slot");
+        assert!(!reaped, "co-resident contribution anchors the slot");
         assert_eq!(tree.get(r).unwrap().watch_demand(), 1);
         assert_eq!(
             last_watch_events(&out),
@@ -595,6 +602,34 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, WatchOp::Unwatch { .. })),
         );
+    }
+
+    #[test]
+    fn sub_watch_then_try_reap_role_only_slot_with_child_survives() {
+        // A `WatchRootParent`-roled slot whose retention also includes
+        // a sibling child stays alive: dropping the contribution
+        // empties the contributions map but `children` still anchors.
+        // Mirrors the live `release_watch_root_parent_claim` path,
+        // where the anchor child has not yet been reaped at the call
+        // moment; the subsequent anchor reap then cascades through and
+        // frees the parent in the same step.
+        let mut tree = Tree::new();
+        let parent = tree.ensure(None, "parent", ResourceRole::WatchRootParent);
+        let _anchor = tree.ensure(Some(parent), "anchor", ResourceRole::User);
+        let mut out = StepOutput::default();
+        let key = ContribKey::ProfileParent(ProfileId::default());
+        add_watch(&mut tree, parent, key, ClassSet::STRUCTURE, &mut out);
+        out.watch_ops.clear();
+
+        let reaped = sub_watch_then_try_reap(&mut tree, parent, key, &mut out);
+
+        assert!(!reaped, "child anchors the parent slot");
+        assert!(tree.get(parent).is_some());
+        assert_eq!(out.watch_ops.len(), 1);
+        assert!(matches!(
+            out.watch_ops[0],
+            WatchOp::Unwatch { resource } if resource == parent,
+        ));
     }
 
     #[test]

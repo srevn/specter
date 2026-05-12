@@ -156,10 +156,15 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     );
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
 
-    // Detach.
+    // Detach. The detach releases the anchor's contribution and the
+    // watch-root parent's contribution; `Tree::try_reap` cascades up
+    // from the now-orphaned anchor and reaps `/root` in the same step
+    // (no other claims). Both slots emit `Unwatch` on the way out.
     let out = e.detach_sub(sid, now);
-    // /root's watch_demand back to 0; Unwatch emitted.
-    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
+    assert!(
+        e.tree().get(root).is_none_or(|r| r.watch_demand() == 0),
+        "/root's watch_demand back to 0 (or slot reaped by the cascade)",
+    );
     let unwatch_count = out
         .watch_ops
         .iter()

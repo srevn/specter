@@ -119,7 +119,8 @@ pub enum Input {
 /// ([`PromoterRegistryDiff`]). The engine's `on_config_diff` applies
 /// both halves atomically in one step: Sub removals → Sub modifications
 /// → Sub additions → Promoter removals → Promoter modifications →
-/// Promoter additions, all merging into a single sorted [`StepOutput`].
+/// Promoter additions, all merging into a single sorted
+/// [`crate::StepOutput`].
 ///
 /// `Default` is derived so call sites that touch only one half can
 /// construct via struct-update syntax: `WatchRegistryDiff { subs,
