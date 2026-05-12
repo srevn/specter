@@ -9,7 +9,10 @@
 //! Public API takes `&str` segments; the interner is internal.
 
 use crate::ids::ResourceId;
+use crate::op::WatchOp;
+use crate::output::StepOutput;
 use crate::resource::{Resource, ResourceKind, ResourceRole};
+use crate::sub::ClassSet;
 use slotmap::SlotMap;
 use std::path::PathBuf;
 use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
@@ -133,48 +136,49 @@ impl Tree {
             .find(|&r| self.nodes.get(r).is_some_and(|n| n.segment == sym))
     }
 
-    /// Reset `kind` to `Unknown` on a slot whose refcounts have already
-    /// been drained. Children, profiles, role, and back-refs survive —
-    /// those are retention anchors. Vacated-but-anchored slots are
-    /// recreated by `ensure` returning the same `ResourceId`.
+    /// Finalise the slot's kernel-watch and sensor-suppress protocols,
+    /// emitting any closing ops the slot still owes, and reset `kind` to
+    /// `Unknown`. The slot is then ready for [`Tree::try_reap`] (no
+    /// back-refs) or for re-entry via [`Tree::ensure`] (back-refs
+    /// persist).
     ///
-    /// **Pre-condition.** `watch_demand == 0 && suppress_count == 0`.
-    /// The caller has already drained the slot via `sub_watch_demand`
-    /// (the standard release path) or via `clamp_watch_demand_to_zero`
-    /// followed by the per-claim burst-finish chain (the
-    /// `WatchOpRejected` recovery path). The `debug_assert!`s below
-    /// pin the contract loudly in dev/CI; in release the field writes
-    /// still execute as defense-in-depth, so a precondition violation
-    /// degrades silently rather than corrupting kernel-engine state.
+    /// `vacate` is the **protocol terminus** for the per-Resource
+    /// `watch_demand` and `suppress_count` counters: each branch acts
+    /// as the symmetric closer for the matching `add_watch_demand` /
+    /// `add_suppress` 0→1 emission. The branches mirror
+    /// `clamp_watch_demand_to_zero`'s "one closing op zeroes every
+    /// contributor at once" pattern; subsequent `sub_watch_demand` /
+    /// `sub_suppress` calls from co-resident bookkeeping
+    /// short-circuit on the post-zero counter.
     ///
-    /// `watch_demand` is the load-bearing precondition: zeroing a
-    /// non-zero counter would destroy cross-owner contributions in the
-    /// engine's view while the kernel watch is still live, and the
-    /// next `sub_watch_demand` from a co-resident contributor would
-    /// underflow. `suppress_count` is the symmetric in-engine
-    /// bookkeeping for in-flight burst phases; force-zeroing it would
-    /// break the `start_*_burst ↔ finish_burst_to_idle` symmetry on
-    /// the anchor.
-    pub fn vacate(&mut self, id: ResourceId) {
-        if let Some(r) = self.nodes.get_mut(id) {
-            debug_assert!(
-                r.watch_demand == 0,
-                "vacate: precondition violated — slot {id:?} still has \
-                 watch_demand={}; caller must drain via sub_watch_demand or \
-                 clamp_watch_demand_to_zero before vacate",
-                r.watch_demand,
-            );
-            debug_assert!(
-                r.suppress_count == 0,
-                "vacate: precondition violated — slot {id:?} still has \
-                 suppress_count={}; caller must drain via the burst-finish \
-                 machinery before vacate",
-                r.suppress_count,
-            );
-            r.kind = ResourceKind::Unknown;
+    /// **Production caller discipline.** The sole production caller
+    /// ([`crate::Tree`]'s consumer in `reconcile::delete_child`) only
+    /// invokes `vacate` once `watch_demand == 0` — co-resident watch
+    /// contributions keep the slot alive via the `watch_demand > 0`
+    /// guard at the call site. The `Unwatch` branch is therefore
+    /// dormant under that caller, but emitting it (rather than
+    /// asserting on the contract) makes any future caller correct by
+    /// construction: misuse degrades to "one extra closing op" rather
+    /// than to a panic / silent orphan.
+    ///
+    /// **What survives.** Children, profiles, role, and the
+    /// `proxy_promoters` back-ref are retention anchors and stay
+    /// untouched. Vacated-but-anchored slots are recreated by
+    /// [`Tree::ensure`] returning the same [`ResourceId`].
+    pub fn vacate(&mut self, id: ResourceId, out: &mut StepOutput) {
+        let Some(r) = self.nodes.get_mut(id) else {
+            return;
+        };
+        if r.watch_demand > 0 {
+            out.watch_ops.push(WatchOp::Unwatch { resource: id });
             r.watch_demand = 0;
+            r.events_union = ClassSet::EMPTY;
+        }
+        if r.suppress_count > 0 {
+            out.watch_ops.push(WatchOp::Unsuppress { resource: id });
             r.suppress_count = 0;
         }
+        r.kind = ResourceKind::Unknown;
     }
 
     /// Remove the slot iff `Resource::has_anchors()` is `false`. Returns
@@ -282,9 +286,18 @@ impl Tree {
 #[cfg(test)]
 mod tests {
     use super::Tree;
+    use crate::op::WatchOp;
+    use crate::output::StepOutput;
     use crate::resource::ResourceRole;
     use proptest::prelude::*;
     use std::path::PathBuf;
+
+    /// Throwaway `StepOutput` for tests that don't inspect the emitted
+    /// ops. Keeping it as a tiny helper makes the in-file tests below
+    /// read closer to their pre-refactor shape.
+    fn discard() -> StepOutput {
+        StepOutput::default()
+    }
 
     fn any_role() -> impl Strategy<Value = ResourceRole> {
         prop_oneof![
@@ -320,7 +333,7 @@ mod tests {
         fn prop_reap_invalidates(seg in any_segment()) {
             let mut tree = Tree::new();
             let id = tree.ensure(None, &seg, ResourceRole::User);
-            tree.vacate(id);
+            tree.vacate(id, &mut discard());
             prop_assert!(tree.try_reap(id));
             prop_assert!(tree.get(id).is_none());
             prop_assert!(tree.lookup(None, &seg).is_none());
@@ -336,7 +349,7 @@ mod tests {
             let mut tree = Tree::new();
             let parent = tree.ensure(None, "p", ResourceRole::User);
             let id_old = tree.ensure(Some(parent), &s_old, ResourceRole::User);
-            tree.vacate(id_old);
+            tree.vacate(id_old, &mut discard());
             prop_assert!(tree.try_reap(id_old));
             let id_new = tree.ensure(Some(parent), &s_new, ResourceRole::User);
             prop_assert_ne!(id_old, id_new);
@@ -367,7 +380,7 @@ mod tests {
     fn try_reap_refused_with_anchor_role() {
         let mut tree = Tree::new();
         let id = tree.ensure(None, "watch-root", ResourceRole::WatchRootParent);
-        tree.vacate(id);
+        tree.vacate(id, &mut discard());
         assert!(!tree.try_reap(id), "infrastructure role must not reap");
         assert!(tree.get(id).is_some());
     }
@@ -377,7 +390,7 @@ mod tests {
         let mut tree = Tree::new();
         let parent = tree.ensure(None, "parent", ResourceRole::User);
         let _child = tree.ensure(Some(parent), "child", ResourceRole::User);
-        tree.vacate(parent);
+        tree.vacate(parent, &mut discard());
         assert!(!tree.try_reap(parent), "parent with child must not reap");
         assert!(tree.get(parent).is_some());
     }
@@ -414,7 +427,7 @@ mod tests {
         // wd == 0 and suppress == 0 by construction (no refcount edges
         // emitted) — vacate's precondition holds.
 
-        tree.vacate(parent);
+        tree.vacate(parent, &mut discard());
 
         let r = tree.get(parent).unwrap();
         assert_eq!(r.kind, crate::resource::ResourceKind::Unknown);
@@ -423,31 +436,85 @@ mod tests {
         assert_eq!(r.children().len(), 1, "children survive vacate");
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "vacate: precondition violated")]
-    fn vacate_panics_in_debug_when_watch_demand_nonzero() {
-        // Counter > 0 ⇒ caller skipped the drain; vacate would destroy
-        // cross-owner contributions in the engine's view while the
-        // kernel watch is still live. Debug assertion makes the misuse
-        // loud in CI / dev.
+    fn vacate_emits_unwatch_when_watch_demand_nonzero() {
+        // Defensive branch: a future caller that reaches vacate without
+        // first draining the kernel-watch counter would have left a
+        // live FD orphaned at the sensor. The protocol-closer contract
+        // emits the `Unwatch` and zeroes the counter atomically, so the
+        // misuse degrades to "one extra closing op" rather than a
+        // panic / silent kernel-watch leak.
         let mut tree = Tree::new();
         let r = tree.ensure(None, "x", ResourceRole::User);
         tree.get_mut(r).unwrap().watch_demand = 1;
-        tree.vacate(r);
+
+        let mut out = StepOutput::default();
+        tree.vacate(r, &mut out);
+
+        assert_eq!(tree.get(r).unwrap().watch_demand, 0);
+        assert_eq!(out.watch_ops.len(), 1);
+        assert!(matches!(
+            out.watch_ops[0],
+            WatchOp::Unwatch { resource } if resource == r,
+        ));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "vacate: precondition violated")]
-    fn vacate_panics_in_debug_when_suppress_count_nonzero() {
-        // Suppress count > 0 ⇒ caller skipped the burst-finish chain;
-        // force-zeroing would underflow the next `sub_suppress`. Debug
-        // assertion catches the misuse early.
+    fn vacate_emits_unsuppress_when_suppress_count_nonzero() {
+        // Load-bearing branch (closes F-CRIT-1): non-anchor descendants
+        // bumped during a Burst's `Batching` window have an outstanding
+        // `suppress_count` when `release_descendant_claim` reaches them
+        // through `delete_child` mid-anchor-loss. Vacate's emission
+        // pairs the prior `Suppress` with the closing `Unsuppress`
+        // before the slot reaps — keeps the sensor's per-Resource
+        // suppress bookkeeping balanced.
         let mut tree = Tree::new();
         let r = tree.ensure(None, "x", ResourceRole::User);
         tree.get_mut(r).unwrap().suppress_count = 1;
-        tree.vacate(r);
+
+        let mut out = StepOutput::default();
+        tree.vacate(r, &mut out);
+
+        assert_eq!(tree.get(r).unwrap().suppress_count, 0);
+        assert_eq!(out.watch_ops.len(), 1);
+        assert!(matches!(
+            out.watch_ops[0],
+            WatchOp::Unsuppress { resource } if resource == r,
+        ));
+    }
+
+    #[test]
+    fn vacate_emits_both_closing_ops_when_both_counters_nonzero() {
+        // Combined branch: both protocols owed at vacate time. Order
+        // is `Unwatch` before `Unsuppress`, matching the symmetric
+        // construction order at `add_watch_demand` /
+        // `clamp_watch_demand_to_zero`. `StepOutput::sort_for_emission`
+        // ultimately re-orders by `ResourceId`; the relative order
+        // within a single Resource's ops is preserved by the sort's
+        // stability.
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "x", ResourceRole::User);
+        {
+            let res = tree.get_mut(r).unwrap();
+            res.watch_demand = 2;
+            res.suppress_count = 3;
+        }
+
+        let mut out = StepOutput::default();
+        tree.vacate(r, &mut out);
+
+        let res = tree.get(r).unwrap();
+        assert_eq!(res.watch_demand, 0);
+        assert_eq!(res.suppress_count, 0);
+        assert_eq!(out.watch_ops.len(), 2);
+        assert!(matches!(
+            out.watch_ops[0],
+            WatchOp::Unwatch { resource } if resource == r,
+        ));
+        assert!(matches!(
+            out.watch_ops[1],
+            WatchOp::Unsuppress { resource } if resource == r,
+        ));
     }
 
     #[test]
@@ -479,7 +546,7 @@ mod tests {
     fn path_of_returns_none_for_stale_id() {
         let mut tree = Tree::new();
         let id = tree.ensure(None, "x", ResourceRole::User);
-        tree.vacate(id);
+        tree.vacate(id, &mut discard());
         assert!(tree.try_reap(id));
         assert!(tree.path_of(id).is_none());
     }

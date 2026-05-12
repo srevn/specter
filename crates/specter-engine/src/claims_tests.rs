@@ -276,9 +276,9 @@ fn discard_anchor_state_idempotent() {
 #[test]
 fn discard_anchor_state_safe_after_clamp() {
     // anchor watch_demand was clamped to 0 (e.g., by WatchOpRejected
-    // pre-helper); the counter-existence guard inside
-    // release_anchor_claim must prevent sub_watch_demand underflow and
-    // suppress the stray Unwatch that the clamp already emitted.
+    // pre-helper); release_anchor_claim's `sub_watch_demand` must
+    // short-circuit on the post-clamp counter and skip emitting a
+    // second Unwatch (the clamp already emitted one).
     let (mut e, _sid, pid, anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
 
     // Capture the pre-clamp counter to make sure clamp actually fired.
@@ -410,4 +410,160 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
         "descendant contribution released after discard_anchor_state",
     );
     let _ = sid;
+}
+
+/// F-CRIT-1 regression: a covered descendant whose `suppress_count` was
+/// bumped during the Profile's Active(Batching) window must have its
+/// `Unsuppress` emitted symmetrically when `release_descendant_claim`
+/// reaches `Tree::vacate` through `delete_child`. Pre-fix this path
+/// panicked in dev (the suppress precondition `debug_assert!`) and
+/// silently orphaned the sensor's per-Resource suppress bookkeeping in
+/// release. Post-fix, vacate is the protocol closer: any outstanding
+/// `suppress_count > 0` at the slot terminus emits the closing op
+/// before the slot is reaped.
+///
+/// Lifecycle reproduced:
+/// 1. Profile P at `/a` (Dir), STRUCTURE-only, with materialised
+///    descendant `/a/b` (Dir) — `b.watch_demand == 1`.
+/// 2. `FsEvent` at `/a` ⇒ `start_standard_burst` ⇒
+///    `Active(Burst { phase: Batching, ... })`. Anchor's
+///    `suppress_count` rises to 1.
+/// 3. `FsEvent` at `/a/b` mid-Batching ⇒ `event_drives_batching`
+///    inserts `b` into `Burst.suppressed_resources` and bumps
+///    `b.suppress_count` to 1.
+/// 4. `WatchOpRejected` on the anchor ⇒ `on_watch_op_rejected` ⇒
+///    clamp + `finalize_anchor_lost(P)` ⇒ `discard_anchor_state(P)`
+///    ⇒ `release_descendant_claim(P)` walks the snapshot
+///    ⇒ `delete_child(b)` ⇒ `sub_watch_demand(b)` zeroes
+///    `b.watch_demand` ⇒ `tree.vacate(b, out)` emits
+///    `WatchOp::Unsuppress { resource: b }` and zeroes
+///    `b.suppress_count`.
+/// 5. `finish_burst_to_idle(P)`'s defensive drain finds `b`'s slot
+///    reaped (or its counter at zero) and short-circuits — no double
+///    Unsuppress.
+#[test]
+fn release_descendant_claim_drains_suppress_via_vacate() {
+    // Materialise P at /a with Dir descendant /a/b. STRUCTURE-only ⇒
+    // `has_per_file_fds = false`, so the descendant clause's Dir branch
+    // is the contribution that the regression exercises.
+    let mut e = Engine::new();
+    let anchor = e.tree_mut().ensure(None, "a", ResourceRole::User);
+    e.tree_mut().set_kind(anchor, ResourceKind::Dir);
+
+    let req = SubAttachRequest::for_resource(
+        "watch".into(),
+        anchor,
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::STRUCTURE,
+        false,
+    );
+    let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let pid = e.subs().get(sid).unwrap().profile;
+
+    // Seed-Ok response materialises descendant /a/b as a Dir.
+    let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
+    let snap = dir_snap(anchor, vec![("b", EntryKind::Dir, 7)]);
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+    let b_id = e.tree().lookup(Some(anchor), "b").expect("b materialised");
+    assert_eq!(
+        e.tree().get(b_id).unwrap().watch_demand,
+        1,
+        "descendant b carries P's STRUCTURE contribution",
+    );
+    assert_eq!(e.tree().get(b_id).unwrap().suppress_count, 0);
+
+    // FsEvent at the anchor opens a Standard burst (Idle → Active).
+    // The anchor's suppress is bracketed by `start_standard_burst` /
+    // `finish_burst_to_idle`; non-anchor descendants accumulate via
+    // `event_drives_batching` below.
+    let _ = e.step(
+        Input::FsEvent {
+            resource: anchor,
+            event: specter_core::FsEvent::StructureChanged,
+        },
+        Instant::now(),
+    );
+
+    // FsEvent at the descendant mid-Batching adds `b` to the burst's
+    // `suppressed_resources` and bumps `b.suppress_count` to 1.
+    let _ = e.step(
+        Input::FsEvent {
+            resource: b_id,
+            event: specter_core::FsEvent::StructureChanged,
+        },
+        Instant::now(),
+    );
+    assert_eq!(
+        e.tree().get(b_id).unwrap().suppress_count,
+        1,
+        "event_drives_batching bumped b.suppress_count",
+    );
+
+    // Synthesise WatchOpRejected on the anchor: triggers the F-CRIT-1
+    // path through finalize_anchor_lost → discard_anchor_state →
+    // release_descendant_claim → delete_child(b) → vacate(b, out).
+    // Pre-fix this panicked at vacate's suppress precondition; post-fix
+    // vacate emits the closing Unsuppress and zeroes the counter.
+    let purge_out = e.step(
+        Input::WatchOpRejected {
+            resource: anchor,
+            op: WatchOp::Watch {
+                resource: anchor,
+                path: std::path::PathBuf::from("a"),
+                kind: ResourceKind::Dir,
+                events: ClassSet::STRUCTURE,
+            },
+            failure: specter_core::WatchFailure::Pressure { errno: 24 },
+        },
+        Instant::now(),
+    );
+
+    // Descendant's slot is reaped (no back-refs, watch_demand=0,
+    // suppress_count=0) — or, in the multi-contributor variant, alive
+    // with both counters at zero. This test exercises the
+    // single-contributor case so reap is the expected outcome.
+    assert!(
+        e.tree().get(b_id).is_none(),
+        "descendant b reaped after delete_child + try_reap",
+    );
+
+    // Sensor-side balance: the prior Suppress(b) (bump from 0→1 in
+    // event_drives_batching) must be paired with exactly one
+    // Unsuppress(b). Pre-fix the count would have been zero (vacate
+    // silently zeroed in release / panicked in dev).
+    let unsuppress_b = purge_out
+        .watch_ops
+        .iter()
+        .filter(|op| matches!(op, WatchOp::Unsuppress { resource } if *resource == b_id))
+        .count();
+    assert_eq!(
+        unsuppress_b, 1,
+        "exactly one Unsuppress(b) emitted via vacate's protocol-closer; \
+         got {:?}",
+        purge_out.watch_ops,
+    );
+
+    // Profile reverts to anchor-loss state: anchor_claim cleared,
+    // baseline / kind cleared, watch_root_parent preserved (the
+    // recovery channel — but the anchor is a root in this fixture, so
+    // `watch_root_parent` is None throughout).
+    let p = e.profiles().get(pid).expect("Profile lives");
+    assert_eq!(p.anchor_claim, AnchorClaim::None);
+    assert!(p.kind.is_none());
+    assert!(p.baseline.is_none());
+    assert!(p.current.is_none());
+
+    // Profile is back to Idle (finish_burst_to_idle ran).
+    assert!(matches!(p.state, specter_core::ProfileState::Idle,));
 }

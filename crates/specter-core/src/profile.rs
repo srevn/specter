@@ -755,6 +755,7 @@ impl ProfileMap {
 mod tests {
     use super::{ClassSet, Profile, ProfileMap, ProfileState, ScanConfig, compute_config_hash};
     use crate::ids::ResourceId;
+    use crate::output::StepOutput;
     use crate::resource::ResourceRole;
     use crate::scan_config::GlobPattern;
     use crate::snapshot::EntryKind;
@@ -889,7 +890,7 @@ mod tests {
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
         );
 
-        tree.vacate(r);
+        tree.vacate(r, &mut StepOutput::default());
         assert!(!tree.try_reap(r), "Profile-anchored resource must not reap");
     }
 
@@ -919,7 +920,7 @@ mod tests {
         );
 
         profiles.detach(&mut tree, pid);
-        tree.vacate(r);
+        tree.vacate(r, &mut StepOutput::default());
         assert!(tree.try_reap(r));
         assert!(tree.get(r).is_none());
     }

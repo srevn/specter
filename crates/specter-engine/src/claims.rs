@@ -19,26 +19,23 @@
 //! Each helper is:
 //! - **Idempotent.** Flag-already-cleared ⇒ no-op. Safe to call from any
 //!   site without first checking the claim's presence.
-//! - **Counter-aware.** `tree.get(r).watch_demand == 0` ⇒ skip
-//!   `sub_watch_demand` (the counter has already been zeroed by an
-//!   out-of-band path, e.g., `clamp_watch_demand_to_zero` from
-//!   `Input::WatchOpRejected`). Only the Profile flag clears.
-//!
-//! The counter-existence check is load-bearing: without it, calling a
-//! helper post-clamp would underflow `sub_watch_demand`'s
-//! `debug_assert!(prev > 0)`. With it, the helper is safe in any state.
+//! - **Safe in any counter state.** Post-clamp slots
+//!   (`clamp_watch_demand_to_zero` from `Input::WatchOpRejected`) and
+//!   post-vacate slots both leave `watch_demand == 0`; the helper's
+//!   `sub_watch_demand` short-circuits silently in that case (see
+//!   [`crate::refcounts`] module rustdoc). The flag-clear runs
+//!   regardless.
 
 use crate::Engine;
 use crate::reconcile::{delete_child, purge_per_file_fired_subs_for_reaped_slots};
 use crate::refcounts::sub_watch_demand;
-use specter_core::{
-    AnchorClaim, ClassSet, ProbeOwner, ProfileId, ProfileState, StepOutput, TreeSnapshot,
-};
+use specter_core::{AnchorClaim, ProbeOwner, ProfileId, ProfileState, StepOutput, TreeSnapshot};
 
 impl Engine {
     /// Release the Profile's anchor `watch_demand` contribution if held.
-    /// Idempotent (flag-false ⇒ no-op). Counter-aware (counter==0 ⇒ flag
-    /// clears only, no underflow).
+    /// Idempotent (flag-false ⇒ no-op). Safe on a post-clamp counter
+    /// (`watch_demand == 0` ⇒ `sub_watch_demand` short-circuits without
+    /// emission; see the [`crate::refcounts`] module rustdoc).
     ///
     /// Does NOT call `try_reap` on the anchor — the Profile's own
     /// back-reference still anchors the slot. Callers that detach the
@@ -51,30 +48,26 @@ impl Engine {
             return;
         };
         let resource = p.resource;
-        let mask = p.events_union;
 
         if let Some(p) = self.profiles.get_mut(pid) {
             p.anchor_claim = AnchorClaim::None;
         }
 
-        if self.tree.get(resource).is_some_and(|r| r.watch_demand > 0) {
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                &self.promoters,
-                resource,
-                mask,
-                None,
-                out,
-            );
-        }
+        sub_watch_demand(
+            &mut self.tree,
+            &self.profiles,
+            &self.promoters,
+            resource,
+            None,
+            out,
+        );
     }
 
     /// Release the Profile's watch-root parent `watch_demand` contribution
-    /// if held. Idempotent. Counter-aware. Calls `try_reap` on the parent
-    /// slot — the parent's `WatchRootParent` role is the only thing
-    /// keeping it alive when no User Profile is anchored at or below it,
-    /// and that's now stale.
+    /// if held. Idempotent; safe in any counter state. Calls `try_reap`
+    /// on the parent slot — the parent's `WatchRootParent` role is the
+    /// only thing keeping it alive when no User Profile is anchored at
+    /// or below it, and that's now stale.
     pub(crate) fn release_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(pid) else {
             return;
@@ -87,26 +80,23 @@ impl Engine {
             p.watch_root_parent = None;
         }
 
-        if self.tree.get(parent).is_some_and(|r| r.watch_demand > 0) {
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                &self.promoters,
-                parent,
-                ClassSet::STRUCTURE,
-                None,
-                out,
-            );
-        }
+        sub_watch_demand(
+            &mut self.tree,
+            &self.profiles,
+            &self.promoters,
+            parent,
+            None,
+            out,
+        );
 
         self.tree.try_reap(parent);
     }
 
     /// Release the Profile's descent prefix `watch_demand` contribution if
     /// `Pending`. Transitions the Profile to `Idle`. Idempotent (non-Pending
-    /// ⇒ no-op). Counter-aware. Calls `try_reap` on the prefix slot — its
-    /// `DescentScaffold` role is no longer load-bearing once no descent
-    /// claims it.
+    /// ⇒ no-op); safe in any counter state. Calls `try_reap` on the
+    /// prefix slot — its `DescentScaffold` role is no longer
+    /// load-bearing once no descent claims it.
     ///
     /// **Cancel-first contract.** Callers that may have an in-flight probe
     /// (e.g., `reap_profile`, `on_watch_op_rejected` descent purge) MUST
@@ -136,17 +126,14 @@ impl Engine {
             p.state = ProfileState::Idle;
         }
 
-        if self.tree.get(prefix).is_some_and(|r| r.watch_demand > 0) {
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                &self.promoters,
-                prefix,
-                ClassSet::STRUCTURE,
-                None,
-                out,
-            );
-        }
+        sub_watch_demand(
+            &mut self.tree,
+            &self.profiles,
+            &self.promoters,
+            prefix,
+            None,
+            out,
+        );
 
         self.tree.try_reap(prefix);
     }
@@ -171,9 +158,11 @@ impl Engine {
     /// Profiles (`TreeSnapshot::File`, no descendants) short-circuit on
     /// the dispatch.
     ///
-    /// **Counter-aware.** [`reconcile::delete_child`] gates each
-    /// `sub_watch_demand` on `tree.get(r).watch_demand > 0`, so
-    /// post-clamp slots (zero counter) skip without underflow.
+    /// **Safe in any counter state.** [`reconcile::delete_child`] calls
+    /// `sub_watch_demand` unconditionally; the helper short-circuits
+    /// silently on a zero counter (post-clamp slots, or slots a prior
+    /// sub-walk in this take-and-walk pass already drained — see the
+    /// [`crate::refcounts`] module rustdoc).
     ///
     /// **Per-file dedup hygiene.** The walk reaps covered Leaves; their
     /// `ResourceId`s may key entries in OTHER Profiles' (or this one's)
@@ -303,10 +292,11 @@ impl Engine {
     /// already-`None` fields; `release_anchor_claim` sees
     /// `AnchorClaim::None` and short-circuits.
     ///
-    /// **Counter-aware.** Inherits from
-    /// [`Engine::release_anchor_claim`]'s counter-existence guard —
-    /// post-clamp slots (zero counter via `clamp_watch_demand_to_zero`)
-    /// skip the recompute without underflow.
+    /// **Safe in any counter state.** Inherits from
+    /// [`Engine::release_anchor_claim`]'s post-clamp tolerance —
+    /// `sub_watch_demand` short-circuits silently on a zero counter
+    /// (`clamp_watch_demand_to_zero` from `Input::WatchOpRejected` is
+    /// the dominant source of this state).
     ///
     /// **Snapshot-shape invariant.**
     /// [`specter_core::Profile::kind`]'s rustdoc pins

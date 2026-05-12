@@ -282,7 +282,6 @@ impl Engine {
                 &self.profiles,
                 &self.promoters,
                 prior,
-                ClassSet::STRUCTURE,
                 None,
                 out,
             );
@@ -1136,7 +1135,6 @@ impl Engine {
                         &self.profiles,
                         &self.promoters,
                         prefix,
-                        ClassSet::STRUCTURE,
                         None,
                         out,
                     );

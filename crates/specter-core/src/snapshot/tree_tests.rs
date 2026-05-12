@@ -4,6 +4,7 @@ use super::{
 };
 use crate::diff::{Diff, EntryRef, Rename};
 use crate::ids::ResourceId;
+use crate::output::StepOutput;
 use crate::resource::ResourceRole;
 use crate::snapshot::EntryKind;
 use crate::tree::Tree;
@@ -715,7 +716,7 @@ fn subtree_at_stale_target_returns_none() {
     let snap = TreeSnapshot::Dir(root);
 
     // Vacate a and try to reap (children=0, profiles=0 ⇒ reaps clean).
-    tree.vacate(a);
+    tree.vacate(a, &mut StepOutput::default());
     let reaped = tree.try_reap(a);
     assert!(reaped, "a is reapable in this fixture");
     // Now stale is a fresh-looking id with no live slot.

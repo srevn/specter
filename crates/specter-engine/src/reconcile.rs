@@ -515,31 +515,28 @@ pub(crate) fn delete_child(
     }
 
     // Phase 2: release this slot's watch contribution if we hold one.
-    // The counter-existence guard (`watch_demand > 0`) makes the helper
-    // safe over the take-then-walk path of `release_descendant_claim`,
-    // where multiple sub-walks may converge on a slot the previous
-    // iteration already drained.
+    // `sub_watch_demand` is safe in any counter state — the take-then-walk
+    // path of `release_descendant_claim` may converge on a slot a prior
+    // sub-walk already drained, and the helper short-circuits silently
+    // on `prev == 0` (see [`crate::refcounts`] module rustdoc).
     let releases_watch = match prior_child.kind() {
         EntryKind::Dir => covers(profile, resource, tree),
         EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
             covers(profile, resource, tree) && profile.has_per_file_fds
         }
     };
-    if releases_watch && tree.get(resource).is_some_and(|r| r.watch_demand > 0) {
-        sub_watch_demand(
-            tree,
-            profiles,
-            promoters,
-            resource,
-            profile.events_union,
-            Some(profile_id),
-            out,
-        );
+    if releases_watch {
+        sub_watch_demand(tree, profiles, promoters, resource, Some(profile_id), out);
     }
 
     // Reap only when fully drained — preserves multi-Profile contributions.
+    // The `watch_demand == 0` gate is load-bearing: a co-resident contributor
+    // (e.g., another Profile anchored at this slot, or a Promoter proxy)
+    // keeps the kernel watch live, and `vacate`'s defensive `Unwatch` branch
+    // would otherwise tear it down. With the gate in place, vacate runs only
+    // on slots that this Profile was the last contributor to.
     if tree.get(resource).is_some_and(|r| r.watch_demand == 0) {
-        tree.vacate(resource);
+        tree.vacate(resource, out);
         tree.try_reap(resource);
     }
 }

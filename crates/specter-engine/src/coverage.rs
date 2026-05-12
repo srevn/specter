@@ -43,8 +43,10 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
     // (target-to-root), then reverse to root-to-target order. SmallVec
     // avoids both heap allocation in the typical shallow case and
     // `tinyvec`'s `T: Default` bound (`&str` doesn't have a non-static
-    // Default).
-    let mut rev: SmallVec<[&str; 4]> = SmallVec::new();
+    // Default). Inline cap of 8 covers typical source-tree depths from a
+    // workspace anchor (`src/foo/bar/baz/qux/file.rs` is 6 deep); cap 4
+    // spilled on every such path.
+    let mut rev: SmallVec<[&str; 8]> = SmallVec::new();
     let mut cur = target;
     loop {
         let Some(resource) = tree.get(cur) else {

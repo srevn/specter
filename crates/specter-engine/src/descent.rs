@@ -420,7 +420,6 @@ impl crate::Engine {
             &self.profiles,
             &self.promoters,
             old_prefix,
-            ClassSet::STRUCTURE,
             None,
             out,
         );
@@ -454,9 +453,10 @@ impl crate::Engine {
     /// - [`Self::on_watch_op_rejected`]'s descent-prefix purge loops
     ///   (Profile and Promoter sides).
     ///
-    /// Counter-awareness mirrors the per-owner helper discipline: a
-    /// prior `clamp_watch_demand_to_zero` may have left the slot at 0,
-    /// in which case the state-flip alone is the observable cleanup.
+    /// Tolerant of any counter state — the per-owner helpers fold the
+    /// "post-clamp / post-vacate counter is 0" case into
+    /// `sub_watch_demand`'s short-circuit, so the state-flip alone is
+    /// the observable cleanup in those degenerate paths.
     fn release_owner_descent_prefix(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
         match owner {
             ProbeOwner::Profile(pid) => self.release_descent_prefix_claim(pid, out),
@@ -521,7 +521,6 @@ impl crate::Engine {
             &self.profiles,
             &self.promoters,
             prefix,
-            ClassSet::STRUCTURE,
             None,
             out,
         );
@@ -628,7 +627,6 @@ impl crate::Engine {
                     &self.profiles,
                     &self.promoters,
                     prefix,
-                    ClassSet::STRUCTURE,
                     None,
                     out,
                 );

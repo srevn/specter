@@ -9,7 +9,7 @@
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    Placeholder, Profile, ProfileMap, ResourceRole, ScanConfig, Sub, SubRegistry, Tree,
+    Placeholder, Profile, ProfileMap, ResourceRole, ScanConfig, StepOutput, Sub, SubRegistry, Tree,
     compute_config_hash,
 };
 use std::sync::Arc;
@@ -164,7 +164,7 @@ fn rename_after_detach_yields_fresh_id() {
 
     // Rename: engine detaches the Profile, then vacates + try_reaps the slot.
     profiles.detach(&mut tree, pid);
-    tree.vacate(id_old);
+    tree.vacate(id_old, &mut StepOutput::default());
     assert!(tree.try_reap(id_old), "post-detach reap must succeed");
 
     let id_new = tree.ensure(Some(parent), "bar.c", ResourceRole::User);
@@ -185,7 +185,7 @@ fn recreate_at_anchored_slot_keeps_id() {
     );
 
     // Vacate without detach: slot is anchored by Profile, try_reap refused.
-    tree.vacate(id);
+    tree.vacate(id, &mut StepOutput::default());
     assert!(!tree.try_reap(id), "Profile-anchored slot must not reap");
 
     // Same (parent, segment) returns the same id.

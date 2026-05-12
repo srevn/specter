@@ -22,32 +22,30 @@
 //!
 //! - **Idempotent.** State already in the post-release shape ⇒ no-op. Safe
 //!   to call from any site without first checking the claim's presence.
-//! - **Counter-aware.** `tree.get(r).watch_demand == 0` ⇒ skip
-//!   `sub_watch_demand` (the counter has already been zeroed by an
-//!   out-of-band path, e.g., `clamp_watch_demand_to_zero` from
-//!   `Input::WatchOpRejected`). Only the state-flip persists.
+//! - **Safe in any counter state.** `sub_watch_demand` short-circuits
+//!   silently on a zero counter (post-clamp slots, or slots reached
+//!   through `Tree::vacate`'s protocol-closer); see the
+//!   [`crate::refcounts`] module rustdoc. Only the state-flip persists
+//!   in those degenerate paths.
 //! - **Cancel-first.** A `debug_assert!` enforces the
 //!   probe-channel-closed precondition. Callers that may have an
 //!   in-flight probe MUST invoke [`Engine::cancel_owner_probe`]
 //!   first; `cancel_owner_probe` is a no-op on a closed channel, so
 //!   "always cancel before release" is the safe default.
-//!
-//! The counter-existence check is load-bearing: without it, calling a
-//! helper post-clamp would underflow `sub_watch_demand`'s
-//! `debug_assert!(prev > 0)`. With it, the helper is safe in any state.
 
 use crate::Engine;
 use crate::refcounts::sub_watch_demand;
-use specter_core::{ClassSet, PromoterId, PromoterState, ResourceId, StepOutput};
+use specter_core::{PromoterId, PromoterState, ResourceId, StepOutput};
 use std::collections::BTreeMap;
 
 impl Engine {
     /// Release the Promoter's literal-prefix `watch_demand` contribution
     /// if `PrefixPending`. Transitions the Promoter to `Active{empty}`.
-    /// Idempotent (non-`PrefixPending` ⇒ no-op). Counter-aware
-    /// (`watch_demand == 0` ⇒ flag-flip only, no `sub_watch_demand`).
-    /// Calls `try_reap` on the prefix slot — its `DescentScaffold` role
-    /// is no longer load-bearing once no descent claims it.
+    /// Idempotent (non-`PrefixPending` ⇒ no-op); safe in any counter
+    /// state (a post-clamp `watch_demand == 0` short-circuits inside
+    /// `sub_watch_demand`). Calls `try_reap` on the prefix slot — its
+    /// `DescentScaffold` role is no longer load-bearing once no descent
+    /// claims it.
     ///
     /// **Cancel-first contract.** Callers with a possibly-in-flight
     /// descent probe (e.g., `on_watch_op_rejected`'s descent purge,
@@ -89,28 +87,25 @@ impl Engine {
             };
         }
 
-        if self.tree.get(prefix).is_some_and(|r| r.watch_demand > 0) {
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                &self.promoters,
-                prefix,
-                ClassSet::STRUCTURE,
-                None,
-                out,
-            );
-        }
+        sub_watch_demand(
+            &mut self.tree,
+            &self.profiles,
+            &self.promoters,
+            prefix,
+            None,
+            out,
+        );
 
         self.tree.try_reap(prefix);
     }
 
     /// Release the Promoter's `Active` proxy claim at `resource`.
-    /// Idempotent (non-`Active` or proxy-not-present ⇒ no-op).
-    /// Counter-aware. Clears the per-Resource back-ref. Calls `try_reap`
-    /// on the proxy slot — with the back-ref cleared and the
-    /// `User`-roled slot, `has_anchors` returns false for promoter-only
-    /// slots; shared slots (Profile descent prefix, other Promoter
-    /// proxies) survive.
+    /// Idempotent (non-`Active` or proxy-not-present ⇒ no-op); safe in
+    /// any counter state. Clears the per-Resource back-ref. Calls
+    /// `try_reap` on the proxy slot — with the back-ref cleared and
+    /// the `User`-roled slot, `has_anchors` returns false for
+    /// promoter-only slots; shared slots (Profile descent prefix, other
+    /// Promoter proxies) survive.
     ///
     /// **Cancel-first contract for in-flight enumeration probes
     /// targeting this proxy.** Callers MUST cancel the probe first; the
@@ -156,20 +151,17 @@ impl Engine {
             q.pending_enumerations.remove(&resource);
         }
 
-        // 2. Counter-aware sub. Skips post-clamp (the
-        // `clamp_watch_demand_to_zero` path zeroed the counter, and
-        // `sub_watch_demand` would otherwise underflow).
-        if self.tree.get(resource).is_some_and(|r| r.watch_demand > 0) {
-            sub_watch_demand(
-                &mut self.tree,
-                &self.profiles,
-                &self.promoters,
-                resource,
-                ClassSet::STRUCTURE,
-                None,
-                out,
-            );
-        }
+        // 2. Decrement. `sub_watch_demand` is safe in any counter state —
+        // post-clamp paths land on `prev == 0` and the helper short-circuits
+        // silently (the Sensor is already Unwatched for this Resource).
+        sub_watch_demand(
+            &mut self.tree,
+            &self.profiles,
+            &self.promoters,
+            resource,
+            None,
+            out,
+        );
 
         // 3. Clear back-ref. retain in place to avoid disturbing
         // co-resident Promoters' entries.

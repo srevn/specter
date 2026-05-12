@@ -22,9 +22,14 @@
 //! - `add_suppress` / `sub_suppress`: `Suppress` / `Unsuppress` on the 0↔1
 //!   edge only — suppression is binary and orthogonal to the mask.
 //!
-//! Underflows on the watch / suppress counters are debug-asserted; in
-//! release the counter clamps at 0 and the edge op is suppressed (the
-//! Sensor is already Unwatched / Unsuppressed in that state).
+//! **Counter-zero on entry to a `sub_*` helper is a legitimate state**, not
+//! a bug: the post-clamp recovery path
+//! ([`clamp_watch_demand_to_zero`]) and the [`crate::Tree::vacate`]
+//! protocol-closer both atomically zero a counter while emitting the
+//! matching closing op, and a co-resident `sub_*` helper invoked
+//! afterwards observes `prev == 0`. The helpers short-circuit silently
+//! in that case — the Sensor is already in the Unwatched / Unsuppressed
+//! state for this Resource, so no further op is owed.
 //!
 //! Stale `ResourceId`: the lookup short-circuits with no mutation and no op
 //! emission. The Engine maintains `watch_demand > 0 ⇒ live slot` (I6) by
@@ -66,7 +71,12 @@ pub fn add_watch_demand(
     contribution: ClassSet,
     out: &mut StepOutput,
 ) {
-    let (prev_refcount, prev_union, new_union) = {
+    // Capture `kind` alongside the counter / union reads in the same
+    // borrow window — the post-block emission needs it, and re-fetching
+    // the slot afterwards costs an extra `SlotMap` lookup per Watch op.
+    // Preserve raw `Unknown` (sensor wildcard) — `matches_or_unknown`
+    // treats it as the engine's intentional pre-classification signal.
+    let (prev_refcount, prev_union, new_union, kind) = {
         let Some(res) = tree.get_mut(r) else {
             return;
         };
@@ -75,17 +85,11 @@ pub fn add_watch_demand(
         let new_union = prev_union | contribution;
         res.watch_demand = prev_refcount.saturating_add(1);
         res.events_union = new_union;
-        (prev_refcount, prev_union, new_union)
+        (prev_refcount, prev_union, new_union, res.kind_raw())
     };
 
     if prev_refcount == 0 || new_union != prev_union {
         let path = tree.path_of(r).unwrap_or_default();
-        // Preserve raw `Unknown` here — the sensor's
-        // `matches_or_unknown` verification treats it as the engine's
-        // intentional wildcard at fresh-watch time.
-        let kind = tree
-            .get(r)
-            .map_or(ResourceKind::Unknown, Resource::kind_raw);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
@@ -99,13 +103,14 @@ pub fn add_watch_demand(
 /// fresh `WatchOp::Watch` when the per-Resource `events_union` shrinks at
 /// refcount > 0.
 ///
-/// `contribution` is documentation-only at v1: the recompute walks every
-/// covering Profile's contribution from scratch (a value-subtract on the
-/// cached union would be unsound — bits owed to the releasing Profile may
-/// be owned by another Profile too). The parameter survives in the
-/// signature for caller-readability symmetry with `add_watch_demand` and
-/// to give v2 per-(Profile, Resource) tracking a natural source-of-truth
-/// for the removal.
+/// **Safe in any counter state.** `prev == 0` is a legitimate input —
+/// reachable post-[`clamp_watch_demand_to_zero`] or post-[`crate::Tree::vacate`]
+/// when a co-resident bookkeeping path catches up. The helper
+/// short-circuits silently; the Sensor is already in the Unwatched
+/// state. Callers therefore do **not** need to wrap the call in an
+/// outer `watch_demand > 0` guard. (Pre-promotion, the wrappers shadowed
+/// an in-helper `debug_assert!` that has since been demoted; both are
+/// now folded into the helper's contract.)
 ///
 /// `profiles` is the registry the recompute walks. Callers pass
 /// `&self.profiles` after the releasing Profile's state-tracking field
@@ -127,30 +132,19 @@ pub fn add_watch_demand(
 /// precisely. Anchor / watch-root-parent / descent-prefix releases pass
 /// `None`; the corresponding flag-clear by the caller already excludes
 /// the releasing Profile's contribution of that kind.
-///
-/// Underflow → `debug_assert!` panic in dev; in release the counter clamps
-/// at 0 and no op is emitted (the Sensor is already in the Unwatched
-/// state).
 pub fn sub_watch_demand(
     tree: &mut Tree,
     profiles: &ProfileMap,
     promoters: &PromoterRegistry,
     r: ResourceId,
-    contribution: ClassSet,
     releasing_descendant: Option<ProfileId>,
     out: &mut StepOutput,
 ) {
-    // Documentation-only at v1; the recompute walks all covering Profiles
-    // rather than subtracting bits. Future v2 predicate-based filtering
-    // may use this as the per-(Profile, Resource) removal key.
-    let _ = contribution;
-
     let (prev_refcount, prev_union) = {
         let Some(res) = tree.get_mut(r) else {
             return;
         };
         let prev = res.watch_demand;
-        debug_assert!(prev > 0, "watch_demand underflow at {r:?}");
         if prev == 0 {
             return;
         }
@@ -174,16 +168,16 @@ pub fn sub_watch_demand(
     // the correct post-release union.
     let new_union = recompute_resource_events(tree, profiles, promoters, r, releasing_descendant);
     if new_union != prev_union {
-        if let Some(res) = tree.get_mut(r) {
+        // Single mutable borrow window for the union write + the
+        // emission's `kind` read (preserving raw `Unknown`, the
+        // sensor's wildcard convention; see `add_watch_demand`).
+        let kind = if let Some(res) = tree.get_mut(r) {
             res.events_union = new_union;
-        }
+            res.kind_raw()
+        } else {
+            ResourceKind::Unknown
+        };
         let path = tree.path_of(r).unwrap_or_default();
-        // Preserve raw `Unknown` (sensor wildcard); see the rustdoc on
-        // `Resource::kind_raw` and the parallel construction in
-        // `add_watch_demand`.
-        let kind = tree
-            .get(r)
-            .map_or(ResourceKind::Unknown, Resource::kind_raw);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
@@ -367,13 +361,17 @@ pub fn add_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
 }
 
 /// `-suppress_count` on `r`. Emits `WatchOp::Unsuppress` on the 1→0 edge.
-/// Same underflow discipline as `sub_watch_demand`.
+/// Safe in any counter state, including `prev == 0` — see
+/// [`sub_watch_demand`]'s rustdoc for the rationale (the `Tree::vacate`
+/// protocol-closer can legitimately zero `suppress_count` mid-burst, so
+/// the eventual symmetric `sub_suppress` from
+/// `finish_burst_to_idle`'s drain enters here on a zero counter and
+/// short-circuits without emission).
 pub fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
     let Some(res) = tree.get_mut(r) else {
         return;
     };
     let prev = res.suppress_count;
-    debug_assert!(prev > 0, "suppress_count underflow at {r:?}");
     if prev == 0 {
         return;
     }
@@ -540,15 +538,7 @@ mod tests {
         add_watch_demand(&mut tree, r, ClassSet::CONTENT, &mut out);
         out.watch_ops.clear();
 
-        sub_watch_demand(
-            &mut tree,
-            &profiles,
-            &promoters,
-            r,
-            ClassSet::CONTENT,
-            None,
-            &mut out,
-        );
+        sub_watch_demand(&mut tree, &profiles, &promoters, r, None, &mut out);
         assert_eq!(tree.get(r).unwrap().watch_demand, 0);
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::EMPTY);
         assert_eq!(out.watch_ops.len(), 1);
@@ -604,15 +594,7 @@ mod tests {
         // state. The recompute should then yield METADATA only.
         profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::None;
         out.watch_ops.clear();
-        sub_watch_demand(
-            &mut tree,
-            &profiles,
-            &promoters,
-            r,
-            ClassSet::CONTENT,
-            None,
-            &mut out,
-        );
+        sub_watch_demand(&mut tree, &profiles, &promoters, r, None, &mut out);
 
         assert_eq!(tree.get(r).unwrap().watch_demand, 1);
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::METADATA);
@@ -661,15 +643,7 @@ mod tests {
         out.watch_ops.clear();
 
         profiles.get_mut(p_a).unwrap().anchor_claim = AnchorClaim::None;
-        sub_watch_demand(
-            &mut tree,
-            &profiles,
-            &promoters,
-            r,
-            ClassSet::CONTENT,
-            None,
-            &mut out,
-        );
+        sub_watch_demand(&mut tree, &profiles, &promoters, r, None, &mut out);
 
         assert_eq!(tree.get(r).unwrap().watch_demand, 1);
         assert_eq!(tree.get(r).unwrap().events_union, ClassSet::CONTENT);
@@ -679,23 +653,19 @@ mod tests {
         );
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "watch_demand underflow")]
-    fn sub_watch_demand_underflow_panics_in_debug() {
+    fn sub_watch_demand_at_zero_counter_is_silent_noop() {
+        // Counter == 0 is a legitimate state — reachable post-clamp or
+        // post-`Tree::vacate` when a co-resident bookkeeping path
+        // catches up. The helper short-circuits without emission; the
+        // Sensor is already in the Unwatched state for this Resource.
         let (mut tree, r) = fresh();
         let profiles = empty_profiles();
         let promoters = empty_promoters();
         let mut out = StepOutput::default();
-        sub_watch_demand(
-            &mut tree,
-            &profiles,
-            &promoters,
-            r,
-            ClassSet::EMPTY,
-            None,
-            &mut out,
-        );
+        sub_watch_demand(&mut tree, &profiles, &promoters, r, None, &mut out);
+        assert!(out.watch_ops.is_empty());
+        assert_eq!(tree.get(r).unwrap().watch_demand, 0);
     }
 
     #[test]
@@ -716,15 +686,7 @@ mod tests {
         let profiles = empty_profiles();
         let promoters = empty_promoters();
         let mut out = StepOutput::default();
-        sub_watch_demand(
-            &mut tree,
-            &profiles,
-            &promoters,
-            r,
-            ClassSet::EMPTY,
-            None,
-            &mut out,
-        );
+        sub_watch_demand(&mut tree, &profiles, &promoters, r, None, &mut out);
         assert!(out.watch_ops.is_empty());
     }
 
@@ -767,13 +729,17 @@ mod tests {
         ));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "suppress_count underflow")]
-    fn sub_suppress_underflow_panics_in_debug() {
+    fn sub_suppress_at_zero_counter_is_silent_noop() {
+        // Symmetric to the watch_demand case — `Tree::vacate` can
+        // legitimately zero `suppress_count` while emitting the
+        // closing `Unsuppress`, and the eventual symmetric drain from
+        // `finish_burst_to_idle` then enters here on `prev == 0`.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         sub_suppress(&mut tree, r, &mut out);
+        assert!(out.watch_ops.is_empty());
+        assert_eq!(tree.get(r).unwrap().suppress_count, 0);
     }
 
     #[test]
@@ -787,15 +753,7 @@ mod tests {
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand, 1);
         assert_eq!(res.suppress_count, 1);
-        sub_watch_demand(
-            &mut tree,
-            &profiles,
-            &promoters,
-            r,
-            ClassSet::CONTENT,
-            None,
-            &mut out,
-        );
+        sub_watch_demand(&mut tree, &profiles, &promoters, r, None, &mut out);
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand, 0);
         // suppress unchanged by the watch decrement.
