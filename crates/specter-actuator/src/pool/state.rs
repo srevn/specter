@@ -170,7 +170,7 @@ struct TimerSpec {
 /// `pending` fires.
 ///
 /// **Engine-side twin.** Every `Effect` the actuator runs corresponds
-/// to a `+1` on the engine's `BurstPhase::Awaiting { outstanding }`
+/// to a `+1` on the engine's `PostFirePhase::Awaiting { outstanding }`
 /// counter for the owning Profile. The slot retires the plan
 /// (or drops the pending Effect on shutdown) and emits exactly one
 /// `Input::EffectComplete` per Effect — multi-instruction programs

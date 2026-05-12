@@ -7,12 +7,12 @@
 //! through `&mut ProfileMap`.
 
 use crate::coverage::nearest_covering_ancestor;
-use specter_core::{BurstPhase, ProfileId, ProfileMap, ProfileState, Tree};
+use specter_core::{ActiveBurst, PreFirePhase, ProfileId, ProfileMap, ProfileState, Tree};
 use tinyvec::TinyVec;
 
 /// Walk parent edges from `source` and apply `delta` to each ancestor's
 /// `dirty_descendants`. Returns ancestors whose count just hit zero
-/// **and** are in [`BurstPhase::Draining`] — that combined condition
+/// **and** are in [`specter_core::PreFirePhase::Draining`] — that combined condition
 /// drives the same-step `Draining → Verifying` reconfirm transition.
 ///
 /// `dirty_descendants` is `u32`; the I4 invariant (`≥ 0`) is enforced
@@ -119,16 +119,21 @@ pub(crate) fn write_parent_edge(
     }
 }
 
-/// True iff `state` is `Active` with `BurstPhase::Draining`. Only
-/// `Draining` Profiles are interested in the `dirty_descendants → 0`
-/// edge — the reconfirm-probe transition is the consumer of
-/// `propagate`'s return list. `Idle` and `Pending` are structurally
-/// not-Draining; the descent lifecycle never drives the reconfirm
-/// cascade.
+/// True iff `state` is `Active(PreFire(Draining))`. Only Draining
+/// Profiles are interested in the `dirty_descendants → 0` edge — the
+/// reconfirm-probe transition is the consumer of `propagate`'s return
+/// list. `Idle` and `Pending` are structurally not-Draining; the
+/// descent lifecycle never drives the reconfirm cascade. Post-fire
+/// phases are type-impossible (`Draining` lives only on
+/// [`PreFirePhase`]); the match's wildcard captures them along with
+/// the other non-Draining pre-fire phases.
 const fn in_draining(state: &ProfileState) -> bool {
     match state {
         ProfileState::Idle | ProfileState::Pending(_) => false,
-        ProfileState::Active(burst) => matches!(burst.phase, BurstPhase::Draining),
+        ProfileState::Active(ActiveBurst::PreFire(pre)) => {
+            matches!(pre.phase, PreFirePhase::Draining)
+        }
+        ProfileState::Active(ActiveBurst::PostFire(_)) => false,
     }
 }
 
@@ -137,8 +142,8 @@ mod tests {
     use super::*;
     use compact_str::CompactString;
     use specter_core::{
-        Burst, BurstIntent, BurstPhase, ChildEntry, ClassSet, DirMeta, DirSnapshot, Profile,
-        ProfileState, ResourceRole, ScanConfig, TimerId, TreeSnapshot,
+        ActiveBurst, BurstIntent, ChildEntry, ClassSet, DirMeta, DirSnapshot, PreFireBurst,
+        PreFirePhase, Profile, ProfileState, ResourceRole, ScanConfig, TimerId, TreeSnapshot,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -270,17 +275,17 @@ mod tests {
         {
             let mid = profiles.get_mut(p_mid).unwrap();
             mid.current = Some(stable_snapshot);
-            mid.state = ProfileState::Active(Burst {
+            mid.state = ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
                 burst_deadline: TimerId::default(),
-                phase: BurstPhase::Draining,
+                phase: PreFirePhase::Draining,
                 intent: BurstIntent::Standard,
                 forced: false,
                 dirty_resources: std::collections::BTreeSet::new(),
                 force_walk_resources: std::collections::BTreeSet::new(),
-                probe_target: None,
+                probe_target: mid_resource,
                 suppressed_resources: std::collections::BTreeSet::new(),
                 last_event_time: None,
-            });
+            }));
             mid.dirty_descendants = 1;
         }
 

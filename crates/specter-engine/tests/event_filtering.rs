@@ -1127,10 +1127,12 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
     }
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: specter_core::BurstPhase::Verifying,
-            ..
-        })
+        ProfileState::Active(specter_core::ActiveBurst::PreFire(
+            specter_core::PreFireBurst {
+                phase: specter_core::PreFirePhase::Verifying,
+                ..
+            }
+        ))
     ));
 
     let out = e.step(
@@ -1558,10 +1560,12 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         .expect("Standard-Ok stable verdict fires one Effect");
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: specter_core::BurstPhase::Awaiting { .. },
-            ..
-        }),
+        ProfileState::Active(specter_core::ActiveBurst::PostFire(
+            specter_core::PostFireBurst {
+                phase: specter_core::PostFirePhase::Awaiting { .. },
+                ..
+            }
+        )),
     ));
 
     // EffectComplete::Ok → transition_to_rebasing.

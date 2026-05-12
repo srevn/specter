@@ -22,13 +22,13 @@ use compact_str::CompactString;
 use specter_core::program::SpawnBody;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, AnchorClaim, ArgPart, ArgTemplate, BurstIntent, BurstPhase, ChildEntry,
+    ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstIntent, ChildEntry,
     ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
     EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, PatternSpec, Placeholder,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileState,
-    PromoterAttachRequest, PromoterId, PromoterRegistryDiff, PromoterState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp,
-    WatchRegistryDiff,
+    PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner,
+    ProbeRequest, ProbeResponse, ProfileState, PromoterAttachRequest, PromoterId,
+    PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp, WatchRegistryDiff,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -912,7 +912,7 @@ fn probe_response_on_idle_state_drops_in_release() {
 #[test]
 fn standard_burst_stable_emits_effect_and_awaits() {
     // Stable verdict emits the Effect and transitions to
-    // `BurstPhase::Awaiting`; the engine waits for the completion before
+    // `PostFirePhase::Awaiting`; the engine waits for the completion before
     // returning to Idle. Idle means "nothing in flight" — outstanding
     // Effects keep the burst Active until they report back.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
@@ -953,12 +953,12 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         now + SETTLE + Duration::from_millis(1),
     );
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b,
+        ProfileState::Active(ActiveBurst::PostFire(post)) => post,
         _ => panic!("expected Active(Awaiting) after firing"),
     };
     assert_eq!(burst.intent, BurstIntent::Standard);
     assert!(
-        matches!(burst.phase, BurstPhase::Awaiting { outstanding: 1, .. }),
+        matches!(burst.phase, PostFirePhase::Awaiting { outstanding: 1, .. }),
         "stable verdict transitions to Awaiting with one outstanding Effect; got {:?}",
         burst.phase,
     );
@@ -1363,11 +1363,11 @@ fn standard_burst_force_fires_on_max_settle() {
         // post-fire rebase happens when the eventual EffectComplete
         // drives the Awaiting → Rebasing transition.
         let phase = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(burst) => &burst.phase,
+            ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
             _ => panic!("expected Active(Awaiting)"),
         };
         assert!(
-            matches!(phase, BurstPhase::Awaiting { outstanding: 1, .. }),
+            matches!(phase, PostFirePhase::Awaiting { outstanding: 1, .. }),
             "force-fired stable verdict transitions to Awaiting; got {phase:?}",
         );
         assert_eq!(out.effects.len(), 1);
@@ -1391,7 +1391,7 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
         Instant::now(),
     );
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b,
+        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre,
         _ => panic!(),
     };
     assert_eq!(
@@ -1399,7 +1399,7 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
         BurstIntent::Seed,
         "intent preserved across Verifying → Batching",
     );
-    assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
+    assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
     let cancels = out
         .probe_ops
         .iter()
@@ -1410,7 +1410,7 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
 
 /// Field-discipline pin for `event_drives_batching`: an FsEvent during
 /// Verifying closes the probe channel atomically with the Cancel emission.
-/// Pre-refactor the close was implicit in the `BurstPhase::Verifying { ... }
+/// Pre-refactor the close was implicit in the `PreFirePhase::Verifying { ... }
 /// → Batching { ... }` variant rewrite; post-refactor it must clear the
 /// per-Profile `pending_probe` slot explicitly.
 #[test]
@@ -1884,7 +1884,7 @@ fn timer_expired_stale_id_emits_diagnostic() {
 //
 // The engine does not return to Idle after firing Effects: the burst
 // stays `Active(Awaiting)` until each completion reports back, and the
-// post-Effect rebase happens in `BurstPhase::Rebasing` as a phase of
+// post-Effect rebase happens in `PostFirePhase::Rebasing` as a phase of
 // the same burst. `EffectComplete` arrivals route by phase: Awaiting
 // decrements / transitions; non-Awaiting emits
 // `EffectCompleteOutsideAwaiting`.
@@ -2427,11 +2427,11 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
     );
 
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b,
+        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre,
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
     assert_eq!(burst.intent, BurstIntent::Seed);
-    assert!(matches!(burst.phase, BurstPhase::Verifying));
+    assert!(matches!(burst.phase, PreFirePhase::Verifying));
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
         "seed burst armed a fresh verify probe",
@@ -2465,11 +2465,11 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
     );
     // Now in Active(Standard) Batching.
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b,
+        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre,
         s => panic!("expected Active(Standard) after FsEvent; got {s:?}"),
     };
     assert_eq!(burst.intent, BurstIntent::Standard);
-    assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
+    assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
 
     let out = e.step(
         Input::SensorOverflow {
@@ -2479,7 +2479,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
     );
 
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b,
+        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre,
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
     assert_eq!(
@@ -2609,7 +2609,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     assert!(
         matches!(
             &e.profiles.get(pid_a).unwrap().state,
-            ProfileState::Active(b) if b.intent == BurstIntent::Seed
+            ProfileState::Active(ActiveBurst::PreFire(pre)) if pre.intent == BurstIntent::Seed
         ),
         "Profile A (anchor at a) reseeded",
     );
@@ -3497,8 +3497,8 @@ fn drive_to_first_effect(
     );
     // Drain settle timer → Verifying.
     let settle_timer = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match &b.phase {
-            BurstPhase::Batching { settle_timer } => *settle_timer,
+        ProfileState::Active(ActiveBurst::PreFire(pre)) => match &pre.phase {
+            PreFirePhase::Batching { settle_timer } => *settle_timer,
             _ => panic!("expected Batching"),
         },
         _ => panic!("expected Active"),
@@ -3527,8 +3527,8 @@ fn drive_to_first_effect(
     );
     // Drain settle timer → Verifying again.
     let settle_timer2 = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match &b.phase {
-            BurstPhase::Batching { settle_timer } => *settle_timer,
+        ProfileState::Active(ActiveBurst::PreFire(pre)) => match &pre.phase {
+            PreFirePhase::Batching { settle_timer } => *settle_timer,
             _ => panic!("expected Batching"),
         },
         _ => panic!("expected Active(Batching)"),
@@ -3976,8 +3976,8 @@ fn drive_to_standard_verifying(
         now,
     );
     let settle_timer = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => match &b.phase {
-            BurstPhase::Batching { settle_timer } => *settle_timer,
+        ProfileState::Active(ActiveBurst::PreFire(pre)) => match &pre.phase {
+            PreFirePhase::Batching { settle_timer } => *settle_timer,
             _ => panic!("expected Standard Batching"),
         },
         _ => panic!("expected Active"),
@@ -4296,7 +4296,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         "Awaiting absorb must emit EventAbsorbedByFireTail",
     );
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b,
+        ProfileState::Active(ActiveBurst::PostFire(post)) => post,
         _ => panic!("expected Active(Awaiting)"),
     };
     assert!(
@@ -4337,10 +4337,10 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
     }
 
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(b) => b,
+        ProfileState::Active(ActiveBurst::PostFire(post)) => post,
         _ => panic!("expected Active(Rebasing)"),
     };
-    assert!(matches!(burst.phase, BurstPhase::Rebasing));
+    assert!(matches!(burst.phase, PostFirePhase::Rebasing));
     assert!(
         burst.force_walk_resources.is_empty(),
         "transition_to_rebasing clears force_walk_resources after \
@@ -4394,14 +4394,14 @@ fn rebasing_without_absorbed_events_ships_empty_force_walk() {
 
 // ---------- rebase_baseline witness clears at every site ----------
 
-/// Construct an `Active(Burst)` state populated with default empty
+/// Construct an `Active(PreFire)` state populated with default empty
 /// per-burst sets and the supplied phase / intent / probe target. Used
 /// by witness-clear tests that drive `dispatch_*_ok` directly with a
-/// pre-staged Profile and have no Batching / Awaiting timer to track.
-fn active_burst(
+/// pre-staged Profile.
+fn active_pre_fire_burst(
     e: &mut Engine,
     pid: specter_core::ProfileId,
-    phase: BurstPhase,
+    phase: PreFirePhase,
     intent: BurstIntent,
     probe_target: ResourceId,
     now: Instant,
@@ -4409,27 +4409,45 @@ fn active_burst(
     let burst_deadline = e
         .timers
         .schedule(now + MAX_SETTLE, pid, TimerKind::BurstDeadline);
-    ProfileState::Active(specter_core::Burst {
+    ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
         burst_deadline,
         phase,
         intent,
         forced: false,
         dirty_resources: BTreeSet::new(),
         force_walk_resources: BTreeSet::new(),
-        probe_target: Some(probe_target),
+        probe_target,
         suppressed_resources: BTreeSet::new(),
         last_event_time: None,
-    })
+    }))
+}
+
+/// Construct an `Active(PostFire)` state with the supplied phase /
+/// intent. Used by witness-clear tests that drive `dispatch_rebase_*`
+/// directly with a pre-staged Profile.
+fn active_post_fire_burst(
+    _e: &mut Engine,
+    _pid: specter_core::ProfileId,
+    phase: PostFirePhase,
+    intent: BurstIntent,
+    _probe_target: ResourceId,
+    _now: Instant,
+) -> ProfileState {
+    ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
+        intent,
+        phase,
+        force_walk_resources: BTreeSet::new(),
+    }))
 }
 
 #[test]
 fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
     let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
 
-    let state = active_burst(
+    let state = active_post_fire_burst(
         &mut e,
         pid,
-        BurstPhase::Rebasing,
+        PostFirePhase::Rebasing,
         BurstIntent::Standard,
         anchor,
         now,
@@ -4460,10 +4478,10 @@ fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
 fn dispatch_seed_ok_no_drift_branch_clears_last_settled_hash_at_loss() {
     let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
 
-    let state = active_burst(
+    let state = active_pre_fire_burst(
         &mut e,
         pid,
-        BurstPhase::Verifying,
+        PreFirePhase::Verifying,
         BurstIntent::Seed,
         anchor,
         now,
@@ -4508,10 +4526,10 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
         profile: pid,
     };
 
-    let state = active_burst(
+    let state = active_pre_fire_burst(
         &mut e,
         pid,
-        BurstPhase::Verifying,
+        PreFirePhase::Verifying,
         BurstIntent::Seed,
         anchor,
         now,

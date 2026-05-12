@@ -38,8 +38,8 @@ use tinyvec::TinyVec;
 ///   When `path` is `Some`, the engine ignores `resource` and walks the
 ///   path components via `Tree::ensure_path`. If any non-leaf component is
 ///   a fresh `DescentScaffold`, the Profile is registered as pending; once
-///   the anchor materializes, a `Burst { intent: Seed }` establishes the
-///   baseline.
+///   the anchor materializes, a Seed burst (`PreFireBurst { intent:
+///   Seed, ... }`) establishes the baseline.
 ///
 /// `name` is `String` so callers don't need a `compact_str` dependency at
 /// this seam — `Sub::new` converts via `Into<CompactString>` internally.

@@ -26,7 +26,7 @@ pub struct CommandResolved {
 ///
 /// **Coalescing identity + bookkeeping.**
 /// `key` drives `DedupKey`-based coalescing; `forced` mirrors
-/// `Burst.forced` at emission time (every Standard burst Effect carries
+/// `PreFireBurst.forced` at emission time (every Standard burst Effect carries
 /// the deadline-crossed flag, regardless of whether the eventual probe
 /// verdict was stable). `diff` is `Some` iff `sub.needs_diff` AND the
 /// diff source (a `baseline` snapshot) was present.
@@ -116,7 +116,7 @@ pub struct CorrelationId(pub u64);
 /// `PerFile` adds no partitioning power (the `sub` already determines
 /// the Profile), but it makes the `key → profile` lookup constant-time
 /// symmetrically across both arms — the engine credits the per-Profile
-/// `BurstPhase::Awaiting` counter on every `EffectComplete`, so this
+/// `PostFirePhase::Awaiting` counter on every `EffectComplete`, so this
 /// lookup is hot.
 ///
 /// `Ord` drives the actuator's `BTreeMap<DedupKey, Slot>` and the

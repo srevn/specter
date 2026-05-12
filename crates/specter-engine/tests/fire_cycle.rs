@@ -32,11 +32,11 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ArgPart, ArgTemplate, BurstPhase, ChildEntry, ClassSet, DedupKey, Diagnostic,
+    ActionProgram, ActiveBurst, ArgPart, ArgTemplate, ChildEntry, ClassSet, DedupKey, Diagnostic,
     DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input,
-    LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
-    SubId, TimerKind, TreeSnapshot,
+    LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
+    ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachRequest, SubId, TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -276,10 +276,13 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     );
     let effect_key = stable_out.effects[0].key.clone();
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => &b.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
         _ => panic!("expected Active(Awaiting)"),
     };
-    assert!(matches!(phase, BurstPhase::Awaiting { outstanding: 1, .. }));
+    assert!(matches!(
+        phase,
+        PostFirePhase::Awaiting { outstanding: 1, .. }
+    ));
 
     // EffectComplete::Ok → Rebasing.
     let rebase_out = e.step(
@@ -292,10 +295,10 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     );
     let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe emitted");
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => &b.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
         _ => panic!("expected Active(Rebasing)"),
     };
-    assert!(matches!(phase, BurstPhase::Rebasing));
+    assert!(matches!(phase, PostFirePhase::Rebasing));
 
     // ProbeResponse Ok (idempotent — same snap) → Idle, baseline rebased.
     e.step(
@@ -359,7 +362,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
         now + Duration::from_millis(10),
     );
     let phase_before = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => format!("{:?}", b.phase),
+        ProfileState::Active(ActiveBurst::PostFire(post)) => format!("{:?}", post.phase),
         _ => panic!("expected Active(Awaiting)"),
     };
     assert!(phase_before.contains("Awaiting"));
@@ -390,7 +393,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
 
     // Phase is unchanged.
     let phase_after = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => format!("{:?}", b.phase),
+        ProfileState::Active(ActiveBurst::PostFire(post)) => format!("{:?}", post.phase),
         _ => panic!("expected Active(Awaiting) post-absorb"),
     };
     assert_eq!(phase_after, phase_before, "phase unchanged after absorb");
@@ -441,10 +444,10 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         .expect("rebase probe correlation");
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Rebasing,
+        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
+            phase: PostFirePhase::Rebasing,
             ..
-        }),
+        })),
     ));
 
     // FsEvent during Rebasing → absorbed.
@@ -521,10 +524,10 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Rebasing,
+        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
+            phase: PostFirePhase::Rebasing,
             ..
-        }),
+        })),
     ));
     let rebase_emitted = combined
         .probe_ops
@@ -562,10 +565,10 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     }
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Rebasing,
+        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
+            phase: PostFirePhase::Rebasing,
             ..
-        }),
+        })),
     ));
 
     // Late EffectComplete::Ok arrives in Rebasing → diagnoses.
@@ -588,10 +591,10 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     // Phase unchanged (still Rebasing).
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Rebasing,
+        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
+            phase: PostFirePhase::Rebasing,
             ..
-        }),
+        })),
     ));
 }
 
@@ -675,10 +678,10 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Rebasing,
+        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
+            phase: PostFirePhase::Rebasing,
             ..
-        }),
+        })),
     ));
 
     // Anchor terminal event during Rebasing.
@@ -852,10 +855,13 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         "two PerStableFile Effects emitted",
     );
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => &b.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
         _ => panic!(),
     };
-    assert!(matches!(phase, BurstPhase::Awaiting { outstanding: 2, .. }));
+    assert!(matches!(
+        phase,
+        PostFirePhase::Awaiting { outstanding: 2, .. }
+    ));
     let key_a = stable_out.effects[0].key.clone();
     let key_b = stable_out.effects[1].key.clone();
 
@@ -869,10 +875,13 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         now + Duration::from_millis(20),
     );
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => &b.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
         _ => panic!(),
     };
-    assert!(matches!(phase, BurstPhase::Awaiting { outstanding: 1, .. }));
+    assert!(matches!(
+        phase,
+        PostFirePhase::Awaiting { outstanding: 1, .. }
+    ));
 
     // Second completion: Failed → outstanding=0 → Rebasing.
     let rebase_out = e.step(
@@ -888,10 +897,10 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Rebasing,
+        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
+            phase: PostFirePhase::Rebasing,
             ..
-        }),
+        })),
     ));
     assert!(
         first_probe_correlation(&rebase_out).is_some(),
@@ -1043,10 +1052,10 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
     );
     // Phase still Awaiting.
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => &b.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
         _ => panic!(),
     };
-    assert!(matches!(phase, BurstPhase::Awaiting { .. }));
+    assert!(matches!(phase, PostFirePhase::Awaiting { .. }));
     assert_eq!(
         e.pending_probe_for(ProbeOwner::Profile(pid)),
         pending_probe_before,

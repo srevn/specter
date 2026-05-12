@@ -6,14 +6,28 @@
 //! prevents drift between the transition-row handlers and the
 //! post-`EffectComplete` re-probe path.
 //!
-//! - `start_seed_burst` / `start_standard_burst` — Idle → Active.
-//! - `event_drives_batching` (FsEvent during Active) /
+//! `ActiveBurst` splits into `PreFireBurst` / `PostFireBurst` (see
+//! [`specter_core::profile`]); helpers below own a typed view of one or
+//! the other. The fire transition (`Verifying → Awaiting`) is a typed
+//! state-machine move at [`PreFireBurst::into_post_fire`].
+//!
+//! - `start_seed_burst` / `start_standard_burst` — Idle →
+//!   `Active(PreFire(_))`.
+//! - `event_drives_batching` (FsEvent during pre-fire) /
 //!   `unstable_response_drives_batching` (probe-unstable response) /
 //!   `transition_to_verifying` (settle-timer expiry, burst-deadline,
 //!   Draining → Verifying reconfirm) /
-//!   `transition_to_draining` — Active → Active phase swaps.
+//!   `transition_to_draining` — pre-fire phase swaps (mutate
+//!   `PreFireBurst`).
+//! - `transition_to_awaiting` — `Active(PreFire(_))` → `Active(PostFire(_))`,
+//!   the sole site that crosses the fire boundary (via
+//!   `PreFireBurst::into_post_fire`).
+//! - `transition_to_rebasing` — `Awaiting → Rebasing` (mutates
+//!   `PostFireBurst`).
+//! - `absorb_event_into_fire_tail` — FsEvent during post-fire (mutates
+//!   `PostFireBurst.force_walk_resources`).
 //! - `finish_burst_to_idle` — Active → Idle, single point of `-suppress` and
-//!   `propagate(-1)`.
+//!   `propagate(-1)`. Discriminates `PreFire` / `PostFire` at the take.
 //!
 //! The two batching helpers exist as a deliberate split rather than one
 //! helper with a runtime flag: each caller has **static knowledge** of
@@ -34,8 +48,9 @@ use crate::Engine;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
-    Burst, BurstIntent, BurstPhase, ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind,
-    StepOutput, TimerKind, Tree, TreeSnapshot,
+    ActiveBurst, BurstIntent, Diagnostic, FsEvent, PostFirePhase, PreFireBurst, PreFirePhase,
+    ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind, StepOutput, TimerKind, Tree,
+    TreeSnapshot,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -90,26 +105,46 @@ impl Engine {
         let burst_deadline =
             self.timers
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
-        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
-            return;
-        };
 
+        // Phase-write BEFORE mint. The I5 invariant is `phase == Verifying
+        // ⇔ pending_probe.is_some()`; both directions can be violated only
+        // intra-step (between two ops in the same `&mut self` window).
+        // Mint→write would leave `pending_probe = Some(_)` with the phase
+        // still implicit (Idle), and a stray observer reading both fields
+        // would see a live correlation in a non-Verifying state — worse,
+        // a re-entrant mint would trip the I5 debug_assert. Write→mint
+        // leaves `phase = Verifying` momentarily with no correlation
+        // (no live response can land in that window in v1's single-
+        // threaded step), and a re-entrant mint succeeds against an
+        // empty slot — strictly safer. v1 single-threaded step never
+        // observes either window; the doc fixes the ordering at
+        // `transition_to_verifying_at` / `transition_to_rebasing` /
+        // `start_seed_burst` and lets the future correlation-on-phase
+        // refactor (Axis 2 of the audit) collapse the iff to one write.
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.state = ProfileState::Active(Burst {
+            p.state = ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
                 burst_deadline,
-                phase: BurstPhase::Verifying,
+                phase: PreFirePhase::Verifying,
                 intent: BurstIntent::Seed,
                 forced: false,
                 dirty_resources: BTreeSet::new(),
                 force_walk_resources: BTreeSet::new(),
-                probe_target: Some(resource),
+                // Seed targets the anchor; the field is invariant for the
+                // Seed burst's pre-fire lifetime (`transition_to_verifying`
+                // re-runs for Seed only on Draining-reconfirm, which Seed
+                // bursts never reach because they skip Batching).
+                probe_target: resource,
                 suppressed_resources: BTreeSet::new(),
                 // Seed bursts skip Batching; the field has no consumer
                 // until a fresh FsEvent during the verify routes through
                 // `event_drives_batching` and repopulates it.
                 last_event_time: None,
-            });
+            }));
         }
+
+        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
+            return;
+        };
 
         add_suppress(&mut self.tree, resource, out);
         let target_path = self.tree.path_of(resource).unwrap_or_default();
@@ -183,21 +218,25 @@ impl Engine {
         force_walk.insert(event_resource);
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.state = ProfileState::Active(Burst {
+            p.state = ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
                 burst_deadline,
-                phase: BurstPhase::Batching { settle_timer },
+                phase: PreFirePhase::Batching { settle_timer },
                 intent: BurstIntent::Standard,
                 forced: false,
                 dirty_resources: dirty,
                 force_walk_resources: force_walk,
-                probe_target: None,
+                // Initial target = anchor. `transition_to_verifying`
+                // overwrites with the LCA of `dirty_resources` on settle
+                // expiry / force-fire; the initial value carries no
+                // observable consequence (no probe has emitted yet).
+                probe_target: resource,
                 suppressed_resources: BTreeSet::new(),
                 // The burst-start FsEvent IS the first event; seed the
                 // settle-deadline source of truth with `now`. Subsequent
                 // events update this in `event_drives_batching` without
                 // re-inserting a fresh heap entry.
                 last_event_time: Some(now),
-            });
+            }));
         }
 
         add_suppress(&mut self.tree, resource, out);
@@ -258,7 +297,15 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let ProfileState::Active(burst) = &p.state else {
+        let ProfileState::Active(ActiveBurst::PreFire(pre)) = &p.state else {
+            // Callers route post-fire FsEvents through
+            // `absorb_event_into_fire_tail`; a PostFire here is a
+            // dispatcher routing breach.
+            debug_assert!(
+                !matches!(p.state, ProfileState::Active(ActiveBurst::PostFire(_))),
+                "event_drives_batching called on PostFire — caller must route \
+                 to absorb_event_into_fire_tail (profile = {profile_id:?})",
+            );
             return;
         };
         let settle = p.settle;
@@ -272,7 +319,7 @@ impl Engine {
         // re-entry. The decision is structural: a live Batching has its
         // own timer slot; Verifying/Draining have none.
         let needs_fresh_timer =
-            matches!(burst.phase, BurstPhase::Verifying | BurstPhase::Draining,);
+            matches!(pre.phase, PreFirePhase::Verifying | PreFirePhase::Draining);
 
         // Idempotent: emits Cancel iff the probe channel is open
         // (Verifying ⇒ pending_probe = Some(_)). For Batching / Draining
@@ -304,7 +351,9 @@ impl Engine {
                 .profiles
                 .get(profile_id)
                 .is_some_and(|p| match &p.state {
-                    ProfileState::Active(b) => !b.suppressed_resources.contains(&event_resource),
+                    ProfileState::Active(ActiveBurst::PreFire(pre)) => {
+                        !pre.suppressed_resources.contains(&event_resource)
+                    }
                     _ => false,
                 });
         if needs_suppress {
@@ -312,16 +361,16 @@ impl Engine {
         }
 
         if let Some(p) = self.profiles.get_mut(profile_id)
-            && let ProfileState::Active(burst) = &mut p.state
+            && let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state
         {
-            burst.last_event_time = Some(now);
+            pre.last_event_time = Some(now);
             if needs_suppress {
-                burst.suppressed_resources.insert(event_resource);
+                pre.suppressed_resources.insert(event_resource);
             }
-            burst.dirty_resources.insert(event_resource);
-            burst.force_walk_resources.insert(event_resource);
+            pre.dirty_resources.insert(event_resource);
+            pre.force_walk_resources.insert(event_resource);
             if let Some(timer_id) = new_settle_timer {
-                burst.phase = BurstPhase::Batching {
+                pre.phase = PreFirePhase::Batching {
                     settle_timer: timer_id,
                 };
             }
@@ -355,14 +404,20 @@ impl Engine {
     /// The forced + not-stable case in `dispatch_standard_ok` also
     /// bypasses this helper — forced + unstable still fires.
     ///
-    /// **`last_event_time` preserved.** The verify just responded;
-    /// no fresh `FsEvent` drove this transition, so the field carries
-    /// its prior value into the new Batching cycle. If no event arrives
-    /// before the freshly-scheduled settle timer fires, the on-expiry
-    /// handler observes `now − last_event_time ≥ settle`
-    /// (`now ≥ unstable_response_at + settle ≥ prior_last_event +
-    /// settle`) and transitions cleanly to Verifying — the cycle
-    /// completes without spurious reschedules.
+    /// **`last_event_time` pinned to `Some(now)`.** The verify just
+    /// responded, so `now` is the timestamp of the latest observation
+    /// that drove a transition on this burst (whether a fresh FsEvent or
+    /// the verify response itself). Pinning here removes the `Instant`
+    /// monotonicity dependency from the on-expiry reschedule check: with
+    /// the prior preserve-semantics, the correctness argument was "the
+    /// freshly-scheduled settle timer fires at `now + settle`, and the
+    /// expiry handler sees `now − last_event_time ≥ settle` because
+    /// `now ≥ unstable_response_at + settle ≥ prior_last_event + settle`,
+    /// which depends on `Instant` monotonicity". The pinned variant has
+    /// the same arithmetic with `last_event_time = now`: the on-expiry
+    /// handler sees `expiry_now − now ≥ settle` (true by construction of
+    /// the scheduled deadline) and transitions cleanly — independent of
+    /// any clock skew between this call and the prior preserve.
     pub(crate) fn unstable_response_drives_batching(
         &mut self,
         profile_id: ProfileId,
@@ -376,9 +431,10 @@ impl Engine {
             .schedule(now + settle, profile_id, TimerKind::Settle);
 
         if let Some(p) = self.profiles.get_mut(profile_id)
-            && let ProfileState::Active(burst) = &mut p.state
+            && let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state
         {
-            burst.phase = BurstPhase::Batching { settle_timer };
+            pre.phase = PreFirePhase::Batching { settle_timer };
+            pre.last_event_time = Some(now);
         }
     }
 
@@ -407,43 +463,45 @@ impl Engine {
     /// LCA would degenerate to anchor and lose the correct subtree).
     /// `force_walk_resources` is consumed by this emission; new events
     /// accumulate into the cleared set.
+    ///
+    /// **Cross-product retention.** The `(intent, phase, anchor_kind)`
+    /// match below is the Phase 1 typed-but-still-broad target selection.
+    /// Phase 2 (Dispatcher consolidation) lifts the target out as a
+    /// parameter and decomposes the dispatch into a small per-call-site
+    /// `emit_probe_for_kind` helper. Kept intact in Phase 1 to keep the
+    /// type split self-contained.
     pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get_mut(profile_id) else {
             return;
         };
 
         // Take the per-burst consumables in one mutable-borrow window. The
-        // post-fire phases (`Awaiting` / `Rebasing`) never reach this
-        // helper — production callers (Settle expiry, BurstDeadline
-        // expiry, ancestor reconfirm from `finish_burst_to_idle`) are
-        // gated on pre-fire phases via `is_timer_referenced` and the
-        // `Draining` hit-zero check respectively. The early return guards
-        // a stray call from minting a fresh probe correlation while an
-        // effect wait is still in flight (which would either trip the I5
-        // debug_assert in `mint_probe_correlation` or, in release,
-        // overwrite the post-fire correlation slot).
+        // post-fire phases never reach this helper — production callers
+        // (Settle expiry, BurstDeadline expiry, ancestor reconfirm from
+        // `finish_burst_to_idle`) are gated on pre-fire phases via
+        // `is_timer_referenced` and the `Draining` hit-zero check
+        // respectively. The early return guards a stray call from minting
+        // a fresh probe correlation while an effect wait is still in
+        // flight (which would either trip the I5 debug_assert in
+        // `mint_probe_correlation` or, in release, overwrite the post-fire
+        // correlation slot).
         //
-        // `force_walk_resources` and `suppressed_resources` are
-        // single-use accumulators consumed by this transition; `mem::take`
-        // moves them out and leaves the fields empty (no follow-up
-        // `clear()` required). `dirty_resources` is preserved — it carries
-        // the LCA basis across the whole burst, so we clone it here.
-        let (intent, phase, prior_target, dirty_for_lca, force_set, suppressed_drain, forced) =
+        // `force_walk_resources` and `suppressed_resources` are single-use
+        // accumulators consumed by this transition; `mem::take` moves them
+        // out and leaves the fields empty (no follow-up `clear()`
+        // required). `dirty_resources` is preserved — it carries the LCA
+        // basis across the whole burst, so we clone it here.
+        let (intent, phase_repr, prior_target, dirty_for_lca, force_set, suppressed_drain, forced) =
             match &mut p.state {
-                ProfileState::Active(b) => {
-                    if matches!(b.phase, BurstPhase::Awaiting { .. } | BurstPhase::Rebasing) {
-                        return;
-                    }
-                    (
-                        b.intent,
-                        phase_kind(&b.phase),
-                        b.probe_target,
-                        b.dirty_resources.clone(),
-                        std::mem::take(&mut b.force_walk_resources),
-                        std::mem::take(&mut b.suppressed_resources),
-                        b.forced,
-                    )
-                }
+                ProfileState::Active(ActiveBurst::PreFire(pre)) => (
+                    pre.intent,
+                    PhaseRepr::from_pre(&pre.phase),
+                    pre.probe_target,
+                    pre.dirty_resources.clone(),
+                    std::mem::take(&mut pre.force_walk_resources),
+                    std::mem::take(&mut pre.suppressed_resources),
+                    pre.forced,
+                ),
                 _ => return,
             };
 
@@ -463,18 +521,15 @@ impl Engine {
         // past the anchor to the parent dir would route the probe
         // outside the Profile's coverage). Dir / unclassified anchors
         // pick LCA / prior / anchor by phase.
-        let target = match (intent, phase, anchor_kind) {
+        let target = match (intent, phase_repr, anchor_kind) {
             (_, _, Some(ResourceKind::File)) => resource,
             (BurstIntent::Seed, _, _) => resource,
-            (BurstIntent::Standard, PhaseKind::Draining, _) => {
-                // Reconfirm probe — re-use the previous target. dirty_resources
-                // is empty in Draining, so LCA would degenerate to anchor and
-                // lose the correct subtree.
-                prior_target.unwrap_or(resource)
+            (BurstIntent::Standard, PhaseRepr::Draining, _) => {
+                // Reconfirm probe — re-use the previous target.
+                // dirty_resources is empty in Draining, so LCA would
+                // degenerate to anchor and lose the correct subtree.
+                prior_target
             }
-            // PostFire is unreachable courtesy of the early-return guard
-            // above; routed alongside `Batching | Verifying` to keep the
-            // match exhaustive without a wildcard.
             (BurstIntent::Standard, _, _) => lca_target(resource, &dirty_for_lca, &self.tree),
         };
 
@@ -490,10 +545,6 @@ impl Engine {
         let force_walk_paths = build_force_walk(&force_set, target, &self.tree);
         let target_path = self.tree.path_of(target).unwrap_or_default();
 
-        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
-            return;
-        };
-
         // Drain the per-burst `suppressed_resources` taken above. Each
         // entry was bumped 0→1 (or N→N+1 in the multi-Profile fan-in
         // case) by `event_drives_batching`; `sub_suppress` returns it
@@ -507,12 +558,21 @@ impl Engine {
             sub_suppress(&mut self.tree, *r, out);
         }
 
+        // Phase-write BEFORE mint. See the rationale on
+        // `start_seed_burst`'s mint call site — the iff (`phase ==
+        // Verifying ⇔ pending_probe.is_some()`) is enforced at probe
+        // boundaries, and write→mint is the strictly safer of the two
+        // intra-step ordering options.
         if let Some(p) = self.profiles.get_mut(profile_id)
-            && let ProfileState::Active(b) = &mut p.state
+            && let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state
         {
-            b.phase = BurstPhase::Verifying;
-            b.probe_target = Some(target);
+            pre.phase = PreFirePhase::Verifying;
+            pre.probe_target = target;
         }
+
+        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
+            return;
+        };
 
         match anchor_kind {
             Some(ResourceKind::File) => {
@@ -557,8 +617,8 @@ impl Engine {
         let Some(p) = self.profiles.get_mut(profile_id) else {
             return;
         };
-        if let ProfileState::Active(burst) = &mut p.state {
-            burst.phase = BurstPhase::Draining;
+        if let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state {
+            pre.phase = PreFirePhase::Draining;
         }
     }
 
@@ -589,16 +649,33 @@ impl Engine {
     /// `pop_expired`. We do not cancel it eagerly: lazy invalidation is
     /// the cheaper path and `BurstDeadline` carries no payload that
     /// would leak.
+    ///
+    /// **Defensive precheck before scheduling.** The gate timer is
+    /// scheduled only after we verify the Profile is in
+    /// `Active(PreFire(_))`. Without the precheck, a defensive miss
+    /// (e.g., a future caller bypassing the post-fire phase check that
+    /// production gates already enforce) would leave the gate timer
+    /// orphaned in the heap; lazy-invalidated by `is_timer_referenced`
+    /// since no PostFire exists yet, but still allocated. The precheck
+    /// is one `matches!` lookup against a freshly-borrowed Profile —
+    /// trivially cheap.
     pub(crate) fn transition_to_awaiting(
         &mut self,
         profile_id: ProfileId,
         outstanding: u32,
         now: Instant,
     ) {
-        let Some(p) = self.profiles.get(profile_id) else {
+        // Precheck. Type-level: the Profile must be Active(PreFire(_));
+        // anything else is a state-machine routing breach (PostFire ⇒
+        // already past the fire; Idle / Pending ⇒ no burst). The
+        // precheck also captures `max_settle` for the deadline
+        // computation under the same Profile-borrow window.
+        let Some(max_settle) = self.profiles.get(profile_id).and_then(|p| {
+            matches!(&p.state, ProfileState::Active(ActiveBurst::PreFire(_)),)
+                .then_some(p.max_settle)
+        }) else {
             return;
         };
-        let max_settle = p.max_settle;
 
         // v1 default: 4× max_settle. Saturating multiplication keeps the
         // arithmetic total — `Duration::saturating_mul` clamps at
@@ -610,13 +687,31 @@ impl Engine {
             TimerKind::AwaitGateDeadline,
         );
 
+        // Typed move PreFire → PostFire. The `mem::replace` swap is
+        // structurally necessary: `into_post_fire` consumes the
+        // pre-fire by value, so we cannot project through `&mut
+        // ProfileState::Active(_)`. Bracketing with the matches!
+        // shape-check above eliminates the transient Idle window's
+        // observability for production callers (a stray observer in
+        // dev/CI that races inside the helper would never reach this
+        // point on a non-PreFire Profile).
         if let Some(p) = self.profiles.get_mut(profile_id)
-            && let ProfileState::Active(burst) = &mut p.state
+            && matches!(&p.state, ProfileState::Active(ActiveBurst::PreFire(_)),)
         {
-            burst.phase = BurstPhase::Awaiting {
-                outstanding,
-                gate_deadline,
-            };
+            let prior = std::mem::replace(&mut p.state, ProfileState::Idle);
+            // Destructure with restore-on-mismatch. The matches! above
+            // guarantees the PreFire arm; the fallback exists so a
+            // future refactor widening the matches! pattern doesn't
+            // silently strand the Profile in `Idle` while dropping the
+            // owned burst.
+            match prior {
+                ProfileState::Active(ActiveBurst::PreFire(pre)) => {
+                    p.state = ProfileState::Active(ActiveBurst::PostFire(
+                        pre.into_post_fire(outstanding, gate_deadline),
+                    ));
+                }
+                other => p.state = other,
+            }
         }
     }
 
@@ -669,13 +764,16 @@ impl Engine {
         };
 
         // Take absorbed events for the rebase walker's force_walk in one
-        // mut-borrow window. `force_walk_resources` is the shared
-        // accumulator for "events since last probe" — Verifying and
-        // Rebasing are sister consumers. Non-Active state is a state-
-        // machine bug here (see rustdoc above); early-return rather than
-        // silently mint a Probe with no matching phase write.
+        // mut-borrow window. `force_walk_resources` on PostFireBurst is
+        // the post-fire accumulator fed by `absorb_event_into_fire_tail`.
+        // Non-PostFire state is a state-machine bug here (production
+        // callers — `on_effect_complete::Rebase` and `handle_gate_deadline`
+        // — gate on `Active(PostFire(Awaiting))`); early-return rather
+        // than silently mint a Probe with no matching phase write.
         let force_set = match &mut p.state {
-            ProfileState::Active(burst) => std::mem::take(&mut burst.force_walk_resources),
+            ProfileState::Active(ActiveBurst::PostFire(post)) => {
+                std::mem::take(&mut post.force_walk_resources)
+            }
             _ => return,
         };
 
@@ -690,16 +788,16 @@ impl Engine {
         let force_walk_paths = build_force_walk(&force_set, resource, &self.tree);
         let target_path = self.tree.path_of(resource).unwrap_or_default();
 
+        // Phase-write BEFORE mint. See `start_seed_burst`'s rationale.
+        if let Some(p) = self.profiles.get_mut(profile_id)
+            && let ProfileState::Active(ActiveBurst::PostFire(post)) = &mut p.state
+        {
+            post.phase = PostFirePhase::Rebasing;
+        }
+
         let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
             return;
         };
-
-        if let Some(p) = self.profiles.get_mut(profile_id)
-            && let ProfileState::Active(burst) = &mut p.state
-        {
-            burst.phase = BurstPhase::Rebasing;
-            burst.probe_target = Some(resource);
-        }
 
         match anchor_kind {
             Some(ResourceKind::File) => {
@@ -733,7 +831,7 @@ impl Engine {
     /// Idempotent: silent no-op on already-Idle Profiles.
     ///
     /// **Draining-exit driver.** `propagate(-1)` returns ancestors whose
-    /// `dirty_descendants` just hit zero AND are in `BurstPhase::Draining`.
+    /// `dirty_descendants` just hit zero AND are in `PreFirePhase::Draining`.
     /// The Engine drives each through `transition_to_verifying` in the
     /// same step — the reconfirm probe compares against the Profile's
     /// `current` (set when `dispatch_standard_ok` entered Draining).
@@ -750,17 +848,21 @@ impl Engine {
         };
         let resource = p.resource;
 
-        // One mut-borrow window covers two reads (intent for the
-        // propagate(-1) gate; suppressed_resources for the defensive
-        // drain) and the state→Idle write. Tightened from
-        // `!matches!(state, Idle)` to `Active(_)`: the burst-end
-        // machinery (`sub_suppress`, `propagate(-1)`) is Active-specific.
-        // Pending Profiles never bumped the anchor's suppress_count or
-        // the ancestor `dirty_descendants`; running this on Pending
-        // would underflow `sub_suppress`. The only documented caller-
-        // side guard that this defends against is
-        // `finalize_anchor_lost` if a future change relaxes its Pending
-        // early-return.
+        // Take the burst-by-value via `mem::replace(_, Idle)` and
+        // discriminate on the typed variant. Both pre-fire and post-fire
+        // arms preserve `intent` (the propagate(-1) gate); only the
+        // pre-fire arm carries `suppressed_resources` to drain. PostFire's
+        // `suppressed_resources` is empty by construction —
+        // `transition_to_verifying` drained the set immediately before
+        // the fire, and `into_post_fire`'s debug_assert catches any
+        // future drift.
+        //
+        // After this point `p.state == Idle` for the whole helper window.
+        // The subsequent `sub_suppress` / `propagate(-1)` /
+        // `transition_to_verifying` (ancestor reconfirm) / reap calls all
+        // run against a focal Profile in Idle — future observers (e.g., a
+        // hook firing on state transitions) would see the transition
+        // bracket cleanly.
         //
         // The defensive `suppressed_resources` drain catches abnormal-
         // end paths that bypass `transition_to_verifying`
@@ -769,20 +871,26 @@ impl Engine {
         // (slot reaped between event ingestion and burst end via
         // `discard_anchor_state`'s descendant release) is a no-op —
         // `refcounts::sub_suppress` short-circuits on a missing slot.
-        // After a normal `transition_to_verifying` drained the set, the
-        // `mem::take` here yields an empty BTreeSet — no double-drain.
         // Only Standard bursts call `propagate(+1)` at start (the
         // burst-propagation row), so only Standard bursts call
         // `propagate(-1)` at end. Seed bursts never contribute to
         // ancestor `dirty_descendants`.
-        let (was_standard, suppressed_drain) = match &mut p.state {
-            ProfileState::Active(b) => (
-                matches!(b.intent, BurstIntent::Standard),
-                std::mem::take(&mut b.suppressed_resources),
+        let prior = std::mem::replace(&mut p.state, ProfileState::Idle);
+        let (was_standard, suppressed_drain) = match prior {
+            ProfileState::Active(ActiveBurst::PreFire(pre)) => (
+                matches!(pre.intent, BurstIntent::Standard),
+                pre.suppressed_resources,
             ),
-            _ => return,
+            ProfileState::Active(ActiveBurst::PostFire(post)) => (
+                matches!(post.intent, BurstIntent::Standard),
+                BTreeSet::new(),
+            ),
+            other => {
+                // Idle / Pending — no burst-end machinery to run. Restore.
+                p.state = other;
+                return;
+            }
         };
-        p.state = ProfileState::Idle;
 
         for r in &suppressed_drain {
             sub_suppress(&mut self.tree, *r, out);
@@ -814,33 +922,74 @@ impl Engine {
             self.reap_profile(profile_id, out);
         }
     }
+
+    /// Absorb a post-fire FsEvent into the rebase probe's force-walk
+    /// hint. The post-fire phases (`Awaiting | Rebasing`) cannot start a
+    /// fresh burst — the rebase probe is already in flight or imminent —
+    /// so the engine defers the event to the next probe's
+    /// `force_walk_paths`. Closes the POSIX content-edit hole: a
+    /// content-only edit at a descendant doesn't bump the anchor's
+    /// mtime, so without this hint the rebase walker mtime-skips at
+    /// every level and the post-fire baseline retains the stale leaf.
+    ///
+    /// `event` is threaded purely for the diagnostic so an operator can
+    /// correlate logs to the deferred FsEvent.
+    pub(crate) fn absorb_event_into_fire_tail(
+        &mut self,
+        profile_id: ProfileId,
+        event_resource: ResourceId,
+        event: FsEvent,
+        out: &mut StepOutput,
+    ) {
+        // Type-guard catches a routing breach (`drive_burst` is the sole
+        // caller and matches PostFire before this). The debug_assert
+        // surfaces drift in dev/CI without changing release semantics.
+        debug_assert!(
+            self.profiles.get(profile_id).is_some_and(|p| matches!(
+                &p.state,
+                ProfileState::Active(ActiveBurst::PostFire(_)),
+            )),
+            "absorb_event_into_fire_tail: caller routed wrong \
+             (profile = {profile_id:?})",
+        );
+        if let Some(p) = self.profiles.get_mut(profile_id)
+            && let ProfileState::Active(ActiveBurst::PostFire(post)) = &mut p.state
+        {
+            post.force_walk_resources.insert(event_resource);
+            out.diagnostics.push(Diagnostic::EventAbsorbedByFireTail {
+                profile: profile_id,
+                resource: event_resource,
+                event,
+            });
+        }
+    }
 }
 
-/// Copy projection of `BurstPhase` for `transition_to_verifying`'s
-/// `(intent, phase)` match — `Batching`'s `TimerId` is irrelevant at the
-/// dispatch site, and `Verifying` is now unit (the probe correlation
-/// lives on `Profile.pending_probe`). The post-fire phases
-/// (`Awaiting` / `Rebasing`) are filtered by an early-return guard at
-/// `transition_to_verifying`'s entry; the projection's `PostFire` arm
-/// exists for exhaustiveness only and is structurally unreachable.
+/// Copy projection of `PreFirePhase` for `transition_to_verifying`'s
+/// `(intent, phase, anchor_kind)` cross-product match — `Batching`'s
+/// `TimerId` is irrelevant at the dispatch site, and `Verifying` is unit.
+/// Unlike the old `PhaseKind` aux enum, this representation has no
+/// `PostFire` arm — the typed split makes that case structurally
+/// impossible to reach inside `transition_to_verifying`, which now only
+/// destructures the `PreFireBurst` half of `ActiveBurst`.
+///
+/// Lives here pending the Phase 2 dispatcher consolidation; the
+/// `target` will then become a caller parameter and this enum
+/// disappears.
 #[derive(Copy, Clone, Eq, PartialEq)]
-enum PhaseKind {
+enum PhaseRepr {
     Batching,
     Verifying,
     Draining,
-    /// Defense-in-depth bucket for `Awaiting` and `Rebasing`. Reaching
-    /// `phase_kind` from a post-fire phase is a state-machine bug;
-    /// `transition_to_verifying`'s entry guard returns before this is
-    /// observed, but the match below must be exhaustive over `BurstPhase`.
-    PostFire,
 }
 
-const fn phase_kind(p: &BurstPhase) -> PhaseKind {
-    match p {
-        BurstPhase::Batching { .. } => PhaseKind::Batching,
-        BurstPhase::Verifying => PhaseKind::Verifying,
-        BurstPhase::Draining => PhaseKind::Draining,
-        BurstPhase::Awaiting { .. } | BurstPhase::Rebasing => PhaseKind::PostFire,
+impl PhaseRepr {
+    const fn from_pre(p: &PreFirePhase) -> Self {
+        match p {
+            PreFirePhase::Batching { .. } => Self::Batching,
+            PreFirePhase::Verifying => Self::Verifying,
+            PreFirePhase::Draining => Self::Draining,
+        }
     }
 }
 
@@ -1014,8 +1163,9 @@ mod tests {
 
     use crate::Engine;
     use specter_core::{
-        BurstIntent, BurstPhase, ClassSet, Input, ProbeOp, ProbeOwner, ProbeRequest, Profile,
-        ProfileState, ResourceKind, ResourceRole, ScanConfig, StepOutput, TimerKind, WatchOp,
+        ActiveBurst, BurstIntent, ClassSet, Input, PreFirePhase, ProbeOp, ProbeOwner, ProbeRequest,
+        Profile, ProfileState, ResourceKind, ResourceRole, ScanConfig, StepOutput, TimerKind,
+        WatchOp,
     };
     use std::time::{Duration, Instant};
 
@@ -1051,11 +1201,11 @@ mod tests {
         // Profile transitioned to Active(Seed Verifying).
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!("expected Active"),
         };
         assert_eq!(burst.intent, BurstIntent::Seed);
-        assert!(matches!(burst.phase, BurstPhase::Verifying));
+        assert!(matches!(burst.phase, PreFirePhase::Verifying));
         assert!(!burst.forced);
 
         // Output: one Probe + one Suppress.
@@ -1089,11 +1239,11 @@ mod tests {
 
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!("expected Active"),
         };
         assert_eq!(burst.intent, BurstIntent::Standard);
-        assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
+        assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
 
         // Heap holds settle_timer + burst_deadline.
         assert_eq!(e.timers.len(), 2);
@@ -1123,8 +1273,10 @@ mod tests {
         e.transition_to_verifying(pid, &mut out);
 
         match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => assert!(matches!(b.phase, BurstPhase::Verifying)),
-            _ => panic!("expected Active"),
+            ProfileState::Active(ActiveBurst::PreFire(b)) => {
+                assert!(matches!(b.phase, PreFirePhase::Verifying));
+            }
+            _ => panic!("expected Active(PreFire)"),
         }
         let correlation = e
             .pending_probe_for(ProbeOwner::Profile(pid))
@@ -1160,10 +1312,10 @@ mod tests {
 
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!("expected Active"),
         };
-        assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
+        assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
         assert_eq!(
             burst.intent,
             BurstIntent::Seed,
@@ -1192,10 +1344,10 @@ mod tests {
         // Still Batching; intent preserved.
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!("expected Active"),
         };
-        assert!(matches!(burst.phase, BurstPhase::Batching { .. }));
+        assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
         assert_eq!(burst.intent, BurstIntent::Standard);
     }
 
@@ -1217,10 +1369,10 @@ mod tests {
 
         assert!(out.probe_ops.is_empty());
         let phase = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(burst) => &burst.phase,
-            _ => panic!("expected Active"),
+            ProfileState::Active(ActiveBurst::PreFire(pre)) => &pre.phase,
+            _ => panic!("expected Active(PreFire)"),
         };
-        assert!(matches!(phase, BurstPhase::Batching { .. }));
+        assert!(matches!(phase, PreFirePhase::Batching { .. }));
     }
 
     #[test]
@@ -1249,7 +1401,7 @@ mod tests {
         // most recent event imprints on the field; intermediate events
         // overwrite without trace.
         let burst = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!("expected Active"),
         };
         assert_eq!(
@@ -1272,7 +1424,7 @@ mod tests {
         );
 
         let initial_settle_timer = match burst.phase {
-            BurstPhase::Batching { settle_timer } => settle_timer,
+            PreFirePhase::Batching { settle_timer } => settle_timer,
             _ => panic!("expected Batching"),
         };
 
@@ -1293,12 +1445,14 @@ mod tests {
         );
 
         let phase = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => &b.phase,
-            _ => panic!("expected Active after reschedule"),
+            ProfileState::Active(ActiveBurst::PreFire(pre)) => &pre.phase,
+            _ => panic!("expected Active(PreFire) after reschedule"),
         };
         let rescheduled_timer = match phase {
-            BurstPhase::Batching { settle_timer } => *settle_timer,
-            other => panic!("expected Batching after reschedule, got {other:?}"),
+            PreFirePhase::Batching { settle_timer } => *settle_timer,
+            PreFirePhase::Verifying | PreFirePhase::Draining => {
+                panic!("expected Batching after reschedule, got {phase:?}")
+            }
         };
         assert_ne!(
             rescheduled_timer, initial_settle_timer,
@@ -1333,11 +1487,11 @@ mod tests {
             final_expiry,
         );
         let final_phase = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => &b.phase,
-            other => panic!("expected Active, got {other:?}"),
+            ProfileState::Active(ActiveBurst::PreFire(pre)) => &pre.phase,
+            other => panic!("expected Active(PreFire), got {other:?}"),
         };
         assert!(
-            matches!(final_phase, BurstPhase::Verifying),
+            matches!(final_phase, PreFirePhase::Verifying),
             "after quiet ≥ settle, on_settle_expired transitions to Verifying; \
              got {final_phase:?}",
         );
@@ -1379,15 +1533,15 @@ mod tests {
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, Instant::now(), &mut out);
         let burst_deadline_initial = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b.burst_deadline,
-            _ => panic!(),
+            ProfileState::Active(ActiveBurst::PreFire(pre)) => pre.burst_deadline,
+            _ => panic!("expected Active(PreFire)"),
         };
         let r = e.profiles.get(pid).unwrap().resource;
 
         e.event_drives_batching(pid, r, Instant::now(), &mut out);
         let burst_deadline_after = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b.burst_deadline,
-            _ => panic!(),
+            ProfileState::Active(ActiveBurst::PreFire(pre)) => pre.burst_deadline,
+            _ => panic!("expected Active(PreFire)"),
         };
         assert_eq!(
             burst_deadline_initial, burst_deadline_after,
@@ -1405,10 +1559,10 @@ mod tests {
 
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!(),
         };
-        assert!(matches!(burst.phase, BurstPhase::Draining));
+        assert!(matches!(burst.phase, PreFirePhase::Draining));
         // Intent and forced preserved.
         assert_eq!(burst.intent, BurstIntent::Seed);
     }
@@ -1623,9 +1777,11 @@ mod tests {
         // Standard burst with two dirty siblings → LCA = root (the anchor).
         e.start_standard_burst(pid, a, now, &mut out);
         // Inject a second dirty resource so LCA computes the sibling parent.
-        if let ProfileState::Active(b_burst) = &mut e.profiles.get_mut(pid).unwrap().state {
-            b_burst.dirty_resources.insert(b);
-            b_burst.force_walk_resources.insert(b);
+        if let ProfileState::Active(ActiveBurst::PreFire(pre)) =
+            &mut e.profiles.get_mut(pid).unwrap().state
+        {
+            pre.dirty_resources.insert(b);
+            pre.force_walk_resources.insert(b);
         }
         let mut probe_out = StepOutput::default();
         e.transition_to_verifying(pid, &mut probe_out);
@@ -1669,14 +1825,17 @@ mod tests {
         // cleared (consumed by this emission); subsequent events accumulate
         // fresh.
         let burst = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!(),
         };
         assert!(burst.force_walk_resources.is_empty());
         // dirty_resources is preserved (LCA basis spans the whole burst).
         assert!(!burst.dirty_resources.is_empty());
-        // probe_target was set to the LCA result.
-        assert!(burst.probe_target.is_some());
+        // probe_target was overwritten by the LCA result — non-Optional under
+        // the type split, so we assert it equals the expected anchor LCA.
+        // For a single dirty event at `a` under root, LCA promotes to `a`
+        // (`a` is itself a Dir).
+        assert_eq!(burst.probe_target, a);
     }
 
     // ---------------------------------------------------------------------------
@@ -1725,7 +1884,7 @@ mod tests {
             "first non-anchor event emits Suppress(a)",
         );
         let burst = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!("expected Active"),
         };
         assert!(
@@ -1790,7 +1949,7 @@ mod tests {
             "anchor events emit no per-resource Suppress",
         );
         let burst = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!("expected Active"),
         };
         assert!(
@@ -1830,7 +1989,7 @@ mod tests {
             "drain emits one Unsuppress(b)",
         );
         let burst = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!("expected Active"),
         };
         assert!(
@@ -1870,7 +2029,7 @@ mod tests {
             "post-unstable-verify event re-emits Suppress(a)",
         );
         let burst = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(b) => b,
+            ProfileState::Active(ActiveBurst::PreFire(b)) => b,
             _ => panic!("expected Active"),
         };
         assert!(

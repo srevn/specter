@@ -432,10 +432,10 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
 /// 1. Profile P at `/a` (Dir), STRUCTURE-only, with materialised
 ///    descendant `/a/b` (Dir) — `b.watch_demand == 1`.
 /// 2. `FsEvent` at `/a` ⇒ `start_standard_burst` ⇒
-///    `Active(Burst { phase: Batching, ... })`. Anchor's
-///    `suppress_count` rises to 1.
+///    `Active(PreFire(PreFireBurst { phase: Batching, ... }))`.
+///    Anchor's `suppress_count` rises to 1.
 /// 3. `FsEvent` at `/a/b` mid-Batching ⇒ `event_drives_batching`
-///    inserts `b` into `Burst.suppressed_resources` and bumps
+///    inserts `b` into `PreFireBurst.suppressed_resources` and bumps
 ///    `b.suppress_count` to 1.
 /// 4. `WatchOpRejected` on the anchor ⇒ `on_watch_op_rejected` ⇒
 ///    clamp + `finalize_anchor_lost(P)` ⇒ `discard_anchor_state(P)`

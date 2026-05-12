@@ -21,87 +21,105 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tinyvec::TinyVec;
 
-/// One fire cycle.
+/// One fire cycle, split by the fire-transition boundary.
 ///
-/// A `Burst` lives `Idle → Active(Burst) → Idle`; its `phase` walks
-/// `Batching → Verifying [→ Draining → Verifying] → Awaiting → Rebasing`
-/// and its `intent` (`Standard | Seed`) decides the terminal action.
+/// A burst lives `Idle → Active(ActiveBurst) → Idle`. The fire transition
+/// (`Verifying → Awaiting`) is a typed state-machine move from
+/// [`PreFireBurst`] to [`PostFireBurst`]: the two sides have disjoint
+/// valid mutators, valid timers, valid probe responses, and accumulator
+/// semantics. Encoding the split at the type level means a field that
+/// has no post-fire consumer (e.g. `forced`, `burst_deadline`,
+/// `dirty_resources`) cannot leak across the boundary by construction.
 ///
-/// Burst-level state (`intent`, `forced`, `burst_deadline`) survives every
-/// phase transition; `phase` carries the **correlation token of the input
-/// the burst is currently waiting on**:
-/// - `Batching { settle_timer }` — armed debounce timer; the burst is
-///   waiting for a quiet gap (or a fresh `FsEvent` to extend it).
-/// - `Verifying` — probe in flight. The probe correlation lives on
-///   [`Profile::pending_probe`] (the per-Profile probe-channel slot, the
-///   single source of truth for "what probe?"); this variant carries no
-///   payload of its own.
-/// - `Draining` — self-stable, descendant Profiles still resolving;
-///   correlated externally by `Profile.dirty_descendants`.
-/// - `Awaiting { outstanding, gate_deadline }` — Effects emitted; the
-///   engine is waiting for `outstanding` `EffectComplete` arrivals from
-///   the actuator. `gate_deadline` is a recovery timer for actuator
-///   hangs. Reaching `outstanding == 0` transitions to `Rebasing`.
-/// - `Rebasing` — post-fire probe in flight at the anchor. The probe's
-///   response captures the post-command tree as the new baseline; the
-///   correlation slot is the same `Profile::pending_probe` reused
-///   (Verifying and Rebasing are time-disjoint within one burst).
+/// **Pre-fire** (`Batching | Verifying | Draining`): event-driven
+/// debounce window, in-flight verify or self-stable / descendants-pending
+/// idle. Carries the event-accumulators (`dirty_resources`,
+/// `force_walk_resources`, `suppressed_resources`) and the source of
+/// truth for the settle deadline (`last_event_time`).
 ///
-/// `dirty_resources` and `force_walk_resources` are accumulators consumed
-/// at every `transition_to_verifying`; `probe_target` survives Verifying
-/// → Draining → Verifying so the reconfirm probe reuses the original LCA.
-///
-/// `last_event_time` is the source of truth for the settle deadline: the
-/// settle timer is scheduled once on Batching entry and reschedules on
-/// expiry only when `last_event_time` has advanced since. Event arrivals
-/// while already in Batching update this field but do **not** re-insert
-/// a fresh heap entry — heap inserts are bounded to one per
-/// `last_event_time + settle` boundary, regardless of event density.
+/// **Post-fire** (`Awaiting | Rebasing`): effect emitted, gate-timer
+/// armed, then post-fire probe re-establishing the baseline. The
+/// pre-fire accumulators are *gone* — they were consumed at the
+/// `transition_to_verifying` immediately preceding the fire — and the
+/// `BurstDeadline` timer becomes structurally irrelevant
+/// (`is_timer_referenced` filters it out for post-fire phases). The only
+/// fresh accumulator is `force_walk_resources`, which the post-fire
+/// absorb arm of `drive_burst` (now: `absorb_event_into_fire_tail`)
+/// feeds for the rebase probe's force-walk hint.
 #[derive(Debug)]
-pub struct Burst {
+pub enum ActiveBurst {
+    PreFire(PreFireBurst),
+    PostFire(PostFireBurst),
+}
+
+/// Pre-fire lifecycle — every phase before the fire transition.
+///
+/// Fields are split across two roles:
+/// - **Burst-scoped invariants** (`intent`, `forced`, `burst_deadline`,
+///   `probe_target`): survive every pre-fire phase transition.
+/// - **Pre-fire accumulators** (`dirty_resources`,
+///   `force_walk_resources`, `suppressed_resources`,
+///   `last_event_time`): populated by `event_drives_batching`, consumed
+///   at the next `transition_to_verifying`.
+///
+/// `force_walk_resources` carries the events the next probe must visit
+/// fresh (defeats the walker's coarse-mtime skip on per-event-dirty
+/// paths). Single accumulator across `Batching | Verifying | Draining` —
+/// `transition_to_verifying` consumes and clears.
+///
+/// `dirty_resources` is preserved across the burst's pre-fire lifetime
+/// because the LCA target is recomputed from it at every reconfirm
+/// (`Draining → Verifying`) — the *target* mutates, the *basis* doesn't.
+///
+/// `probe_target` is the resource id of the latest emitted probe.
+/// Initialised to the Profile's anchor at burst start; overwritten by
+/// `transition_to_verifying` (LCA for Standard, anchor for Seed) and by
+/// `transition_to_rebasing` (anchor unconditionally). Non-Optional —
+/// the anchor is a meaningful pre-probe initial value, and every
+/// reader either knows it's been written or correctly treats it as the
+/// fallback. The prior `Option<ResourceId>` with a `unwrap_or(anchor)`
+/// fallback at every reader was the same semantics with one extra
+/// nullability layer.
+///
+/// `last_event_time` is the source of truth for the settle deadline:
+/// the settle timer is scheduled once on Batching entry and reschedules
+/// on expiry only when `last_event_time` has advanced since. Event
+/// arrivals while already in Batching update this field but do **not**
+/// re-insert a fresh heap entry — heap inserts are bounded to one per
+/// `last_event_time + settle` boundary, regardless of event density.
+/// `None` only at fresh Seed start (no first event); `event_drives_batching`
+/// repopulates on any subsequent FsEvent.
+#[derive(Debug)]
+pub struct PreFireBurst {
     pub burst_deadline: TimerId,
-    pub phase: BurstPhase,
+    pub phase: PreFirePhase,
     pub intent: BurstIntent,
     pub forced: bool,
     /// Resources whose `FsEvent` drove (or is driving) this burst.
     /// Populated by `start_standard_burst` (`{ event_resource }` seed)
-    /// and `event_drives_batching` (each FsEvent during `Active`'s
-    /// pre-fire phases — `Batching | Verifying | Draining`). Cleared
-    /// when the `Burst` is dropped (`finish_burst_to_idle`). Used to
-    /// compute the LCA target at every `transition_to_verifying`. Not
-    /// extended on the post-fire absorb path: the rebase probe targets
-    /// the anchor unconditionally, with no LCA to compute.
+    /// and `event_drives_batching` (each FsEvent during the pre-fire
+    /// phases — `Batching | Verifying | Draining`). Used to compute the
+    /// LCA target at every `transition_to_verifying`.
     pub dirty_resources: BTreeSet<ResourceId>,
-    /// Set of resources whose snapshots the next probe must visit
-    /// fresh, defeating the walker's coarse-mtime skip. Two
-    /// accumulation sources, each consumed at the next probe issuance:
-    /// • Pre-fire: `start_standard_burst` and `event_drives_batching`
-    ///   (FsEvents during `Batching | Verifying | Draining`) seed the
-    ///   set; `transition_to_verifying` consumes and clears.
-    /// • Post-fire: `drive_burst`'s absorb arm (FsEvents during
-    ///   `Awaiting | Rebasing`) seeds the set; `transition_to_rebasing`
-    ///   consumes and clears.
-    /// Events absorbed during `Rebasing` after the rebase probe is in
-    /// flight have no consumer — they accumulate into the cleared
-    /// field and drop at `finish_burst_to_idle`. The bounded residual
-    /// window (≈ probe round-trip latency) is the v1 carve-out.
+    /// Resources whose snapshots the next probe must visit fresh,
+    /// defeating the walker's coarse-mtime skip. Seeded by
+    /// `start_standard_burst` and `event_drives_batching`;
+    /// `transition_to_verifying` consumes and clears via `mem::take`.
     pub force_walk_resources: BTreeSet<ResourceId>,
-    /// `target_resource` of the most recently emitted probe in this burst.
-    /// Mirrors the latest `ProbeRequest.target_resource`. Read by the
-    /// Draining→Verifying reconfirm path (`dirty_resources` is empty
-    /// there, so LCA would degenerate to the anchor — reuse the prior
-    /// target instead) and by `dispatch_standard_ok` to know which
-    /// subtree of `Profile.current` to compare against `response_subtree`
-    /// for the stability verdict. `None` until the first probe emits.
-    pub probe_target: Option<ResourceId>,
+    /// Latest probe target. Initialised to the Profile's anchor at
+    /// burst start. Overwritten by `transition_to_verifying` (LCA for
+    /// Standard / anchor for Seed) and `transition_to_rebasing`
+    /// (anchor). The Draining → Verifying reconfirm path reads this
+    /// value (rather than recomputing LCA) because `dirty_resources` is
+    /// empty in Draining; recomputing would degenerate to anchor and
+    /// lose the correct subtree.
+    pub probe_target: ResourceId,
     /// Non-anchor resources whose `suppress_count` was bumped 0→1 by
     /// `event_drives_batching` during this burst's pre-fire phases.
     /// Taken (via `mem::take`) at `transition_to_verifying` to drive
     /// the symmetric `sub_suppress` drain, and defensively at
     /// `finish_burst_to_idle` for abnormal-end paths
-    /// (`finalize_anchor_lost`, reap mid-burst). The take leaves the
-    /// field empty for the next pre-fire cycle without a follow-up
-    /// `clear()`.
+    /// (`finalize_anchor_lost`, reap mid-burst).
     ///
     /// **Anchor explicitly excluded.** The anchor's suppress is the
     /// existing `start_*_burst → finish_burst_to_idle` lifecycle and is
@@ -112,19 +130,10 @@ pub struct Burst {
     /// Profile's identity-floor set" rather than continue to spell
     /// `event_resource != anchor` literally.
     ///
-    /// Empty after every `transition_to_verifying`. Re-armed by the next
-    /// `event_drives_batching` call after an unstable verify routes the
-    /// burst back to Batching. Empty for `Seed` bursts (no Batching
-    /// phase); the field exists for struct uniformity.
-    ///
     /// `BTreeSet` (not `Vec`) so iteration order is deterministic — the
     /// `sub_suppress` drain emits `Unsuppress` ops in `ResourceId`
     /// ascending order, matching `StepOutput.watch_ops`'s sort
-    /// discipline. Size is typically 0 (W_ssh — anchor-only event
-    /// source) to N (W_build — distinct per-file resources receiving
-    /// events during one Batching window). No allocation pressure
-    /// relative to the existing `dirty_resources` /
-    /// `force_walk_resources`.
+    /// discipline.
     pub suppressed_resources: BTreeSet<ResourceId>,
     /// Wall-clock instant of the most recent `FsEvent` that drove this
     /// burst. The **source of truth** for the Batching settle deadline:
@@ -141,24 +150,19 @@ pub struct Burst {
     /// - `Some(now)` from `start_standard_burst` — the burst-start
     ///   `FsEvent` is the first event and seeds the field.
     /// - `None` from `start_seed_burst` — Seed bursts transition Idle →
-    ///   Active(Verifying) directly, with no Batching phase at start.
-    ///   If a fresh `FsEvent` later arrives during the Seed verify
-    ///   (`event_drives_batching` from the `Verifying → Batching` arm),
-    ///   the field is repopulated.
-    /// - Updated by `event_drives_batching` on every event, regardless
-    ///   of which pre-fire phase (`Batching | Verifying | Draining`)
-    ///   preceded.
-    /// - **Preserved** across `unstable_response_drives_batching` — the
-    ///   verify just responded; the next event repopulates. The
-    ///   freshly-scheduled settle timer fires at `now + settle`; the
-    ///   on-expiry handler then sees `now − last_event_time ≥ settle`
-    ///   (because `now ≥ unstable_response_at + settle ≥
-    ///   last_event_time + settle`) and transitions cleanly.
+    ///   `Active(PreFire(Verifying))` directly, with no Batching phase
+    ///   at start. If a fresh `FsEvent` later arrives during the Seed
+    ///   verify (`event_drives_batching` from the `Verifying → Batching`
+    ///   arm), the field is repopulated.
+    /// - Updated by `event_drives_batching` on every event.
+    /// - **Pinned to `Some(now)`** by
+    ///   `unstable_response_drives_batching` — the verify just
+    ///   responded, and pinning the timestamp removes the `Instant`
+    ///   monotonicity dependency from the reschedule correctness
+    ///   argument.
     /// - **Preserved** across `transition_to_verifying` (the reconfirm
     ///   path) and `transition_to_draining` — phase swaps without
     ///   semantic resets.
-    /// - Cleared implicitly when the `Burst` is dropped at
-    ///   `finish_burst_to_idle`.
     ///
     /// **Distinct from the watcher's `last_event_at`.** The watcher's
     /// field is per-watcher, scoped to drain-cadence recency. This field
@@ -167,7 +171,7 @@ pub struct Burst {
     pub last_event_time: Option<Instant>,
 }
 
-/// What the burst is waiting on, as a discriminator.
+/// Pre-fire phase discriminator.
 ///
 /// `Batching` carries its own correlation token (`settle_timer: TimerId`)
 /// because timer correlation is per-Burst and has no peer slot to live on.
@@ -176,17 +180,8 @@ pub struct Burst {
 /// burst phase only encodes "probe in flight" as state-machine identity.
 /// `Draining` is correlated externally by `Profile.dirty_descendants` and
 /// carries no token of its own.
-///
-/// `Awaiting { outstanding, gate_deadline }` is the post-fire phase: the
-/// engine has emitted Effects to the actuator and is waiting for their
-/// completions to drive `outstanding → 0`. `gate_deadline` is the
-/// safety-net `AwaitGateDeadline` timer — a hung child is recovered by
-/// force-transitioning to `Rebasing` once the timer expires. `Rebasing`
-/// is unit (post-fire probe in flight; correlation lives on
-/// [`Profile::pending_probe`], same slot Verifying used — they are
-/// time-disjoint within one burst by construction).
 #[derive(Debug)]
-pub enum BurstPhase {
+pub enum PreFirePhase {
     /// Activity-gap detection. `settle_timer` is the armed debounce
     /// timer; an `FsEvent` reschedules it (`event_drives_batching`),
     /// timer expiry advances to `Verifying` (`transition_to_verifying`).
@@ -204,24 +199,111 @@ pub enum BurstPhase {
     /// `TreeSnapshot` on the variant would only invite drift between the
     /// two references.
     Draining,
-    /// Effects emitted; awaiting completion(s) from the actuator.
-    /// `outstanding` decrements on each `EffectComplete` for this
-    /// Profile's `DedupKey`s; reaching zero transitions to `Rebasing`
-    /// (or, when `Profile.reap_pending` is set, finishes the burst
-    /// directly without re-probing). `gate_deadline` is the recovery
-    /// timer for an actuator that never reports completion — its
-    /// expiry forces the burst into `Rebasing` so the engine can
-    /// re-establish a baseline against disk reality.
+}
+
+/// Post-fire lifecycle — Awaiting effect completion or Rebasing.
+///
+/// **Three fields, by construction.**
+/// - No `forced`: no fire decision left (the fire already happened).
+/// - No `burst_deadline`: the BurstDeadline timer is filtered out by
+///   `is_timer_referenced` for post-fire phases. Stored on the pre-fire
+///   side; lazy-dropped when it expires post-fire.
+/// - No `probe_target`: Rebasing always targets the Profile's anchor.
+/// - No `dirty_resources` / `suppressed_resources` / `last_event_time`:
+///   pre-fire accumulators, drained at `transition_to_verifying`
+///   entry (the only path to fire).
+///
+/// `intent: BurstIntent` survives because `dispatch_rebase_*` reads it
+/// for the `ProbeVanished` / `ProbeFailed` diagnostic — Seed-driven
+/// drift rebases and Standard-driven post-fire rebases both reach
+/// PostFire, and the diagnostic distinguishes them.
+///
+/// `force_walk_resources` is a fresh accumulator distinct from the
+/// pre-fire one. Populated by `absorb_event_into_fire_tail` (FsEvents
+/// arriving during the post-fire tail) and consumed at
+/// `transition_to_rebasing` for the rebase probe's force-walk hint —
+/// closes the POSIX content-edit hole where a descendant content
+/// change during fire-tail doesn't bump the anchor's mtime.
+#[derive(Debug)]
+pub struct PostFireBurst {
+    pub intent: BurstIntent,
+    pub phase: PostFirePhase,
+    /// Events absorbed during the post-fire tail
+    /// (`Awaiting | Rebasing`). Seeded by `absorb_event_into_fire_tail`
+    /// in `drive_burst`'s post-fire arm; consumed at
+    /// `transition_to_rebasing`. Events absorbed during `Rebasing`
+    /// after the rebase probe is in flight have no consumer — they
+    /// accumulate into the cleared field and drop at
+    /// `finish_burst_to_idle`. The bounded residual window (≈ probe
+    /// round-trip latency) is the v1 carve-out.
+    pub force_walk_resources: BTreeSet<ResourceId>,
+}
+
+/// Post-fire phase discriminator.
+///
+/// `Awaiting { outstanding, gate_deadline }`: effects emitted, counter
+/// decrements on each `EffectComplete` for this Profile's `DedupKey`s.
+/// Reaching zero advances to `Rebasing` (or, when `Profile.reap_pending`
+/// is set, finishes the burst directly). `gate_deadline` is the recovery
+/// timer for an actuator that never reports completion — its expiry
+/// forces the burst into `Rebasing`.
+///
+/// `Rebasing`: post-fire probe in flight at the anchor. Correlation
+/// lives on [`Profile::pending_probe`] (same slot Verifying used —
+/// Verifying and Rebasing are time-disjoint within one burst).
+/// `dispatch_rebase_ok` then sets `baseline := current` and finishes
+/// the burst to Idle.
+#[derive(Debug)]
+pub enum PostFirePhase {
     Awaiting {
         outstanding: u32,
         gate_deadline: TimerId,
     },
-    /// Post-fire probe in flight. Correlation lives on
-    /// [`Profile::pending_probe`] (same slot Verifying uses — Verifying
-    /// and Rebasing are time-disjoint within one burst). The probe's
-    /// `Ok` response captures the post-command tree; `dispatch_rebase_ok`
-    /// then sets `baseline := current` and finishes the burst to Idle.
     Rebasing,
+}
+
+impl PreFireBurst {
+    /// Typed move from pre-fire to post-fire.
+    ///
+    /// Drops, by leaving them out of the constructor:
+    /// - `burst_deadline` — lazy-dropped by `is_timer_referenced`'s
+    ///   filter once it expires post-fire.
+    /// - `forced` — no fire decision left in the post-fire lifecycle.
+    /// - `probe_target` — Rebasing always targets the anchor.
+    /// - `last_event_time` — pre-fire-only accumulator.
+    /// - `dirty_resources` — pre-fire-only accumulator.
+    /// - `force_walk_resources` — pre-fire-only accumulator. Drained
+    ///   to empty at the Verifying-entry that immediately precedes the
+    ///   fire (`transition_to_verifying`'s `mem::take`); the
+    ///   debug_assert below catches a future regression that omits the
+    ///   drain.
+    /// - `suppressed_resources` — likewise drained at
+    ///   `transition_to_verifying`; debug_asserted here as
+    ///   defense-in-depth.
+    ///
+    /// `intent` is preserved (read by `dispatch_rebase_*` for the
+    /// diagnostic).
+    #[must_use]
+    pub fn into_post_fire(self, outstanding: u32, gate_deadline: TimerId) -> PostFireBurst {
+        debug_assert!(
+            self.force_walk_resources.is_empty(),
+            "PreFireBurst::into_post_fire: force_walk_resources not drained \
+             at Verifying entry — drain must happen at transition_to_verifying",
+        );
+        debug_assert!(
+            self.suppressed_resources.is_empty(),
+            "PreFireBurst::into_post_fire: suppressed_resources not drained \
+             at Verifying entry — drain must happen at transition_to_verifying",
+        );
+        PostFireBurst {
+            intent: self.intent,
+            phase: PostFirePhase::Awaiting {
+                outstanding,
+                gate_deadline,
+            },
+            force_walk_resources: BTreeSet::new(),
+        }
+    }
 }
 
 /// Profile state machine.
@@ -252,10 +334,10 @@ pub enum ProfileState {
     /// Profile; `DescentState.current_prefix` does. When the anchor
     /// materializes (descent's last component arrives) the engine
     /// transitions Pending → Idle (releasing the prefix's contribution and
-    /// bumping the anchor's), then immediately Idle → Active(Seed) via
-    /// `start_seed_burst`.
+    /// bumping the anchor's), then immediately Idle → `Active(PreFire(Seed))`
+    /// via `start_seed_burst`.
     Pending(DescentState),
-    Active(Burst),
+    Active(ActiveBurst),
 }
 
 /// State for a Profile undergoing pending-path descent.
@@ -417,17 +499,17 @@ pub enum BurstIntent {
 
 /// Discriminator for a scheduled timer's role within a Burst's lifecycle.
 ///
-/// `Settle` — debounce timer armed during [`BurstPhase::Batching`]. Expiry
-/// drives Batching → Verifying.
+/// `Settle` — debounce timer armed during [`PreFirePhase::Batching`].
+/// Expiry drives Batching → Verifying.
 /// `BurstDeadline` — Burst-level max-settle timer armed at Burst start.
-/// Expiry sets `Burst.forced = true` and dispatches by current phase. The
-/// timer is structurally relevant only in pre-fire phases (`Batching`,
-/// `Verifying`, `Draining`); once the burst transitions to `Awaiting` the
-/// fire has already happened, the deadline is moot, and a stale fire is
-/// dropped silently by the validation in `Engine::is_timer_referenced`
-/// (in `specter-engine`).
+/// Expiry sets `PreFireBurst.forced = true` and dispatches by current
+/// phase. The timer is carried on [`PreFireBurst`] and is structurally
+/// invalid in post-fire phases; once the burst crosses
+/// [`PreFireBurst::into_post_fire`] the timer is dropped from the
+/// type's field set, and a stale fire is filtered out by
+/// `Engine::is_timer_referenced` (in `specter-engine`).
 /// `AwaitGateDeadline` — recovery timer armed at
-/// [`BurstPhase::Awaiting`] entry. Expiry indicates the actuator is
+/// [`PostFirePhase::Awaiting`] entry. Expiry indicates the actuator is
 /// taking longer than expected (likely a hung child); the engine
 /// force-transitions to `Rebasing` to re-establish a baseline against
 /// disk reality.

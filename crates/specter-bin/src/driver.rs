@@ -19,7 +19,7 @@
 //!
 //! **Drain order rationale.** Sensor inputs (FsEvents) drain *before*
 //! effect completions because the fire-cycle's post-fire tail
-//! (`BurstPhase::Awaiting` / `Rebasing`) absorbs FsEvents and folds
+//! (`PostFirePhase::Awaiting` / `Rebasing`) absorbs FsEvents and folds
 //! their disk state into the rebase, while `EffectComplete` arrivals
 //! transition `Awaiting → Rebasing`. If the order were inverted, an
 //! `EffectComplete` could move the burst into Rebasing before the
@@ -27,7 +27,7 @@
 //! would then route to the wrong burst (or kick off a fresh burst
 //! against an in-flight rebase). Sensor-first preserves the
 //! "fire-tail absorbs concurrent edits" contract documented on
-//! `BurstPhase::Awaiting`.
+//! `PostFirePhase::Awaiting`.
 //!
 //! **Auto-reload settle pipeline.** The config-event drain re-arms
 //! `config_settle_until` to `now + CONFIG_SETTLE` per pulse — sustained
@@ -1372,7 +1372,7 @@ mod tests {
         // Sensor inputs drain BEFORE effect completions: an EffectComplete
         // could move an Awaiting burst into Rebasing, and any FsEvent
         // queued in the same tick should reach the engine first so the
-        // fire-tail (`BurstPhase::Awaiting` / `Rebasing`) can absorb it
+        // fire-tail (`PostFirePhase::Awaiting` / `Rebasing`) can absorb it
         // and fold the disk change into the post-fire rebase. Push an
         // EffectComplete first, then an FsEvent; tick sees the FsEvent first
         // because of the drain order — even though EffectComplete was queued earlier.

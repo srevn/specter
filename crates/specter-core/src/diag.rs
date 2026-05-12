@@ -62,7 +62,7 @@ pub enum Diagnostic {
     /// from a misbehaving caller.
     StaleTimer { id: TimerId },
     /// `EffectComplete` arrived for a Profile not in
-    /// [`crate::BurstPhase::Awaiting`]. Two paths reach here legitimately:
+    /// [`crate::PostFirePhase::Awaiting`]. Two paths reach here legitimately:
     ///
     /// - `gate_deadline` expired and force-transitioned to `Rebasing`
     ///   (or, post-rebase, to Idle); a late completion arrives.
@@ -282,7 +282,7 @@ pub enum Diagnostic {
         target: ResourceId,
     },
     /// `FsEvent` arrived while the Profile was in
-    /// [`crate::BurstPhase::Awaiting`] or [`crate::BurstPhase::Rebasing`]
+    /// [`crate::PostFirePhase::Awaiting`] or [`crate::PostFirePhase::Rebasing`]
     /// — the post-fire tail of a burst. The engine absorbs the event:
     /// no fresh burst, no settle re-arm, no `dirty_resources` extension.
     /// The Rebasing probe captures the disk state (including whatever
@@ -298,7 +298,7 @@ pub enum Diagnostic {
     /// `AwaitGateDeadline` timer elapsed before all outstanding
     /// `EffectComplete`s arrived. Indicates the actuator likely has a
     /// hung child or a slow command; the engine force-transitions the
-    /// burst to [`crate::BurstPhase::Rebasing`] so it can re-establish
+    /// burst to [`crate::PostFirePhase::Rebasing`] so it can re-establish
     /// a baseline against disk reality. Late completions land in
     /// [`Self::EffectCompleteOutsideAwaiting`].
     AwaitGateDeadlineElapsed {

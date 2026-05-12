@@ -17,10 +17,10 @@ use crate::refcounts::add_watch;
 use crate::timer::{TimerEntry, TimerHeap};
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, BurstPhase, ClassSet, ContribKey, DedupKey, DescentState, Diagnostic, Input,
-    ProbeOwner, Profile, ProfileId, ProfileMap, ProfileState, PromoterRegistry, PromoterState,
-    ResourceId, StepOutput, Sub, SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree,
-    compute_config_hash,
+    ActiveBurst, AnchorClaim, ClassSet, ContribKey, DedupKey, DescentState, Diagnostic, Input,
+    PostFirePhase, PreFirePhase, ProbeOwner, Profile, ProfileId, ProfileMap, ProfileState,
+    PromoterRegistry, PromoterState, ResourceId, StepOutput, Sub, SubAttachRequest, SubId,
+    SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -145,8 +145,8 @@ impl Engine {
     /// path that the engine materialises (`req.path`). Reuses an
     /// existing Profile when `(resource, config_hash)` matches;
     /// otherwise creates a fresh Profile, emits `WatchOp::Watch` on its
-    /// anchor, and starts a `Burst { intent: Seed, phase: Verifying }`
-    /// to establish the initial baseline.
+    /// anchor, and starts a Seed burst (`PreFireBurst { intent: Seed,
+    /// phase: Verifying }`) to establish the initial baseline.
     ///
     /// **Zombie revival.** When the matched Profile is in deferred-reap
     /// state (`reap_pending == true`, set by `detach_sub_inner` when the
@@ -874,18 +874,16 @@ impl Engine {
     /// `on_timer_expired` re-runs it as defense-in-depth for direct
     /// `step(Input::TimerExpired)` callers (tests, fuzzers).
     ///
-    /// `kind` narrows the comparison:
-    /// - `Settle` checks the `BurstPhase::Batching { settle_timer }`
-    ///   slot only — no settle timer exists in any other phase.
-    /// - `BurstDeadline` checks the Burst-level field, but only while
-    ///   the burst is in a pre-fire phase (`Batching` / `Verifying` /
-    ///   `Draining`). Once the burst transitions to `Awaiting` the
-    ///   deadline is moot (we have already fired); a stale fire is
-    ///   dropped silently here so `handle_burst_deadline` is never
-    ///   reached from a post-fire phase.
-    /// - `AwaitGateDeadline` checks the `BurstPhase::Awaiting
-    ///   { gate_deadline }` slot only. Late fires from `Rebasing` or
-    ///   beyond (where the phase has already advanced) are dropped.
+    /// Each (`TimerKind`, `ActiveBurst` variant) pair is either a live
+    /// match (returns based on `id` equality with the carried token) or
+    /// type-impossible (falls through to `_ => false`). The typed split
+    /// eliminates the pre-split runtime narrowing for `BurstDeadline`
+    /// (the field cannot live on `PostFireBurst` so its post-fire match
+    /// arms are now unreachable by type):
+    /// - `Settle` lives on `PreFirePhase::Batching` only.
+    /// - `BurstDeadline` lives on `PreFireBurst`; any `PreFirePhase` is
+    ///   structurally valid.
+    /// - `AwaitGateDeadline` lives on `PostFirePhase::Awaiting` only.
     ///
     /// Only `Active` Profiles schedule timers; `Idle` and `Pending`
     /// Profiles own none of these slots.
@@ -898,25 +896,23 @@ impl Engine {
         let Some(p) = profiles.get(profile) else {
             return false;
         };
-        let ProfileState::Active(burst) = &p.state else {
+        let ProfileState::Active(active) = &p.state else {
             return false;
         };
-        match kind {
-            TimerKind::Settle => matches!(
-                &burst.phase,
-                BurstPhase::Batching { settle_timer } if *settle_timer == id,
+        match (kind, active) {
+            (TimerKind::Settle, ActiveBurst::PreFire(pre)) => matches!(
+                &pre.phase,
+                PreFirePhase::Batching { settle_timer } if *settle_timer == id,
             ),
-            TimerKind::BurstDeadline => {
-                burst.burst_deadline == id
-                    && matches!(
-                        &burst.phase,
-                        BurstPhase::Batching { .. } | BurstPhase::Verifying | BurstPhase::Draining,
-                    )
-            }
-            TimerKind::AwaitGateDeadline => matches!(
-                &burst.phase,
-                BurstPhase::Awaiting { gate_deadline, .. } if *gate_deadline == id,
+            (TimerKind::BurstDeadline, ActiveBurst::PreFire(pre)) => pre.burst_deadline == id,
+            (TimerKind::AwaitGateDeadline, ActiveBurst::PostFire(post)) => matches!(
+                &post.phase,
+                PostFirePhase::Awaiting { gate_deadline, .. } if *gate_deadline == id,
             ),
+            // Type-impossible: Settle / BurstDeadline on PostFire, and
+            // AwaitGateDeadline on PreFire. Lazy drop in `pop_expired`.
+            (TimerKind::Settle | TimerKind::BurstDeadline, ActiveBurst::PostFire(_))
+            | (TimerKind::AwaitGateDeadline, ActiveBurst::PreFire(_)) => false,
         }
     }
 }

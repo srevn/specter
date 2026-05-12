@@ -38,8 +38,8 @@ pub use op::{
 pub use output::StepOutput;
 pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use profile::{
-    AnchorClaim, Burst, BurstIntent, BurstPhase, DescentRemaining, DescentState, Profile,
-    ProfileMap, ProfileState, TimerKind,
+    ActiveBurst, AnchorClaim, BurstIntent, DescentRemaining, DescentState, PostFireBurst,
+    PostFirePhase, PreFireBurst, PreFirePhase, Profile, ProfileMap, ProfileState, TimerKind,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{

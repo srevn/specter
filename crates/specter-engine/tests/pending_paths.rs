@@ -16,10 +16,10 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachRequest,
+    ActionProgram, ActiveBurst, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
+    EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachRequest,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -156,7 +156,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
     // Profile is now in Active(Seed Probing) — the Seed burst was
     // started at materialization.
     let burst_intent = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(b) => b.intent,
+        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre.intent,
         _ => panic!("expected Active"),
     };
     assert_eq!(burst_intent, specter_core::BurstIntent::Seed);

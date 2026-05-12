@@ -969,7 +969,7 @@ fn descent_remaining_from_empty_vec_is_none() {
 // Probe-channel discipline (post-refactor invariants)
 //
 // I5 ("at most one outstanding probe per Profile") moved from a structural
-// type-law (mutual exclusion of `BurstPhase::Verifying { ... }` and
+// type-law (mutual exclusion of `PreFirePhase::Verifying { ... }` and
 // `DescentPhase::Probing { ... }`) to a field-discipline (single
 // `Profile.pending_probe` slot). The tests below pin the post-refactor
 // invariants: clear-on-cancel, recovery-overlap accounting, and the

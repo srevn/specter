@@ -20,10 +20,10 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, BurstPhase, ChildEntry, ClassSet, Diff, DirChild, DirMeta, DirSnapshot,
-    EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubAttachRequest, WatchOp,
+    ActionProgram, ActiveBurst, ChildEntry, ClassSet, Diff, DirChild, DirMeta, DirSnapshot,
+    EffectScope, EntryKind, FsEvent, Input, LeafEntry, PostFireBurst, PostFirePhase, PreFireBurst,
+    PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -343,10 +343,10 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     );
     assert!(matches!(
         e.profiles().get(pid_parent).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Draining,
+        ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
+            phase: PreFirePhase::Draining,
             ..
-        }),
+        })),
     ));
 
     // Drive child's stable verdict — the post-stable path routes through
@@ -369,10 +369,10 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     // Stable verdict transitions to Awaiting; no reconfirm yet.
     assert!(matches!(
         e.profiles().get(pid_child).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Awaiting { outstanding: 1, .. },
+        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
+            phase: PostFirePhase::Awaiting { outstanding: 1, .. },
             ..
-        }),
+        })),
     ));
     assert!(
         !stable_out
@@ -388,10 +388,10 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         .expect("child fired one Effect at stable verdict");
     assert!(matches!(
         e.profiles().get(pid_parent).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Draining,
+        ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
+            phase: PreFirePhase::Draining,
             ..
-        }),
+        })),
     ));
 
     // Inject EffectComplete::Ok → child Awaiting → Rebasing.
@@ -439,10 +439,10 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     // Parent's state is now Probing again (the reconfirm).
     assert!(matches!(
         e.profiles().get(pid_parent).unwrap().state,
-        ProfileState::Active(specter_core::Burst {
-            phase: BurstPhase::Verifying,
+        ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
+            phase: PreFirePhase::Verifying,
             ..
-        }),
+        })),
     ));
 }
 

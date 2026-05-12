@@ -130,8 +130,8 @@ pub enum ProbeRequest {
         force_walk: BTreeSet<PathBuf>,
         /// `true` ⇒ walker bypasses mtime-skip at every directory
         /// regardless of `baseline_subtree` and `force_walk`. Engine sets
-        /// this when `Burst.forced` is true (max-settle deadline elapsed;
-        /// force-fire).
+        /// this when `PreFireBurst.forced` is true (max-settle deadline
+        /// elapsed; force-fire).
         ///
         /// Defensive: mtime-skip is correct under normal semantics, but a
         /// forced probe wants the freshest possible snapshot regardless
@@ -219,9 +219,9 @@ pub struct ProbeResponse {
 /// Walker outcome.
 ///
 /// Four variants, intent-agnostic on Vanished/Failed (the engine routes
-/// those by `(Profile.state, BurstPhase)`, not by request shape — a
-/// vanished anchor is a vanished anchor regardless of whether the walker
-/// was looking at a file or a directory).
+/// those by `Profile.state` discriminator + pre-/post-fire phase, not by
+/// request shape — a vanished anchor is a vanished anchor regardless of
+/// whether the walker was looking at a file or a directory).
 #[derive(Debug, Clone)]
 pub enum ProbeOutcome {
     /// `AnchorFile` request returned a leaf observation. Sole producer is

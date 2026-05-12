@@ -13,7 +13,7 @@
 //! - Probe target ≠ `Profile.resource` during descent (probes go to the
 //!   deepest existing prefix, not the anchor).
 //! - There's no Effect to fire — the Profile has no baseline yet.
-//! - The settle timer (carried inside `BurstPhase::Batching`) and
+//! - The settle timer (carried inside `PreFirePhase::Batching`) and
 //!   `burst_deadline` are stability concerns; descent
 //!   is event-driven (a `StructureChanged` at the prefix triggers a
 //!   fresh probe with no settle wait).
@@ -21,7 +21,7 @@
 //!   `Pending` and `Active` are mutually exclusive `ProfileState`
 //!   variants (the compiler proves it); within `Pending`, an in-flight
 //!   probe is signalled by `Profile.pending_probe = Some(_)` — the same
-//!   discipline as `Active(Burst { phase: Verifying })`.
+//!   discipline as `Active(PreFire(_))` with `phase = Verifying`.
 //!
 //! **Lifecycle.**
 //! 1. `Engine::attach_sub` with a path-based request walks the path; if
