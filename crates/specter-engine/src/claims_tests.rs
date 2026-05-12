@@ -487,7 +487,7 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
         1,
         "descendant b carries P's STRUCTURE contribution",
     );
-    assert_eq!(e.tree().get(b_id).unwrap().suppress_count, 0);
+    assert_eq!(e.tree().get(b_id).unwrap().suppress_count(), 0);
 
     // FsEvent at the anchor opens a Standard burst (Idle → Active).
     // The anchor's suppress is bracketed by `start_standard_burst` /
@@ -511,7 +511,7 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
         Instant::now(),
     );
     assert_eq!(
-        e.tree().get(b_id).unwrap().suppress_count,
+        e.tree().get(b_id).unwrap().suppress_count(),
         1,
         "event_drives_batching bumped b.suppress_count",
     );

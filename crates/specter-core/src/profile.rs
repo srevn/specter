@@ -286,14 +286,15 @@ pub struct DescentState {
     pub remaining_components: DescentRemaining,
 }
 
-/// Path-component chain from a descent's `current_prefix` (exclusive)
-/// down to the anchor (inclusive). The non-empty invariant is encoded
-/// at the type level — the sole constructor [`DescentRemaining::from_vec`]
-/// rejects empty inputs, and the two mutators ([`advance`](Self::advance)
-/// and [`prepend`](Self::prepend)) preserve non-emptiness by construction.
+/// Path-component chain from a descent's `current_prefix` down to the
+/// anchor.
 ///
-/// `CompactString` keeps typical-length names (≤24 bytes) inline, so the
-/// per-element advance / rewind avoids the heap for the common path.
+/// Non-emptiness is a type-level invariant: the sole constructor
+/// [`DescentRemaining::from_vec`] rejects empty inputs, and the two
+/// mutators ([`advance`](Self::advance) and [`prepend`](Self::prepend))
+/// preserve non-emptiness by construction. `CompactString` keeps
+/// typical-length names (≤24 bytes) inline, so the per-element advance
+/// / rewind avoids the heap for the common path.
 ///
 /// **API discipline.**
 /// - [`head`](Self::head) is the next segment under consideration —
@@ -342,15 +343,25 @@ impl DescentRemaining {
 
     /// Number of remaining segments. Always `>= 1` by invariant.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Always `false` — non-emptiness is a type-level invariant
+    /// upheld by [`Self::from_vec`] (rejects empty inputs) and the
+    /// mutators ([`Self::advance`] / [`Self::prepend`]). Implemented
+    /// so the `len() / is_empty()` pair is complete by Rust convention;
+    /// production callers should prefer [`Self::is_terminal`].
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        false
     }
 
     /// True iff only the head remains (`len() == 1`). The descent
     /// dispatcher's terminal arm consumes the head via anchor
     /// materialization on this edge and never calls [`advance`].
     #[must_use]
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         self.inner.len() == 1
     }
 

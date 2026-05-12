@@ -492,7 +492,7 @@ fn co_located_profiles_share_suppress_count() {
     let pid_b = e.subs().get(sid_b).unwrap().profile;
 
     // After both attach: suppress_count == 2 (both Profiles in Seed).
-    assert_eq!(e.tree().get(r).unwrap().suppress_count, 2);
+    assert_eq!(e.tree().get(r).unwrap().suppress_count(), 2);
 
     // Drive both Seeds.
     let corr_a = e
@@ -511,7 +511,7 @@ fn co_located_profiles_share_suppress_count() {
         }),
         now,
     );
-    assert_eq!(e.tree().get(r).unwrap().suppress_count, 1);
+    assert_eq!(e.tree().get(r).unwrap().suppress_count(), 1);
     let unsuppresses_a = out_a
         .watch_ops
         .iter()
@@ -528,7 +528,7 @@ fn co_located_profiles_share_suppress_count() {
         }),
         now,
     );
-    assert_eq!(e.tree().get(r).unwrap().suppress_count, 0);
+    assert_eq!(e.tree().get(r).unwrap().suppress_count(), 0);
     let unsuppresses_b = out_b
         .watch_ops
         .iter()

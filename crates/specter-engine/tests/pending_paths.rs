@@ -490,7 +490,7 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         .count();
     assert_eq!(unsuppress_count, 0);
     assert_eq!(
-        e.tree().get(anchor).unwrap().suppress_count,
+        e.tree().get(anchor).unwrap().suppress_count(),
         0,
         "suppress_count untouched (Pending never bumped it)",
     );

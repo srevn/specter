@@ -540,7 +540,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
         .tree_mut()
         .ensure(Some(root), "file.txt", ResourceRole::User);
     e.tree_mut().set_kind(child, ResourceKind::File);
-    e.tree_mut().get_mut(child).unwrap().contributions.insert(
+    e.tree_mut().get_mut(child).unwrap().insert_contribution(
         specter_core::ContribKey::ProfileDescendant(pid),
         ClassSet::CONTENT,
     );
@@ -599,7 +599,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
         .tree_mut()
         .ensure(Some(root), "file.txt", ResourceRole::User);
     e.tree_mut().set_kind(child, ResourceKind::File);
-    e.tree_mut().get_mut(child).unwrap().contributions.insert(
+    e.tree_mut().get_mut(child).unwrap().insert_contribution(
         specter_core::ContribKey::ProfileDescendant(pid),
         ClassSet::CONTENT,
     );

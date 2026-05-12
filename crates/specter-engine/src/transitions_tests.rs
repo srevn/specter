@@ -167,7 +167,7 @@ fn attach_sub_fresh_profile_emits_watch_suppress_probe() {
     // After attach: anchor watch_demand=1, suppress_count=1, Profile is
     // Active(Seed Verifying).
     assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
-    assert_eq!(e.tree.get(r).unwrap().suppress_count, 1);
+    assert_eq!(e.tree.get(r).unwrap().suppress_count(), 1);
 }
 
 /// `Profile.kind` is the cached witness of the anchor's classification:
@@ -1551,7 +1551,7 @@ fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
     // is satisfied.
     let child = e.tree.ensure(Some(root), "child.txt", ResourceRole::User);
     e.tree.set_kind(child, ResourceKind::File);
-    e.tree.get_mut(child).unwrap().contributions.insert(
+    e.tree.get_mut(child).unwrap().insert_contribution(
         specter_core::ContribKey::ProfileDescendant(pid),
         ClassSet::CONTENT,
     );
@@ -1615,7 +1615,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
 
     let child = e.tree.ensure(Some(r), "f.txt", ResourceRole::User);
     e.tree.set_kind(child, ResourceKind::File);
-    e.tree.get_mut(child).unwrap().contributions.insert(
+    e.tree.get_mut(child).unwrap().insert_contribution(
         specter_core::ContribKey::ProfileDescendant(pid),
         ClassSet::STRUCTURE,
     );
@@ -1723,7 +1723,7 @@ fn fs_event_at_watched_resource_with_no_consumer_emits_event_no_consumer_not_unw
     // routed through the `EventOnUnwatchedResource` path.
     let r = e.tree.ensure(None, "lonely", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
-    e.tree.get_mut(r).unwrap().contributions.insert(
+    e.tree.get_mut(r).unwrap().insert_contribution(
         specter_core::ContribKey::ProfileAnchor(specter_core::ProfileId::default()),
         ClassSet::STRUCTURE,
     );

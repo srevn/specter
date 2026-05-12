@@ -1733,7 +1733,7 @@ mod tests {
             "burst tracks the suppressed non-anchor resource",
         );
         assert_eq!(
-            e.tree.get(a).unwrap().suppress_count,
+            e.tree.get(a).unwrap().suppress_count(),
             1,
             "underlying suppress_count bumped to 1",
         );
@@ -1761,7 +1761,7 @@ mod tests {
             "repeat events on the same non-anchor resource emit no extra Suppress",
         );
         assert_eq!(
-            e.tree.get(a).unwrap().suppress_count,
+            e.tree.get(a).unwrap().suppress_count(),
             1,
             "underlying suppress_count stays at 1",
         );
@@ -1778,7 +1778,7 @@ mod tests {
         let mut out = StepOutput::default();
         let now = Instant::now();
         e.start_standard_burst(pid, root, now, &mut out);
-        let suppress_after_start = e.tree.get(root).unwrap().suppress_count;
+        let suppress_after_start = e.tree.get(root).unwrap().suppress_count();
         out.watch_ops.clear();
 
         e.event_drives_batching(pid, root, now + Duration::from_millis(1), &mut out);
@@ -1798,7 +1798,7 @@ mod tests {
             "anchor never enters suppressed_resources",
         );
         assert_eq!(
-            e.tree.get(root).unwrap().suppress_count,
+            e.tree.get(root).unwrap().suppress_count(),
             suppress_after_start,
             "anchor's suppress_count unchanged across event_drives_batching calls",
         );
@@ -1837,8 +1837,8 @@ mod tests {
             burst.suppressed_resources.is_empty(),
             "drain clears the per-burst tracking set",
         );
-        assert_eq!(e.tree.get(a).unwrap().suppress_count, 0);
-        assert_eq!(e.tree.get(b).unwrap().suppress_count, 0);
+        assert_eq!(e.tree.get(a).unwrap().suppress_count(), 0);
+        assert_eq!(e.tree.get(b).unwrap().suppress_count(), 0);
     }
 
     #[test]
@@ -1902,9 +1902,9 @@ mod tests {
         assert_eq!(unsuppress_count_for(&out, a), 1);
         assert_eq!(unsuppress_count_for(&out, b), 1);
         assert_eq!(unsuppress_count_for(&out, root), 1);
-        assert_eq!(e.tree.get(a).unwrap().suppress_count, 0);
-        assert_eq!(e.tree.get(b).unwrap().suppress_count, 0);
-        assert_eq!(e.tree.get(root).unwrap().suppress_count, 0);
+        assert_eq!(e.tree.get(a).unwrap().suppress_count(), 0);
+        assert_eq!(e.tree.get(b).unwrap().suppress_count(), 0);
+        assert_eq!(e.tree.get(root).unwrap().suppress_count(), 0);
     }
 
     #[test]

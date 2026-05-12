@@ -971,7 +971,7 @@ fn fire_cycle_event_at_unsuppressed_descendant_during_awaiting_absorbs() {
     );
     // Confirm the child is NOT suppressed.
     assert_eq!(
-        e.tree().get(child).unwrap().suppress_count,
+        e.tree().get(child).unwrap().suppress_count(),
         0,
         "descendants are not suppressed during burst",
     );

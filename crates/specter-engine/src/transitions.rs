@@ -569,9 +569,8 @@ impl Engine {
             Some(prior_kind) => {
                 debug_assert!(
                     false,
-                    "walker contract violated: response {:?} for kind {:?} \
-                     (profile = {profile_id:?})",
-                    response_kind, prior_kind,
+                    "walker contract violated: response {response_kind:?} \
+                     for kind {prior_kind:?} (profile = {profile_id:?})",
                 );
                 out.diagnostics.push(Diagnostic::AnchorKindMismatch {
                     profile: profile_id,

@@ -84,9 +84,9 @@ pub(crate) fn add_watch(
     let Some(res) = tree.get_mut(r) else {
         return;
     };
-    let was_empty = res.contributions.is_empty();
+    let was_empty = res.contributions().is_empty();
     let prev_union = res.events_union();
-    res.contributions.insert(key, mask);
+    res.insert_contribution(key, mask);
     let new_union = res.events_union();
 
     let emit = was_empty || new_union != prev_union;
@@ -128,11 +128,11 @@ pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &m
         return;
     };
     let prev_union = res.events_union();
-    if res.contributions.remove(&key).is_none() {
+    if res.remove_contribution(key).is_none() {
         return;
     }
 
-    if res.contributions.is_empty() {
+    if res.contributions().is_empty() {
         out.watch_ops.push(WatchOp::Unwatch { resource: r });
         return;
     }
@@ -158,9 +158,7 @@ pub(crate) fn add_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput)
     let Some(res) = tree.get_mut(r) else {
         return;
     };
-    let prev = res.suppress_count;
-    res.suppress_count = prev.saturating_add(1);
-    if prev == 0 {
+    if res.inc_suppress() {
         out.watch_ops.push(WatchOp::Suppress { resource: r });
     }
 }
@@ -177,12 +175,7 @@ pub(crate) fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput)
     let Some(res) = tree.get_mut(r) else {
         return;
     };
-    let prev = res.suppress_count;
-    if prev == 0 {
-        return;
-    }
-    res.suppress_count = prev - 1;
-    if prev == 1 {
+    if res.dec_suppress() {
         out.watch_ops.push(WatchOp::Unsuppress { resource: r });
     }
 }
@@ -456,7 +449,7 @@ mod tests {
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         add_suppress(&mut tree, r, &mut out);
-        assert_eq!(tree.get(r).unwrap().suppress_count, 1);
+        assert_eq!(tree.get(r).unwrap().suppress_count(), 1);
         assert_eq!(out.watch_ops.len(), 1);
         assert!(matches!(
             out.watch_ops[0],
@@ -471,7 +464,7 @@ mod tests {
         add_suppress(&mut tree, r, &mut out);
         out.watch_ops.clear();
         add_suppress(&mut tree, r, &mut out);
-        assert_eq!(tree.get(r).unwrap().suppress_count, 2);
+        assert_eq!(tree.get(r).unwrap().suppress_count(), 2);
         assert!(out.watch_ops.is_empty());
     }
 
@@ -482,7 +475,7 @@ mod tests {
         add_suppress(&mut tree, r, &mut out);
         out.watch_ops.clear();
         sub_suppress(&mut tree, r, &mut out);
-        assert_eq!(tree.get(r).unwrap().suppress_count, 0);
+        assert_eq!(tree.get(r).unwrap().suppress_count(), 0);
         assert_eq!(out.watch_ops.len(), 1);
         assert!(matches!(
             out.watch_ops[0],
@@ -500,7 +493,7 @@ mod tests {
         let mut out = StepOutput::default();
         sub_suppress(&mut tree, r, &mut out);
         assert!(out.watch_ops.is_empty());
-        assert_eq!(tree.get(r).unwrap().suppress_count, 0);
+        assert_eq!(tree.get(r).unwrap().suppress_count(), 0);
     }
 
     #[test]
@@ -513,13 +506,13 @@ mod tests {
         {
             let res = tree.get(r).unwrap();
             assert_eq!(res.watch_demand(), 1);
-            assert_eq!(res.suppress_count, 1);
+            assert_eq!(res.suppress_count(), 1);
         }
         sub_watch(&mut tree, r, key, &mut out);
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand(), 0);
         // suppress unchanged by the watch decrement.
-        assert_eq!(res.suppress_count, 1);
+        assert_eq!(res.suppress_count(), 1);
     }
 
     #[test]

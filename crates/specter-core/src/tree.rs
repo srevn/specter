@@ -208,13 +208,11 @@ impl Tree {
         let Some(r) = self.nodes.get_mut(id) else {
             return;
         };
-        if !r.contributions.is_empty() {
+        if r.clear_contributions() > 0 {
             out.watch_ops.push(WatchOp::Unwatch { resource: id });
-            r.contributions.clear();
         }
-        if r.suppress_count > 0 {
+        if r.clear_suppress() > 0 {
             out.watch_ops.push(WatchOp::Unsuppress { resource: id });
-            r.suppress_count = 0;
         }
         r.kind = ResourceKind::Unknown;
     }
@@ -570,7 +568,7 @@ mod tests {
     fn try_reap_refused_with_live_contribution() {
         let mut tree = Tree::new();
         let id = tree.ensure(None, "root", ResourceRole::User);
-        tree.get_mut(id).unwrap().contributions.insert(
+        tree.get_mut(id).unwrap().insert_contribution(
             crate::resource::ContribKey::ProfileAnchor(crate::ids::ProfileId::default()),
             crate::sub::ClassSet::STRUCTURE,
         );
@@ -619,7 +617,7 @@ mod tests {
         let r = tree.get(parent).unwrap();
         assert_eq!(r.kind, crate::resource::ResourceKind::Unknown);
         assert_eq!(r.watch_demand(), 0);
-        assert_eq!(r.suppress_count, 0);
+        assert_eq!(r.suppress_count(), 0);
         assert_eq!(r.children().len(), 1, "children survive vacate");
     }
 
@@ -633,10 +631,10 @@ mod tests {
         // than a panic / silent kernel-watch leak.
         let mut tree = Tree::new();
         let r = tree.ensure(None, "x", ResourceRole::User);
-        // Simulate a stranded contribution by inserting directly into
-        // the map — the production path goes through
+        // Simulate a stranded contribution by inserting directly via
+        // the typed mutator — the production path goes through
         // `engine::refcounts::add_watch`.
-        tree.get_mut(r).unwrap().contributions.insert(
+        tree.get_mut(r).unwrap().insert_contribution(
             crate::resource::ContribKey::ProfileAnchor(crate::ids::ProfileId::default()),
             crate::sub::ClassSet::STRUCTURE,
         );
@@ -663,12 +661,12 @@ mod tests {
         // per-Resource suppress bookkeeping balanced.
         let mut tree = Tree::new();
         let r = tree.ensure(None, "x", ResourceRole::User);
-        tree.get_mut(r).unwrap().suppress_count = 1;
+        tree.get_mut(r).unwrap().inc_suppress();
 
         let mut out = StepOutput::default();
         tree.vacate(r, &mut out);
 
-        assert_eq!(tree.get(r).unwrap().suppress_count, 0);
+        assert_eq!(tree.get(r).unwrap().suppress_count(), 0);
         assert_eq!(out.watch_ops.len(), 1);
         assert!(matches!(
             out.watch_ops[0],
@@ -688,7 +686,7 @@ mod tests {
     fn try_reap_emits_unsuppress_for_drained_slot_with_residual_suppress() {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "x", ResourceRole::User);
-        tree.get_mut(r).unwrap().suppress_count = 1;
+        tree.get_mut(r).unwrap().inc_suppress();
         // Slot is reapable: contributions empty, no children / profiles /
         // proxies, but suppress_count > 0 ⇒ vacate's Unsuppress branch
         // fires from inside the terminus.
@@ -716,8 +714,8 @@ mod tests {
         let mut tree = Tree::new();
         let parent = tree.ensure(None, "parent", ResourceRole::DescentScaffold);
         let child = tree.ensure(Some(parent), "child", ResourceRole::User);
-        tree.get_mut(child).unwrap().suppress_count = 1;
-        tree.get_mut(parent).unwrap().suppress_count = 1;
+        tree.get_mut(child).unwrap().inc_suppress();
+        tree.get_mut(parent).unwrap().inc_suppress();
 
         let mut out = StepOutput::default();
         assert!(tree.try_reap(child, &mut out));
@@ -749,15 +747,19 @@ mod tests {
         {
             let res = tree.get_mut(r).unwrap();
             // Two distinct contribution keys ⇒ refcount of 2.
-            res.contributions.insert(
+            res.insert_contribution(
                 crate::resource::ContribKey::ProfileAnchor(crate::ids::ProfileId::default()),
                 crate::sub::ClassSet::STRUCTURE,
             );
-            res.contributions.insert(
+            res.insert_contribution(
                 crate::resource::ContribKey::ProfileParent(crate::ids::ProfileId::default()),
                 crate::sub::ClassSet::STRUCTURE,
             );
-            res.suppress_count = 3;
+            // Bump the counter to 3 — three independent suppress edges'
+            // worth of accounting, simulating a slot mid-burst.
+            res.inc_suppress();
+            res.inc_suppress();
+            res.inc_suppress();
         }
 
         let mut out = StepOutput::default();
@@ -765,7 +767,7 @@ mod tests {
 
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand(), 0);
-        assert_eq!(res.suppress_count, 0);
+        assert_eq!(res.suppress_count(), 0);
         assert_eq!(out.watch_ops.len(), 2);
         assert!(matches!(
             out.watch_ops[0],

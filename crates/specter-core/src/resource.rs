@@ -13,13 +13,22 @@
 //! choice explicit at every call site. Writes go through
 //! [`crate::Tree::set_kind`], same pattern as `Tree::set_role`.
 //!
-//! `contributions` is `pub(crate)` — the engine's refcount helpers
-//! (`add_watch` / `sub_watch`) are the sole legitimate mutators. Read
-//! access for the per-Resource demand summary goes through
-//! [`Resource::watch_demand`] (number of contributors) and
-//! [`Resource::events_union`] (OR over contributions' masks).
+//! `contributions` and `suppress_count` are `pub(crate)` — every
+//! engine-side mutation flows through the typed methods on `Resource`
+//! ([`Resource::insert_contribution`] / [`Resource::remove_contribution`]
+//! / [`Resource::clear_contributions`] for the contributions map;
+//! [`Resource::inc_suppress`] / [`Resource::dec_suppress`] /
+//! [`Resource::clear_suppress`] for the counter). The mutators return
+//! the edge information the refcount helpers need (`bool` for `0 ↔ 1`
+//! edges, `usize` / `u32` for the prior count on `clear_*`), so the
+//! 0↔non-empty / 0↔1 emission decisions sit at the engine helper layer
+//! without leaking the underlying field shape. Read access for the
+//! demand summary goes through [`Resource::contributions`],
+//! [`Resource::watch_demand`], [`Resource::events_union`],
+//! [`Resource::suppress_count`].
 //!
-//! `suppress_count` and `role` are `pub`; the engine writes them directly.
+//! `role` is `pub`; the engine writes it directly. Role is metadata
+//! (no refcount edges), so a typed setter would buy nothing.
 
 use crate::ids::{ProfileId, PromoterId, ResourceId};
 use crate::sub::ClassSet;
@@ -114,12 +123,21 @@ pub struct Resource {
     /// contribution passes the explicit [`ContribKey`], so removal is
     /// O(log k) by key, not O(registry).
     ///
-    /// `pub` joins `suppress_count` — the engine's refcount helpers
-    /// mutate the field directly. Outside the engine, the read surface
-    /// is [`Resource::watch_demand`] / [`Resource::events_union`] /
-    /// [`Resource::contributions`].
-    pub contributions: BTreeMap<ContribKey, ClassSet>,
-    pub suppress_count: u32,
+    /// `pub(crate)` — the legitimate external mutators are the typed
+    /// methods on `Resource` ([`Resource::insert_contribution`],
+    /// [`Resource::remove_contribution`],
+    /// [`Resource::clear_contributions`]). Outside the engine, the
+    /// read surface is [`Resource::contributions`] /
+    /// [`Resource::watch_demand`] / [`Resource::events_union`].
+    pub(crate) contributions: BTreeMap<ContribKey, ClassSet>,
+    /// Suppression refcount. Event delivery is silenced iff `> 0`. The
+    /// 0↔1 edges drive the sensor's `Suppress` / `Unsuppress`
+    /// emissions; intermediate counts are bookkeeping only.
+    ///
+    /// `pub(crate)` — mutated via [`Resource::inc_suppress`] /
+    /// [`Resource::dec_suppress`] / [`Resource::clear_suppress`].
+    /// Read surface is [`Resource::suppress_count`].
+    pub(crate) suppress_count: u32,
     pub role: ResourceRole,
 }
 
@@ -356,6 +374,91 @@ impl Resource {
     pub const fn kind_raw(&self) -> ResourceKind {
         self.kind
     }
+
+    /// Read-only view of the per-Resource contributions map.
+    ///
+    /// Sole mutators are [`Self::insert_contribution`],
+    /// [`Self::remove_contribution`], and [`Self::clear_contributions`].
+    /// The engine's [`add_watch`] / [`sub_watch`] helpers and
+    /// [`crate::Tree::vacate`]'s protocol terminus are the legitimate
+    /// production callers.
+    ///
+    /// [`add_watch`]: ../../specter_engine/refcounts/fn.add_watch.html
+    /// [`sub_watch`]: ../../specter_engine/refcounts/fn.sub_watch.html
+    #[must_use]
+    pub const fn contributions(&self) -> &BTreeMap<ContribKey, ClassSet> {
+        &self.contributions
+    }
+
+    /// Insert or overwrite the contribution at `key` with `mask`.
+    /// Returns the prior mask iff `key` was already present.
+    ///
+    /// Engine helpers use the return value (along with
+    /// [`Self::events_union`] before/after) to detect the 0→1 existence
+    /// edge and union-widening transitions that drive `WatchOp::Watch`
+    /// emission. Tests may use it to assert overwrite semantics.
+    pub fn insert_contribution(&mut self, key: ContribKey, mask: ClassSet) -> Option<ClassSet> {
+        self.contributions.insert(key, mask)
+    }
+
+    /// Remove the contribution at `key`. Returns the prior mask iff
+    /// `key` was present; `None` is the idempotent absent-key path —
+    /// safe against post-`vacate` slots and slots a prior sub-walk in
+    /// the same step already drained.
+    pub fn remove_contribution(&mut self, key: ContribKey) -> Option<ClassSet> {
+        self.contributions.remove(&key)
+    }
+
+    /// Atomically clear every contribution. Returns the prior count
+    /// (`> 0` ⇒ caller should emit the closing `WatchOp::Unwatch`;
+    /// `0` ⇒ no-op already drained). Used by [`crate::Tree::vacate`]'s
+    /// protocol terminus.
+    pub fn clear_contributions(&mut self) -> usize {
+        let n = self.contributions.len();
+        self.contributions.clear();
+        n
+    }
+
+    /// Current suppression refcount. Event delivery is silenced iff
+    /// `> 0`.
+    #[must_use]
+    pub const fn suppress_count(&self) -> u32 {
+        self.suppress_count
+    }
+
+    /// Saturating `+1` on [`Self::suppress_count`]. Returns `true` iff
+    /// this call traversed the `0 → 1` edge — i.e., suppression just
+    /// activated, and the caller (engine's `add_suppress`) should emit
+    /// `WatchOp::Suppress`.
+    pub const fn inc_suppress(&mut self) -> bool {
+        let prev = self.suppress_count;
+        self.suppress_count = prev.saturating_add(1);
+        prev == 0
+    }
+
+    /// `-1` on [`Self::suppress_count`], saturating at 0. Returns
+    /// `true` iff this call traversed the `1 → 0` edge — i.e.,
+    /// suppression just deactivated, and the caller (engine's
+    /// `sub_suppress`) should emit `WatchOp::Unsuppress`. Returns
+    /// `false` on the no-op path (counter was already 0; reachable
+    /// post-[`crate::Tree::vacate`] when symmetric drain enters here
+    /// after the terminus already emitted the closing op).
+    pub const fn dec_suppress(&mut self) -> bool {
+        let prev = self.suppress_count;
+        if prev == 0 {
+            return false;
+        }
+        self.suppress_count = prev - 1;
+        prev == 1
+    }
+
+    /// Atomically zero the suppression refcount. Returns the prior
+    /// count (`> 0` ⇒ caller should emit the closing
+    /// `WatchOp::Unsuppress`; `0` ⇒ no-op already zeroed). Used by
+    /// [`crate::Tree::vacate`]'s protocol terminus.
+    pub const fn clear_suppress(&mut self) -> u32 {
+        std::mem::replace(&mut self.suppress_count, 0)
+    }
 }
 
 #[cfg(test)]
@@ -393,7 +496,7 @@ mod tests {
     #[test]
     fn anchored_when_contribution_present() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
-        r.contributions.insert(
+        r.insert_contribution(
             ContribKey::ProfileAnchor(ProfileId::default()),
             ClassSet::STRUCTURE,
         );
@@ -492,7 +595,7 @@ mod tests {
     #[test]
     fn contributions_map_yields_count_and_union() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
-        r.contributions.insert(
+        r.insert_contribution(
             ContribKey::ProfileAnchor(ProfileId::default()),
             ClassSet::CONTENT,
         );
@@ -500,7 +603,7 @@ mod tests {
         // normally collide on the slotmap key; use a distinct
         // [`ContribKey`] variant to keep the test free of slotmap
         // setup boilerplate.
-        r.contributions.insert(
+        r.insert_contribution(
             ContribKey::ProfileParent(ProfileId::default()),
             ClassSet::STRUCTURE,
         );
@@ -515,10 +618,92 @@ mod tests {
     fn contributions_same_key_overwrites_mask() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
         let key = ContribKey::ProfileAnchor(ProfileId::default());
-        r.contributions.insert(key, ClassSet::CONTENT);
-        r.contributions
-            .insert(key, ClassSet::CONTENT | ClassSet::METADATA);
+        let prior = r.insert_contribution(key, ClassSet::CONTENT);
+        assert!(prior.is_none(), "fresh key: no prior mask");
+        let overwritten = r.insert_contribution(key, ClassSet::CONTENT | ClassSet::METADATA);
+        assert_eq!(
+            overwritten,
+            Some(ClassSet::CONTENT),
+            "re-insert returns the prior mask",
+        );
         assert_eq!(r.watch_demand(), 1);
         assert_eq!(r.events_union(), ClassSet::CONTENT | ClassSet::METADATA);
+    }
+
+    /// `remove_contribution` returns the prior mask iff the key was
+    /// present. The idempotent absent-key path returns `None` so
+    /// callers (engine's `sub_watch`) can short-circuit silently
+    /// against post-`vacate` slots.
+    #[test]
+    fn remove_contribution_returns_prior_mask_or_none() {
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let key = ContribKey::ProfileAnchor(ProfileId::default());
+        assert!(
+            r.remove_contribution(key).is_none(),
+            "absent key: idempotent no-op",
+        );
+        r.insert_contribution(key, ClassSet::CONTENT);
+        assert_eq!(r.remove_contribution(key), Some(ClassSet::CONTENT));
+        assert!(r.contributions().is_empty());
+    }
+
+    /// `clear_contributions` returns the prior count. The vacate
+    /// terminus uses `> 0` to decide whether to emit `Unwatch`.
+    #[test]
+    fn clear_contributions_returns_prior_count() {
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        assert_eq!(r.clear_contributions(), 0, "empty: no-op");
+        r.insert_contribution(
+            ContribKey::ProfileAnchor(ProfileId::default()),
+            ClassSet::CONTENT,
+        );
+        r.insert_contribution(
+            ContribKey::ProfileParent(ProfileId::default()),
+            ClassSet::STRUCTURE,
+        );
+        assert_eq!(r.clear_contributions(), 2);
+        assert!(r.contributions().is_empty());
+    }
+
+    /// `inc_suppress` reports the `0 → 1` edge; intermediate bumps
+    /// return `false`. This is what the engine's `add_suppress` helper
+    /// uses to decide whether to emit `WatchOp::Suppress`.
+    #[test]
+    fn inc_suppress_reports_zero_to_one_edge_once() {
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        assert!(r.inc_suppress(), "0 → 1 edge");
+        assert_eq!(r.suppress_count(), 1);
+        assert!(!r.inc_suppress(), "1 → 2: intermediate, no edge");
+        assert_eq!(r.suppress_count(), 2);
+        assert!(!r.inc_suppress(), "2 → 3: intermediate, no edge");
+        assert_eq!(r.suppress_count(), 3);
+    }
+
+    /// `dec_suppress` reports the `1 → 0` edge; intermediate
+    /// decrements and the saturating zero-floor path return `false`.
+    #[test]
+    fn dec_suppress_reports_one_to_zero_edge_and_saturates_at_zero() {
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        assert!(!r.dec_suppress(), "no-op at 0: no edge, no underflow panic");
+        assert_eq!(r.suppress_count(), 0);
+        r.inc_suppress();
+        r.inc_suppress();
+        assert_eq!(r.suppress_count(), 2);
+        assert!(!r.dec_suppress(), "2 → 1: intermediate");
+        assert!(r.dec_suppress(), "1 → 0: edge");
+        assert_eq!(r.suppress_count(), 0);
+    }
+
+    /// `clear_suppress` returns the prior count. Vacate uses `> 0` to
+    /// decide whether to emit `Unsuppress`.
+    #[test]
+    fn clear_suppress_returns_prior_count() {
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        assert_eq!(r.clear_suppress(), 0, "already zero: no-op");
+        r.inc_suppress();
+        r.inc_suppress();
+        r.inc_suppress();
+        assert_eq!(r.clear_suppress(), 3);
+        assert_eq!(r.suppress_count(), 0);
     }
 }
