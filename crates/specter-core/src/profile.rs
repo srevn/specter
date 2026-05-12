@@ -349,6 +349,47 @@ pub enum ProfileState {
     Active(ActiveBurst),
 }
 
+impl ProfileState {
+    /// Variant-tag projection used by diagnostics that need to name
+    /// "what state was the Profile actually in" without copying the
+    /// payload. The four discriminants line up with the four routing
+    /// classes burst helpers care about: `Idle` (pre-burst), `Pending`
+    /// (descent in flight), `ActivePreFire` (settling / verifying /
+    /// draining), `ActivePostFire` (awaiting / rebasing). The fire
+    /// transition (`PreFire → PostFire`) is the only edge that crosses
+    /// the third-vs-fourth discriminator, which is exactly the same
+    /// boundary the [`ActiveBurst`] type split enforces.
+    #[must_use]
+    pub const fn discriminant(&self) -> ProfileStateDiscriminant {
+        match self {
+            Self::Idle => ProfileStateDiscriminant::Idle,
+            Self::Pending(_) => ProfileStateDiscriminant::Pending,
+            Self::Active(ActiveBurst::PreFire(_)) => ProfileStateDiscriminant::ActivePreFire,
+            Self::Active(ActiveBurst::PostFire(_)) => ProfileStateDiscriminant::ActivePostFire,
+        }
+    }
+}
+
+/// Variant tag for [`ProfileState`], carried on diagnostics that report
+/// state-machine routing breaches without copying the payload.
+///
+/// The four variants match the four routing classes the engine's burst
+/// helpers branch on. They are coarser than the full state enum
+/// (`Active(PreFire(Batching{settle_timer}))` collapses to
+/// `ActivePreFire`) — sufficient for operator triage, and stable
+/// against future phase additions.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ProfileStateDiscriminant {
+    /// [`ProfileState::Idle`].
+    Idle,
+    /// [`ProfileState::Pending`].
+    Pending,
+    /// [`ProfileState::Active`] with [`ActiveBurst::PreFire`].
+    ActivePreFire,
+    /// [`ProfileState::Active`] with [`ActiveBurst::PostFire`].
+    ActivePostFire,
+}
+
 /// State for a Profile undergoing pending-path descent.
 ///
 /// Lives inline on `ProfileState::Pending` for the duration of descent.

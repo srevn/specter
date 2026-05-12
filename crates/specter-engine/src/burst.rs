@@ -56,15 +56,119 @@ use crate::Engine;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
-    ActiveBurst, BurstIntent, Diagnostic, FsEvent, PostFirePhase, PreFireBurst, PreFirePhase,
-    ProbeCorrelation, ProbeOwner, Profile, ProfileId, ProfileState, ResourceId, ResourceKind,
-    StepOutput, TimerKind, Tree, TreeSnapshot,
+    ActiveBurst, BurstHelper, BurstIntent, Diagnostic, FsEvent, LcaIntegritySource, PostFirePhase,
+    PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOwner, Profile, ProfileId, ProfileState,
+    ResourceId, ResourceKind, StepOutput, TimerKind, Tree, TreeSnapshot,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
 impl Engine {
+    /// Precondition gate for the Active(PreFire(_)) burst helpers. Returns
+    /// `true` iff `profile_id` is live AND in `Active(PreFire(_))`; on a
+    /// state mismatch emits [`Diagnostic::InvalidBurstTransition`] and
+    /// returns `false`. A stale `ProfileId` (no live slot) is a benign
+    /// post-detach race and returns `false` silently — the diagnostic is
+    /// reserved for genuine state-machine routing breaches.
+    ///
+    /// **Why a single gate rather than ad-hoc match-and-return.** Every
+    /// pre-fire helper opens by reading the Profile's state; the prior
+    /// shape used a `let ... else { return; }` projection that silently
+    /// dropped misrouted calls. Routing the precondition through this
+    /// gate keeps the silent-return semantics on stale ids (the engine
+    /// already handles slot reaping at the dispatch level) while
+    /// surfacing routing breaches as a typed diagnostic — operators see
+    /// the helper name + observed state and can map straight back to the
+    /// caller.
+    ///
+    /// **Pairs with [`Self::require_active_post_fire`] /
+    /// [`Self::require_idle`]** — these three cover every helper with a
+    /// typed entry precondition. `finish_burst_to_idle` is intentionally
+    /// idempotent (handles Idle / Pending as silent no-op) and bypasses
+    /// the gate.
+    fn require_active_pre_fire(
+        &self,
+        profile_id: ProfileId,
+        helper: BurstHelper,
+        out: &mut StepOutput,
+    ) -> bool {
+        let Some(p) = self.profiles.get(profile_id) else {
+            return false;
+        };
+        if matches!(&p.state, ProfileState::Active(ActiveBurst::PreFire(_))) {
+            return true;
+        }
+        out.diagnostics.push(Diagnostic::InvalidBurstTransition {
+            profile: profile_id,
+            helper,
+            observed: p.state.discriminant(),
+        });
+        false
+    }
+
+    /// Precondition gate for the Active(PostFire(_)) burst helpers.
+    /// Mirrors [`Self::require_active_pre_fire`] on the post-fire side
+    /// of the type split.
+    ///
+    /// `transition_to_rebasing`'s callers (the `Rebase` arm of
+    /// `on_effect_complete` and `handle_gate_deadline`) further narrow
+    /// to `PostFirePhase::Awaiting` before invoking, but the gate stops
+    /// at the variant level — narrower phase-level preconditions would
+    /// duplicate the caller-side check without surfacing additional
+    /// routing breaches (a phase-level mismatch within PostFire is
+    /// caught by the helper's inner phase match instead).
+    fn require_active_post_fire(
+        &self,
+        profile_id: ProfileId,
+        helper: BurstHelper,
+        out: &mut StepOutput,
+    ) -> bool {
+        let Some(p) = self.profiles.get(profile_id) else {
+            return false;
+        };
+        if matches!(&p.state, ProfileState::Active(ActiveBurst::PostFire(_))) {
+            return true;
+        }
+        out.diagnostics.push(Diagnostic::InvalidBurstTransition {
+            profile: profile_id,
+            helper,
+            observed: p.state.discriminant(),
+        });
+        false
+    }
+
+    /// Precondition gate for the burst-construction helpers
+    /// (`start_seed_burst`, `start_standard_burst`). Both transition Idle
+    /// → `Active(PreFire(_))`; calling either on a non-Idle Profile is a
+    /// routing breach. Stale ids return false silently — same policy as
+    /// the Active gates above.
+    ///
+    /// Replaces the prior `debug_assert!(matches!(p.state,
+    /// ProfileState::Idle))` discipline: that variant panicked in
+    /// dev/CI and silently misrouted in release. The diagnostic
+    /// emission is visible in both build modes and survives via the
+    /// usual `StepOutput.diagnostics` plumbing.
+    fn require_idle(
+        &self,
+        profile_id: ProfileId,
+        helper: BurstHelper,
+        out: &mut StepOutput,
+    ) -> bool {
+        let Some(p) = self.profiles.get(profile_id) else {
+            return false;
+        };
+        if matches!(&p.state, ProfileState::Idle) {
+            return true;
+        }
+        out.diagnostics.push(Diagnostic::InvalidBurstTransition {
+            profile: profile_id,
+            helper,
+            observed: p.state.discriminant(),
+        });
+        false
+    }
+
     /// Start a Seed burst: no settle wait, immediate Probe.
     ///
     /// **Callers** (post-`Awaiting`/`Rebasing` lifecycle):
@@ -90,13 +194,16 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
+        if !self.require_idle(profile_id, BurstHelper::StartSeedBurst, out) {
+            return;
+        }
+        // `require_idle` confirmed the Profile is live + Idle; the
+        // re-borrow below is for captures (`resource`, `max_settle`),
+        // not a re-check. In v1's single-threaded `step`, no mutation
+        // intervenes between the precondition and this read.
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        debug_assert!(
-            matches!(p.state, ProfileState::Idle),
-            "start_seed_burst: Profile must be Idle on entry",
-        );
         let resource = p.resource;
         let max_settle = p.max_settle;
 
@@ -172,13 +279,14 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
+        if !self.require_idle(profile_id, BurstHelper::StartStandardBurst, out) {
+            return;
+        }
+        // Re-borrow for captures; the precondition has already confirmed
+        // the Profile is live + Idle.
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        debug_assert!(
-            matches!(p.state, ProfileState::Idle),
-            "start_standard_burst: Profile must be Idle on entry",
-        );
         let resource = p.resource;
         let settle = p.settle;
         let max_settle = p.max_settle;
@@ -272,18 +380,19 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
+        if !self.require_active_pre_fire(profile_id, BurstHelper::EventDrivesBatching, out) {
+            return;
+        }
+        // Re-borrow for captures + the phase projection used to decide
+        // whether a fresh settle timer is needed below. The precondition
+        // gate already emitted a diagnostic on any state mismatch (e.g.,
+        // a PostFire that should have routed through
+        // `absorb_event_into_fire_tail`); the inner projection is the
+        // borrow-checker discipline for reading `pre.phase`.
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
         let ProfileState::Active(ActiveBurst::PreFire(pre)) = &p.state else {
-            // Callers route post-fire FsEvents through
-            // `absorb_event_into_fire_tail`; a PostFire here is a
-            // dispatcher routing breach.
-            debug_assert!(
-                !matches!(p.state, ProfileState::Active(ActiveBurst::PostFire(_))),
-                "event_drives_batching called on PostFire — caller must route \
-                 to absorb_event_into_fire_tail (profile = {profile_id:?})",
-            );
             return;
         };
         let settle = p.settle;
@@ -400,7 +509,15 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         now: Instant,
+        out: &mut StepOutput,
     ) {
+        if !self.require_active_pre_fire(
+            profile_id,
+            BurstHelper::UnstableResponseDrivesBatching,
+            out,
+        ) {
+            return;
+        }
         let Some(settle) = self.profiles.get(profile_id).map(|p| p.settle) else {
             return;
         };
@@ -448,14 +565,22 @@ impl Engine {
     /// the cleared `force_walk_resources` set and ship on the next
     /// emission.
     pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToVerifying, out) {
+            return;
+        }
         // Compute target under one immutable borrow window. `&self.tree`
         // and `&self.profiles.get(_)` are disjoint Engine-field borrows;
         // the call returns a `ResourceId` (`Copy`), so neither borrow
         // outlives this block.
+        //
+        // `pre_fire_target` may emit `LcaIntegrityViolation` via
+        // `lca_pair` if the Standard burst's `dirty_resources` walk
+        // breaks ancestry; the helper still returns a usable
+        // `ResourceId` (folded back to anchor), so the burst proceeds.
         let target = match self.profiles.get(profile_id) {
             Some(p) => match &p.state {
                 ProfileState::Active(ActiveBurst::PreFire(pre)) => {
-                    pre_fire_target(p, pre, &self.tree)
+                    pre_fire_target(p, pre, &self.tree, profile_id, out)
                 }
                 _ => return,
             },
@@ -530,11 +655,13 @@ impl Engine {
     /// `Profile.current` (set by `dispatch_standard_ok` immediately
     /// before this call), so no `Arc<TreeSnapshot>` is duplicated on the
     /// phase variant.
-    pub(crate) fn transition_to_draining(&mut self, profile_id: ProfileId) {
-        let Some(p) = self.profiles.get_mut(profile_id) else {
+    pub(crate) fn transition_to_draining(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToDraining, out) {
             return;
-        };
-        if let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state {
+        }
+        if let Some(p) = self.profiles.get_mut(profile_id)
+            && let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state
+        {
             pre.phase = PreFirePhase::Draining;
         }
     }
@@ -581,12 +708,16 @@ impl Engine {
         profile_id: ProfileId,
         outstanding: u32,
         now: Instant,
+        out: &mut StepOutput,
     ) {
-        // Precheck. Type-level: the Profile must be Active(PreFire(_));
-        // anything else is a state-machine routing breach (PostFire ⇒
-        // already past the fire; Idle / Pending ⇒ no burst). The
-        // precheck also captures `max_settle` for the deadline
-        // computation under the same Profile-borrow window.
+        if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToAwaiting, out) {
+            return;
+        }
+        // Re-borrow for `max_settle` capture under the same shape-checked
+        // window. Anything else here would be a routing breach the
+        // precondition would have caught — the inner `matches!` is the
+        // borrow-checker discipline for the typed move below, not a
+        // duplicated guard.
         let Some(max_settle) = self.profiles.get(profile_id).and_then(|p| {
             matches!(&p.state, ProfileState::Active(ActiveBurst::PreFire(_)),)
                 .then_some(p.max_settle)
@@ -676,15 +807,15 @@ impl Engine {
     /// arm requires `Active`) — leaving the probe channel open with no
     /// matching Burst.
     pub(crate) fn transition_to_rebasing(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        if !self.require_active_post_fire(profile_id, BurstHelper::TransitionToRebasing, out) {
+            return;
+        }
         // Take absorbed events for the rebase walker's force_walk and
         // capture the anchor (`target = p.resource`) in one mut-borrow
         // window. `force_walk_resources` on `PostFireBurst` is the
         // post-fire accumulator fed by `absorb_event_into_fire_tail`.
-        // Non-PostFire state is a state-machine bug here (production
-        // callers — `on_effect_complete::Rebase` and
-        // `handle_gate_deadline` — gate on `Active(PostFire(Awaiting))`);
-        // early-return rather than silently mint a Probe with no
-        // matching phase write.
+        // The inner match below is the borrow-checker discipline for
+        // extracting `post`; the precondition guaranteed PostFire above.
         let (force_set, target) = match self.profiles.get_mut(profile_id) {
             Some(p) => {
                 let target = p.resource;
@@ -830,17 +961,9 @@ impl Engine {
         event: FsEvent,
         out: &mut StepOutput,
     ) {
-        // Type-guard catches a routing breach (`drive_burst` is the sole
-        // caller and matches PostFire before this). The debug_assert
-        // surfaces drift in dev/CI without changing release semantics.
-        debug_assert!(
-            self.profiles.get(profile_id).is_some_and(|p| matches!(
-                &p.state,
-                ProfileState::Active(ActiveBurst::PostFire(_)),
-            )),
-            "absorb_event_into_fire_tail: caller routed wrong \
-             (profile = {profile_id:?})",
-        );
+        if !self.require_active_post_fire(profile_id, BurstHelper::AbsorbEventIntoFireTail, out) {
+            return;
+        }
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(ActiveBurst::PostFire(post)) = &mut p.state
         {
@@ -968,10 +1091,15 @@ pub(crate) fn lca_target(
     anchor: ResourceId,
     dirty: &BTreeSet<ResourceId>,
     tree: &Tree,
+    profile: ProfileId,
+    out: &mut StepOutput,
 ) -> ResourceId {
     // 1. Filter stale ResourceIds. A `dirty_resources` entry whose slot
     // was reaped between FsEvent ingestion and probe emission
-    // (delete-recreate-different-inode race) is dropped here.
+    // (delete-recreate-different-inode race) is dropped here. This is
+    // benign — the slot's prior events are no longer routable. No
+    // diagnostic: per-event noise would flood logs during normal
+    // delete-recreate churn.
     let live: SmallVec<[ResourceId; 4]> = dirty
         .iter()
         .copied()
@@ -987,10 +1115,13 @@ pub(crate) fn lca_target(
     }
 
     // 2. Pairwise LCA reduction. For each new entry, walk both candidates
-    // up to a common depth, then up in lockstep until they match.
+    // up to a common depth, then up in lockstep until they match. A
+    // `None` from `lca_pair` indicates the integrity violation has
+    // already been reported via `Diagnostic::LcaIntegrityViolation`;
+    // we just fold to anchor and move on.
     let mut acc = live[0];
     for &r in &live[1..] {
-        match lca_pair(acc, r, tree) {
+        match lca_pair(acc, r, tree, profile, out) {
             Some(joint) => acc = joint,
             None => return anchor,
         }
@@ -1000,27 +1131,94 @@ pub(crate) fn lca_target(
 
 /// LCA of two resources via depth-equalisation + lockstep ancestor walk.
 /// O(max(depth_a, depth_b)). Returns `None` only when an input slot is
-/// stale or a parent walk runs out of ancestors before the candidates
-/// align — the caller falls back to anchor.
-fn lca_pair(a: ResourceId, b: ResourceId, tree: &Tree) -> Option<ResourceId> {
+/// stale (`LcaIntegritySource::StaleId`) or a parent walk runs out of
+/// ancestors before the candidates align (`LcaIntegritySource::BrokenAncestry`).
+/// In either case the helper emits
+/// [`Diagnostic::LcaIntegrityViolation`] tagged with the source before
+/// returning; the caller folds to anchor so the burst still has a
+/// probe target.
+///
+/// Source-tagging rationale: stale-id ingress at this helper is a
+/// fresh class of bug — `lca_target`'s upstream `live` filter is the
+/// canonical drop point for reaped slots, and a stale id reaching
+/// `lca_pair` means the filter was bypassed (e.g., a future caller
+/// constructing the pair from a non-filtered source). Broken ancestry
+/// is the parent walk running out before alignment, which indicates
+/// the Tree's parent chain is structurally inconsistent.
+pub(crate) fn lca_pair(
+    a: ResourceId,
+    b: ResourceId,
+    tree: &Tree,
+    profile: ProfileId,
+    out: &mut StepOutput,
+) -> Option<ResourceId> {
     if a == b {
         return Some(a);
+    }
+    // Defense-in-depth: upstream `lca_target` filters stale ids, but a
+    // future caller bypassing that filter would otherwise manifest as
+    // `BrokenAncestry` on the first parent walk. Surfacing it as
+    // `StaleId` keeps the operational signal accurate.
+    if tree.get(a).is_none() || tree.get(b).is_none() {
+        out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
+            profile,
+            source: LcaIntegritySource::StaleId,
+        });
+        return None;
     }
     let depth_a = tree.ancestors(a).count();
     let depth_b = tree.ancestors(b).count();
     let mut a = a;
     let mut b = b;
-    // Walk the deeper one up to the same depth as the shallower.
+    // Walk the deeper one up to the same depth as the shallower. A
+    // `None` here means the parent chain dangled; emit BrokenAncestry
+    // and bail.
     for _ in 0..depth_a.saturating_sub(depth_b) {
-        a = tree.parent(a)?;
+        a = match tree.parent(a) {
+            Some(p) => p,
+            None => {
+                out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
+                    profile,
+                    source: LcaIntegritySource::BrokenAncestry,
+                });
+                return None;
+            }
+        };
     }
     for _ in 0..depth_b.saturating_sub(depth_a) {
-        b = tree.parent(b)?;
+        b = match tree.parent(b) {
+            Some(p) => p,
+            None => {
+                out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
+                    profile,
+                    source: LcaIntegritySource::BrokenAncestry,
+                });
+                return None;
+            }
+        };
     }
     // Walk both up in lockstep until they match.
     while a != b {
-        a = tree.parent(a)?;
-        b = tree.parent(b)?;
+        a = match tree.parent(a) {
+            Some(p) => p,
+            None => {
+                out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
+                    profile,
+                    source: LcaIntegritySource::BrokenAncestry,
+                });
+                return None;
+            }
+        };
+        b = match tree.parent(b) {
+            Some(p) => p,
+            None => {
+                out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
+                    profile,
+                    source: LcaIntegritySource::BrokenAncestry,
+                });
+                return None;
+            }
+        };
     }
     Some(a)
 }
@@ -1082,10 +1280,16 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 /// no longer need reconfirmation — and the stale-`ResourceId` failure
 /// mode of the old prior-target reuse is gone (`lca_target` filters
 /// reaped slots and falls back to anchor when the live set is empty).
-pub(crate) fn pre_fire_target(p: &Profile, pre: &PreFireBurst, tree: &Tree) -> ResourceId {
+pub(crate) fn pre_fire_target(
+    p: &Profile,
+    pre: &PreFireBurst,
+    tree: &Tree,
+    profile: ProfileId,
+    out: &mut StepOutput,
+) -> ResourceId {
     match (p.kind, pre.intent) {
         (Some(ResourceKind::File), _) | (_, BurstIntent::Seed) => p.resource,
-        _ => lca_target(p.resource, &pre.dirty_resources, tree),
+        _ => lca_target(p.resource, &pre.dirty_resources, tree, profile, out),
     }
 }
 
@@ -1338,7 +1542,7 @@ mod tests {
         e.transition_to_verifying(pid, &mut out);
         out.probe_ops.clear();
 
-        e.unstable_response_drives_batching(pid, now);
+        e.unstable_response_drives_batching(pid, now, &mut out);
 
         assert!(out.probe_ops.is_empty());
         let phase = match &e.profiles.get(pid).unwrap().state {
@@ -1528,7 +1732,7 @@ mod tests {
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, Instant::now(), &mut out);
 
-        e.transition_to_draining(pid);
+        e.transition_to_draining(pid, &mut out);
 
         let p = e.profiles.get(pid).unwrap();
         let burst = match &p.state {
@@ -1541,10 +1745,109 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Precondition diagnostics — F-MED-7
+    //
+    // The Phase 3 precondition gates upgrade silent-return on state mismatch
+    // to a typed diagnostic (`InvalidBurstTransition`). The tests below pin
+    // each gate variant by invoking a helper on a deliberately wrong state.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn precondition_diagnoses_active_helper_called_on_idle() {
+        // `transition_to_verifying` requires `Active(PreFire(_))`. Calling
+        // it on a fresh Idle Profile triggers the precondition: the helper
+        // bails without minting a correlation, without emitting a Probe,
+        // and surfaces `InvalidBurstTransition` tagged with `observed: Idle`.
+        let (mut e, pid) = engine_with_profile();
+        let mut out = StepOutput::default();
+
+        e.transition_to_verifying(pid, &mut out);
+
+        assert!(
+            out.probe_ops.is_empty(),
+            "helper bails before any probe-side side effects",
+        );
+        let saw = out.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                specter_core::Diagnostic::InvalidBurstTransition {
+                    profile,
+                    helper: specter_core::BurstHelper::TransitionToVerifying,
+                    observed: specter_core::ProfileStateDiscriminant::Idle,
+                } if *profile == pid,
+            )
+        });
+        assert!(
+            saw,
+            "InvalidBurstTransition emitted with helper + observed tags; got {:?}",
+            out.diagnostics,
+        );
+    }
+
+    #[test]
+    fn precondition_diagnoses_idle_helper_called_on_active() {
+        // `start_seed_burst` requires `Idle`. Calling it on an
+        // already-Active Profile triggers the precondition: the helper
+        // bails before re-scheduling timers or re-minting a probe, and
+        // surfaces `InvalidBurstTransition` with `observed: ActivePreFire`.
+        // Replaces the prior `debug_assert!(matches!(p.state,
+        // Idle))` discipline that panicked in dev/CI and silently
+        // misrouted in release.
+        let (mut e, pid) = engine_with_profile();
+        let mut out = StepOutput::default();
+        e.start_seed_burst(pid, Instant::now(), &mut out);
+        // Drop the first burst's emissions; only the second call is under test.
+        out.probe_ops.clear();
+        out.watch_ops.clear();
+        out.diagnostics.clear();
+
+        e.start_seed_burst(pid, Instant::now(), &mut out);
+
+        assert!(
+            out.probe_ops.is_empty(),
+            "second start_seed_burst emits no Probe (precondition bails)",
+        );
+        let saw = out.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                specter_core::Diagnostic::InvalidBurstTransition {
+                    profile,
+                    helper: specter_core::BurstHelper::StartSeedBurst,
+                    observed: specter_core::ProfileStateDiscriminant::ActivePreFire,
+                } if *profile == pid,
+            )
+        });
+        assert!(
+            saw,
+            "InvalidBurstTransition emitted with helper=StartSeedBurst, \
+             observed=ActivePreFire; got {:?}",
+            out.diagnostics,
+        );
+    }
+
+    #[test]
+    fn precondition_on_stale_profile_is_silent() {
+        // Stale `ProfileId` is a benign post-detach race — no diagnostic.
+        // The precondition discriminates "live but wrong state" (loud)
+        // from "no longer exists" (silent).
+        let (mut e, pid) = engine_with_profile();
+        e.profiles.detach(&mut e.tree, pid);
+        let mut out = StepOutput::default();
+
+        e.transition_to_verifying(pid, &mut out);
+
+        assert!(
+            out.diagnostics.is_empty(),
+            "stale ProfileId triggers no diagnostic; got {:?}",
+            out.diagnostics,
+        );
+    }
+
+    // ---------------------------------------------------------------------------
     // LCA + force_walk + transition_to_verifying
     // ---------------------------------------------------------------------------
 
-    use crate::burst::{build_force_walk, lca_target, pre_fire_target};
+    use crate::burst::{build_force_walk, lca_pair, lca_target, pre_fire_target};
     use specter_core::{PreFireBurst, TimerId};
     use std::collections::BTreeSet;
 
@@ -1580,32 +1883,138 @@ mod tests {
     fn lca_empty_dirty_returns_anchor() {
         let (e, pid, root, _a, _b) = engine_with_two_children();
         let dirty = BTreeSet::new();
-        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
+        let mut out = StepOutput::default();
+        let target = lca_target(
+            e.profiles.get(pid).unwrap().resource,
+            &dirty,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(target, root);
+        assert!(out.diagnostics.is_empty());
     }
 
     #[test]
     fn lca_two_siblings_returns_parent() {
         let (e, pid, root, a, b) = engine_with_two_children();
         let dirty: BTreeSet<_> = [a, b].iter().copied().collect();
-        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
+        let mut out = StepOutput::default();
+        let target = lca_target(
+            e.profiles.get(pid).unwrap().resource,
+            &dirty,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(target, root);
+        assert!(out.diagnostics.is_empty());
     }
 
     #[test]
     fn lca_single_dirty_at_anchor_returns_anchor() {
         let (e, pid, root, _a, _b) = engine_with_two_children();
         let dirty: BTreeSet<_> = std::iter::once(root).collect();
-        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
+        let mut out = StepOutput::default();
+        let target = lca_target(
+            e.profiles.get(pid).unwrap().resource,
+            &dirty,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(target, root);
+        assert!(out.diagnostics.is_empty());
     }
 
     #[test]
     fn lca_single_dirty_deep_returns_self() {
         let (e, pid, _root, a, _b) = engine_with_two_children();
         let dirty: BTreeSet<_> = std::iter::once(a).collect();
-        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
+        let mut out = StepOutput::default();
+        let target = lca_target(
+            e.profiles.get(pid).unwrap().resource,
+            &dirty,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(target, a);
+        assert!(out.diagnostics.is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // LCA integrity diagnostics — F-MED-4
+    //
+    // `lca_pair` emits `LcaIntegrityViolation` source-tagged on either
+    // failure mode. The lca_target-level `live` filter stays silent
+    // (benign delete-recreate race).
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn lca_pair_on_disjoint_roots_emits_broken_ancestry() {
+        // Construct a forest: `a` and `b` both have `parent = None`. The
+        // depth-equalisation loops don't run (both depth 0). The
+        // lockstep loop attempts `tree.parent(a)?` which returns None,
+        // so the helper emits `BrokenAncestry` and bails. This is
+        // structurally unreachable from `lca_target` in production (the
+        // engine maintains a single FS-root scaffold every attach
+        // descends from), but the diagnostic surfaces the invariant
+        // break if a future refactor ever produces multi-root Trees.
+        let mut e = Engine::new();
+        let a = e.tree.ensure(None, "alpha", ResourceRole::User);
+        let b = e.tree.ensure(None, "beta", ResourceRole::User);
+        let pid = specter_core::ProfileId::default();
+        let mut out = StepOutput::default();
+
+        let res = lca_pair(a, b, &e.tree, pid, &mut out);
+
+        assert_eq!(res, None);
+        let saw = out.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                specter_core::Diagnostic::LcaIntegrityViolation {
+                    source: specter_core::LcaIntegritySource::BrokenAncestry,
+                    ..
+                },
+            )
+        });
+        assert!(
+            saw,
+            "expected LcaIntegrityViolation(BrokenAncestry); got {:?}",
+            out.diagnostics,
+        );
+    }
+
+    #[test]
+    fn lca_pair_on_stale_id_emits_stale_id() {
+        // A stale ResourceId reaching `lca_pair` directly bypasses
+        // `lca_target`'s upstream `live` filter — a fresh class of bug
+        // the diagnostic surfaces. We construct a live Tree, reap one
+        // entry, then call `lca_pair` directly.
+        let (mut e, pid, _root, a, _b) = engine_with_two_children();
+        let mut reap_out = StepOutput::default();
+        e.tree.try_reap(a, &mut reap_out);
+        let mut out = StepOutput::default();
+        let live_id = e.profiles.get(pid).unwrap().resource;
+
+        let res = lca_pair(a, live_id, &e.tree, pid, &mut out);
+
+        assert_eq!(res, None);
+        let saw = out.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                specter_core::Diagnostic::LcaIntegrityViolation {
+                    profile,
+                    source: specter_core::LcaIntegritySource::StaleId,
+                } if *profile == pid,
+            )
+        });
+        assert!(
+            saw,
+            "expected LcaIntegrityViolation(StaleId); got {:?}",
+            out.diagnostics,
+        );
     }
 
     #[test]
@@ -1614,10 +2023,23 @@ mod tests {
         // Reap `a` to make its id stale.
         e.tree.try_reap(a, &mut StepOutput::default());
         // Stale id in the set; LCA must filter and return anchor (since the
-        // remaining live entry is empty after the filter).
+        // remaining live entry is empty after the filter). The stale-id
+        // drop happens at the `live` filter — no diagnostic; per-event
+        // noise during delete-recreate churn would flood logs.
         let dirty: BTreeSet<_> = std::iter::once(a).collect();
-        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
+        let mut out = StepOutput::default();
+        let target = lca_target(
+            e.profiles.get(pid).unwrap().resource,
+            &dirty,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(target, root);
+        assert!(
+            out.diagnostics.is_empty(),
+            "live-filter drop is silent (benign delete-recreate race)",
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1653,21 +2075,34 @@ mod tests {
         // directly; promoting past the anchor would route the probe outside
         // the Profile's coverage.
         let (mut e, pid, _parent, file_anchor) = engine_with_file_anchor();
+        let mut out = StepOutput::default();
         let pre = pre_fire_burst_for_test(
             BurstIntent::Standard,
             std::iter::once(file_anchor).collect(),
         );
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree, pid, &mut out);
         assert_eq!(target, file_anchor);
 
         // Same conclusion even if dirty is empty.
         let pre_empty = pre_fire_burst_for_test(BurstIntent::Standard, BTreeSet::new());
-        let target_empty = pre_fire_target(e.profiles.get(pid).unwrap(), &pre_empty, &e.tree);
+        let target_empty = pre_fire_target(
+            e.profiles.get(pid).unwrap(),
+            &pre_empty,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(target_empty, file_anchor);
 
         // And under Seed intent.
         let pre_seed = pre_fire_burst_for_test(BurstIntent::Seed, BTreeSet::new());
-        let target_seed = pre_fire_target(e.profiles.get(pid).unwrap(), &pre_seed, &e.tree);
+        let target_seed = pre_fire_target(
+            e.profiles.get(pid).unwrap(),
+            &pre_seed,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(target_seed, file_anchor);
 
         // Silence unused-mut on `e` when no further mutation runs.
@@ -1681,13 +2116,20 @@ mod tests {
         // history rather than a stable subtree verdict, so they probe at
         // the anchor unconditionally.
         let (e, pid, root, a, _b) = engine_with_two_children();
+        let mut out = StepOutput::default();
         let pre = pre_fire_burst_for_test(BurstIntent::Seed, std::iter::once(a).collect());
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree, pid, &mut out);
         assert_eq!(target, root);
 
         // Same with empty dirty.
         let pre_empty = pre_fire_burst_for_test(BurstIntent::Seed, BTreeSet::new());
-        let target_empty = pre_fire_target(e.profiles.get(pid).unwrap(), &pre_empty, &e.tree);
+        let target_empty = pre_fire_target(
+            e.profiles.get(pid).unwrap(),
+            &pre_empty,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(target_empty, root);
     }
 
@@ -1697,15 +2139,22 @@ mod tests {
         // `lca_target(anchor, dirty)`. Two sibling dirty entries reduce to
         // their parent (the anchor here).
         let (e, pid, root, a, b) = engine_with_two_children();
+        let mut out = StepOutput::default();
         let dirty: BTreeSet<_> = [a, b].iter().copied().collect();
         let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty);
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree, pid, &mut out);
         assert_eq!(target, root);
 
         // Single dirty entry reduces to that entry itself (already a Dir).
         let pre_single =
             pre_fire_burst_for_test(BurstIntent::Standard, std::iter::once(a).collect());
-        let target_single = pre_fire_target(e.profiles.get(pid).unwrap(), &pre_single, &e.tree);
+        let target_single = pre_fire_target(
+            e.profiles.get(pid).unwrap(),
+            &pre_single,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(target_single, a);
     }
 
@@ -1717,8 +2166,9 @@ mod tests {
         // dirty-Resource was reaped between the original verify and the
         // reconfirm.
         let (e, pid, root, _a, _b) = engine_with_two_children();
+        let mut out = StepOutput::default();
         let pre = pre_fire_burst_for_test(BurstIntent::Standard, BTreeSet::new());
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree, pid, &mut out);
         assert_eq!(target, root);
     }
 
@@ -1788,11 +2238,19 @@ mod tests {
         );
 
         let dirty: BTreeSet<_> = [leaf_a, leaf_b].iter().copied().collect();
-        let target = lca_target(e.profiles.get(pid).unwrap().resource, &dirty, &e.tree);
+        let mut out = StepOutput::default();
+        let target = lca_target(
+            e.profiles.get(pid).unwrap().resource,
+            &dirty,
+            &e.tree,
+            pid,
+            &mut out,
+        );
         assert_eq!(
             target, l2,
             "LCA of leaves under l3a and l3b is l2 (their shared depth-2 ancestor)",
         );
+        assert!(out.diagnostics.is_empty());
     }
 
     #[test]
@@ -2094,7 +2552,7 @@ mod tests {
         // emitting Cancel — the verify just responded, so no in-flight
         // probe to revoke. (`unstable_response_drives_batching` does not
         // call `cancel_pending_probe`.)
-        e.unstable_response_drives_batching(pid, now + Duration::from_millis(2));
+        e.unstable_response_drives_batching(pid, now + Duration::from_millis(2), &mut out);
         out.watch_ops.clear();
 
         e.event_drives_batching(pid, a, now + Duration::from_millis(3), &mut out);

@@ -60,8 +60,14 @@ impl PartialOrd for TimerEntry {
 /// transitions (`BurstDeadline` orphans at `Awaiting` entry;
 /// `AwaitGateDeadline` orphans at `Rebasing` entry); all clear
 /// lazily at their original deadlines.
+///
+/// **Visibility.** `pub(crate)` — the heap itself is engine-internal;
+/// the bin layer only ever holds the [`TimerEntry`] returned by
+/// [`crate::Engine::pop_expired`]. Demoting the type keeps the engine
+/// crate's public surface scoped to the dispatcher view of the timer
+/// subsystem.
 #[derive(Debug, Default)]
-pub struct TimerHeap {
+pub(crate) struct TimerHeap {
     inner: BinaryHeap<Reverse<TimerEntry>>,
     /// Monotonic counter for `TimerId` minting. Saturates at `u64::MAX` —
     /// at one billion timers per second that boundary is ~580 years out,
@@ -70,11 +76,6 @@ pub struct TimerHeap {
 }
 
 impl TimerHeap {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Schedule a fresh timer. Returns the minted [`TimerId`]; the engine
     /// stores this on the owning Profile's burst so `pop_expired` can
     /// recognize live timers from cancelled ones.
@@ -117,18 +118,27 @@ impl TimerHeap {
     /// Iterate every entry currently in the heap, including stale entries
     /// that lazy invalidation has not yet collected. Order is unspecified
     /// (`BinaryHeap` exposes its internal layout, not the priority order).
-    /// Intended for tests and debug introspection.
-    pub fn iter(&self) -> impl Iterator<Item = &TimerEntry> {
+    /// Test-only introspection — production code reads the heap through
+    /// [`peek_top`](Self::peek_top) and [`pop_top`](Self::pop_top), which
+    /// honour the priority order.
+    #[cfg(test)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &TimerEntry> {
         self.inner.iter().map(|r| &r.0)
     }
 
+    /// Length and emptiness accessors are test-only introspection (asserted
+    /// against in `#[cfg(test)]` siblings to pin steady-state heap sizes);
+    /// production code reads the heap through [`peek_top`](Self::peek_top)
+    /// and [`pop_top`](Self::pop_top) exclusively.
+    #[cfg(test)]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.inner.len()
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 }
@@ -147,7 +157,7 @@ mod tests {
 
     #[test]
     fn empty_heap_peek_and_pop_return_none() {
-        let mut h = TimerHeap::new();
+        let mut h = TimerHeap::default();
         assert!(h.peek_top().is_none());
         assert!(h.pop_top().is_none());
         assert_eq!(h.len(), 0);
@@ -156,7 +166,7 @@ mod tests {
 
     #[test]
     fn schedule_returns_distinct_ids() {
-        let mut h = TimerHeap::new();
+        let mut h = TimerHeap::default();
         let now = Instant::now();
         let a = h.schedule(now, ProfileId::default(), TimerKind::Settle);
         let b = h.schedule(now, ProfileId::default(), TimerKind::Settle);
@@ -168,7 +178,7 @@ mod tests {
 
     #[test]
     fn len_and_is_empty_track_schedules_and_pops() {
-        let mut h = TimerHeap::new();
+        let mut h = TimerHeap::default();
         let now = Instant::now();
         assert!(h.is_empty());
         h.schedule(now, ProfileId::default(), TimerKind::Settle);
@@ -185,7 +195,7 @@ mod tests {
     fn monotonic_counter_persists_across_pops() {
         // Schedule → pop → schedule. The second-minted id must differ from
         // the first; the counter does not recycle on pop.
-        let mut h = TimerHeap::new();
+        let mut h = TimerHeap::default();
         let now = Instant::now();
         let a = h.schedule(now, ProfileId::default(), TimerKind::Settle);
         h.pop_top();
@@ -195,7 +205,7 @@ mod tests {
 
     #[test]
     fn peek_top_is_smallest_after_schedules() {
-        let mut h = TimerHeap::new();
+        let mut h = TimerHeap::default();
         let base = Instant::now();
         let later = base + Duration::from_millis(50);
         let earlier = base + Duration::from_millis(10);
@@ -209,7 +219,7 @@ mod tests {
     fn pop_breaks_ties_by_profile_then_id() {
         // Same deadline, different profile: the smaller profile pops first
         // even when scheduled later — confirms profile-tier tie-break.
-        let mut h = TimerHeap::new();
+        let mut h = TimerHeap::default();
         let when = Instant::now();
         let p_high = pid(0xdead_beef);
         let p_low = pid(0x0001);
@@ -228,7 +238,7 @@ mod tests {
         // Same deadline, same profile, two timers: the smaller-Ord TimerId
         // pops first. Don't assume the direction of TimerId's Ord (slotmap's
         // KeyData encoding is opaque); verify smaller-of-the-two-comes-first.
-        let mut h = TimerHeap::new();
+        let mut h = TimerHeap::default();
         let when = Instant::now();
         let p = pid(1);
         let id_a = h.schedule(when, p, TimerKind::Settle);
@@ -249,7 +259,7 @@ mod tests {
         fn prop_pop_drains_in_non_decreasing_order(
             deltas in prop::collection::vec(0u64..1_000_000, 1..32),
         ) {
-            let mut h = TimerHeap::new();
+            let mut h = TimerHeap::default();
             let base = Instant::now();
             for d in &deltas {
                 h.schedule(base + Duration::from_micros(*d), ProfileId::default(), TimerKind::Settle);
@@ -266,7 +276,7 @@ mod tests {
 
         #[test]
         fn prop_schedule_returns_distinct_ids(n in 1usize..64) {
-            let mut h = TimerHeap::new();
+            let mut h = TimerHeap::default();
             let now = Instant::now();
             let mut ids = Vec::with_capacity(n);
             for _ in 0..n {
@@ -281,7 +291,7 @@ mod tests {
         fn prop_peek_matches_pop(
             deltas in prop::collection::vec(0u64..1_000_000, 1..16),
         ) {
-            let mut h = TimerHeap::new();
+            let mut h = TimerHeap::default();
             let base = Instant::now();
             for d in &deltas {
                 h.schedule(base + Duration::from_micros(*d), ProfileId::default(), TimerKind::Settle);

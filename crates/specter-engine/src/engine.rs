@@ -56,7 +56,24 @@ pub struct Engine {
     /// registry the Promoter helpers mutate.
     pub(crate) promoters: PromoterRegistry,
     pub(crate) timers: TimerHeap,
-    pub(crate) next_correlation: u64,
+    /// Monotonic counter for [`specter_core::op::ProbeCorrelation`]
+    /// minting. Read and bumped exclusively by
+    /// [`Engine::mint_owner_correlation`] in `probe_channel.rs`. Kept
+    /// in a separate counter from the Effect side so the two token
+    /// spaces never share a numeric range — a misrouted Effect
+    /// completion (`ProbeCorrelation` value flowing into an
+    /// `EffectComplete` filter, or symmetric) cannot accidentally
+    /// match. Saturating arithmetic plus a `debug_assert!` on the mint
+    /// path catches the (unreachable) saturation case.
+    pub(crate) next_probe_correlation: u64,
+    /// Monotonic counter for [`specter_core::CorrelationId`] minting.
+    /// Read and bumped exclusively by `Engine::next_effect_correlation`
+    /// in `transitions.rs`; consumed by `emit_effects` at every
+    /// `Effect` push so the actuator-side coalescer can correlate
+    /// completions back to the originating Effect across the Latest
+    /// dedup. Disjoint from [`Self::next_probe_correlation`] per the
+    /// rationale on that field.
+    pub(crate) next_effect_correlation: u64,
 }
 
 impl Engine {
@@ -858,10 +875,13 @@ impl Engine {
             if top.deadline > now {
                 return None;
             }
-            let entry = self
-                .timers
-                .pop_top()
-                .expect("peek_top returned Some; pop_top must too");
+            let entry = self.timers.pop_top().expect(
+                "TimerHeap.pop_top returned None immediately after peek_top \
+                 returned Some — BinaryHeap invariant violated (would require \
+                 concurrent mutation or a borrow-rule breach); structurally \
+                 unreachable under `pop_expired`'s single-threaded \
+                 `&mut self` window",
+            );
             if Self::is_timer_referenced(&self.profiles, entry.profile, entry.kind, entry.id) {
                 return Some(entry);
             }
@@ -1231,8 +1251,8 @@ mod tests {
 
     #[test]
     fn mint_probe_correlation_is_monotonic_per_profile() {
-        // Three Profiles, each minted once: the shared
-        // `Engine.next_correlation` counter advances monotonically
+        // Three Profiles, each minted once: the
+        // `Engine.next_probe_correlation` counter advances monotonically
         // across mints regardless of which Profile owns each open
         // channel. Pinning to discrete Profiles avoids the I5
         // double-open assertion (one open channel per Profile).
@@ -1301,7 +1321,8 @@ mod tests {
         assert!(e.subs.is_empty());
         assert!(e.timers.is_empty());
         assert!(e.next_deadline().is_none());
-        assert_eq!(e.next_correlation, 0);
+        assert_eq!(e.next_probe_correlation, 0);
+        assert_eq!(e.next_effect_correlation, 0);
     }
 
     // ===== decompose_attach_path =====

@@ -1001,6 +1001,21 @@ pub fn log_diagnostic(d: &Diagnostic) {
             path = %path.display(),
             "dynamic Sub reaped (anchor terminal — Promoter dynamic_subs entry dropped)",
         ),
+        Diagnostic::InvalidBurstTransition {
+            profile,
+            helper,
+            observed,
+        } => tracing::warn!(
+            ?profile,
+            ?helper,
+            ?observed,
+            "burst lifecycle helper precondition failed (state-machine routing breach)",
+        ),
+        Diagnostic::LcaIntegrityViolation { profile, source } => tracing::warn!(
+            ?profile,
+            ?source,
+            "LCA integrity violation in burst's dirty_resources reduction (fell back to anchor)",
+        ),
     }
 }
 

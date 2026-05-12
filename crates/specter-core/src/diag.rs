@@ -7,7 +7,7 @@
 use crate::ids::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
 use crate::input::{FsEvent, OverflowScope};
 use crate::op::{ProbeCorrelation, ProbeOwner, WatchFailure};
-use crate::profile::BurstIntent;
+use crate::profile::{BurstIntent, ProfileStateDiscriminant};
 use crate::resource::ResourceKind;
 use compact_str::CompactString;
 use std::path::PathBuf;
@@ -23,6 +23,68 @@ pub enum ClaimKind {
     Anchor,
     WatchRootParent,
     DescentPrefix,
+}
+
+/// Identifies the burst-lifecycle helper whose precondition failed.
+///
+/// Tagged onto [`Diagnostic::InvalidBurstTransition`]. Each variant
+/// names exactly one helper in `specter-engine`'s `burst.rs`. Variants
+/// are added when a helper is created; helpers without a typed
+/// precondition (the idempotent `finish_burst_to_idle`) are absent by
+/// design.
+///
+/// The enum is exported from `specter-core` rather than `specter-engine`
+/// because the [`Diagnostic`] type owns it transitively — the bin layer
+/// and integration tests inspect the diagnostic without depending on the
+/// engine's helper module.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BurstHelper {
+    /// `Engine::start_seed_burst` — Idle → `Active(PreFire(Seed))`.
+    StartSeedBurst,
+    /// `Engine::start_standard_burst` — Idle → `Active(PreFire(Standard))`.
+    StartStandardBurst,
+    /// `Engine::event_drives_batching` — pre-fire FsEvent absorb.
+    EventDrivesBatching,
+    /// `Engine::unstable_response_drives_batching` — unstable verify
+    /// response re-arms Batching.
+    UnstableResponseDrivesBatching,
+    /// `Engine::transition_to_verifying` — Batching/Draining → Verifying.
+    TransitionToVerifying,
+    /// `Engine::transition_to_draining` — Verifying → Draining.
+    TransitionToDraining,
+    /// `Engine::transition_to_awaiting` — fire transition
+    /// (PreFire → PostFire).
+    TransitionToAwaiting,
+    /// `Engine::transition_to_rebasing` — Awaiting → Rebasing.
+    TransitionToRebasing,
+    /// `Engine::absorb_event_into_fire_tail` — post-fire FsEvent absorb.
+    AbsorbEventIntoFireTail,
+}
+
+/// Failure mode for an [`Diagnostic::LcaIntegrityViolation`] emission.
+///
+/// The engine's LCA reduction (`burst::lca_target` →  `burst::lca_pair`)
+/// walks each `dirty_resources` entry up the Tree to its joint
+/// ancestor; the variants below distinguish the two ways that walk can
+/// abort.
+///
+/// In production each is structurally unreachable — the upstream
+/// `live` filter drops stale ids before `lca_pair` runs, and ancestry
+/// walks bottom out at the FS-root scaffold — but instrumenting both
+/// keeps the failure surface visible if a future refactor breaks
+/// either invariant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LcaIntegritySource {
+    /// `tree.get(id)` returned `None` at `lca_pair`'s entry — an upstream
+    /// caller bypassed the `live` filter and handed a stale id through.
+    /// Fresh class of bug; the silent live-filter at `lca_target` should
+    /// have caught this.
+    StaleId,
+    /// `tree.parent(id)` returned `None` mid-walk — the candidate's
+    /// ancestor chain ran out before two candidates aligned. Indicates a
+    /// structural break in the Tree (a node whose `parent` pointer
+    /// dangles) or a depth-equalisation error.
+    BrokenAncestry,
 }
 
 /// Subject of a [`Diagnostic::PromoterClaimPurged`] emission.
@@ -443,5 +505,43 @@ pub enum Diagnostic {
         promoter: PromoterId,
         sub: SubId,
         path: PathBuf,
+    },
+    /// A burst-lifecycle helper was invoked on a Profile whose state
+    /// did not match the helper's typed precondition (e.g.,
+    /// `transition_to_verifying` called on a Profile in
+    /// `ActivePostFire`). The helper bails before mutating any
+    /// state; this variant surfaces the routing breach so the
+    /// originating dispatcher can be fixed.
+    ///
+    /// `helper` names which entry point bailed; `observed` reports
+    /// the Profile's state at the call. Stale `ProfileId`
+    /// (`profiles.get(_) == None`) does NOT emit this variant — that
+    /// is a benign post-detach race, surfaced only when an op
+    /// targeting the missing slot rises through the usual handlers.
+    ///
+    /// Structurally unreachable in v1 — every dispatcher gates on the
+    /// state variant before reaching a helper — but the precondition
+    /// gates the gate, so any future routing regression surfaces here
+    /// instead of silently dropping the transition.
+    InvalidBurstTransition {
+        profile: ProfileId,
+        helper: BurstHelper,
+        observed: ProfileStateDiscriminant,
+    },
+    /// The engine's LCA reduction over a burst's `dirty_resources`
+    /// failed an internal integrity check. `source` distinguishes the
+    /// two failure modes; the caller (`lca_target`) recovers by
+    /// folding the joint candidate to anchor so the burst still has a
+    /// probe target — the diagnostic surfaces the breach without
+    /// stalling the lifecycle.
+    ///
+    /// See [`LcaIntegritySource`] for the two failure modes. Both are
+    /// structurally unreachable in v1 (the upstream `live` filter
+    /// catches stale ids; Tree ancestry walks always bottom out at the
+    /// FS-root scaffold), so an emission here is a regression signal,
+    /// not noise.
+    LcaIntegrityViolation {
+        profile: ProfileId,
+        source: LcaIntegritySource,
     },
 }

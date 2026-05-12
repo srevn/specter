@@ -1599,41 +1599,64 @@ impl Engine {
         // `last_settled_hash_at_loss` witness in survival mode). Every
         // Sub that has a fire history on this Profile re-fires once,
         // unconditionally — drift is a per-Profile signal under the
-        // cross-field invariant; per-key narrowing is gone. The rebase
-        // (`baseline := current`) happens in both branches below; on the
-        // drift-fires branch it must run before `transition_to_awaiting`
-        // so the Profile's view is consistent for any FsEvent absorbed
-        // during the post-fire tail (Awaiting/Rebasing).
+        // cross-field invariant; per-key narrowing is gone.
+        //
+        // **Why two rebases on the drift branch.** Seed's semantic is
+        // `baseline := observed`; the drift detection fires the
+        // recovery Effects FIRST, then completes that semantic by
+        // calling `rebase_baseline` before `transition_to_awaiting`.
+        // The post-Rebasing rebase (in `dispatch_rebase_ok`) sits on
+        // top — it's the Standard-style post-command refresh, capturing
+        // the disk state AFTER the recovery commands ran. The two
+        // rebases serve different roles, not duplicate ones: this one
+        // seals the Seed observation; the post-Rebasing one seals the
+        // post-Effect view. Standard bursts skip this pre-Awaiting
+        // rebase because their baseline was already authoritative at
+        // burst start; only Seed completes a `baseline := observed`
+        // semantic mid-cycle.
+        //
+        // The pre-Awaiting rebase here is also forward-defensive: no
+        // current code path reads `Profile.baseline` during Awaiting /
+        // Rebasing (the absorb arm touches only
+        // `PostFireBurst.force_walk_resources`; `transition_to_rebasing`
+        // ships `Profile.current`, not `baseline`), but pinning the
+        // Profile's view here keeps the cross-field invariant intact
+        // against any future absorb / rebase path that does read it.
         if self.seed_drift_observed(profile_id) {
-            let drifted_keys: SmallVec<[DedupKey; 2]> = self
+            // Project `DedupKey::Subtree { sub, profile }` → `sub`. The
+            // `profile` field is constant across the iteration (it's
+            // `profile_id`), and the PerFile variant is filtered out
+            // upfront — both of which the `&[SubId]` payload makes
+            // unrepresentable. The resulting slice is sorted by `SubId`
+            // because `fired_subs` is a `BTreeSet<DedupKey>` and
+            // `DedupKey::Subtree`'s `Ord` decomposes to `(sub, profile)`
+            // with profile constant.
+            let drifted: SmallVec<[SubId; 2]> = self
                 .profiles
                 .get(profile_id)
                 .map(|p| {
                     p.fired_subs
                         .iter()
-                        .filter(|k| matches!(k, DedupKey::Subtree { .. }))
-                        .cloned()
+                        .filter_map(|k| match k {
+                            DedupKey::Subtree { sub, .. } => Some(*sub),
+                            DedupKey::PerFile { .. } => None,
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
-            // `drifted_keys` may be empty if the Profile has only PerFile
+            // `drifted` may be empty if the Profile has only PerFile
             // fires (Subtree filter excludes them) or if every Subtree Sub
             // detached between record and now (a same-step race —
             // `detach_sub_inner` normally purges fired_subs). Fall
             // through to the no-drift finish path in either case.
-            if !drifted_keys.is_empty() {
-                let outcome = self.emit_effects(
-                    profile_id,
-                    EmitMode::SeedDrift {
-                        drifted: &drifted_keys,
-                    },
-                    out,
-                );
+            if !drifted.is_empty() {
+                let outcome =
+                    self.emit_effects(profile_id, EmitMode::SeedDrift { drifted: &drifted }, out);
                 if outcome.count > 0 {
                     if let Some(p) = self.profiles.get_mut(profile_id) {
                         p.rebase_baseline();
                     }
-                    self.transition_to_awaiting(profile_id, outcome.count, now);
+                    self.transition_to_awaiting(profile_id, outcome.count, now, out);
                     return;
                 }
             }
@@ -1810,9 +1833,15 @@ impl Engine {
             // it will rebase when the Rebasing probe response lands
             // (`dispatch_rebase_ok`). Standard mode: every matching Sub
             // emits, suppress controlled by `forced`.
+            //
+            // Standard intentionally skips the pre-Awaiting rebase that
+            // `dispatch_seed_ok`'s drift branch performs: Standard's
+            // baseline was authoritative at burst start; only Seed
+            // completes a `baseline := observed` semantic mid-cycle
+            // (see `dispatch_seed_ok` for the rationale).
             let outcome = self.emit_effects(profile_id, EmitMode::Standard { forced }, out);
             if outcome.count > 0 {
-                self.transition_to_awaiting(profile_id, outcome.count, now);
+                self.transition_to_awaiting(profile_id, outcome.count, now, out);
             } else {
                 self.finish_burst_to_idle(profile_id, out);
             }
@@ -1821,7 +1850,7 @@ impl Engine {
             // `Profile.current` (just spliced in by graft); the reconfirm
             // probe compares against `current`. No need to pin a duplicate
             // snapshot on the phase variant.
-            self.transition_to_draining(profile_id);
+            self.transition_to_draining(profile_id, out);
         } else if forced {
             // Not-stable + forced → fire Effect with forced=true. Same
             // Awaiting / finish-to-Idle branching as the stable + dirty=0
@@ -1830,7 +1859,7 @@ impl Engine {
             // returns count == 0.
             let outcome = self.emit_effects(profile_id, EmitMode::Standard { forced: true }, out);
             if outcome.count > 0 {
-                self.transition_to_awaiting(profile_id, outcome.count, now);
+                self.transition_to_awaiting(profile_id, outcome.count, now, out);
             } else {
                 self.finish_burst_to_idle(profile_id, out);
             }
@@ -1838,7 +1867,7 @@ impl Engine {
             // Not-stable + !forced → re-arm debounce in `Batching`. By
             // construction no probe is in flight (we're inside the
             // response handler), so no Cancel is emitted.
-            self.unstable_response_drives_batching(profile_id, now);
+            self.unstable_response_drives_batching(profile_id, now, out);
         }
     }
 
@@ -2008,22 +2037,21 @@ impl Engine {
         // BurstDeadline to PreFire only. A PostFire match arm would be
         // dead code; instead, falling through the pre-fire match keeps
         // the helper's body PreFire-typed end-to-end.
+        //
+        // Both pre-fire arms write `pre.forced = true` identically; only
+        // the phase-decision differs (Batching/Draining → transition to
+        // Verifying on the next probe; Verifying → wait for the in-flight
+        // response, which will dispatch with `forced = true`). Lifting
+        // the write out makes "burst-deadline elapsed ⇒ forced fire on
+        // next emission" the helper's first statement.
         let needs_verify = if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state
         {
-            match &pre.phase {
-                PreFirePhase::Batching { .. } | PreFirePhase::Draining => {
-                    pre.forced = true;
-                    true
-                }
-                // Verifying: probe in flight; no second emission. The
-                // response, when it arrives, dispatches with
-                // `forced = true`.
-                PreFirePhase::Verifying => {
-                    pre.forced = true;
-                    false
-                }
-            }
+            pre.forced = true;
+            matches!(
+                &pre.phase,
+                PreFirePhase::Batching { .. } | PreFirePhase::Draining,
+            )
         } else {
             return;
         };
@@ -2167,10 +2195,10 @@ impl Engine {
                         sub: sub_id,
                         profile: profile_id,
                     };
-                    // SeedDrift narrows to its pre-filtered key set; Standard
+                    // SeedDrift narrows to its pre-filtered Sub set; Standard
                     // emits every Sub (modulo the suppress check below).
                     if let EmitMode::SeedDrift { drifted } = mode
-                        && !drifted.contains(&dk)
+                        && !drifted.contains(&sub_id)
                     {
                         continue;
                     }
@@ -2429,19 +2457,23 @@ impl Engine {
         out
     }
 
-    /// Mint a fresh `CorrelationId` for an Effect. Engine-monotonic, sharing
-    /// the same `Engine.next_correlation` counter as
-    /// [`Engine::mint_probe_correlation`] — the typed wrappers
-    /// ([`CorrelationId`] vs `ProbeCorrelation`) keep the spaces disjoint.
+    /// Mint a fresh `CorrelationId` for an Effect. Engine-monotonic on the
+    /// dedicated `Engine.next_effect_correlation` counter — disjoint from
+    /// the probe-side counter (`Engine.next_probe_correlation`, bumped by
+    /// `Engine::mint_owner_correlation`). The disjoint counters plus the
+    /// typed wrappers ([`CorrelationId`] vs `ProbeCorrelation`) keep the
+    /// spaces structurally unreachable from each other — even a
+    /// misrouted token cannot accidentally numerically match across
+    /// spaces.
     fn next_effect_correlation(&mut self) -> CorrelationId {
         debug_assert!(
-            self.next_correlation < u64::MAX,
-            "Engine.next_correlation saturated at u64::MAX; subsequent effect \
-             correlations would collide with probe correlations and break \
+            self.next_effect_correlation < u64::MAX,
+            "Engine.next_effect_correlation saturated at u64::MAX; \
+             subsequent effect correlations would collide and break \
              actuator-side coalescing",
         );
-        self.next_correlation = self.next_correlation.saturating_add(1);
-        CorrelationId(self.next_correlation)
+        self.next_effect_correlation = self.next_effect_correlation.saturating_add(1);
+        CorrelationId(self.next_effect_correlation)
     }
 
     /// Single-pass classification of owners that carry a dispatch
@@ -2543,7 +2575,7 @@ pub(crate) struct EmitOutcome {
 ///
 /// - **Subtree key gating.** Standard fires every `SubtreeRoot` Sub on
 ///   the Profile (modulo the suppress check). SeedDrift fires only the
-///   Subs whose `DedupKey::Subtree` is in `drifted`.
+///   Subs in `drifted` (one [`SubId`] per drifted Subtree-keyed Sub).
 /// - **Suppress.** Standard honours dedup-hash suppression unless
 ///   `forced` is set. SeedDrift's `drifted` is built from keys where
 ///   `last_emitted ≠ current` by construction, so suppression is
@@ -2557,6 +2589,15 @@ pub(crate) struct EmitOutcome {
 ///   post-Seed `current` lacks the per-leaf history needed for a
 ///   faithful per-file diff).
 ///
+/// **Payload type.** `drifted: &[SubId]` rather than `&[DedupKey]`. By
+/// construction the slice carries only `DedupKey::Subtree { sub, profile }`
+/// entries whose `profile == profile_id` (the focal Profile); projecting
+/// to `SubId` upstream drops the redundant profile field AND removes
+/// the variant-ambiguity (a `DedupKey::PerFile` cannot be represented
+/// in `&[SubId]`). The SeedDrift Subtree-arm filter becomes
+/// `drifted.contains(&sub_id)` — same cost class as `contains(&dk)`,
+/// stronger type contract.
+///
 /// [`Effect::forced`] is derived from the variant via
 /// [`Self::effect_forced`]: `true` only on `Standard { forced: true }`.
 /// SeedDrift always emits with `forced = false` — the engine reached a
@@ -2566,7 +2607,7 @@ pub(crate) struct EmitOutcome {
 #[derive(Copy, Clone)]
 enum EmitMode<'a> {
     Standard { forced: bool },
-    SeedDrift { drifted: &'a [DedupKey] },
+    SeedDrift { drifted: &'a [SubId] },
 }
 
 impl EmitMode<'_> {

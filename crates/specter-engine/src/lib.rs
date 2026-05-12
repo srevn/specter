@@ -19,7 +19,10 @@ mod transitions;
 
 pub use coverage::{covers, nearest_covering_ancestor};
 pub use engine::Engine;
-pub use timer::{TimerEntry, TimerHeap};
+// `TimerHeap` itself is engine-internal (`pub(crate)`); only `TimerEntry`
+// crosses the crate boundary — the bin layer reads its fields off the
+// `Engine::pop_expired` return value.
+pub use timer::TimerEntry;
 
 // Re-export `SubAttachRequest` from `core` for back-compat with sites
 // that imported it from `specter_engine`.

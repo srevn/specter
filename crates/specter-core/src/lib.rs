@@ -26,7 +26,7 @@ mod sub;
 mod time;
 mod tree;
 
-pub use diag::{ClaimKind, Diagnostic, PromoterClaimKind};
+pub use diag::{BurstHelper, ClaimKind, Diagnostic, LcaIntegritySource, PromoterClaimKind};
 pub use diff::{Diff, EntryRef, Rename};
 pub use effect::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome};
 pub use ids::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
@@ -39,7 +39,8 @@ pub use output::StepOutput;
 pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use profile::{
     ActiveBurst, AnchorClaim, BurstIntent, DescentRemaining, DescentState, PostFireBurst,
-    PostFirePhase, PreFireBurst, PreFirePhase, Profile, ProfileMap, ProfileState, TimerKind,
+    PostFirePhase, PreFireBurst, PreFirePhase, Profile, ProfileMap, ProfileState,
+    ProfileStateDiscriminant, TimerKind,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{

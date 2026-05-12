@@ -11,10 +11,13 @@
 //!
 //! This module is the single source of three disciplines:
 //! 1. Counter monotonicity for the probe side — `mint_owner_correlation`
-//!    is the only path that bumps `Engine.next_correlation` for a probe
-//!    token. The effect side (`next_effect_correlation` in
-//!    `transitions.rs`) shares the underlying counter; the typed wrappers
-//!    (`ProbeCorrelation` vs `CorrelationId`) keep the spaces disjoint.
+//!    is the only path that bumps `Engine.next_probe_correlation`. The
+//!    effect side has its own counter (`Engine.next_effect_correlation`,
+//!    bumped by `Engine::next_effect_correlation` in `transitions.rs`);
+//!    the disjoint counters PLUS the typed wrappers (`ProbeCorrelation`
+//!    vs `CorrelationId`) keep the spaces structurally unreachable from
+//!    each other — a misrouted token cannot accidentally numerically
+//!    match across spaces.
 //! 2. Channel-state slot — only `mint_owner_correlation` writes
 //!    `pending_probe = Some(_)`; only `cancel_owner_probe` and the
 //!    `on_probe_response` pre-dispatch clear write `pending_probe = None`.
@@ -96,13 +99,13 @@ impl Engine {
         self.pending_slot_mut(owner)?;
 
         debug_assert!(
-            self.next_correlation < u64::MAX,
-            "Engine.next_correlation saturated at u64::MAX; subsequent probe \
-             correlations would collide with effect correlations and break \
-             stale-response detection",
+            self.next_probe_correlation < u64::MAX,
+            "Engine.next_probe_correlation saturated at u64::MAX; subsequent \
+             probe correlations would collide and break stale-response \
+             detection",
         );
-        self.next_correlation = self.next_correlation.saturating_add(1);
-        let correlation = ProbeCorrelation(self.next_correlation);
+        self.next_probe_correlation = self.next_probe_correlation.saturating_add(1);
+        let correlation = ProbeCorrelation(self.next_probe_correlation);
         if let Some(slot) = self.pending_slot_mut(owner) {
             *slot = Some(correlation);
         }
