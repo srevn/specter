@@ -58,7 +58,7 @@ pub use snapshot::tree::{
 };
 pub use sub::{ClassSet, EffectScope, Sub, SubAttachRequest, SubRegistry, SubRegistryDiff};
 pub use time::{Clock, SystemClock};
-pub use tree::Tree;
+pub use tree::{AttachPathError, FS_ROOT_SEGMENT, Tree, TreePath};
 
 #[cfg(feature = "testkit")]
 pub mod testkit;

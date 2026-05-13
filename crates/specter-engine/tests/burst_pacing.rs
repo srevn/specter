@@ -21,9 +21,9 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope,
     FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
 };
-use specter_engine::{Engine, SubAttachRequest};
+use specter_engine::Engine;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -95,6 +95,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).expect("sub").profile;
     let seed_correlation =
         first_probe_correlation(&attach_out).expect("Seed probe fires immediately");
@@ -202,6 +203,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
         source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).expect("sub").profile;
     let seed_correlation =
         first_probe_correlation(&attach_out).expect("Seed probe fires immediately");

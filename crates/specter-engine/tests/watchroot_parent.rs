@@ -72,6 +72,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         false,
     );
     let (sid, _out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     assert_eq!(
@@ -110,6 +111,7 @@ fn root_anchor_has_no_watch_root_parent() {
         false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     assert!(e.profiles().get(pid).unwrap().watch_root_parent.is_none());
 }
@@ -135,6 +137,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         false,
     );
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Drive Seed → Idle.
@@ -160,7 +163,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     // watch-root parent's contribution; `Tree::try_reap` cascades up
     // from the now-orphaned anchor and reaps `/root` in the same step
     // (no other claims). Both slots emit `Unwatch` on the way out.
-    let out = e.detach_sub(sid, now);
+    let out = e.detach_sub(sid);
     assert!(
         e.tree().get(root).is_none_or(|r| r.watch_demand() == 0),
         "/root's watch_demand back to 0 (or slot reaped by the cascade)",

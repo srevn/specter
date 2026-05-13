@@ -26,15 +26,14 @@
     clippy::too_many_lines
 )]
 
-use crate::engine::FS_ROOT_SEG;
-use crate::{Engine, SubAttachRequest};
+use crate::Engine;
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectScope, EntryKind, FsEvent, Input, LeafEntry, PatternSpec, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeResponse, PromoterAttachRequest, PromoterId, PromoterState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, SubId,
+    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, LeafEntry, PatternSpec, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, PromoterAttachRequest, PromoterId, PromoterState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, SubId,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -100,7 +99,7 @@ fn dir_snap_at(target: ResourceId, children: &[(&str, EntryKind, u64)]) -> Arc<D
 /// Helper for setup blocks that pre-place a Dir on the Tree.
 fn ensure_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     let mut comps = Vec::with_capacity(segments.len() + 1);
-    comps.push(FS_ROOT_SEG);
+    comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(segments);
     let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -140,6 +139,7 @@ fn attach_immediate_active_at_existing_prefix() {
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
     let (pid, out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     assert_ne!(pid, PromoterId::default(), "promoter id minted");
 
     // State: Active{proxies: {/var/log → idx=lpl}} where lpl=3.
@@ -193,6 +193,7 @@ fn attach_pending_when_literal_prefix_missing() {
     let mut e = Engine::new();
     // No /var/log on disk; only the FS-root bootstrap will create /.
     let (pid, out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     assert_ne!(pid, PromoterId::default());
 
     // State: PrefixPending(d). d.current_prefix == FS-root slot;
@@ -201,7 +202,10 @@ fn attach_pending_when_literal_prefix_missing() {
     let PromoterState::PrefixPending(d) = &q.state else {
         panic!("expected PrefixPending, got {:?}", q.state);
     };
-    let fs_root = e.tree().lookup(None, FS_ROOT_SEG).expect("FS-root exists");
+    let fs_root = e
+        .tree()
+        .lookup(None, FS_ROOT_SEGMENT)
+        .expect("FS-root exists");
     assert_eq!(d.current_prefix, fs_root, "descent at FS-root");
     assert_eq!(
         d.remaining_components.as_slice(),
@@ -224,6 +228,7 @@ fn descent_advances_one_segment_on_partial_response() {
     let var = ensure_dir(&mut e, &["var"]);
 
     let (pid, out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
     assert_eq!(last_probe_target(&out), Some(var), "first probe at /var");
 
@@ -262,6 +267,7 @@ fn enumeration_ok_promotes_final_match() {
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
     let (pid, out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
     assert_eq!(last_probe_target(&out), Some(var_log));
 
@@ -320,6 +326,7 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
     let srv = ensure_dir(&mut e, &["srv"]);
 
     let (pid, _out) = e.attach_promoter(req_for("sites", "/srv/*/site"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Inject /srv listing: two child Dirs ("alpha", "beta") and a stray
@@ -384,6 +391,7 @@ fn try_promote_is_idempotent_on_repeated_match() {
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Cycle 1: foo.log matches. Promotion mints SubA.
@@ -432,6 +440,7 @@ fn proxy_event_enqueues_and_dispatches() {
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     // Drain the initial enumeration: respond Ok with empty entries.
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
     let snap = dir_snap_at(var_log, &[]);
@@ -526,6 +535,7 @@ fn descent_vanished_rewinds_to_parent() {
     let var = ensure_dir(&mut e, &["var"]);
 
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr1 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
     // Sanity: descent is at /var with remaining=["log"].
     let q = e.promoters.get(pid).unwrap();
@@ -561,7 +571,7 @@ fn descent_vanished_rewinds_to_parent() {
     let PromoterState::PrefixPending(d) = &q.state else {
         panic!("expected PrefixPending after rewind");
     };
-    let fs_root = e.tree().lookup(None, FS_ROOT_SEG).unwrap();
+    let fs_root = e.tree().lookup(None, FS_ROOT_SEGMENT).unwrap();
     assert_eq!(d.current_prefix, fs_root, "rewind landed at FS-root");
     assert_eq!(
         d.remaining_components.as_slice(),
@@ -607,6 +617,7 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
     let mut e = Engine::new();
     let var = ensure_dir(&mut e, &["var"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     // Sanity: descent at /var with remaining=["log"], probe in flight.
     let corr = e
         .pending_probe_for(ProbeOwner::Promoter(pid))
@@ -672,6 +683,7 @@ fn prefix_pending_event_during_in_flight_probe_drops() {
     let mut e = Engine::new();
     let var = ensure_dir(&mut e, &["var"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     // Probe in flight from setup.
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
@@ -709,6 +721,7 @@ fn prefix_pending_terminal_event_at_prefix_emits_fresh_descent_probe() {
     let mut e = Engine::new();
     let var = ensure_dir(&mut e, &["var"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     // Drain the in-flight probe.
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
     let snap = dir_snap_at(var, &[]);
@@ -759,6 +772,7 @@ fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
     let mut e = Engine::new();
     let var = ensure_dir(&mut e, &["var"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Inject Failed (e.g. transient EACCES).
@@ -812,6 +826,7 @@ fn register_proxy_is_idempotent_on_re_registration() {
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let watch_demand_after_attach = e.tree().get(var_log).unwrap().watch_demand();
     let queue_after_attach = pending_enumerations(&e, pid).len();
 
@@ -846,6 +861,7 @@ fn dispatch_next_enumeration_records_pending_target() {
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     // Initial enumeration was dispatched by `enter_active`; the
     // pending_enumeration_target now points at /var/log.
     assert_eq!(
@@ -870,6 +886,7 @@ fn pending_enumeration_target_clears_on_response() {
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     let snap = dir_snap_at(var_log, &[]);
@@ -905,6 +922,7 @@ fn cancel_owner_probe_clears_pending_enumeration_target() {
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     assert_eq!(
         e.promoters.get(pid).unwrap().pending_enumeration_target,
         Some(var_log),
@@ -948,6 +966,7 @@ fn enumeration_vanished_unregisters_proxy_and_emits_diagnostic() {
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
     assert!(
         e.tree()
@@ -1018,6 +1037,7 @@ fn enumeration_vanished_cascades_subproxies() {
     let mut e = Engine::new();
     let srv = ensure_dir(&mut e, &["srv"]);
     let (pid, _out) = e.attach_promoter(req_for("sites", "/srv/*/site"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr1 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Forward pass at /srv: alpha (Dir) → register sub-proxy at /srv/alpha.
@@ -1085,6 +1105,7 @@ fn enumeration_failed_retains_proxy_state_with_diagnostic() {
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     let out = e.step(
@@ -1125,9 +1146,10 @@ fn reap_promoter_active_with_proxy_unregisters_and_removes() {
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     assert_eq!(e.tree().get(var_log).unwrap().watch_demand(), 1);
 
-    let out = e.reap_promoter(pid, Instant::now());
+    let out = e.reap_promoter(pid);
 
     // PromoterReaped emitted.
     assert!(
@@ -1174,7 +1196,8 @@ fn reap_promoter_prefix_pending_releases_prefix() {
     // Pattern /var/log/*.log with /var/log absent → PrefixPending at FS-root.
     let mut e = Engine::new();
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
-    let fs_root = e.tree().lookup(None, FS_ROOT_SEG).unwrap();
+    let pid = pid.expect("attach_promoter succeeded");
+    let fs_root = e.tree().lookup(None, FS_ROOT_SEGMENT).unwrap();
     assert!(matches!(
         e.promoters.get(pid).unwrap().state,
         PromoterState::PrefixPending(_),
@@ -1185,7 +1208,7 @@ fn reap_promoter_prefix_pending_releases_prefix() {
         "FS-root carries the prefix's STRUCTURE contribution",
     );
 
-    let out = e.reap_promoter(pid, Instant::now());
+    let out = e.reap_promoter(pid);
 
     assert!(
         out.diagnostics.iter().any(|d| matches!(
@@ -1217,6 +1240,7 @@ fn reap_promoter_drains_dynamic_subs() {
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Mint a dynamic Sub at /var/log/foo.log.
@@ -1241,7 +1265,7 @@ fn reap_promoter_drains_dynamic_subs() {
         .unwrap();
     assert!(e.subs().get(sub_id).is_some(), "Sub registered");
 
-    let _out = e.reap_promoter(pid, Instant::now());
+    let _out = e.reap_promoter(pid);
 
     assert!(e.promoters.get(pid).is_none(), "Promoter removed");
     assert!(
@@ -1254,7 +1278,7 @@ fn reap_promoter_drains_dynamic_subs() {
 fn reap_promoter_stale_id_is_silent_noop() {
     let mut e = Engine::new();
     let stale = PromoterId::default();
-    let out = e.reap_promoter(stale, Instant::now());
+    let out = e.reap_promoter(stale);
     assert!(
         out.diagnostics.is_empty(),
         "no diagnostic on stale id: {:?}",
@@ -1272,6 +1296,7 @@ fn reap_promoter_active_with_subproxies_clears_all() {
     let mut e = Engine::new();
     let srv = ensure_dir(&mut e, &["srv"]);
     let (pid, _out) = e.attach_promoter(req_for("sites", "/srv/*/site"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Forward pass: alpha → sub-proxy at /srv/alpha.
@@ -1287,7 +1312,7 @@ fn reap_promoter_active_with_subproxies_clears_all() {
     let alpha = e.tree().lookup(Some(srv), "alpha").expect("alpha present");
     assert_eq!(active_proxies(&e, pid).len(), 2);
 
-    let _out = e.reap_promoter(pid, Instant::now());
+    let _out = e.reap_promoter(pid);
 
     assert!(e.promoters.get(pid).is_none(), "Promoter removed");
     // With the Promoter as their sole claim, both `/srv` and
@@ -1315,7 +1340,7 @@ fn reap_promoter_active_with_subproxies_clears_all() {
 /// FsEvent::Removed reaches `on_anchor_terminal_event`).
 fn ensure_file(e: &mut Engine, parent_segs: &[&str], leaf: &str) -> ResourceId {
     let mut comps: Vec<&str> = Vec::with_capacity(parent_segs.len() + 2);
-    comps.push(FS_ROOT_SEG);
+    comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(parent_segs);
     comps.push(leaf);
     let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
@@ -1334,6 +1359,7 @@ fn promote_one(
     let parent = ensure_dir(e, parent_segs);
     let anchor_resource = ensure_file(e, parent_segs, leaf);
     let (pid, _out) = e.attach_promoter(req_for("test", pattern), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
     let snap = dir_snap_at(parent, &[(leaf, EntryKind::File, 1)]);
     let _ = e.step(
@@ -1429,6 +1455,7 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
         source_promoter: None,
     };
     let (static_sid, _attach_out) = e.attach_sub(static_req, Instant::now());
+    let static_sid = static_sid.expect("attach_sub succeeded");
     assert_eq!(
         e.subs().get(static_sid).unwrap().profile,
         profile_id,
@@ -1500,6 +1527,7 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
         source_promoter: None,
     };
     let (sid, _out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let profile_id = e.subs().get(sid).unwrap().profile;
 
     let _out = e.step(

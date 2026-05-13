@@ -102,6 +102,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
     );
     let now = Instant::now();
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Initial pending state: intermediate scaffold in place; anchor
@@ -196,6 +197,7 @@ fn pending_path_failed_probe_retains_state() {
         false,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     let corr = first_probe_corr(&attach_out).expect("descent probe");
 
@@ -242,6 +244,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         false,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     let corr = first_probe_corr(&attach_out).expect("descent probe");
 
@@ -302,6 +305,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     );
     let now = Instant::now();
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     // Drive Seed → Idle.
     let seed_corr = first_probe_corr(&attach_out).unwrap();
@@ -371,6 +375,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     );
     let now = Instant::now();
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Profile is Pending with an in-flight descent probe.
@@ -387,7 +392,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     );
 
     // Detach without delivering a probe response.
-    let detach_out = e.detach_sub(sid, now);
+    let detach_out = e.detach_sub(sid);
 
     // Profile is reaped.
     assert!(
@@ -433,6 +438,7 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     );
     let now = Instant::now();
     let (sid, _attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     let p = e.profiles().get(pid).expect("Profile attached");
@@ -541,6 +547,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     );
     let now = Instant::now();
     let (sid_a, attach_a_out) = e.attach_sub(req_a, now);
+    let sid_a = sid_a.expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile;
     let a_corr = first_probe_corr(&attach_a_out).expect("descent probe at attach");
     e.step(
@@ -576,6 +583,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         false,
     );
     let (sid_b, attach_b_out) = e.attach_sub(req_b, now);
+    let sid_b = sid_b.expect("attach_sub succeeded");
     let pid_b = e.subs().get(sid_b).unwrap().profile;
     let b_corr = first_probe_corr(&attach_b_out).expect("Seed probe at attach");
     e.step(
@@ -616,6 +624,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         false,
     );
     let (sid_c, attach_c_out) = e.attach_sub(req_c, now);
+    let sid_c = sid_c.expect("attach_sub succeeded");
     let pid_c = e.subs().get(sid_c).unwrap().profile;
     let c_corr = first_probe_corr(&attach_c_out).expect("Seed probe at attach");
     e.step(

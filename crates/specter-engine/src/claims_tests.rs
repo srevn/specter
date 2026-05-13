@@ -93,6 +93,7 @@ fn engine_with_materialised_profile(
         false,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Drive Seed-Ok to materialise current + baseline.
@@ -380,6 +381,7 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
         false,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
     let snap = dir_snap(anchor, vec![("nested", EntryKind::Dir, 1)]);
@@ -468,6 +470,7 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
         false,
     );
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Seed-Ok response materialises descendant /a/b as a Dir.

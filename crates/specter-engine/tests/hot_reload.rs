@@ -91,6 +91,7 @@ fn config_diff_add_sub_to_existing_profile() {
         ),
         now,
     );
+    let sid_a = sid_a.expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     assert_eq!(e.profiles().get(pid).unwrap().sub_refcount, 1);
 
@@ -152,6 +153,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     );
     let now = Instant::now();
     let (sid_a, attach_out) = e.attach_sub(req, now);
+    let sid_a = sid_a.expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops
@@ -217,6 +219,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         ),
         now,
     );
+    let sid_a = sid_a.expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops
@@ -319,6 +322,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
         ),
         now,
     );
+    let sid_a = sid_a.expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops
@@ -426,6 +430,7 @@ fn effect_complete_after_detach_drops_silently() {
         ),
         now,
     );
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops
@@ -506,6 +511,7 @@ fn config_diff_modified_remove_then_add() {
         ),
         now,
     );
+    let sid_a = sid_a.expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops

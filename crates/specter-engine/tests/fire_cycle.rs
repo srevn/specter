@@ -137,6 +137,7 @@ fn attach_and_complete_seed_with(
     now: Instant,
 ) -> (SubId, ProfileId) {
     let (sid, out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = pid_of(e, sid);
     let seed_corr = first_probe_correlation(&out).expect("Seed probe");
     e.step(
@@ -163,6 +164,7 @@ fn attach_and_complete_seed(
     now: Instant,
 ) -> (SubId, ProfileId) {
     let (sid, out) = e.attach_sub(subtree_request("test", r), now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = pid_of(e, sid);
     let seed_corr = first_probe_correlation(&out).expect("Seed probe");
     e.step(
@@ -714,6 +716,7 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let (sid, out) = e.attach_sub(subtree_request("test", r), now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let seed_corr = first_probe_correlation(&out).expect("Seed probe");
 
@@ -826,6 +829,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         false,
     );
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
     e.step(
@@ -923,7 +927,7 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     let effect_key = stable_out.effects[0].key.clone();
 
     // Detach the only Sub. Profile is Active(Awaiting) → reap_pending=true.
-    let _detach_out = e.detach_sub(sid, now + Duration::from_millis(15));
+    let _detach_out = e.detach_sub(sid);
     assert!(
         e.profiles().get(pid).unwrap().reap_pending,
         "reap_pending set on Active profile detach",
@@ -1315,6 +1319,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         false,
     );
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
     e.step(

@@ -110,6 +110,7 @@ fn attach_at(
         false,
     );
     let (sid, out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     (sid, pid, out)
 }

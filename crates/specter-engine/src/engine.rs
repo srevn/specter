@@ -17,23 +17,26 @@ use crate::counter::MonotonicCounter;
 use crate::refcounts::add_watch;
 use crate::timer::{TimerEntry, TimerHeap};
 use compact_str::CompactString;
+// Identity.
+use specter_core::{ProfileId, ResourceId, SubId, TimerId};
+// Tree + path validation.
+use specter_core::Tree;
+// Profile state machine.
 use specter_core::{
-    ActiveBurst, AnchorClaim, ClassSet, ContribKey, CorrelationId, DedupKey, DescentState,
-    Diagnostic, Input, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOwner, Profile,
-    ProfileId, ProfileMap, ProfileState, PromoterRegistry, PromoterState, ResourceId, StepOutput,
-    Sub, SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
+    ActiveBurst, AnchorClaim, DescentState, PostFirePhase, PreFirePhase, Profile, ProfileMap,
+    ProfileState, TimerKind,
 };
-use std::path::Component;
+// Registries.
+use specter_core::{PromoterRegistry, PromoterState, Sub, SubAttachRequest, SubRegistry};
+// Per-Resource bookkeeping.
+use specter_core::{ClassSet, ContribKey};
+// Probe + effect correlation.
+use specter_core::{CorrelationId, DedupKey, ProbeCorrelation, ProbeOwner};
+// Engine step I/O.
+use specter_core::{Diagnostic, Input, StepOutput};
+// Helpers.
+use specter_core::compute_config_hash;
 use std::time::{Duration, Instant};
-
-/// Synthetic segment representing the filesystem root `/`. Lives in the
-/// Tree as a single `DescentScaffold`-roled root that absolute-path
-/// attaches share — every absolute attach decomposes to `[FS_ROOT_SEG,
-/// ...real segments]` so descents have a guaranteed-existing starting
-/// ancestor. `Tree::path_of` reconstructs an absolute path from this
-/// segment because `PathBuf::push` resets to absolute when given `"/"`.
-/// Verified by `tree::tests::path_of_handles_absolute_root_segment`.
-pub(crate) const FS_ROOT_SEG: &str = "/";
 
 /// `pub(crate)` field visibility lets sibling modules read/write engine
 /// state directly. External consumers go through the public methods.
@@ -170,24 +173,23 @@ impl Engine {
     /// (`recompute_profile_settle`, dead-id `fired_subs` purge) runs. The
     /// in-flight burst continues to completion under the new Sub set.
     ///
-    /// Returns the minted [`SubId`] and a sorted [`StepOutput`]. On a
-    /// path-rejection short-circuit (see invariants below), returns
-    /// `SubId::default()` plus a sorted [`StepOutput`] carrying a
-    /// [`Diagnostic::AttachPathInvalid`] and no other ops.
+    /// Returns `(Some(sub_id), out)` on success. On path rejection
+    /// (see invariants below), returns `(None, out)` with `out`
+    /// carrying a [`Diagnostic::AttachPathInvalid`] and no other ops.
     ///
     /// # Production invariants (path-based attach)
     ///
     /// 1. **Absolute paths only.** `req.path` must be absolute and
-    ///    UTF-8. The internal `decompose_attach_path` is the canonical
-    ///    gate; it rejects non-absolute paths, non-UTF-8 segments,
-    ///    `.` / `..` components, Windows path prefixes, and empty
-    ///    segments. The bin layer's `canonicalize_lenient` already
-    ///    enforces absolute paths for TOML-loaded configs, but
-    ///    hot-reload `ConfigDiff::added` constructs `SubAttachRequest`
-    ///    from a different path; the gate keeps the engine's contract
+    ///    UTF-8. [`Tree::parse_attach_path`] is the canonical gate; it
+    ///    rejects non-absolute paths, non-UTF-8 segments, `.` / `..`
+    ///    components, Windows path prefixes, and empty segments. The
+    ///    bin layer's `canonicalize_lenient` already enforces absolute
+    ///    paths for TOML-loaded configs, but hot-reload
+    ///    `ConfigDiff::added` constructs `SubAttachRequest` from a
+    ///    different path; the gate keeps the engine's contract
     ///    independent of every caller.
-    /// 2. **Single FS-root.** Every absolute attach decomposes to
-    ///    `[FS_ROOT_SEG, ...]`; `materialize_path_or_pending` lazily
+    /// 2. **Single FS-root.** Every validated [`TreePath`] starts with
+    ///    [`FS_ROOT_SEGMENT`]; `materialize_path_or_pending` lazily
     ///    bootstraps a synthetic `/` slot (role
     ///    `ResourceRole::DescentScaffold`) before the pre-existence
     ///    walk so every Profile's rewind chain terminates at this
@@ -204,7 +206,11 @@ impl Engine {
     /// Panics if `req.resource` is stale (no live Tree slot) on the
     /// resource-based attach path. The Engine must construct the
     /// Resource before attaching a Sub to it.
-    pub fn attach_sub(&mut self, req: SubAttachRequest, now: Instant) -> (SubId, StepOutput) {
+    pub fn attach_sub(
+        &mut self,
+        req: SubAttachRequest,
+        now: Instant,
+    ) -> (Option<SubId>, StepOutput) {
         let mut out = StepOutput::default();
         let sub_id = self.attach_sub_inner(req, now, &mut out);
         out.sort_for_emission();
@@ -213,24 +219,31 @@ impl Engine {
 
     /// Inner attach used by `on_config_diff` to compose multiple
     /// detach/attach operations into a single (sorted) `StepOutput`.
-    /// Returns the minted [`SubId`] (or `SubId::default()` if anchor
-    /// resolution fails — only the path-based path can fail; the engine
-    /// emits a Diagnostic in that case).
+    /// Returns `Some(sub_id)` on success, or `None` when path-based
+    /// anchor resolution fails (the engine emits a
+    /// [`Diagnostic::AttachPathInvalid`] in that case). The
+    /// resource-based path cannot fail and always returns `Some`.
     pub(crate) fn attach_sub_inner(
         &mut self,
         req: SubAttachRequest,
         now: Instant,
         out: &mut StepOutput,
-    ) -> SubId {
+    ) -> Option<SubId> {
         // Resolve anchor. Path-based attach materializes scaffolds;
         // resource-based attach trusts the caller's id.
         let (anchor, pending_components) = match req.path.as_ref() {
             Some(path) => {
-                let Some(comps) = decompose_attach_path(path, out) else {
-                    return SubId::default();
+                let parsed = match Tree::parse_attach_path(path) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        out.diagnostics.push(Diagnostic::AttachPathInvalid {
+                            path: path.clone(),
+                            hint: err.hint(),
+                        });
+                        return None;
+                    }
                 };
-                let materialize = self.materialize_path_or_pending(&comps);
-                match materialize {
+                match self.materialize_path_or_pending(&parsed) {
                     crate::descent::MaterializeResult::Materialized(id) => (id, None),
                     crate::descent::MaterializeResult::Pending {
                         anchor,
@@ -324,10 +337,10 @@ impl Engine {
         }
 
         // Lifecycle diagnostic — single emit point that fires for both
-        // the existing-Profile join arm (`return sub_id` below) and the
-        // fresh-Profile arm (function-end `return sub_id`). Sole
-        // upstream early-return is the `decompose_attach_path` failure
-        // arm, which returns `SubId::default()` and emits
+        // the existing-Profile join arm (`return Some(sub_id)` below)
+        // and the fresh-Profile arm (function-end `return Some(sub_id)`).
+        // Sole upstream early-return is the `Tree::parse_attach_path`
+        // failure arm, which returns `None` and emits
         // `AttachPathInvalid` instead — `SubAttached` is unreachable
         // for that branch.
         out.diagnostics.push(Diagnostic::SubAttached {
@@ -382,7 +395,7 @@ impl Engine {
             {
                 p.settle = req.settle;
             }
-            return sub_id;
+            return Some(sub_id);
         }
 
         // ===== Fresh Profile path =====
@@ -434,7 +447,7 @@ impl Engine {
             self.start_seed_burst(profile_id, now, out);
         }
 
-        sub_id
+        Some(sub_id)
     }
 
     /// Set up the Profile's watch-root parent contribution. For each
@@ -533,9 +546,14 @@ impl Engine {
     /// `compute_parent` level; this filter is the critical-path
     /// reduction.
     fn recompute_dependent_parent_edges(&mut self, new_profile: ProfileId) {
-        let Some(new_anchor) = self.profiles.get(new_profile).map(|p| p.resource) else {
-            return;
-        };
+        // The caller (`attach_sub_inner`) just inserted-or-found the
+        // Profile two statements above and `profile_id` is still live;
+        // a missing slot here is a structural invariant breach.
+        let new_anchor = self
+            .profiles
+            .get(new_profile)
+            .map(|p| p.resource)
+            .expect("recompute_dependent_parent_edges: caller's profile_id must be live");
         let candidates: Vec<ProfileId> = self
             .profiles
             .iter()
@@ -574,16 +592,21 @@ impl Engine {
     ///
     /// Idempotent on stale `SubId` (Diagnostic + drop). Returns the sorted
     /// `StepOutput` of any ops emitted.
-    pub fn detach_sub(&mut self, sub: SubId, now: Instant) -> StepOutput {
+    ///
+    /// Time-independent: detach is a pure registry/refcount operation
+    /// (no timer scheduling, no burst transitions that need a `now`).
+    /// Bursts running on detached Profiles continue under their existing
+    /// schedule until `finish_burst_to_idle`.
+    pub fn detach_sub(&mut self, sub: SubId) -> StepOutput {
         let mut out = StepOutput::default();
-        self.detach_sub_inner(sub, now, &mut out);
+        self.detach_sub_inner(sub, &mut out);
         out.sort_for_emission();
         out
     }
 
     /// Inner detach used by `on_config_diff` to compose multiple
     /// detach/attach operations into a single (sorted) `StepOutput`.
-    pub(crate) fn detach_sub_inner(&mut self, sub: SubId, _now: Instant, out: &mut StepOutput) {
+    pub(crate) fn detach_sub_inner(&mut self, sub: SubId, out: &mut StepOutput) {
         let profile_id = match self.subs.remove(sub) {
             Some(s) => s.profile,
             None => {
@@ -943,98 +966,6 @@ enum DetachLifecycle {
     DeferToBurstEnd,
 }
 
-/// Decompose an absolute, UTF-8 attach path into Tree segments, with
-/// `RootDir` mapped to the synthetic [`FS_ROOT_SEG`] so the engine has a
-/// single shared root for every attach. `Tree::path_of` reconstructs an
-/// absolute path from this segment because `PathBuf::push("/")` resets
-/// to absolute.
-///
-/// Returns `None` and emits [`Diagnostic::AttachPathInvalid`] for:
-/// - non-absolute paths (engine requires fully-qualified paths; the bin
-///   layer's `canonicalize_lenient` enforces this for TOML-loaded
-///   configs, but hot-reload `ConfigDiff::added` and test-only attaches
-///   can bypass the bin's discipline — the gate keeps the engine's
-///   contract independent of every caller);
-/// - paths with non-UTF-8 bytes (the Tree's segment store is
-///   `&str`-keyed; the engine cannot represent non-UTF-8 segments);
-/// - relative components `.` / `..` (caller must canonicalize before
-///   attach);
-/// - Windows path prefixes (Unix v1 only);
-/// - empty path segments (defense-in-depth against hand-constructed
-///   `PathBuf`s — `PathBuf` itself normalises double-slashes).
-///
-/// **Post-condition.** On `Some(comps)`, `comps[0] == FS_ROOT_SEG` and
-/// every `comps[i]` is a non-empty UTF-8 string. `materialize_path_or_pending`
-/// relies on this to skip the FS-root pre-existence check and bootstrap
-/// the slot unconditionally.
-pub(crate) fn decompose_attach_path<'a>(
-    path: &'a std::path::Path,
-    out: &mut StepOutput,
-) -> Option<Vec<&'a str>> {
-    if !path.is_absolute() {
-        out.diagnostics.push(Diagnostic::AttachPathInvalid {
-            path: path.to_path_buf(),
-            hint: "path must be absolute (engine requires fully-qualified paths)",
-        });
-        return None;
-    }
-
-    // Single upfront UTF-8 check on the whole path. On Unix, `Path::to_str`
-    // returns `Some` iff every byte is valid UTF-8; a `Some` result means
-    // every `Component::Normal`'s byte-slice is also UTF-8. The loop body's
-    // `s.to_str().expect(...)` is sound under this precondition.
-    if path.to_str().is_none() {
-        out.diagnostics.push(Diagnostic::AttachPathInvalid {
-            path: path.to_path_buf(),
-            hint: "non-UTF-8 path segment (engine requires UTF-8)",
-        });
-        return None;
-    }
-
-    let mut comps: Vec<&str> = Vec::with_capacity(path.components().count());
-    for c in path.components() {
-        match c {
-            Component::RootDir => comps.push(FS_ROOT_SEG),
-            Component::Normal(s) => {
-                let name = s.to_str().expect("path UTF-8 verified above");
-                if name.is_empty() {
-                    out.diagnostics.push(Diagnostic::AttachPathInvalid {
-                        path: path.to_path_buf(),
-                        hint: "empty path segment",
-                    });
-                    return None;
-                }
-                comps.push(name);
-            }
-            Component::CurDir | Component::ParentDir => {
-                out.diagnostics.push(Diagnostic::AttachPathInvalid {
-                    path: path.to_path_buf(),
-                    hint: "non-canonical attach path (`.`/`..`); canonicalize before attach",
-                });
-                return None;
-            }
-            Component::Prefix(_) => {
-                out.diagnostics.push(Diagnostic::AttachPathInvalid {
-                    path: path.to_path_buf(),
-                    hint: "Windows path prefix not supported on Unix v1",
-                });
-                return None;
-            }
-        }
-    }
-
-    // The `is_absolute()` guard above guarantees `Component::RootDir` was
-    // emitted, which puts `FS_ROOT_SEG` at `comps[0]`. Defense-in-depth
-    // assertion against future regressions or hand-constructed paths
-    // that confuse the components iterator.
-    debug_assert!(
-        !comps.is_empty() && comps[0] == FS_ROOT_SEG,
-        "decompose_attach_path post-condition: absolute path → comps[0] == FS_ROOT_SEG",
-    );
-
-    Some(comps)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1330,136 +1261,8 @@ mod tests {
         let _ = e.effect_correlations.next();
     }
 
-    // ===== decompose_attach_path =====
+    // ===== Engine-level attach-rejection contract =====
     //
-    // Path decomposition is the seam between user-supplied `PathBuf` (from
-    // the bin's TOML loader) and the Tree's `&str` segment world. The fix
-    // preserves `Component::RootDir` as the synthetic [`FS_ROOT_SEG`] so
-    // `Tree::path_of` reconstructs an absolute path on the way back out.
-
-    #[test]
-    fn decompose_absolute_path_preserves_root_marker() {
-        let mut out = StepOutput::default();
-        let comps = decompose_attach_path(std::path::Path::new("/tmp"), &mut out)
-            .expect("absolute path decomposes");
-        assert_eq!(comps, vec![FS_ROOT_SEG, "tmp"]);
-        assert!(out.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn decompose_absolute_deep_path_preserves_each_segment() {
-        let mut out = StepOutput::default();
-        let comps = decompose_attach_path(std::path::Path::new("/var/log/myapp"), &mut out)
-            .expect("absolute deep path decomposes");
-        assert_eq!(comps, vec![FS_ROOT_SEG, "var", "log", "myapp"]);
-    }
-
-    #[test]
-    fn decompose_empty_path_rejected_as_non_absolute() {
-        // An empty `Path` is non-absolute on Unix; the gate's `is_absolute`
-        // check fires before any component-level work, so the diagnostic's
-        // hint is "absolute" rather than "empty". The empty-segment hint
-        // is reserved for the `Component::Normal` branch's defense-in-depth
-        // check (hand-constructed paths with empty components).
-        let mut out = StepOutput::default();
-        let result = decompose_attach_path(std::path::Path::new(""), &mut out);
-        assert!(result.is_none());
-        assert!(out.diagnostics.iter().any(|d| matches!(
-            d,
-            specter_core::Diagnostic::AttachPathInvalid { path, hint }
-                if path == std::path::Path::new("") && hint.contains("absolute"),
-        )));
-    }
-
-    // Note: `Component::CurDir` is structurally unreachable for absolute
-    // paths — `Path::components()` normalises `./` away when it appears
-    // after `RootDir`, and the `is_absolute()` gate rejects leading-`./`
-    // paths before the loop runs. The `CurDir | ParentDir` match arm
-    // remains as defense-in-depth, exercised in production only via
-    // `ParentDir` (covered by the next test).
-
-    #[test]
-    fn decompose_path_with_parentdir_is_rejected() {
-        let mut out = StepOutput::default();
-        let result = decompose_attach_path(std::path::Path::new("/var/../log"), &mut out);
-        assert!(result.is_none());
-        assert!(out.diagnostics.iter().any(|d| matches!(
-            d,
-            specter_core::Diagnostic::AttachPathInvalid { path, hint }
-                if path == std::path::Path::new("/var/../log") && hint.contains("non-canonical"),
-        )));
-    }
-
-    #[test]
-    fn decompose_root_only_path_is_single_segment() {
-        let mut out = StepOutput::default();
-        let comps = decompose_attach_path(std::path::Path::new("/"), &mut out)
-            .expect("root-only path decomposes");
-        assert_eq!(comps, vec![FS_ROOT_SEG]);
-    }
-
-    // ===== Boundary rejection tests =====
-    //
-    // Three rejection categories pin at the decomposition seam:
-    // non-absolute paths, non-UTF-8 segments, and non-canonical
-    // components. The tests below cover the categories not already
-    // exercised above (`parentdir_is_rejected` covers the `..` case).
-
-    #[test]
-    fn decompose_relative_multi_segment_path_emits_diagnostic() {
-        let mut out = StepOutput::default();
-        let result = decompose_attach_path(std::path::Path::new("foo/bar"), &mut out);
-        assert!(result.is_none());
-        assert!(out.diagnostics.iter().any(|d| matches!(
-            d,
-            specter_core::Diagnostic::AttachPathInvalid { path, hint }
-                if path == std::path::Path::new("foo/bar") && hint.contains("absolute"),
-        )));
-    }
-
-    #[test]
-    fn decompose_relative_single_segment_path_emits_diagnostic() {
-        // The single-segment case is the one the dropped `None` branch
-        // of `materialize_path_or_pending` used to handle as a degenerate
-        // `prefix == anchor` fixture. Post-Group-D the gate rejects it
-        // outright.
-        let mut out = StepOutput::default();
-        let result = decompose_attach_path(std::path::Path::new("foo"), &mut out);
-        assert!(result.is_none());
-        assert!(out.diagnostics.iter().any(|d| matches!(
-            d,
-            specter_core::Diagnostic::AttachPathInvalid { path, hint }
-                if path == std::path::Path::new("foo") && hint.contains("absolute"),
-        )));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn decompose_path_with_non_utf8_segment_emits_diagnostic() {
-        // Non-UTF-8 segments sneak in via `canonicalize` resolving through
-        // a symlink whose target component holds non-UTF-8 bytes. The
-        // pre-fix decomposer silently dropped these, attaching the engine
-        // to the wrong directory; the gate now rejects with an explicit
-        // diagnostic.
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-        use std::path::PathBuf;
-
-        let bad_seg = OsStr::from_bytes(&[0xFF, 0xFE]);
-        let mut path = PathBuf::from("/foo");
-        path.push(bad_seg);
-        path.push("bar");
-
-        let mut out = StepOutput::default();
-        let result = decompose_attach_path(&path, &mut out);
-        assert!(result.is_none());
-        assert!(out.diagnostics.iter().any(|d| matches!(
-            d,
-            specter_core::Diagnostic::AttachPathInvalid { hint, .. }
-                if hint.contains("non-UTF-8"),
-        )));
-    }
-
     #[test]
     fn attach_path_invalid_carries_offending_path() {
         let mut e = Engine::new();
@@ -1489,8 +1292,8 @@ mod tests {
     /// End-to-end gate enforcement: a relative-path attach request rolls
     /// up no `SubId`, no Tree slots, and no Profile — only the diagnostic
     /// surfaces. Pins the contract that `attach_sub_inner`'s
-    /// `decompose_attach_path` short-circuit is total: rejection
-    /// produces `SubId::default()` and zero side-effects on engine state.
+    /// `Tree::parse_attach_path` short-circuit is total: rejection
+    /// produces `None` plus zero side-effects on engine state.
     #[test]
     fn attach_with_relative_path_emits_diagnostic_and_no_state() {
         let mut e = Engine::new();
@@ -1511,7 +1314,7 @@ mod tests {
         );
         let (sid, out) = e.attach_sub(req, Instant::now());
 
-        assert_eq!(sid, SubId::default(), "rejected attach mints no SubId");
+        assert!(sid.is_none(), "rejected attach mints no SubId");
         assert_eq!(e.tree.len(), pre_tree_len, "no Tree slots created");
         assert_eq!(e.profiles.len(), pre_profile_count, "no Profile attached");
         assert!(e.subs.is_empty(), "no Sub recorded in registry");
@@ -1557,7 +1360,7 @@ mod tests {
         );
         let (sid, out) = e.attach_sub(req, Instant::now());
 
-        assert_eq!(sid, SubId::default(), "rejected attach mints no SubId");
+        assert!(sid.is_none(), "rejected attach mints no SubId");
         assert_eq!(e.tree.len(), pre_tree_len, "no Tree slots created");
         assert_eq!(e.profiles.len(), pre_profile_count, "no Profile attached");
         assert!(e.subs.is_empty(), "no Sub recorded in registry");
@@ -1575,7 +1378,7 @@ mod tests {
     fn detach_unknown_sub_emits_dedicated_diagnostic() {
         let mut e = Engine::new();
         let bogus = SubId::default();
-        let out = e.detach_sub(bogus, Instant::now());
+        let out = e.detach_sub(bogus);
 
         let saw_dedicated = out.diagnostics.iter().any(|d| {
             matches!(
@@ -1675,6 +1478,7 @@ mod tests {
         let now = Instant::now();
 
         let (sid_a, _) = e.attach_sub(revival_attach_req(r, "A", Duration::from_millis(50)), now);
+        let sid_a = sid_a.expect("attach_sub succeeded");
         let pid = e.subs().get(sid_a).unwrap().profile;
         let watch_demand_after_attach = e.tree.get(r).unwrap().watch_demand();
         assert_eq!(watch_demand_after_attach, 1, "anchor watch_demand from A");
@@ -1692,7 +1496,7 @@ mod tests {
 
         // Detach A. Profile is Active → reap_pending=true; anchor watch
         // unchanged; `fired_subs` survives the deferred-reap branch.
-        let _ = e.detach_sub(sid_a, now);
+        let _ = e.detach_sub(sid_a);
         assert!(e.profiles().get(pid).unwrap().reap_pending);
         assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
         assert_eq!(e.profiles().get(pid).unwrap().fired_subs.len(), 1);
@@ -1701,6 +1505,7 @@ mod tests {
         // 50ms so the min-update would be visibly wrong).
         let (sid_b, attach_out) =
             e.attach_sub(revival_attach_req(r, "B", Duration::from_millis(200)), now);
+        let sid_b = sid_b.expect("attach_sub succeeded");
         let pid_b = e.subs().get(sid_b).unwrap().profile;
 
         assert_eq!(pid_b, pid, "B reuses A's Profile");
@@ -1757,6 +1562,7 @@ mod tests {
 
         let (sid_a, attach_out) =
             e.attach_sub(revival_attach_req(r, "A", Duration::from_millis(50)), now);
+        let sid_a = sid_a.expect("attach_sub succeeded");
         let pid = e.subs().get(sid_a).unwrap().profile;
         let seed_corr = attach_out
             .probe_ops
@@ -1767,8 +1573,9 @@ mod tests {
             })
             .expect("attach emitted Probe");
 
-        e.detach_sub(sid_a, now);
+        e.detach_sub(sid_a);
         let (sid_b, _) = e.attach_sub(revival_attach_req(r, "B", Duration::from_millis(50)), now);
+        let sid_b = sid_b.expect("attach_sub succeeded");
 
         // Drive the in-flight Seed-Verifying burst to a terminal Vanished.
         // `dispatch_seed_vanished → finalize_anchor_lost → finish_burst_to_idle`

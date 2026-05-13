@@ -126,6 +126,7 @@ fn attach_sub_with_events(
         false,
     );
     let (sid, out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     (sid, pid, out)
 }
@@ -399,6 +400,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
         false,
     );
     let (sid, _attach_out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Profile is Pending; current_prefix is /tmp.
@@ -879,7 +881,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
 
     // Step 4: detach. reap_profile must NOT debug_assert and must NOT
     // leak the anchor's watch_demand.
-    let out = e.detach_sub(sid, Instant::now());
+    let out = e.detach_sub(sid);
     assert!(
         e.profiles().get(pid).is_none(),
         "Profile reaped without panic",
@@ -997,7 +999,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
     );
 
     // Detach mid-burst to set reap_pending.
-    let _ = e.detach_sub(sid, t1);
+    let _ = e.detach_sub(sid);
     assert!(e.profiles().get(pid).unwrap().reap_pending);
 
     // Drain the settle timer to advance to Probing.
@@ -1055,7 +1057,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
         },
         t1,
     );
-    let _ = e.detach_sub(sid, t1);
+    let _ = e.detach_sub(sid);
     assert!(e.profiles().get(pid).unwrap().reap_pending);
 
     let t2 = t1 + SETTLE * 2;
@@ -1111,7 +1113,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
         },
         t1,
     );
-    let _ = e.detach_sub(sid, t1);
+    let _ = e.detach_sub(sid);
     assert!(e.profiles().get(pid).unwrap().reap_pending);
 
     let t2 = t1 + SETTLE * 2;
@@ -1207,6 +1209,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         false,
     );
     let (sid_p, attach_out_p) = e.attach_sub(attach_p, Instant::now());
+    let sid_p = sid_p.expect("attach_sub succeeded");
     let (_sid_q, attach_out_q) = e.attach_sub(attach_q, Instant::now());
     let pid_p = e.subs().get(sid_p).unwrap().profile;
     let pid_q = e
@@ -1236,7 +1239,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         t1,
     );
     // Detach P to set reap_pending. Q stays alive.
-    let _ = e.detach_sub(sid_p, t1);
+    let _ = e.detach_sub(sid_p);
     assert!(e.profiles().get(pid_p).unwrap().reap_pending);
     assert!(!e.profiles().get(pid_q).unwrap().reap_pending);
 
@@ -1339,7 +1342,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_dir() {
     assert!(e.tree().get(child).is_some());
     assert!(e.tree().get(child).unwrap().watch_demand() >= 1);
 
-    let out = e.detach_sub(sid, Instant::now());
+    let out = e.detach_sub(sid);
     assert!(
         e.profiles().get(pid).is_none(),
         "Idle Profile reaped on last-Sub detach",
@@ -1385,7 +1388,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
     let leaf = e.tree().lookup(Some(root), "a.rs").expect("leaf seeded");
     assert!(e.tree().get(leaf).unwrap().watch_demand() >= 1);
 
-    let out = e.detach_sub(sid, Instant::now());
+    let out = e.detach_sub(sid);
     assert!(e.profiles().get(pid).is_none());
     assert!(
         e.tree().get(leaf).is_none(),
@@ -1417,7 +1420,7 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
         },
         t1,
     );
-    let _ = e.detach_sub(sid, t1);
+    let _ = e.detach_sub(sid);
     assert!(e.profiles().get(pid).unwrap().reap_pending);
 
     // Drain the settle timer to advance to Verifying.
@@ -1654,6 +1657,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         false,
     );
     let (sid_p, attach_out_p) = e.attach_sub(attach_p, Instant::now());
+    let sid_p = sid_p.expect("attach_sub succeeded");
     let (_sid_q, attach_out_q) = e.attach_sub(attach_q, Instant::now());
     let pid_p = e.subs().get(sid_p).unwrap().profile;
     let pid_q = e
@@ -1692,7 +1696,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         },
         t1,
     );
-    let _ = e.detach_sub(sid_p, t1);
+    let _ = e.detach_sub(sid_p);
 
     let t2 = t1 + SETTLE * 2;
     while let Some(entry) = e.pop_expired(t2) {
@@ -1783,6 +1787,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         false,
     );
     let (sid_p, attach_out_p) = e.attach_sub(attach_p, Instant::now());
+    let sid_p = sid_p.expect("attach_sub succeeded");
     let (_sid_q, attach_out_q) = e.attach_sub(attach_q, Instant::now());
     let pid_p = e.subs().get(sid_p).unwrap().profile;
     let pid_q = e

@@ -35,10 +35,10 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileState, PromoterAttachRequest, PromoterRegistryDiff, PromoterState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, WatchOp,
-    WatchRegistryDiff,
+    EntryKind, FS_ROOT_SEGMENT, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, PromoterAttachRequest,
+    PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    SubAttachRequest, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -48,7 +48,6 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
-const FS_ROOT_SEG: &str = "/";
 
 fn empty_program() -> Arc<ActionProgram> {
     single_exec_program([specter_core::ArgTemplate::new([
@@ -121,7 +120,7 @@ fn last_probe_target(out: &specter_core::StepOutput) -> Option<ResourceId> {
 /// pin in detail.
 fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     let mut comps = Vec::with_capacity(segments.len() + 1);
-    comps.push(FS_ROOT_SEG);
+    comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(segments);
     let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -138,7 +137,7 @@ fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
 /// timer scheduled at the engine's `now + max_settle`.
 fn pre_place_file(e: &mut Engine, dir_segments: &[&str], file_name: &str) -> ResourceId {
     let mut comps = Vec::with_capacity(dir_segments.len() + 2);
-    comps.push(FS_ROOT_SEG);
+    comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(dir_segments);
     comps.push(file_name);
     let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
@@ -174,6 +173,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
 
     let now = Instant::now();
     let (pid, attach_out) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), now);
+    let pid = pid.expect("attach_promoter succeeded");
 
     // ---- PromoterAttached + initial enumeration probe ----
     assert!(
@@ -408,6 +408,7 @@ fn static_attach_emits_sub_attached_with_no_source_promoter() {
         false,
     );
     let (sid, out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     assert_ne!(sid, specter_core::SubId::default());
 
     let mut sub_attached_count = 0usize;
@@ -470,6 +471,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     // `PrefixPending(/a, ["b"])` because /a/b doesn't yet exist.
     let a = pre_place_dir(&mut e, &["a"]);
     let (qid, attach_q_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.txt"), now);
+    let qid = qid.expect("attach_promoter succeeded");
     assert!(matches!(
         e.promoters().get(qid).unwrap().state,
         PromoterState::PrefixPending(_),
@@ -525,6 +527,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         false,
     );
     let (sid, attach_p_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
@@ -631,7 +634,9 @@ fn two_promoters_sharing_proxy_unwind_independently() {
     // the first proxy at `enter_active` is /shared with index = lpl.
     let shared = pre_place_dir(&mut e, &["shared"]);
     let (q1, _attach_q1) = e.attach_promoter(promoter_req("q1", "/shared/*.log"), now);
+    let q1 = q1.expect("attach_promoter succeeded");
     let (q2, _attach_q2) = e.attach_promoter(promoter_req("q2", "/shared/*.txt"), now);
+    let q2 = q2.expect("attach_promoter succeeded");
 
     // Both Promoters should be Active with a proxy at /shared.
     for qid in [q1, q2] {
@@ -745,6 +750,7 @@ fn sensor_overflow_reseeds_active_promoter() {
     // proxies (one per matched Dir entry).
     let var_log = pre_place_dir(&mut e, &["var", "log"]);
     let (qid, attach_out) = e.attach_promoter(promoter_req("logs", "/var/log/*"), now);
+    let qid = qid.expect("attach_promoter succeeded");
     let initial_enum_corr =
         first_probe_corr(&attach_out).expect("initial enumeration probe in flight");
 
@@ -831,6 +837,7 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
     // `materialize_path_or_pending` returns Pending(/a, [b]).
     let a = pre_place_dir(&mut e, &["a"]);
     let (qid, attach_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.log"), now);
+    let qid = qid.expect("attach_promoter succeeded");
     let descent_corr = first_probe_corr(&attach_out).expect("descent probe in flight");
     assert!(matches!(
         e.promoters().get(qid).unwrap().state,
@@ -905,6 +912,7 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
     // probe IN FLIGHT (no response).
     let _a = pre_place_dir(&mut e, &["a"]);
     let (qid, _attach_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.log"), now);
+    let qid = qid.expect("attach_promoter succeeded");
     let in_flight_corr = e
         .pending_probe_for(ProbeOwner::Promoter(qid))
         .expect("descent probe in flight");
@@ -980,6 +988,7 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     let frozen = Instant::now() + Duration::from_secs(1_000_000);
 
     let (pid, _attach_out) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), frozen);
+    let pid = pid.expect("attach_promoter succeeded");
     let enum_corr = e
         .pending_probe_for(ProbeOwner::Promoter(pid))
         .expect("enumeration probe in flight");

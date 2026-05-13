@@ -14,13 +14,13 @@
 )]
 
 use crate::Engine;
-use crate::engine::FS_ROOT_SEG;
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectScope, EntryKind, Input, LeafEntry, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest,
-    ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
+    EffectScope, EntryKind, FS_ROOT_SEGMENT, Input, LeafEntry, ProbeOp, ProbeOutcome, ProbeOwner,
+    ProbeRequest, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -85,7 +85,7 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
     // directory the engine has discovered.
     let foo = e
         .tree_mut()
-        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
@@ -100,6 +100,7 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
         false,
     );
     let (sid, _out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     (e, sid, pid)
 }
@@ -110,7 +111,7 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
 fn lookup_foo(e: &Engine) -> ResourceId {
     let root = e
         .tree()
-        .lookup(None, FS_ROOT_SEG)
+        .lookup(None, FS_ROOT_SEGMENT)
         .expect("FS-root bootstrapped by ensure_path");
     e.tree().lookup(Some(root), "foo").expect("/foo exists")
 }
@@ -162,7 +163,7 @@ fn descent_two_levels_advances_progressively() {
     let mut e = Engine::new();
     let foo = e
         .tree_mut()
-        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
@@ -177,6 +178,7 @@ fn descent_two_levels_advances_progressively() {
         false,
     );
     let (sid, _out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // First probe at /foo. Inject "bar" appears.
@@ -426,6 +428,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         false,
     );
     let (sid, out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Tree contains the synthetic FS-root and the `tmp` scaffold.
@@ -535,6 +538,7 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
         false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     let root = e.tree().lookup(None, "/").unwrap();
@@ -561,7 +565,7 @@ fn descent_probe_uses_descent_variant() {
     let mut e = Engine::new();
     let foo = e
         .tree_mut()
-        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let user_cfg = specter_core::ScanConfig::builder()
@@ -642,7 +646,7 @@ fn reap_pending_profile_releases_only_descent_prefix() {
 
     // Detach the only Sub. Profile is Pending; Pending Profiles reap
     // immediately (they hold no burst that would resolve a deferred reap).
-    let out = e.detach_sub(sid, Instant::now());
+    let out = e.detach_sub(sid);
 
     // `bar`'s slot is reaped (no other anchors), `foo` still has its
     // pre-existing User Resource — only the descent's contribution is
@@ -700,6 +704,7 @@ fn descent_state_helper_returns_none_for_idle() {
         false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     // Materialized Profile starts a Seed burst — Active, not Idle. Drive
     // it to completion to land in Idle.
@@ -736,6 +741,7 @@ fn descent_state_helper_returns_none_for_active() {
         false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     // Materialized Profile starts a Seed burst — state is Active.
     assert!(matches!(
@@ -814,7 +820,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_pending() {
     // Pending Profile reap path: descent_prefix.is_some() &&
     // anchor_claim == None. Predicate `(some && Held)` matches false →
     // assertion holds.
-    let _ = e.detach_sub(sid, Instant::now());
+    let _ = e.detach_sub(sid);
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
 }
 
@@ -838,6 +844,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
         false,
     );
     let (sid, _) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim,
@@ -861,7 +868,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     // anchor lookup. For coverage of the assertion, the detach path
     // itself is sufficient (it runs reap_profile, which contains the
     // assertion).
-    let _ = e.detach_sub(sid, Instant::now());
+    let _ = e.detach_sub(sid);
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
 }
 
@@ -876,7 +883,7 @@ fn detach_sub_pending_profile_reaps_immediately() {
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_some());
     assert_eq!(e.tree().get(foo).unwrap().watch_demand(), 1);
 
-    let out = e.detach_sub(sid, Instant::now());
+    let out = e.detach_sub(sid);
 
     // Profile reaped synchronously: no longer in the registry; descent
     // contribution released atomically.

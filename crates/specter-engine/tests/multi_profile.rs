@@ -158,6 +158,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
         ),
         now,
     );
+    let sid_p = sid_p.expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_p).unwrap().profile;
 
     // Drive parent through Seed → Idle.
@@ -185,6 +186,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
         ),
         now,
     );
+    let sid_c = sid_c.expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_c).unwrap().profile;
     let child_seed = first_probe_correlation(&out_c).unwrap();
 
@@ -254,6 +256,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         ),
         now,
     );
+    let sid_p = sid_p.expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_p).unwrap().profile;
     let parent_seed = first_probe_correlation(&out_p).unwrap();
     e.step(
@@ -279,6 +282,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         ),
         now,
     );
+    let sid_c = sid_c.expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_c).unwrap().profile;
     let child_seed = first_probe_correlation(&out_c).unwrap();
     e.step(
@@ -473,6 +477,7 @@ fn co_located_profiles_share_suppress_count() {
         ),
         now,
     );
+    let sid_a = sid_a.expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile;
 
     let (sid_b, _) = e.attach_sub(
@@ -489,6 +494,7 @@ fn co_located_profiles_share_suppress_count() {
         ),
         now,
     );
+    let sid_b = sid_b.expect("attach_sub succeeded");
     let pid_b = e.subs().get(sid_b).unwrap().profile;
 
     // After both attach: suppress_count == 2 (both Profiles in Seed).

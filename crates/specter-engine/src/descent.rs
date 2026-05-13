@@ -51,8 +51,8 @@ use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
     AnchorClaim, ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, DirSnapshot,
-    EntryKind, ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    StepOutput,
+    EntryKind, FS_ROOT_SEGMENT, ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind,
+    ResourceRole, StepOutput, TreePath,
 };
 use std::time::Instant;
 
@@ -78,8 +78,8 @@ pub(crate) enum MaterializeResult {
 }
 
 impl crate::Engine {
-    /// Walk `components` into the Tree. The leaf is created with
-    /// `ResourceRole::User`; non-leaf components are
+    /// Walk a validated [`TreePath`] into the Tree. The leaf is created
+    /// with `ResourceRole::User`; non-leaf components are
     /// `ResourceRole::DescentScaffold` if freshly created (the existing
     /// `Tree::ensure` contract preserves existing roles, so an already-
     /// User parent stays User).
@@ -92,52 +92,40 @@ impl crate::Engine {
     ///
     /// "Deepest existing ancestor" is determined by Tree-side
     /// pre-existence: each component is `lookup`'d before the walk;
-    /// the deepest `i` for which `lookup(components[..=i])` succeeded
-    /// before the materialising `ensure_path` call is the prefix index.
-    /// The FS-root bootstrap guarantees `i >= 0` for every absolute
-    /// attach. Role plays no part in this decision — a slot that
-    /// existed before the walk may be a `User` peer anchor, a
+    /// the deepest `i` for which `lookup(path.segments()[..=i])`
+    /// succeeded before the materialising `ensure_path` call is the
+    /// prefix index. The FS-root bootstrap guarantees `i >= 0` for every
+    /// absolute attach. Role plays no part in this decision — a slot
+    /// that existed before the walk may be a `User` peer anchor, a
     /// `WatchRootParent` of some other Profile, or a `DescentScaffold`
     /// retained from an earlier Pending Profile's descent chain; any
     /// of those count as "pre-existing".
     ///
-    /// **Pre-condition.** `components` is non-empty and `components[0] ==
-    /// FS_ROOT_SEG`. [`crate::engine::decompose_attach_path`] is the
-    /// canonical producer and enforces both invariants by gate; the
-    /// `debug_assert!` below pins the contract for any future
-    /// hand-constructed caller (test fixtures, fuzzers).
-    pub(crate) fn materialize_path_or_pending(&mut self, components: &[&str]) -> MaterializeResult {
-        debug_assert!(
-            !components.is_empty() && components[0] == crate::engine::FS_ROOT_SEG,
-            "materialize_path_or_pending pre-condition: components must be non-empty and \
-             components[0] == FS_ROOT_SEG (decompose_attach_path is the canonical producer)",
-        );
-        // Release-mode degradation for the empty case: the Engine's
-        // caller (`attach_sub_inner`) maps `Materialized(default)` to a
-        // no-op return path. Keep this short-circuit so a future caller
-        // misuse can't index out-of-bounds on `components[0]` below.
-        if components.is_empty() {
-            return MaterializeResult::Materialized(ResourceId::default());
-        }
+    /// **Pre-conditions are now type-enforced.** [`TreePath`]'s type
+    /// invariants (non-empty; `segments()[0] == FS_ROOT_SEGMENT`) make
+    /// the prior `debug_assert!` and release-mode degradation branch
+    /// structurally impossible.
+    pub(crate) fn materialize_path_or_pending(&mut self, path: &TreePath) -> MaterializeResult {
+        // Borrow segments as `&[&str]` once for the Tree-side helpers
+        // (`lookup`, `ensure_path`, `resolve_components`) which all key
+        // on `&str`. One small allocation bounded by path depth.
+        let components: Vec<&str> = path.segments().iter().map(CompactString::as_str).collect();
 
-        // FS-root bootstrap. Unconditional: the pre-condition guarantees
-        // `components[0] == FS_ROOT_SEG`, and `Tree::ensure` is idempotent
-        // (returns the existing slot if `(parent=None, segment="/")`
-        // already maps to one). The role is `DescentScaffold` on first
-        // creation; if a prior `User` attach at `/` already promoted the
-        // slot, `ensure`'s preserve-existing-role contract leaves it
-        // alone. Bootstrapping unconditionally guarantees every Profile's
-        // rewind chain terminates at this `/` slot — the kernel always
-        // `lstat`s `/` successfully on Unix, so a `Vanished` response
-        // from a `/` probe is impossible, making cascading parent
-        // destruction (`rm -rf /a/b/c/d`) recoverable: the descent stays
-        // Pending at `/` waiting for the cascade's bottom segment to
-        // reappear.
-        self.tree.ensure(
-            None,
-            crate::engine::FS_ROOT_SEG,
-            ResourceRole::DescentScaffold,
-        );
+        // FS-root bootstrap. Unconditional: [`TreePath`]'s invariant
+        // guarantees `components[0] == FS_ROOT_SEGMENT`, and `Tree::ensure`
+        // is idempotent (returns the existing slot if `(parent=None,
+        // segment="/")` already maps to one). The role is
+        // `DescentScaffold` on first creation; if a prior `User` attach
+        // at `/` already promoted the slot, `ensure`'s
+        // preserve-existing-role contract leaves it alone. Bootstrapping
+        // unconditionally guarantees every Profile's rewind chain
+        // terminates at this `/` slot — the kernel always `lstat`s `/`
+        // successfully on Unix, so a `Vanished` response from a `/` probe
+        // is impossible, making cascading parent destruction
+        // (`rm -rf /a/b/c/d`) recoverable: the descent stays Pending at
+        // `/` waiting for the cascade's bottom segment to reappear.
+        self.tree
+            .ensure(None, FS_ROOT_SEGMENT, ResourceRole::DescentScaffold);
 
         // Snapshot which segments existed BEFORE the walk so we can tell
         // freshly-scaffolded segments from already-existing ones. The
@@ -145,7 +133,7 @@ impl crate::Engine {
         // pre-exists.
         let mut pre_existed: Vec<bool> = Vec::with_capacity(components.len());
         let mut cur_lookup: Option<ResourceId> = None;
-        for comp in components {
+        for comp in &components {
             let id = self.tree.lookup(cur_lookup, comp);
             pre_existed.push(id.is_some());
             cur_lookup = id;
@@ -157,7 +145,7 @@ impl crate::Engine {
 
         // Now do the walk. `ensure_path` creates non-leaf as
         // `DescentScaffold`, leaf as `User`.
-        let anchor = self.tree.ensure_path(components, ResourceRole::User);
+        let anchor = self.tree.ensure_path(&components, ResourceRole::User);
 
         // Walk forward to find the deepest pre-existing prefix. The
         // bootstrap guarantees `pre_existed[0] == true`, so `prefix_idx`
@@ -185,10 +173,10 @@ impl crate::Engine {
             let prefix = self
                 .resolve_components(&components[..=prefix_idx])
                 .expect("ensure_path created every component; prefix slice must resolve");
-            let remaining_vec: Vec<CompactString> = components[prefix_idx + 1..]
-                .iter()
-                .map(|&s| CompactString::from(s))
-                .collect();
+            // Reuse the already-validated `CompactString` segments from
+            // [`TreePath`] rather than re-allocating from `&str`. Bounded
+            // by path depth and lifts straight into [`DescentRemaining`].
+            let remaining_vec: Vec<CompactString> = path.segments()[prefix_idx + 1..].to_vec();
             // `prefix_idx + 1 < components.len()` is structurally
             // guaranteed by the outer `if`, so `from_vec` always
             // succeeds here; `expect` documents the contract and gives

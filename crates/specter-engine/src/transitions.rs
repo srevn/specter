@@ -873,10 +873,10 @@ impl Engine {
 
         // ---- Sub side ----
         for sub_id in subs.removed {
-            self.detach_sub_inner(sub_id, now, out);
+            self.detach_sub_inner(sub_id, out);
         }
         for (sub_id, req) in subs.modified {
-            self.detach_sub_inner(sub_id, now, out);
+            self.detach_sub_inner(sub_id, out);
             let _ = self.attach_sub_inner(req, now, out);
         }
         for req in subs.added {
@@ -885,10 +885,10 @@ impl Engine {
 
         // ---- Promoter side ----
         for pid in promoters.removed {
-            self.reap_promoter_inner(pid, now, out);
+            self.reap_promoter_inner(pid, out);
         }
         for (pid, req) in promoters.modified {
-            self.reap_promoter_inner(pid, now, out);
+            self.reap_promoter_inner(pid, out);
             let _ = self.attach_promoter_inner(req, now, out);
         }
         for req in promoters.added {

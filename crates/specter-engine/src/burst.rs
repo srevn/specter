@@ -390,7 +390,7 @@ impl Engine {
         let settle = p.settle;
         let anchor = p.resource;
 
-        // Read phase before mutating self via `cancel_pending_probe`. The
+        // Read phase before mutating self via `cancel_owner_probe`. The
         // Cancel emission doesn't touch `burst.phase`, but it does take
         // `&mut self` and so invalidates the borrow on `burst`. Decide
         // here whether the existing Batching settle timer (if any) carries
@@ -2543,7 +2543,7 @@ mod tests {
         // Unstable response shrinks the burst back to Batching without
         // emitting Cancel — the verify just responded, so no in-flight
         // probe to revoke. (`unstable_response_drives_batching` does not
-        // call `cancel_pending_probe`.)
+        // call `cancel_owner_probe`.)
         e.unstable_response_drives_batching(pid, now + Duration::from_millis(2), &mut out);
         out.watch_ops.clear();
 

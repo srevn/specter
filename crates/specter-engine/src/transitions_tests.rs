@@ -16,19 +16,18 @@
     clippy::unnecessary_wraps
 )]
 
-use crate::engine::FS_ROOT_SEG;
-use crate::{Engine, SubAttachRequest};
+use crate::Engine;
 use compact_str::CompactString;
 use specter_core::program::SpawnBody;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstIntent, ChildEntry,
     ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
-    EffectScope, EntryKind, FsEvent, Input, LeafEntry, OverflowScope, PatternSpec, Placeholder,
-    PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeRequest, ProbeResponse, ProfileState, PromoterAttachRequest, PromoterId,
+    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, LeafEntry, OverflowScope, PatternSpec,
+    Placeholder, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeRequest, ProbeResponse, ProfileState, PromoterAttachRequest, PromoterId,
     PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubId, TimerKind, TreeSnapshot, WatchOp, WatchRegistryDiff,
+    StepOutput, SubAttachRequest, SubId, TimerKind, TreeSnapshot, WatchOp, WatchRegistryDiff,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -82,6 +81,7 @@ fn engine_with_attached_sub() -> (
         source_promoter: None,
     };
     let (sid, _out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     (e, pid, sid, r, now)
 }
@@ -213,6 +213,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
         source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
 
     assert_eq!(
@@ -270,6 +271,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
     };
     let now = Instant::now();
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert_eq!(
         e.profiles.get(pid).and_then(|p| p.kind),
@@ -329,6 +331,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
     };
     let now = Instant::now();
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert_eq!(
         e.profiles.get(pid).and_then(|p| p.kind),
@@ -375,7 +378,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     let mut e = Engine::new();
     let foo = e
         .tree
-        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User);
     e.tree.set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_path(
         "guard".into(),
@@ -390,6 +393,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     );
     let now = Instant::now();
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert!(
         matches!(
@@ -454,6 +458,7 @@ fn dispatch_standard_ok_with_kind_mismatched_response_routes_through_finalize_an
     };
     let now = Instant::now();
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     // Complete the Seed burst with an AnchorOk so the Profile lands at
     // kind = Some(File).
@@ -590,6 +595,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
         source_promoter: None,
     };
     let (sid2, out) = e.attach_sub(req, now);
+    let sid2 = sid2.expect("attach_sub succeeded");
     assert_eq!(e.profiles.get(pid).unwrap().sub_refcount, pre_refcount + 1);
     assert_eq!(e.subs.get(sid2).unwrap().profile, pid, "shared Profile");
     // No fresh watch/probe/suppress emitted: existing Profile already has
@@ -1125,6 +1131,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     // Seed → Idle.
     let seed_corr = e
@@ -1216,6 +1223,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
 
     // Seed → leaf v1; Standard injects the same leaf so the verdict
@@ -1610,6 +1618,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
         source_promoter: None,
     };
     let (sid, _out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     complete_seed_burst(&mut e, pid, r);
 
@@ -1990,6 +1999,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
         source_promoter: None,
     };
     let (sid, _out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert!(e.subs.get(sid).unwrap().needs_diff);
 
@@ -2200,7 +2210,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     let mut e = Engine::new();
     let foo = e
         .tree
-        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User);
     e.tree.set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_path(
         "guard".into(),
@@ -2337,7 +2347,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     let mut e = Engine::new();
     let foo = e
         .tree
-        .ensure_path(&[FS_ROOT_SEG, "foo"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User);
     e.tree.set_kind(foo, ResourceKind::Dir);
     let req_a = SubAttachRequest::for_path(
         "a".into(),
@@ -2362,7 +2372,9 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         false,
     );
     let (sid_a, _) = e.attach_sub(req_a, Instant::now());
+    let sid_a = sid_a.expect("attach_sub succeeded");
     let (sid_b, _) = e.attach_sub(req_b, Instant::now());
+    let sid_b = sid_b.expect("attach_sub succeeded");
     let pid_a = e.subs.get(sid_a).unwrap().profile;
     let pid_b = e.subs.get(sid_b).unwrap().profile;
     // Both descents at /foo (different anchors).
@@ -2584,7 +2596,9 @@ fn sensor_overflow_resource_scope_filters_profiles() {
         ..req_a.clone()
     };
     let (sid_a, _) = e.attach_sub(req_a, now);
+    let sid_a = sid_a.expect("attach_sub succeeded");
     let (sid_b, _) = e.attach_sub(req_b, now);
+    let sid_b = sid_b.expect("attach_sub succeeded");
     let pid_a = e.subs.get(sid_a).unwrap().profile;
     let pid_b = e.subs.get(sid_b).unwrap().profile;
     complete_seed_burst(&mut e, pid_a, a);
@@ -2629,7 +2643,7 @@ fn seed_vanished_then_reap_releases_anchor_via_claim() {
     assert_eq!(e.profiles.get(pid).unwrap().anchor_claim, AnchorClaim::Held,);
 
     // Detach the Sub mid-burst → reap_pending = true.
-    let _ = e.detach_sub(sid, Instant::now());
+    let _ = e.detach_sub(sid);
     assert!(e.profiles.get(pid).unwrap().reap_pending);
 
     // Drive Seed Vanished to fire the reap.
@@ -2697,7 +2711,7 @@ fn detach_sub_idle_profile_reaps_immediately() {
         e.profiles.get(pid).unwrap().state,
         ProfileState::Idle,
     ));
-    let out = e.detach_sub(sid, Instant::now());
+    let out = e.detach_sub(sid);
     // Profile reaped; anchor unwatched.
     assert!(e.profiles.get(pid).is_none());
     assert!(
@@ -2716,7 +2730,7 @@ fn detach_sub_idle_profile_reaps_immediately() {
 fn detach_sub_active_profile_marks_reap_pending() {
     let (mut e, pid, sid, _r, _now) = engine_with_attached_sub();
     // Profile is Active(Seed Verifying) — Seed-burst still in flight.
-    let _out = e.detach_sub(sid, Instant::now());
+    let _out = e.detach_sub(sid);
     let p = e.profiles.get(pid).expect("profile alive until burst ends");
     assert!(p.reap_pending);
     assert_eq!(p.sub_refcount, 0);
@@ -2740,7 +2754,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
     );
 
     // Detach the Sub mid-burst.
-    let _ = e.detach_sub(sid, t1);
+    let _ = e.detach_sub(sid);
     assert!(e.profiles.get(pid).unwrap().reap_pending);
 
     // Drain the settle timer to advance to Verifying.
@@ -2798,6 +2812,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
         },
         now,
     );
+    let sid_fast = sid_fast.expect("attach_sub succeeded");
     let pid = e.subs.get(sid_fast).unwrap().profile;
     let (_sid_slow, _) = e.attach_sub(
         SubAttachRequest {
@@ -2822,7 +2837,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
     );
 
     // Detach the fast Sub. Remaining settle is the slow one's.
-    let _ = e.detach_sub(sid_fast, now);
+    let _ = e.detach_sub(sid_fast);
     assert_eq!(
         e.profiles.get(pid).unwrap().settle,
         Duration::from_millis(200)
@@ -2938,7 +2953,7 @@ fn config_diff_promoter_added_attaches_promoter() {
     let _var_log = {
         let r = e
             .tree_mut()
-            .ensure_path(&[FS_ROOT_SEG, "var", "log"], ResourceRole::User);
+            .ensure_path(&[FS_ROOT_SEGMENT, "var", "log"], ResourceRole::User);
         e.tree_mut().set_kind(r, ResourceKind::Dir);
         r
     };
@@ -2973,11 +2988,12 @@ fn config_diff_promoter_removed_reaps_promoter() {
     let mut e = Engine::new();
     let var_log = e
         .tree_mut()
-        .ensure_path(&[FS_ROOT_SEG, "var", "log"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "var", "log"], ResourceRole::User);
     e.tree_mut().set_kind(var_log, ResourceKind::Dir);
 
     let (pid, _attach_out) =
         e.attach_promoter(promoter_req("logs", "/var/log/*.log"), Instant::now());
+    let pid = pid.expect("attach_promoter succeeded");
     assert_eq!(e.promoters.len(), 1);
 
     let diff = WatchRegistryDiff {
@@ -3010,10 +3026,11 @@ fn config_diff_promoter_modified_reaps_and_attaches() {
     let mut e = Engine::new();
     let var_log = e
         .tree_mut()
-        .ensure_path(&[FS_ROOT_SEG, "var", "log"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "var", "log"], ResourceRole::User);
     e.tree_mut().set_kind(var_log, ResourceKind::Dir);
 
     let (old_pid, _) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), Instant::now());
+    let old_pid = old_pid.expect("attach_promoter succeeded");
 
     let diff = WatchRegistryDiff {
         promoters: PromoterRegistryDiff {
@@ -3075,7 +3092,7 @@ fn config_diff_applies_both_halves_in_one_step() {
     // Literal prefix for the Promoter.
     let var_log = e
         .tree_mut()
-        .ensure_path(&[FS_ROOT_SEG, "var", "log"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "var", "log"], ResourceRole::User);
     e.tree_mut().set_kind(var_log, ResourceKind::Dir);
 
     let sub_req = SubAttachRequest {
@@ -3167,6 +3184,7 @@ fn config_diff_promoter_modify_during_prefix_pending() {
     // PrefixPending.
     let (old_pid, attach_out) =
         e.attach_promoter(promoter_req("logs", "/missing/dir/*.log"), Instant::now());
+    let old_pid = old_pid.expect("attach_promoter succeeded");
     assert!(matches!(
         e.promoters.get(old_pid).map(|q| &q.state),
         Some(PromoterState::PrefixPending(_)),
@@ -3226,6 +3244,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
 
     // Complete Seed with empty baseline.
@@ -3370,6 +3389,7 @@ fn per_stable_file_skips_dir_entries() {
         source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
 
     // Seed completes against a snapshot already containing one Dir
@@ -3630,6 +3650,7 @@ fn per_file_effect_target_matches_dedup_key_resource() {
         source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
 
     // Complete Seed with empty baseline.
@@ -3893,6 +3914,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         source_promoter: None,
     };
     let (sid, _out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert!(
         e.profiles.get(pid).unwrap().has_per_file_fds,
@@ -3920,7 +3942,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     // Detaching the second Sub leaves the Profile alive (sub_refcount > 0
     // before detach); the flag still doesn't flip because the Profile's
     // events mask is invariant.
-    let _ = e.detach_sub(sid, Instant::now());
+    let _ = e.detach_sub(sid);
     assert!(e.profiles.get(pid).unwrap().has_per_file_fds);
 }
 
@@ -3946,6 +3968,7 @@ fn structure_only_profile_has_per_file_fds_false() {
         source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert!(!e.profiles.get(pid).unwrap().has_per_file_fds);
 }
@@ -4255,6 +4278,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         source_promoter: None,
     };
     let (sid, _) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
 
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
@@ -4868,6 +4892,7 @@ mod props {
             source_promoter: None,
         };
         let (sid, out) = e.attach_sub(req, now);
+        let sid = sid.expect("attach_sub succeeded");
         let last_correlation = out.probe_ops.iter().find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,

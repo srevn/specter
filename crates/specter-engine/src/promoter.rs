@@ -36,14 +36,13 @@
 
 use crate::Engine;
 use crate::descent::{MaterializeResult, kind_from_entry};
-use crate::engine::decompose_attach_path;
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
     ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
     PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, Promoter, PromoterAttachRequest,
     PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole, StepOutput, SubAttachRequest,
-    SubId,
+    SubId, Tree,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -80,13 +79,13 @@ impl Engine {
     ///
     /// On a malformed `pattern_spec` (defense-in-depth — `PatternSpec`
     /// parse should have rejected the same shape upstream), the engine
-    /// returns `PromoterId::default()` and emits
-    /// [`Diagnostic::AttachPathInvalid`] without registering anything.
+    /// returns `(None, out)` with `out` carrying a
+    /// [`Diagnostic::AttachPathInvalid`] and no other ops.
     pub fn attach_promoter(
         &mut self,
         req: PromoterAttachRequest,
         now: Instant,
-    ) -> (PromoterId, StepOutput) {
+    ) -> (Option<PromoterId>, StepOutput) {
         let mut out = StepOutput::default();
         let pid = self.attach_promoter_inner(req, now, &mut out);
         out.sort_for_emission();
@@ -95,6 +94,10 @@ impl Engine {
 
     /// Inner attach used by `on_config_diff` to compose multiple
     /// detach/attach operations into a single (sorted) `StepOutput`.
+    /// Returns `Some(promoter_id)` on success, or `None` when the
+    /// rendered literal prefix fails [`Tree::parse_attach_path`] —
+    /// defense-in-depth against a `PatternSpec` invariant breach. On
+    /// `None`, `out` carries a [`Diagnostic::AttachPathInvalid`].
     ///
     /// Compute-then-insert: the materialisation outcome decides the
     /// initial `PromoterState` shape *before* the registry insert, so
@@ -108,22 +111,29 @@ impl Engine {
         req: PromoterAttachRequest,
         now: Instant,
         out: &mut StepOutput,
-    ) -> PromoterId {
+    ) -> Option<PromoterId> {
         // 1. Render the literal prefix. components[0..literal_prefix_len]
         // are all Literal post-parse; the loop is a fold.
         let prefix_path = render_literal_prefix(&req.pattern_spec);
 
-        // 2. Decompose. Defense-in-depth: PatternSpec::parse should have
-        // rejected anything decompose_attach_path would reject. The
-        // None arm emits Diagnostic::AttachPathInvalid; we surface a
-        // sentinel id mirroring `attach_sub_inner`.
-        let Some(comps) = decompose_attach_path(&prefix_path, out) else {
-            return PromoterId::default();
+        // 2. Parse. Defense-in-depth: PatternSpec::parse should have
+        // rejected anything Tree::parse_attach_path would reject. On
+        // failure, emit Diagnostic::AttachPathInvalid (preserving the
+        // operator-facing hint) and return None.
+        let parsed = match Tree::parse_attach_path(&prefix_path) {
+            Ok(p) => p,
+            Err(err) => {
+                out.diagnostics.push(Diagnostic::AttachPathInvalid {
+                    path: prefix_path,
+                    hint: err.hint(),
+                });
+                return None;
+            }
         };
 
         // 3. Compute materialise BEFORE insert. Pick the final state
         // shape; insert once.
-        let materialize = self.materialize_path_or_pending(&comps);
+        let materialize = self.materialize_path_or_pending(&parsed);
 
         // 4. Capture the literal_prefix_len; first proxy at materialisation
         // carries this index in `pattern.components`.
@@ -217,14 +227,14 @@ impl Engine {
                         "mint_owner_correlation returned None for just-inserted Promoter \
                          (promoter = {promoter_id:?})",
                     );
-                    return promoter_id;
+                    return Some(promoter_id);
                 };
                 let target_path = self.tree.path_of(prefix).unwrap_or_default();
                 Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
             }
         }
 
-        promoter_id
+        Some(promoter_id)
     }
 
     /// Single helper for both Promoter materialisation paths:
@@ -1074,13 +1084,9 @@ impl Engine {
             promoter_id,
         );
 
-        let sub_id = self.attach_sub_inner(req, now, out);
-        debug_assert_ne!(
-            sub_id,
-            SubId::default(),
-            "for_resource_dynamic bypasses decompose_attach_path; attach_sub_inner cannot \
-             fail on the resource-anchored path (promoter = {promoter_id:?}, \
-             anchor = {anchor_resource:?})",
+        let sub_id = self.attach_sub_inner(req, now, out).expect(
+            "for_resource_dynamic bypasses path validation; attach_sub_inner cannot fail \
+             on the resource-anchored path",
         );
 
         // Dedup map. `anchor_resource: Copy` — no consumption
@@ -1223,9 +1229,14 @@ impl Engine {
     /// Stale `pid` is a silent no-op (no diagnostic) — mirrors
     /// `cancel_owner_probe` and `detach_sub_inner`'s defensive
     /// idempotence on stale ids.
-    pub fn reap_promoter(&mut self, pid: PromoterId, now: Instant) -> StepOutput {
+    ///
+    /// Time-independent like [`Self::detach_sub`]: the helper drives
+    /// only refcount and registry teardown; bursts running on Profiles
+    /// cascaded by promoter reap continue under their existing
+    /// schedule.
+    pub fn reap_promoter(&mut self, pid: PromoterId) -> StepOutput {
         let mut out = StepOutput::default();
-        self.reap_promoter_inner(pid, now, &mut out);
+        self.reap_promoter_inner(pid, &mut out);
         out.sort_for_emission();
         out
     }
@@ -1258,12 +1269,7 @@ impl Engine {
     ///      and try-reaps the slot.
     /// 4. Remove the Promoter from the registry. Emit
     ///    [`Diagnostic::PromoterReaped`].
-    pub(crate) fn reap_promoter_inner(
-        &mut self,
-        promoter_id: PromoterId,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
+    pub(crate) fn reap_promoter_inner(&mut self, promoter_id: PromoterId, out: &mut StepOutput) {
         // Stale id: silent no-op. Mirrors `detach_sub_inner`'s
         // defensive shape but without the `DetachUnknownSub`-style
         // diagnostic — there is no `DetachUnknownPromoter` variant in
@@ -1296,7 +1302,7 @@ impl Engine {
             q.dynamic_subs.clear();
         }
         for sub_id in sub_ids {
-            self.detach_sub_inner(sub_id, now, out);
+            self.detach_sub_inner(sub_id, out);
         }
 
         // 3. Release the per-Resource claims. Both helpers are

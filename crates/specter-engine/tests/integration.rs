@@ -29,9 +29,10 @@ use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, BurstIntent, ChildEntry, ClassSet, Diagnostic, DirChild,
     DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
     Placeholder, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, Profile,
-    ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, Tree, WatchOp,
+    ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
+    Tree, WatchOp,
 };
-use specter_engine::{Engine, SubAttachRequest, covers, nearest_covering_ancestor};
+use specter_engine::{Engine, covers, nearest_covering_ancestor};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -283,6 +284,7 @@ fn golden_path_full_lifecycle() {
         source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
 
     // attach_sub emits Watch + Suppress (anchor) + Probe (Seed). No Effect.
     assert!(
@@ -389,6 +391,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         source_promoter: None,
     };
     let (sid, out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let correlation = first_probe_correlation(&out).expect("Seed probe");
     let pid = pid_of(&e, sid);
 
@@ -428,6 +431,7 @@ fn pending_event_race_late_probe_response_discarded() {
         source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let stale_correlation = first_probe_correlation(&attach_out).expect("Seed probe correlation");
 
@@ -477,6 +481,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
         source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let correlation = first_probe_correlation(&attach_out).unwrap();
 
@@ -522,6 +527,7 @@ fn force_fire_emits_effect_with_forced_true() {
         source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let seed_corr = first_probe_correlation(&attach_out).unwrap();
 
@@ -590,6 +596,7 @@ fn step_output_is_sorted() {
         source_promoter: None,
     };
     let (sid, attach_out) = e.attach_sub(req, Instant::now());
+    let sid = sid.expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let correlation = first_probe_correlation(&attach_out).unwrap();
     let leaves: Vec<(String, EntryKind, u64)> = (0..5)

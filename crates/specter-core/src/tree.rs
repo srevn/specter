@@ -12,9 +12,104 @@ use crate::ids::ResourceId;
 use crate::op::WatchOp;
 use crate::output::StepOutput;
 use crate::resource::{Resource, ResourceKind, ResourceRole};
+use compact_str::CompactString;
 use slotmap::SlotMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
+
+/// Synthetic segment representing the filesystem root `/`.
+///
+/// Every absolute attach decomposes to `[FS_ROOT_SEGMENT, ...real
+/// segments]` so descents have a guaranteed-existing starting ancestor;
+/// [`Tree::path_of`] reconstructs an absolute path back out because
+/// `PathBuf::push("/")` resets the buffer to absolute. The constant
+/// lives in [`Tree`] rather than in the engine because the path-parsing
+/// invariant it anchors is Tree-shape, not engine-lifecycle.
+pub const FS_ROOT_SEGMENT: &str = "/";
+
+/// Reason an absolute-path attach request was rejected during
+/// [`Tree::parse_attach_path`].
+///
+/// The engine maps each variant to
+/// [`crate::Diagnostic::AttachPathInvalid`] with the matching
+/// [`Self::hint`] string so operators see the same actionable message
+/// regardless of which caller (static config, hot reload, fuzz harness)
+/// produced the malformed path.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AttachPathError {
+    /// `is_absolute() == false`. The bin's `canonicalize_lenient`
+    /// already filters this for static config, but hot-reload diff
+    /// applies and direct test fixtures can bypass the bin's discipline.
+    NotAbsolute,
+    /// At least one path segment is not valid UTF-8. The Tree's segment
+    /// store is `&str`-keyed; non-UTF-8 segments are unrepresentable.
+    NonUtf8,
+    /// A `Component::Normal` payload was the empty string. Defensive
+    /// against hand-constructed `PathBuf`s — `PathBuf` itself normalises
+    /// repeated separators.
+    EmptyComponent,
+    /// `.` or `..` component. Caller must canonicalise before attach;
+    /// the Tree's `(parent, segment)` identity model has no notion of
+    /// dot navigation.
+    Relative,
+    /// `Component::Prefix(_)` — a Windows path prefix (e.g. `C:`).
+    /// Unix v1 only.
+    WindowsPrefix,
+}
+
+impl AttachPathError {
+    /// Static operator-facing message paired with each rejection variant.
+    /// Kept stable so the engine's [`crate::Diagnostic::AttachPathInvalid`]
+    /// hint matches the pre-refactor strings byte-for-byte.
+    #[must_use]
+    pub const fn hint(self) -> &'static str {
+        match self {
+            Self::NotAbsolute => "path must be absolute (engine requires fully-qualified paths)",
+            Self::NonUtf8 => "non-UTF-8 path segment (engine requires UTF-8)",
+            Self::EmptyComponent => "empty path segment",
+            Self::Relative => "non-canonical attach path (`.`/`..`); canonicalize before attach",
+            Self::WindowsPrefix => "Windows path prefix not supported on Unix v1",
+        }
+    }
+}
+
+/// Validated Tree-path produced by [`Tree::parse_attach_path`].
+///
+/// **Type invariants** (enforced by the sole constructor):
+/// - `segments()` is non-empty.
+/// - `segments()[0] == FS_ROOT_SEGMENT`.
+/// - Every other `segments()[i]` is a non-empty UTF-8 string containing
+///   no path separators, no `.` / `..`, and no Windows prefix.
+///
+/// Downstream consumers (`Engine::materialize_path_or_pending`,
+/// `Engine::attach_sub_inner`'s descent setup) take `&TreePath` and
+/// rely on these invariants without re-checking. The opaque field
+/// guarantees the only producer is the parser.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreePath {
+    segments: Vec<CompactString>,
+}
+
+impl TreePath {
+    /// Validated segments. `[0] == FS_ROOT_SEGMENT`; non-empty.
+    #[must_use]
+    pub fn segments(&self) -> &[CompactString] {
+        &self.segments
+    }
+
+    /// Segment count. Always `>= 1` by type invariant.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// Always `false` by type invariant. Method present for API
+    /// completeness so clippy's `len_without_is_empty` is happy.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Tree {
@@ -27,6 +122,78 @@ impl Tree {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Parse an absolute, UTF-8 attach path into a validated
+    /// [`TreePath`]. `Component::RootDir` lowers to the synthetic
+    /// [`FS_ROOT_SEGMENT`] so the engine has a single shared root for
+    /// every absolute attach; [`Tree::path_of`] reconstructs an absolute
+    /// path on the way back out (`PathBuf::push("/")` resets to absolute).
+    ///
+    /// Rejection categories (each maps to a distinct
+    /// [`AttachPathError`] variant — see [`AttachPathError::hint`]):
+    /// - non-absolute paths;
+    /// - paths containing non-UTF-8 bytes;
+    /// - relative components (`.` / `..`);
+    /// - Windows path prefixes;
+    /// - empty path segments (defense-in-depth against hand-constructed
+    ///   `PathBuf`s — `PathBuf` itself normalises double separators).
+    ///
+    /// **Why on [`Tree`].** The validated invariants — non-empty,
+    /// root-anchored, segment shape — are Tree-shape invariants, not
+    /// engine-lifecycle invariants. The parser lives next to the type
+    /// that consumes the result (`Tree::ensure`, `Tree::lookup`) so a
+    /// future core-side path constructor can produce `TreePath`s without
+    /// borrowing engine code.
+    ///
+    /// **Post-condition.** On `Ok`, `path.segments()` is non-empty and
+    /// `path.segments()[0] == FS_ROOT_SEGMENT`; downstream callers rely
+    /// on both invariants without re-checking.
+    pub fn parse_attach_path(path: &Path) -> Result<TreePath, AttachPathError> {
+        if !path.is_absolute() {
+            return Err(AttachPathError::NotAbsolute);
+        }
+
+        // Single upfront UTF-8 check on the whole path. On Unix,
+        // `Path::to_str` returns `Some` iff every byte is valid UTF-8;
+        // a `Some` result means every `Component::Normal`'s byte-slice
+        // is also UTF-8. The loop body's `to_str().expect(...)` is
+        // sound under this precondition.
+        if path.to_str().is_none() {
+            return Err(AttachPathError::NonUtf8);
+        }
+
+        let mut segments: Vec<CompactString> = Vec::new();
+        for c in path.components() {
+            match c {
+                Component::RootDir => segments.push(CompactString::const_new(FS_ROOT_SEGMENT)),
+                Component::Normal(s) => {
+                    let name = s.to_str().expect("path UTF-8 verified above");
+                    if name.is_empty() {
+                        return Err(AttachPathError::EmptyComponent);
+                    }
+                    segments.push(CompactString::from(name));
+                }
+                Component::CurDir | Component::ParentDir => {
+                    return Err(AttachPathError::Relative);
+                }
+                Component::Prefix(_) => {
+                    return Err(AttachPathError::WindowsPrefix);
+                }
+            }
+        }
+
+        // `is_absolute()` guarantees `Component::RootDir` was emitted,
+        // which puts `FS_ROOT_SEGMENT` at `segments[0]`. The TreePath
+        // type invariant rests on this; the assertion pins the contract
+        // against future regressions or hand-constructed paths that
+        // confuse the components iterator.
+        debug_assert!(
+            !segments.is_empty() && segments[0].as_str() == FS_ROOT_SEGMENT,
+            "Tree::parse_attach_path post-condition: absolute path → segments[0] == FS_ROOT_SEGMENT",
+        );
+
+        Ok(TreePath { segments })
     }
 
     /// Walk `components` from a root downward, ensuring each segment.
@@ -899,5 +1066,127 @@ mod tests {
         tree.set_role(id, ResourceRole::User);
         // No panic; lookups still return None.
         assert!(tree.get(id).is_none());
+    }
+
+    // ===== parse_attach_path =====
+    //
+    // The parser is the seam between user-supplied `PathBuf` (bin's
+    // TOML loader, hot-reload diff, test fixtures) and the Tree's
+    // `&str` segment world. The post-condition (`segments[0] ==
+    // FS_ROOT_SEGMENT`) is load-bearing for every downstream consumer.
+
+    use super::{AttachPathError, FS_ROOT_SEGMENT};
+    use compact_str::CompactString;
+    use std::path::Path;
+
+    #[test]
+    fn parse_attach_path_preserves_root_marker() {
+        let p = Tree::parse_attach_path(Path::new("/tmp")).expect("absolute parses");
+        assert_eq!(
+            p.segments()
+                .iter()
+                .map(CompactString::as_str)
+                .collect::<Vec<_>>(),
+            vec![FS_ROOT_SEGMENT, "tmp"],
+        );
+    }
+
+    #[test]
+    fn parse_attach_path_deep_path_preserves_each_segment() {
+        let p = Tree::parse_attach_path(Path::new("/var/log/myapp")).expect("absolute parses");
+        assert_eq!(
+            p.segments()
+                .iter()
+                .map(CompactString::as_str)
+                .collect::<Vec<_>>(),
+            vec![FS_ROOT_SEGMENT, "var", "log", "myapp"],
+        );
+    }
+
+    #[test]
+    fn parse_attach_path_root_only_path_is_single_segment() {
+        let p = Tree::parse_attach_path(Path::new("/")).expect("root-only parses");
+        assert_eq!(p.len(), 1);
+        assert_eq!(p.segments()[0].as_str(), FS_ROOT_SEGMENT);
+    }
+
+    #[test]
+    fn parse_attach_path_empty_is_not_absolute() {
+        // An empty `Path` is non-absolute on Unix; the gate fires before
+        // any component-level work — the diagnostic's hint is "absolute"
+        // rather than "empty". `EmptyComponent` is reserved for the
+        // hand-constructed paths where `Component::Normal` carries an
+        // empty `OsStr`.
+        assert_eq!(
+            Tree::parse_attach_path(Path::new("")),
+            Err(AttachPathError::NotAbsolute),
+        );
+    }
+
+    #[test]
+    fn parse_attach_path_relative_segments_rejected() {
+        assert_eq!(
+            Tree::parse_attach_path(Path::new("foo")),
+            Err(AttachPathError::NotAbsolute),
+        );
+        assert_eq!(
+            Tree::parse_attach_path(Path::new("foo/bar")),
+            Err(AttachPathError::NotAbsolute),
+        );
+    }
+
+    #[test]
+    fn parse_attach_path_parent_dir_rejected() {
+        assert_eq!(
+            Tree::parse_attach_path(Path::new("/var/../log")),
+            Err(AttachPathError::Relative),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_attach_path_non_utf8_rejected() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::PathBuf;
+
+        let bad_seg = OsStr::from_bytes(&[0xFF, 0xFE]);
+        let mut path = PathBuf::from("/foo");
+        path.push(bad_seg);
+        path.push("bar");
+
+        assert_eq!(
+            Tree::parse_attach_path(&path),
+            Err(AttachPathError::NonUtf8),
+        );
+    }
+
+    #[test]
+    fn attach_path_error_hint_matches_pre_refactor_strings() {
+        // The hint strings are operator-visible (driver logs them and the
+        // engine forwards them via `Diagnostic::AttachPathInvalid.hint`).
+        // Pinning the exact substrings keeps the bin's grep / dashboard
+        // matchers stable across the move from engine::decompose_attach_path
+        // to Tree::parse_attach_path.
+        assert!(
+            AttachPathError::NotAbsolute.hint().contains("absolute"),
+            "NotAbsolute hint must include 'absolute'",
+        );
+        assert!(
+            AttachPathError::NonUtf8.hint().contains("non-UTF-8"),
+            "NonUtf8 hint must include 'non-UTF-8'",
+        );
+        assert!(
+            AttachPathError::EmptyComponent.hint().contains("empty"),
+            "EmptyComponent hint must include 'empty'",
+        );
+        assert!(
+            AttachPathError::Relative.hint().contains("non-canonical"),
+            "Relative hint must include 'non-canonical'",
+        );
+        assert!(
+            AttachPathError::WindowsPrefix.hint().contains("Windows"),
+            "WindowsPrefix hint must include 'Windows'",
+        );
     }
 }

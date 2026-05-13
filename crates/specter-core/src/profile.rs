@@ -691,9 +691,9 @@ pub struct Profile {
     /// Holds the correlation token of an outstanding `ProbeRequest`, or
     /// `None` if no probe is in flight.
     ///
-    /// **Discipline.** Open via `Engine::mint_probe_correlation`; close
+    /// **Discipline.** Open via `Engine::mint_owner_correlation`; close
     /// via the response-dispatch path (top of `Engine::on_probe_response`)
-    /// or via `Engine::cancel_pending_probe`. Open for at most one
+    /// or via `Engine::cancel_owner_probe`. Open for at most one
     /// outstanding request, regardless of which lifecycle state
     /// (`Pending` or `Active`) drives the emission.
     ///

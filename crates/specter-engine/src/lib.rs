@@ -24,7 +24,3 @@ pub use engine::Engine;
 // crosses the crate boundary — the bin layer reads its fields off the
 // `Engine::pop_expired` return value.
 pub use timer::TimerEntry;
-
-// Re-export `SubAttachRequest` from `core` for back-compat with sites
-// that imported it from `specter_engine`.
-pub use specter_core::SubAttachRequest;

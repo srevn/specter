@@ -108,7 +108,7 @@ impl Engine {
     ///
     /// **Cancel-first contract.** Callers that may have an in-flight probe
     /// (e.g., `reap_profile`, `on_watch_op_rejected` descent purge) MUST
-    /// invoke [`Engine::cancel_pending_probe`] before this helper. The
+    /// invoke [`Engine::cancel_owner_probe`] before this helper. The
     /// debug_assert below catches any future regression: in release builds
     /// a missed cancel leaks one `ProbeOp::Cancel` emission, and the
     /// prober's eventual response is dropped as `StaleProbeResponse` —
@@ -126,7 +126,7 @@ impl Engine {
                 .get(pid)
                 .is_some_and(|p| p.pending_probe.is_none()),
             "release_descent_prefix_claim: probe channel must be closed before release; \
-             caller must invoke cancel_pending_probe (or take the response-dispatch path) \
+             caller must invoke cancel_owner_probe (or take the response-dispatch path) \
              first to avoid losing the Cancel emission (profile = {pid:?})",
         );
 
@@ -267,9 +267,9 @@ impl Engine {
     /// **Pre-condition.** The probe channel must already be closed.
     /// Callers either took the response-dispatch path (which closes
     /// the channel before any dispatch arm runs, see
-    /// `on_probe_response`) or invoked [`Engine::cancel_pending_probe`]
+    /// `on_probe_response`) or invoked [`Engine::cancel_owner_probe`]
     /// first (`finalize_anchor_lost`'s pattern). The helper does not
-    /// call `cancel_pending_probe` itself — matches the
+    /// call `cancel_owner_probe` itself — matches the
     /// `release_*_claim` cancel-first contract.
     ///
     /// **Idempotence.** Each step short-circuits on already-cleared

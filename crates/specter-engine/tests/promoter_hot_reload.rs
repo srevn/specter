@@ -148,7 +148,9 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
     // Initial attach: register one Sub and one Promoter.
     let now = Instant::now();
     let (old_sid, _attach_out_a) = e.attach_sub(sub_req.clone(), now);
+    let old_sid = old_sid.expect("attach_sub succeeded");
     let (old_pid, _attach_out_b) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), now);
+    let old_pid = old_pid.expect("attach_promoter succeeded");
 
     // Build a modify-diff: same names; both entries with a
     // structurally-distinct request. The static Sub keeps its
@@ -236,7 +238,9 @@ fn mixed_remove_diff_emits_promoter_reaped_only() {
     let sub_req = sub_req_at_root("build", &mut e);
     let now = Instant::now();
     let (sid, _) = e.attach_sub(sub_req, now);
+    let sid = sid.expect("attach_sub succeeded");
     let (pid, _) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), now);
+    let pid = pid.expect("attach_promoter succeeded");
 
     let diff = WatchRegistryDiff {
         subs: SubRegistryDiff {
@@ -286,6 +290,7 @@ fn static_to_dynamic_migration_diff_swaps_via_diagnostic_stream() {
     let sub_req = sub_req_at_root("foo", &mut e);
     let now = Instant::now();
     let (sid, _) = e.attach_sub(sub_req, now);
+    let sid = sid.expect("attach_sub succeeded");
 
     let diff = WatchRegistryDiff {
         subs: SubRegistryDiff {
@@ -325,6 +330,7 @@ fn dynamic_to_static_migration_diff_swaps_via_diagnostic_stream() {
     let mut e = Engine::new();
     let now = Instant::now();
     let (pid, _) = e.attach_promoter(promoter_req("foo", "/var/log/*.log"), now);
+    let pid = pid.expect("attach_promoter succeeded");
     let static_req = sub_req_at_root("foo", &mut e);
 
     let diff = WatchRegistryDiff {
