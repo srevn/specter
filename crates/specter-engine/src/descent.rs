@@ -2,12 +2,12 @@
 //!
 //! Pending descent runs **outside** the Burst lifecycle. A Profile whose
 //! anchor doesn't yet exist on the filesystem lives in
-//! `ProfileState::Pending(DescentState)`. The descent emits its own probes
-//! (the correlation lives on `Profile.pending_probe`, the per-Profile
-//! probe-channel slot), advances one path component per probe response,
-//! and ends by materializing the anchor — at which point the Profile
-//! transitions Pending → Idle and immediately Idle → Active(Seed) to
-//! establish its baseline.
+//! `ProfileState::Pending(DescentState)`. The descent emits its own
+//! probes through the engine's `ProbeChannel` (keyed by
+//! `ProbeOwner::Profile(_)` with `OpenKind::ProfileDescent`), advances
+//! one path component per probe response, and ends by materializing
+//! the anchor — at which point the Profile transitions Pending → Idle
+//! and immediately Idle → Active(Seed) to establish its baseline.
 //!
 //! **Why a parallel state machine?** Burst semantics don't fit:
 //! - Probe target ≠ `Profile.resource` during descent (probes go to the
@@ -20,8 +20,8 @@
 //! - I5 stays intact: at most one outstanding probe per Profile.
 //!   `Pending` and `Active` are mutually exclusive `ProfileState`
 //!   variants (the compiler proves it); within `Pending`, an in-flight
-//!   probe is signalled by `Profile.pending_probe = Some(_)` — the same
-//!   discipline as `Active(PreFire(_))` with `phase = Verifying`.
+//!   probe is signalled by an open entry in the engine's `ProbeChannel`
+//!   under `ProbeOwner::Profile(_)` — same channel used by `Active`.
 //!
 //! **Lifecycle.**
 //! 1. `Engine::attach_sub` with a path-based request walks the path; if
@@ -45,8 +45,9 @@
 //!      next event.
 //! 4. `on_descent_event` triggers a fresh probe (no settle) on
 //!    `StructureChanged` at `current_prefix`. I5: drops the event if a
-//!    probe is already in flight (`Profile.pending_probe.is_some()`).
+//!    probe is already in flight (channel open for this owner).
 
+use crate::probe_channel::OpenKind;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
@@ -223,7 +224,7 @@ impl crate::Engine {
     ///
     /// **Pre-condition.** Profile must be `Idle` with a closed probe
     /// channel. The debug_assert below catches any caller passing a
-    /// non-Idle Profile or one with `pending_probe.is_some()`.
+    /// non-Idle Profile or one with an open channel entry.
     ///
     /// **Caller responsibility.** Parent-edge work (`compute_and_set_parent_edge`,
     /// `recompute_dependent_parent_edges`) is NOT done here — the fresh-attach
@@ -247,21 +248,21 @@ impl crate::Engine {
         remaining: DescentRemaining,
         out: &mut StepOutput,
     ) {
+        let owner = ProbeOwner::Profile(profile_id);
         debug_assert!(
-            self.profiles.get(profile_id).is_some_and(|p| {
-                matches!(p.state, ProfileState::Idle) && p.pending_probe.is_none()
-            }),
+            self.profiles
+                .get(profile_id)
+                .is_some_and(|p| matches!(p.state, ProfileState::Idle))
+                && self.probe_channel.correlation_for(owner).is_none(),
             "enter_pending_descent: Profile must be Idle with closed probe channel; \
              caller must invoke cancel_owner_probe (or take the response-dispatch path) \
              and release prior state before re-entering descent (profile = {profile_id:?})",
         );
 
-        // Step 1: mint correlation. Failure path is clean — no side
-        // effects yet, no leaked refcount.
-        let owner = ProbeOwner::Profile(profile_id);
-        let Some(correlation) = self.mint_owner_correlation(owner) else {
-            return;
-        };
+        // Step 1: open the channel. Probe-channel opens panic on I5
+        // breach (double-open); a stale Profile here would be a
+        // programming error caught upstream.
+        let correlation = self.probe_channel.open(owner, OpenKind::ProfileDescent);
 
         // Step 2: state-flip Idle → Pending. Done before the refcount
         // edge so any reader between this point and step 3 sees the
@@ -306,9 +307,10 @@ impl crate::Engine {
     /// non-terminal advance — are identical and operate via the
     /// owner-polymorphic descent state accessors.
     ///
-    /// **Caller (`on_*_probe_response`).** The probe channel was closed
-    /// before dispatch; this function may re-open it via
-    /// `mint_owner_correlation` in the advance branch.
+    /// **Caller (`on_*_probe_response`).** The probe channel was
+    /// closed (via `ProbeChannel::close_if`) before dispatch; this
+    /// function may re-open it via `ProbeChannel::open` in the
+    /// advance branch.
     pub(crate) fn dispatch_descent_ok(
         &mut self,
         owner: ProbeOwner,
@@ -426,9 +428,7 @@ impl crate::Engine {
         new_prefix: ResourceId,
         out: &mut StepOutput,
     ) {
-        let Some(correlation) = self.mint_owner_correlation(owner) else {
-            return;
-        };
+        let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
         if let Some(d) = self.descent_state_mut(owner) {
             d.current_prefix = new_prefix;
             // Non-terminal by caller contract — `dispatch_descent_ok`
@@ -630,9 +630,7 @@ impl crate::Engine {
                 // `remaining_components` rather than cloning + rebuilding
                 // a fresh DescentState — saves both the whole-vec clone
                 // and the per-element CompactString clone.
-                let Some(correlation) = self.mint_owner_correlation(owner) else {
-                    return;
-                };
+                let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
                 if let Some(d) = self.descent_state_mut(owner) {
                     d.current_prefix = parent_id;
                     if let Some(name) = prefix_name {
@@ -685,19 +683,19 @@ impl crate::Engine {
         // Retain in-descent state; await next event at the prefix.
     }
 
-    /// Owner-polymorphic Handle an `FsEvent` arriving at a descent's
+    /// Owner-polymorphic handler for `FsEvent` arriving at a descent's
     /// `current_prefix`. Triggers a fresh probe (no settle wait —
     /// descent is event-driven). I5: drops the event if a probe is
     /// already in flight (the in-flight probe will pick up the change
-    /// in its response). The "in flight" signal is the per-owner
-    /// probe-channel slot, read via [`Engine::pending_probe_for`].
+    /// in its response). The "in flight" signal is the open channel
+    /// entry for this owner.
     pub(crate) fn on_descent_event(
         &mut self,
         owner: ProbeOwner,
         _now: Instant,
         out: &mut StepOutput,
     ) {
-        if self.pending_probe_for(owner).is_some() {
+        if self.probe_channel.correlation_for(owner).is_some() {
             return;
         }
         let prefix = match self.descent_state(owner) {
@@ -705,9 +703,7 @@ impl crate::Engine {
             None => return,
         };
 
-        let Some(correlation) = self.mint_owner_correlation(owner) else {
-            return;
-        };
+        let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
         let target_path = self.tree.path_of(prefix).unwrap_or_default();
         Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
     }
@@ -730,6 +726,18 @@ const fn descent_key(owner: ProbeOwner) -> ContribKey {
     match owner {
         ProbeOwner::Profile(pid) => ContribKey::ProfileDescent(pid),
         ProbeOwner::Promoter(qid) => ContribKey::PromoterPrefix(qid),
+    }
+}
+
+/// Owner-polymorphic [`OpenKind`] for descent probes. Profile descents
+/// open with [`OpenKind::ProfileDescent`]; Promoter descents with
+/// [`OpenKind::PromoterDescent`]. Pairs with [`descent_key`]: both
+/// fan-outs are 1-to-1 with the owner discriminant and mirror the
+/// shape of `ProbeOwner` itself.
+const fn descent_open_kind(owner: ProbeOwner) -> OpenKind {
+    match owner {
+        ProbeOwner::Profile(_) => OpenKind::ProfileDescent,
+        ProbeOwner::Promoter(_) => OpenKind::PromoterDescent,
     }
 }
 

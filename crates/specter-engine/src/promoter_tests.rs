@@ -27,6 +27,7 @@
 )]
 
 use crate::Engine;
+use crate::probe_channel::OpenKind;
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
@@ -851,38 +852,40 @@ fn register_proxy_is_idempotent_on_re_registration() {
     );
 }
 
-// ---- pending_enumeration_target lifecycle ----
+// ---- promoter enumeration channel lifecycle ----
 
 #[test]
 fn dispatch_next_enumeration_records_pending_target() {
-    // The slot is set in lockstep with `pending_probe` at probe-emit
-    // time so `Vanished` / `Failed` responses can identify the proxy.
+    // `OpenKind::PromoterEnumerating { target }` is stamped on the
+    // channel at probe-emit time so `Vanished` / `Failed` responses
+    // (which carry no payload) can identify the proxy.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
     let pid = pid.expect("attach_promoter succeeded");
     // Initial enumeration was dispatched by `enter_active`; the
-    // pending_enumeration_target now points at /var/log.
-    assert_eq!(
-        e.promoters
-            .get(pid)
-            .and_then(|q| q.pending_enumeration_target),
-        Some(var_log),
-        "pending_enumeration_target tracks the in-flight proxy",
+    // channel's OpenKind carries the in-flight proxy resource.
+    let kind = e
+        .probe_channel
+        .kind_for(ProbeOwner::Promoter(pid))
+        .expect("enumeration channel open");
+    assert!(
+        matches!(kind, OpenKind::PromoterEnumerating { target } if *target == var_log),
+        "channel kind carries the in-flight proxy target (got {kind:?})",
     );
     // The probe correlation is also live.
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
-        "probe correlation in flight alongside the target slot",
+        "probe correlation in flight alongside the channel kind",
     );
 }
 
 #[test]
 fn pending_enumeration_target_clears_on_response() {
-    // The slot clears in lockstep with `pending_probe` when the
-    // response arrives — both fields go to None *before* dispatch
-    // arms run.
+    // The channel closes on response — both the correlation slot and
+    // the kind tag go away atomically (`close_if` removes the Open
+    // entry as one operation).
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
@@ -900,12 +903,10 @@ fn pending_enumeration_target_clears_on_response() {
     );
 
     assert!(
-        e.promoters
-            .get(pid)
-            .unwrap()
-            .pending_enumeration_target
+        e.probe_channel
+            .kind_for(ProbeOwner::Promoter(pid))
             .is_none(),
-        "target slot cleared after response",
+        "enumeration channel closed after response",
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
@@ -914,31 +915,31 @@ fn pending_enumeration_target_clears_on_response() {
 }
 
 #[test]
-fn cancel_owner_probe_clears_pending_enumeration_target() {
-    // `cancel_owner_probe` is the canonical close-on-cancel path.
-    // For Promoter owners it clears `pending_enumeration_target`
-    // unconditionally (the slot tracks the correlation channel's
-    // lifecycle).
+fn cancel_owner_probe_clears_promoter_enumeration_channel() {
+    // `cancel_owner_probe` is the canonical close-on-cancel path. For
+    // a Promoter owner with an open enumeration channel it closes the
+    // channel and emits a Cancel op.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let (pid, _out) = e.attach_promoter(req_for("logs", "/var/log/*.log"), Instant::now());
     let pid = pid.expect("attach_promoter succeeded");
-    assert_eq!(
-        e.promoters.get(pid).unwrap().pending_enumeration_target,
-        Some(var_log),
-        "pre-cancel target slot points at /var/log",
+    let pre_kind = e
+        .probe_channel
+        .kind_for(ProbeOwner::Promoter(pid))
+        .expect("enumeration channel open pre-cancel");
+    assert!(
+        matches!(pre_kind, OpenKind::PromoterEnumerating { target } if *target == var_log),
+        "pre-cancel channel targets /var/log (got {pre_kind:?})",
     );
 
     let mut out = specter_core::StepOutput::default();
     e.cancel_owner_probe(ProbeOwner::Promoter(pid), &mut out);
 
     assert!(
-        e.promoters
-            .get(pid)
-            .unwrap()
-            .pending_enumeration_target
+        e.probe_channel
+            .kind_for(ProbeOwner::Promoter(pid))
             .is_none(),
-        "target slot cleared by cancel_owner_probe",
+        "enumeration channel closed by cancel_owner_probe",
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),

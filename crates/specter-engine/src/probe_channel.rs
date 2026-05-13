@@ -1,170 +1,276 @@
 //! Probe channel — engine↔Prober communication primitive.
 //!
-//! At most one outstanding probe per [`ProbeOwner`]. The channel is
-//! **opened** when the engine emits `ProbeOp::Probe` (after
-//! `mint_owner_correlation` writes the correlation to the owner's slot).
-//! The channel is **closed** when either:
-//! - the matching `ProbeResponse` arrives (top of `on_probe_response`
-//!   clears the slot before dispatch), or
-//! - the engine emits `ProbeOp::Cancel` (`cancel_owner_probe` clears
-//!   the slot and emits Cancel atomically).
+//! [`ProbeChannel`] owns the per-owner outstanding-probe map, the
+//! correlation counter, and (for [`OpenKind::PromoterEnumerating`]) the
+//! sibling state the dispatcher reads when [`specter_core::ProbeOutcome`]
+//! variants carry no payload. The structure encodes three invariants that
+//! were previously split between core fields and engine helpers:
 //!
-//! This module is the single source of three disciplines:
-//! 1. Counter monotonicity for the probe side — `mint_owner_correlation`
-//!    is the only path that drives `Engine.probe_correlations` forward.
-//!    The counter is phantom-typed
-//!    ([`crate::counter::MonotonicCounter<ProbeCorrelation>`]), so a
-//!    misrouted token cannot numerically collide with an effect-side
-//!    [`specter_core::CorrelationId`] — the type system rejects
-//!    cross-counter wiring before the values exist.
-//! 2. Channel-state slot — only `mint_owner_correlation` writes
-//!    `pending_probe = Some(_)`; only `cancel_owner_probe` and the
-//!    `on_probe_response` pre-dispatch clear write `pending_probe = None`.
-//! 3. `ProbeOp::Probe` construction — the three typed helpers
-//!    (`emit_anchor_probe`, `emit_subtree_probe`, `emit_descent_probe`)
-//!    are the only paths that push a `ProbeOp::Probe`. Each helper bakes
-//!    the request variant: callers cannot accidentally ship a Subtree
-//!    request to a File-anchored Profile, or attach a baseline to a
-//!    descent prefix.
+//! 1. **I5 — at most one outstanding probe per [`ProbeOwner`].** Enforced
+//!    structurally: a single [`std::collections::BTreeMap`] entry per
+//!    owner; [`ProbeChannel::open`] panics unconditionally on a
+//!    double-open (matches [`crate::counter::MonotonicCounter::next`]'s
+//!    saturation discipline — silent overwrite would corrupt
+//!    stale-response detection).
+//! 2. **Correlation monotonicity for the probe id space.** The counter
+//!    lives inside the channel; mint is the sole drive site. Cross-counter
+//!    misuse (minting a [`specter_core::CorrelationId`] from this counter
+//!    or vice versa) is a compile error via the phantom-typed wrapper.
+//! 3. **Per-owner sibling state.** [`OpenKind::PromoterEnumerating`]
+//!    carries the proxy [`ResourceId`] the enumeration response refers
+//!    to (the wire's `Vanished` / `Failed` outcomes echo no payload).
+//!    The kind variant pairs the target with the channel state in one
+//!    structural slot — no second field to drift out of lockstep with
+//!    the correlation.
 //!
-//! Per-owner slot lookup goes through [`Engine::pending_slot_mut`] /
-//! [`Engine::pending_slot`] — a single match on [`ProbeOwner`] keeps the
-//! `mint`/`cancel`/read trio symmetric. The match is exhaustive over
-//! every owner kind today; extending the enum requires adding one arm
-//! here and one in the dispatcher (`on_probe_response`).
+//! Response dispatchers route on [`Open::kind`] rather than inspecting
+//! Profile / Promoter state, so phase-mismatch cases that used to require
+//! `debug_assert!(false, "I5 violated")` arms are now unrepresentable.
+//!
+//! The associated [`Engine::emit_anchor_probe`] /
+//! [`Engine::emit_subtree_probe`] / [`Engine::emit_descent_probe`] helpers
+//! are the sole construction sites for [`ProbeOp::Probe`] requests; they
+//! live alongside the channel type because both belong to "probe wiring"
+//! even though the helpers are stateless typed constructors.
 
 use crate::Engine;
+use crate::counter::MonotonicCounter;
 use specter_core::{
     DirSnapshot, ProbeCorrelation, ProbeOp, ProbeOwner, ProbeRequest, ResourceId, ScanConfig,
     StepOutput,
 };
-use std::collections::BTreeSet;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-impl Engine {
-    /// Mutable accessor for the per-owner pending-probe slot. Returns
-    /// `None` for a stale owner (slotmap key whose entity has been
-    /// reaped); otherwise threads through to the owner's
-    /// `pending_probe: Option<ProbeCorrelation>` field.
-    ///
-    /// This is the single source of truth that
-    /// `mint_owner_correlation` / `cancel_owner_probe` /
-    /// `pending_slot` route through — adding a new
-    /// [`ProbeOwner`] variant means extending exactly one match here
-    /// (and one in `on_probe_response`).
-    fn pending_slot_mut(&mut self, owner: ProbeOwner) -> Option<&mut Option<ProbeCorrelation>> {
-        match owner {
-            ProbeOwner::Profile(pid) => self.profiles.get_mut(pid).map(|p| &mut p.pending_probe),
-            ProbeOwner::Promoter(pid) => self.promoters.get_mut(pid).map(|q| &mut q.pending_probe),
-        }
-    }
+/// Engine-resident probe-channel state. Owns the open-map and the
+/// correlation counter.
+///
+/// **Construction.** [`Engine::probe_channel`] is initialised via
+/// `Default` at [`Engine::new`]; both the map and the counter start empty.
+///
+/// **Invariants.**
+/// - Every entry in `open` is for a live [`ProbeOwner`] — closure happens
+///   in [`Engine::cancel_owner_probe`] (which precedes every reap path)
+///   and the per-owner response dispatchers' [`Self::close_if`] step.
+///   Reap-time `debug_assert!` in [`Engine::reap_profile`] /
+///   [`Engine::reap_promoter_inner`] catches missed closures.
+/// - `counter` advances monotonically; saturation panics
+///   unconditionally via [`MonotonicCounter::next`] (release-runnable).
+#[derive(Debug, Default)]
+pub(crate) struct ProbeChannel {
+    open: BTreeMap<ProbeOwner, Open>,
+    counter: MonotonicCounter<ProbeCorrelation>,
+}
 
-    /// Read counterpart of [`Self::pending_slot_mut`]. Returns `None`
-    /// for a stale owner or a closed channel.
-    fn pending_slot(&self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
-        match owner {
-            ProbeOwner::Profile(pid) => self.profiles.get(pid).and_then(|p| p.pending_probe),
-            ProbeOwner::Promoter(pid) => self.promoters.get(pid).and_then(|q| q.pending_probe),
-        }
-    }
+/// Per-owner channel-state record. Carries the correlation the channel
+/// was opened with and a typed [`OpenKind`] discriminant the dispatcher
+/// reads to route the response.
+///
+/// Construction is closed under [`ProbeChannel::open`] — fields are
+/// private; engine code accesses them via [`Self::correlation`] /
+/// [`Self::kind`].
+#[derive(Debug)]
+pub(crate) struct Open {
+    correlation: ProbeCorrelation,
+    kind: OpenKind,
+}
 
-    /// Open the probe channel: bump the engine-monotonic correlation
-    /// counter, mint a fresh `ProbeCorrelation`, and write it to the
-    /// owner's pending-probe slot.
-    ///
-    /// Returns `None` only on a stale owner (defense-in-depth;
-    /// production paths look up the owner within the same `&mut self`
-    /// window immediately before this call). On success the slot is
-    /// `Some(c)` and the returned `ProbeCorrelation` matches.
-    ///
-    /// **I5 enforcement.** A `debug_assert!` fires on double-open.
-    /// Release builds silently overwrite — benign because the
-    /// now-orphaned outstanding probe's response will fail the
-    /// `pending_probe == Some(received)` check at the top of
-    /// `on_probe_response` and emit `StaleProbeResponse`. The assertion
-    /// is the early-warning signal in CI/dev.
-    ///
-    /// **Saturation.** Counter saturation panics unconditionally via
-    /// [`crate::counter::MonotonicCounter::next`]; release builds are
-    /// not exempt because silent wrap would re-issue an
-    /// already-outstanding correlation and break stale-response
-    /// detection.
+impl Open {
     #[must_use]
-    pub(crate) fn mint_owner_correlation(&mut self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
-        // I5 staleness check. Read-only; the &mut downgrade window for
-        // the slot write happens below.
-        let existing = self.pending_slot(owner);
-        debug_assert!(
-            existing.is_none(),
-            "I5 violated: minting probe correlation while channel is open \
-             (existing = {existing:?}, owner = {owner:?})",
-        );
-        // Stale owner — defensive bail before consuming a counter tick.
-        self.pending_slot_mut(owner)?;
-
-        let correlation = self.probe_correlations.next();
-        if let Some(slot) = self.pending_slot_mut(owner) {
-            *slot = Some(correlation);
-        }
-        Some(correlation)
+    pub(crate) const fn correlation(&self) -> ProbeCorrelation {
+        self.correlation
     }
 
-    /// Close the probe channel and emit `ProbeOp::Cancel` iff the channel
-    /// was open. Idempotent — silently no-ops on a closed channel or stale
-    /// owner.
+    #[must_use]
+    pub(crate) const fn kind(&self) -> &OpenKind {
+        &self.kind
+    }
+}
+
+/// Typed routing tag for an outstanding probe.
+///
+/// Five variants — owner affinity is encoded in the variant name so the
+/// mint-site discipline (Profile owners open with `Profile*` kinds;
+/// Promoter owners with `Promoter*`) is named. Dispatchers route by
+/// [`Self`] discriminant rather than by inspecting owner state:
+/// `on_profile_probe_response` matches the three `Profile*` variants;
+/// `on_promoter_probe_response` matches the two `Promoter*` variants;
+/// any cross-affinity match is a regression-detection arm
+/// (`debug_assert!` + [`specter_core::Diagnostic::StaleProbeResponse`]).
+///
+/// [`Self::PromoterEnumerating`] carries the proxy [`ResourceId`] the
+/// enumeration probe targets so the `Vanished` / `Failed` dispatch can
+/// identify the proxy without a separate per-Promoter slot. If the wire
+/// were ever extended to echo the target on `ProbeOutcome::Vanished` /
+/// `Failed`, this variant would collapse to a unit and the payload
+/// argument would disappear from call sites.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum OpenKind {
+    /// Profile pre-fire stability check (Seed or Standard burst).
+    /// Dispatcher reads `(intent, forced)` off the `PreFireBurst`.
+    ProfileVerifying,
+    /// Profile post-fire rebase. Dispatcher routes the outcome through
+    /// `dispatch_rebase_*`.
+    ProfileRebasing,
+    /// Profile pending-anchor descent. Dispatcher routes through
+    /// `dispatch_descent_*` with `ProbeOwner::Profile(_)`.
+    ProfileDescent,
+    /// Promoter literal-prefix descent. Dispatcher routes through
+    /// `dispatch_descent_*` with `ProbeOwner::Promoter(_)`.
+    PromoterDescent,
+    /// Promoter proxy enumeration. `target` identifies the proxy the
+    /// probe is enumerating; the dispatcher reads it on
+    /// `ProbeOutcome::{Vanished, Failed}` (those outcomes carry no
+    /// wire payload). On `ProbeOutcome::SubtreeOk(arc)` the dispatcher
+    /// instead reads `arc.root_resource` (the walker's stamp).
+    PromoterEnumerating { target: ResourceId },
+}
+
+impl ProbeChannel {
+    /// Open the channel for `owner`. Mints a fresh
+    /// [`ProbeCorrelation`] from the channel's monotonic counter,
+    /// stamps it onto a new [`Open`] keyed by `owner`, and returns the
+    /// correlation for the caller to embed in the outgoing
+    /// [`ProbeRequest`].
     ///
-    /// Sole caller surface for the Profile-side cancel-emission paths:
-    /// `event_drives_batching`, `finalize_anchor_lost`,
-    /// `on_watch_op_rejected` descent purge, `reap_profile`. Promoter
-    /// callers route through [`Engine::reap_promoter_inner`].
+    /// **I5 enforcement is unconditional.** A double-open panics in
+    /// both debug and release: the channel is the sole mint site, so a
+    /// second open without a matching close is a programming error.
+    /// Silent overwrite would orphan the prior probe's response (its
+    /// correlation no longer matches anything in the map, so
+    /// [`Self::close_if`] would reject it as stale even though the
+    /// engine asked for it). Crashing loudly is the only correct
+    /// outcome.
     ///
-    /// **Per-owner sibling-state cleanup.** Promoter owners carry a
-    /// second slot (`pending_enumeration_target`) that pairs with
-    /// `pending_probe` for enumeration probes; the lockstep is owned
-    /// by [`specter_core::Promoter::close_probe_channel`] (the canonical
-    /// "close both fields together" entry point on the Promoter type).
-    /// Profile owners have no equivalent (descent target lives on
-    /// `Profile.state` directly), so this helper short-circuits to a
-    /// plain take on the slot.
+    /// **Counter saturation.** Inherited from
+    /// [`MonotonicCounter::next`]: unconditional panic at
+    /// [`u64::MAX`].
+    #[must_use]
+    pub(crate) fn open(&mut self, owner: ProbeOwner, kind: OpenKind) -> ProbeCorrelation {
+        let correlation = self.counter.next();
+        let prior = self.open.insert(owner, Open { correlation, kind });
+        assert!(
+            prior.is_none(),
+            "I5 violated: opening probe channel for {owner:?} while already open \
+             (prior = {prior:?}, attempted kind = {kind:?})",
+        );
+        correlation
+    }
+
+    /// Atomic check-and-take. Returns `Some(Open)` iff a channel is
+    /// open for `owner` AND its correlation matches `received`;
+    /// otherwise returns `None` and leaves any existing entry intact.
+    ///
+    /// The "leave intact on mismatch" semantics matter: a late
+    /// response carrying a *stale* correlation must NOT displace the
+    /// legitimately-outstanding entry. Production callers
+    /// (`on_*_probe_response`) emit
+    /// [`specter_core::Diagnostic::StaleProbeResponse`] on `None` and
+    /// proceed.
+    ///
+    /// Implemented via [`std::collections::btree_map::Entry`] so the
+    /// "find then maybe remove" decision happens under a single
+    /// navigation rather than the prior peek → check → write
+    /// three-step at every response site.
+    pub(crate) fn close_if(
+        &mut self,
+        owner: ProbeOwner,
+        received: ProbeCorrelation,
+    ) -> Option<Open> {
+        match self.open.entry(owner) {
+            Entry::Occupied(e) if e.get().correlation == received => Some(e.remove()),
+            Entry::Occupied(_) | Entry::Vacant(_) => None,
+        }
+    }
+
+    /// Unconditional close. Returns the prior [`Open`] entry (if any)
+    /// so the caller can use its fields for diagnostics. Cancel paths
+    /// use this — by then the caller has decided the channel must die
+    /// regardless of correlation (reap, force-cancel on
+    /// event-during-Verifying, etc.).
+    pub(crate) fn close(&mut self, owner: ProbeOwner) -> Option<Open> {
+        self.open.remove(&owner)
+    }
+
+    /// Read the correlation an open channel holds, or `None` if
+    /// closed. Used by reap-time invariant checks and by
+    /// `on_descent_event`'s I5 short-circuit ("drop the event if a
+    /// probe is already in flight").
+    #[must_use]
+    pub(crate) fn correlation_for(&self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
+        self.open.get(&owner).map(Open::correlation)
+    }
+
+    /// Read the [`OpenKind`] discriminant of an open channel, or
+    /// `None` if closed. Used by:
+    ///
+    /// - `on_watch_op_rejected`'s Promoter proxy-purge: cancel only
+    ///   when the in-flight probe targets the rejected proxy.
+    /// - `release_promoter_proxy_claim`'s cancel-first
+    ///   `debug_assert!`: assert the in-flight enumeration (if any)
+    ///   targets some OTHER proxy of the same Promoter.
+    ///
+    /// Pattern-matching at the call site is the natural idiom; a
+    /// dedicated `enumeration_target_for` helper would just hide the
+    /// match.
+    #[must_use]
+    pub(crate) fn kind_for(&self, owner: ProbeOwner) -> Option<&OpenKind> {
+        self.open.get(&owner).map(Open::kind)
+    }
+
+    /// Test-only counter prime. Saturation tests jump to `u64::MAX`
+    /// without consuming the counter via repeated `open` calls.
+    #[cfg(test)]
+    pub(crate) fn prime_counter(&mut self, value: u64) {
+        self.counter.prime(value);
+    }
+
+    /// Test-only counter peek for "fresh channel starts at zero"
+    /// fixtures.
+    #[cfg(test)]
+    pub(crate) fn counter_peek(&self) -> u64 {
+        self.counter.peek()
+    }
+}
+
+impl Engine {
+    /// Read accessor for the owner's pending-probe correlation.
+    /// Returns `None` for a closed channel or stale owner.
+    ///
+    /// `pub` (not `pub(crate)`) — the engine crate's `tests/`
+    /// directory is an external crate from a Rust visibility
+    /// standpoint, and ~35 integration-test call sites depend on this
+    /// for channel-state assertions. Plain delegate to
+    /// [`ProbeChannel::correlation_for`].
+    #[must_use]
+    pub fn pending_probe_for(&self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
+        self.probe_channel.correlation_for(owner)
+    }
+
+    /// Close the channel for `owner` and emit [`ProbeOp::Cancel`] iff
+    /// it was open. Idempotent on closed channels.
+    ///
+    /// Sole "close + emit Cancel" choke point used at every cancel
+    /// site — `event_drives_batching`, `finalize_anchor_lost`,
+    /// `on_watch_op_rejected` descent / proxy purges, `reap_profile`,
+    /// `reap_promoter_inner`. Inlining at each site loses the named
+    /// contract that "you must Cancel if-and-only-if you held the
+    /// channel".
     pub(crate) fn cancel_owner_probe(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
-        let was_open = match owner {
-            ProbeOwner::Profile(pid) => self
-                .profiles
-                .get_mut(pid)
-                .is_some_and(|p| p.pending_probe.take().is_some()),
-            ProbeOwner::Promoter(pid) => self.promoters.get_mut(pid).is_some_and(|q| {
-                let was_open = q.pending_probe.is_some();
-                q.close_probe_channel();
-                was_open
-            }),
-        };
-        if was_open {
+        if self.probe_channel.close(owner).is_some() {
             out.probe_ops.push(ProbeOp::Cancel { owner });
         }
     }
 
-    /// Read accessor for the owner's pending-probe slot. Returns `None`
-    /// for a stale owner or a closed channel. `pub` so integration
-    /// tests in the engine crate's `tests/` directory can query the
-    /// channel state via the engine's public surface.
-    #[must_use]
-    pub fn pending_probe_for(&self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
-        self.pending_slot(owner)
-    }
-
-    /// Emit `ProbeRequest::AnchorFile`. The walker runs a single `lstat`
-    /// against `target_path` and returns `ProbeOutcome::AnchorOk` (or
-    /// `Vanished` / `Failed`).
+    /// Emit [`ProbeRequest::AnchorFile`]. Walker runs a single `lstat`
+    /// and returns `ProbeOutcome::AnchorOk` / `Vanished` / `Failed`.
     ///
-    /// `correlation` must already be on the owner's pending-probe slot
-    /// (the caller minted it via `mint_owner_correlation` immediately
-    /// prior). `target_path` is captured at the call site so this
-    /// helper avoids borrowing `&self.tree` during the emit.
-    ///
-    /// Associated function (no `self`): the helper is a thin variant
-    /// constructor with no Engine-state dependency. Callers reach it as
-    /// `Self::emit_anchor_probe(...)`.
+    /// `correlation` must be the value returned by the matching
+    /// [`ProbeChannel::open`] (the caller's mint precedes this call
+    /// within the same `&mut self` window). Associated function — no
+    /// Engine-state dependency.
     pub(crate) fn emit_anchor_probe(
         owner: ProbeOwner,
         correlation: ProbeCorrelation,
@@ -180,20 +286,15 @@ impl Engine {
         });
     }
 
-    /// Emit `ProbeRequest::Subtree`. Recursive Dir walk honouring the
-    /// Profile's `ScanConfig`; walker returns
+    /// Emit [`ProbeRequest::Subtree`]. Recursive Dir walk honouring
+    /// `scan_config`; walker returns
     /// `ProbeOutcome::SubtreeOk(Arc<DirSnapshot>)` rooted at
     /// `target_resource`.
     ///
-    /// `scan_config` and `captured_with` come from the Profile — the
-    /// caller already holds a `&Profile` borrow at every call site (to
-    /// read `kind`, `current`, `resource`, etc.) and threads
-    /// `(p.config.clone(), p.config_hash)` through here. The helper does
-    /// not re-borrow `self` to look them up, which would also force the
-    /// helper to take `&self` for an otherwise stateless construction.
-    ///
-    /// Associated function (no `self`): same rationale as
-    /// [`Self::emit_anchor_probe`].
+    /// `scan_config` / `captured_with` come from the Profile — the
+    /// caller already holds a `&Profile` borrow at every call site and
+    /// threads `(p.config.clone(), p.config_hash)` through here. The
+    /// helper does not re-borrow `self` to look them up.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_subtree_probe(
         owner: ProbeOwner,
@@ -222,24 +323,16 @@ impl Engine {
         });
     }
 
-    /// Emit `ProbeRequest::Descent`. Single-level enumeration of the
-    /// prefix; walker hardcodes the override config (`recursive=false`,
-    /// `hidden=true`, no exclude/pattern, no `max_depth`) — the
-    /// Profile's user-facing filters would mask the very segment descent
-    /// is searching for.
+    /// Emit [`ProbeRequest::Descent`]. Single-level enumeration of the
+    /// prefix; walker hardcodes the override config
+    /// (`recursive=false`, `hidden=true`, no exclude/pattern, no
+    /// `max_depth`) — the Profile's user-facing filters would mask the
+    /// very segment descent is searching for.
     ///
-    /// Walker still returns `ProbeOutcome::SubtreeOk(arc)` carrying the
-    /// prefix's direct children; descent dispatch reads
-    /// `arc.entries.get(name)` and (for Profile descent) discards the
-    /// snapshot.
-    ///
-    /// `target_resource` is the prefix the engine is enumerating. The
-    /// walker stamps it onto `DirSnapshot.root_resource` so consumers
-    /// reading the snapshot directly can identify the prefix without
-    /// consulting per-state engine fields.
-    ///
-    /// Associated function (no `self`): same rationale as
-    /// [`Self::emit_anchor_probe`].
+    /// Walker stamps `target_resource` onto
+    /// `DirSnapshot.root_resource` so consumers reading the snapshot
+    /// directly can identify the prefix without consulting per-state
+    /// engine fields.
     pub(crate) fn emit_descent_probe(
         owner: ProbeOwner,
         correlation: ProbeCorrelation,
@@ -260,19 +353,21 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    use super::{OpenKind, ProbeChannel};
     use crate::Engine;
     use specter_core::{
-        ClassSet, ProbeOp, ProbeOwner, Profile, ResourceRole, ScanConfig, StepOutput,
+        ClassSet, ProbeCorrelation, ProbeOp, ProbeOwner, Profile, ResourceRole, ScanConfig,
+        StepOutput,
     };
     use std::time::Duration;
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
 
-    /// Attach a fresh `Idle` Profile at a synthetic anchor, returning the
-    /// engine and the new [`ProbeOwner`]. The Profile carries no Subs and
-    /// no claims — purely a vehicle for exercising the probe-channel slot
-    /// in isolation.
+    /// Attach a fresh `Idle` Profile at a synthetic anchor, returning
+    /// the engine and the new [`ProbeOwner`]. The Profile carries no
+    /// Subs and no claims — purely a vehicle for exercising the
+    /// channel state in isolation.
     fn fresh_engine_with_idle_profile() -> (Engine, ProbeOwner) {
         let mut e = Engine::new();
         let r = e.tree.ensure(None, "anchor", ResourceRole::User);
@@ -289,87 +384,117 @@ mod tests {
         (e, ProbeOwner::Profile(pid))
     }
 
-    /// Double-open is a state-machine bug (I5 violation). Debug builds fire
-    /// the assertion in `mint_owner_correlation`; release builds silently
-    /// overwrite (the now-orphaned probe's response staless against the
-    /// new correlation).
+    /// Open returns a fresh correlation; channel reports it on
+    /// `correlation_for`.
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
-    #[should_panic(expected = "I5 violated")]
-    fn mint_owner_correlation_panics_on_double_open() {
+    fn open_returns_correlation_and_records_kind() {
         let (mut e, owner) = fresh_engine_with_idle_profile();
-        let _ = e
-            .mint_owner_correlation(owner)
-            .expect("first mint succeeds");
-        let _ = e.mint_owner_correlation(owner); // panics: I5 violated
+        let corr = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
+        assert_eq!(e.pending_probe_for(owner), Some(corr));
+        assert_eq!(
+            e.probe_channel.kind_for(owner),
+            Some(&OpenKind::ProfileVerifying),
+        );
     }
 
-    /// Counter saturation — release-runnable. Distinct from the
-    /// `debug_assert!`-gated I5 test above: the underlying
-    /// [`crate::counter::MonotonicCounter`] uses an unconditional
-    /// `assert!`, so the panic survives the release profile. Pairs with
-    /// the `MonotonicCounter` unit tests in `counter.rs`; this site test
-    /// proves the engine routes through the counter at the `mint`
+    /// I5: double-open panics. Unconditional `assert!` — survives
+    /// release builds (deliberately distinct from the pre-Phase-3
+    /// `debug_assert!`-gated regression check).
+    #[test]
+    #[should_panic(expected = "I5 violated")]
+    fn open_panics_on_double_open() {
+        let (mut e, owner) = fresh_engine_with_idle_profile();
+        let _ = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
+        let _ = e.probe_channel.open(owner, OpenKind::ProfileVerifying); // panics
+    }
+
+    /// Counter saturation — release-runnable. Pairs with the
+    /// [`crate::counter::MonotonicCounter`] unit tests; this site test
+    /// proves the channel routes through the counter at the `open`
     /// boundary rather than reimplementing the bump.
     #[test]
     #[should_panic(expected = "MonotonicCounter")]
-    fn mint_owner_correlation_panics_on_counter_saturation() {
+    fn open_panics_on_counter_saturation() {
         let (mut e, owner) = fresh_engine_with_idle_profile();
-        e.probe_correlations.prime(u64::MAX);
-        let _ = e.mint_owner_correlation(owner);
+        e.probe_channel.prime_counter(u64::MAX);
+        let _ = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
     }
 
-    /// Closed channel + cancel = no-op. The helper's idempotence is
-    /// load-bearing — `event_drives_batching` invokes it on every event,
-    /// regardless of whether a probe is in flight.
+    /// `close_if` succeeds on matched correlation and returns the
+    /// `Open` with the expected kind.
+    #[test]
+    fn close_if_matched_returns_open() {
+        let (mut e, owner) = fresh_engine_with_idle_profile();
+        let corr = e.probe_channel.open(owner, OpenKind::ProfileRebasing);
+        let open = e
+            .probe_channel
+            .close_if(owner, corr)
+            .expect("matched correlation closes");
+        assert_eq!(open.correlation(), corr);
+        assert_eq!(open.kind(), &OpenKind::ProfileRebasing);
+        assert!(
+            e.pending_probe_for(owner).is_none(),
+            "channel closed post-close_if",
+        );
+    }
+
+    /// `close_if` rejects mismatched correlation; the in-flight entry
+    /// stays intact (a stale response must NOT displace a
+    /// legitimately-outstanding probe).
+    #[test]
+    fn close_if_mismatch_preserves_entry() {
+        let (mut e, owner) = fresh_engine_with_idle_profile();
+        let corr = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
+        let bogus = ProbeCorrelation(corr.0 + 9_999);
+        assert!(
+            e.probe_channel.close_if(owner, bogus).is_none(),
+            "mismatched correlation returns None",
+        );
+        assert_eq!(
+            e.pending_probe_for(owner),
+            Some(corr),
+            "channel entry preserved",
+        );
+    }
+
+    /// `close_if` on a closed channel is a clean `None`. No surprise.
+    #[test]
+    fn close_if_closed_returns_none() {
+        let (mut e, owner) = fresh_engine_with_idle_profile();
+        let bogus = ProbeCorrelation(42);
+        assert!(e.probe_channel.close_if(owner, bogus).is_none());
+        assert!(e.pending_probe_for(owner).is_none());
+    }
+
+    /// `cancel_owner_probe` on closed channel = no-op. Load-bearing
+    /// for `event_drives_batching` which invokes it on every event
+    /// regardless of phase.
     #[test]
     fn cancel_owner_probe_idempotent_on_closed_channel() {
         let (mut e, owner) = fresh_engine_with_idle_profile();
-        assert!(
-            e.pending_probe_for(owner).is_none(),
-            "channel starts closed",
-        );
+        assert!(e.pending_probe_for(owner).is_none());
         let mut out = StepOutput::default();
         e.cancel_owner_probe(owner, &mut out);
-        assert!(
-            out.probe_ops.is_empty(),
-            "no Cancel emitted on closed channel",
-        );
-        assert!(
-            e.pending_probe_for(owner).is_none(),
-            "channel remains closed",
-        );
+        assert!(out.probe_ops.is_empty());
+        assert!(e.pending_probe_for(owner).is_none());
     }
 
-    /// Open channel + cancel = single Cancel emission + slot cleared. Pairs
-    /// with the idempotence test above to fully spec the helper's contract.
+    /// `cancel_owner_probe` on open channel: single Cancel + close.
     #[test]
     fn cancel_owner_probe_emits_and_clears_on_open_channel() {
         let (mut e, owner) = fresh_engine_with_idle_profile();
-        let corr = e.mint_owner_correlation(owner).expect("mint succeeds");
+        let corr = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
         assert_eq!(e.pending_probe_for(owner), Some(corr));
-
         let mut out = StepOutput::default();
         e.cancel_owner_probe(owner, &mut out);
-
-        assert_eq!(out.probe_ops.len(), 1, "exactly one Cancel emitted");
-        assert!(
-            matches!(out.probe_ops[0], ProbeOp::Cancel { owner: o } if o == owner),
-            "Cancel targets the same owner",
-        );
-        assert!(
-            e.pending_probe_for(owner).is_none(),
-            "channel closed post-cancel",
-        );
+        assert_eq!(out.probe_ops.len(), 1);
+        assert!(matches!(out.probe_ops[0], ProbeOp::Cancel { owner: o } if o == owner));
+        assert!(e.pending_probe_for(owner).is_none());
     }
 
     /// Cancel is per-owner: closing one owner's channel doesn't touch
-    /// another's. Cross-owner concurrency is necessary for descent fan-out
-    /// at `on_descent_event` (multiple Pending Profiles awaiting siblings
-    /// under one prefix).
+    /// another's. Cross-owner concurrency drives descent fan-out
+    /// (multiple Pending Profiles awaiting siblings under one prefix).
     #[test]
     fn cancel_owner_probe_is_per_owner() {
         let mut e = Engine::new();
@@ -386,47 +511,45 @@ mod tests {
         );
         let owner1 = ProbeOwner::Profile(pid1);
         let owner2 = ProbeOwner::Profile(pid2);
-        let c1 = e.mint_owner_correlation(owner1).unwrap();
-        let c2 = e.mint_owner_correlation(owner2).unwrap();
+        let c1 = e.probe_channel.open(owner1, OpenKind::ProfileVerifying);
+        let c2 = e.probe_channel.open(owner2, OpenKind::ProfileDescent);
 
         let mut out = StepOutput::default();
         e.cancel_owner_probe(owner1, &mut out);
 
         assert!(e.pending_probe_for(owner1).is_none());
-        assert_eq!(
-            e.pending_probe_for(owner2),
-            Some(c2),
-            "owner2's channel untouched by owner1's cancel",
-        );
-        assert_ne!(c1, c2, "correlations are distinct across owners");
+        assert_eq!(e.pending_probe_for(owner2), Some(c2));
+        assert_ne!(c1, c2);
     }
 
-    /// Stale owner (post-detach) — both helpers no-op without panic.
-    /// `cancel_owner_probe` defends against late `WatchOpRejected`
-    /// purges arriving after `reap_profile` already detached.
+    /// `kind_for` round-trips the variant data — relied on by the
+    /// proxy-purge call site to detect "in-flight enumeration of
+    /// THIS proxy". The channel itself doesn't validate owner-kind
+    /// affinity (mint discipline lives at call sites); a Promoter
+    /// owner paired with `PromoterEnumerating` is the natural shape.
     #[test]
-    fn helpers_noop_on_stale_owner() {
-        let (mut e, owner) = fresh_engine_with_idle_profile();
-        match owner {
-            ProbeOwner::Profile(pid) => {
-                let _ = e.profiles.detach(&mut e.tree, pid);
-            }
-            ProbeOwner::Promoter(_) => {
-                unreachable!("fresh_engine_with_idle_profile only produces Profile owners");
-            }
-        }
-
+    fn kind_for_round_trips_promoter_enumerating_target() {
+        let mut e = Engine::new();
+        let r = e.tree.ensure(None, "proxy", ResourceRole::User);
+        let owner = ProbeOwner::Promoter(specter_core::PromoterId::default());
+        let _ = e
+            .probe_channel
+            .open(owner, OpenKind::PromoterEnumerating { target: r });
+        let kind = e.probe_channel.kind_for(owner).expect("channel open");
         assert!(
-            e.mint_owner_correlation(owner).is_none(),
-            "mint returns None for stale owner",
+            matches!(kind, OpenKind::PromoterEnumerating { target } if *target == r),
+            "kind carries the target ResourceId verbatim",
         );
+    }
 
-        let mut out = StepOutput::default();
-        e.cancel_owner_probe(owner, &mut out);
-        assert!(out.probe_ops.is_empty(), "cancel no-ops on stale owner");
-        assert!(
-            e.pending_probe_for(owner).is_none(),
-            "accessor returns None",
+    /// Fresh channel reports a zero counter.
+    #[test]
+    fn default_channel_starts_at_zero_counter() {
+        let c = ProbeChannel::default();
+        assert_eq!(c.counter_peek(), 0);
+        assert_eq!(
+            c.kind_for(ProbeOwner::Profile(specter_core::ProfileId::default())),
+            None,
         );
     }
 }

@@ -975,12 +975,12 @@ fn descent_remaining_from_empty_vec_is_none() {
 // ───────────────────────────────────────────────────────────────────────
 // Probe-channel discipline (post-refactor invariants)
 //
-// I5 ("at most one outstanding probe per Profile") moved from a structural
-// type-law (mutual exclusion of `PreFirePhase::Verifying { ... }` and
-// `DescentPhase::Probing { ... }`) to a field-discipline (single
-// `Profile.pending_probe` slot). The tests below pin the post-refactor
-// invariants: clear-on-cancel, recovery-overlap accounting, and the
-// cancel-first contract on `release_descent_prefix_claim`.
+// I5 ("at most one outstanding probe per Profile") is enforced
+// structurally by the engine's `ProbeChannel` (single map entry per
+// owner; `open()` panics unconditionally on double-open). The tests
+// below pin the surrounding behaviour: clear-on-cancel,
+// recovery-overlap accounting, and the cancel-first contract on
+// `release_descent_prefix_claim`.
 // ───────────────────────────────────────────────────────────────────────
 
 /// `on_watch_op_rejected` descent purge: cancel-then-release ordering

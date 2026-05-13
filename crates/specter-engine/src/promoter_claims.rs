@@ -34,8 +34,9 @@
 //!   "always cancel before release" is the safe default.
 
 use crate::Engine;
+use crate::probe_channel::OpenKind;
 use crate::refcounts::sub_watch_then_try_reap;
-use specter_core::{ContribKey, PromoterId, PromoterState, ResourceId, StepOutput};
+use specter_core::{ContribKey, ProbeOwner, PromoterId, PromoterState, ResourceId, StepOutput};
 use std::collections::BTreeMap;
 
 impl Engine {
@@ -73,9 +74,9 @@ impl Engine {
         };
 
         debug_assert!(
-            self.promoters
-                .get(qid)
-                .is_some_and(|q| q.pending_probe.is_none()),
+            self.probe_channel
+                .correlation_for(ProbeOwner::Promoter(qid))
+                .is_none(),
             "release_promoter_descent_prefix_claim: probe channel must be closed before release; \
              caller must invoke cancel_owner_probe (or take the response-dispatch path) \
              first to avoid losing the Cancel emission (promoter = {qid:?})",
@@ -103,11 +104,14 @@ impl Engine {
     /// survive. The role tag is metadata; it does not affect this reap.
     ///
     /// **Cancel-first contract for in-flight enumeration probes
-    /// targeting this proxy.** Callers MUST cancel the probe first; the
-    /// `debug_assert!` below pins the contract. `pending_enumeration_target`
-    /// is the engine-side signal that an enumeration probe is targeting
-    /// `resource`; if it points at any other proxy of the same Promoter,
-    /// the probe is unaffected by our release and stays in flight.
+    /// targeting this proxy.** Callers MUST cancel the probe first;
+    /// the `debug_assert!` below pins the contract by inspecting the
+    /// probe channel's [`crate::probe_channel::OpenKind`] for the
+    /// Promoter owner — an `OpenKind::PromoterEnumerating { target =
+    /// resource }` entry would mean an enumeration is targeting this
+    /// proxy. If the channel is closed, or its variant points at any
+    /// other proxy of the same Promoter, the probe is unaffected by
+    /// our release and stays in flight.
     ///
     /// Sole production callers post-Tier-1: [`Engine::unregister_proxy`]
     /// (which delegates here), [`Engine::on_watch_op_rejected`]'s proxy
@@ -128,9 +132,10 @@ impl Engine {
         }
 
         debug_assert!(
-            self.promoters
-                .get(qid)
-                .is_some_and(|q| q.pending_enumeration_target != Some(resource)),
+            !matches!(
+                self.probe_channel.kind_for(ProbeOwner::Promoter(qid)),
+                Some(OpenKind::PromoterEnumerating { target }) if *target == resource,
+            ),
             "release_promoter_proxy_claim: probe channel for this proxy must be closed first; \
              caller must invoke cancel_owner_probe before release \
              (promoter = {qid:?}, proxy = {resource:?})",

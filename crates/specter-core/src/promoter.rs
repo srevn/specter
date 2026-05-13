@@ -22,11 +22,11 @@
 //!
 //! ## Single-slot probe
 //!
-//! `Promoter.pending_probe: Option<ProbeCorrelation>` mirrors
-//! `Profile.pending_probe`: at most one outstanding probe per Promoter.
-//! Concurrent enumerations queue via `pending_enumerations`. The slot
-//! discipline is owned by `engine::probe_channel`'s
-//! `mint_owner_correlation` / `cancel_owner_probe` against `ProbeOwner`.
+//! At most one outstanding probe per Promoter. Concurrent enumerations
+//! queue via `pending_enumerations` and drain into a probe via the
+//! engine's `dispatch_next_enumeration`. The channel itself lives on
+//! the engine (`engine::probe_channel::ProbeChannel`) — the Promoter
+//! type holds no probe-side state.
 //!
 //! ## Dynamic Sub deduplication
 //!
@@ -44,7 +44,6 @@
 //! `reap_promoter_inner` (full drain on Promoter teardown).
 
 use crate::ids::{PromoterId, ResourceId, SubId};
-use crate::op::ProbeCorrelation;
 use crate::pattern::PatternSpec;
 use crate::profile::DescentState;
 use crate::program::ActionProgram;
@@ -98,26 +97,6 @@ pub struct Promoter {
 
     pub state: PromoterState,
 
-    /// At most one outstanding probe. Slot discipline is owned by
-    /// `engine::probe_channel`'s
-    /// `mint_owner_correlation` / `cancel_owner_probe` against
-    /// `ProbeOwner::Promoter(_)`.
-    pub pending_probe: Option<ProbeCorrelation>,
-
-    /// Proxy currently being enumerated, paired with `pending_probe` for
-    /// enumeration probes. `None` while idle or while a *descent* probe
-    /// is in flight (descent reads its target from `DescentState`
-    /// directly). Set by `dispatch_next_enumeration` immediately after
-    /// minting the probe correlation; cleared in lockstep with
-    /// `pending_probe` on response or cancel.
-    ///
-    /// The dispatcher uses this slot to identify which proxy a
-    /// `Vanished` / `Failed` enumeration response refers to —
-    /// `ProbeOutcome::{Vanished, Failed}` carry no payload, and
-    /// `Promoter.pending_enumerations` no longer holds the target after
-    /// `pop_first` consumed it at probe-emit time.
-    pub pending_enumeration_target: Option<ResourceId>,
-
     /// Deterministic queue of proxies awaiting enumeration. `BTreeSet` for
     /// stable iteration; insertion is gated on `!already_carries` in
     /// `register_proxy` so re-registration of an already-known proxy is
@@ -137,25 +116,6 @@ pub struct Promoter {
     /// suppresses repeats so pathological patterns warn once per Promoter
     /// lifetime.
     pub warned_at_threshold: bool,
-}
-
-impl Promoter {
-    /// Close the probe channel for this Promoter and clear the sibling
-    /// `pending_enumeration_target` slot in lockstep. Sole sites that
-    /// touch the per-Promoter probe-channel state directly should use
-    /// this helper rather than mutating the two fields independently —
-    /// the lockstep semantic (target tracks the channel's lifetime) is
-    /// the contract that two separate writes can quietly break.
-    ///
-    /// Counterpart to `engine::probe_channel::cancel_owner_probe` for
-    /// the Promoter owner kind: the engine helper invokes this method
-    /// on the cancel path; the response handler invokes it on the
-    /// pre-dispatch close path. Profile owners have no analogous
-    /// helper because they carry no sibling slot.
-    pub const fn close_probe_channel(&mut self) {
-        self.pending_probe = None;
-        self.pending_enumeration_target = None;
-    }
 }
 
 /// Mutually-exclusive Promoter state. `PrefixPending` covers the
@@ -328,8 +288,6 @@ mod tests {
             state: PromoterState::Active {
                 proxies: BTreeMap::new(),
             },
-            pending_probe: None,
-            pending_enumeration_target: None,
             pending_enumerations: BTreeSet::new(),
             dynamic_subs: BTreeMap::new(),
             warned_at_threshold: false,

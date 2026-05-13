@@ -31,7 +31,7 @@ use specter_core::{PromoterRegistry, PromoterState, Sub, SubAttachRequest, SubRe
 // Per-Resource bookkeeping.
 use specter_core::{ClassSet, ContribKey};
 // Probe + effect correlation.
-use specter_core::{CorrelationId, DedupKey, ProbeCorrelation, ProbeOwner};
+use specter_core::{CorrelationId, DedupKey, ProbeOwner};
 // Engine step I/O.
 use specter_core::{Diagnostic, Input, StepOutput};
 // Helpers.
@@ -60,19 +60,17 @@ pub struct Engine {
     /// registry the Promoter helpers mutate.
     pub(crate) promoters: PromoterRegistry,
     pub(crate) timers: TimerHeap,
-    /// Monotonic counter for [`ProbeCorrelation`] minting. Read and
-    /// bumped exclusively by [`Engine::mint_owner_correlation`] in
-    /// `probe_channel.rs`. Phantom-typed
-    /// ([`MonotonicCounter<ProbeCorrelation>`]) so cross-counter misuse
-    /// (e.g. attempting to mint a `CorrelationId` from this counter) is
-    /// a compile error.
-    pub(crate) probe_correlations: MonotonicCounter<ProbeCorrelation>,
+    /// Probe-channel state. Owns the per-owner outstanding-probe map
+    /// and the [`ProbeCorrelation`] monotonic counter. See
+    /// [`crate::probe_channel::ProbeChannel`] for the channel's
+    /// invariants and API.
+    pub(crate) probe_channel: crate::probe_channel::ProbeChannel,
     /// Monotonic counter for [`CorrelationId`] minting. Bumped at
     /// every `Effect` push in `transitions.rs::emit_effects` so the
     /// actuator-side coalescer can correlate completions back to the
     /// originating Effect across the Latest dedup. Phantom-typed
-    /// distinct from [`Self::probe_correlations`]: the two id spaces
-    /// stay structurally separate at the type level.
+    /// distinct from the channel's probe-side counter: the two id
+    /// spaces stay structurally separate at the type level.
     pub(crate) effect_correlations: MonotonicCounter<CorrelationId>,
 }
 
@@ -91,8 +89,7 @@ impl Engine {
     /// Sole reader API for the descent-state payload outside the routing
     /// match sites in `on_*_probe_response`. The exhaustive `ProbeOwner`
     /// match enforces that adding a new owner kind requires extending
-    /// this accessor — the same discipline `pending_slot` enforces in
-    /// `probe_channel.rs`.
+    /// this accessor.
     #[must_use]
     pub(crate) fn descent_state(&self, owner: ProbeOwner) -> Option<&DescentState> {
         match owner {
@@ -756,6 +753,13 @@ impl Engine {
         // channel). Mirrors `on_watch_op_rejected`'s descent-purge
         // pattern.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
+        debug_assert!(
+            self.probe_channel
+                .correlation_for(ProbeOwner::Profile(profile_id))
+                .is_none(),
+            "reap_profile: probe channel still open for profile = {profile_id:?} \
+             after cancel_owner_probe; channel-close contract violated",
+        );
 
         // Release every claim this Profile may hold. Helpers are
         // idempotent — no-op when the corresponding flag / snapshot is
@@ -1172,12 +1176,12 @@ mod tests {
     }
 
     #[test]
-    fn mint_probe_correlation_is_monotonic_per_profile() {
-        // Three Profiles, each minted once: the
-        // `Engine.probe_correlations` counter advances monotonically
-        // across mints regardless of which Profile owns each open
-        // channel. Pinning to discrete Profiles avoids the I5
-        // double-open assertion (one open channel per Profile).
+    fn probe_channel_open_is_monotonic_per_owner() {
+        // Three Profiles, each opened once: the channel's correlation
+        // counter advances monotonically across opens regardless of
+        // which Profile owns each open channel. Distinct owners avoid
+        // the I5 double-open panic (one open channel per owner).
+        use crate::probe_channel::OpenKind;
         let mut e = Engine::new();
         let r1 = e.tree.ensure(None, "x", specter_core::ResourceRole::User);
         let r2 = e.tree.ensure(None, "y", specter_core::ResourceRole::User);
@@ -1215,21 +1219,21 @@ mod tests {
         );
 
         let a = e
-            .mint_owner_correlation(ProbeOwner::Profile(pid1))
-            .expect("pid1 is live");
+            .probe_channel
+            .open(ProbeOwner::Profile(pid1), OpenKind::ProfileVerifying);
         let b = e
-            .mint_owner_correlation(ProbeOwner::Profile(pid2))
-            .expect("pid2 is live");
+            .probe_channel
+            .open(ProbeOwner::Profile(pid2), OpenKind::ProfileVerifying);
         let c = e
-            .mint_owner_correlation(ProbeOwner::Profile(pid3))
-            .expect("pid3 is live");
+            .probe_channel
+            .open(ProbeOwner::Profile(pid3), OpenKind::ProfileVerifying);
         assert!(a < b);
         assert!(b < c);
         assert_eq!(a, ProbeCorrelation(1));
         assert_eq!(b, ProbeCorrelation(2));
         assert_eq!(c, ProbeCorrelation(3));
 
-        // Slots populated symmetrically.
+        // Channel populated symmetrically.
         assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid1)), Some(a));
         assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid2)), Some(b));
         assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid3)), Some(c));
@@ -1243,7 +1247,7 @@ mod tests {
         assert!(e.subs.is_empty());
         assert!(e.timers.is_empty());
         assert!(e.next_deadline().is_none());
-        assert_eq!(e.probe_correlations.peek(), 0);
+        assert_eq!(e.probe_channel.counter_peek(), 0);
         assert_eq!(e.effect_correlations.peek(), 0);
     }
 

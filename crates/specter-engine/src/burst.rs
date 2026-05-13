@@ -53,6 +53,7 @@
 //!   recovers via descent.
 
 use crate::Engine;
+use crate::probe_channel::OpenKind;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
@@ -211,13 +212,14 @@ impl Engine {
             self.timers
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
-        // Phase-write BEFORE mint. The I5 invariant is `phase == Verifying
-        // ⇔ pending_probe.is_some()`; both directions can be violated only
-        // intra-step (between two ops in the same `&mut self` window).
-        // Mint→write would leave `pending_probe = Some(_)` with the phase
-        // still implicit (Idle), and a stray observer reading both fields
-        // would see a live correlation in a non-Verifying state — worse,
-        // a re-entrant mint would trip the I5 debug_assert.
+        // Phase-write BEFORE channel open. The invariant is "phase ==
+        // Verifying iff the channel is open for this owner with
+        // `OpenKind::ProfileVerifying`"; both directions can be
+        // violated only intra-step. Open→write would leave the channel
+        // entry live while the phase is still Idle, so a stray observer
+        // reading both would see a live correlation in a non-Verifying
+        // state; worse, a re-entrant open would trip
+        // `ProbeChannel::open`'s unconditional double-open assert.
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.state = ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
                 burst_deadline,
@@ -239,9 +241,9 @@ impl Engine {
             }));
         }
 
-        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
-            return;
-        };
+        let correlation = self
+            .probe_channel
+            .open(ProbeOwner::Profile(profile_id), OpenKind::ProfileVerifying);
 
         add_suppress(&mut self.tree, resource, out);
         // Seed bursts always target the anchor; `force_walk` is empty
@@ -401,9 +403,9 @@ impl Engine {
             matches!(pre.phase, PreFirePhase::Verifying | PreFirePhase::Draining);
 
         // Idempotent: emits Cancel iff the probe channel is open
-        // (Verifying ⇒ pending_probe = Some(_)). For Batching / Draining
-        // entries, no probe is in flight and the helper is a no-op —
-        // matching the prior `was_verifying` snapshot's role.
+        // (Verifying ⇒ channel open for this owner). For Batching /
+        // Draining entries, no probe is in flight and the helper is
+        // a no-op — matching the prior `was_verifying` snapshot's role.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
 
         let new_settle_timer = if needs_fresh_timer {
@@ -478,10 +480,11 @@ impl Engine {
     /// **Reachability.** This helper runs *only* when no `FsEvent`
     /// intercepted the verify. An `FsEvent` during `Verifying` routes
     /// through `event_drives_batching`, which Cancels the in-flight
-    /// probe and clears `pending_probe`; the eventual late response
-    /// then fails the live-slot check and drops as `StaleProbeResponse`.
-    /// The forced + not-stable case in `dispatch_standard_ok` also
-    /// bypasses this helper — forced + unstable still fires.
+    /// probe and closes the channel; the eventual late response then
+    /// fails `close_if`'s correlation check and drops as
+    /// `StaleProbeResponse`. The forced + not-stable case in
+    /// `dispatch_standard_ok` also bypasses this helper — forced +
+    /// unstable still fires.
     ///
     /// **`last_event_time` pinned to `Some(now)`.** The verify just
     /// responded, so `now` is the timestamp of the latest observation
@@ -584,11 +587,10 @@ impl Engine {
         // callers (Settle expiry, BurstDeadline expiry, ancestor
         // reconfirm from `finish_burst_to_idle`) are gated on pre-fire
         // phases via `is_timer_referenced` and the Draining hit-zero
-        // check respectively. The early return guards a stray call from
-        // minting a fresh probe correlation while an effect wait is
-        // still in flight (which would either trip the I5 debug_assert
-        // in `mint_probe_correlation` or, in release, overwrite the
-        // post-fire correlation slot).
+        // check respectively. The early return guards a stray call
+        // from opening a fresh probe channel while an effect wait is
+        // still in flight — `ProbeChannel::open` would panic
+        // unconditionally on the double-open.
         //
         // `force_walk_resources` and `suppressed_resources` are
         // single-use accumulators consumed by this transition;
@@ -620,11 +622,11 @@ impl Engine {
             sub_suppress(&mut self.tree, *r, out);
         }
 
-        // Phase-write BEFORE mint. See the rationale on
-        // `start_seed_burst`'s mint call site — the iff (`phase ==
-        // Verifying ⇔ pending_probe.is_some()`) is enforced at probe
-        // boundaries, and write→mint is the strictly safer of the two
-        // intra-step ordering options.
+        // Phase-write BEFORE channel open. See the rationale on
+        // `start_seed_burst`'s open call site — the invariant
+        // ("phase == Verifying iff channel open with ProfileVerifying")
+        // is enforced at probe boundaries, and write→open is the
+        // strictly safer of the two intra-step ordering options.
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state
         {
@@ -632,9 +634,9 @@ impl Engine {
             pre.probe_target = target;
         }
 
-        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
-            return;
-        };
+        let correlation = self
+            .probe_channel
+            .open(ProbeOwner::Profile(profile_id), OpenKind::ProfileVerifying);
         self.emit_probe_at(profile_id, correlation, target, &force_set, forced, out);
     }
 
@@ -761,12 +763,12 @@ impl Engine {
     /// `handle_gate_deadline` calls it on the actuator-hang recovery
     /// path.
     ///
-    /// **Probe channel.** `mint_probe_correlation` opens a fresh probe
-    /// channel — I5 holds because Verifying closed the slot before
-    /// `emit_effects` ran, and Awaiting does not mint. The post-fire
-    /// probe targets the anchor (we want the freshest disk state of
-    /// the whole watched subtree, not the LCA of the now-stale
-    /// `dirty_resources`).
+    /// **Probe channel.** `ProbeChannel::open` opens a fresh channel
+    /// entry with `OpenKind::ProfileRebasing`. I5 holds because
+    /// Verifying closed the channel before `emit_effects` ran, and
+    /// Awaiting does not open. The post-fire probe targets the anchor
+    /// (we want the freshest disk state of the whole watched subtree,
+    /// not the LCA of the now-stale `dirty_resources`).
     ///
     /// **`baseline_subtree` for mtime-skip.** The Rebasing probe ships
     /// `Profile.current` as `baseline_subtree`. For an idempotent
@@ -821,16 +823,17 @@ impl Engine {
             None => return,
         };
 
-        // Phase-write BEFORE mint. See `start_seed_burst`'s rationale.
+        // Phase-write BEFORE channel open. See `start_seed_burst`'s
+        // rationale.
         if let Some(p) = self.profiles.get_mut(profile_id)
             && let ProfileState::Active(ActiveBurst::PostFire(post)) = &mut p.state
         {
             post.phase = PostFirePhase::Rebasing;
         }
 
-        let Some(correlation) = self.mint_owner_correlation(ProbeOwner::Profile(profile_id)) else {
-            return;
-        };
+        let correlation = self
+            .probe_channel
+            .open(ProbeOwner::Profile(profile_id), OpenKind::ProfileRebasing);
         // `forced = false`: the rebase probe is never forced — that
         // field is pre-fire-only (a `BurstDeadline` decision) and
         // doesn't survive the typed move into `PostFireBurst`.

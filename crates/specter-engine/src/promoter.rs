@@ -17,25 +17,30 @@
 //! ```
 //!
 //! Single-slot probe per Promoter: the descent probe and the proxy
-//! enumeration probe share `Promoter.pending_probe`. Concurrent
-//! enumerations queue via `pending_enumerations`; `dispatch_next_enumeration`
-//! pops one target at a time.
+//! enumeration probe share the engine's `ProbeChannel` entry keyed by
+//! `ProbeOwner::Promoter(_)`. Concurrent enumerations queue via
+//! `pending_enumerations`; `dispatch_next_enumeration` pops one target
+//! at a time and opens the channel with
+//! `OpenKind::PromoterEnumerating { target }`.
 //!
-//! Two response dispatchers route on state:
-//! - `PrefixPending` → descent. The dispatcher arms route to the
+//! Two response dispatchers route on [`crate::probe_channel::OpenKind`]:
+//! - `OpenKind::PromoterDescent` → descent. Arms route to the
 //!   owner-polymorphic [`Engine::dispatch_descent_ok`] /
 //!   [`Engine::dispatch_descent_vanished`] /
 //!   [`Engine::dispatch_descent_failed`] in `descent.rs`; on completion
 //!   of the last literal segment, [`Engine::enter_active`] (the
 //!   Promoter-side terminal-arm helper) flips the state and registers
 //!   the first proxy.
-//! - `Active` → enumeration (`dispatch_promoter_enumeration_*`); each
-//!   response either registers sub-proxies (intermediate components),
-//!   mints dynamic Subs (final component), or unregisters proxies that
-//!   no longer correspond to a directory entry.
+//! - `OpenKind::PromoterEnumerating { target }` → enumeration
+//!   (`dispatch_promoter_enumeration_*`); each response either
+//!   registers sub-proxies (intermediate components), mints dynamic
+//!   Subs (final component), or unregisters proxies that no longer
+//!   correspond to a directory entry. The `Vanished` / `Failed` arms
+//!   read `target` directly off the channel's variant payload.
 
 use crate::Engine;
 use crate::descent::{MaterializeResult, kind_from_entry};
+use crate::probe_channel::{Open, OpenKind};
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
@@ -171,8 +176,6 @@ impl Engine {
             events: req.events,
             log_output: req.log_output,
             state: initial_state,
-            pending_probe: None,
-            pending_enumeration_target: None,
             pending_enumerations: BTreeSet::new(),
             dynamic_subs: BTreeMap::new(),
             warned_at_threshold: false,
@@ -215,20 +218,7 @@ impl Engine {
                     out,
                 );
                 let owner = ProbeOwner::Promoter(promoter_id);
-                let Some(correlation) = self.mint_owner_correlation(owner) else {
-                    // `mint_owner_correlation` only fails for a stale
-                    // owner; the Promoter was inserted three statements
-                    // above and is live. Assert loudly so a future
-                    // change to mint's semantics surfaces here rather
-                    // than stranding a registered Promoter with no
-                    // descent probe.
-                    debug_assert!(
-                        false,
-                        "mint_owner_correlation returned None for just-inserted Promoter \
-                         (promoter = {promoter_id:?})",
-                    );
-                    return Some(promoter_id);
-                };
+                let correlation = self.probe_channel.open(owner, OpenKind::PromoterDescent);
                 let target_path = self.tree.path_of(prefix).unwrap_or_default();
                 Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
             }
@@ -511,10 +501,19 @@ impl Engine {
         }
     }
 
-    /// Promoter-side probe response handler. Closed under the Promoter
-    /// owner kind: I5 staleness check, channel close, and dispatch by
-    /// state. Sibling owner kinds (Profile) route through their own
-    /// `on_*_probe_response` from [`Self::on_probe_response`].
+    /// Promoter-side probe response handler. Atomic check-and-take on
+    /// the probe channel, then [`OpenKind`]-routed dispatch.
+    ///
+    /// **Target read.** `Vanished` / `Failed` enumeration responses
+    /// carry no wire payload; the dispatcher reads the proxy
+    /// `ResourceId` directly off the
+    /// [`OpenKind::PromoterEnumerating { target }`] variant the
+    /// channel recorded at open-time. No separate per-Promoter slot to
+    /// thread through.
+    ///
+    /// **Cross-affinity.** Mint-site discipline forbids Promoter
+    /// owners from holding `Profile*` kinds; the catch-all arm exists
+    /// for regression detection.
     pub(crate) fn on_promoter_probe_response(
         &mut self,
         promoter_id: PromoterId,
@@ -525,129 +524,122 @@ impl Engine {
         let owner = response.owner;
         let received = response.correlation;
 
-        // I5 staleness check + capture `pending_enumeration_target`
-        // under one read borrow. The captured target identifies the
-        // proxy a `Vanished` / `Failed` enumeration response refers to
-        // — those outcomes carry no payload, and `pending_enumerations`
-        // no longer holds the target after `pop_first` consumed it at
-        // probe-emit time. `None` while a descent probe is in flight
-        // (descent reads target from `DescentState`).
-        let (is_live, current_target) = match self.promoters.get(promoter_id) {
-            Some(q) => (
-                q.pending_probe == Some(received),
-                q.pending_enumeration_target,
-            ),
-            None => (false, None),
-        };
-        if !is_live {
+        let Some(open) = self.probe_channel.close_if(owner, received) else {
             out.diagnostics.push(Diagnostic::StaleProbeResponse {
                 owner,
                 correlation: received,
             });
             return;
-        }
+        };
 
-        // Close the channel BEFORE dispatching. Dispatch arms may
-        // re-open a fresh channel (descent advance, post-enumeration
-        // drain); they MUST see a closed channel on entry, otherwise
-        // the I5 debug_assert in `mint_owner_correlation` fires.
-        // `close_probe_channel` clears `pending_probe` and
-        // `pending_enumeration_target` in lockstep — the lockstep
-        // contract lives on the Promoter type so two separate writes
-        // can't quietly drift.
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.close_probe_channel();
-        }
-
-        // Route on state. PrefixPending → descent; Active → enumerate.
-        let dispatch = self.promoters.get(promoter_id).map(|q| match &q.state {
-            PromoterState::PrefixPending(_) => PromoterDispatch::Descent,
-            PromoterState::Active { .. } => PromoterDispatch::Enumerate,
-        });
-
-        match (dispatch, response.outcome) {
-            (Some(PromoterDispatch::Descent), ProbeOutcome::SubtreeOk(arc)) => {
-                self.dispatch_descent_ok(ProbeOwner::Promoter(promoter_id), &arc, now, out);
-            }
-            (Some(PromoterDispatch::Descent), ProbeOutcome::Vanished) => {
-                self.dispatch_descent_vanished(ProbeOwner::Promoter(promoter_id), now, out);
-            }
-            (Some(PromoterDispatch::Descent), ProbeOutcome::Failed { errno }) => {
-                self.dispatch_descent_failed(ProbeOwner::Promoter(promoter_id), errno, out);
-            }
-            (Some(PromoterDispatch::Descent), ProbeOutcome::AnchorOk(_)) => {
-                // Walker-contract violation: descent always probes a
-                // Dir prefix, walker must return SubtreeOk or
-                // Vanished.
-                debug_assert!(
-                    false,
-                    "walker contract violated: Promoter descent received AnchorOk \
-                     (promoter = {promoter_id:?})",
-                );
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    owner,
-                    correlation: received,
-                });
-            }
-            (Some(PromoterDispatch::Enumerate), ProbeOutcome::SubtreeOk(arc)) => {
-                self.dispatch_promoter_enumeration_ok(promoter_id, &arc, now, out);
-            }
-            (Some(PromoterDispatch::Enumerate), ProbeOutcome::Vanished) => {
-                self.dispatch_promoter_enumeration_vanished(promoter_id, current_target, out);
-            }
-            (Some(PromoterDispatch::Enumerate), ProbeOutcome::Failed { errno }) => {
-                self.dispatch_promoter_enumeration_failed(promoter_id, current_target, errno, out);
-            }
-            (Some(PromoterDispatch::Enumerate), ProbeOutcome::AnchorOk(_)) => {
-                debug_assert!(
-                    false,
-                    "walker contract violated: Promoter enumeration received AnchorOk \
-                     (promoter = {promoter_id:?})",
-                );
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    owner,
-                    correlation: received,
-                });
-            }
-            (None, _) => {
-                // Promoter reaped between the probe submit and
-                // response. Defense-in-depth — `is_live` above already
-                // excludes the post-reap case (registry get fails),
-                // but the match needs an arm.
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    owner,
-                    correlation: received,
-                });
-            }
-        }
+        self.dispatch_promoter_open_outcome(promoter_id, &open, response.outcome, now, out);
 
         // Drain the next queued enumeration (if any). No-op if a probe
-        // is in flight (descent advance reopened the slot) or the
+        // is in flight (descent advance reopened the channel) or the
         // queue is empty.
         self.dispatch_next_enumeration(promoter_id, out);
+    }
+
+    /// Dispatch the response under the open channel's [`OpenKind`].
+    /// Split out for two reasons:
+    ///
+    /// 1. `on_promoter_probe_response` ends with a single
+    ///    `dispatch_next_enumeration` drain — keeping the match in its
+    ///    own helper preserves that uniform tail-call shape.
+    /// 2. The match arms read fields off `open`; isolating them keeps
+    ///    the caller's borrow shape minimal.
+    fn dispatch_promoter_open_outcome(
+        &mut self,
+        promoter_id: PromoterId,
+        open: &Open,
+        outcome: ProbeOutcome,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        let owner = ProbeOwner::Promoter(promoter_id);
+        let correlation = open.correlation();
+
+        match (open.kind(), outcome) {
+            // ----- PromoterDescent -----
+            (OpenKind::PromoterDescent, ProbeOutcome::SubtreeOk(arc)) => {
+                self.dispatch_descent_ok(owner, &arc, now, out);
+            }
+            (OpenKind::PromoterDescent, ProbeOutcome::Vanished) => {
+                self.dispatch_descent_vanished(owner, now, out);
+            }
+            (OpenKind::PromoterDescent, ProbeOutcome::Failed { errno }) => {
+                self.dispatch_descent_failed(owner, errno, out);
+            }
+            (OpenKind::PromoterDescent, ProbeOutcome::AnchorOk(_)) => {
+                debug_assert!(
+                    false,
+                    "walker contract violated: PromoterDescent received AnchorOk \
+                     (promoter = {promoter_id:?})",
+                );
+                out.diagnostics
+                    .push(Diagnostic::StaleProbeResponse { owner, correlation });
+            }
+
+            // ----- PromoterEnumerating -----
+            (OpenKind::PromoterEnumerating { .. }, ProbeOutcome::SubtreeOk(arc)) => {
+                // The `Ok` arm reads `arc.root_resource` (walker's
+                // stamp) as the proxy id; the channel's `target` is
+                // redundant here but kept on the variant so the
+                // `Vanished` / `Failed` arms can read it.
+                self.dispatch_promoter_enumeration_ok(promoter_id, &arc, now, out);
+            }
+            (OpenKind::PromoterEnumerating { target }, ProbeOutcome::Vanished) => {
+                self.dispatch_promoter_enumeration_vanished(promoter_id, *target, out);
+            }
+            (OpenKind::PromoterEnumerating { target }, ProbeOutcome::Failed { errno }) => {
+                self.dispatch_promoter_enumeration_failed(promoter_id, *target, errno, out);
+            }
+            (OpenKind::PromoterEnumerating { .. }, ProbeOutcome::AnchorOk(_)) => {
+                debug_assert!(
+                    false,
+                    "walker contract violated: PromoterEnumerating received AnchorOk \
+                     (promoter = {promoter_id:?})",
+                );
+                out.diagnostics
+                    .push(Diagnostic::StaleProbeResponse { owner, correlation });
+            }
+
+            // ----- Cross-affinity: Promoter owner with Profile kind -----
+            (
+                OpenKind::ProfileVerifying | OpenKind::ProfileRebasing | OpenKind::ProfileDescent,
+                _,
+            ) => {
+                debug_assert!(
+                    false,
+                    "owner-affinity violated: Promoter owner with Profile kind \
+                     (promoter = {promoter_id:?}, kind = {:?})",
+                    open.kind(),
+                );
+                out.diagnostics
+                    .push(Diagnostic::StaleProbeResponse { owner, correlation });
+            }
+        }
     }
 
     /// Drain one queued enumeration target into a probe. No-op if a
     /// probe is already in flight (single-slot discipline) or the
     /// queue is empty.
     ///
-    /// Records the popped target on `Promoter.pending_enumeration_target`
-    /// in lockstep with `pending_probe` — `Vanished` / `Failed`
-    /// responses carry no payload, so the dispatcher reads this slot
-    /// at response time to identify which proxy the response refers
-    /// to. The `Ok` arm reads `snapshot.root_resource` per [C-1] and
-    /// the slot's value is redundant for it; the field clears
-    /// uniformly in `on_promoter_probe_response`.
+    /// Opens the channel with
+    /// [`OpenKind::PromoterEnumerating { target }`] — the proxy
+    /// `target` lives on the variant payload so `Vanished` / `Failed`
+    /// responses (which carry no wire payload) can identify the proxy
+    /// at dispatch time. The `Ok` arm reads `snapshot.root_resource`
+    /// per [C-1] and the variant's value is redundant there; closure
+    /// happens uniformly via `close_if` in `on_promoter_probe_response`.
     pub(crate) fn dispatch_next_enumeration(
         &mut self,
         promoter_id: PromoterId,
         out: &mut StepOutput,
     ) {
+        let owner = ProbeOwner::Promoter(promoter_id);
         // At most one outstanding probe per Promoter.
-        if self
-            .pending_probe_for(ProbeOwner::Promoter(promoter_id))
-            .is_some()
-        {
+        if self.probe_channel.correlation_for(owner).is_some() {
             return;
         }
 
@@ -662,32 +654,18 @@ impl Engine {
             return;
         };
 
-        let owner = ProbeOwner::Promoter(promoter_id);
-        let Some(correlation) = self.mint_owner_correlation(owner) else {
-            // `mint_owner_correlation` only fails for a stale owner;
-            // `pop_first` succeeded above on the same Promoter within
-            // this `&mut self` window, so the registry id is live.
-            // Assert loudly so a future change to mint's semantics
-            // surfaces here rather than silently dropping the popped
-            // enumeration target.
-            debug_assert!(
-                false,
-                "mint_owner_correlation returned None mid-step for live Promoter \
-                 (promoter = {promoter_id:?}, target = {target:?})",
-            );
-            return;
-        };
-
-        // Lockstep with `pending_probe`: record the in-flight target
-        // so `Vanished` / `Failed` responses can identify the proxy.
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.pending_enumeration_target = Some(target);
-        }
+        // Open the channel with the typed `PromoterEnumerating` kind:
+        // the proxy `target` lives on the variant so `Vanished` /
+        // `Failed` responses (which carry no wire payload) can
+        // identify the proxy without a separate per-Promoter slot.
+        let correlation = self
+            .probe_channel
+            .open(owner, OpenKind::PromoterEnumerating { target });
 
         let target_path = self.tree.path_of(target).unwrap_or_default();
-        // [C-1] target_resource carried on the wire so the dispatch
-        // arm can identify which proxy this response corresponds to
-        // via `snapshot.root_resource`.
+        // [C-1] target_resource carried on the wire so the `Ok` arm
+        // reads `snapshot.root_resource` to identify which proxy this
+        // response corresponds to.
         Self::emit_descent_probe(owner, correlation, target, target_path, out);
     }
 
@@ -924,36 +902,19 @@ impl Engine {
     /// path, preserving the rule that only anchor-terminal removes
     /// dynamic Subs.
     ///
-    /// `target` comes from `Promoter.pending_enumeration_target`
-    /// captured at the response handler's read-borrow window. A
-    /// kernel-driven cascade (the proxy's parent's enumeration_ok
-    /// reverse pass triggered by the parent's `StructureChanged`
-    /// event when the proxy is removed) reaches the same end state;
-    /// observing `Vanished` directly short-circuits that round-trip.
-    ///
-    /// On the rare path where `target` is `None` (lockstep invariant
-    /// broken — production paths set the slot at probe-emit time),
-    /// this is a defensive `debug_assert` + diagnostic-only fallback.
+    /// `target` is read off the channel's
+    /// [`OpenKind::PromoterEnumerating { target }`] variant at
+    /// response time. A kernel-driven cascade (the proxy's parent's
+    /// enumeration_ok reverse pass triggered by the parent's
+    /// `StructureChanged` event when the proxy is removed) reaches
+    /// the same end state; observing `Vanished` directly short-circuits
+    /// that round-trip.
     pub(crate) fn dispatch_promoter_enumeration_vanished(
         &mut self,
         promoter_id: PromoterId,
-        target: Option<ResourceId>,
+        target: ResourceId,
         out: &mut StepOutput,
     ) {
-        let Some(target) = target else {
-            debug_assert!(
-                false,
-                "dispatch_promoter_enumeration_vanished: \
-                 pending_enumeration_target was None at response time \
-                 (promoter = {promoter_id:?})",
-            );
-            out.diagnostics
-                .push(Diagnostic::PromoterEnumerationVanished {
-                    promoter: promoter_id,
-                    proxy: ResourceId::default(),
-                });
-            return;
-        };
         out.diagnostics
             .push(Diagnostic::PromoterEnumerationVanished {
                 promoter: promoter_id,
@@ -968,29 +929,20 @@ impl Engine {
     /// permanent failure leaves the proxy stalled until the
     /// underlying condition clears or the operator restarts.
     ///
-    /// `target` is captured in lockstep with the probe correlation —
-    /// the `None` arm is defense-in-depth for the lockstep
-    /// invariant, mirroring [`Self::dispatch_promoter_enumeration_vanished`].
+    /// `target` is read off the channel's
+    /// [`OpenKind::PromoterEnumerating { target }`] variant — typed,
+    /// always present, no defensive fallback needed.
     #[allow(clippy::unused_self)]
     pub(crate) fn dispatch_promoter_enumeration_failed(
         &self,
         promoter_id: PromoterId,
-        target: Option<ResourceId>,
+        target: ResourceId,
         errno: i32,
         out: &mut StepOutput,
     ) {
-        let proxy = target.unwrap_or_else(|| {
-            debug_assert!(
-                false,
-                "dispatch_promoter_enumeration_failed: \
-                 pending_enumeration_target was None at response time \
-                 (promoter = {promoter_id:?})",
-            );
-            ResourceId::default()
-        });
         out.diagnostics.push(Diagnostic::PromoterEnumerationFailed {
             promoter: promoter_id,
-            proxy,
+            proxy: target,
             errno,
         });
     }
@@ -1245,8 +1197,9 @@ impl Engine {
     /// detach/attach operations into a single (sorted) [`StepOutput`].
     ///
     /// Sequence:
-    /// 1. Cancel any in-flight probe (descent or enumeration) and
-    ///    clear `pending_enumeration_target` in lockstep.
+    /// 1. Cancel any in-flight probe (descent or enumeration). The
+    ///    channel close drops any `OpenKind::PromoterEnumerating`'s
+    ///    `target` payload alongside the correlation.
     /// 2. Pre-clear `dynamic_subs` so any cascading detach paths see
     ///    an empty map (defense-in-depth — `detach_sub_inner` itself
     ///    doesn't read it). Then iterate the captured Sub ids and
@@ -1279,14 +1232,22 @@ impl Engine {
             return;
         }
 
-        // 1. Close the probe channel. `cancel_owner_probe` clears
-        // both `pending_probe` and `pending_enumeration_target` for
-        // Promoter owners and emits `ProbeOp::Cancel` iff the channel
-        // was open. `pending_enumerations` drains as a side effect of
-        // the proxy-release pass below: every queued entry corresponds
-        // to a registered proxy, and `release_promoter_proxy_claim`
+        // 1. Close the probe channel. `cancel_owner_probe` closes the
+        // channel structurally (any `OpenKind::PromoterEnumerating`'s
+        // `target` is dropped with the entry) and emits
+        // `ProbeOp::Cancel` iff the channel was open.
+        // `pending_enumerations` drains as a side effect of the
+        // proxy-release pass below: every queued entry corresponds to
+        // a registered proxy, and `release_promoter_proxy_claim`
         // removes its own queue entry inside `unregister_proxy`.
         self.cancel_owner_probe(ProbeOwner::Promoter(promoter_id), out);
+        debug_assert!(
+            self.probe_channel
+                .correlation_for(ProbeOwner::Promoter(promoter_id))
+                .is_none(),
+            "reap_promoter_inner: probe channel still open for promoter = {promoter_id:?} \
+             after cancel_owner_probe; channel-close contract violated",
+        );
 
         // 2. Detach every dynamic Sub. Pre-clear `dynamic_subs` so
         // cascading paths observe an empty map; then iterate the
@@ -1314,8 +1275,8 @@ impl Engine {
         // already `Active`; when state is `PrefixPending` it captures
         // `current_prefix`, flips state to `Active{empty}`, and releases
         // the [`ContribKey::PromoterPrefix`] contribution + try-reaps
-        // the slot. The cancel-first precondition
-        // (`pending_probe.is_none()`) is satisfied by the cancel above.
+        // the slot. The cancel-first precondition (channel closed) is
+        // satisfied by the cancel above.
         self.release_promoter_descent_prefix_claim(promoter_id, out);
 
         // Snapshot the proxy keys post-release: state is now
@@ -1365,16 +1326,6 @@ fn render_literal_prefix(spec: &PatternSpec) -> PathBuf {
         }
     }
     p
-}
-
-/// State-keyed dispatch tag for [`Engine::on_promoter_probe_response`].
-/// Computed once per response from the Promoter's current state, then
-/// matched against the response outcome to route into the descent or
-/// enumeration arm.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum PromoterDispatch {
-    Descent,
-    Enumerate,
 }
 
 #[cfg(test)]

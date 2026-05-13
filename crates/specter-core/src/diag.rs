@@ -385,9 +385,9 @@ pub enum Diagnostic {
     /// [`Self::SensorOverflow`]'s peer reseed loop). Per-Promoter
     /// dispatch is state-keyed:
     /// - `PrefixPending(_)` ⇒ a fresh descent probe is emitted at
-    ///   `current_prefix` (gated on `pending_probe.is_none()`; an
-    ///   in-flight descent probe's response will reflect the
-    ///   post-overflow state).
+    ///   `current_prefix` (gated on the probe channel being closed for
+    ///   this Promoter; an in-flight descent probe's response will
+    ///   reflect the post-overflow state).
     /// - `Active { proxies }` ⇒ every proxy is enqueued into
     ///   `pending_enumerations`; the dispatcher drains one immediately
     ///   into a probe, with the rest queued behind the single-slot.

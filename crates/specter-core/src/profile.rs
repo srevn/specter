@@ -8,7 +8,6 @@
 
 use crate::effect::DedupKey;
 use crate::ids::{ProfileId, ResourceId, TimerId};
-use crate::op::ProbeCorrelation;
 use crate::resource::ResourceKind;
 use crate::scan_config::{ScanConfig, compute_config_hash};
 use crate::snapshot::tree::TreeSnapshot;
@@ -184,20 +183,22 @@ pub struct PreFireBurst {
 ///
 /// `Batching` carries its own correlation token (`settle_timer: TimerId`)
 /// because timer correlation is per-Burst and has no peer slot to live on.
-/// `Verifying` is unit: the probe correlation lives on
-/// [`Profile::pending_probe`] — the per-Profile probe-channel slot — so the
-/// burst phase only encodes "probe in flight" as state-machine identity.
-/// `Draining` is correlated externally by `Profile.dirty_descendants` and
-/// carries no token of its own.
+/// `Verifying` is unit: the probe correlation lives on the engine's
+/// `ProbeChannel` keyed by `ProbeOwner::Profile(_)` with
+/// `OpenKind::ProfileVerifying`, so the burst phase only encodes
+/// "probe in flight" as state-machine identity. `Draining` is
+/// correlated externally by `Profile.dirty_descendants` and carries no
+/// token of its own.
 #[derive(Debug)]
 pub enum PreFirePhase {
     /// Activity-gap detection. `settle_timer` is the armed debounce
     /// timer; an `FsEvent` reschedules it (`event_drives_batching`),
     /// timer expiry advances to `Verifying` (`transition_to_verifying`).
     Batching { settle_timer: TimerId },
-    /// Probe in flight. The matching `ProbeCorrelation` lives on
-    /// [`Profile::pending_probe`]; this variant is unit because the
-    /// Profile-side slot is the single source of truth (encoding the
+    /// Probe in flight. The matching `ProbeCorrelation` lives on the
+    /// engine's `ProbeChannel` (keyed by `ProbeOwner::Profile(_)` with
+    /// `OpenKind::ProfileVerifying`); this variant is unit because
+    /// the channel is the single source of truth (encoding the
     /// correlation twice would invite drift).
     Verifying,
     /// Self-stable; descendants pending. The stable snapshot lives on
@@ -258,10 +259,11 @@ pub struct PostFireBurst {
 /// forces the burst into `Rebasing`.
 ///
 /// `Rebasing`: post-fire probe in flight at the anchor. Correlation
-/// lives on [`Profile::pending_probe`] (same slot Verifying used —
-/// Verifying and Rebasing are time-disjoint within one burst).
-/// `dispatch_rebase_ok` then sets `baseline := current` and finishes
-/// the burst to Idle.
+/// lives on the engine's `ProbeChannel` (keyed by
+/// `ProbeOwner::Profile(_)` with `OpenKind::ProfileRebasing`; Verifying
+/// and Rebasing are time-disjoint within one burst so the same channel
+/// key is reused). `dispatch_rebase_ok` then sets `baseline := current`
+/// and finishes the burst to Idle.
 #[derive(Debug)]
 pub enum PostFirePhase {
     Awaiting {
@@ -328,12 +330,13 @@ impl PreFireBurst {
 /// - `Active(Burst)`: anchor is materialized; a stability burst is in
 ///   flight.
 ///
-/// I5 (at most one outstanding probe per Profile) is enforced as a
-/// **field discipline** on [`Profile::pending_probe`]: that slot holds the
-/// correlation of the in-flight probe, regardless of which lifecycle state
-/// drives it. Pending and Active remain mutually exclusive at the type
-/// level, so the dispatch site routes a live response on state identity
-/// alone (see `Engine::on_probe_response` in `specter-engine`).
+/// I5 (at most one outstanding probe per Profile) is enforced
+/// **structurally** by the engine's `ProbeChannel`: at most one map
+/// entry per `ProbeOwner`. Open via `ProbeChannel::open` (panics on
+/// double-open); close via `close_if` (correlation-matched) or
+/// `close` (unconditional). The dispatch site routes on the channel's
+/// `OpenKind` discriminant rather than per-state inspection (see
+/// `Engine::on_probe_response` in `specter-engine`).
 #[derive(Debug, Default)]
 pub enum ProfileState {
     #[default]
@@ -403,9 +406,10 @@ pub enum ProfileStateDiscriminant {
 ///   on materialization rather than emptying the path.
 ///
 /// I5 ("at most one outstanding probe per Profile") for the Pending
-/// lifecycle is enforced by the per-Profile probe channel slot
-/// ([`Profile::pending_probe`]) — the same slot used for Active bursts.
-/// The descent's variant payload holds no probe-correlation data of its
+/// lifecycle is enforced structurally by the engine's `ProbeChannel`
+/// (keyed by `ProbeOwner::Profile(_)`; descent probes carry
+/// `OpenKind::ProfileDescent`). The descent's variant payload holds no
+/// probe-correlation data of its
 /// own.
 #[derive(Clone, Debug)]
 pub struct DescentState {
@@ -686,21 +690,6 @@ pub struct Profile {
     /// clears both atomically inside one `Engine::step`.
     pub kind: Option<ResourceKind>,
     pub state: ProfileState,
-    /// Engine-side slot for the **probe channel** — the per-Profile
-    /// communication primitive between the engine and the Prober pool.
-    /// Holds the correlation token of an outstanding `ProbeRequest`, or
-    /// `None` if no probe is in flight.
-    ///
-    /// **Discipline.** Open via `Engine::mint_owner_correlation`; close
-    /// via the response-dispatch path (top of `Engine::on_probe_response`)
-    /// or via `Engine::cancel_owner_probe`. Open for at most one
-    /// outstanding request, regardless of which lifecycle state
-    /// (`Pending` or `Active`) drives the emission.
-    ///
-    /// **Sibling channels.** Distinct from the *watch channel*
-    /// (per-Resource, refcounted via `watch_demand`) and the *effect
-    /// channel* (per-(Sub, DedupKey), coalesced in the Actuator).
-    pub pending_probe: Option<ProbeCorrelation>,
     pub baseline: Option<TreeSnapshot>,
     pub current: Option<TreeSnapshot>,
     /// Cached nearest covering ancestor Profile — the parent edge
@@ -715,8 +704,7 @@ pub struct Profile {
     /// **Discipline.** Engine writes converge on the
     /// `stability::write_parent_edge` helper, the single source of
     /// the self-parent `debug_assert_ne!`. Direct field assignment
-    /// is reserved for testkit / unit-test setup — same convention
-    /// as `pending_probe`.
+    /// is reserved for testkit / unit-test setup.
     pub parent_profile: Option<ProfileId>,
     pub dirty_descendants: u32,
     pub sub_refcount: u32,
@@ -849,7 +837,6 @@ impl Profile {
             config_hash,
             kind: None,
             state: ProfileState::Idle,
-            pending_probe: None,
             baseline: None,
             current: None,
             parent_profile: None,

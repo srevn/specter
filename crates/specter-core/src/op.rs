@@ -26,13 +26,13 @@ impl From<u64> for ProbeCorrelation {
 /// [`ProbeOp::Cancel`] so the engine can demux each response to the
 /// entity that's awaiting it.
 ///
-/// Two owner kinds. [`Self::Profile`] wraps the per-Profile
-/// probe-channel slot ([`crate::Profile::pending_probe`]) for the
-/// burst / descent / rebase lifecycle. [`Self::Promoter`] wraps the
-/// per-Promoter slot ([`crate::Promoter::pending_probe`]) for the
-/// literal-prefix descent and proxy-enumeration lifecycle. The two
-/// counters are isolated by owner: one Profile and one Promoter can
-/// each carry an outstanding probe simultaneously without collision.
+/// Two owner kinds. [`Self::Profile`] drives the burst / descent /
+/// rebase lifecycle. [`Self::Promoter`] drives the literal-prefix
+/// descent and proxy-enumeration lifecycle. The engine's probe channel
+/// keys an outstanding-probe map on this enum: at most one open entry
+/// per owner, with isolated counters per owner-kind by construction
+/// (one Profile and one Promoter can each carry an outstanding probe
+/// simultaneously without collision).
 ///
 /// **Determinism.** Derived `Ord` produces variant-declaration-order
 /// (Profile < Promoter), then per-payload [`ProfileId`] /
@@ -40,13 +40,13 @@ impl From<u64> for ProbeCorrelation {
 /// sequences keep the prior byte-stable sort.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ProbeOwner {
-    /// Per-Profile slot. The wrapped [`ProfileId`] keys
-    /// [`crate::Profile::pending_probe`] via the engine's slot
-    /// accessor.
+    /// Profile-driven probe. The engine's probe channel keys this
+    /// owner to its in-flight `ProbeCorrelation` and `OpenKind`
+    /// discriminant (Verifying / Rebasing / Descent).
     Profile(ProfileId),
-    /// Per-Promoter slot. The wrapped [`PromoterId`] keys
-    /// [`crate::Promoter::pending_probe`] via the engine's slot
-    /// accessor.
+    /// Promoter-driven probe. The engine's probe channel keys this
+    /// owner to its in-flight `ProbeCorrelation` and `OpenKind`
+    /// discriminant (Descent / Enumerating { target }).
     Promoter(PromoterId),
 }
 

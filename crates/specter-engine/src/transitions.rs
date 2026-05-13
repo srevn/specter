@@ -7,11 +7,14 @@
 //! rows (e.g., emit Effects on Standard stable verdict) is factored into
 //! private helpers within this module.
 //!
-//! The match on `(DispatchTarget, ProbeOutcome)` in `on_probe_response` is
-//! the single post-probe dispatch site; per-intent fan-out lives in
-//! `dispatch_burst_outcome`.
+//! `on_probe_response` routes each response by
+//! [`crate::probe_channel::OpenKind`]: the response handler closes the
+//! channel atomically via [`crate::probe_channel::ProbeChannel::close_if`]
+//! and matches `(open.kind(), outcome)`. Per-intent fan-out for the
+//! Verifying arm lives in `dispatch_burst_outcome`.
 
 use crate::Engine;
+use crate::probe_channel::OpenKind;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use compact_str::CompactString;
 use smallvec::SmallVec;
@@ -214,38 +217,36 @@ impl Engine {
         self.enter_pending_descent(profile_id, parent, remaining, out);
     }
 
-    /// Dispatch a [`ProbeResponse`].
+    /// Dispatch a [`ProbeResponse`] by routing to the per-owner
+    /// handler.
     ///
-    /// I5 staleness is decided once, against the per-Profile probe channel
-    /// (`Profile.pending_probe`): the response is live iff the slot holds
-    /// the received correlation. After the live check the channel is closed
-    /// before any dispatch arm runs — descent advance, post-Effect Seed,
-    /// and Draining → Verifying reconfirm all re-mint via
-    /// [`Engine::mint_probe_correlation`], which I5-asserts an empty slot.
+    /// **Staleness.** Each per-owner handler closes the channel
+    /// atomically via
+    /// [`crate::probe_channel::ProbeChannel::close_if`]; the call
+    /// returns `Some(Open)` iff the channel is open AND its
+    /// correlation matches the received one. A `None` covers every
+    /// stale path — stale id, response after Cancel, out-of-order
+    /// response — and yields [`Diagnostic::StaleProbeResponse`].
     ///
-    /// `(state, phase)` then routes the live response to one of three
-    /// dispatch families: `Pending(_)` ⇒ descent; `Active(_)` with phase
-    /// `Verifying` ⇒ burst; `Active(_)` with phase `Rebasing` ⇒ rebase.
-    /// Every other shape (Idle with the slot occupied, or Active with
-    /// phase `Batching` / `Draining` / `Awaiting`) is an I5 invariant
-    /// breach — the slot held a correlation but no in-flight mint
-    /// corresponds to it. The dispatch `debug_assert!`s those cases
-    /// (panic in dev/CI) and falls through to a
-    /// [`Diagnostic::StaleProbeResponse`] in release rather than
-    /// misroute. The remaining benign route is `None` (stale `ProfileId`
-    /// from a Profile detached / reaped between FsEvent ingestion and
-    /// step), which emits the same diagnostic without a debug assertion.
+    /// **Routing.** The returned [`crate::probe_channel::Open`]
+    /// carries the [`crate::probe_channel::OpenKind`] the channel
+    /// recorded at open-time. The handlers match `(open.kind(),
+    /// outcome)` directly — no per-(state, phase) projection, so
+    /// state-phase divergence that used to surface as
+    /// `debug_assert!(false, "I5 violated")` is structurally
+    /// unrepresentable (a channel opened with `ProfileVerifying`
+    /// cannot drift into a state where the dispatch arm rejects it,
+    /// because the kind is what's matched).
     ///
-    /// **Walker-contract violations.** A `Pending` Profile receiving an
-    /// `AnchorOk` outcome (or a Verifying/Rebasing Profile whose
-    /// `Profile.kind == Some(Dir)` receiving an `AnchorOk`) is a walker
-    /// bug — the engine emitted a Subtree request and got back a leaf.
-    /// The structural error path is `debug_assert!` in dev/CI plus
-    /// `StaleProbeResponse` in release, so the engine never grafts a
-    /// kind-mismatched payload. The mirror case (File-anchored Profile
-    /// receiving `SubtreeOk`) routes through the existing dispatch arm
-    /// — `dispatch_*_ok` synthesises a `TreeSnapshot::Dir`, and
-    /// `current_target_hash` / graft handle the kind change at the
+    /// **Walker-contract violations.** A descent probe receiving
+    /// `AnchorOk` (the walker contracted to return `SubtreeOk` or
+    /// `Vanished` for `ProbeRequest::Descent`) is a walker bug. The
+    /// dispatch arms `debug_assert!` and emit
+    /// [`Diagnostic::StaleProbeResponse`] so the engine never grafts
+    /// a kind-mismatched payload. The mirror case (File-anchored
+    /// Profile receiving `SubtreeOk`) routes through the existing
+    /// dispatch arm — `dispatch_*_ok` synthesises a
+    /// `TreeSnapshot::Dir`, and graft handles the kind change at the
     /// snapshot level.
     pub(crate) fn on_probe_response(
         &mut self,
@@ -259,11 +260,24 @@ impl Engine {
         }
     }
 
-    /// Profile-side probe response handler. Closed under the Profile
-    /// owner kind: I5 staleness check, channel close, and dispatch by
-    /// `(state, phase)`. Sibling owner kinds (added in later phases)
-    /// will route through their own `on_*_probe_response` from
-    /// [`Self::on_probe_response`].
+    /// Profile-side probe response handler. Atomic check-and-take on
+    /// the probe channel, then [`OpenKind`]-routed dispatch.
+    ///
+    /// **Staleness.** [`crate::probe_channel::ProbeChannel::close_if`]
+    /// is atomic: it returns `Some(Open)` iff the channel is open AND
+    /// its correlation matches `received`, and leaves the entry
+    /// intact on mismatch. A `None` covers every stale path — stale
+    /// `ProfileId`, response after Cancel, response after a fresh
+    /// mint, out-of-order response — and yields
+    /// [`Diagnostic::StaleProbeResponse`].
+    ///
+    /// **Routing.** Match on the [`OpenKind`] discriminant the channel
+    /// records at open-time. Profile owners mint with
+    /// `ProfileVerifying` / `ProfileRebasing` / `ProfileDescent`; the
+    /// Promoter-kind arm catches a cross-affinity regression
+    /// (`debug_assert!` + diagnostic). Walker-contract violations
+    /// (descent receiving `AnchorOk`) are handled in-arm: production
+    /// walkers never emit those shapes.
     fn on_profile_probe_response(
         &mut self,
         profile_id: ProfileId,
@@ -274,101 +288,76 @@ impl Engine {
         let owner = response.owner;
         let received = response.correlation;
 
-        // Single I5 stale-detection check, anchored to the Profile-level
-        // probe channel. Catches every stale path: stale ProfileId, response
-        // after Cancel, response after a fresh mint (release-build I5
-        // overwrite — see `mint_owner_correlation`), out-of-order response.
-        let is_live = self
-            .profiles
-            .get(profile_id)
-            .is_some_and(|p| p.pending_probe == Some(received));
-        if !is_live {
+        let Some(open) = self.probe_channel.close_if(owner, received) else {
             out.diagnostics.push(Diagnostic::StaleProbeResponse {
                 owner,
                 correlation: received,
             });
             return;
-        }
-
-        // Close the channel BEFORE dispatching. Dispatch arms may re-open a
-        // fresh channel (descent advance / rewind, anchor-materialization
-        // → Seed, Draining → Verifying reconfirm); they MUST see a closed
-        // channel on entry, otherwise the I5 debug_assert in
-        // `mint_owner_correlation` fires.
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.pending_probe = None;
-        }
-
-        // Route on (state, phase). Only Verifying / Rebasing (Active) and
-        // Pending mint into the probe channel; observing pending_probe =
-        // Some(received) in any other shape is an I5 invariant breach —
-        // the slot was minted, then the phase changed without a matching
-        // cancel_owner_probe. The debug_assert! arms surface those as
-        // panics in dev/CI; release builds fall through to
-        // DispatchTarget::Stale so the engine never dispatches a
-        // misclassified response (which would, e.g., drive
-        // dispatch_standard_ok against an Awaiting Profile and overwrite
-        // outstanding via a spurious transition_to_awaiting).
-        let dispatch = match self.profiles.get(profile_id).map(|p| &p.state) {
-            Some(ProfileState::Pending(_)) => DispatchTarget::Descent,
-            Some(ProfileState::Active(ActiveBurst::PreFire(pre))) => match &pre.phase {
-                PreFirePhase::Verifying => DispatchTarget::Burst {
-                    intent: pre.intent,
-                    forced: pre.forced,
-                },
-                PreFirePhase::Batching { .. } | PreFirePhase::Draining => {
-                    debug_assert!(
-                        false,
-                        "I5 violated: live probe response in non-mint pre-fire \
-                         phase (profile = {profile_id:?}, phase = {:?})",
-                        pre.phase,
-                    );
-                    DispatchTarget::Stale
-                }
-            },
-            Some(ProfileState::Active(ActiveBurst::PostFire(post))) => match &post.phase {
-                PostFirePhase::Rebasing => DispatchTarget::Rebase,
-                PostFirePhase::Awaiting { .. } => {
-                    debug_assert!(
-                        false,
-                        "I5 violated: live probe response in non-mint post-fire \
-                         phase (profile = {profile_id:?}, phase = {:?})",
-                        post.phase,
-                    );
-                    DispatchTarget::Stale
-                }
-            },
-            Some(ProfileState::Idle) => {
-                debug_assert!(
-                    false,
-                    "I5 violated: live probe response on Idle Profile \
-                     (profile = {profile_id:?}); Idle must hold pending_probe = None",
-                );
-                DispatchTarget::Stale
-            }
-            None => DispatchTarget::Stale,
         };
 
-        match (dispatch, response.outcome) {
-            // ----- Pending (descent) -----
-            (DispatchTarget::Descent, ProbeOutcome::SubtreeOk(arc)) => {
-                self.dispatch_descent_ok(ProbeOwner::Profile(profile_id), &arc, now, out);
+        match (open.kind(), response.outcome) {
+            // ----- ProfileVerifying -----
+            (OpenKind::ProfileVerifying, outcome) => {
+                // Read `(intent, forced)` off the PreFireBurst. State
+                // agreement is structural: only `start_seed_burst` and
+                // `transition_to_verifying` mint with this kind, and
+                // both write `phase = Verifying` before opening the
+                // channel. The bail covers a test forging a channel
+                // open without a matching phase write — never reached
+                // in production.
+                let Some((intent, forced)) = self.profiles.get(profile_id).and_then(|p| {
+                    if let ProfileState::Active(ActiveBurst::PreFire(pre)) = &p.state {
+                        Some((pre.intent, pre.forced))
+                    } else {
+                        None
+                    }
+                }) else {
+                    debug_assert!(
+                        false,
+                        "channel ProfileVerifying but profile state diverges \
+                         (profile = {profile_id:?})",
+                    );
+                    out.diagnostics.push(Diagnostic::StaleProbeResponse {
+                        owner,
+                        correlation: received,
+                    });
+                    return;
+                };
+                self.dispatch_burst_outcome(profile_id, intent, forced, outcome, now, out);
             }
-            (DispatchTarget::Descent, ProbeOutcome::Vanished) => {
-                self.dispatch_descent_vanished(ProbeOwner::Profile(profile_id), now, out);
+
+            // ----- ProfileRebasing -----
+            (OpenKind::ProfileRebasing, ProbeOutcome::AnchorOk(leaf)) => {
+                self.dispatch_rebase_ok(profile_id, TreeSnapshot::File(leaf), out);
             }
-            (DispatchTarget::Descent, ProbeOutcome::Failed { errno }) => {
-                self.dispatch_descent_failed(ProbeOwner::Profile(profile_id), errno, out);
+            (OpenKind::ProfileRebasing, ProbeOutcome::SubtreeOk(arc)) => {
+                self.dispatch_rebase_ok(profile_id, TreeSnapshot::Dir(arc), out);
             }
-            (DispatchTarget::Descent, ProbeOutcome::AnchorOk(_)) => {
-                // Walker-contract violation: descent always probes a Dir
-                // prefix, walker must return SubtreeOk or Vanished. Surface
-                // as a debug_assert in dev/CI; release builds emit
-                // StaleProbeResponse so the engine never dispatches a
-                // kind-mismatched payload.
+            (OpenKind::ProfileRebasing, ProbeOutcome::Vanished) => {
+                self.dispatch_rebase_vanished(profile_id, out);
+            }
+            (OpenKind::ProfileRebasing, ProbeOutcome::Failed { errno }) => {
+                self.dispatch_rebase_failed(profile_id, errno, out);
+            }
+
+            // ----- ProfileDescent -----
+            (OpenKind::ProfileDescent, ProbeOutcome::SubtreeOk(arc)) => {
+                self.dispatch_descent_ok(owner, &arc, now, out);
+            }
+            (OpenKind::ProfileDescent, ProbeOutcome::Vanished) => {
+                self.dispatch_descent_vanished(owner, now, out);
+            }
+            (OpenKind::ProfileDescent, ProbeOutcome::Failed { errno }) => {
+                self.dispatch_descent_failed(owner, errno, out);
+            }
+            (OpenKind::ProfileDescent, ProbeOutcome::AnchorOk(_)) => {
+                // Walker contract: descent probes a Dir prefix, walker
+                // returns `SubtreeOk` or `Vanished`. `AnchorOk` here is
+                // a walker-side regression.
                 debug_assert!(
                     false,
-                    "walker contract violated: descent received AnchorOk \
+                    "walker contract violated: ProfileDescent received AnchorOk \
                      (profile = {profile_id:?})",
                 );
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
@@ -377,26 +366,18 @@ impl Engine {
                 });
             }
 
-            // ----- Burst Verifying -----
-            (DispatchTarget::Burst { intent, forced }, outcome) => {
-                self.dispatch_burst_outcome(profile_id, intent, forced, outcome, now, out);
-            }
-
-            // ----- Rebase -----
-            (DispatchTarget::Rebase, ProbeOutcome::AnchorOk(leaf)) => {
-                self.dispatch_rebase_ok(profile_id, TreeSnapshot::File(leaf), out);
-            }
-            (DispatchTarget::Rebase, ProbeOutcome::SubtreeOk(arc)) => {
-                self.dispatch_rebase_ok(profile_id, TreeSnapshot::Dir(arc), out);
-            }
-            (DispatchTarget::Rebase, ProbeOutcome::Vanished) => {
-                self.dispatch_rebase_vanished(profile_id, out);
-            }
-            (DispatchTarget::Rebase, ProbeOutcome::Failed { errno }) => {
-                self.dispatch_rebase_failed(profile_id, errno, out);
-            }
-
-            (DispatchTarget::Stale, _) => {
+            // ----- Cross-affinity: Profile owner with Promoter kind -----
+            // Mint-site discipline forbids; this arm is regression
+            // detection. A Promoter-kinded entry under a Profile key
+            // requires either a future buggy mint site or test forgery
+            // — neither reachable in production.
+            (OpenKind::PromoterDescent | OpenKind::PromoterEnumerating { .. }, _) => {
+                debug_assert!(
+                    false,
+                    "owner-affinity violated: Profile owner with Promoter kind \
+                     (profile = {profile_id:?}, kind = {:?})",
+                    open.kind(),
+                );
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
                     owner,
                     correlation: received,
@@ -1053,17 +1034,19 @@ impl Engine {
         }
 
         // Promoter `Active` proxy purge — mirror with one twist:
-        // cancel only when `pending_enumeration_target == resource`.
-        // A probe targeting a SIBLING proxy of the same Promoter is
-        // unaffected by this rejection and stays in flight. The
-        // cancel-first contract on `release_promoter_proxy_claim`
-        // gates on this exact condition.
+        // cancel only when the in-flight enumeration targets THIS
+        // resource. A probe targeting a SIBLING proxy of the same
+        // Promoter is unaffected by this rejection and stays in
+        // flight. The cancel-first contract on
+        // `release_promoter_proxy_claim` gates on this exact
+        // condition.
         for qid in promoter_proxy_claimers {
-            let target_matches = self
-                .promoters
-                .get(qid)
-                .and_then(|q| q.pending_enumeration_target)
-                == Some(resource);
+            let target_matches = matches!(
+                self.probe_channel
+                    .kind_for(ProbeOwner::Promoter(qid)),
+                Some(crate::probe_channel::OpenKind::PromoterEnumerating { target })
+                    if *target == resource,
+            );
             if target_matches {
                 self.cancel_owner_probe(ProbeOwner::Promoter(qid), out);
             }
@@ -1188,13 +1171,15 @@ impl Engine {
         for qid in promoters_to_reseed {
             // Project the relevant state into a local enum so the
             // borrow on `self.promoters.get(qid)` ends before the
-            // `&mut self` calls below (mint_owner_correlation,
+            // `&mut self` calls below (probe_channel.open,
             // dispatch_next_enumeration). Stale id ⇒ skip without
             // emitting the reseed diagnostic — the Promoter is gone.
+            let qowner = ProbeOwner::Promoter(qid);
+            let channel_open = self.probe_channel.correlation_for(qowner).is_some();
             let action = match self.promoters.get(qid) {
                 None => continue,
                 Some(q) => match &q.state {
-                    PromoterState::PrefixPending(d) if q.pending_probe.is_none() => {
+                    PromoterState::PrefixPending(d) if !channel_open => {
                         PromoterReseedAction::DescentProbe(d.current_prefix)
                     }
                     // PrefixPending with in-flight descent probe: the
@@ -1209,12 +1194,11 @@ impl Engine {
 
             match action {
                 PromoterReseedAction::DescentProbe(prefix) => {
-                    let owner = ProbeOwner::Promoter(qid);
-                    let Some(correlation) = self.mint_owner_correlation(owner) else {
-                        continue;
-                    };
+                    let correlation = self
+                        .probe_channel
+                        .open(qowner, crate::probe_channel::OpenKind::PromoterDescent);
                     let target_path = self.tree.path_of(prefix).unwrap_or_default();
-                    Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
+                    Self::emit_descent_probe(qowner, correlation, prefix, target_path, out);
                 }
                 PromoterReseedAction::Enumerate(proxy_keys) => {
                     // Enqueue every proxy. Single-slot drain processes
@@ -1518,11 +1502,10 @@ impl Engine {
         let was_active = matches!(p.state, ProfileState::Active(_));
 
         // Idempotent: emits Cancel iff the probe channel is open
-        // (Active+Verifying ⇒ pending_probe = Some(_)). For
-        // Active+Batching/Draining no probe is in flight and the helper
-        // is a no-op — replaces the prior `was_verifying` snapshot's
-        // role with field-discipline equivalence. Required by
-        // discard_anchor_state's cancel-first contract.
+        // (Active+Verifying ⇒ channel open). For Active+Batching /
+        // Draining no probe is in flight and the helper is a no-op —
+        // structural equivalent of the prior `was_verifying` snapshot.
+        // Required by discard_anchor_state's cancel-first contract.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
 
         // Discard runs BEFORE finish_burst_to_idle. The release-helpers
@@ -2626,7 +2609,7 @@ enum AwaitAction {
 /// Per-Promoter dispatch projection used by [`Engine::on_sensor_overflow`].
 /// Computed under a short `&self.promoters` borrow, then dispatched
 /// under `&mut self` — splitting the borrow lifetimes is the only way
-/// to thread the post-state-read calls (`mint_owner_correlation`,
+/// to thread the post-state-read calls (`probe_channel.open`,
 /// `dispatch_next_enumeration`) through Rust's borrow rules without
 /// re-querying the registry per access.
 ///
@@ -2642,36 +2625,6 @@ enum PromoterReseedAction {
     DescentProbe(ResourceId),
     Enumerate(Vec<ResourceId>),
     Skip,
-}
-
-/// Snapshot of `on_probe_response`'s routing decision. Computed under a
-/// short `&self.profiles` borrow, then dispatched under `&mut self`.
-///
-/// Variants:
-/// - `Descent`: the live response targets `ProfileState::Pending(_)`.
-///   Routes to the descent dispatchers (`dispatch_descent_ok` /
-///   `_vanished` / `_failed`).
-/// - `Rebase`: the live response targets `ProfileState::Active(_)` with
-///   phase `PostFirePhase::Rebasing`. Routes to `dispatch_rebase_*` (post-fire
-///   rebase — no stability verdict; graft + `baseline := current` + finish).
-/// - `Burst { intent, forced }`: the live response targets `Verifying`.
-///   The intent + forced flags are captured here so `dispatch_burst_outcome`
-///   can act on them.
-/// - `Stale`: the live response cannot be routed coherently. Two reasons:
-///   stale `ProfileId` (`None`, benign post-detach race) or I5 invariant
-///   breach (Idle / non-mint Active phase with a non-empty `pending_probe`
-///   slot — a state-machine bug surfaced by `debug_assert!` in dev/CI;
-///   release builds fall through to a `StaleProbeResponse` diagnostic).
-///
-/// The top-level `pending_probe == Some(received)` check in
-/// `on_probe_response` filters correlation-mismatch staleness before this
-/// enum is constructed; `Stale` here covers shape mismatches that survive
-/// that filter.
-enum DispatchTarget {
-    Descent,
-    Rebase,
-    Burst { intent: BurstIntent, forced: bool },
-    Stale,
 }
 
 /// Event-class assignment. Maps an [`FsEvent`] + the resource's
