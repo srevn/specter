@@ -19,11 +19,11 @@ use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
-    ActiveBurst, AnchorClaim, BurstIntent, ClaimKind, ClassSet, DedupKey, DescentRemaining,
-    Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase,
-    PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
-    PromoterClaimKind, PromoterId, PromoterState, Resource, ResourceId, ResourceKind, StepOutput,
-    SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
+    ActiveBurst, AnchorClaim, BurstFinish, BurstIntent, ClaimKind, ClassSet, DedupKey,
+    DescentRemaining, Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope,
+    PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
+    PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource, ResourceId, ResourceKind,
+    StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -307,7 +307,7 @@ impl Engine {
                 // open without a matching phase write — never reached
                 // in production.
                 let Some((intent, forced)) = self.profiles.get(profile_id).and_then(|p| {
-                    if let ProfileState::Active(ActiveBurst::PreFire(pre)) = &p.state {
+                    if let ProfileState::Active(ActiveBurst::PreFire(pre), _) = &p.state {
                         Some((pre.intent, pre.forced))
                     } else {
                         None
@@ -641,7 +641,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let ProfileState::Active(ActiveBurst::PreFire(pre)) = &p.state else {
+        let ProfileState::Active(ActiveBurst::PreFire(pre), _) = &p.state else {
             return;
         };
         // is_timer_referenced upstream guarantees Batching, but the
@@ -664,7 +664,7 @@ impl Engine {
                 .timers
                 .schedule(new_deadline, profile_id, TimerKind::Settle);
             if let Some(p) = self.profiles.get_mut(profile_id)
-                && let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state
+                && let ProfileState::Active(ActiveBurst::PreFire(pre), _) = &mut p.state
             {
                 pre.phase = PreFirePhase::Batching {
                     settle_timer: new_timer,
@@ -727,31 +727,27 @@ impl Engine {
         }
 
         // Resolve the action under a short read borrow, then mutate.
-        // Reading `reap_pending` here means the AwaitAction::Reap branch
-        // sees the most recent flag value — covers the race where a Sub
-        // detaches between the prior `outstanding == N` step and this
-        // completion (the flag flips before this read).
-        let phase_action = match self
-            .profiles
-            .get(profile_id)
-            .map(|p| (&p.state, p.reap_pending))
-        {
-            Some((ProfileState::Active(ActiveBurst::PostFire(post)), reap_pending)) => {
-                match &post.phase {
-                    PostFirePhase::Awaiting { outstanding, .. } => {
-                        if *outstanding <= 1 {
-                            if reap_pending {
-                                AwaitAction::Reap
-                            } else {
-                                AwaitAction::Rebase
-                            }
-                        } else {
-                            AwaitAction::Decrement
+        // The `BurstFinish` payload on the Active variant is the source
+        // of truth for the Reap-vs-Rebase decision — a Sub that detaches
+        // between the prior `outstanding == N` step and this completion
+        // mutates the directive in place via `mark_active_for_reap`,
+        // and the match arm below sees the post-flip value.
+        let phase_action = match self.profiles.get(profile_id).map(|p| &p.state) {
+            Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => match &post.phase {
+                PostFirePhase::Awaiting { outstanding, .. } => {
+                    if *outstanding <= 1 {
+                        // Exhaustive match on BurstFinish — the
+                        // boolean ternary is gone.
+                        match finish {
+                            BurstFinish::Reap => AwaitAction::Reap,
+                            BurstFinish::ReturnToIdle => AwaitAction::Rebase,
                         }
+                    } else {
+                        AwaitAction::Decrement
                     }
-                    PostFirePhase::Rebasing => AwaitAction::Diagnose,
                 }
-            }
+                PostFirePhase::Rebasing => AwaitAction::Diagnose,
+            },
             // PreFire phases (Batching / Verifying / Draining), Idle,
             // Pending, stale Profile (None): not waiting for this
             // completion — a late arrival the engine no longer tracks.
@@ -761,7 +757,7 @@ impl Engine {
         match phase_action {
             AwaitAction::Decrement => {
                 if let Some(p) = self.profiles.get_mut(profile_id)
-                    && let ProfileState::Active(ActiveBurst::PostFire(post)) = &mut p.state
+                    && let ProfileState::Active(ActiveBurst::PostFire(post), _) = &mut p.state
                     && let PostFirePhase::Awaiting {
                         ref mut outstanding,
                         ..
@@ -1131,7 +1127,7 @@ impl Engine {
                 ProfileState::Idle => {
                     self.start_seed_burst(pid, now, out);
                 }
-                ProfileState::Active(_) => {
+                ProfileState::Active(_, _) => {
                     // Abandon the in-flight burst, then reseed. The two
                     // helpers compose: `finish_burst_to_idle` returns
                     // the Profile to Idle (decrementing suppress_count
@@ -1317,10 +1313,10 @@ impl Engine {
             // belongs to `PostFireBurst` alone, and the helper owns the
             // mutation in `burst.rs` so `transitions.rs` never reaches
             // for burst internals.
-            ProfileState::Active(ActiveBurst::PostFire(_)) => {
+            ProfileState::Active(ActiveBurst::PostFire(_), _) => {
                 self.absorb_event_into_fire_tail(profile_id, event_resource, event, out);
             }
-            ProfileState::Active(ActiveBurst::PreFire(_)) => {
+            ProfileState::Active(ActiveBurst::PreFire(_), _) => {
                 self.event_drives_batching(profile_id, event_resource, now, out);
             }
             // Pending Profiles never reach here — `covering_profiles`
@@ -1435,21 +1431,21 @@ impl Engine {
 
         // 4. Reap the Profile. Active Profiles need their burst force-
         // ended via `finish_burst_to_idle`; Idle / Pending Profiles
-        // reap synchronously. We set `reap_pending = true` for the
-        // Active branch so `finish_burst_to_idle` runs `reap_profile`
-        // internally (single source of truth for the four-claim
-        // release + ProfileMap detach).
-        let active = self
+        // reap synchronously. The Active branch flips
+        // [`BurstFinish::Reap`] via `mark_active_for_reap` so
+        // `finish_burst_to_idle` runs `reap_profile` internally with
+        // `via = DeferredFromBurst` (single source of truth for the
+        // four-claim release + ProfileMap detach).
+        let marked = self
             .profiles
-            .get(profile_id)
-            .is_some_and(|p| matches!(p.state, ProfileState::Active(_)));
-        if active {
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.reap_pending = true;
-            }
+            .get_mut(profile_id)
+            .is_some_and(|p| p.state.mark_active_for_reap());
+        if marked {
             self.finish_burst_to_idle(profile_id, out);
         } else if self.profiles.get(profile_id).is_some() {
-            self.reap_profile(profile_id, out);
+            // Non-Active arm: the all-dynamic teardown reached a
+            // Profile in Idle or Pending. Reap inline.
+            self.reap_profile(profile_id, ReapTrigger::Immediate, out);
         }
     }
 
@@ -1499,7 +1495,7 @@ impl Engine {
         // does), so the read is order-insensitive in v1; pinning it
         // before the helper guards against any future helper change
         // that touches state.
-        let was_active = matches!(p.state, ProfileState::Active(_));
+        let was_active = matches!(p.state, ProfileState::Active(_, _));
 
         // Idempotent: emits Cancel iff the probe channel is open
         // (Active+Verifying ⇒ channel open). For Active+Batching /
@@ -1560,7 +1556,7 @@ impl Engine {
         // semantics one-for-one.
         let target = match self.profiles.get(profile_id) {
             Some(p) => match &p.state {
-                ProfileState::Active(ActiveBurst::PreFire(pre)) => pre.probe_target,
+                ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.probe_target,
                 _ => p.resource,
             },
             None => return,
@@ -1775,7 +1771,7 @@ impl Engine {
         let (target, prior_target_hash, dirty_zero) = match self.profiles.get(profile_id) {
             Some(p) => {
                 let target = match &p.state {
-                    ProfileState::Active(ActiveBurst::PreFire(pre)) => pre.probe_target,
+                    ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.probe_target,
                     _ => p.resource,
                 };
                 let prior_hash = crate::reconcile::current_target_hash(p, target, &self.tree);
@@ -1998,8 +1994,8 @@ impl Engine {
         self.profiles
             .get(profile_id)
             .and_then(|p| match &p.state {
-                ProfileState::Active(ActiveBurst::PostFire(post)) => Some(post.intent),
-                ProfileState::Active(ActiveBurst::PreFire(pre)) => Some(pre.intent),
+                ProfileState::Active(ActiveBurst::PostFire(post), _) => Some(post.intent),
+                ProfileState::Active(ActiveBurst::PreFire(pre), _) => Some(pre.intent),
                 _ => None,
             })
             .unwrap_or(BurstIntent::Standard)
@@ -2028,7 +2024,7 @@ impl Engine {
         // the write out makes "burst-deadline elapsed ⇒ forced fire on
         // next emission" the helper's first statement.
         let needs_verify = if let Some(p) = self.profiles.get_mut(profile_id)
-            && let ProfileState::Active(ActiveBurst::PreFire(pre)) = &mut p.state
+            && let ProfileState::Active(ActiveBurst::PreFire(pre), _) = &mut p.state
         {
             pre.forced = true;
             matches!(
@@ -2048,6 +2044,15 @@ impl Engine {
     /// arrivals (after this transition) land in
     /// [`Diagnostic::EffectCompleteOutsideAwaiting`].
     ///
+    /// **Zombie burst short-circuit.** A burst carrying
+    /// [`BurstFinish::Reap`] has no consumer for the rebased baseline
+    /// — its Profile is dying. Skip the rebase probe entirely and route
+    /// straight through `finish_burst_to_idle`, which runs the
+    /// `propagate(-1) / sub_suppress` drain and then dispatches
+    /// `reap_profile`. The diagnostic still fires so operators see the
+    /// actuator-hang signal; only the wasted rebase round-trip is
+    /// elided.
+    ///
     /// Defensive: if the phase has already advanced (e.g., a race with
     /// `finalize_anchor_lost`), the helper no-ops. The
     /// `is_timer_referenced` gate already filters most non-Awaiting
@@ -2056,18 +2061,23 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let ProfileState::Active(ActiveBurst::PostFire(post)) = &p.state else {
+        let ProfileState::Active(ActiveBurst::PostFire(post), finish) = &p.state else {
             return;
         };
         let PostFirePhase::Awaiting { outstanding, .. } = &post.phase else {
             return;
         };
         let outstanding = *outstanding;
+        let zombie = matches!(finish, BurstFinish::Reap);
         out.diagnostics.push(Diagnostic::AwaitGateDeadlineElapsed {
             profile: profile_id,
             outstanding,
         });
-        self.transition_to_rebasing(profile_id, out);
+        if zombie {
+            self.finish_burst_to_idle(profile_id, out);
+        } else {
+            self.transition_to_rebasing(profile_id, out);
+        }
     }
 
     /// Emit Effects at a stable verdict. Routes per scope:
@@ -2107,7 +2117,11 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return EmitOutcome::default();
         };
-        if p.reap_pending {
+        // Burst carrying `BurstFinish::Reap` is on its way out. Any
+        // remaining Subs (none, by construction of the directive's
+        // writers) would fire against a Sub registry that no longer
+        // holds them — suppress emission entirely.
+        if matches!(p.state.burst_finish(), Some(BurstFinish::Reap)) {
             return EmitOutcome::default();
         }
         let resource = p.resource;
@@ -2480,7 +2494,7 @@ impl Engine {
                 {
                     out.recoveries.push(pid);
                 }
-                ProfileState::Pending(_) | ProfileState::Idle | ProfileState::Active(_) => {}
+                ProfileState::Pending(_) | ProfileState::Idle | ProfileState::Active(_, _) => {}
             }
         }
         for (qid, q) in self.promoters.iter() {

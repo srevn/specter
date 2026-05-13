@@ -249,8 +249,12 @@ impl Engine {
     ///   `fired_subs`. Clearing here would silently fail to re-fire
     ///   emitted-once Effects on every recovery.
     /// - All other fields (`parent_profile`, `events_union`,
-    ///   `has_per_file_fds`, `config*`, `resource`, `reap_pending`,
-    ///   `settle*`).
+    ///   `has_per_file_fds`, `config*`, `resource`, `settle*`). The
+    ///   prior `reap_pending: bool` field is gone; the deferred-reap
+    ///   directive now rides on `ProfileState::Active`'s payload via
+    ///   [`specter_core::BurstFinish`], so its preservation across
+    ///   recovery is part of `state`'s preservation (the helper does
+    ///   not write `state`).
     ///
     /// **Captured then later cleared on recovery.**
     /// - `Profile.last_settled_hash_at_loss` — set from

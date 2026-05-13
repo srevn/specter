@@ -38,9 +38,9 @@ pub use op::{
 pub use output::StepOutput;
 pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use profile::{
-    ActiveBurst, AnchorClaim, BurstIntent, DescentRemaining, DescentState, PostFireBurst,
-    PostFirePhase, PreFireBurst, PreFirePhase, Profile, ProfileMap, ProfileState,
-    ProfileStateDiscriminant, TimerKind,
+    ActiveBurst, AnchorClaim, BurstFinish, BurstIntent, DescentRemaining, DescentState,
+    DetachLifecycle, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, Profile, ProfileMap,
+    ProfileState, ProfileStateDiscriminant, ReapTrigger, TimerKind,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{

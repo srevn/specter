@@ -130,10 +130,10 @@ pub(crate) fn write_parent_edge(
 const fn in_draining(state: &ProfileState) -> bool {
     match state {
         ProfileState::Idle | ProfileState::Pending(_) => false,
-        ProfileState::Active(ActiveBurst::PreFire(pre)) => {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
             matches!(pre.phase, PreFirePhase::Draining)
         }
-        ProfileState::Active(ActiveBurst::PostFire(_)) => false,
+        ProfileState::Active(ActiveBurst::PostFire(_), _) => false,
     }
 }
 
@@ -142,8 +142,9 @@ mod tests {
     use super::*;
     use compact_str::CompactString;
     use specter_core::{
-        ActiveBurst, BurstIntent, ChildEntry, ClassSet, DirMeta, DirSnapshot, PreFireBurst,
-        PreFirePhase, Profile, ProfileState, ResourceRole, ScanConfig, TimerId, TreeSnapshot,
+        ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DirMeta, DirSnapshot,
+        PreFireBurst, PreFirePhase, Profile, ProfileState, ResourceRole, ScanConfig, TimerId,
+        TreeSnapshot,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -275,17 +276,20 @@ mod tests {
         {
             let mid = profiles.get_mut(p_mid).unwrap();
             mid.current = Some(stable_snapshot);
-            mid.state = ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
-                burst_deadline: TimerId::default(),
-                phase: PreFirePhase::Draining,
-                intent: BurstIntent::Standard,
-                forced: false,
-                dirty_resources: std::collections::BTreeSet::new(),
-                force_walk_resources: std::collections::BTreeSet::new(),
-                probe_target: mid_resource,
-                suppressed_resources: std::collections::BTreeSet::new(),
-                last_event_time: None,
-            }));
+            mid.state = ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    burst_deadline: TimerId::default(),
+                    phase: PreFirePhase::Draining,
+                    intent: BurstIntent::Standard,
+                    forced: false,
+                    dirty_resources: std::collections::BTreeSet::new(),
+                    force_walk_resources: std::collections::BTreeSet::new(),
+                    probe_target: mid_resource,
+                    suppressed_resources: std::collections::BTreeSet::new(),
+                    last_event_time: None,
+                }),
+                BurstFinish::ReturnToIdle,
+            );
             mid.dirty_descendants = 1;
         }
 

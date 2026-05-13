@@ -755,9 +755,9 @@ impl EngineDriver {
 /// landed, `EffectCompleteForUnknownSub` is `warn` too — the auto-reload
 /// path makes the detach-during-effect race routine; engine bugs surface
 /// via test assertions on the `Diagnostic::` variant rather than via log
-/// severity. `ReapPendingResolved` and `ReapPendingCancelled` are `info`
-/// (informational; the late reap completed or was pre-empted by a
-/// revival).
+/// severity. `ProfileReaped` and `ReapPendingCancelled` are `info`
+/// (informational; the Profile was reaped — see `via` for the
+/// trigger — or the deferred reap was pre-empted by a revival).
 pub fn log_diagnostic(d: &Diagnostic) {
     match d {
         Diagnostic::StaleProbeResponse { owner, correlation } => tracing::warn!(
@@ -834,10 +834,9 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?profile,
             "reap-pending Profile revived (fresh attach pre-empted deferred reap)",
         ),
-        Diagnostic::ReapPendingResolved { profile } => tracing::info!(
-            ?profile,
-            "reap-pending Profile resolved (Sub removed mid-burst)",
-        ),
+        Diagnostic::ProfileReaped { profile, via } => {
+            tracing::info!(?profile, ?via, "Profile reaped");
+        }
         Diagnostic::ProfileClaimPurged {
             profile,
             claim,

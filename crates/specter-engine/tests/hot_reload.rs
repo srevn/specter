@@ -16,9 +16,9 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ChildEntry, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    ActionProgram, BurstFinish, ChildEntry, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta,
+    DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, LeafEntry, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
     SubAttachRequest, SubRegistryDiff, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
@@ -184,11 +184,13 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     );
 
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
-    assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::ReapPendingResolved { .. }))
-    );
+    assert!(out.diagnostics.iter().any(|d| matches!(
+        d,
+        Diagnostic::ProfileReaped {
+            via: specter_core::ReapTrigger::Immediate,
+            ..
+        }
+    )));
     let unwatches = out
         .watch_ops
         .iter()
@@ -259,7 +261,10 @@ fn config_diff_mid_burst_remove_defers_reap() {
         t1,
     );
     assert!(
-        e.profiles().get(pid).unwrap().reap_pending,
+        matches!(
+            e.profiles().get(pid).unwrap().state.burst_finish(),
+            Some(BurstFinish::Reap)
+        ),
         "reap deferred to burst end",
     );
 
@@ -382,7 +387,10 @@ fn config_diff_mid_burst_modify_revives_profile() {
     let pid_b = e.subs().get(sid_b).unwrap().profile;
     assert_eq!(pid_b, pid, "B revives A's Profile (same config_hash)");
     let p = e.profiles().get(pid).unwrap();
-    assert!(!p.reap_pending, "reap_pending cleared by revival");
+    assert!(
+        !matches!(p.state.burst_finish(), Some(BurstFinish::Reap)),
+        "reap_pending cleared by revival"
+    );
     assert_eq!(p.sub_refcount, 1, "exactly one live Sub (B)");
     assert_eq!(
         e.tree().get(r).unwrap().watch_demand(),

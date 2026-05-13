@@ -223,15 +223,25 @@ pub enum Diagnostic {
         prefix: ResourceId,
         errno: i32,
     },
-    /// `Profile.reap_pending` was set, then a fresh `attach_sub` arrived
-    /// at the same `(resource, config_hash)` before the burst completed —
-    /// the deferred reap is cancelled and the Profile remains alive under
-    /// the new Sub set. Informational — not an error. Pairs with
-    /// [`Self::ReapPendingResolved`] (the reap actually ran).
+    /// A Profile's active burst carried [`crate::BurstFinish::Reap`]
+    /// (the last Sub had detached mid-burst), then a fresh `attach_sub`
+    /// arrived at the same `(resource, config_hash)` before the burst
+    /// completed — the directive is flipped back to
+    /// [`crate::BurstFinish::ReturnToIdle`] and the Profile remains
+    /// alive under the new Sub set. Informational — not an error.
+    /// Pairs with [`Self::ProfileReaped`] (the reap actually ran).
     ReapPendingCancelled { profile: ProfileId },
-    /// `Profile.reap_pending` was set; the burst completed and the Profile
-    /// has been reaped. Informational — not an error.
-    ReapPendingResolved { profile: ProfileId },
+    /// A Profile was reaped — its [`crate::ProfileMap`] entry is gone,
+    /// every watch contribution released. `via` distinguishes the
+    /// trigger so operators can tell a steady-state detach
+    /// ([`crate::ReapTrigger::Immediate`]) from a deferred burst-end
+    /// reap ([`crate::ReapTrigger::DeferredFromBurst`], honouring a
+    /// prior [`crate::BurstFinish::Reap`]). Informational — not an
+    /// error.
+    ProfileReaped {
+        profile: ProfileId,
+        via: crate::ReapTrigger,
+    },
     /// A Profile's claim on `resource` was purged because the kernel
     /// rejected the watch on it (`Input::WatchOpRejected` arrived,
     /// clamping `watch_demand := 0`). One emission per affected

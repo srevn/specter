@@ -157,7 +157,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
     // Profile is now in Active(Seed Probing) — the Seed burst was
     // started at materialization.
     let burst_intent = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre.intent,
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.intent,
         _ => panic!("expected Active"),
     };
     assert_eq!(burst_intent, specter_core::BurstIntent::Seed);

@@ -21,13 +21,14 @@ use compact_str::CompactString;
 use specter_core::program::SpawnBody;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstIntent, ChildEntry,
-    ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome,
-    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, LeafEntry, OverflowScope, PatternSpec,
-    Placeholder, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeRequest, ProbeResponse, ProfileState, PromoterAttachRequest, PromoterId,
-    PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubAttachRequest, SubId, TimerKind, TreeSnapshot, WatchOp, WatchRegistryDiff,
+    ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, BurstIntent,
+    ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
+    EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, LeafEntry,
+    OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
+    PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileState,
+    PromoterAttachRequest, PromoterId, PromoterRegistryDiff, PromoterState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, TimerKind,
+    TreeSnapshot, WatchOp, WatchRegistryDiff,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -564,7 +565,10 @@ fn standard_burst_on_unknown_anchor_emits_subtree_probe() {
 #[test]
 fn attach_sub_existing_profile_bumps_refcount() {
     let (mut e, pid, _sid, r, now) = engine_with_attached_sub();
-    let pre_state = matches!(e.profiles.get(pid).unwrap().state, ProfileState::Active(_));
+    let pre_state = matches!(
+        e.profiles.get(pid).unwrap().state,
+        ProfileState::Active(_, _)
+    );
     assert!(pre_state, "first attach went Active");
     let pre_refcount = e.profiles.get(pid).unwrap().sub_refcount;
 
@@ -728,7 +732,7 @@ fn probe_response_correlation_mismatch_drops_with_diagnostic() {
     // State unchanged: still Active(Seed Verifying).
     assert!(matches!(
         e.profiles.get(pid).unwrap().state,
-        ProfileState::Active(_),
+        ProfileState::Active(_, _),
     ));
 }
 
@@ -806,7 +810,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         now + SETTLE + Duration::from_millis(1),
     );
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => post,
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
         _ => panic!("expected Active(Awaiting) after firing"),
     };
     assert_eq!(burst.intent, BurstIntent::Standard);
@@ -1218,7 +1222,7 @@ fn standard_burst_force_fires_on_max_settle() {
         // post-fire rebase happens when the eventual EffectComplete
         // drives the Awaiting → Rebasing transition.
         let phase = match &e.profiles.get(pid).unwrap().state {
-            ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
+            ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
             _ => panic!("expected Active(Awaiting)"),
         };
         assert!(
@@ -1246,7 +1250,7 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
         Instant::now(),
     );
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre,
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         _ => panic!(),
     };
     assert_eq!(
@@ -1385,7 +1389,10 @@ fn fs_event_metadatachanged_at_anchor_bypasses_class_filter() {
         "anchor events bypass the class filter",
     );
     assert!(
-        matches!(e.profiles.get(pid).unwrap().state, ProfileState::Active(_),),
+        matches!(
+            e.profiles.get(pid).unwrap().state,
+            ProfileState::Active(_, _),
+        ),
         "MetadataChanged at the anchor drives a burst even on EMPTY mask",
     );
 }
@@ -1622,7 +1629,7 @@ fn fs_event_removed_at_anchor_active_terminates() {
     );
     assert!(matches!(
         e.profiles.get(pid).unwrap().state,
-        ProfileState::Active(_),
+        ProfileState::Active(_, _),
     ));
     // Now Removed at anchor → terminate.
     let out = e.step(
@@ -1706,7 +1713,7 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
     let p = e.profiles.get(pid).unwrap();
     assert!(matches!(
         p.state,
-        ProfileState::Active(_) // Verifying
+        ProfileState::Active(_, _) // Verifying
     ));
     let probes = out
         .probe_ops
@@ -2286,7 +2293,7 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
     );
 
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre,
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
     assert_eq!(burst.intent, BurstIntent::Seed);
@@ -2324,7 +2331,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
     );
     // Now in Active(Standard) Batching.
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre,
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         s => panic!("expected Active(Standard) after FsEvent; got {s:?}"),
     };
     assert_eq!(burst.intent, BurstIntent::Standard);
@@ -2338,7 +2345,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
     );
 
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PreFire(pre)) => pre,
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
     assert_eq!(
@@ -2470,7 +2477,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     assert!(
         matches!(
             &e.profiles.get(pid_a).unwrap().state,
-            ProfileState::Active(ActiveBurst::PreFire(pre)) if pre.intent == BurstIntent::Seed
+            ProfileState::Active(ActiveBurst::PreFire(pre), _) if pre.intent == BurstIntent::Seed
         ),
         "Profile A (anchor at a) reseeded",
     );
@@ -2491,7 +2498,10 @@ fn seed_vanished_then_reap_releases_anchor_via_claim() {
 
     // Detach the Sub mid-burst → reap_pending = true.
     let _ = e.detach_sub(sid);
-    assert!(e.profiles.get(pid).unwrap().reap_pending);
+    assert!(matches!(
+        e.profiles.get(pid).unwrap().state.burst_finish(),
+        Some(BurstFinish::Reap)
+    ));
 
     // Drive Seed Vanished to fire the reap.
     let correlation = e
@@ -2566,11 +2576,13 @@ fn detach_sub_idle_profile_reaps_immediately() {
             .iter()
             .any(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == r))
     );
-    assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::ReapPendingResolved { .. }))
-    );
+    assert!(out.diagnostics.iter().any(|d| matches!(
+        d,
+        Diagnostic::ProfileReaped {
+            via: specter_core::ReapTrigger::Immediate,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -2579,7 +2591,7 @@ fn detach_sub_active_profile_marks_reap_pending() {
     // Profile is Active(Seed Verifying) — Seed-burst still in flight.
     let _out = e.detach_sub(sid);
     let p = e.profiles.get(pid).expect("profile alive until burst ends");
-    assert!(p.reap_pending);
+    assert!(matches!(p.state.burst_finish(), Some(BurstFinish::Reap)));
     assert_eq!(p.sub_refcount, 0);
 }
 
@@ -2602,7 +2614,10 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
 
     // Detach the Sub mid-burst.
     let _ = e.detach_sub(sid);
-    assert!(e.profiles.get(pid).unwrap().reap_pending);
+    assert!(matches!(
+        e.profiles.get(pid).unwrap().state.burst_finish(),
+        Some(BurstFinish::Reap)
+    ));
 
     // Drain the settle timer to advance to Verifying.
     let t2 = t1 + SETTLE * 2;
@@ -3364,7 +3379,7 @@ fn drive_to_first_effect(
     );
     // Drain settle timer → Verifying.
     let settle_timer = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PreFire(pre)) => match &pre.phase {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
             PreFirePhase::Batching { settle_timer } => *settle_timer,
             _ => panic!("expected Batching"),
         },
@@ -3394,7 +3409,7 @@ fn drive_to_first_effect(
     );
     // Drain settle timer → Verifying again.
     let settle_timer2 = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PreFire(pre)) => match &pre.phase {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
             PreFirePhase::Batching { settle_timer } => *settle_timer,
             _ => panic!("expected Batching"),
         },
@@ -3846,7 +3861,7 @@ fn drive_to_standard_verifying(
         now,
     );
     let settle_timer = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PreFire(pre)) => match &pre.phase {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
             PreFirePhase::Batching { settle_timer } => *settle_timer,
             _ => panic!("expected Standard Batching"),
         },
@@ -4069,7 +4084,10 @@ fn finalize_anchor_lost_was_active_pre_helper_ordering() {
         Instant::now(),
     );
     assert!(
-        matches!(e.profiles.get(pid).unwrap().state, ProfileState::Active(_)),
+        matches!(
+            e.profiles.get(pid).unwrap().state,
+            ProfileState::Active(_, _)
+        ),
         "harness pre-condition: Profile is Active",
     );
 
@@ -4167,7 +4185,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         "Awaiting absorb must emit EventAbsorbedByFireTail",
     );
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => post,
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
         _ => panic!("expected Active(Awaiting)"),
     };
     assert!(
@@ -4208,7 +4226,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
     }
 
     let burst = match &e.profiles.get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => post,
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
         _ => panic!("expected Active(Rebasing)"),
     };
     assert!(matches!(burst.phase, PostFirePhase::Rebasing));
@@ -4280,17 +4298,20 @@ fn active_pre_fire_burst(
     let burst_deadline = e
         .timers
         .schedule(now + MAX_SETTLE, pid, TimerKind::BurstDeadline);
-    ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
-        burst_deadline,
-        phase,
-        intent,
-        forced: false,
-        dirty_resources: BTreeSet::new(),
-        force_walk_resources: BTreeSet::new(),
-        probe_target,
-        suppressed_resources: BTreeSet::new(),
-        last_event_time: None,
-    }))
+    ProfileState::Active(
+        ActiveBurst::PreFire(PreFireBurst {
+            burst_deadline,
+            phase,
+            intent,
+            forced: false,
+            dirty_resources: BTreeSet::new(),
+            force_walk_resources: BTreeSet::new(),
+            probe_target,
+            suppressed_resources: BTreeSet::new(),
+            last_event_time: None,
+        }),
+        BurstFinish::ReturnToIdle,
+    )
 }
 
 /// Construct an `Active(PostFire)` state with the supplied phase /
@@ -4304,11 +4325,14 @@ fn active_post_fire_burst(
     _probe_target: ResourceId,
     _now: Instant,
 ) -> ProfileState {
-    ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
-        intent,
-        phase,
-        force_walk_resources: BTreeSet::new(),
-    }))
+    ProfileState::Active(
+        ActiveBurst::PostFire(PostFireBurst {
+            intent,
+            phase,
+            force_walk_resources: BTreeSet::new(),
+        }),
+        BurstFinish::ReturnToIdle,
+    )
 }
 
 #[test]

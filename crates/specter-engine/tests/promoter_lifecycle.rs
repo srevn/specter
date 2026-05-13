@@ -372,9 +372,9 @@ fn full_lifecycle_attach_promote_seed_reap() {
     // `on_anchor_terminal_event` — the variant doc spells this
     // out): a Promoter reap routes through `detach_sub_inner`
     // directly and surfaces no per-dynamic-Sub diagnostic. The
-    // reap-pending Profile path emits `ReapPendingResolved` for
-    // the same Profile when the Seed-burst-baselined snapshot is
-    // still mid-rebase at reap time.
+    // deferred-reap Profile path emits `ProfileReaped` for the same
+    // Profile when the Seed-burst-baselined snapshot is still mid-rebase
+    // at reap time.
     assert!(
         reap_out.diagnostics.iter().any(|d| matches!(
             d,

@@ -1412,13 +1412,13 @@ fn anchor_terminal_all_dynamic_reaps_profile_and_notifies_promoter() {
         "DynamicSubReaped emitted: {:?}",
         out.diagnostics,
     );
-    // ReapPendingResolved emitted (the all-dynamic teardown reaps the Profile).
+    // ProfileReaped emitted (the all-dynamic teardown reaps the Profile).
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::ReapPendingResolved { profile } if *profile == profile_id,
+            Diagnostic::ProfileReaped { profile, via: _ } if *profile == profile_id,
         )),
-        "ReapPendingResolved emitted for the dynamic-only Profile: {:?}",
+        "ProfileReaped emitted for the dynamic-only Profile: {:?}",
         out.diagnostics,
     );
     // Profile gone, Sub gone, Promoter dynamic_subs entry cleared.

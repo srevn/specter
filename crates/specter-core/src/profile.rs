@@ -253,10 +253,11 @@ pub struct PostFireBurst {
 ///
 /// `Awaiting { outstanding, gate_deadline }`: effects emitted, counter
 /// decrements on each `EffectComplete` for this Profile's `DedupKey`s.
-/// Reaching zero advances to `Rebasing` (or, when `Profile.reap_pending`
-/// is set, finishes the burst directly). `gate_deadline` is the recovery
-/// timer for an actuator that never reports completion — its expiry
-/// forces the burst into `Rebasing`.
+/// Reaching zero advances to `Rebasing` (or, when the burst carries
+/// [`BurstFinish::Reap`], finishes the burst directly). `gate_deadline`
+/// is the recovery timer for an actuator that never reports completion
+/// — its expiry forces the burst into `Rebasing` (or, on a zombie
+/// burst, directly into [`crate::ProfileState::Idle`] via reap).
 ///
 /// `Rebasing`: post-fire probe in flight at the anchor. Correlation
 /// lives on the engine's `ProbeChannel` (keyed by
@@ -317,6 +318,108 @@ impl PreFireBurst {
     }
 }
 
+/// Burst-finish directive — *what does the Profile do at burst-end?*
+///
+/// Carried as the second payload of [`ProfileState::Active`]. Default
+/// [`Self::ReturnToIdle`]: the burst completes, the Profile returns to
+/// [`ProfileState::Idle`], and the next `FsEvent` may start a fresh
+/// burst. [`Self::Reap`] flips the directive: the active burst still
+/// runs to completion (so the `propagate(-1) / sub_suppress` drain
+/// ordering is preserved), but `finish_burst_to_idle` then routes
+/// through `reap_profile` instead of returning the Profile to Idle.
+///
+/// **Why a payload, not a parallel field on Profile.** The directive
+/// is *only* meaningful inside an Active burst. Encoding it as a `bool`
+/// alongside [`ProfileState`] (the prior `Profile.reap_pending`) made
+/// `(Idle, true)` representable but structurally illegal —
+/// discipline enforced by convention rather than by the type system.
+/// Folding the directive into the `Active` variant's payload
+/// type-bans the illegal combination by construction.
+///
+/// **Writers.**
+/// - [`ProfileState::mark_active_for_reap`] flips
+///   [`Self::ReturnToIdle`] → [`Self::Reap`]. Sole callers:
+///   `detach_sub_inner` (last Sub detached mid-burst) and
+///   `on_anchor_terminal_all_dynamic` (all-dynamic Promoter teardown
+///   converged on a still-Active Profile).
+/// - [`ProfileState::clear_active_reap`] flips
+///   [`Self::Reap`] → [`Self::ReturnToIdle`]. Sole caller:
+///   `attach_sub_inner`'s zombie-revival arm — a fresh Sub joining a
+///   zombie Profile resurrects it under the new Sub set.
+///
+/// **Readers.** `emit_effects` (suppress emission), `on_effect_complete`
+/// (route last completion to reap vs rebase), `handle_gate_deadline`
+/// (route zombie burst directly to finish), and `finish_burst_to_idle`
+/// (post-drain reap dispatch).
+///
+/// The directive is preserved across the fire transition
+/// (`PreFireBurst::into_post_fire`'s caller carries it through the
+/// `mem::replace`) and across phase transitions within pre-fire
+/// (`transition_to_verifying`, `_draining`, etc.) — these helpers
+/// mutate the burst's inner state without touching the `Active`
+/// variant's outer shape.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub enum BurstFinish {
+    /// Default. Burst-end transitions the Profile to [`ProfileState::Idle`].
+    #[default]
+    ReturnToIdle,
+    /// Burst-end reaps the Profile via `reap_profile`. Set by
+    /// [`ProfileState::mark_active_for_reap`]; cleared by
+    /// [`ProfileState::clear_active_reap`].
+    Reap,
+}
+
+/// Where should a Profile's `sub_refcount == 0` arrival land?
+///
+/// Computed by [`ProfileState::detach_lifecycle`] at the moment the
+/// last Sub is removed. The two arms encode the only paths that
+/// preserve the burst-end drain ordering:
+///
+/// - [`Self::ReapNow`]: the Profile is [`ProfileState::Idle`] or
+///   [`ProfileState::Pending`] — there is no burst to drain.
+///   `reap_profile` runs immediately, releasing the descent prefix
+///   (Pending) or the anchor contribution (Idle / materialized).
+/// - [`Self::DeferToBurstEnd`]: the Profile is [`ProfileState::Active`]
+///   — a burst is in flight whose `propagate(-1) / sub_suppress` drain
+///   ordering must run before reap. The caller flips
+///   [`BurstFinish::Reap`] (via [`ProfileState::mark_active_for_reap`])
+///   so `finish_burst_to_idle` routes through `reap_profile` once the
+///   burst converges.
+///
+/// Lives in core (not in the engine) because the classification is a
+/// projection over [`ProfileState`] — the state knows what its
+/// `sub_refcount == 0` outcome must be.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum DetachLifecycle {
+    /// Profile has no burst — reap synchronously.
+    ReapNow,
+    /// Profile has an Active burst — mark for reap, drain runs first.
+    DeferToBurstEnd,
+}
+
+/// Trigger that drove a Profile's reap, threaded into
+/// [`crate::Diagnostic::ProfileReaped`]. Two paths converge on the
+/// same `reap_profile` machinery:
+///
+/// - [`Self::Immediate`]: `detach_sub_inner` on an Idle/Pending Profile
+///   whose last Sub just detached. No burst to wait on, so reap runs
+///   inline. Also reached by `on_anchor_terminal_all_dynamic`'s
+///   non-Active arm.
+/// - [`Self::DeferredFromBurst`]: `finish_burst_to_idle` honouring the
+///   [`BurstFinish::Reap`] directive at burst-end. The Profile spent
+///   time as a zombie burst before reaching reap.
+///
+/// Operators distinguish the two for incident triage: a flood of
+/// `DeferredFromBurst` reaps signals churn on Active Profiles, whereas
+/// `Immediate` is the steady-state detach path.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ReapTrigger {
+    /// Reap runs inline at refcount→0 — no burst to drain.
+    Immediate,
+    /// Reap runs at burst-end via [`BurstFinish::Reap`] honour.
+    DeferredFromBurst,
+}
+
 /// Profile state machine.
 ///
 /// Three lifecycle states, mutually exclusive by construction:
@@ -327,8 +430,16 @@ impl PreFireBurst {
 ///   component per response. The anchor's `Profile.resource` slot is
 ///   `DescentScaffold`-roled and carries no `watch_demand` from this
 ///   Profile (the prefix carries the `+1`). See `DescentState` invariants.
-/// - `Active(Burst)`: anchor is materialized; a stability burst is in
-///   flight.
+/// - `Active(ActiveBurst, BurstFinish)`: anchor is materialized; a
+///   stability burst is in flight. The second payload is the
+///   post-burst directive — see [`BurstFinish`] for the four-site
+///   reader / two-site writer surface that drives it. Default
+///   ([`BurstFinish::ReturnToIdle`]) returns the Profile to Idle at
+///   burst-end; [`BurstFinish::Reap`] dispatches `reap_profile`
+///   instead. The pre-Phase-4 shape carried [`BurstFinish::Reap`] as a
+///   `pub` boolean on [`Profile`] (the now-deleted `reap_pending`
+///   field); the variant payload structurally bans the illegal
+///   `(Idle, reap_pending = true)` combination.
 ///
 /// I5 (at most one outstanding probe per Profile) is enforced
 /// **structurally** by the engine's `ProbeChannel`: at most one map
@@ -346,10 +457,16 @@ pub enum ProfileState {
     /// Profile; `DescentState.current_prefix` does. When the anchor
     /// materializes (descent's last component arrives) the engine
     /// transitions Pending → Idle (releasing the prefix's contribution and
-    /// bumping the anchor's), then immediately Idle → `Active(PreFire(Seed))`
+    /// bumping the anchor's), then immediately Idle → `Active(PreFire(Seed), …)`
     /// via `start_seed_burst`.
     Pending(DescentState),
-    Active(ActiveBurst),
+    /// Stability burst in flight, with a post-burst directive. See
+    /// [`BurstFinish`] for the directive's semantics; the default
+    /// ([`BurstFinish::ReturnToIdle`]) is set at burst-launch and the
+    /// engine flips to [`BurstFinish::Reap`] via
+    /// [`Self::mark_active_for_reap`] when the Profile loses its last
+    /// Sub mid-burst.
+    Active(ActiveBurst, BurstFinish),
 }
 
 impl ProfileState {
@@ -362,13 +479,103 @@ impl ProfileState {
     /// transition (`PreFire → PostFire`) is the only edge that crosses
     /// the third-vs-fourth discriminator, which is exactly the same
     /// boundary the [`ActiveBurst`] type split enforces.
+    ///
+    /// [`BurstFinish`] is intentionally collapsed at this projection —
+    /// zombie and live bursts share routing class because every
+    /// burst-helper that consults the discriminant routes identically
+    /// for both. Readers that need to distinguish call
+    /// [`Self::burst_finish`].
     #[must_use]
     pub const fn discriminant(&self) -> ProfileStateDiscriminant {
         match self {
             Self::Idle => ProfileStateDiscriminant::Idle,
             Self::Pending(_) => ProfileStateDiscriminant::Pending,
-            Self::Active(ActiveBurst::PreFire(_)) => ProfileStateDiscriminant::ActivePreFire,
-            Self::Active(ActiveBurst::PostFire(_)) => ProfileStateDiscriminant::ActivePostFire,
+            Self::Active(ActiveBurst::PreFire(_), _) => ProfileStateDiscriminant::ActivePreFire,
+            Self::Active(ActiveBurst::PostFire(_), _) => ProfileStateDiscriminant::ActivePostFire,
+        }
+    }
+
+    /// Read the burst-finish directive. `Some(_)` only when the
+    /// Profile is in an Active burst; `None` for Idle and Pending
+    /// (where the directive is structurally meaningless).
+    ///
+    /// Read by `emit_effects` (suppress emission on zombie),
+    /// `on_effect_complete` (route last completion), `handle_gate_deadline`
+    /// (zombie-skip), and indirectly by every test that previously
+    /// inspected `Profile.reap_pending`.
+    #[must_use]
+    pub const fn burst_finish(&self) -> Option<BurstFinish> {
+        match self {
+            Self::Active(_, finish) => Some(*finish),
+            Self::Idle | Self::Pending(_) => None,
+        }
+    }
+
+    /// Classify a `sub_refcount == 0` arrival's reap path. Called by
+    /// `detach_sub_inner` once the refcount actually hits zero — the
+    /// result chooses between immediate `reap_profile` and
+    /// deferred-to-burst-end via [`Self::mark_active_for_reap`].
+    ///
+    /// Lives on [`ProfileState`] because the choice is a pure
+    /// projection over the variant — the engine has no other input
+    /// that influences the decision.
+    #[must_use]
+    pub const fn detach_lifecycle(&self) -> DetachLifecycle {
+        match self {
+            Self::Idle | Self::Pending(_) => DetachLifecycle::ReapNow,
+            Self::Active(_, _) => DetachLifecycle::DeferToBurstEnd,
+        }
+    }
+
+    /// Flip an Active burst's [`BurstFinish`] from
+    /// [`BurstFinish::ReturnToIdle`] to [`BurstFinish::Reap`].
+    /// Returns `true` iff the state was [`Self::Active`] and the
+    /// directive was set (already-`Reap` returns `true` and is a
+    /// silent no-op — idempotent under re-entry).
+    ///
+    /// **Preconditions, by intent.** Callers have already established
+    /// that the state is Active (via [`Self::detach_lifecycle`] or a
+    /// `matches!` guard). The `bool` return surfaces "did the flip
+    /// land" so callers can `debug_assert!` against a future routing
+    /// breach.
+    ///
+    /// **Sole writers.** `detach_sub_inner` (refcount→0 on Active)
+    /// and `on_anchor_terminal_all_dynamic` (all-dynamic Promoter
+    /// teardown on Active). No other site has a legitimate need to
+    /// mark a burst for reap.
+    #[must_use]
+    pub const fn mark_active_for_reap(&mut self) -> bool {
+        if let Self::Active(_, finish) = self {
+            *finish = BurstFinish::Reap;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Flip an Active burst's [`BurstFinish`] back from
+    /// [`BurstFinish::Reap`] to [`BurstFinish::ReturnToIdle`].
+    /// Returns `true` iff the state was [`Self::Active`] *and* the
+    /// prior directive was `Reap` — i.e., a zombie burst was revived.
+    /// `false` on `(Active, ReturnToIdle)` (normal join — nothing to
+    /// clear), Idle, and Pending.
+    ///
+    /// **Why the precondition narrows to current-Reap.** The clear
+    /// path's *only* legitimate trigger is zombie revival in
+    /// `attach_sub_inner`. Returning `false` on a non-Reap Active
+    /// keeps the bool return informative: the caller branches on it
+    /// to emit the [`crate::Diagnostic::ReapPendingCancelled`]
+    /// diagnostic and run the post-revival cleanup
+    /// (`recompute_profile_settle`).
+    ///
+    /// **Sole writer.** `attach_sub_inner`'s zombie-revival arm.
+    #[must_use]
+    pub const fn clear_active_reap(&mut self) -> bool {
+        if let Self::Active(_, finish @ BurstFinish::Reap) = self {
+            *finish = BurstFinish::ReturnToIdle;
+            true
+        } else {
+            false
         }
     }
 }
@@ -714,10 +921,6 @@ pub struct Profile {
     /// recomputes this as `min(remaining_subs.settles)` on `attach_sub`
     /// (existing Profile) and `detach_sub`.
     pub settle: Duration,
-    /// True iff the last Sub on this Profile was detached while a burst was
-    /// in flight. The active burst runs to completion; `finish_burst_to_idle`
-    /// checks this flag, suppresses Effect emission, and reaps the Profile.
-    pub reap_pending: bool,
     /// Cached parent Resource that this Profile contributes a watch to.
     /// `attach_sub` sets it; `detach_sub` releases the contribution via the
     /// cached id without re-deriving the parent. `None` if the anchor is
@@ -801,11 +1004,12 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Construct a fresh Profile: state `Idle`, no baseline/current,
-    /// refcounts at zero, no reap pending, no watch-root parent recorded.
-    /// `config_hash` is computed from `(config, max_settle, events)` and
-    /// is stable for the Profile's lifetime — there is no path to a
-    /// Profile with an unset or stale hash.
+    /// Construct a fresh Profile: state `Idle` (so no burst-finish
+    /// directive exists yet), no baseline/current, refcounts at zero,
+    /// no watch-root parent recorded. `config_hash` is computed from
+    /// `(config, max_settle, events)` and is stable for the Profile's
+    /// lifetime — there is no path to a Profile with an unset or stale
+    /// hash.
     ///
     /// `events` becomes the Profile's `events_union` and drives
     /// `has_per_file_fds` (true iff CONTENT or METADATA is in the mask).
@@ -844,7 +1048,6 @@ impl Profile {
             sub_refcount: 0,
             max_settle,
             settle,
-            reap_pending: false,
             watch_root_parent: None,
             anchor_claim: AnchorClaim::None,
             fired_subs: BTreeSet::new(),

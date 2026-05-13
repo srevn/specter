@@ -24,8 +24,8 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DedupKey, Diagnostic,
-    DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
+    ActionProgram, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, ChildEntry, ClassSet, DedupKey,
+    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
     ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
     ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, WatchOp,
 };
@@ -362,7 +362,7 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
         assert!(
             matches!(
                 e.profiles().get(pid).unwrap().state,
-                ProfileState::Active(_),
+                ProfileState::Active(_, _),
             ),
             "anchor MetadataChanged drives a burst on Profile {pid:?} regardless of mask",
         );
@@ -616,7 +616,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
     assert!(
         matches!(
             e.profiles().get(pid).unwrap().state,
-            ProfileState::Active(_),
+            ProfileState::Active(_, _),
         ),
         "Modified on a CONTENT-class child drives a burst",
     );
@@ -1000,7 +1000,10 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
 
     // Detach mid-burst to set reap_pending.
     let _ = e.detach_sub(sid);
-    assert!(e.profiles().get(pid).unwrap().reap_pending);
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state.burst_finish(),
+        Some(BurstFinish::Reap)
+    ));
 
     // Drain the settle timer to advance to Probing.
     let t2 = t1 + SETTLE * 2;
@@ -1058,7 +1061,10 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
         t1,
     );
     let _ = e.detach_sub(sid);
-    assert!(e.profiles().get(pid).unwrap().reap_pending);
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state.burst_finish(),
+        Some(BurstFinish::Reap)
+    ));
 
     let t2 = t1 + SETTLE * 2;
     while let Some(entry) = e.pop_expired(t2) {
@@ -1114,7 +1120,10 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
         t1,
     );
     let _ = e.detach_sub(sid);
-    assert!(e.profiles().get(pid).unwrap().reap_pending);
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state.burst_finish(),
+        Some(BurstFinish::Reap)
+    ));
 
     let t2 = t1 + SETTLE * 2;
     while let Some(entry) = e.pop_expired(t2) {
@@ -1129,12 +1138,13 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
     }
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::ActiveBurst::PreFire(
-            specter_core::PreFireBurst {
+        ProfileState::Active(
+            specter_core::ActiveBurst::PreFire(specter_core::PreFireBurst {
                 phase: specter_core::PreFirePhase::Verifying,
                 ..
-            }
-        ))
+            }),
+            _,
+        )
     ));
 
     let out = e.step(
@@ -1240,8 +1250,14 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
     );
     // Detach P to set reap_pending. Q stays alive.
     let _ = e.detach_sub(sid_p);
-    assert!(e.profiles().get(pid_p).unwrap().reap_pending);
-    assert!(!e.profiles().get(pid_q).unwrap().reap_pending);
+    assert!(matches!(
+        e.profiles().get(pid_p).unwrap().state.burst_finish(),
+        Some(BurstFinish::Reap)
+    ));
+    assert!(!matches!(
+        e.profiles().get(pid_q).unwrap().state.burst_finish(),
+        Some(BurstFinish::Reap)
+    ));
 
     // Advance P to Probing.
     let t2 = t1 + SETTLE * 2;
@@ -1421,7 +1437,10 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
         t1,
     );
     let _ = e.detach_sub(sid);
-    assert!(e.profiles().get(pid).unwrap().reap_pending);
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state.burst_finish(),
+        Some(BurstFinish::Reap)
+    ));
 
     // Drain the settle timer to advance to Verifying.
     let t2 = t1 + SETTLE * 2;
@@ -1563,12 +1582,13 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         .expect("Standard-Ok stable verdict fires one Effect");
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(specter_core::ActiveBurst::PostFire(
-            specter_core::PostFireBurst {
+        ProfileState::Active(
+            specter_core::ActiveBurst::PostFire(specter_core::PostFireBurst {
                 phase: specter_core::PostFirePhase::Awaiting { .. },
                 ..
-            }
-        )),
+            }),
+            _,
+        ),
     ));
 
     // EffectComplete::Ok → transition_to_rebasing.

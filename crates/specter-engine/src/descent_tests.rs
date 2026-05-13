@@ -19,7 +19,7 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FS_ROOT_SEGMENT, Input, LeafEntry, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeRequest, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    ProbeRequest, ProbeResponse, ReapTrigger, ResourceId, ResourceKind, ResourceRole, ScanConfig,
     SubAttachRequest,
 };
 use std::collections::BTreeMap;
@@ -746,7 +746,7 @@ fn descent_state_helper_returns_none_for_active() {
     // Materialized Profile starts a Seed burst — state is Active.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        specter_core::ProfileState::Active(_)
+        specter_core::ProfileState::Active(_, _)
     ));
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
 }
@@ -805,7 +805,7 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
     // transitions Idle → Active(Seed). The post-step state is Active.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(_)
+        ProfileState::Active(_, _)
     ));
     // descent_state agrees: no descent.
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
@@ -896,10 +896,14 @@ fn detach_sub_pending_profile_reaps_immediately() {
         "descent contribution released",
     );
     assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::ReapPendingResolved { profile } if *profile == pid)),
-        "ReapPendingResolved emitted",
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ProfileReaped {
+                profile,
+                via: ReapTrigger::Immediate,
+            } if *profile == pid,
+        )),
+        "ProfileReaped(Immediate) emitted",
     );
 }
 
@@ -929,7 +933,7 @@ fn on_probe_response_routes_descent_via_state_match() {
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        specter_core::ProfileState::Active(_)
+        specter_core::ProfileState::Active(_, _)
     ));
 }
 

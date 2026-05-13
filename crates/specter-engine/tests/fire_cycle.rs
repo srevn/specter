@@ -32,11 +32,11 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ActiveBurst, ArgPart, ArgTemplate, ChildEntry, ClassSet, DedupKey, Diagnostic,
-    DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, Input,
-    LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubAttachRequest, SubId, TimerKind, TreeSnapshot,
+    ActionProgram, ActiveBurst, ArgPart, ArgTemplate, BurstFinish, ChildEntry, ClassSet, DedupKey,
+    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent,
+    Input, LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, StepOutput, SubAttachRequest, SubId, TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -278,7 +278,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     );
     let effect_key = stable_out.effects[0].key.clone();
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!("expected Active(Awaiting)"),
     };
     assert!(matches!(
@@ -297,7 +297,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     );
     let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe emitted");
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!("expected Active(Rebasing)"),
     };
     assert!(matches!(phase, PostFirePhase::Rebasing));
@@ -364,7 +364,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
         now + Duration::from_millis(10),
     );
     let phase_before = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => format!("{:?}", post.phase),
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => format!("{:?}", post.phase),
         _ => panic!("expected Active(Awaiting)"),
     };
     assert!(phase_before.contains("Awaiting"));
@@ -395,7 +395,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
 
     // Phase is unchanged.
     let phase_after = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => format!("{:?}", post.phase),
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => format!("{:?}", post.phase),
         _ => panic!("expected Active(Awaiting) post-absorb"),
     };
     assert_eq!(phase_after, phase_before, "phase unchanged after absorb");
@@ -446,10 +446,13 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         .expect("rebase probe correlation");
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
-            phase: PostFirePhase::Rebasing,
-            ..
-        })),
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::Rebasing,
+                ..
+            }),
+            BurstFinish::ReturnToIdle
+        ),
     ));
 
     // FsEvent during Rebasing → absorbed.
@@ -526,10 +529,13 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
-            phase: PostFirePhase::Rebasing,
-            ..
-        })),
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::Rebasing,
+                ..
+            }),
+            BurstFinish::ReturnToIdle
+        ),
     ));
     let rebase_emitted = combined
         .probe_ops
@@ -567,10 +573,13 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     }
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
-            phase: PostFirePhase::Rebasing,
-            ..
-        })),
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::Rebasing,
+                ..
+            }),
+            BurstFinish::ReturnToIdle
+        ),
     ));
 
     // Late EffectComplete::Ok arrives in Rebasing → diagnoses.
@@ -593,10 +602,13 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     // Phase unchanged (still Rebasing).
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
-            phase: PostFirePhase::Rebasing,
-            ..
-        })),
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::Rebasing,
+                ..
+            }),
+            BurstFinish::ReturnToIdle
+        ),
     ));
 }
 
@@ -680,10 +692,13 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
-            phase: PostFirePhase::Rebasing,
-            ..
-        })),
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::Rebasing,
+                ..
+            }),
+            BurstFinish::ReturnToIdle
+        ),
     ));
 
     // Anchor terminal event during Rebasing.
@@ -859,7 +874,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         "two PerStableFile Effects emitted",
     );
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!(),
     };
     assert!(matches!(
@@ -879,7 +894,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         now + Duration::from_millis(20),
     );
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!(),
     };
     assert!(matches!(
@@ -901,10 +916,13 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
-        ProfileState::Active(ActiveBurst::PostFire(PostFireBurst {
-            phase: PostFirePhase::Rebasing,
-            ..
-        })),
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::Rebasing,
+                ..
+            }),
+            BurstFinish::ReturnToIdle
+        ),
     ));
     assert!(
         first_probe_correlation(&rebase_out).is_some(),
@@ -917,7 +935,7 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     // Drive to Awaiting; detach the only Sub → reap_pending=true, phase
     // still Awaiting. Inject EffectComplete::Ok → AwaitAction::Reap →
     // finish_burst_to_idle → reap_profile (deferred). Profile gone from
-    // registry; ReapPendingResolved diagnostic.
+    // registry; ProfileReaped(DeferredFromBurst) diagnostic.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
@@ -929,7 +947,10 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     // Detach the only Sub. Profile is Active(Awaiting) → reap_pending=true.
     let _detach_out = e.detach_sub(sid);
     assert!(
-        e.profiles().get(pid).unwrap().reap_pending,
+        matches!(
+            e.profiles().get(pid).unwrap().state.burst_finish(),
+            Some(BurstFinish::Reap)
+        ),
         "reap_pending set on Active profile detach",
     );
 
@@ -946,9 +967,12 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     assert!(
         reap_out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::ReapPendingResolved { profile } if *profile == pid,
+            Diagnostic::ProfileReaped {
+                profile,
+                via: specter_core::ReapTrigger::DeferredFromBurst,
+            } if *profile == pid,
         )),
-        "ReapPendingResolved diagnostic on reap-during-Awaiting",
+        "ProfileReaped(DeferredFromBurst) diagnostic on reap-during-Awaiting",
     );
     assert!(
         e.profiles().get(pid).is_none(),
@@ -1056,7 +1080,7 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
     );
     // Phase still Awaiting.
     let phase = match &e.profiles().get(pid).unwrap().state {
-        ProfileState::Active(ActiveBurst::PostFire(post)) => &post.phase,
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!(),
     };
     assert!(matches!(phase, PostFirePhase::Awaiting { .. }));
