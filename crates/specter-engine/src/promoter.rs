@@ -65,11 +65,16 @@ pub(crate) const FANOUT_WARNING_THRESHOLD: usize = 1000;
 impl Engine {
     /// Attach a Promoter to the engine. Materialises the literal-prefix
     /// path on the Tree (creating scaffolds where the prefix doesn't
-    /// yet exist on disk), opens the probe channel, and returns the
-    /// minted [`PromoterId`] alongside a sorted [`StepOutput`].
+    /// yet exist on disk), opens the probe channel, and emits a
+    /// [`Diagnostic::PromoterAttached`] carrying the minted
+    /// [`PromoterId`].
     ///
-    /// **Two materialisation paths** branched inside
-    /// `attach_promoter_inner`:
+    /// Sole public entry is [`crate::Input::AttachPromoter`] via
+    /// [`Engine::step`]; the `pub(crate)` inner survives because
+    /// [`Engine::on_config_diff`] composes multiple detach/attach
+    /// operations into one [`StepOutput`] on hot reload.
+    ///
+    /// **Two materialisation paths:**
     ///
     /// - **Immediate `Active`** — the literal-prefix path resolved to a
     ///   live Tree slot. The Promoter is constructed with empty
@@ -84,25 +89,8 @@ impl Engine {
     ///
     /// On a malformed `pattern_spec` (defense-in-depth — `PatternSpec`
     /// parse should have rejected the same shape upstream), the engine
-    /// returns `(None, out)` with `out` carrying a
-    /// [`Diagnostic::AttachPathInvalid`] and no other ops.
-    pub fn attach_promoter(
-        &mut self,
-        req: PromoterAttachRequest,
-        now: Instant,
-    ) -> (Option<PromoterId>, StepOutput) {
-        let mut out = StepOutput::default();
-        let pid = self.attach_promoter_inner(req, now, &mut out);
-        out.sort_for_emission();
-        (pid, out)
-    }
-
-    /// Inner attach used by `on_config_diff` to compose multiple
-    /// detach/attach operations into a single (sorted) `StepOutput`.
-    /// Returns `Some(promoter_id)` on success, or `None` when the
-    /// rendered literal prefix fails [`Tree::parse_attach_path`] —
-    /// defense-in-depth against a `PatternSpec` invariant breach. On
-    /// `None`, `out` carries a [`Diagnostic::AttachPathInvalid`].
+    /// emits [`Diagnostic::AttachPathInvalid`] and returns `None`
+    /// without minting a [`PromoterId`].
     ///
     /// Compute-then-insert: the materialisation outcome decides the
     /// initial `PromoterState` shape *before* the registry insert, so
@@ -151,10 +139,7 @@ impl Engine {
             },
             MaterializeResult::Pending {
                 prefix, remaining, ..
-            } => PromoterState::PrefixPending(DescentState {
-                current_prefix: *prefix,
-                remaining_components: remaining.clone(),
-            }),
+            } => PromoterState::PrefixPending(DescentState::new(*prefix, remaining.clone())),
         };
 
         // 6. Mint the Promoter with the final state. `insert_with_key`
@@ -276,11 +261,8 @@ impl Engine {
         // it so observers (logs, future tracing) read the slot's role
         // as its current functional purpose rather than its descent
         // origin.
-        if let Some(res) = self.tree.get(new_proxy_resource)
-            && matches!(res.role, ResourceRole::DescentScaffold)
-        {
-            self.tree.set_role(new_proxy_resource, ResourceRole::User);
-        }
+        self.tree
+            .promote_scaffold(new_proxy_resource, ResourceRole::User);
 
         // 1. Flip state to `Active { proxies: empty }` BEFORE any
         // refcount work. Owner-bookkeeping: the contribution-map

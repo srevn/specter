@@ -77,8 +77,8 @@ fn config_diff_add_sub_to_existing_profile() {
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
-    let (sid_a, _attach) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let attach = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "A".into(),
             r,
             cfg.clone(),
@@ -88,10 +88,10 @@ fn config_diff_add_sub_to_existing_profile() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_a = sid_a.expect("attach_sub succeeded");
+    let sid_a = specter_core::testkit::first_attached_sub(&attach).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     assert_eq!(e.profiles().get(pid).unwrap().sub_refcount, 1);
 
@@ -152,8 +152,9 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         false,
     );
     let now = Instant::now();
-    let (sid_a, attach_out) = e.attach_sub(req, now);
-    let sid_a = sid_a.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid_a =
+        specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops
@@ -207,8 +208,8 @@ fn config_diff_mid_burst_remove_defers_reap() {
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let (sid_a, attach_out) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let attach_out = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "A".into(),
             r,
             ScanConfig::builder().build(),
@@ -218,10 +219,11 @@ fn config_diff_mid_burst_remove_defers_reap() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_a = sid_a.expect("attach_sub succeeded");
+    let sid_a =
+        specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops
@@ -313,8 +315,8 @@ fn config_diff_mid_burst_modify_revives_profile() {
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let cfg = ScanConfig::builder().build();
-    let (sid_a, attach_out) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let attach_out = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "A".into(),
             r,
             cfg.clone(),
@@ -324,10 +326,11 @@ fn config_diff_mid_burst_modify_revives_profile() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_a = sid_a.expect("attach_sub succeeded");
+    let sid_a =
+        specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops
@@ -424,8 +427,8 @@ fn effect_complete_after_detach_drops_silently() {
     let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let (sid, attach_out) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let attach_out = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "A".into(),
             r,
             ScanConfig::builder().build(),
@@ -435,10 +438,10 @@ fn effect_complete_after_detach_drops_silently() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid = sid.expect("attach_sub succeeded");
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops
@@ -505,8 +508,8 @@ fn config_diff_modified_remove_then_add() {
     let r = e.tree_mut().ensure_path(&["/", "src"], ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let (sid_a, attach_out) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let attach_out = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "A".into(),
             r,
             ScanConfig::builder().recursive(true).build(),
@@ -516,10 +519,11 @@ fn config_diff_modified_remove_then_add() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_a = sid_a.expect("attach_sub succeeded");
+    let sid_a =
+        specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
         .probe_ops

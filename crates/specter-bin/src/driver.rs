@@ -237,13 +237,13 @@ impl EngineDriver {
             .collect();
         for spec in watch_specs {
             let req = spec.to_attach_request();
-            let (_id, out) = self.engine.attach_sub(req, now);
+            let out = self.engine.step(Input::AttachSub(req), now);
             Self::reconcile_loader_from_diagnostics(&mut self.loader, &[], &[], &out.diagnostics);
             self.forward(out);
         }
         for spec in promoter_specs {
             let req = spec.to_attach_request();
-            let (_pid, out) = self.engine.attach_promoter(req, now);
+            let out = self.engine.step(Input::AttachPromoter(req), now);
             Self::reconcile_loader_from_diagnostics(&mut self.loader, &[], &[], &out.diagnostics);
             self.forward(out);
         }

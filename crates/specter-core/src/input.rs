@@ -4,8 +4,8 @@ use crate::effect::{DedupKey, EffectOutcome};
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::op::{ProbeResponse, WatchFailure, WatchOp};
 use crate::profile::TimerKind;
-use crate::promoter::PromoterRegistryDiff;
-use crate::sub::SubRegistryDiff;
+use crate::promoter::{PromoterAttachRequest, PromoterRegistryDiff};
+use crate::sub::{SubAttachRequest, SubRegistryDiff};
 
 /// Normalized filesystem event. `kqueue` / `inotify` / `FSEvents` flags
 /// fold into these six.
@@ -110,6 +110,32 @@ pub enum Input {
     SensorOverflow {
         scope: OverflowScope,
     },
+    /// Attach a Sub. The engine resolves the request's anchor (path
+    /// or resource), mints a fresh Profile if `(anchor, config_hash)`
+    /// doesn't already index one, registers the Sub, and starts the
+    /// Seed burst (immediate path) or descent (pending path).
+    ///
+    /// The minted [`SubId`] surfaces via [`crate::Diagnostic::SubAttached`] in the
+    /// `StepOutput.diagnostics` stream; on path rejection
+    /// (`Tree::parse_attach_path` failure), surfaces via
+    /// [`crate::Diagnostic::AttachPathInvalid`] instead with no Sub registered.
+    /// The bin's loader keys its `name → SubId` map off the diagnostic
+    /// stream rather than the (deleted) synchronous-return shape.
+    AttachSub(SubAttachRequest),
+    /// Detach a Sub. The engine drops the Sub from the registry,
+    /// decrements `Profile.sub_refcount`, and either reaps the
+    /// Profile (Idle/Pending: immediate) or marks it for
+    /// deferred-reap (Active: [`crate::BurstFinish::Reap`]). Stale
+    /// [`SubId`] yields a [`crate::Diagnostic::DetachUnknownSub`].
+    DetachSub(SubId),
+    /// Attach a Promoter. The engine renders the literal-prefix path,
+    /// materialises the Tree, opens the probe channel, and starts the
+    /// Promoter in either `Active` (prefix materialised) or
+    /// `PrefixPending` (descent needed). The minted
+    /// [`crate::PromoterId`] surfaces via
+    /// [`crate::Diagnostic::PromoterAttached`]; on
+    /// path rejection, via [`crate::Diagnostic::AttachPathInvalid`].
+    AttachPromoter(PromoterAttachRequest),
 }
 
 /// Hot-reload diff payload for [`Input::ConfigDiff`] — the watch-registry

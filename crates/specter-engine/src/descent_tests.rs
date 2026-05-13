@@ -45,7 +45,7 @@ fn empty_program() -> Arc<ActionProgram> {
 /// children. `target` is the descent prefix (or burst probe target) the
 /// snapshot is responding to — the walker stamps this onto
 /// `DirSnapshot.root_resource`, and `dispatch_descent_ok`'s walker-stamp
-/// debug_assert pins it equal to `descent.current_prefix`. Descent probes
+/// debug_assert pins it equal to `descent.current_prefix()`. Descent probes
 /// ship `recursive=false`, so every descent test response is a
 /// single-level `DirSnapshot`; this helper matches that shape exactly.
 /// Recursive uses are out of scope for the descent test surface
@@ -99,8 +99,8 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
         NO_EVENTS,
         false,
     );
-    let (sid, _out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     (e, sid, pid)
 }
@@ -125,7 +125,7 @@ fn descent_one_level_advances_on_created_entry() {
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("first probe in flight");
     assert_eq!(
-        descent.remaining_components.as_slice(),
+        descent.remaining_components().as_slice(),
         &[CompactString::from("bar")][..],
     );
 
@@ -177,20 +177,20 @@ fn descent_two_levels_advances_progressively() {
         NO_EVENTS,
         false,
     );
-    let (sid, _out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // First probe at /foo. Inject "bar" appears.
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     let corr1 = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
-        descent.remaining_components.as_slice(),
+        descent.remaining_components().as_slice(),
         &[CompactString::from("bar"), CompactString::from("baz")][..],
     );
 
     let snap1 = dir_snap_with(foo, vec![("bar", EntryKind::Dir, 1)]);
-    let _out = e.step(
+    let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr1,
@@ -204,7 +204,7 @@ fn descent_two_levels_advances_progressively() {
         .descent_state(ProbeOwner::Profile(pid))
         .expect("still pending");
     assert_eq!(
-        descent.remaining_components.as_slice(),
+        descent.remaining_components().as_slice(),
         &[CompactString::from("baz")][..],
     );
     let bar = e.tree().lookup(Some(foo), "bar").expect("bar materialized");
@@ -215,7 +215,7 @@ fn descent_two_levels_advances_progressively() {
 
     // Inject "baz" appears.
     let snap2 = dir_snap_with(bar, vec![("baz", EntryKind::Dir, 2)]);
-    let _out = e.step(
+    let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr2,
@@ -236,7 +236,7 @@ fn descent_no_progress_keeps_pending() {
     // Snapshot with unrelated entries (no "bar").
     let foo = lookup_foo(&e);
     let snap = dir_snap_with(foo, vec![("other.c", EntryKind::File, 1)]);
-    let _out = e.step(
+    let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
@@ -248,7 +248,7 @@ fn descent_no_progress_keeps_pending() {
     // Still pending; no new probe.
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
-        descent.remaining_components.as_slice(),
+        descent.remaining_components().as_slice(),
         &[CompactString::from("bar")][..],
     );
     assert!(
@@ -339,7 +339,7 @@ fn descent_failed_retains_state() {
     // Still pending; no probe in flight.
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
-        descent.remaining_components.as_slice(),
+        descent.remaining_components().as_slice(),
         &[CompactString::from("bar")][..],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_none());
@@ -427,8 +427,8 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         NO_EVENTS,
         false,
     );
-    let (sid, out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Tree contains the synthetic FS-root and the `tmp` scaffold.
@@ -442,9 +442,9 @@ fn absolute_attach_bootstraps_fs_root_segment() {
     let descent = e
         .descent_state(ProbeOwner::Profile(pid))
         .expect("absolute attach against empty Tree is pending");
-    assert_eq!(descent.current_prefix, root);
+    assert_eq!(descent.current_prefix(), root);
     assert_eq!(
-        descent.remaining_components.as_slice(),
+        descent.remaining_components().as_slice(),
         &[CompactString::from("tmp")][..],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
@@ -509,8 +509,8 @@ fn second_absolute_attach_reuses_fs_root() {
         NO_EVENTS,
         false,
     );
-    let (_, _) = e.attach_sub(req1, Instant::now());
-    let (_, _) = e.attach_sub(req2, Instant::now());
+    let _ = e.step(Input::AttachSub(req1), Instant::now());
+    let _ = e.step(Input::AttachSub(req2), Instant::now());
 
     let root = e.tree().lookup(None, "/").expect("single FS-root");
     assert_eq!(e.tree().roots().len(), 1, "exactly one tree root");
@@ -537,15 +537,15 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
         NO_EVENTS,
         false,
     );
-    let (sid, _) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     let root = e.tree().lookup(None, "/").unwrap();
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
-    assert_eq!(descent.current_prefix, root);
+    assert_eq!(descent.current_prefix(), root);
     assert_eq!(
-        descent.remaining_components.as_slice(),
+        descent.remaining_components().as_slice(),
         &[
             CompactString::from("var"),
             CompactString::from("log"),
@@ -583,7 +583,7 @@ fn descent_probe_uses_descent_variant() {
         NO_EVENTS,
         false,
     );
-    let (_sid, out) = e.attach_sub(req, Instant::now());
+    let out = e.step(Input::AttachSub(req), Instant::now());
 
     let descent_emitted = out.probe_ops.iter().any(|op| {
         matches!(
@@ -646,7 +646,7 @@ fn reap_pending_profile_releases_only_descent_prefix() {
 
     // Detach the only Sub. Profile is Pending; Pending Profiles reap
     // immediately (they hold no burst that would resolve a deferred reap).
-    let out = e.detach_sub(sid);
+    let out = e.step(Input::DetachSub(sid), Instant::now());
 
     // `bar`'s slot is reaped (no other anchors), `foo` still has its
     // pre-existing User Resource — only the descent's contribution is
@@ -703,8 +703,8 @@ fn descent_state_helper_returns_none_for_idle() {
         NO_EVENTS,
         false,
     );
-    let (sid, _) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     // Materialized Profile starts a Seed burst — Active, not Idle. Drive
     // it to completion to land in Idle.
@@ -740,8 +740,8 @@ fn descent_state_helper_returns_none_for_active() {
         NO_EVENTS,
         false,
     );
-    let (sid, _) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     // Materialized Profile starts a Seed burst — state is Active.
     assert!(matches!(
@@ -760,7 +760,7 @@ fn descent_state_helper_returns_some_for_pending() {
         .descent_state(ProbeOwner::Profile(pid))
         .expect("Pending state populated");
     assert_eq!(
-        descent.remaining_components.as_slice(),
+        descent.remaining_components().as_slice(),
         &[CompactString::from("bar")][..],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
@@ -820,7 +820,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_pending() {
     // Pending Profile reap path: descent_prefix.is_some() &&
     // anchor_claim == None. Predicate `(some && Held)` matches false →
     // assertion holds.
-    let _ = e.detach_sub(sid);
+    let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
 }
 
@@ -843,8 +843,8 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
         NO_EVENTS,
         false,
     );
-    let (sid, _) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim,
@@ -868,7 +868,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     // anchor lookup. For coverage of the assertion, the detach path
     // itself is sufficient (it runs reap_profile, which contains the
     // assertion).
-    let _ = e.detach_sub(sid);
+    let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
 }
 
@@ -883,7 +883,7 @@ fn detach_sub_pending_profile_reaps_immediately() {
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_some());
     assert_eq!(e.tree().get(foo).unwrap().watch_demand(), 1);
 
-    let out = e.detach_sub(sid);
+    let out = e.step(Input::DetachSub(sid), Instant::now());
 
     // Profile reaped synchronously: no longer in the registry; descent
     // contribution released atomically.

@@ -74,7 +74,7 @@ fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
 /// stamps `target_resource` from the request onto
 /// `DirSnapshot.root_resource`; descent dispatch's
 /// `debug_assert_eq!` pins `snapshot.root_resource ==
-/// descent.current_prefix`. Pass the right `target` per phase or
+/// descent.current_prefix()`. Pass the right `target` per phase or
 /// the assert panics.
 fn dir_snap_with(target: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
@@ -172,8 +172,12 @@ fn full_lifecycle_attach_promote_seed_reap() {
     let var_log = pre_place_dir(&mut e, &["var", "log"]);
 
     let now = Instant::now();
-    let (pid, attach_out) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), now);
-    let pid = pid.expect("attach_promoter succeeded");
+    let attach_out = e.step(
+        Input::AttachPromoter(promoter_req("logs", "/var/log/*.log")),
+        now,
+    );
+    let pid = specter_core::testkit::first_attached_promoter(&attach_out)
+        .expect("attach_promoter succeeded");
 
     // ---- PromoterAttached + initial enumeration probe ----
     assert!(
@@ -190,7 +194,8 @@ fn full_lifecycle_attach_promote_seed_reap() {
         ),
         PromoterState::PrefixPending(d) => panic!(
             "expected Active, got PrefixPending(prefix={:?}, remaining={:?})",
-            d.current_prefix, d.remaining_components,
+            d.current_prefix(),
+            d.remaining_components(),
         ),
     }
     assert_eq!(
@@ -407,8 +412,8 @@ fn static_attach_emits_sub_attached_with_no_source_promoter() {
         ClassSet::EMPTY,
         false,
     );
-    let (sid, out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     assert_ne!(sid, specter_core::SubId::default());
 
     let mut sub_attached_count = 0usize;
@@ -470,8 +475,12 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     // the literal segments are `["a", "b"]`). Promoter starts in
     // `PrefixPending(/a, ["b"])` because /a/b doesn't yet exist.
     let a = pre_place_dir(&mut e, &["a"]);
-    let (qid, attach_q_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.txt"), now);
-    let qid = qid.expect("attach_promoter succeeded");
+    let attach_q_out = e.step(
+        Input::AttachPromoter(promoter_req("logs", "/a/b/*.txt")),
+        now,
+    );
+    let qid = specter_core::testkit::first_attached_promoter(&attach_q_out)
+        .expect("attach_promoter succeeded");
     assert!(matches!(
         e.promoters().get(qid).unwrap().state,
         PromoterState::PrefixPending(_),
@@ -526,8 +535,9 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         ClassSet::EMPTY,
         false,
     );
-    let (sid, attach_p_out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_p_out = e.step(Input::AttachSub(req), now);
+    let sid =
+        specter_core::testkit::first_attached_sub(&attach_p_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,
@@ -633,10 +643,18 @@ fn two_promoters_sharing_proxy_unwind_independently() {
     // literal prefix and a single glob component matching anything;
     // the first proxy at `enter_active` is /shared with index = lpl.
     let shared = pre_place_dir(&mut e, &["shared"]);
-    let (q1, _attach_q1) = e.attach_promoter(promoter_req("q1", "/shared/*.log"), now);
-    let q1 = q1.expect("attach_promoter succeeded");
-    let (q2, _attach_q2) = e.attach_promoter(promoter_req("q2", "/shared/*.txt"), now);
-    let q2 = q2.expect("attach_promoter succeeded");
+    let attach_q1 = e.step(
+        Input::AttachPromoter(promoter_req("q1", "/shared/*.log")),
+        now,
+    );
+    let q1 = specter_core::testkit::first_attached_promoter(&attach_q1)
+        .expect("attach_promoter succeeded");
+    let attach_q2 = e.step(
+        Input::AttachPromoter(promoter_req("q2", "/shared/*.txt")),
+        now,
+    );
+    let q2 = specter_core::testkit::first_attached_promoter(&attach_q2)
+        .expect("attach_promoter succeeded");
 
     // Both Promoters should be Active with a proxy at /shared.
     for qid in [q1, q2] {
@@ -749,8 +767,12 @@ fn sensor_overflow_reseeds_active_promoter() {
     // drain the initial enumeration so the Promoter has multiple
     // proxies (one per matched Dir entry).
     let var_log = pre_place_dir(&mut e, &["var", "log"]);
-    let (qid, attach_out) = e.attach_promoter(promoter_req("logs", "/var/log/*"), now);
-    let qid = qid.expect("attach_promoter succeeded");
+    let attach_out = e.step(
+        Input::AttachPromoter(promoter_req("logs", "/var/log/*")),
+        now,
+    );
+    let qid = specter_core::testkit::first_attached_promoter(&attach_out)
+        .expect("attach_promoter succeeded");
     let initial_enum_corr =
         first_probe_corr(&attach_out).expect("initial enumeration probe in flight");
 
@@ -836,8 +858,12 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
     // Promoter's literal prefix is /a/b which doesn't yet exist;
     // `materialize_path_or_pending` returns Pending(/a, [b]).
     let a = pre_place_dir(&mut e, &["a"]);
-    let (qid, attach_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.log"), now);
-    let qid = qid.expect("attach_promoter succeeded");
+    let attach_out = e.step(
+        Input::AttachPromoter(promoter_req("logs", "/a/b/*.log")),
+        now,
+    );
+    let qid = specter_core::testkit::first_attached_promoter(&attach_out)
+        .expect("attach_promoter succeeded");
     let descent_corr = first_probe_corr(&attach_out).expect("descent probe in flight");
     assert!(matches!(
         e.promoters().get(qid).unwrap().state,
@@ -911,8 +937,12 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
     // Same setup as the prefix-pending test, but leave the descent
     // probe IN FLIGHT (no response).
     let _a = pre_place_dir(&mut e, &["a"]);
-    let (qid, _attach_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.log"), now);
-    let qid = qid.expect("attach_promoter succeeded");
+    let attach_out = e.step(
+        Input::AttachPromoter(promoter_req("logs", "/a/b/*.log")),
+        now,
+    );
+    let qid = specter_core::testkit::first_attached_promoter(&attach_out)
+        .expect("attach_promoter succeeded");
     let in_flight_corr = e
         .pending_probe_for(ProbeOwner::Promoter(qid))
         .expect("descent probe in flight");
@@ -987,8 +1017,12 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     // magnitude.
     let frozen = Instant::now() + Duration::from_secs(1_000_000);
 
-    let (pid, _attach_out) = e.attach_promoter(promoter_req("logs", "/var/log/*.log"), frozen);
-    let pid = pid.expect("attach_promoter succeeded");
+    let attach_out = e.step(
+        Input::AttachPromoter(promoter_req("logs", "/var/log/*.log")),
+        frozen,
+    );
+    let pid = specter_core::testkit::first_attached_promoter(&attach_out)
+        .expect("attach_promoter succeeded");
     let enum_corr = e
         .pending_probe_for(ProbeOwner::Promoter(pid))
         .expect("enumeration probe in flight");

@@ -35,7 +35,8 @@ use crate::Engine;
 use crate::reconcile::{apply_diff_to_tree, purge_per_file_fired_subs_for_resources};
 use crate::refcounts::{sub_watch, sub_watch_then_try_reap};
 use specter_core::{
-    AnchorClaim, ContribKey, Diff, ProbeOwner, ProfileId, ProfileState, StepOutput, TreeSnapshot,
+    AnchorClaim, ContribKey, DescentState, Diff, ProbeOwner, ProfileId, ProfileState, StepOutput,
+    TreeSnapshot,
 };
 
 impl Engine {
@@ -116,7 +117,7 @@ impl Engine {
     pub(crate) fn release_descent_prefix_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(prefix) = self
             .descent_state(ProbeOwner::Profile(pid))
-            .map(|d| d.current_prefix)
+            .map(DescentState::current_prefix)
         else {
             return;
         };

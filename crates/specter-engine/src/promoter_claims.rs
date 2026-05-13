@@ -5,7 +5,7 @@
 //!
 //! 1. **Descent prefix.** `Promoter.state == PrefixPending(d)` ⇒ the
 //!    Promoter contributes [`ContribKey::PromoterPrefix`] with
-//!    `STRUCTURE` at `d.current_prefix`.
+//!    `STRUCTURE` at `d.current_prefix()`.
 //! 2. **Active proxy.** `Promoter.state == Active { proxies }` ⇒ the
 //!    Promoter contributes [`ContribKey::PromoterProxy`] with
 //!    `STRUCTURE` at each `proxies.keys()` slot.
@@ -67,7 +67,7 @@ impl Engine {
         out: &mut StepOutput,
     ) {
         let Some(prefix) = self.promoters.get(qid).and_then(|q| match &q.state {
-            PromoterState::PrefixPending(d) => Some(d.current_prefix),
+            PromoterState::PrefixPending(d) => Some(d.current_prefix()),
             PromoterState::Active { .. } => None,
         }) else {
             return;

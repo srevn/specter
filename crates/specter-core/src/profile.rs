@@ -761,11 +761,74 @@ pub enum ProfileStateDiscriminant {
 pub struct DescentState {
     /// Deepest existing ancestor currently Watched. The Profile
     /// contributes `+1` to this Resource's `watch_demand`.
-    pub current_prefix: ResourceId,
+    pub(crate) current_prefix: ResourceId,
     /// Path components from `current_prefix` (exclusive) down to the
     /// anchor (inclusive). Non-empty by type construction;
     /// single-component segments (no `/`).
-    pub remaining_components: DescentRemaining,
+    pub(crate) remaining_components: DescentRemaining,
+}
+
+impl DescentState {
+    /// Construct a fresh descent payload. Sole producer pattern used
+    /// by `materialize_path_or_pending` (Profile pending arm), the
+    /// Promoter attach path's pending arm, and the recovery / rewind
+    /// flows in `engine::descent` that re-enter `Pending` after an
+    /// anchor-terminal event.
+    ///
+    /// Field-private; callers route through this constructor so the
+    /// invariants on `current_prefix` (Watched, refcounted) and
+    /// `remaining_components` (non-empty by [`DescentRemaining`]'s
+    /// own constructor) are pinned at a single boundary. The engine's
+    /// refcount setup runs around this constructor (the contribution
+    /// at `current_prefix` is installed by `add_watch` separately) —
+    /// the struct itself only carries the bookkeeping needed to
+    /// dispatch the next descent step.
+    #[must_use]
+    pub const fn new(current_prefix: ResourceId, remaining_components: DescentRemaining) -> Self {
+        Self {
+            current_prefix,
+            remaining_components,
+        }
+    }
+
+    /// The deepest currently-Watched ancestor on the descent path.
+    /// Carries this Profile / Promoter's `+1 STRUCTURE`
+    /// [`crate::ContribKey::ProfileDescent`] /
+    /// [`crate::ContribKey::PromoterPrefix`] contribution.
+    #[must_use]
+    pub const fn current_prefix(&self) -> ResourceId {
+        self.current_prefix
+    }
+
+    /// Read-only handle to the remaining-path-component chain.
+    #[must_use]
+    pub const fn remaining_components(&self) -> &DescentRemaining {
+        &self.remaining_components
+    }
+
+    /// Mutable handle to the remaining-path-component chain. Sole
+    /// callers are the engine's descent dispatcher
+    /// (`engine::descent::advance_descent` consumes the head via
+    /// [`DescentRemaining::advance`]) and the rewind path
+    /// (`dispatch_descent_vanished` re-injects the prefix's segment
+    /// via [`DescentRemaining::prepend`]).
+    pub const fn remaining_components_mut(&mut self) -> &mut DescentRemaining {
+        &mut self.remaining_components
+    }
+
+    /// Rewrite the descent's current prefix. Used by the engine's
+    /// descent dispatcher on forward advance (the prior prefix's
+    /// `Ok` response routes here with the newly-Watched child) and
+    /// by the rewind path (`Vanished` on the prefix routes here with
+    /// the parent that just took over the descent's watch).
+    ///
+    /// Pairs with the engine's `add_watch` / `sub_watch` calls that
+    /// maintain the `+1 STRUCTURE` contribution at the new and old
+    /// prefixes respectively; the typed mutator pins that the field
+    /// only moves under refcount-aware control.
+    pub const fn advance_to(&mut self, new_prefix: ResourceId) {
+        self.current_prefix = new_prefix;
+    }
 }
 
 /// Path-component chain from a descent's `current_prefix` down to the
@@ -2074,11 +2137,10 @@ mod tests {
     /// channel for correlation, not a heap timer).
     #[test]
     fn profile_state_timer_token_pending_returns_none_for_every_kind() {
-        let s = ProfileState::Pending(DescentState {
-            current_prefix: ResourceId::default(),
-            remaining_components: DescentRemaining::from_vec(vec![CompactString::from("a")])
-                .expect("non-empty"),
-        });
+        let s = ProfileState::Pending(DescentState::new(
+            ResourceId::default(),
+            DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
+        ));
         for k in [
             TimerKind::Settle,
             TimerKind::BurstDeadline,
@@ -2125,11 +2187,10 @@ mod tests {
         // Every other shape — false.
         for state in [
             ProfileState::Idle,
-            ProfileState::Pending(DescentState {
-                current_prefix: r,
-                remaining_components: DescentRemaining::from_vec(vec![CompactString::from("a")])
-                    .expect("non-empty"),
-            }),
+            ProfileState::Pending(DescentState::new(
+                r,
+                DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
+            )),
             ProfileState::Active(
                 ActiveBurst::PreFire(unit_pre(PreFirePhase::Verifying, tid(1), r)),
                 BurstFinish::ReturnToIdle,
@@ -2168,11 +2229,10 @@ mod tests {
     fn descent_state_returns_some_only_on_pending() {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
-        let descent = DescentState {
-            current_prefix: r,
-            remaining_components: DescentRemaining::from_vec(vec![CompactString::from("a")])
-                .expect("non-empty"),
-        };
+        let descent = DescentState::new(
+            r,
+            DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
+        );
         let pending = ProfileState::Pending(descent);
         assert!(pending.descent_state().is_some());
 
@@ -2190,23 +2250,20 @@ mod tests {
     fn descent_state_mut_lets_caller_advance_pending() {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
-        let mut state = ProfileState::Pending(DescentState {
-            current_prefix: r,
-            remaining_components: DescentRemaining::from_vec(vec![
-                CompactString::from("a"),
-                CompactString::from("b"),
-            ])
-            .expect("non-empty"),
-        });
+        let mut state = ProfileState::Pending(DescentState::new(
+            r,
+            DescentRemaining::from_vec(vec![CompactString::from("a"), CompactString::from("b")])
+                .expect("non-empty"),
+        ));
 
         {
             let d = state.descent_state_mut().expect("Pending carries descent");
-            d.remaining_components.advance();
+            d.remaining_components_mut().advance();
         }
 
         let d = state.descent_state().expect("still Pending");
         assert_eq!(
-            d.remaining_components.as_slice(),
+            d.remaining_components().as_slice(),
             &[CompactString::from("b")]
         );
 

@@ -101,7 +101,7 @@ fn two_profiles_one_resource_share_watch_demand() {
         NO_EVENTS,
         false,
     );
-    let (_sid_a, out_a) = e.attach_sub(req_a, Instant::now());
+    let out_a = e.step(Input::AttachSub(req_a), Instant::now());
     let watch_count_a = out_a
         .watch_ops
         .iter()
@@ -120,7 +120,7 @@ fn two_profiles_one_resource_share_watch_demand() {
         NO_EVENTS,
         false,
     );
-    let (_sid_b, out_b) = e.attach_sub(req_b, Instant::now());
+    let out_b = e.step(Input::AttachSub(req_b), Instant::now());
     let watch_count_b = out_b
         .watch_ops
         .iter()
@@ -145,8 +145,8 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
 
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
-    let (sid_p, out_p) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let out_p = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "parent".into(),
             src,
             cfg.clone(),
@@ -156,10 +156,10 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_p = sid_p.expect("attach_sub succeeded");
+    let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_p).unwrap().profile;
 
     // Drive parent through Seed → Idle.
@@ -173,8 +173,8 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
         now,
     );
 
-    let (sid_c, out_c) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let out_c = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "child".into(),
             foo,
             cfg,
@@ -184,10 +184,10 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_c = sid_c.expect("attach_sub succeeded");
+    let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_c).unwrap().profile;
     let child_seed = first_probe_correlation(&out_c).unwrap();
 
@@ -243,8 +243,8 @@ fn parent_in_draining_reconfirms_after_child_settles() {
 
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
-    let (sid_p, out_p) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let out_p = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "parent".into(),
             src,
             cfg.clone(),
@@ -254,10 +254,10 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_p = sid_p.expect("attach_sub succeeded");
+    let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_p).unwrap().profile;
     let parent_seed = first_probe_correlation(&out_p).unwrap();
     e.step(
@@ -269,8 +269,8 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         now,
     );
 
-    let (sid_c, out_c) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let out_c = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "child".into(),
             foo,
             cfg,
@@ -280,10 +280,10 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_c = sid_c.expect("attach_sub succeeded");
+    let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_c).unwrap().profile;
     let child_seed = first_probe_correlation(&out_c).unwrap();
     e.step(
@@ -476,8 +476,8 @@ fn co_located_profiles_share_suppress_count() {
     let cfg_b = ScanConfig::builder().recursive(false).build();
     let now = Instant::now();
 
-    let (sid_a, _) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let attach_out = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "a".into(),
             r,
             cfg_a,
@@ -487,14 +487,15 @@ fn co_located_profiles_share_suppress_count() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_a = sid_a.expect("attach_sub succeeded");
+    let sid_a =
+        specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile;
 
-    let (sid_b, _) = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let attach_out = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "b".into(),
             r,
             cfg_b,
@@ -504,10 +505,11 @@ fn co_located_profiles_share_suppress_count() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let sid_b = sid_b.expect("attach_sub succeeded");
+    let sid_b =
+        specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid_b = e.subs().get(sid_b).unwrap().profile;
 
     // After both attach: suppress_count == 2 (both Profiles in Seed).

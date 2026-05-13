@@ -5,9 +5,30 @@
 //! those edges. There is no `StabilityIndex` struct; the cached edge is
 //! per-Profile metadata, and the verb (propagate) reads it directly
 //! through `&mut ProfileMap`.
+//!
+//! # Parent-edge recompute API
+//!
+//! Three free functions form the family, paired so each call site
+//! reads as a clear two-step "gather candidates → recompute":
+//!
+//! - [`collect_in_subtree`] — gather Profiles anchored within a Tree
+//!   subtree (strict descendants of a given anchor). Use after
+//!   attaching a fresh Profile: the new Profile may interpose between
+//!   any descendant Profile and that descendant's prior parent edge.
+//! - [`collect_pointing_at`] — gather Profiles whose `parent_profile`
+//!   currently names a specific (about-to-be-reaped) ProfileId. Use
+//!   from `Engine::reap_profile` after detaching the Profile from
+//!   the registry.
+//! - [`recompute_parent_edges`] — for each candidate, call
+//!   [`nearest_covering_ancestor`] and write the result via
+//!   [`write_parent_edge`].
+//!
+//! Both collectors share an `Engine.scratch_profile_ids` buffer
+//! (clear → fill → drain) so the recompute can take `&mut ProfileMap`
+//! after the read-borrow on the gather completes.
 
 use crate::coverage::nearest_covering_ancestor;
-use specter_core::{ProfileId, ProfileMap, Tree};
+use specter_core::{ProfileId, ProfileMap, ResourceId, Tree};
 use tinyvec::TinyVec;
 
 /// Walk parent edges from `source` and apply `delta` to each ancestor's
@@ -21,9 +42,10 @@ use tinyvec::TinyVec;
 /// before clamping back into `[0, u32::MAX]`.
 ///
 /// Defensive: if the cached chain points at a reaped Profile (a
-/// transient state between detach and `recompute_parent_edges_for_dependents`,
-/// or any missed maintenance bug), the walk terminates rather than
-/// trying to mutate a vacated slot.
+/// transient state between `ProfileMap::detach` and the post-reap
+/// `collect_pointing_at + recompute_parent_edges` pair, or any missed
+/// maintenance bug), the walk terminates rather than trying to mutate
+/// a vacated slot.
 pub(crate) fn propagate(
     profiles: &mut ProfileMap,
     source: ProfileId,
@@ -59,50 +81,93 @@ pub(crate) fn propagate(
     hit_zero
 }
 
-/// Recompute parent edges for every Profile that currently names
-/// `removed_profile` as its parent. Called from `Engine::reap_profile`
-/// after the Profile is detached from `ProfileMap`, so dependents
-/// re-resolve against the current topology. Profiles whose new edge
-/// resolves to `None` (no covering ancestor remains) have their
-/// `parent_profile` cleared.
+/// Collect Profile ids anchored in the strict descendants of `root`.
+/// Drives the post-attach recompute: a freshly-attached Profile at
+/// `root` may interpose between any descendant Profile and that
+/// descendant's prior parent edge — those descendants are the
+/// recompute candidates.
 ///
-/// Asymptotic: O(profiles) per call (the iteration scans the whole
-/// `ProfileMap` to find dependents). For v1 typical configs (~50
-/// Profiles) this is trivially fast. A reverse index
-/// `Map<parent, Vec<children>>` would narrow this to O(dependents);
-/// deferred until profile-attach rates make it visible.
-pub(crate) fn recompute_parent_edges_for_dependents(
+/// Walks the Tree downward from `root` and harvests the
+/// [`specter_core::Resource::profiles`] back-index at each visited
+/// slot. Strictness (excludes `root` itself) falls out naturally: the
+/// walk descends into `root`'s children rather than visiting `root`.
+/// Profiles anchored at `root` with a different `config_hash` than
+/// the newly-attached one are skipped — they share `Profile.resource`
+/// with the new attach, so the new Profile cannot interpose between
+/// them and their existing parent (the new Profile is a sibling at
+/// the same Tree slot, not an interposing covering ancestor).
+///
+/// `scratch` is cleared on entry and refilled. The expected pattern is:
+/// borrow `Engine.scratch_profile_ids` once, fill via this function,
+/// then `drain(..)` into [`recompute_parent_edges`] which takes a
+/// `&mut ProfileMap`.
+///
+/// Asymptotic: O(subtree_resources × profiles_per_slot). For sparse
+/// v1 workloads (~50 Profiles) the walked subtree is typically a
+/// handful of slots; the previous "scan all Profiles, ancestor-walk
+/// per Profile" form was O(N × depth). The downward walk also more
+/// honestly names the predicate: "Profile P interposes between Q and
+/// Q's prior parent" ⇔ "Q is in P's Tree subtree."
+pub(crate) fn collect_in_subtree(
     tree: &Tree,
-    profiles: &mut ProfileMap,
-    removed_profile: ProfileId,
+    profiles: &ProfileMap,
+    root: ResourceId,
+    scratch: &mut Vec<ProfileId>,
 ) {
-    let dependents: Vec<ProfileId> = profiles
-        .iter()
-        .filter(|(_, p)| p.parent_profile == Some(removed_profile))
-        .map(|(pid, _)| pid)
-        .collect();
-    for pid in dependents {
-        let new_parent = nearest_covering_ancestor(tree, profiles, pid);
-        write_parent_edge(profiles, pid, new_parent);
+    scratch.clear();
+    // Iterative DFS over strict descendants. Bounded by the subtree
+    // size; the stack holds at most `max_depth` ids at once. Lifts
+    // straight from `Tree::children_ids` so callers don't re-implement
+    // the BTreeMap iteration order.
+    let mut stack: Vec<ResourceId> = tree.children_ids(root).collect();
+    while let Some(node) = stack.pop() {
+        scratch.extend(profiles.at(node));
+        stack.extend(tree.children_ids(node));
     }
 }
 
-/// Recompute parent edges for every Profile yielded by `candidates`.
-/// Used by `Engine::attach_sub_inner` to re-resolve any existing
-/// Profile whose edge would now name the freshly-added Profile (the
-/// new Profile may interpose between an old child and its old parent).
+/// Collect Profile ids whose [`specter_core::Profile::parent_profile`]
+/// currently names `removed_profile`. Drives the post-reap recompute:
+/// dependents must re-resolve against the post-removal topology so
+/// their cache no longer points at a vacated slot.
 ///
-/// Profiles whose recomputed edge is `None` have their
-/// `parent_profile` cleared; otherwise the edge is overwritten. The
-/// caller pre-narrows `candidates` to strict descendants of the new
-/// anchor (see `Engine::recompute_dependent_parent_edges`).
-pub(crate) fn recompute_parent_edges_for_subset<I>(
+/// `scratch` is cleared on entry and refilled. See the module rustdoc
+/// for the canonical gather → recompute pattern.
+///
+/// Asymptotic: O(profiles) per call. A reverse index
+/// `Map<parent, Vec<children>>` would narrow this to O(dependents);
+/// deferred until profile-attach rates make it measurable.
+pub(crate) fn collect_pointing_at(
+    profiles: &ProfileMap,
+    removed_profile: ProfileId,
+    scratch: &mut Vec<ProfileId>,
+) {
+    scratch.clear();
+    scratch.extend(
+        profiles
+            .iter()
+            .filter(|(_, p)| p.parent_profile == Some(removed_profile))
+            .map(|(pid, _)| pid),
+    );
+}
+
+/// Recompute parent edges for every Profile yielded by `candidates`.
+/// Each candidate's edge is rewritten in place via the
+/// [`nearest_covering_ancestor`] derivation; profiles whose
+/// recomputed edge is `None` (no covering ancestor remains) have
+/// their `parent_profile` field cleared.
+///
+/// Take `IntoIterator` so callers can either pass a borrowed slice or
+/// the moving `Vec::drain` pattern. The recompute body is order-
+/// independent given a snapshot of `(Tree topology,
+/// Resource::profiles back-index)` — both reads are immutable across
+/// the loop; only `Profile::parent_profile` is written, and that
+/// field is never read by [`nearest_covering_ancestor`].
+pub(crate) fn recompute_parent_edges<I: IntoIterator<Item = ProfileId>>(
     tree: &Tree,
     profiles: &mut ProfileMap,
     candidates: I,
-) where
-    I: IntoIterator<Item = ProfileId>,
-{
+) {
     for pid in candidates {
         let new_parent = nearest_covering_ancestor(tree, profiles, pid);
         write_parent_edge(profiles, pid, new_parent);
@@ -183,7 +248,8 @@ mod tests {
     }
 
     /// Resolve and write the parent edge for `child` in one step.
-    /// Mirrors `Engine::compute_and_set_parent_edge`'s shape so tests
+    /// Mirrors the `nearest_covering_ancestor + write_parent_edge`
+    /// composition used inside `recompute_parent_edges` so tests
     /// exercise the same code path as production.
     fn resolve_parent(tree: &Tree, profiles: &mut ProfileMap, child: ProfileId) {
         let parent = nearest_covering_ancestor(tree, profiles, child);
@@ -320,7 +386,8 @@ mod tests {
     /// Defensive: a cached `parent_profile` pointing at a vacated slot
     /// must not panic — `propagate` halts at the first dead pointer.
     /// Reproduces the transient stale window between
-    /// `ProfileMap::detach` and `recompute_parent_edges_for_dependents`.
+    /// `ProfileMap::detach` and the post-reap
+    /// `collect_pointing_at + recompute_parent_edges` pair.
     #[test]
     fn propagate_halts_on_stale_parent_pointer() {
         let (mut tree, mut profiles, p_root, p_mid, p_leaf) = three_level_chain();
@@ -338,10 +405,10 @@ mod tests {
         assert_eq!(profiles.get(p_mid).unwrap().dirty_descendants, 1);
     }
 
-    /// Detach `removed`, run `recompute_parent_edges_for_dependents`:
-    /// dependents whose new edge is `None` have their cache cleared;
-    /// dependents that re-resolve to a different ancestor are
-    /// rewritten in place.
+    /// Detach `removed`, run the `collect_pointing_at +
+    /// recompute_parent_edges` pair: dependents whose new edge is
+    /// `None` have their cache cleared; dependents that re-resolve to
+    /// a different ancestor are rewritten in place.
     #[test]
     fn recompute_for_dependents_clears_or_rewrites_each_child() {
         let (mut tree, mut profiles, p_root, p_mid, p_leaf) = three_level_chain();
@@ -352,7 +419,9 @@ mod tests {
         // sees it as a candidate.
         let _ = profiles.detach(&mut tree, p_root);
 
-        recompute_parent_edges_for_dependents(&tree, &mut profiles, p_root);
+        let mut scratch = Vec::new();
+        collect_pointing_at(&profiles, p_root, &mut scratch);
+        recompute_parent_edges(&tree, &mut profiles, scratch);
 
         // p_mid had p_root as parent; recomputed edge is `None`
         // (no other covering ancestor). p_leaf still names p_mid as
@@ -363,8 +432,8 @@ mod tests {
 
     /// Sequence: leaf's edge currently points at root. Then a Profile
     /// is added at the mid Resource that covers leaf —
-    /// `recompute_parent_edges_for_subset` over `[p_leaf]` rewrites
-    /// the edge to the new mid.
+    /// `recompute_parent_edges` over `[p_leaf]` rewrites the edge to
+    /// the new mid.
     #[test]
     fn recompute_for_subset_picks_new_interposing_profile() {
         let mut tree = Tree::new();
@@ -387,15 +456,76 @@ mod tests {
         // Initial parent edge: p_leaf → p_root (no mid yet).
         resolve_parent(&tree, &mut profiles, p_leaf);
 
-        // Interpose p_mid; recompute_parent_edges_for_subset sees
-        // p_leaf and rewrites its edge to the closer ancestor.
+        // Interpose p_mid; recompute_parent_edges sees p_leaf and
+        // rewrites its edge to the closer ancestor.
         let p_mid = profiles.attach(
             &mut tree,
             Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
         );
-        recompute_parent_edges_for_subset(&tree, &mut profiles, [p_leaf]);
+        recompute_parent_edges(&tree, &mut profiles, [p_leaf]);
 
         assert_eq!(profiles.get(p_leaf).unwrap().parent_profile, Some(p_mid));
+    }
+
+    /// `collect_in_subtree` harvests Profile ids anchored in strict
+    /// descendants of the given root. The root itself is excluded —
+    /// the walk descends into the root's children, not the root.
+    #[test]
+    fn collect_in_subtree_yields_strict_descendant_profiles_only() {
+        let (tree, profiles, p_root, p_mid, p_leaf) = three_level_chain();
+        let root_resource = profiles.get(p_root).unwrap().resource;
+        let mid_resource = profiles.get(p_mid).unwrap().resource;
+
+        let mut scratch = Vec::new();
+        collect_in_subtree(&tree, &profiles, root_resource, &mut scratch);
+        assert_eq!(
+            scratch
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [p_mid, p_leaf].into_iter().collect(),
+            "strict descendants of root: mid + leaf, not root itself",
+        );
+
+        scratch.clear();
+        collect_in_subtree(&tree, &profiles, mid_resource, &mut scratch);
+        assert_eq!(
+            scratch
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::iter::once(p_leaf).collect(),
+            "strict descendants of mid: leaf only",
+        );
+    }
+
+    /// `collect_in_subtree` clears the scratch on entry — repeated
+    /// calls do not accumulate.
+    #[test]
+    fn collect_in_subtree_clears_scratch_on_entry() {
+        let (tree, profiles, p_root, _, _) = three_level_chain();
+        let root_resource = profiles.get(p_root).unwrap().resource;
+
+        let mut scratch: Vec<ProfileId> = vec![ProfileId::default(); 7];
+        collect_in_subtree(&tree, &profiles, root_resource, &mut scratch);
+        // Filled exactly with the strict descendants of root (mid, leaf).
+        assert_eq!(scratch.len(), 2);
+    }
+
+    /// `collect_pointing_at` clears the scratch on entry — repeated
+    /// calls do not accumulate.
+    #[test]
+    fn collect_pointing_at_clears_scratch_on_entry() {
+        let (_tree, mut profiles, p_root, p_mid, p_leaf) = three_level_chain();
+        write_parent_edge(&mut profiles, p_leaf, Some(p_mid));
+        write_parent_edge(&mut profiles, p_mid, Some(p_root));
+
+        let mut scratch: Vec<ProfileId> = vec![ProfileId::default(); 5];
+        collect_pointing_at(&profiles, p_mid, &mut scratch);
+        assert_eq!(scratch, vec![p_leaf]);
+        // Run again with a different target — scratch is cleared and refilled.
+        collect_pointing_at(&profiles, p_root, &mut scratch);
+        assert_eq!(scratch, vec![p_mid]);
     }
 
     #[cfg(debug_assertions)]

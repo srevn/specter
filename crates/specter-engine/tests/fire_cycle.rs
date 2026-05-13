@@ -136,8 +136,8 @@ fn attach_and_complete_seed_with(
     snap: std::sync::Arc<DirSnapshot>,
     now: Instant,
 ) -> (SubId, ProfileId) {
-    let (sid, out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = pid_of(e, sid);
     let seed_corr = first_probe_correlation(&out).expect("Seed probe");
     e.step(
@@ -163,8 +163,8 @@ fn attach_and_complete_seed(
     snap: std::sync::Arc<DirSnapshot>,
     now: Instant,
 ) -> (SubId, ProfileId) {
-    let (sid, out) = e.attach_sub(subtree_request("test", r), now);
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(subtree_request("test", r)), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = pid_of(e, sid);
     let seed_corr = first_probe_correlation(&out).expect("Seed probe");
     e.step(
@@ -730,8 +730,8 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
-    let (sid, out) = e.attach_sub(subtree_request("test", r), now);
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(subtree_request("test", r)), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let seed_corr = first_probe_correlation(&out).expect("Seed probe");
 
@@ -843,8 +843,8 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         ClassSet::CONTENT,
         false,
     );
-    let (sid, attach_out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
     e.step(
@@ -945,7 +945,7 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     let effect_key = stable_out.effects[0].key.clone();
 
     // Detach the only Sub. Profile is Active(Awaiting) → reap_pending=true.
-    let _detach_out = e.detach_sub(sid);
+    let _detach_out = e.step(Input::DetachSub(sid), Instant::now());
     assert!(
         matches!(
             e.profiles().get(pid).unwrap().state.burst_finish(),
@@ -1342,8 +1342,8 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         ClassSet::CONTENT,
         false,
     );
-    let (sid, attach_out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
     e.step(

@@ -404,18 +404,18 @@ mod tests {
     /// the type composition compiles and accepts the intended payloads.
     #[test]
     fn promoter_state_prefix_pending_carries_descent_state() {
-        let state = PromoterState::PrefixPending(DescentState {
-            current_prefix: ResourceId::default(),
-            remaining_components: DescentRemaining::from_vec(vec![
+        let state = PromoterState::PrefixPending(DescentState::new(
+            ResourceId::default(),
+            DescentRemaining::from_vec(vec![
                 CompactString::from("var"),
                 CompactString::from("log"),
             ])
             .expect("non-empty by test construction"),
-        });
+        ));
         let PromoterState::PrefixPending(d) = state else {
             panic!("expected PrefixPending");
         };
-        assert_eq!(d.remaining_components.len(), 2);
+        assert_eq!(d.remaining_components().len(), 2);
     }
 
     /// Active proxies map carries `(ResourceId, ProxyState)` entries. The
@@ -456,11 +456,10 @@ mod tests {
     /// `PrefixPending`, returns `None` for `Active`.
     #[test]
     fn promoter_state_descent_state_returns_some_only_on_prefix_pending() {
-        let pending = PromoterState::PrefixPending(DescentState {
-            current_prefix: ResourceId::default(),
-            remaining_components: DescentRemaining::from_vec(vec![CompactString::from("var")])
-                .expect("non-empty"),
-        });
+        let pending = PromoterState::PrefixPending(DescentState::new(
+            ResourceId::default(),
+            DescentRemaining::from_vec(vec![CompactString::from("var")]).expect("non-empty"),
+        ));
         assert!(pending.descent_state().is_some());
 
         let active = PromoterState::Active {
@@ -473,24 +472,24 @@ mod tests {
     /// when the state is `PrefixPending`.
     #[test]
     fn promoter_state_descent_state_mut_advances_pending() {
-        let mut state = PromoterState::PrefixPending(DescentState {
-            current_prefix: ResourceId::default(),
-            remaining_components: DescentRemaining::from_vec(vec![
+        let mut state = PromoterState::PrefixPending(DescentState::new(
+            ResourceId::default(),
+            DescentRemaining::from_vec(vec![
                 CompactString::from("var"),
                 CompactString::from("log"),
             ])
             .expect("non-empty"),
-        });
+        ));
 
         {
             let d = state
                 .descent_state_mut()
                 .expect("PrefixPending carries descent");
-            d.remaining_components.advance();
+            d.remaining_components_mut().advance();
         }
 
         let d = state.descent_state().expect("still PrefixPending");
-        assert_eq!(d.remaining_components.len(), 1);
+        assert_eq!(d.remaining_components().len(), 1);
 
         // Mutator returns None on Active.
         let mut active = PromoterState::Active {

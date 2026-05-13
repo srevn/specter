@@ -94,8 +94,8 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         log_output: false,
         source_promoter: None,
     };
-    let (sid, attach_out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).expect("sub").profile;
     let seed_correlation =
         first_probe_correlation(&attach_out).expect("Seed probe fires immediately");
@@ -202,8 +202,8 @@ fn sustained_unstable_response_storm_paces_at_settle() {
         log_output: false,
         source_promoter: None,
     };
-    let (sid, attach_out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).expect("sub").profile;
     let seed_correlation =
         first_probe_correlation(&attach_out).expect("Seed probe fires immediately");

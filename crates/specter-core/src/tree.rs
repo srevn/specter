@@ -244,6 +244,30 @@ impl Tree {
         }
     }
 
+    /// Promote a `DescentScaffold`-roled slot to `new_role`. No-op if
+    /// the slot is already `User` / `WatchRootParent` (preserves the
+    /// existing role — never demote a real role to its scaffold
+    /// origin) or if the slot is stale.
+    ///
+    /// Captures the common attach/promoter pattern:
+    /// > "a slot that came from `ensure_path` as a scaffold has now
+    /// > acquired a real purpose (anchor of a User Profile, parent of
+    /// > one, or proxy of a Promoter) — flip its tag for diagnostic
+    /// > clarity."
+    ///
+    /// Role is metadata: retention runs through the structural
+    /// claimants on [`Resource::has_anchors`] (`children`, `profiles`,
+    /// `proxy_promoters`, `contributions`), so the tag mutation is
+    /// observer-only. The helper exists to keep the four-line "get +
+    /// matches + set_role" idiom from drifting across call sites.
+    pub fn promote_scaffold(&mut self, id: ResourceId, new_role: ResourceRole) {
+        if let Some(r) = self.nodes.get_mut(id)
+            && matches!(r.role, ResourceRole::DescentScaffold)
+        {
+            r.role = new_role;
+        }
+    }
+
     /// Set the probed kind on the slot. No-op for stale `id`. The engine
     /// calls this from `reconcile::create_child`, `descent::dispatch`,
     /// and the entry-validate path inside reconcile — every site that

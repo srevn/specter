@@ -71,8 +71,8 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         NO_EVENTS,
         false,
     );
-    let (sid, _out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     assert_eq!(
@@ -110,8 +110,8 @@ fn root_anchor_has_no_watch_root_parent() {
         NO_EVENTS,
         false,
     );
-    let (sid, _) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     assert!(e.profiles().get(pid).unwrap().watch_root_parent.is_none());
 }
@@ -136,8 +136,8 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         NO_EVENTS,
         false,
     );
-    let (sid, attach_out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Drive Seed → Idle.
@@ -163,7 +163,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     // watch-root parent's contribution; `Tree::try_reap` cascades up
     // from the now-orphaned anchor and reaps `/root` in the same step
     // (no other claims). Both slots emit `Unwatch` on the way out.
-    let out = e.detach_sub(sid);
+    let out = e.step(Input::DetachSub(sid), Instant::now());
     assert!(
         e.tree().get(root).is_none_or(|r| r.watch_demand() == 0),
         "/root's watch_demand back to 0 (or slot reaped by the cascade)",
@@ -190,8 +190,8 @@ fn multiple_profiles_share_one_watch_root_parent() {
     e.tree_mut().set_kind(src_b, ResourceKind::Dir);
 
     let now = Instant::now();
-    let _ = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let _ = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "A".into(),
             src_a,
             ScanConfig::builder().build(),
@@ -201,11 +201,11 @@ fn multiple_profiles_share_one_watch_root_parent() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
-    let _ = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let _ = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "B".into(),
             src_b,
             ScanConfig::builder().build(),
@@ -215,7 +215,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
     assert_eq!(
@@ -238,8 +238,8 @@ fn watch_root_parent_role_stays_user_when_already_user() {
 
     let now = Instant::now();
     // Sub at /root.
-    let _ = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let _ = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "outer".into(),
             root,
             ScanConfig::builder().recursive(false).build(),
@@ -249,7 +249,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
     assert!(matches!(
@@ -258,8 +258,8 @@ fn watch_root_parent_role_stays_user_when_already_user() {
     ));
 
     // Sub at /root/src — /root becomes its watch_root_parent.
-    let _ = e.attach_sub(
-        SubAttachRequest::for_resource(
+    let _ = e.step(
+        Input::AttachSub(SubAttachRequest::for_resource(
             "inner".into(),
             src,
             ScanConfig::builder().build(),
@@ -269,7 +269,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
-        ),
+        )),
         now,
     );
 

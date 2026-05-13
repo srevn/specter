@@ -226,11 +226,12 @@ impl crate::Engine {
     /// channel. The debug_assert below catches any caller passing a
     /// non-Idle Profile or one with an open channel entry.
     ///
-    /// **Caller responsibility.** Parent-edge work (`compute_and_set_parent_edge`,
-    /// `recompute_dependent_parent_edges`) is NOT done here — the fresh-attach
-    /// path needs it on first entry; the recovery path doesn't (the parent
-    /// edges already exist on the recovering Profile). Keeping the helper
-    /// minimal preserves that contract.
+    /// **Caller responsibility.** Parent-edge work
+    /// ([`Engine::install_parent_edges_for`]) is NOT done here — the
+    /// fresh-attach path needs it on first entry (called from
+    /// `bootstrap_pending`); the recovery path doesn't (the parent
+    /// edges already exist on the recovering Profile). Keeping the
+    /// helper minimal preserves that contract.
     ///
     /// **Recovery-overlap invariant.** When called from `start_pending_recovery`,
     /// the Profile already holds a `+1 STRUCTURE` contribution on the
@@ -269,10 +270,7 @@ impl crate::Engine {
         // Profile's claim shape that the contribution will attribute
         // to (matches `materialize_profile_anchor`'s sequencing).
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.state = ProfileState::Pending(DescentState {
-                current_prefix: prefix,
-                remaining_components: remaining,
-            });
+            p.state = ProfileState::Pending(DescentState::new(prefix, remaining));
         }
 
         // Step 3: install the prefix's STRUCTURE contribution.
@@ -325,11 +323,11 @@ impl crate::Engine {
         let Some(descent) = self.descent_state(owner) else {
             return;
         };
-        let prefix = descent.current_prefix;
+        let prefix = descent.current_prefix();
 
         // Defense-in-depth: the walker stamps `DirSnapshot.root_resource`
         // with the `target_resource` we placed on the `Descent` request,
-        // which the engine sets to `descent.current_prefix` at every
+        // which the engine sets to `descent.current_prefix()` at every
         // `emit_descent_probe` site. Divergence signals a walker bug or
         // a wire-side regression.
         debug_assert_eq!(
@@ -341,8 +339,8 @@ impl crate::Engine {
         // `release_owner_descent_prefix` recovery is no longer
         // reachable (and the corresponding `Diagnostic` variants have
         // been retired).
-        let next_segment = descent.remaining_components.head().clone();
-        let is_terminal = descent.remaining_components.is_terminal();
+        let next_segment = descent.remaining_components().head().clone();
+        let is_terminal = descent.remaining_components().is_terminal();
 
         // Descent probes ship `recursive=false`, so the response is a
         // single-level Dir snapshot — look up the next segment by name in
@@ -430,13 +428,13 @@ impl crate::Engine {
     ) {
         let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
         if let Some(d) = self.descent_state_mut(owner) {
-            d.current_prefix = new_prefix;
+            d.advance_to(new_prefix);
             // Non-terminal by caller contract — `dispatch_descent_ok`
             // routes terminal descents through anchor materialization
             // before reaching `advance_descent`. The debug_assert
             // inside `DescentRemaining::advance` pins this for
             // regression detection.
-            d.remaining_components.advance();
+            d.remaining_components_mut().advance();
         }
 
         let key = descent_key(owner);
@@ -449,8 +447,8 @@ impl crate::Engine {
 
     /// Owner-polymorphic descent-prefix release. Routes to the per-owner
     /// claim helper, both of which read the prefix from descent state
-    /// (Profile: `Pending(d).current_prefix`; Promoter:
-    /// `PrefixPending(d).current_prefix`).
+    /// (Profile: `Pending(d).current_prefix()`; Promoter:
+    /// `PrefixPending(d).current_prefix()`).
     ///
     /// Per-owner cleanup (parallel shape):
     ///
@@ -609,7 +607,7 @@ impl crate::Engine {
         let Some(descent) = self.descent_state(owner) else {
             return;
         };
-        let prefix = descent.current_prefix;
+        let prefix = descent.current_prefix();
 
         out.diagnostics
             .push(descent_vanished_diagnostic(owner, prefix));
@@ -632,9 +630,9 @@ impl crate::Engine {
                 // and the per-element CompactString clone.
                 let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
                 if let Some(d) = self.descent_state_mut(owner) {
-                    d.current_prefix = parent_id;
+                    d.advance_to(parent_id);
                     if let Some(name) = prefix_name {
-                        d.remaining_components.prepend(name);
+                        d.remaining_components_mut().prepend(name);
                     }
                 }
 
@@ -675,7 +673,7 @@ impl crate::Engine {
         out: &mut StepOutput,
     ) {
         let prefix = match self.descent_state(owner) {
-            Some(d) => d.current_prefix,
+            Some(d) => d.current_prefix(),
             None => return,
         };
         out.diagnostics
@@ -699,7 +697,7 @@ impl crate::Engine {
             return;
         }
         let prefix = match self.descent_state(owner) {
-            Some(d) => d.current_prefix,
+            Some(d) => d.current_prefix(),
             None => return,
         };
 

@@ -283,8 +283,8 @@ fn golden_path_full_lifecycle() {
         log_output: false,
         source_promoter: None,
     };
-    let (sid, attach_out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
 
     // attach_sub emits Watch + Suppress (anchor) + Probe (Seed). No Effect.
     assert!(
@@ -390,8 +390,8 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         log_output: false,
         source_promoter: None,
     };
-    let (sid, out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let correlation = first_probe_correlation(&out).expect("Seed probe");
     let pid = pid_of(&e, sid);
 
@@ -430,8 +430,8 @@ fn pending_event_race_late_probe_response_discarded() {
         log_output: false,
         source_promoter: None,
     };
-    let (sid, attach_out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let stale_correlation = first_probe_correlation(&attach_out).expect("Seed probe correlation");
 
@@ -480,8 +480,8 @@ fn seed_burst_descendants_watched_via_first_probe() {
         log_output: false,
         source_promoter: None,
     };
-    let (sid, attach_out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let correlation = first_probe_correlation(&attach_out).unwrap();
 
@@ -526,8 +526,8 @@ fn force_fire_emits_effect_with_forced_true() {
         log_output: false,
         source_promoter: None,
     };
-    let (sid, attach_out) = e.attach_sub(req, now);
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let seed_corr = first_probe_correlation(&attach_out).unwrap();
 
@@ -595,8 +595,8 @@ fn step_output_is_sorted() {
         log_output: false,
         source_promoter: None,
     };
-    let (sid, attach_out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
     let correlation = first_probe_correlation(&attach_out).unwrap();
     let leaves: Vec<(String, EntryKind, u64)> = (0..5)

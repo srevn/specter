@@ -125,8 +125,8 @@ fn attach_sub_with_events(
         events,
         false,
     );
-    let (sid, out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     (sid, pid, out)
 }
@@ -399,8 +399,8 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
         ClassSet::CONTENT, // user wants CONTENT only
         false,
     );
-    let (sid, _attach_out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Profile is Pending; current_prefix is /tmp.
@@ -408,7 +408,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
         ProfileState::Pending(d) => d.clone(),
         s => panic!("expected Pending, got {s:?}"),
     };
-    assert_eq!(descent.current_prefix, tmp);
+    assert_eq!(descent.current_prefix(), tmp);
 
     // /tmp's events_union is STRUCTURE — NOT the Sub's CONTENT mask. The
     // Sub's mask only contributes to its own anchor's union; the prefix
@@ -881,7 +881,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
 
     // Step 4: detach. reap_profile must NOT debug_assert and must NOT
     // leak the anchor's watch_demand.
-    let out = e.detach_sub(sid);
+    let out = e.step(Input::DetachSub(sid), Instant::now());
     assert!(
         e.profiles().get(pid).is_none(),
         "Profile reaped without panic",
@@ -986,7 +986,7 @@ fn setup_with_surviving_child(
 #[test]
 fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
     let mut e = Engine::new();
-    let (root, _child, sid, pid, _attach_out) = setup_with_surviving_child(&mut e);
+    let (root, _child, sid, pid, _) = setup_with_surviving_child(&mut e);
 
     // Drive a Standard burst.
     let t1 = Instant::now();
@@ -999,7 +999,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
     );
 
     // Detach mid-burst to set reap_pending.
-    let _ = e.detach_sub(sid);
+    let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
         e.profiles().get(pid).unwrap().state.burst_finish(),
         Some(BurstFinish::Reap)
@@ -1050,7 +1050,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
 fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
     // Symmetric regression for dispatch_standard_failed.
     let mut e = Engine::new();
-    let (root, _child, sid, pid, _attach_out) = setup_with_surviving_child(&mut e);
+    let (root, _child, sid, pid, _) = setup_with_surviving_child(&mut e);
 
     let t1 = Instant::now();
     e.step(
@@ -1060,7 +1060,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
         },
         t1,
     );
-    let _ = e.detach_sub(sid);
+    let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
         e.profiles().get(pid).unwrap().state.burst_finish(),
         Some(BurstFinish::Reap)
@@ -1109,7 +1109,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
 /// mistake on a still-live counter.
 fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceId, ProfileId) {
     let mut e = Engine::new();
-    let (root, _child, sid, pid, _attach_out) = setup_with_surviving_child(&mut e);
+    let (root, _child, sid, pid, _) = setup_with_surviving_child(&mut e);
 
     let t1 = Instant::now();
     e.step(
@@ -1119,7 +1119,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
         },
         t1,
     );
-    let _ = e.detach_sub(sid);
+    let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
         e.profiles().get(pid).unwrap().state.burst_finish(),
         Some(BurstFinish::Reap)
@@ -1218,9 +1218,10 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         ClassSet::CONTENT,
         false,
     );
-    let (sid_p, attach_out_p) = e.attach_sub(attach_p, Instant::now());
-    let sid_p = sid_p.expect("attach_sub succeeded");
-    let (_sid_q, attach_out_q) = e.attach_sub(attach_q, Instant::now());
+    let attach_out_p = e.step(Input::AttachSub(attach_p), Instant::now());
+    let sid_p =
+        specter_core::testkit::first_attached_sub(&attach_out_p).expect("attach_sub succeeded");
+    let attach_out_q = e.step(Input::AttachSub(attach_q), Instant::now());
     let pid_p = e.subs().get(sid_p).unwrap().profile;
     let pid_q = e
         .profiles()
@@ -1249,7 +1250,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         t1,
     );
     // Detach P to set reap_pending. Q stays alive.
-    let _ = e.detach_sub(sid_p);
+    let _ = e.step(Input::DetachSub(sid_p), Instant::now());
     assert!(matches!(
         e.profiles().get(pid_p).unwrap().state.burst_finish(),
         Some(BurstFinish::Reap)
@@ -1348,7 +1349,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_dir() {
     // `Profile.current` and releases `subdir`'s `watch_demand`
     // contribution; the slot reaps. Pre-PR-1 the descendant leaked.
     let mut e = Engine::new();
-    let (_root, child, sid, pid, _attach_out) = setup_with_surviving_child(&mut e);
+    let (_root, child, sid, pid, _) = setup_with_surviving_child(&mut e);
 
     // Pre-conditions: Profile is Idle, child has watch_demand >= 1.
     assert!(matches!(
@@ -1358,7 +1359,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_dir() {
     assert!(e.tree().get(child).is_some());
     assert!(e.tree().get(child).unwrap().watch_demand() >= 1);
 
-    let out = e.detach_sub(sid);
+    let out = e.step(Input::DetachSub(sid), Instant::now());
     assert!(
         e.profiles().get(pid).is_none(),
         "Idle Profile reaped on last-Sub detach",
@@ -1404,7 +1405,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
     let leaf = e.tree().lookup(Some(root), "a.rs").expect("leaf seeded");
     assert!(e.tree().get(leaf).unwrap().watch_demand() >= 1);
 
-    let out = e.detach_sub(sid);
+    let out = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles().get(pid).is_none());
     assert!(
         e.tree().get(leaf).is_none(),
@@ -1425,7 +1426,7 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
     // alongside the anchor's. Pre-PR-1 the descendants leaked even
     // though the anchor was correctly released.
     let mut e = Engine::new();
-    let (root, child, sid, pid, _attach_out) = setup_with_surviving_child(&mut e);
+    let (root, child, sid, pid, _) = setup_with_surviving_child(&mut e);
 
     // Drive a Standard burst.
     let t1 = Instant::now();
@@ -1436,7 +1437,7 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
         },
         t1,
     );
-    let _ = e.detach_sub(sid);
+    let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
         e.profiles().get(pid).unwrap().state.burst_finish(),
         Some(BurstFinish::Reap)
@@ -1491,7 +1492,7 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
     // per-descendant contributions. Same shape as the dispatch_*_vanished
     // path but driven through `on_anchor_terminal_event`.
     let mut e = Engine::new();
-    let (root, child, _sid, pid, _attach_out) = setup_with_surviving_child(&mut e);
+    let (root, child, _sid, pid, _) = setup_with_surviving_child(&mut e);
 
     let out = e.step(
         Input::FsEvent {
@@ -1537,7 +1538,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     // → dispatch_rebase_vanished. The release_descendant_claim wire-up
     // walks Profile.current and reaps subdir.
     let mut e = Engine::new();
-    let (root, child, sid, pid, _attach_out) = setup_with_surviving_child(&mut e);
+    let (root, child, sid, pid, _) = setup_with_surviving_child(&mut e);
 
     let t1 = Instant::now();
     e.step(
@@ -1676,9 +1677,10 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         ClassSet::CONTENT,
         false,
     );
-    let (sid_p, attach_out_p) = e.attach_sub(attach_p, Instant::now());
-    let sid_p = sid_p.expect("attach_sub succeeded");
-    let (_sid_q, attach_out_q) = e.attach_sub(attach_q, Instant::now());
+    let attach_out_p = e.step(Input::AttachSub(attach_p), Instant::now());
+    let sid_p =
+        specter_core::testkit::first_attached_sub(&attach_out_p).expect("attach_sub succeeded");
+    let attach_out_q = e.step(Input::AttachSub(attach_q), Instant::now());
     let pid_p = e.subs().get(sid_p).unwrap().profile;
     let pid_q = e
         .profiles()
@@ -1716,7 +1718,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         },
         t1,
     );
-    let _ = e.detach_sub(sid_p);
+    let _ = e.step(Input::DetachSub(sid_p), Instant::now());
 
     let t2 = t1 + SETTLE * 2;
     while let Some(entry) = e.pop_expired(t2) {
@@ -1806,9 +1808,10 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         ClassSet::METADATA,
         false,
     );
-    let (sid_p, attach_out_p) = e.attach_sub(attach_p, Instant::now());
-    let sid_p = sid_p.expect("attach_sub succeeded");
-    let (_sid_q, attach_out_q) = e.attach_sub(attach_q, Instant::now());
+    let attach_out_p = e.step(Input::AttachSub(attach_p), Instant::now());
+    let sid_p =
+        specter_core::testkit::first_attached_sub(&attach_out_p).expect("attach_sub succeeded");
+    let attach_out_q = e.step(Input::AttachSub(attach_q), Instant::now());
     let pid_p = e.subs().get(sid_p).unwrap().profile;
     let pid_q = e
         .profiles()

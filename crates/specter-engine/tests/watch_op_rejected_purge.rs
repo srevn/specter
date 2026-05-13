@@ -103,8 +103,8 @@ fn attach_subtree_root(
         ClassSet::CONTENT,
         false,
     );
-    let (sid, out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     (sid, pid, out)
 }
@@ -161,7 +161,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
         "ProfileClaimPurged{{Anchor}} emitted",
     );
 
-    let _ = e.detach_sub(sid);
+    let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles().get(pid).is_none(), "Profile reaped cleanly");
 }
 
@@ -300,7 +300,7 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
     let _ = p_seed_vanished;
 
     // Detach P; assert clean reap.
-    let _ = e.detach_sub(sid_p);
+    let _ = e.step(Input::DetachSub(sid_p), Instant::now());
     assert!(e.profiles().get(pid_p).is_none());
     // Q remains alive.
     assert!(e.profiles().get(pid_q).is_some());
@@ -367,7 +367,7 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
         "ProfileClaimPurged{{WatchRootParent}} emitted",
     );
 
-    let _ = e.detach_sub(sid);
+    let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles().get(pid).is_none(), "Profile reaped cleanly");
 }
 
@@ -396,8 +396,8 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         ClassSet::EMPTY,
         false,
     );
-    let (sid, attach_out) = e.attach_sub(req, Instant::now());
-    let sid = sid.expect("attach_sub succeeded");
+    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     let initial_corr = first_probe_corr(&attach_out).expect("descent probe");
     assert!(matches!(
@@ -515,8 +515,12 @@ fn watch_op_rejected_purges_promoter_descent_prefix() {
     // /a/b doesn't exist, so the Promoter starts in PrefixPending(/a, [b])
     // and emits a descent probe at /a.
     let a = pre_place_dir(&mut e, &["a"]);
-    let (qid, _attach_out) = e.attach_promoter(promoter_req("logs", "/a/b/*.log"), now);
-    let qid = qid.expect("attach_promoter succeeded");
+    let attach_out = e.step(
+        Input::AttachPromoter(promoter_req("logs", "/a/b/*.log")),
+        now,
+    );
+    let qid = specter_core::testkit::first_attached_promoter(&attach_out)
+        .expect("attach_promoter succeeded");
     assert!(matches!(
         e.promoters().get(qid).unwrap().state,
         PromoterState::PrefixPending(_),
@@ -583,8 +587,9 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
     // is /a; first proxy registers at /a (immediate-Active mode);
     // an enumeration probe is in flight.
     let a = pre_place_dir(&mut e, &["a"]);
-    let (qid, _attach_out) = e.attach_promoter(promoter_req("logs", "/a/*.log"), now);
-    let qid = qid.expect("attach_promoter succeeded");
+    let attach_out = e.step(Input::AttachPromoter(promoter_req("logs", "/a/*.log")), now);
+    let qid = specter_core::testkit::first_attached_promoter(&attach_out)
+        .expect("attach_promoter succeeded");
     match &e.promoters().get(qid).unwrap().state {
         PromoterState::Active { proxies } => assert!(proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active at /a, got {s:?}"),
@@ -655,8 +660,9 @@ fn watch_op_rejected_purges_co_claimed_resource() {
     // Pre-place /a so the Promoter goes immediate-Active with a proxy
     // at /a. The proxy contributes +1 STRUCTURE.
     let a = pre_place_dir(&mut e, &["a"]);
-    let (qid, _attach_q_out) = e.attach_promoter(promoter_req("logs", "/a/*.log"), now);
-    let qid = qid.expect("attach_promoter succeeded");
+    let attach_q_out = e.step(Input::AttachPromoter(promoter_req("logs", "/a/*.log")), now);
+    let qid = specter_core::testkit::first_attached_promoter(&attach_q_out)
+        .expect("attach_promoter succeeded");
     match &e.promoters().get(qid).unwrap().state {
         PromoterState::Active { proxies } => assert!(proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
@@ -688,8 +694,9 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         ClassSet::EMPTY,
         false,
     );
-    let (sid_p, _attach_p_out) = e.attach_sub(req, now);
-    let sid_p = sid_p.expect("attach_sub succeeded");
+    let attach_p_out = e.step(Input::AttachSub(req), now);
+    let sid_p =
+        specter_core::testkit::first_attached_sub(&attach_p_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_p).unwrap().profile;
     assert!(matches!(
         e.profiles().get(pid).unwrap().state,

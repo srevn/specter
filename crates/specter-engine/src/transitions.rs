@@ -914,7 +914,7 @@ impl Engine {
         // Snapshot every claimer BEFORE any mutation. Borrow checker
         // (we'll mutate self.profiles / self.promoters in the loops)
         // and we want a stable view of the pre-clamp world: a Profile
-        // that's `Pending(d)` with `d.current_prefix == resource` must
+        // that's `Pending(d)` with `d.current_prefix() == resource` must
         // be detected here, because the helpers we run below transition
         // the Profile to Idle. Same for Promoter state-flips below.
         let mut anchor_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
@@ -928,7 +928,7 @@ impl Engine {
                 parent_claimers.push(pid);
             }
             if let ProfileState::Pending(d) = &p.state
-                && d.current_prefix == resource
+                && d.current_prefix() == resource
             {
                 descent_claimers.push(pid);
             }
@@ -945,7 +945,7 @@ impl Engine {
             smallvec::SmallVec::new();
         for (qid, q) in self.promoters.iter() {
             match &q.state {
-                PromoterState::PrefixPending(d) if d.current_prefix == resource => {
+                PromoterState::PrefixPending(d) if d.current_prefix() == resource => {
                     promoter_descent_claimers.push(qid);
                 }
                 PromoterState::Active { proxies } if proxies.contains_key(&resource) => {
@@ -1177,7 +1177,7 @@ impl Engine {
                 None => continue,
                 Some(q) => match &q.state {
                     PromoterState::PrefixPending(d) if !channel_open => {
-                        PromoterReseedAction::DescentProbe(d.current_prefix)
+                        PromoterReseedAction::DescentProbe(d.current_prefix())
                     }
                     // PrefixPending with in-flight descent probe: the
                     // probe's response will reflect the post-overflow
@@ -1252,7 +1252,8 @@ impl Engine {
             .iter()
             .filter(|(_, q)| match &q.state {
                 PromoterState::PrefixPending(d) => {
-                    d.current_prefix == r || self.tree.ancestors(d.current_prefix).any(|a| a == r)
+                    d.current_prefix() == r
+                        || self.tree.ancestors(d.current_prefix()).any(|a| a == r)
                 }
                 PromoterState::Active { proxies } => proxies
                     .keys()
@@ -2462,7 +2463,7 @@ impl Engine {
     /// Two carrier classes:
     ///
     /// - **Descent** ([`ProbeOwner`]): owners currently descending whose
-    ///   `DescentState.current_prefix == resource`. Both Profile
+    ///   `DescentState.current_prefix() == resource`. Both Profile
     ///   (`ProfileState::Pending(d)`) and Promoter
     ///   (`PromoterState::PrefixPending(d)`) descents qualify; the
     ///   Promoter arm closes the bug where a Promoter waiting on a
@@ -2487,7 +2488,7 @@ impl Engine {
         };
         for (pid, p) in self.profiles.iter() {
             match &p.state {
-                ProfileState::Pending(d) if d.current_prefix == resource => {
+                ProfileState::Pending(d) if d.current_prefix() == resource => {
                     out.descents.push(ProbeOwner::Profile(pid));
                 }
                 ProfileState::Idle
@@ -2500,7 +2501,7 @@ impl Engine {
         }
         for (qid, q) in self.promoters.iter() {
             if let specter_core::PromoterState::PrefixPending(d) = &q.state
-                && d.current_prefix == resource
+                && d.current_prefix() == resource
             {
                 out.descents.push(ProbeOwner::Promoter(qid));
             }

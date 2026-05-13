@@ -128,9 +128,9 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
 /// profiles, child)` function of the `covers` predicate, with no
 /// caching or peer state. The cached parent edge lives on
 /// `Profile.parent_profile`; engine-side write paths
-/// (`compute_and_set_parent_edge`,
-/// `stability::recompute_parent_edges_for_*`) call this function and
-/// route the result through `stability::write_parent_edge`.
+/// (`Engine::install_parent_edges_for`,
+/// `stability::recompute_parent_edges`) call this function and route
+/// the result through `stability::write_parent_edge`.
 #[must_use]
 pub fn nearest_covering_ancestor(
     tree: &Tree,
