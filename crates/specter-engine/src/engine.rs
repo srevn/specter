@@ -23,11 +23,11 @@ use specter_core::{ProfileId, ResourceId, SubId, TimerId};
 use specter_core::Tree;
 // Profile state machine.
 use specter_core::{
-    ActiveBurst, AnchorClaim, BurstFinish, DescentState, DetachLifecycle, PostFirePhase,
-    PreFirePhase, Profile, ProfileMap, ProfileState, ReapTrigger, TimerKind,
+    AnchorClaim, BurstFinish, DescentState, DetachLifecycle, Profile, ProfileMap, ProfileState,
+    ReapTrigger, TimerKind,
 };
 // Registries.
-use specter_core::{PromoterRegistry, PromoterState, Sub, SubAttachRequest, SubRegistry};
+use specter_core::{PromoterRegistry, Sub, SubAttachRequest, SubRegistry};
 // Per-Resource bookkeeping.
 use specter_core::{ClassSet, ContribKey};
 // Probe + effect correlation.
@@ -37,6 +37,17 @@ use specter_core::{Diagnostic, Input, StepOutput};
 // Helpers.
 use specter_core::compute_config_hash;
 use std::time::{Duration, Instant};
+
+/// Per-call stale-drain bound for [`Engine::pop_expired`].
+///
+/// Realistic worst case per call is single-digit (each Active Profile
+/// carries ~2 timer slots and orphans at most one per burst
+/// transition; the bin's tick loop polls frequently enough that
+/// orphans collect incrementally rather than piling at the heap top).
+/// The bound is loose enough to absorb multi-Profile burst-end
+/// cleanup yet tight enough to surface an "engine transition leaks
+/// timer references" regression in dev/CI.
+const STALE_DRAIN_BOUND: u32 = 32;
 
 /// `pub(crate)` field visibility lets sibling modules read/write engine
 /// state directly. External consumers go through the public methods.
@@ -89,32 +100,23 @@ impl Engine {
     /// Sole reader API for the descent-state payload outside the routing
     /// match sites in `on_*_probe_response`. The exhaustive `ProbeOwner`
     /// match enforces that adding a new owner kind requires extending
-    /// this accessor.
+    /// this accessor; the per-state-type projection
+    /// ([`ProfileState::descent_state`] /
+    /// [`PromoterState::descent_state`]) owns the in-variant payload
+    /// match, so the dispatcher here stays a thin two-line route.
     #[must_use]
     pub(crate) fn descent_state(&self, owner: ProbeOwner) -> Option<&DescentState> {
         match owner {
-            ProbeOwner::Profile(pid) => match &self.profiles.get(pid)?.state {
-                ProfileState::Pending(d) => Some(d),
-                ProfileState::Idle | ProfileState::Active(_, _) => None,
-            },
-            ProbeOwner::Promoter(pid) => match &self.promoters.get(pid)?.state {
-                PromoterState::PrefixPending(d) => Some(d),
-                PromoterState::Active { .. } => None,
-            },
+            ProbeOwner::Profile(pid) => self.profiles.get(pid)?.state.descent_state(),
+            ProbeOwner::Promoter(pid) => self.promoters.get(pid)?.state.descent_state(),
         }
     }
 
     /// Mutable counterpart to [`Engine::descent_state`].
     pub(crate) fn descent_state_mut(&mut self, owner: ProbeOwner) -> Option<&mut DescentState> {
         match owner {
-            ProbeOwner::Profile(pid) => match &mut self.profiles.get_mut(pid)?.state {
-                ProfileState::Pending(d) => Some(d),
-                ProfileState::Idle | ProfileState::Active(_, _) => None,
-            },
-            ProbeOwner::Promoter(pid) => match &mut self.promoters.get_mut(pid)?.state {
-                PromoterState::PrefixPending(d) => Some(d),
-                PromoterState::Active { .. } => None,
-            },
+            ProbeOwner::Profile(pid) => self.profiles.get_mut(pid)?.state.descent_state_mut(),
+            ProbeOwner::Promoter(pid) => self.promoters.get_mut(pid)?.state.descent_state_mut(),
         }
     }
 
@@ -867,13 +869,25 @@ impl Engine {
     /// Recompute `Profile.settle = min(remaining_subs.settles)` after a
     /// Sub addition or removal. O(subs-on-profile), bounded — typically
     /// 1–2 in v1 because `max_settle` already partitions Profiles.
+    ///
+    /// Uses `.map(...).expect(...)` rather than a defensive
+    /// `.filter_map(...)`: [`SubRegistry::insert`] and
+    /// [`SubRegistry::remove`] keep the `by_profile` index and the
+    /// slotmap in lockstep, so every id returned by [`SubRegistry::at`]
+    /// is live in [`SubRegistry::get`] by construction. A `None`
+    /// here would be a structural invariant breach; the `expect` is
+    /// the surface that names it.
     pub(crate) fn recompute_profile_settle(&mut self, profile_id: ProfileId) {
         let new_min: Option<Duration> = self
             .subs
             .at(profile_id)
             .iter()
-            .filter_map(|sid| self.subs.get(*sid))
-            .map(|s| s.settle)
+            .map(|sid| {
+                self.subs
+                    .get(*sid)
+                    .expect("by_profile index keeps SubIds live for SubRegistry::at")
+                    .settle
+            })
             .min();
         if let (Some(s), Some(p)) = (new_min, self.profiles.get_mut(profile_id)) {
             p.settle = s;
@@ -936,66 +950,73 @@ impl Engine {
     /// dropped. The returned [`TimerEntry`] carries the owning profile,
     /// kind, and id together — the bin forwards it to
     /// [`Input::TimerExpired`] without any rediscovery.
+    ///
+    /// **Stale-drain bound (dev only).** A single call drains at most
+    /// 32 stale entries before tripping a `debug_assert!`. Realistic
+    /// per-call drain is single-digit — each Active Profile carries
+    /// ~2 timer slots and orphans at most one per burst transition,
+    /// and the bin's tick loop polls frequently enough that orphans
+    /// collect incrementally. The bound is loose enough to absorb
+    /// multi-Profile burst-end cleanup, tight enough to surface an
+    /// "engine transition leaks timer references" regression. Release
+    /// builds run unbounded (the lazy drain is correct either way; the
+    /// bound is purely a developer-time invariant check).
     pub fn pop_expired(&mut self, now: Instant) -> Option<TimerEntry> {
+        // Stale-drain accounting — see the rustdoc above for the bound's
+        // semantics. `u32` is more than enough headroom even in a
+        // release build where the assert is compiled out.
+        let mut stale_drops: u32 = 0;
         loop {
             let top = self.timers.peek_top()?;
             if top.deadline > now {
                 return None;
             }
             let entry = self.timers.pop_top().expect("peek_top was Some");
-            if Self::is_timer_referenced(&self.profiles, entry.profile, entry.kind, entry.id) {
+            if is_timer_referenced(&self.profiles, entry.profile, entry.kind, entry.id) {
                 return Some(entry);
             }
             // Stale — silently drop, continue draining.
+            stale_drops += 1;
+            debug_assert!(
+                stale_drops <= STALE_DRAIN_BOUND,
+                "pop_expired: drained {stale_drops} stale timers in a single call \
+                 (bound = {STALE_DRAIN_BOUND}); a transition is leaking timer references. \
+                 Last stale: kind = {:?}, profile = {:?}",
+                entry.kind,
+                entry.profile,
+            );
         }
     }
+}
 
-    /// Whether `id` is the live timer for `profile`'s `kind` slot —
-    /// `pop_expired` uses this to filter stale heap heads, and
-    /// `on_timer_expired` re-runs it as defense-in-depth for direct
-    /// `step(Input::TimerExpired)` callers (tests, fuzzers).
-    ///
-    /// Each (`TimerKind`, `ActiveBurst` variant) pair is either a live
-    /// match (returns based on `id` equality with the carried token) or
-    /// type-impossible (falls through to `_ => false`). The typed split
-    /// eliminates the pre-split runtime narrowing for `BurstDeadline`
-    /// (the field cannot live on `PostFireBurst` so its post-fire match
-    /// arms are now unreachable by type):
-    /// - `Settle` lives on `PreFirePhase::Batching` only.
-    /// - `BurstDeadline` lives on `PreFireBurst`; any `PreFirePhase` is
-    ///   structurally valid.
-    /// - `AwaitGateDeadline` lives on `PostFirePhase::Awaiting` only.
-    ///
-    /// Only `Active` Profiles schedule timers; `Idle` and `Pending`
-    /// Profiles own none of these slots.
-    pub(crate) fn is_timer_referenced(
-        profiles: &ProfileMap,
-        profile: ProfileId,
-        kind: TimerKind,
-        id: TimerId,
-    ) -> bool {
-        let Some(p) = profiles.get(profile) else {
-            return false;
-        };
-        let ProfileState::Active(active, _) = &p.state else {
-            return false;
-        };
-        match (kind, active) {
-            (TimerKind::Settle, ActiveBurst::PreFire(pre)) => matches!(
-                &pre.phase,
-                PreFirePhase::Batching { settle_timer } if *settle_timer == id,
-            ),
-            (TimerKind::BurstDeadline, ActiveBurst::PreFire(pre)) => pre.burst_deadline == id,
-            (TimerKind::AwaitGateDeadline, ActiveBurst::PostFire(post)) => matches!(
-                &post.phase,
-                PostFirePhase::Awaiting { gate_deadline, .. } if *gate_deadline == id,
-            ),
-            // Type-impossible: Settle / BurstDeadline on PostFire, and
-            // AwaitGateDeadline on PreFire. Lazy drop in `pop_expired`.
-            (TimerKind::Settle | TimerKind::BurstDeadline, ActiveBurst::PostFire(_))
-            | (TimerKind::AwaitGateDeadline, ActiveBurst::PreFire(_)) => false,
-        }
-    }
+/// Whether `id` is the live timer for `profile`'s `kind` slot —
+/// `pop_expired` uses this to filter stale heap heads, and
+/// `on_timer_expired` re-runs it as defense-in-depth for direct
+/// `step(Input::TimerExpired)` callers (tests, fuzzers).
+///
+/// Implemented as a thin lookup-and-compare against
+/// [`ProfileState::timer_token`]: every `(state, kind)` pair routes
+/// to whichever burst-side type carries the field, with the
+/// type-impossible pairs (e.g., `Settle` on `PostFire`) folding to
+/// `None` at the leaf without an explicit fallthrough arm. Returns
+/// `false` for stale `profile` ids and for any state that doesn't
+/// own a `kind` timer right now.
+///
+/// Free function rather than a method on [`Engine`]: the projection
+/// is purely a query over [`ProfileMap`] and doesn't reach into the
+/// engine's other fields, so a free function keeps the call-site
+/// shape (`is_timer_referenced(&self.profiles, …)`) honest about
+/// the dependency.
+pub(crate) fn is_timer_referenced(
+    profiles: &ProfileMap,
+    profile: ProfileId,
+    kind: TimerKind,
+    id: TimerId,
+) -> bool {
+    profiles
+        .get(profile)
+        .and_then(|p| p.state.timer_token(kind))
+        .is_some_and(|live| live == id)
 }
 
 /// Find-or-create-or-revive outcome for `attach_sub_inner`. The three
@@ -1204,6 +1225,32 @@ mod tests {
 
         assert_eq!(e.pop_expired(now), None);
         assert_eq!(e.timers.len(), 0, "stale heads were drained");
+    }
+
+    /// Stale-drain bound: a `pop_expired` call that drains more than
+    /// [`STALE_DRAIN_BOUND`] consecutive stale entries trips the
+    /// `debug_assert!`. Production code is structurally bounded
+    /// (per-Profile orphan count is small); this test pins the
+    /// regression sensor by deliberately exceeding the bound.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "stale timers in a single call")]
+    fn pop_expired_panics_on_excessive_stale_drain_in_debug() {
+        let mut e = Engine::new();
+        let now = Instant::now();
+        let past = now
+            .checked_sub(Duration::from_millis(1))
+            .expect("test clock has room for sub-millisecond rewind");
+        // Schedule one beyond the bound. All stale (default ProfileId
+        // has no Active state), so the drain runs through them all.
+        for _ in 0..=STALE_DRAIN_BOUND {
+            e.timers
+                .schedule(past, ProfileId::default(), TimerKind::Settle);
+        }
+        let _ = e.pop_expired(now);
     }
 
     #[test]

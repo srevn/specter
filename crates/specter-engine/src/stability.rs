@@ -7,7 +7,7 @@
 //! through `&mut ProfileMap`.
 
 use crate::coverage::nearest_covering_ancestor;
-use specter_core::{ActiveBurst, PreFirePhase, ProfileId, ProfileMap, ProfileState, Tree};
+use specter_core::{ProfileId, ProfileMap, Tree};
 use tinyvec::TinyVec;
 
 /// Walk parent edges from `source` and apply `delta` to each ancestor's
@@ -29,6 +29,14 @@ pub(crate) fn propagate(
     source: ProfileId,
     delta: i32,
 ) -> TinyVec<[ProfileId; 4]> {
+    // δ=0 is a no-op by construction: every ancestor's count would
+    // round-trip through `prev → prev`, the `prev > 0 && new == 0`
+    // edge can't cross, and the walk has no observable effect.
+    // Short-circuit so callers that pass δ=0 (defensive paths in the
+    // dispatcher) don't pay the parent-chain walk.
+    if delta == 0 {
+        return TinyVec::new();
+    }
     let mut hit_zero: TinyVec<[ProfileId; 4]> = TinyVec::new();
     let mut current = source;
     while let Some(parent) = profiles.get(current).and_then(|p| p.parent_profile) {
@@ -43,7 +51,7 @@ pub(crate) fn propagate(
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let new_value = clamped as u32;
         p.dirty_descendants = new_value;
-        if prev > 0 && new_value == 0 && in_draining(&p.state) {
+        if prev > 0 && new_value == 0 && p.state.is_draining() {
             hit_zero.push(parent);
         }
         current = parent;
@@ -116,24 +124,6 @@ pub(crate) fn write_parent_edge(
     }
     if let Some(profile) = profiles.get_mut(child) {
         profile.parent_profile = parent;
-    }
-}
-
-/// True iff `state` is `Active(PreFire(Draining))`. Only Draining
-/// Profiles are interested in the `dirty_descendants → 0` edge — the
-/// reconfirm-probe transition is the consumer of `propagate`'s return
-/// list. `Idle` and `Pending` are structurally not-Draining; the
-/// descent lifecycle never drives the reconfirm cascade. Post-fire
-/// phases are type-impossible (`Draining` lives only on
-/// [`PreFirePhase`]); the match's wildcard captures them along with
-/// the other non-Draining pre-fire phases.
-const fn in_draining(state: &ProfileState) -> bool {
-    match state {
-        ProfileState::Idle | ProfileState::Pending(_) => false,
-        ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
-            matches!(pre.phase, PreFirePhase::Draining)
-        }
-        ProfileState::Active(ActiveBurst::PostFire(_), _) => false,
     }
 }
 
@@ -302,9 +292,10 @@ mod tests {
     }
 
     /// I3 placeholder: every Profile is Idle. `propagate`'s `hit_zero`
-    /// filter (`prev > 0 && new == 0 && in_draining`) cannot fire —
-    /// crossing the `prev > 0 → new == 0` boundary is fine, but
-    /// `in_draining(Idle)` is false, so the ancestor is not returned.
+    /// filter (`prev > 0 && new == 0 && p.state.is_draining()`) cannot
+    /// fire — crossing the `prev > 0 → new == 0` boundary is fine, but
+    /// `ProfileState::Idle.is_draining()` is false, so the ancestor is
+    /// not returned.
     #[test]
     fn propagate_returns_empty_in_idle_only_world() {
         let (tree, mut profiles, p_root, _, p_leaf) = three_level_chain();

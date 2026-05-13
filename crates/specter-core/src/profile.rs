@@ -41,10 +41,12 @@ use tinyvec::TinyVec;
 /// pre-fire accumulators are *gone* — they were consumed at the
 /// `transition_to_verifying` immediately preceding the fire — and the
 /// `BurstDeadline` timer becomes structurally irrelevant
-/// (`is_timer_referenced` filters it out for post-fire phases). The only
-/// fresh accumulator is `force_walk_resources`, which the post-fire
-/// absorb arm of `drive_burst` (now: `absorb_event_into_fire_tail`)
-/// feeds for the rebase probe's force-walk hint.
+/// ([`PostFireBurst::timer_token`] folds it to `None` for post-fire
+/// phases, so the engine's stale-drain lazily collects the heap
+/// entry). The only fresh accumulator is `force_walk_resources`,
+/// which the post-fire absorb arm of `drive_burst` (now:
+/// `absorb_event_into_fire_tail`) feeds for the rebase probe's
+/// force-walk hint.
 #[derive(Debug)]
 pub enum ActiveBurst {
     PreFire(PreFireBurst),
@@ -216,8 +218,9 @@ pub enum PreFirePhase {
 /// **Three fields, by construction.**
 /// - No `forced`: no fire decision left (the fire already happened).
 /// - No `burst_deadline`: the BurstDeadline timer is filtered out by
-///   `is_timer_referenced` for post-fire phases. Stored on the pre-fire
-///   side; lazy-dropped when it expires post-fire.
+///   [`PostFireBurst::timer_token`]'s `Settle | BurstDeadline` arm for
+///   post-fire phases. Stored on the pre-fire side; lazy-dropped when
+///   it expires post-fire.
 /// - No `probe_target`: Rebasing always targets the Profile's anchor.
 /// - No `dirty_resources` / `suppressed_resources` / `last_event_time`:
 ///   pre-fire accumulators, drained at `transition_to_verifying`
@@ -275,11 +278,42 @@ pub enum PostFirePhase {
 }
 
 impl PreFireBurst {
+    /// The `TimerId` armed on this burst for `kind`, or `None` if the
+    /// pre-fire shape doesn't carry a slot for `kind`.
+    ///
+    /// Pre-fire owns:
+    /// - [`TimerKind::Settle`] — lives on [`PreFirePhase::Batching`]
+    ///   only; the field is absent in `Verifying`/`Draining` and the
+    ///   arm returns `None`.
+    /// - [`TimerKind::BurstDeadline`] — non-Optional on
+    ///   [`PreFireBurst`]; always `Some(self.burst_deadline)`.
+    /// - [`TimerKind::AwaitGateDeadline`] — type-impossible here (the
+    ///   field lives on [`PostFireBurst`] only); the arm returns
+    ///   `None` to encode the structural absence.
+    ///
+    /// Consumed via the [`ActiveBurst`] / [`ProfileState`] delegation
+    /// chain by the engine's stale-timer filter; each layer only
+    /// enumerates the kinds its data shape can actually carry, so the
+    /// type-impossible pairs fold to `None` at the leaf without a
+    /// wildcard fallthrough.
+    #[must_use]
+    pub const fn timer_token(&self, kind: TimerKind) -> Option<TimerId> {
+        match kind {
+            TimerKind::Settle => match &self.phase {
+                PreFirePhase::Batching { settle_timer } => Some(*settle_timer),
+                PreFirePhase::Verifying | PreFirePhase::Draining => None,
+            },
+            TimerKind::BurstDeadline => Some(self.burst_deadline),
+            TimerKind::AwaitGateDeadline => None,
+        }
+    }
+
     /// Typed move from pre-fire to post-fire.
     ///
     /// Drops, by leaving them out of the constructor:
-    /// - `burst_deadline` — lazy-dropped by `is_timer_referenced`'s
-    ///   filter once it expires post-fire.
+    /// - `burst_deadline` — lazy-dropped by
+    ///   [`PostFireBurst::timer_token`]'s `None` arm once it expires
+    ///   post-fire.
     /// - `forced` — no fire decision left in the post-fire lifecycle.
     /// - `probe_target` — Rebasing always targets the anchor.
     /// - `last_event_time` — pre-fire-only accumulator.
@@ -314,6 +348,46 @@ impl PreFireBurst {
                 gate_deadline,
             },
             force_walk_resources: BTreeSet::new(),
+        }
+    }
+}
+
+impl PostFireBurst {
+    /// The `TimerId` armed on this burst for `kind`, or `None` if the
+    /// post-fire shape doesn't carry a slot for `kind`.
+    ///
+    /// Post-fire owns:
+    /// - [`TimerKind::AwaitGateDeadline`] — lives on
+    ///   [`PostFirePhase::Awaiting`]'s `gate_deadline` field; the arm
+    ///   returns `None` once the burst advances to `Rebasing` (the
+    ///   field doesn't exist on that variant).
+    /// - [`TimerKind::Settle`] / [`TimerKind::BurstDeadline`] —
+    ///   type-impossible here (the fields were dropped at
+    ///   [`PreFireBurst::into_post_fire`]); the arm returns `None`
+    ///   to encode the structural absence.
+    #[must_use]
+    pub const fn timer_token(&self, kind: TimerKind) -> Option<TimerId> {
+        match kind {
+            TimerKind::AwaitGateDeadline => match &self.phase {
+                PostFirePhase::Awaiting { gate_deadline, .. } => Some(*gate_deadline),
+                PostFirePhase::Rebasing => None,
+            },
+            TimerKind::Settle | TimerKind::BurstDeadline => None,
+        }
+    }
+}
+
+impl ActiveBurst {
+    /// Delegate to the lifecycle-side projection. [`Self::PreFire`]
+    /// and [`Self::PostFire`] carry disjoint timer fields by
+    /// construction; this dispatcher routes to whichever side the
+    /// burst is currently on without re-enumerating the
+    /// type-impossible cross-pairs.
+    #[must_use]
+    pub const fn timer_token(&self, kind: TimerKind) -> Option<TimerId> {
+        match self {
+            Self::PreFire(pre) => pre.timer_token(kind),
+            Self::PostFire(post) => post.timer_token(kind),
         }
     }
 }
@@ -578,6 +652,71 @@ impl ProfileState {
             false
         }
     }
+
+    /// The live `TimerId` for the requested `kind` slot, or `None` if
+    /// the state owns no timer of that kind right now.
+    ///
+    /// Only [`Self::Active`] Profiles schedule timers — [`Self::Idle`]
+    /// and [`Self::Pending`] (descent) own none and return `None` for
+    /// every kind. The `Active` arm delegates to
+    /// [`ActiveBurst::timer_token`], which in turn routes to whichever
+    /// burst-side type ([`PreFireBurst`] or [`PostFireBurst`]) actually
+    /// carries the field. Each layer only enumerates the kinds its
+    /// data shape can carry, so type-impossible pairs fold to `None`
+    /// at the leaf without an explicit wildcard arm.
+    ///
+    /// Consumed by the engine's `pop_expired` and `on_timer_expired`
+    /// gates to distinguish a live timer from a stale heap orphan
+    /// (cancelled because the Profile's burst was reset between
+    /// `schedule` and pop).
+    #[must_use]
+    pub const fn timer_token(&self, kind: TimerKind) -> Option<TimerId> {
+        match self {
+            Self::Active(burst, _) => burst.timer_token(kind),
+            Self::Idle | Self::Pending(_) => None,
+        }
+    }
+
+    /// True iff the state is `Active(PreFire(Draining))`. The
+    /// reconfirm cascade (the `Draining → Verifying` re-probe driven
+    /// when `dirty_descendants → 0`) keys off this predicate — only
+    /// Draining ancestors care about the descendants-cleared edge.
+    /// `Idle` and `Pending` are structurally not-Draining; the
+    /// post-fire arm and the other pre-fire phases (Batching,
+    /// Verifying) also return `false`.
+    #[must_use]
+    pub const fn is_draining(&self) -> bool {
+        match self {
+            Self::Active(ActiveBurst::PreFire(pre), _) => {
+                matches!(pre.phase, PreFirePhase::Draining)
+            }
+            Self::Idle | Self::Pending(_) | Self::Active(ActiveBurst::PostFire(_), _) => false,
+        }
+    }
+
+    /// Borrow the descent payload if the state is currently
+    /// [`Self::Pending`]. `None` for [`Self::Idle`] and
+    /// [`Self::Active`] — the descent payload only lives in the
+    /// `Pending` variant.
+    ///
+    /// Symmetric with [`crate::PromoterState::descent_state`]; the
+    /// engine's owner-polymorphic `descent_state` dispatcher routes
+    /// to either projection through [`crate::ProbeOwner`].
+    #[must_use]
+    pub const fn descent_state(&self) -> Option<&DescentState> {
+        match self {
+            Self::Pending(d) => Some(d),
+            Self::Idle | Self::Active(_, _) => None,
+        }
+    }
+
+    /// Mutable counterpart to [`Self::descent_state`].
+    pub const fn descent_state_mut(&mut self) -> Option<&mut DescentState> {
+        match self {
+            Self::Pending(d) => Some(d),
+            Self::Idle | Self::Active(_, _) => None,
+        }
+    }
 }
 
 /// Variant tag for [`ProfileState`], carried on diagnostics that report
@@ -767,8 +906,9 @@ pub enum BurstIntent {
 /// phase. The timer is carried on [`PreFireBurst`] and is structurally
 /// invalid in post-fire phases; once the burst crosses
 /// [`PreFireBurst::into_post_fire`] the timer is dropped from the
-/// type's field set, and a stale fire is filtered out by
-/// `Engine::is_timer_referenced` (in `specter-engine`).
+/// type's field set, and a stale fire is filtered out by the
+/// [`PostFireBurst::timer_token`] projection (the engine's stale-drain
+/// consumes the projection through [`ProfileState::timer_token`]).
 /// `AwaitGateDeadline` — recovery timer armed at
 /// [`PostFirePhase::Awaiting`] entry. Expiry indicates the actuator is
 /// taking longer than expected (likely a hung child); the engine
@@ -1748,5 +1888,330 @@ mod tests {
             initial + 2,
             "each sibling clone bumps the strong count",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ProfileState projections: timer_token / is_draining / descent_state
+    // -----------------------------------------------------------------------
+
+    use super::{
+        ActiveBurst, BurstFinish, BurstIntent, DescentRemaining, DescentState, PostFireBurst,
+        PostFirePhase, PreFireBurst, PreFirePhase, TimerKind,
+    };
+    use crate::ids::TimerId;
+    use slotmap::KeyData;
+    use std::collections::BTreeSet;
+
+    fn tid(n: u64) -> TimerId {
+        TimerId::from(KeyData::from_ffi(n))
+    }
+
+    fn batching_burst(settle: TimerId, deadline: TimerId, anchor: ResourceId) -> PreFireBurst {
+        PreFireBurst {
+            burst_deadline: deadline,
+            phase: PreFirePhase::Batching {
+                settle_timer: settle,
+            },
+            intent: BurstIntent::Standard,
+            forced: false,
+            dirty_resources: BTreeSet::new(),
+            force_walk_resources: BTreeSet::new(),
+            probe_target: anchor,
+            suppressed_resources: BTreeSet::new(),
+            last_event_time: None,
+        }
+    }
+
+    fn unit_pre(phase: PreFirePhase, deadline: TimerId, anchor: ResourceId) -> PreFireBurst {
+        PreFireBurst {
+            burst_deadline: deadline,
+            phase,
+            intent: BurstIntent::Standard,
+            forced: false,
+            dirty_resources: BTreeSet::new(),
+            force_walk_resources: BTreeSet::new(),
+            probe_target: anchor,
+            suppressed_resources: BTreeSet::new(),
+            last_event_time: None,
+        }
+    }
+
+    /// Settle on Batching returns the carried token.
+    #[test]
+    fn timer_token_settle_on_batching_returns_settle_timer() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let pre = batching_burst(tid(7), tid(99), r);
+        assert_eq!(pre.timer_token(TimerKind::Settle), Some(tid(7)));
+    }
+
+    /// BurstDeadline on any pre-fire phase returns the burst's deadline,
+    /// non-Optional by construction.
+    #[test]
+    fn timer_token_burst_deadline_lives_on_every_prefire_phase() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        for phase in [
+            PreFirePhase::Batching {
+                settle_timer: tid(1),
+            },
+            PreFirePhase::Verifying,
+            PreFirePhase::Draining,
+        ] {
+            let pre = unit_pre(phase, tid(42), r);
+            assert_eq!(pre.timer_token(TimerKind::BurstDeadline), Some(tid(42)));
+        }
+    }
+
+    /// Settle on non-Batching pre-fire phases returns None — the field
+    /// is structurally absent.
+    #[test]
+    fn timer_token_settle_is_none_on_verifying_or_draining() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        for phase in [PreFirePhase::Verifying, PreFirePhase::Draining] {
+            let pre = unit_pre(phase, tid(42), r);
+            assert!(pre.timer_token(TimerKind::Settle).is_none());
+        }
+    }
+
+    /// AwaitGateDeadline is type-impossible on pre-fire — returns None.
+    #[test]
+    fn timer_token_await_gate_is_none_on_prefire() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let pre = batching_burst(tid(1), tid(2), r);
+        assert!(pre.timer_token(TimerKind::AwaitGateDeadline).is_none());
+    }
+
+    /// AwaitGateDeadline on Awaiting returns the carried token.
+    #[test]
+    fn timer_token_await_gate_on_awaiting_returns_gate_deadline() {
+        let post = PostFireBurst {
+            intent: BurstIntent::Standard,
+            phase: PostFirePhase::Awaiting {
+                outstanding: 1,
+                gate_deadline: tid(55),
+            },
+            force_walk_resources: BTreeSet::new(),
+        };
+        assert_eq!(
+            post.timer_token(TimerKind::AwaitGateDeadline),
+            Some(tid(55)),
+        );
+    }
+
+    /// AwaitGateDeadline on Rebasing returns None — the field doesn't
+    /// exist on that variant.
+    #[test]
+    fn timer_token_await_gate_is_none_on_rebasing() {
+        let post = PostFireBurst {
+            intent: BurstIntent::Standard,
+            phase: PostFirePhase::Rebasing,
+            force_walk_resources: BTreeSet::new(),
+        };
+        assert!(post.timer_token(TimerKind::AwaitGateDeadline).is_none());
+    }
+
+    /// Settle / BurstDeadline are type-impossible on post-fire — None
+    /// for both phases.
+    #[test]
+    fn timer_token_settle_and_burst_deadline_are_none_on_postfire() {
+        for phase in [
+            PostFirePhase::Awaiting {
+                outstanding: 1,
+                gate_deadline: tid(99),
+            },
+            PostFirePhase::Rebasing,
+        ] {
+            let post = PostFireBurst {
+                intent: BurstIntent::Standard,
+                phase,
+                force_walk_resources: BTreeSet::new(),
+            };
+            assert!(post.timer_token(TimerKind::Settle).is_none());
+            assert!(post.timer_token(TimerKind::BurstDeadline).is_none());
+        }
+    }
+
+    /// ActiveBurst delegates to the held inner type.
+    #[test]
+    fn active_burst_timer_token_dispatches_by_lifecycle() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let pre = ActiveBurst::PreFire(batching_burst(tid(3), tid(4), r));
+        assert_eq!(pre.timer_token(TimerKind::Settle), Some(tid(3)));
+        assert_eq!(pre.timer_token(TimerKind::BurstDeadline), Some(tid(4)));
+        assert!(pre.timer_token(TimerKind::AwaitGateDeadline).is_none());
+
+        let post = ActiveBurst::PostFire(PostFireBurst {
+            intent: BurstIntent::Standard,
+            phase: PostFirePhase::Awaiting {
+                outstanding: 1,
+                gate_deadline: tid(9),
+            },
+            force_walk_resources: BTreeSet::new(),
+        });
+        assert_eq!(post.timer_token(TimerKind::AwaitGateDeadline), Some(tid(9)));
+        assert!(post.timer_token(TimerKind::Settle).is_none());
+        assert!(post.timer_token(TimerKind::BurstDeadline).is_none());
+    }
+
+    /// ProfileState::Idle owns no timers.
+    #[test]
+    fn profile_state_timer_token_idle_returns_none_for_every_kind() {
+        let s = ProfileState::Idle;
+        for k in [
+            TimerKind::Settle,
+            TimerKind::BurstDeadline,
+            TimerKind::AwaitGateDeadline,
+        ] {
+            assert!(s.timer_token(k).is_none());
+        }
+    }
+
+    /// ProfileState::Pending owns no timers (descent uses the probe
+    /// channel for correlation, not a heap timer).
+    #[test]
+    fn profile_state_timer_token_pending_returns_none_for_every_kind() {
+        let s = ProfileState::Pending(DescentState {
+            current_prefix: ResourceId::default(),
+            remaining_components: DescentRemaining::from_vec(vec![CompactString::from("a")])
+                .expect("non-empty"),
+        });
+        for k in [
+            TimerKind::Settle,
+            TimerKind::BurstDeadline,
+            TimerKind::AwaitGateDeadline,
+        ] {
+            assert!(s.timer_token(k).is_none());
+        }
+    }
+
+    /// ProfileState::Active delegates to the held ActiveBurst.
+    #[test]
+    fn profile_state_timer_token_active_delegates_to_burst() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let state = ProfileState::Active(
+            ActiveBurst::PreFire(batching_burst(tid(11), tid(12), r)),
+            BurstFinish::ReturnToIdle,
+        );
+        assert_eq!(state.timer_token(TimerKind::Settle), Some(tid(11)));
+        assert_eq!(state.timer_token(TimerKind::BurstDeadline), Some(tid(12)));
+        assert!(state.timer_token(TimerKind::AwaitGateDeadline).is_none());
+    }
+
+    /// `is_draining` is true exactly on `Active(PreFire(Draining), _)`.
+    #[test]
+    fn is_draining_is_true_only_on_active_prefire_draining() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+
+        // Active PreFire Draining — true.
+        let draining = ProfileState::Active(
+            ActiveBurst::PreFire(unit_pre(PreFirePhase::Draining, tid(1), r)),
+            BurstFinish::ReturnToIdle,
+        );
+        assert!(draining.is_draining());
+
+        // BurstFinish doesn't influence the predicate.
+        let draining_reap = ProfileState::Active(
+            ActiveBurst::PreFire(unit_pre(PreFirePhase::Draining, tid(1), r)),
+            BurstFinish::Reap,
+        );
+        assert!(draining_reap.is_draining());
+
+        // Every other shape — false.
+        for state in [
+            ProfileState::Idle,
+            ProfileState::Pending(DescentState {
+                current_prefix: r,
+                remaining_components: DescentRemaining::from_vec(vec![CompactString::from("a")])
+                    .expect("non-empty"),
+            }),
+            ProfileState::Active(
+                ActiveBurst::PreFire(unit_pre(PreFirePhase::Verifying, tid(1), r)),
+                BurstFinish::ReturnToIdle,
+            ),
+            ProfileState::Active(
+                ActiveBurst::PreFire(batching_burst(tid(1), tid(2), r)),
+                BurstFinish::ReturnToIdle,
+            ),
+            ProfileState::Active(
+                ActiveBurst::PostFire(PostFireBurst {
+                    intent: BurstIntent::Standard,
+                    phase: PostFirePhase::Awaiting {
+                        outstanding: 1,
+                        gate_deadline: tid(3),
+                    },
+                    force_walk_resources: BTreeSet::new(),
+                }),
+                BurstFinish::ReturnToIdle,
+            ),
+            ProfileState::Active(
+                ActiveBurst::PostFire(PostFireBurst {
+                    intent: BurstIntent::Standard,
+                    phase: PostFirePhase::Rebasing,
+                    force_walk_resources: BTreeSet::new(),
+                }),
+                BurstFinish::ReturnToIdle,
+            ),
+        ] {
+            assert!(!state.is_draining(), "expected !is_draining for {state:?}");
+        }
+    }
+
+    /// `descent_state` borrows the inner state in `Pending`, returns
+    /// `None` for every other variant.
+    #[test]
+    fn descent_state_returns_some_only_on_pending() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let descent = DescentState {
+            current_prefix: r,
+            remaining_components: DescentRemaining::from_vec(vec![CompactString::from("a")])
+                .expect("non-empty"),
+        };
+        let pending = ProfileState::Pending(descent);
+        assert!(pending.descent_state().is_some());
+
+        assert!(ProfileState::Idle.descent_state().is_none());
+        let active = ProfileState::Active(
+            ActiveBurst::PreFire(batching_burst(tid(1), tid(2), r)),
+            BurstFinish::ReturnToIdle,
+        );
+        assert!(active.descent_state().is_none());
+    }
+
+    /// `descent_state_mut` lets a caller advance the descent in place
+    /// when the state is `Pending`.
+    #[test]
+    fn descent_state_mut_lets_caller_advance_pending() {
+        let mut tree = Tree::new();
+        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let mut state = ProfileState::Pending(DescentState {
+            current_prefix: r,
+            remaining_components: DescentRemaining::from_vec(vec![
+                CompactString::from("a"),
+                CompactString::from("b"),
+            ])
+            .expect("non-empty"),
+        });
+
+        {
+            let d = state.descent_state_mut().expect("Pending carries descent");
+            d.remaining_components.advance();
+        }
+
+        let d = state.descent_state().expect("still Pending");
+        assert_eq!(
+            d.remaining_components.as_slice(),
+            &[CompactString::from("b")]
+        );
+
+        // Mutator returns None on non-Pending states.
+        let mut idle = ProfileState::Idle;
+        assert!(idle.descent_state_mut().is_none());
     }
 }

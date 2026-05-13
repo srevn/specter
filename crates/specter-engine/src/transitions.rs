@@ -14,6 +14,7 @@
 //! Verifying arm lives in `dispatch_burst_outcome`.
 
 use crate::Engine;
+use crate::engine::is_timer_referenced;
 use crate::probe_channel::OpenKind;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use compact_str::CompactString;
@@ -579,11 +580,11 @@ impl Engine {
     /// (Batching → Verifying, with possible reschedule), burst-deadline
     /// expiry (force-fire), or gate-deadline expiry (actuator-hang
     /// recovery). The `id` epoch survives the validation re-check that
-    /// [`Engine::is_timer_referenced`] performs against the live burst
-    /// slot for that `kind`; `pop_expired` already ran the same check
-    /// before `step` was called, so the production path runs it twice
-    /// (cheap), and any direct `step(Input::TimerExpired)` from a test
-    /// or fuzzer falls through the same gate.
+    /// [`is_timer_referenced`] performs against the live burst slot for
+    /// that `kind`; `pop_expired` already ran the same check before
+    /// `step` was called, so the production path runs it twice (cheap),
+    /// and any direct `step(Input::TimerExpired)` from a test or
+    /// fuzzer falls through the same gate.
     ///
     /// `now` flows through to [`Engine::on_settle_expired`]: the settle
     /// expiry handler reads it to decide whether to reschedule for
@@ -599,7 +600,7 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        if !Self::is_timer_referenced(&self.profiles, profile, kind, id) {
+        if !is_timer_referenced(&self.profiles, profile, kind, id) {
             out.diagnostics.push(Diagnostic::StaleTimer { id });
             return;
         }
@@ -627,7 +628,7 @@ impl Engine {
     /// populate it before any settle timer is scheduled). Forwards to
     /// [`Engine::transition_to_verifying`].
     ///
-    /// **Preconditions** (guaranteed by [`Engine::is_timer_referenced`]
+    /// **Preconditions** (guaranteed by [`is_timer_referenced`]
     /// upstream): `Profile.state == Active(PreFire(_))` and
     /// `pre.phase == PreFirePhase::Batching { settle_timer == popped_id }`.
     /// The defensive early returns below cover direct

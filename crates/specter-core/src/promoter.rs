@@ -141,6 +141,31 @@ pub enum PromoterState {
     },
 }
 
+impl PromoterState {
+    /// Borrow the descent payload if the state is currently
+    /// [`Self::PrefixPending`]. `None` for [`Self::Active`] — descent
+    /// only lives in the pre-materialised state.
+    ///
+    /// Symmetric with [`crate::ProfileState::descent_state`]; the
+    /// engine's owner-polymorphic `descent_state` dispatcher routes
+    /// to either projection through [`crate::ProbeOwner`].
+    #[must_use]
+    pub const fn descent_state(&self) -> Option<&DescentState> {
+        match self {
+            Self::PrefixPending(d) => Some(d),
+            Self::Active { .. } => None,
+        }
+    }
+
+    /// Mutable counterpart to [`Self::descent_state`].
+    pub const fn descent_state_mut(&mut self) -> Option<&mut DescentState> {
+        match self {
+            Self::PrefixPending(d) => Some(d),
+            Self::Active { .. } => None,
+        }
+    }
+}
+
 /// Per-proxy enumeration cursor.
 ///
 /// `pattern_component_index` points at the `PatternComponent` to test
@@ -425,5 +450,52 @@ mod tests {
         let sid = SubId::default();
         p.dynamic_subs.insert(resource, sid);
         assert_eq!(p.dynamic_subs.get(&resource), Some(&sid));
+    }
+
+    /// `PromoterState::descent_state` borrows the descent in
+    /// `PrefixPending`, returns `None` for `Active`.
+    #[test]
+    fn promoter_state_descent_state_returns_some_only_on_prefix_pending() {
+        let pending = PromoterState::PrefixPending(DescentState {
+            current_prefix: ResourceId::default(),
+            remaining_components: DescentRemaining::from_vec(vec![CompactString::from("var")])
+                .expect("non-empty"),
+        });
+        assert!(pending.descent_state().is_some());
+
+        let active = PromoterState::Active {
+            proxies: BTreeMap::new(),
+        };
+        assert!(active.descent_state().is_none());
+    }
+
+    /// `descent_state_mut` lets a caller advance the descent in place
+    /// when the state is `PrefixPending`.
+    #[test]
+    fn promoter_state_descent_state_mut_advances_pending() {
+        let mut state = PromoterState::PrefixPending(DescentState {
+            current_prefix: ResourceId::default(),
+            remaining_components: DescentRemaining::from_vec(vec![
+                CompactString::from("var"),
+                CompactString::from("log"),
+            ])
+            .expect("non-empty"),
+        });
+
+        {
+            let d = state
+                .descent_state_mut()
+                .expect("PrefixPending carries descent");
+            d.remaining_components.advance();
+        }
+
+        let d = state.descent_state().expect("still PrefixPending");
+        assert_eq!(d.remaining_components.len(), 1);
+
+        // Mutator returns None on Active.
+        let mut active = PromoterState::Active {
+            proxies: BTreeMap::new(),
+        };
+        assert!(active.descent_state_mut().is_none());
     }
 }
