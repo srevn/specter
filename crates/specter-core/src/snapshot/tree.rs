@@ -752,13 +752,7 @@ fn splice_dir_prior(
     // (slot reaped vs. uncovered intermediate) lives at the recursion
     // leaves rather than being reconstructed at this dispatcher.
     match splice_dir(&root, &chain[1..], replacement, tree) {
-        Ok(new_root) => {
-            if Arc::ptr_eq(&new_root, &root) {
-                SpliceResult::Spliced(TreeSnapshot::Dir(root))
-            } else {
-                SpliceResult::Spliced(TreeSnapshot::Dir(new_root))
-            }
-        }
+        Ok(new_root) => SpliceResult::Spliced(TreeSnapshot::Dir(new_root)),
         Err(cause) => SpliceResult::CrossedUncovered(cause),
     }
 }
@@ -778,6 +772,17 @@ fn splice_dir_prior(
 /// site's classification intact. [`splice_dir_prior`] wraps the result
 /// into [`SpliceResult::CrossedUncovered`] preserving the prior
 /// unchanged.
+///
+/// **Performance.** Each ancestor on the path-to-anchor whose child
+/// hash changed clones its `BTreeMap<CompactString, ChildEntry>` to
+/// install one updated slot — `O(Σ fanout_per_ancestor)` per splice,
+/// plus one `compute_dir_hash` fold per rebuilt ancestor. Worst-case
+/// for a 1000-entry directory at depth-3 splice: ~3000 `ChildEntry`
+/// clones plus the BTreeMap's interior-node allocs (4-8 entries per
+/// node ⇒ ~150 node allocs per level). The per-level G7 short-circuit
+/// prunes ancestors above the deepest observable change, so the
+/// realistic cost is over the *changed* prefix of the spine, not the
+/// full path.
 fn splice_dir(
     prior: &Arc<DirSnapshot>,
     rest: &[ResourceId],
@@ -810,17 +815,26 @@ fn splice_dir(
     );
     let new_child = splice_dir(&pc, deeper, replacement, tree)?;
 
-    // G7 per-level: child unchanged ⇒ parent unchanged; propagate
-    // Arc::ptr_eq up the spine without rebuilding.
+    // G7 per-level: propagate `Arc::clone(prior)` up the spine when
+    // nothing observable changed at this level. Same-Arc strictly
+    // implies equal `dir_hash` (the hash is a pure function of the
+    // data, computed eagerly at construction), so the hash arm
+    // subsumes the ptr_eq arm; the disjunct is the fast early-out
+    // for the common baseline-forwarded case.
     if Arc::ptr_eq(&new_child, &pc) || new_child.dir_hash() == pc.dir_hash() {
         return Ok(Arc::clone(prior));
     }
 
+    // `prior.lookup_covered_dir(name)` above proved the key exists, so
+    // we mutate the cloned entry in place — `BTreeMap::insert(K, V)`
+    // would drop a fresh `CompactString::new(name)` on the floor here
+    // (insert updates the value but never the key when the key was
+    // already present in the map).
     let mut new_entries = prior.entries.clone();
-    new_entries.insert(
-        CompactString::new(name),
-        ChildEntry::Dir(DirChild::Covered(new_child)),
-    );
+    *new_entries.get_mut(name).expect(
+        "splice_dir: entry at `name` is present in `new_entries` because \
+         `prior.lookup_covered_dir(name)` succeeded above",
+    ) = ChildEntry::Dir(DirChild::Covered(new_child));
     // Preserve prior's `captured_with` on the rebuilt parent: it is
     // conceptually "still the same observation as prior, with one child
     // subtree spliced in", and `captured_with` is constant within a
