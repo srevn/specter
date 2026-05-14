@@ -1467,6 +1467,7 @@ impl ProfileMap {
 #[cfg(test)]
 mod tests {
     use super::{ClassSet, Profile, ProfileMap, ProfileState, ScanConfig, compute_config_hash};
+    use crate::fs_id::FsIdentity;
     use crate::ids::ResourceId;
     use crate::output::StepOutput;
     use crate::resource::ResourceRole;
@@ -1711,8 +1712,10 @@ mod tests {
             resource,
             DirMeta {
                 mtime: UNIX_EPOCH,
-                inode: 0,
-                device: 0,
+                fs_id: FsIdentity {
+                    inode: 0,
+                    device: 0,
+                },
             },
             0,
             BTreeMap::new(),
@@ -1720,7 +1723,15 @@ mod tests {
     }
 
     fn empty_leaf_entry() -> LeafEntry {
-        LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, 0, 0)
+        LeafEntry::new(
+            EntryKind::File,
+            0,
+            UNIX_EPOCH,
+            FsIdentity {
+                inode: 0,
+                device: 0,
+            },
+        )
     }
 
     #[test]

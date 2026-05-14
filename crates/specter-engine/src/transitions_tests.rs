@@ -23,7 +23,7 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, BurstIntent,
     ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, LeafEntry,
+    EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry,
     OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
     PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileState,
     PromoterAttachRequest, PromoterId, PromoterRegistryDiff, PromoterState, ResourceId,
@@ -98,11 +98,15 @@ fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc
     for (name, kind, inode) in children {
         let child = match kind {
             EntryKind::Dir => ChildEntry::Dir(DirChild {
-                inode,
-                device: 0,
+                fs_id: FsIdentity { inode, device: 0 },
                 subtree: None,
             }),
-            _ => ChildEntry::Leaf(LeafEntry::new(kind, 0, UNIX_EPOCH, inode, 0)),
+            _ => ChildEntry::Leaf(LeafEntry::new(
+                kind,
+                0,
+                UNIX_EPOCH,
+                FsIdentity { inode, device: 0 },
+            )),
         };
         map.insert(CompactString::new(name), child);
     }
@@ -110,8 +114,10 @@ fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
-            inode: 0,
-            device: 0,
+            fs_id: FsIdentity {
+                inode: 0,
+                device: 0,
+            },
         },
         0,
         map,
@@ -123,7 +129,7 @@ fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc
 /// the engine-internal `Profile.current`, not the wire response.
 #[allow(dead_code)]
 fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> LeafEntry {
-    LeafEntry::new(kind, size, mtime, inode, 0)
+    LeafEntry::new(kind, size, mtime, FsIdentity { inode, device: 0 })
 }
 
 /// Drive the Profile from fresh-attach through Seed-Ok → Idle (post-Seed

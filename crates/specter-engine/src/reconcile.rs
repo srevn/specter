@@ -530,8 +530,8 @@ mod tests {
     use smallvec::smallvec;
     use specter_core::{
         ChildEntry, ClassSet, DedupKey, Diff, DirChild, DirMeta, DirSnapshot, EntryKind, EntryRef,
-        LeafEntry, Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-        StepOutput, SubId, Tree, TreeSnapshot, WatchOp,
+        FsIdentity, LeafEntry, Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole,
+        ScanConfig, StepOutput, SubId, Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -547,19 +547,22 @@ mod tests {
     fn meta(inode: u64) -> DirMeta {
         DirMeta {
             mtime: UNIX_EPOCH,
-            inode,
-            device: 0,
+            fs_id: FsIdentity { inode, device: 0 },
         }
     }
 
     fn leaf(kind: EntryKind, inode: u64) -> ChildEntry {
-        ChildEntry::Leaf(LeafEntry::new(kind, 0, UNIX_EPOCH, inode, 0))
+        ChildEntry::Leaf(LeafEntry::new(
+            kind,
+            0,
+            UNIX_EPOCH,
+            FsIdentity { inode, device: 0 },
+        ))
     }
 
     fn dir_child(inode: u64, subtree: Option<Arc<DirSnapshot>>) -> ChildEntry {
         ChildEntry::Dir(DirChild {
-            inode,
-            device: 0,
+            fs_id: FsIdentity { inode, device: 0 },
             subtree,
         })
     }
@@ -713,7 +716,10 @@ mod tests {
             deleted: smallvec![EntryRef {
                 segment: CompactString::new("sub"),
                 kind: EntryKind::Dir,
-                inode: 2,
+                fs_id: FsIdentity {
+                    inode: 2,
+                    device: 0
+                },
             }],
             ..Default::default()
         };
@@ -750,7 +756,10 @@ mod tests {
             deleted: smallvec![EntryRef {
                 segment: CompactString::new("a.rs"),
                 kind: EntryKind::File,
-                inode: 1,
+                fs_id: FsIdentity {
+                    inode: 1,
+                    device: 0
+                },
             }],
             ..Default::default()
         };
@@ -793,12 +802,18 @@ mod tests {
             deleted: smallvec![EntryRef {
                 segment: CompactString::new("foo"),
                 kind: EntryKind::Dir,
-                inode: 1,
+                fs_id: FsIdentity {
+                    inode: 1,
+                    device: 0
+                },
             }],
             created: smallvec![EntryRef {
                 segment: CompactString::new("foo"),
                 kind: EntryKind::Dir,
-                inode: 2,
+                fs_id: FsIdentity {
+                    inode: 2,
+                    device: 0
+                },
             }],
             ..Default::default()
         };
@@ -1309,8 +1324,8 @@ mod tests {
         // pre-condition.
         let prior_foo_child = prior_current.entries.get("foo").unwrap();
         let new_foo_child = response.entries.get("foo").unwrap();
-        assert_eq!(prior_foo_child.inode(), new_foo_child.inode());
-        assert_eq!(prior_foo_child.device(), new_foo_child.device());
+        assert_eq!(prior_foo_child.fs_id().inode, new_foo_child.fs_id().inode);
+        assert_eq!(prior_foo_child.fs_id().device, new_foo_child.fs_id().device);
         assert_ne!(
             prior_foo_child.kind(),
             new_foo_child.kind(),

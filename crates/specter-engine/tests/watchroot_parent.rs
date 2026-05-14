@@ -16,8 +16,8 @@
 
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ClassSet, DirMeta, DirSnapshot, EffectScope, Input, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    ActionProgram, ClassSet, DirMeta, DirSnapshot, EffectScope, FsIdentity, Input, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
     SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
@@ -41,8 +41,10 @@ fn dir_snap(root: ResourceId) -> std::sync::Arc<DirSnapshot> {
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
-            inode: 0,
-            device: 0,
+            fs_id: FsIdentity {
+                inode: 0,
+                device: 0,
+            },
         },
         0,
         BTreeMap::new(),

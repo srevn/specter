@@ -12,10 +12,10 @@
 //! new state).
 //!
 //! Hardlinks (same inode at multiple segments) collide in the
-//! `(device, inode)` rename map; later entry wins. Documented v1
-//! limitation; the `hardlink_no_panic` property test confirms graceful
-//! degradation.
+//! `fs_id` rename map; later entry wins. Documented v1 limitation; the
+//! `hardlink_no_panic` property test confirms graceful degradation.
 
+use crate::fs_id::FsIdentity;
 use crate::snapshot::EntryKind;
 use compact_str::CompactString;
 use smallvec::SmallVec;
@@ -44,12 +44,20 @@ impl Diff {
 
 /// Lightweight reference into a snapshot entry — the shape downstream
 /// consumers need (`segment` for path joining, `kind` for File/Dir
-/// dispatch, `inode` for cross-snapshot identity).
+/// dispatch, `fs_id` for cross-snapshot identity).
+///
+/// The `fs_id` field carries both inode and device, so the diff atom is
+/// faithful to the kernel's identity model across multi-mount setups
+/// (the snapshot walker already keys cross-filesystem boundary detection
+/// on the device half). The actuator's `SPECTER_DIFF_PATH` wire format
+/// currently exposes only the inode half (one identifier per entry,
+/// matching `stat -c %i`); device exposure waits on a paired
+/// `$SPECTER_DEVICE` resolver decision.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct EntryRef {
     pub segment: CompactString,
     pub kind: EntryKind,
-    pub inode: u64,
+    pub fs_id: FsIdentity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]

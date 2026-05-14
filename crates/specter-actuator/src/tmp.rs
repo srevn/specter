@@ -59,7 +59,7 @@ fn write_entry(f: &mut std::fs::File, kind: &str, e: &EntryRef) -> io::Result<()
         f,
         "{kind}\t{seg}\t{inode}",
         seg = e.segment,
-        inode = e.inode
+        inode = e.fs_id.inode,
     )
 }
 
@@ -68,13 +68,13 @@ fn write_rename(f: &mut std::fs::File, r: &Rename) -> io::Result<()> {
         f,
         "renamed_from\t{seg}\t{inode}",
         seg = r.from.segment,
-        inode = r.from.inode,
+        inode = r.from.fs_id.inode,
     )?;
     writeln!(
         f,
         "renamed_to\t{seg}\t{inode}",
         seg = r.to.segment,
-        inode = r.to.inode,
+        inode = r.to.fs_id.inode,
     )?;
     Ok(())
 }
@@ -96,14 +96,14 @@ mod tests {
     use super::*;
     use compact_str::CompactString;
     use smallvec::smallvec;
-    use specter_core::{CorrelationId, Diff, EntryKind, EntryRef, Rename};
+    use specter_core::{CorrelationId, Diff, EntryKind, EntryRef, FsIdentity, Rename};
     use std::io::Read;
 
     fn entry(seg: &str, inode: u64) -> EntryRef {
         EntryRef {
             segment: CompactString::from(seg),
             kind: EntryKind::File,
-            inode,
+            fs_id: FsIdentity { inode, device: 0 },
         }
     }
 

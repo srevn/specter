@@ -2012,8 +2012,8 @@ mod tests {
     /// something to release.
     fn build_materialised_profile_for_permutation() -> (Engine, ProfileId, ResourceId, ResourceId) {
         use specter_core::{
-            ChildEntry, ClassSet, DirMeta, DirSnapshot, LeafEntry, ResourceKind, ResourceRole,
-            TreeSnapshot,
+            ChildEntry, ClassSet, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ResourceKind,
+            ResourceRole, TreeSnapshot,
         };
         use std::collections::BTreeMap;
         use std::sync::Arc;
@@ -2055,16 +2055,20 @@ mod tests {
                 specter_core::EntryKind::File,
                 0,
                 UNIX_EPOCH,
-                0,
-                0,
+                FsIdentity {
+                    inode: 0,
+                    device: 0,
+                },
             )),
         );
         let dir = DirSnapshot::new(
             anchor,
             DirMeta {
                 mtime: UNIX_EPOCH,
-                inode: 0,
-                device: 0,
+                fs_id: FsIdentity {
+                    inode: 0,
+                    device: 0,
+                },
             },
             0,
             entries,
@@ -2123,7 +2127,7 @@ mod tests {
             }
             for i in 0..k {
                 heaps(arr, k - 1, out);
-                if k % 2 == 0 {
+                if k.is_multiple_of(2) {
                     arr.swap(i, k - 1);
                 } else {
                     arr.swap(0, k - 1);

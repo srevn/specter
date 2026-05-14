@@ -35,7 +35,7 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, FS_ROOT_SEGMENT, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp,
+    EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, PromoterAttachRequest,
     PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
     SubAttachRequest, WatchOp, WatchRegistryDiff,
@@ -81,11 +81,15 @@ fn dir_snap_with(target: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> A
     for (name, kind, inode) in children {
         let child = match kind {
             EntryKind::Dir => ChildEntry::Dir(DirChild {
-                inode,
-                device: 0,
+                fs_id: FsIdentity { inode, device: 0 },
                 subtree: None,
             }),
-            _ => ChildEntry::Leaf(LeafEntry::new(kind, 0, UNIX_EPOCH, inode, 0)),
+            _ => ChildEntry::Leaf(LeafEntry::new(
+                kind,
+                0,
+                UNIX_EPOCH,
+                FsIdentity { inode, device: 0 },
+            )),
         };
         map.insert(CompactString::new(name), child);
     }
@@ -93,8 +97,10 @@ fn dir_snap_with(target: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> A
         target,
         DirMeta {
             mtime: UNIX_EPOCH,
-            inode: 0,
-            device: 0,
+            fs_id: FsIdentity {
+                inode: 0,
+                device: 0,
+            },
         },
         0,
         map,
@@ -321,7 +327,15 @@ fn full_lifecycle_attach_promote_seed_reap() {
     // things look right now" against which future Standard bursts
     // observe drift. This is `dispatch_seed_ok`'s no-drift terminal
     // arm.
-    let leaf = LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, 10, 0);
+    let leaf = LeafEntry::new(
+        EntryKind::File,
+        0,
+        UNIX_EPOCH,
+        FsIdentity {
+            inode: 10,
+            device: 0,
+        },
+    );
     let baseline_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(dynamic_profile),

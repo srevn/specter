@@ -18,9 +18,9 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectScope, EntryKind, FS_ROOT_SEGMENT, Input, LeafEntry, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeRequest, ProbeResponse, ReapTrigger, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    SubAttachRequest,
+    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeRequest, ProbeResponse, ReapTrigger, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -57,11 +57,15 @@ fn dir_snap_with(target: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> A
     for (name, kind, inode) in children {
         let child = match kind {
             EntryKind::Dir => ChildEntry::Dir(DirChild {
-                inode,
-                device: 0,
+                fs_id: FsIdentity { inode, device: 0 },
                 subtree: None,
             }),
-            _ => ChildEntry::Leaf(LeafEntry::new(kind, 0, UNIX_EPOCH, inode, 0)),
+            _ => ChildEntry::Leaf(LeafEntry::new(
+                kind,
+                0,
+                UNIX_EPOCH,
+                FsIdentity { inode, device: 0 },
+            )),
         };
         map.insert(CompactString::new(name), child);
     }
@@ -69,8 +73,10 @@ fn dir_snap_with(target: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> A
         target,
         DirMeta {
             mtime: UNIX_EPOCH,
-            inode: 0,
-            device: 0,
+            fs_id: FsIdentity {
+                inode: 0,
+                device: 0,
+            },
         },
         0,
         map,

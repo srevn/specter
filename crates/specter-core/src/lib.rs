@@ -12,6 +12,7 @@ pub mod program;
 
 mod diag;
 mod diff;
+mod fs_id;
 mod ids;
 mod input;
 mod op;
@@ -29,6 +30,7 @@ mod tree;
 pub use diag::{BurstHelper, ClaimKind, Diagnostic, LcaIntegritySource, PromoterClaimKind};
 pub use diff::{Diff, EntryRef, Rename};
 pub use effect::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome};
+pub use fs_id::FsIdentity;
 pub use ids::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
 pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};
 pub use op::{

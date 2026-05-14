@@ -25,9 +25,10 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, ChildEntry, ClassSet, DedupKey,
-    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, Input, LeafEntry,
-    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, WatchOp,
+    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input,
+    LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
+    WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -54,11 +55,15 @@ fn dir_snap(
     for (name, kind, inode) in children {
         let child = match kind {
             EntryKind::Dir => ChildEntry::Dir(DirChild {
-                inode,
-                device: 0,
+                fs_id: FsIdentity { inode, device: 0 },
                 subtree: None,
             }),
-            _ => ChildEntry::Leaf(LeafEntry::new(kind, 0, UNIX_EPOCH, inode, 0)),
+            _ => ChildEntry::Leaf(LeafEntry::new(
+                kind,
+                0,
+                UNIX_EPOCH,
+                FsIdentity { inode, device: 0 },
+            )),
         };
         map.insert(CompactString::new(name), child);
     }
@@ -66,8 +71,10 @@ fn dir_snap(
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
-            inode: 0,
-            device: 0,
+            fs_id: FsIdentity {
+                inode: 0,
+                device: 0,
+            },
         },
         0,
         map,
@@ -1868,8 +1875,10 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
-            inode: 0,
-            device: 0,
+            fs_id: FsIdentity {
+                inode: 0,
+                device: 0,
+            },
         },
         0,
         BTreeMap::new(),

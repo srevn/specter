@@ -198,8 +198,8 @@ mod tests {
     use compact_str::CompactString;
     use specter_core::{
         ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DirMeta, DirSnapshot,
-        PreFireBurst, PreFirePhase, Profile, ProfileState, ResourceRole, ScanConfig, TimerId,
-        TreeSnapshot,
+        FsIdentity, PreFireBurst, PreFirePhase, Profile, ProfileState, ResourceRole, ScanConfig,
+        TimerId, TreeSnapshot,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -323,8 +323,10 @@ mod tests {
             mid_resource,
             DirMeta {
                 mtime: UNIX_EPOCH,
-                inode: 0,
-                device: 0,
+                fs_id: FsIdentity {
+                    inode: 0,
+                    device: 0,
+                },
             },
             0,
             BTreeMap::<CompactString, ChildEntry>::new(),

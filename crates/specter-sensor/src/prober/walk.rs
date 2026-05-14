@@ -11,7 +11,7 @@
 //!
 //! Three controls live on the [`ProbeRequest::Subtree`] variant:
 //! - `baseline_subtree`: the engine's last-known view of the target's
-//!   subtree. Equal `(mtime, inode, device)` against the freshly `lstat`-ed
+//!   subtree. Equal `(mtime, fs_id)` against the freshly `lstat`-ed
 //!   directory ⇒ return `Arc::clone(prior)` (mtime-skip). The skip
 //!   cascades into recursion via `entries[name].subtree`.
 //! - `force_walk`: a `BTreeSet<PathBuf>` of paths the walker must
@@ -41,8 +41,8 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, LeafEntry, ProbeOutcome, ResourceId,
-    ScanConfig,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, LeafEntry, ProbeOutcome,
+    ResourceId, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -75,8 +75,10 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
         EntryKind::File,
         meta.len(),
         meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        meta.ino(),
-        meta.dev(),
+        FsIdentity {
+            inode: meta.ino(),
+            device: meta.dev(),
+        },
     );
     ProbeOutcome::AnchorOk(leaf)
 }
@@ -129,8 +131,10 @@ pub(super) fn probe_subtree(
     }
     let root_meta = DirMeta {
         mtime: root_meta_raw.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        inode: root_meta_raw.ino(),
-        device: root_meta_raw.dev(),
+        fs_id: FsIdentity {
+            inode: root_meta_raw.ino(),
+            device: root_meta_raw.dev(),
+        },
     };
 
     // Top-level mtime-skip. Bypassed when forced, or when any forced path
@@ -152,7 +156,7 @@ pub(super) fn probe_subtree(
         force_walk,
         forced,
         0,
-        root_meta.device,
+        root_meta.fs_id.device,
     );
     ProbeOutcome::SubtreeOk(Arc::new(DirSnapshot::new(
         target_resource,
@@ -341,8 +345,10 @@ fn build_dir_child(
         // Uncovered branch: not recursive, beyond max_depth, or cross-fs.
         // Walker stores the entry but does not recurse.
         return ChildEntry::Dir(DirChild {
-            inode: cmeta.ino(),
-            device: cmeta.dev(),
+            fs_id: FsIdentity {
+                inode: cmeta.ino(),
+                device: cmeta.dev(),
+            },
             subtree: None,
         });
     }
@@ -367,8 +373,10 @@ fn build_dir_child(
         root_dev,
     );
     ChildEntry::Dir(DirChild {
-        inode: cmeta.ino(),
-        device: cmeta.dev(),
+        fs_id: FsIdentity {
+            inode: cmeta.ino(),
+            device: cmeta.dev(),
+        },
         subtree: sub,
     })
 }
@@ -396,8 +404,10 @@ fn build_leaf_child(
         kind,
         cmeta.len(),
         cmeta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        cmeta.ino(),
-        cmeta.dev(),
+        FsIdentity {
+            inode: cmeta.ino(),
+            device: cmeta.dev(),
+        },
     );
     let leaf = match baseline.and_then(|b| b.leaf_hash_if_unchanged(name, &leaf)) {
         Some(h) => leaf.with_cached_hash(h),
@@ -431,8 +441,10 @@ fn walk_subdir(
     }
     let root_meta = DirMeta {
         mtime: raw.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        inode: raw.ino(),
-        device: raw.dev(),
+        fs_id: FsIdentity {
+            inode: raw.ino(),
+            device: raw.dev(),
+        },
     };
 
     // Per-level mtime-skip — same primitive as the root probe.

@@ -13,8 +13,9 @@ use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, GlobPattern, Input, LeafEntry,
-    ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId, ResourceId, ScanConfig,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, GlobPattern, Input,
+    LeafEntry, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId, ResourceId,
+    ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -561,7 +562,10 @@ fn mtime_skip_does_not_match_when_inode_differs() {
     let forged = Arc::new(DirSnapshot::new(
         baseline.root_resource,
         DirMeta {
-            inode: baseline.root_meta.inode.wrapping_add(1),
+            fs_id: FsIdentity {
+                inode: baseline.root_meta.fs_id.inode.wrapping_add(1),
+                device: baseline.root_meta.fs_id.device,
+            },
             ..baseline.root_meta
         },
         baseline.captured_with,
@@ -602,7 +606,10 @@ fn mtime_skip_does_not_match_when_device_differs() {
     let forged = Arc::new(DirSnapshot::new(
         baseline.root_resource,
         DirMeta {
-            device: baseline.root_meta.device.wrapping_add(1),
+            fs_id: FsIdentity {
+                inode: baseline.root_meta.fs_id.inode,
+                device: baseline.root_meta.fs_id.device.wrapping_add(1),
+            },
             ..baseline.root_meta
         },
         baseline.captured_with,
@@ -964,8 +971,7 @@ fn poison_baseline(real: &Arc<DirSnapshot>, leaf_override: Option<LeafEntry>) ->
                 real_leaf.kind,
                 real_leaf.size,
                 real_leaf.mtime,
-                real_leaf.inode,
-                real_leaf.device,
+                real_leaf.fs_id,
             )
         })
         .with_cached_hash(POISON);
@@ -1052,8 +1058,7 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
         real_leaf.kind,
         real_leaf.size.wrapping_add(1),
         real_leaf.mtime,
-        real_leaf.inode,
-        real_leaf.device,
+        real_leaf.fs_id,
     );
     let poisoned = poison_baseline(&real, Some(mismatch));
 
@@ -1117,8 +1122,7 @@ fn cache_transfer_threads_through_recursion() {
                 real_leaf.kind,
                 real_leaf.size,
                 real_leaf.mtime,
-                real_leaf.inode,
-                real_leaf.device,
+                real_leaf.fs_id,
             )
             .with_cached_hash(POISON),
         ),
@@ -1136,8 +1140,7 @@ fn cache_transfer_threads_through_recursion() {
     root_entries.insert(
         CompactString::new("sub"),
         ChildEntry::Dir(DirChild {
-            inode: poisoned_sub.root_meta.inode,
-            device: poisoned_sub.root_meta.device,
+            fs_id: poisoned_sub.root_meta.fs_id,
             subtree: Some(Arc::clone(&poisoned_sub)),
         }),
     );
@@ -1199,8 +1202,8 @@ fn dir_snapshot_root_meta_carries_lstat_triple() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("expected Ok(Dir)");
     };
-    assert_eq!(arc.root_meta.inode, raw.ino());
-    assert_eq!(arc.root_meta.device, raw.dev());
+    assert_eq!(arc.root_meta.fs_id.inode, raw.ino());
+    assert_eq!(arc.root_meta.fs_id.device, raw.dev());
 }
 
 #[test]

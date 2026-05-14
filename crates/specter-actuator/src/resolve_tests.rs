@@ -15,8 +15,8 @@ use specter_core::program::SpawnBody;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ArgPart, ArgTemplate, CommandResolved, CorrelationId, DedupKey, Diff, Effect, EffectScope,
-    EntryKind, EntryRef, ExecAction, Placeholder, ProfileId, Rename, ResourceId, ResourceKind,
-    SubId,
+    EntryKind, EntryRef, ExecAction, FsIdentity, Placeholder, ProfileId, Rename, ResourceId,
+    ResourceKind, SubId,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -109,7 +109,7 @@ fn entry_ref(seg: &str, inode: u64) -> EntryRef {
     EntryRef {
         segment: CompactString::from(seg),
         kind: EntryKind::File,
-        inode,
+        fs_id: FsIdentity { inode, device: 0 },
     }
 }
 

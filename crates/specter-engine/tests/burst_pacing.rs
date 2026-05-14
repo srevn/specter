@@ -20,8 +20,8 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope,
-    FsEvent, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
+    FsEvent, FsIdentity, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -40,8 +40,10 @@ fn empty_dir_snap(root: ResourceId) -> Arc<DirSnapshot> {
         root,
         DirMeta {
             mtime: UNIX_EPOCH,
-            inode: 0,
-            device: 0,
+            fs_id: FsIdentity {
+                inode: 0,
+                device: 0,
+            },
         },
         0,
         BTreeMap::<CompactString, ChildEntry>::new(),
@@ -248,16 +250,20 @@ fn sustained_unstable_response_storm_paces_at_settle() {
                 specter_core::EntryKind::File,
                 u64::from(cycle),
                 UNIX_EPOCH,
-                u64::from(cycle) + 1,
-                0,
+                FsIdentity {
+                    inode: u64::from(cycle) + 1,
+                    device: 0,
+                },
             )),
         );
         let unstable_snap = Arc::new(DirSnapshot::new(
             r,
             DirMeta {
                 mtime: UNIX_EPOCH,
-                inode: 0,
-                device: 0,
+                fs_id: FsIdentity {
+                    inode: 0,
+                    device: 0,
+                },
             },
             0,
             entries,

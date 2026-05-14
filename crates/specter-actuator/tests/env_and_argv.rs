@@ -7,7 +7,9 @@ mod common;
 use common::*;
 use compact_str::CompactString;
 use smallvec::smallvec;
-use specter_core::{CorrelationId, Diff, Effect, EffectOutcome, EntryKind, EntryRef, Input};
+use specter_core::{
+    CorrelationId, Diff, Effect, EffectOutcome, EntryKind, EntryRef, FsIdentity, Input,
+};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -142,12 +144,18 @@ fn child_receives_specter_created_newline_separated() {
             EntryRef {
                 segment: CompactString::from("a.rs"),
                 kind: EntryKind::File,
-                inode: 1,
+                fs_id: FsIdentity {
+                    inode: 1,
+                    device: 0
+                },
             },
             EntryRef {
                 segment: CompactString::from("src/b.rs"),
                 kind: EntryKind::File,
-                inode: 2,
+                fs_id: FsIdentity {
+                    inode: 2,
+                    device: 0
+                },
             },
         ],
         ..Default::default()
@@ -191,7 +199,10 @@ fn child_receives_specter_diff_path_when_diff_present() {
         created: smallvec![EntryRef {
             segment: CompactString::from("a.rs"),
             kind: EntryKind::File,
-            inode: 7,
+            fs_id: FsIdentity {
+                inode: 7,
+                device: 0
+            },
         }],
         ..Default::default()
     });
@@ -260,7 +271,10 @@ fn tmp_diff_file_cleaned_up_after_completion() {
         created: smallvec![EntryRef {
             segment: CompactString::from("a"),
             kind: EntryKind::File,
-            inode: 1,
+            fs_id: FsIdentity {
+                inode: 1,
+                device: 0
+            },
         }],
         ..Default::default()
     });

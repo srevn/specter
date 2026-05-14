@@ -20,24 +20,30 @@
 //!
 //! ## Hashing
 //!
-//! - [`LeafEntry::leaf_hash`] folds `(kind, size, mtime, inode, device)` to
-//!   a 128-bit signature, cached in `OnceLock`. A leaf's mtime is its
+//! - [`LeafEntry::leaf_hash`] folds `(kind, size, mtime, fs_id)` to a
+//!   128-bit signature, cached in `OnceLock`. A leaf's mtime is its
 //!   per-file content fingerprint, so it belongs in the identity.
 //! - [`DirSnapshot::dir_hash`] folds `captured_with`, the directory's own
-//!   `(inode, device)`, an entry-count length-prefix, then each
-//!   `(name, ChildEntry)` pair in lex order. Per-`Dir` child carries
-//!   `(inode, device, subtree.dir_hash())`; subtree=None contributes a
-//!   constant `0u128`. `root_meta.mtime` is **not** folded — `dir_hash`
-//!   is filter-aware identity ("are these snapshots observably the same
-//!   to the user?"), and a directory's mtime bumps on every dirent-block
-//!   change including filtered-out entries (`.DS_Store`, hidden files,
-//!   excluded paths) the user-configured filter would never present.
-//!   The walker's mtime-skip optimisation reads `root_meta.mtime` as a
-//!   struct field on [`DirSnapshot`] (its own kernel-aware identity);
-//!   no consumer needs the value composed into the hash.
+//!   `fs_id`, an entry-count length-prefix, then each `(name,
+//!   ChildEntry)` pair in lex order. Per-`Dir` child carries `(fs_id,
+//!   subtree.dir_hash())`; subtree=None contributes a constant `0u128`.
+//!   `root_meta.mtime` is **not** folded — `dir_hash` is filter-aware
+//!   identity ("are these snapshots observably the same to the user?"),
+//!   and a directory's mtime bumps on every dirent-block change including
+//!   filtered-out entries (`.DS_Store`, hidden files, excluded paths) the
+//!   user-configured filter would never present. The walker's mtime-skip
+//!   optimisation reads `root_meta.mtime` as a struct field on
+//!   [`DirSnapshot`] (its own kernel-aware identity); no consumer needs
+//!   the value composed into the hash.
 //! - 128-bit width (`siphasher::sip128`): pair-comparison space at scale
 //!   (`O(levels × bursts × profiles)`) makes 64-bit collision probability
 //!   uncomfortable; 128 bits is astronomically safe.
+//! - `#[derive(Hash)]` on [`FsIdentity`] emits `inode.hash; device.hash;`
+//!   in declaration order with no struct discriminator, so `fs_id.hash(h)`
+//!   is byte-identical to the historical `inode.hash(h); device.hash(h);`
+//!   sequence. Pinned by `fs_id::tests::fs_identity_hash_matches_inode_then_device`
+//!   so a future derive-semantics change or field reorder fires at nextest
+//!   time before goldens silently drift.
 //!
 //! ## Mutability and concurrency
 //!
@@ -50,6 +56,7 @@
 //!   handles without locks.
 
 use crate::diff::{Diff, EntryRef, Rename};
+use crate::fs_id::FsIdentity;
 use crate::hash::{Hasher128Ext, hash_systemtime_into, hasher_128};
 use crate::ids::ResourceId;
 use crate::snapshot::EntryKind;
@@ -65,19 +72,18 @@ use std::time::SystemTime;
 // DirMeta
 // ---------------------------------------------------------------------------
 
-/// `lstat` triple of a directory: the load-bearing fields for the V5
-/// walker's mtime-skip plus inode/device guards against the
+/// `lstat` pair of a directory: the load-bearing fields for the V5
+/// walker's mtime-skip plus the kernel identity guarding against the
 /// delete-and-recreate-at-same-path case.
 ///
-/// `mtime` drives the skip; `inode`/`device` defend against the case
-/// where the directory was unlinked and recreated at the same path
-/// between probes (the recreation gets a fresh inode under POSIX
-/// semantics — same name, different identity).
+/// `mtime` drives the skip; `fs_id` defends against the case where the
+/// directory was unlinked and recreated at the same path between probes
+/// (the recreation gets a fresh inode under POSIX semantics — same name,
+/// different identity).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct DirMeta {
     pub mtime: SystemTime,
-    pub inode: u64,
-    pub device: u64,
+    pub fs_id: FsIdentity,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,32 +93,24 @@ pub struct DirMeta {
 /// Direct child that is *not* a directory: file, symlink, or other.
 ///
 /// `leaf_hash` is the lazy 128-bit signature of `(kind, size, mtime,
-/// inode, device)` — see [`LeafEntry::leaf_hash`]. Cached on first read;
-/// `Clone` preserves the cache.
+/// fs_id)` — see [`LeafEntry::leaf_hash`]. Cached on first read; `Clone`
+/// preserves the cache.
 pub struct LeafEntry {
     pub kind: EntryKind,
     pub size: u64,
     pub mtime: SystemTime,
-    pub inode: u64,
-    pub device: u64,
+    pub fs_id: FsIdentity,
     leaf_hash: OnceLock<u128>,
 }
 
 impl LeafEntry {
     #[must_use]
-    pub const fn new(
-        kind: EntryKind,
-        size: u64,
-        mtime: SystemTime,
-        inode: u64,
-        device: u64,
-    ) -> Self {
+    pub const fn new(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> Self {
         Self {
             kind,
             size,
             mtime,
-            inode,
-            device,
+            fs_id,
             leaf_hash: OnceLock::new(),
         }
     }
@@ -133,8 +131,8 @@ impl LeafEntry {
     /// which reads each child leaf's hash transitively).
     ///
     /// **Precondition.** `h` must equal `compute_leaf_hash(self)` for
-    /// `self`'s identity fields (kind, size, mtime, inode, device).
-    /// Passing any other value poisons the cache permanently — every
+    /// `self`'s identity fields (kind, size, mtime, fs_id). Passing any
+    /// other value poisons the cache permanently — every
     /// subsequent [`leaf_hash`](Self::leaf_hash) reads the stale value,
     /// breaking stability comparison and parent `dir_hash` folds.
     ///
@@ -154,7 +152,7 @@ impl LeafEntry {
 
 impl Clone for LeafEntry {
     fn clone(&self) -> Self {
-        let out = Self::new(self.kind, self.size, self.mtime, self.inode, self.device);
+        let out = Self::new(self.kind, self.size, self.mtime, self.fs_id);
         if let Some(&v) = self.leaf_hash.get() {
             // OnceLock::set on a fresh cell never errors. The discard is
             // intentional — preserving the cached value is an optimisation,
@@ -173,8 +171,7 @@ impl PartialEq for LeafEntry {
         self.kind == other.kind
             && self.size == other.size
             && self.mtime == other.mtime
-            && self.inode == other.inode
-            && self.device == other.device
+            && self.fs_id == other.fs_id
     }
 }
 impl Eq for LeafEntry {}
@@ -188,8 +185,7 @@ impl std::fmt::Debug for LeafEntry {
             .field("kind", &self.kind)
             .field("size", &self.size)
             .field("mtime", &self.mtime)
-            .field("inode", &self.inode)
-            .field("device", &self.device)
+            .field("fs_id", &self.fs_id)
             .finish_non_exhaustive()
     }
 }
@@ -198,15 +194,16 @@ impl std::fmt::Debug for LeafEntry {
 // DirChild
 // ---------------------------------------------------------------------------
 
-/// Direct child that *is* a directory. Carries inode/device for rename
-/// detection and an optional `Arc<DirSnapshot>` for the recursive subtree.
+/// Direct child that *is* a directory. Carries the kernel identity for
+/// rename detection and an optional `Arc<DirSnapshot>` for the recursive
+/// subtree.
 ///
 /// `subtree: None` means *uncovered*: `recursive=false`, beyond
-/// `max_depth`, cross-filesystem boundary (the child's `dev` differs
-/// from the anchor's `root_dev`), or a mid-walk `lstat`/kind-flip
-/// failure on the subdir itself. The walker stored the entry but did
-/// not recurse; the parent's [`DirSnapshot::dir_hash`] contributes
-/// `(inode, device, 0u128)` for the subtree slot.
+/// `max_depth`, cross-filesystem boundary (the child's `fs_id.device`
+/// differs from the anchor's `root_dev`), or a mid-walk `lstat`/
+/// kind-flip failure on the subdir itself. The walker stored the entry
+/// but did not recurse; the parent's [`DirSnapshot::dir_hash`]
+/// contributes `(fs_id, 0u128)` for the subtree slot.
 ///
 /// Two boundary cases to keep distinct:
 /// - **`exclude` glob**: filtered entries are absent from the parent's
@@ -226,8 +223,7 @@ impl std::fmt::Debug for LeafEntry {
 /// identity is independent of kernel-side dirent-block churn).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirChild {
-    pub inode: u64,
-    pub device: u64,
+    pub fs_id: FsIdentity,
     pub subtree: Option<Arc<DirSnapshot>>,
 }
 
@@ -243,22 +239,14 @@ pub enum ChildEntry {
 }
 
 impl ChildEntry {
-    /// Inode of the underlying entry — same accessor for Leaf and Dir.
-    /// Used by the engine reconciler for inode-stable Dir pairs and by
-    /// `diff_tree`'s rename pairing.
+    /// Kernel identity of the underlying entry — same accessor for Leaf
+    /// and Dir. Used by the engine reconciler for fs_id-stable Dir pairs
+    /// and by `diff_tree`'s rename pairing.
     #[must_use]
-    pub const fn inode(&self) -> u64 {
+    pub const fn fs_id(&self) -> FsIdentity {
         match self {
-            Self::Leaf(l) => l.inode,
-            Self::Dir(d) => d.inode,
-        }
-    }
-
-    #[must_use]
-    pub const fn device(&self) -> u64 {
-        match self {
-            Self::Leaf(l) => l.device,
-            Self::Dir(d) => d.device,
+            Self::Leaf(l) => l.fs_id,
+            Self::Dir(d) => d.fs_id,
         }
     }
 
@@ -313,13 +301,13 @@ impl DirSnapshot {
         }
     }
 
-    /// Lazy 128-bit signature of `(captured_with, root_meta.{inode,
-    /// device}, entries)`. `root_meta.mtime` is intentionally absent
-    /// from the fold — `dir_hash` is filter-aware identity, while the
-    /// raw `lstat` mtime lives on the [`DirSnapshot::root_meta`] struct
-    /// field for kernel-aware comparisons (the walker's mtime-skip).
-    /// The cache is process-local and never invalidated; the snapshot
-    /// is immutable post-construction.
+    /// Lazy 128-bit signature of `(captured_with, root_meta.fs_id,
+    /// entries)`. `root_meta.mtime` is intentionally absent from the
+    /// fold — `dir_hash` is filter-aware identity, while the raw `lstat`
+    /// mtime lives on the [`DirSnapshot::root_meta`] struct field for
+    /// kernel-aware comparisons (the walker's mtime-skip). The cache is
+    /// process-local and never invalidated; the snapshot is immutable
+    /// post-construction.
     #[must_use]
     pub fn dir_hash(&self) -> u128 {
         *self.dir_hash.get_or_init(|| compute_dir_hash(self))
@@ -477,23 +465,21 @@ fn compute_leaf_hash(l: &LeafEntry) -> u128 {
     (l.kind as u8).hash(&mut h);
     l.size.hash(&mut h);
     hash_systemtime_into(l.mtime, &mut h);
-    l.inode.hash(&mut h);
-    l.device.hash(&mut h);
+    l.fs_id.hash(&mut h);
     h.finish_128_u128()
 }
 
 fn compute_dir_hash(d: &DirSnapshot) -> u128 {
     let mut h = hasher_128();
 
-    // Header: ScanConfig hash + the directory's own (inode, device).
+    // Header: ScanConfig hash + the directory's own kernel identity.
     // `root_meta.mtime` is **not** folded — filter-aware identity is
     // independent of kernel-side dirent-block churn (filtered-out
     // entries bump mtime without changing the user-visible state).
     // The walker reads `root_meta.mtime` directly off the struct
     // field for its mtime-skip; no consumer needs it via the hash.
     d.captured_with.hash(&mut h);
-    d.root_meta.inode.hash(&mut h);
-    d.root_meta.device.hash(&mut h);
+    d.root_meta.fs_id.hash(&mut h);
 
     // Length prefix: belt-and-suspenders alongside SipHash24's
     // prefix-freeness. Keeps the golden test legible.
@@ -511,19 +497,18 @@ fn compute_dir_hash(d: &DirSnapshot) -> u128 {
                 l.leaf_hash().hash(&mut h);
             }
             ChildEntry::Dir(c) => {
-                // `(inode, device)` are folded twice on the `Some(subtree)`
-                // path: once via the DirChild and once transitively through
+                // `fs_id` is folded twice on the `Some(subtree)` path:
+                // once via the DirChild and once transitively through
                 // the subtree's `root_meta` inside `dir_hash`. The values
-                // agree by walker construction (both lstats target the same
-                // dirent), so the duplication is harmless. The asymmetry is
-                // necessary: when `subtree = None` (uncovered), only the
-                // DirChild fold contributes inode/device, since
-                // `UNCOVERED_SUBTREE_HASH` is a constant. Folding the
-                // DirChild's inode/device unconditionally keeps the
-                // covered/uncovered cases distinguishable.
+                // agree by walker construction (both lstats target the
+                // same dirent), so the duplication is harmless. The
+                // asymmetry is necessary: when `subtree = None`
+                // (uncovered), only the DirChild fold contributes
+                // `fs_id`, since `UNCOVERED_SUBTREE_HASH` is a constant.
+                // Folding the DirChild's `fs_id` unconditionally keeps
+                // the covered/uncovered cases distinguishable.
                 DIR_TAG.hash(&mut h);
-                c.inode.hash(&mut h);
-                c.device.hash(&mut h);
+                c.fs_id.hash(&mut h);
                 let sub: u128 = c
                     .subtree
                     .as_ref()
@@ -791,8 +776,7 @@ fn splice_dir(
     new_entries.insert(
         CompactString::new(name),
         ChildEntry::Dir(DirChild {
-            inode: new_child.root_meta.inode,
-            device: new_child.root_meta.device,
+            fs_id: new_child.root_meta.fs_id,
             subtree: Some(new_child),
         }),
     );
@@ -884,10 +868,9 @@ pub fn diff_tree(baseline: &TreeSnapshot, current: &TreeSnapshot) -> Diff {
 struct StagedEntry {
     rel: CompactString,
     kind: EntryKind,
-    inode: u64,
-    device: u64,
-    /// When `false`, `pair_renames` skips this entry's `(device, inode)`
-    /// from rename matching and routes it directly to `out.created` /
+    fs_id: FsIdentity,
+    /// When `false`, `pair_renames` skips this entry's `fs_id` from
+    /// rename matching and routes it directly to `out.created` /
     /// `out.deleted`. Used for parent slots whose identity has flipped
     /// (kind change at the same name, Dir replaced at a different inode):
     /// such slots represent observably-different entities and are not
@@ -961,58 +944,33 @@ fn diff_same_name(
     let rel = compose_rel(rel_prefix, name);
     match (pc, nc) {
         (ChildEntry::Leaf(p), ChildEntry::Leaf(n)) => {
-            if p.inode != n.inode || p.device != n.device {
-                // Same name, different inode ⇒ delete-then-create. Stage
-                // as pair_eligible: each side may legitimately pair with
-                // a cross-level entry sharing its inode (the user moved
-                // the prior file out and a different one in).
+            if p.fs_id != n.fs_id {
+                // Same name, different kernel identity ⇒ delete-then-create.
+                // Stage as pair_eligible: each side may legitimately pair
+                // with a cross-level entry sharing its `fs_id` (the user
+                // moved the prior file out and a different one in).
                 staged_deleted.push(StagedEntry {
                     rel: rel.clone(),
                     kind: p.kind,
-                    inode: p.inode,
-                    device: p.device,
+                    fs_id: p.fs_id,
                     pair_eligible: true,
                 });
                 staged_created.push(StagedEntry {
                     rel,
                     kind: n.kind,
-                    inode: n.inode,
-                    device: n.device,
+                    fs_id: n.fs_id,
                     pair_eligible: true,
                 });
             } else if p.leaf_hash() != n.leaf_hash() {
                 modified.push(EntryRef {
                     segment: rel,
                     kind: n.kind,
-                    inode: n.inode,
+                    fs_id: n.fs_id,
                 });
             }
         }
         (ChildEntry::Dir(p), ChildEntry::Dir(n)) => {
-            if p.inode != n.inode || p.device != n.device {
-                // Same-name dir-replace at a different inode: parent slot
-                // represents a different entity. Stage parent ineligible
-                // (it must surface as Deleted + Created, never collapse
-                // to a same-rel "Rename"), and recurse both subtrees so
-                // descendants surface as Deleted/Created or pair as
-                // cross-level Renames against the rest of the walk.
-                staged_deleted.push(StagedEntry {
-                    rel: rel.clone(),
-                    kind: EntryKind::Dir,
-                    inode: p.inode,
-                    device: p.device,
-                    pair_eligible: false,
-                });
-                staged_created.push(StagedEntry {
-                    rel: rel.clone(),
-                    kind: EntryKind::Dir,
-                    inode: n.inode,
-                    device: n.device,
-                    pair_eligible: false,
-                });
-                stage_descendants_deleted(&rel, pc, staged_deleted);
-                stage_descendants_created(&rel, nc, staged_created);
-            } else {
+            if p.fs_id == n.fs_id {
                 match (p.subtree.as_deref(), n.subtree.as_deref()) {
                     (Some(ps), Some(ns)) if ps.dir_hash() != ns.dir_hash() => {
                         collect_dir_pair(ps, ns, &rel, modified, staged_created, staged_deleted);
@@ -1034,6 +992,28 @@ fn diff_same_name(
                         );
                     }
                 }
+            } else {
+                // Same-name dir-replace at a different kernel identity:
+                // parent slot represents a different entity. Stage parent
+                // ineligible (it must surface as Deleted + Created, never
+                // collapse to a same-rel "Rename"), and recurse both
+                // subtrees so descendants surface as Deleted/Created or
+                // pair as cross-level Renames against the rest of the
+                // walk.
+                staged_deleted.push(StagedEntry {
+                    rel: rel.clone(),
+                    kind: EntryKind::Dir,
+                    fs_id: p.fs_id,
+                    pair_eligible: false,
+                });
+                staged_created.push(StagedEntry {
+                    rel: rel.clone(),
+                    kind: EntryKind::Dir,
+                    fs_id: n.fs_id,
+                    pair_eligible: false,
+                });
+                stage_descendants_deleted(&rel, pc, staged_deleted);
+                stage_descendants_created(&rel, nc, staged_created);
             }
         }
         // Kind change at same name (Leaf↔Dir): the slot represents
@@ -1047,15 +1027,13 @@ fn diff_same_name(
             staged_deleted.push(StagedEntry {
                 rel: rel.clone(),
                 kind: pc.kind(),
-                inode: pc.inode(),
-                device: pc.device(),
+                fs_id: pc.fs_id(),
                 pair_eligible: false,
             });
             staged_created.push(StagedEntry {
                 rel: rel.clone(),
                 kind: nc.kind(),
-                inode: nc.inode(),
-                device: nc.device(),
+                fs_id: nc.fs_id(),
                 pair_eligible: false,
             });
             stage_descendants_deleted(&rel, pc, staged_deleted);
@@ -1099,8 +1077,7 @@ fn stage_deleted(
     staged.push(StagedEntry {
         rel: rel.clone(),
         kind: pc.kind(),
-        inode: pc.inode(),
-        device: pc.device(),
+        fs_id: pc.fs_id(),
         pair_eligible: true,
     });
     // For Dir deletions, recurse to emit each descendant as Deleted.
@@ -1125,8 +1102,7 @@ fn stage_created(
     staged.push(StagedEntry {
         rel: rel.clone(),
         kind: nc.kind(),
-        inode: nc.inode(),
-        device: nc.device(),
+        fs_id: nc.fs_id(),
         pair_eligible: true,
     });
     if let ChildEntry::Dir(d) = nc
@@ -1190,7 +1166,7 @@ impl Diff {
             out.created.push(EntryRef {
                 segment: s.rel,
                 kind: s.kind,
-                inode: s.inode,
+                fs_id: s.fs_id,
             });
         }
         out
@@ -1215,26 +1191,26 @@ impl Diff {
             out.deleted.push(EntryRef {
                 segment: s.rel,
                 kind: s.kind,
-                inode: s.inode,
+                fs_id: s.fs_id,
             });
         }
         out
     }
 }
 
-/// Pair Created/Deleted entries by `(device, inode)` to recover Renames.
+/// Pair Created/Deleted entries by `fs_id` to recover Renames.
 ///
-/// The index uses `BTreeMap::insert` semantics, so when a `(device, inode)`
+/// The index uses `BTreeMap::insert` semantics, so when an `fs_id`
 /// collides (the pathological hardlink case of multiple Created at the
 /// same inode) the *last* index wins. The `paired` set guarantees one
 /// Created can match at most one Deleted.
 ///
 /// **Pairing rules.** A `(deleted, created)` pair becomes a `Rename` iff
-/// (1) both sides are `pair_eligible`, (2) the `(device, inode)` matches,
-/// (3) the `kind` matches, and (4) the `rel` differs. Same-`rel` candidates
-/// are structurally impossible for eligible entries (parent kind changes
-/// and Dir-replace-at-different-inode stage their parents ineligible;
-/// other staging paths cannot produce same-rel collisions in the global
+/// (1) both sides are `pair_eligible`, (2) the `fs_id` matches, (3) the
+/// `kind` matches, and (4) the `rel` differs. Same-`rel` candidates are
+/// structurally impossible for eligible entries (parent kind changes and
+/// Dir-replace-at-different-fs_id stage their parents ineligible; other
+/// staging paths cannot produce same-rel collisions in the global
 /// buffer) — pinned by the `debug_assert` below. Cross-kind candidates
 /// arise from kernel inode reuse across unrelated operations and are
 /// not renames; they fall through to Created+Deleted.
@@ -1243,15 +1219,19 @@ impl Diff {
 /// (depth-first lex on each side); Renamed entries are emitted in
 /// `staged_deleted`'s iteration order (also depth-first lex on the
 /// baseline side).
+///
+/// The BTreeMap is keyed lookup-only (never iterated), so the canonical
+/// `FsIdentity` ord (inode-first by declaration order) supersedes the
+/// pre-migration `(device, inode)` tuple ord with no observable effect.
 fn pair_renames(
     staged_created: Vec<StagedEntry>,
     staged_deleted: Vec<StagedEntry>,
     out: &mut Diff,
 ) {
-    let mut by_key: BTreeMap<(u64, u64), usize> = BTreeMap::new();
+    let mut by_key: BTreeMap<FsIdentity, usize> = BTreeMap::new();
     for (i, c) in staged_created.iter().enumerate() {
         if c.pair_eligible {
-            by_key.insert((c.device, c.inode), i);
+            by_key.insert(c.fs_id, i);
         }
     }
     let mut paired: BTreeSet<usize> = BTreeSet::new();
@@ -1265,7 +1245,7 @@ fn pair_renames(
             leftover_deleted.push(d);
             continue;
         }
-        match by_key.get(&(d.device, d.inode)) {
+        match by_key.get(&d.fs_id) {
             Some(&ci) if !paired.contains(&ci) => {
                 let c = &staged_created[ci];
                 debug_assert!(
@@ -1285,12 +1265,12 @@ fn pair_renames(
                     from: EntryRef {
                         segment: d.rel,
                         kind: d.kind,
-                        inode: d.inode,
+                        fs_id: d.fs_id,
                     },
                     to: EntryRef {
                         segment: c.rel.clone(),
                         kind: c.kind,
-                        inode: c.inode,
+                        fs_id: c.fs_id,
                     },
                 });
                 paired.insert(ci);
@@ -1304,7 +1284,7 @@ fn pair_renames(
             out.created.push(EntryRef {
                 segment: c.rel,
                 kind: c.kind,
-                inode: c.inode,
+                fs_id: c.fs_id,
             });
         }
     }
@@ -1312,33 +1292,34 @@ fn pair_renames(
         out.deleted.push(EntryRef {
             segment: d.rel,
             kind: d.kind,
-            inode: d.inode,
+            fs_id: d.fs_id,
         });
     }
 }
 
 fn diff_file_pair(b: &LeafEntry, c: &LeafEntry, out: &mut Diff) {
-    if b.inode == c.inode && b.device == c.device {
+    if b.fs_id == c.fs_id {
         if b.leaf_hash() != c.leaf_hash() {
             out.modified.push(EntryRef {
                 segment: CompactString::new(""),
                 kind: c.kind,
-                inode: c.inode,
+                fs_id: c.fs_id,
             });
         }
     } else {
-        // Inode change at the file Profile's anchor: same-segment kind/
-        // identity flip. Emit Deleted + Created (no Rename: a file Profile
-        // sees its anchor as one fact, not a moved name).
+        // Kernel-identity change at the file Profile's anchor:
+        // same-segment kind/identity flip. Emit Deleted + Created (no
+        // Rename: a file Profile sees its anchor as one fact, not a
+        // moved name).
         out.deleted.push(EntryRef {
             segment: CompactString::new(""),
             kind: b.kind,
-            inode: b.inode,
+            fs_id: b.fs_id,
         });
         out.created.push(EntryRef {
             segment: CompactString::new(""),
             kind: c.kind,
-            inode: c.inode,
+            fs_id: c.fs_id,
         });
     }
 }

@@ -922,14 +922,17 @@ mod tests {
     fn effect_with_diff_passes_specter_diff_path() {
         use compact_str::CompactString;
         use smallvec::smallvec;
-        use specter_core::{Diff, EntryKind, EntryRef};
+        use specter_core::{Diff, EntryKind, EntryRef, FsIdentity};
 
         let mut h = Harness::new(4);
         let diff = Arc::new(Diff {
             created: smallvec![EntryRef {
                 segment: CompactString::from("a.rs"),
                 kind: EntryKind::File,
-                inode: 1,
+                fs_id: FsIdentity {
+                    inode: 1,
+                    device: 0
+                },
             }],
             ..Default::default()
         });
@@ -1059,14 +1062,17 @@ mod tests {
     fn multi_step_plan_shares_tmp_diff_path_and_cleans_at_terminus() {
         use compact_str::CompactString;
         use smallvec::smallvec;
-        use specter_core::{Diff, EntryKind, EntryRef};
+        use specter_core::{Diff, EntryKind, EntryRef, FsIdentity};
 
         let mut h = Harness::new(4);
         let diff = Arc::new(Diff {
             created: smallvec![EntryRef {
                 segment: CompactString::from("a.rs"),
                 kind: EntryKind::File,
-                inode: 1,
+                fs_id: FsIdentity {
+                    inode: 1,
+                    device: 0
+                },
             }],
             ..Default::default()
         });
