@@ -110,6 +110,12 @@ pub struct Effect {
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct CorrelationId(pub u64);
 
+impl From<u64> for CorrelationId {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 /// Coalescing identity.
 ///
 /// Both variants carry the owning Profile. The `profile` field on

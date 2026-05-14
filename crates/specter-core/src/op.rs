@@ -14,6 +14,12 @@ use std::sync::Arc;
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProbeCorrelation(pub u64);
 
+impl From<u64> for ProbeCorrelation {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 /// Probe-channel owner — the engine-resident entity that minted a probe.
 ///
 /// Echoed verbatim through [`ProbeRequest`] / [`ProbeResponse`] /

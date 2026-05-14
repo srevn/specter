@@ -1,6 +1,7 @@
 //! Timer heap. Tie-break on `(deadline, ProfileId, TimerId)`;
 //! cancelled timers are not removed eagerly, only invalidated on pop.
 
+use crate::counter::MonotonicCounter;
 use specter_core::{ProfileId, TimerId, TimerKind};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -69,10 +70,9 @@ impl PartialOrd for TimerEntry {
 #[derive(Debug, Default)]
 pub(crate) struct TimerHeap {
     inner: BinaryHeap<Reverse<TimerEntry>>,
-    /// Monotonic counter for `TimerId` minting. Saturates at `u64::MAX` —
-    /// at one billion timers per second that boundary is ~580 years out,
-    /// safely past any plausible v1 deployment.
-    counter: u64,
+    /// Monotonic counter for `TimerId` minting. Saturation panics
+    /// unconditionally (see [`MonotonicCounter::next`]).
+    counter: MonotonicCounter<TimerId>,
 }
 
 impl TimerHeap {
@@ -85,18 +85,12 @@ impl TimerHeap {
     /// and which transition to dispatch — without it, the engine would
     /// re-derive from state on every fire.
     ///
-    /// The minted id is unique within this heap's lifetime (modulo counter
-    /// saturation, which is unreachable in any realistic deployment) —
-    /// monotonic-counter minting via [`TimerId::from_counter`] sidesteps
-    /// `slotmap`'s generation re-use semantics.
+    /// The minted id is unique within this heap's lifetime. The counter
+    /// minting via [`MonotonicCounter`] sidesteps `slotmap`'s generation
+    /// re-use semantics: the heap stores raw `u64`-derived
+    /// [`slotmap::KeyData`] without a backing slot allocation.
     pub fn schedule(&mut self, deadline: Instant, profile: ProfileId, kind: TimerKind) -> TimerId {
-        debug_assert!(
-            self.counter < u64::MAX,
-            "TimerHeap counter saturated at u64::MAX; subsequent ids would collide \
-             and break lazy invalidation",
-        );
-        self.counter = self.counter.saturating_add(1);
-        let id = TimerId::from_counter(self.counter);
+        let id = self.counter.next();
         self.inner.push(Reverse(TimerEntry {
             deadline,
             profile,
@@ -174,6 +168,18 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);
+    }
+
+    /// Counter saturation — release-runnable. Pairs with the
+    /// `MonotonicCounter` unit tests in `counter.rs`; this site test
+    /// proves the heap wires the counter all the way through `schedule`
+    /// rather than re-implementing the bump.
+    #[test]
+    #[should_panic(expected = "MonotonicCounter")]
+    fn schedule_panics_on_counter_saturation() {
+        let mut h = TimerHeap::default();
+        h.counter.prime(u64::MAX);
+        let _ = h.schedule(Instant::now(), ProfileId::default(), TimerKind::Settle);
     }
 
     #[test]

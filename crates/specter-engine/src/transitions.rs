@@ -16,9 +16,9 @@ use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
-    ActiveBurst, AnchorClaim, BurstIntent, ClaimKind, ClassSet, CorrelationId, DedupKey,
-    DescentRemaining, Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope,
-    PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
+    ActiveBurst, AnchorClaim, BurstIntent, ClaimKind, ClassSet, DedupKey, DescentRemaining,
+    Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase,
+    PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
     PromoterClaimKind, PromoterId, PromoterState, Resource, ResourceId, ResourceKind, StepOutput,
     SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
 };
@@ -2232,7 +2232,7 @@ impl Engine {
                     } else {
                         None
                     };
-                    let correlation = self.next_effect_correlation();
+                    let correlation = self.effect_correlations.next();
                     let Some(sub) = self.subs.get(sub_id) else {
                         continue;
                     };
@@ -2382,7 +2382,7 @@ impl Engine {
                 resource,
             };
 
-            let correlation = self.next_effect_correlation();
+            let correlation = self.effect_correlations.next();
             // The Sub may have been removed mid-burst; defensive lookup.
             let Some(sub) = self.subs.get(sub_id) else {
                 continue;
@@ -2455,25 +2455,6 @@ impl Engine {
             cur = self.tree.parent(rid);
         }
         out
-    }
-
-    /// Mint a fresh `CorrelationId` for an Effect. Engine-monotonic on the
-    /// dedicated `Engine.next_effect_correlation` counter — disjoint from
-    /// the probe-side counter (`Engine.next_probe_correlation`, bumped by
-    /// `Engine::mint_owner_correlation`). The disjoint counters plus the
-    /// typed wrappers ([`CorrelationId`] vs `ProbeCorrelation`) keep the
-    /// spaces structurally unreachable from each other — even a
-    /// misrouted token cannot accidentally numerically match across
-    /// spaces.
-    fn next_effect_correlation(&mut self) -> CorrelationId {
-        debug_assert!(
-            self.next_effect_correlation < u64::MAX,
-            "Engine.next_effect_correlation saturated at u64::MAX; \
-             subsequent effect correlations would collide and break \
-             actuator-side coalescing",
-        );
-        self.next_effect_correlation = self.next_effect_correlation.saturating_add(1);
-        CorrelationId(self.next_effect_correlation)
     }
 
     /// Single-pass classification of owners that carry a dispatch

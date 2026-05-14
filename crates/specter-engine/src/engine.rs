@@ -13,14 +13,15 @@
 //! corresponding `on_*` handler. `attach_sub` is the engine's public
 //! Sub-attachment API.
 
+use crate::counter::MonotonicCounter;
 use crate::refcounts::add_watch;
 use crate::timer::{TimerEntry, TimerHeap};
 use compact_str::CompactString;
 use specter_core::{
-    ActiveBurst, AnchorClaim, ClassSet, ContribKey, DedupKey, DescentState, Diagnostic, Input,
-    PostFirePhase, PreFirePhase, ProbeOwner, Profile, ProfileId, ProfileMap, ProfileState,
-    PromoterRegistry, PromoterState, ResourceId, StepOutput, Sub, SubAttachRequest, SubId,
-    SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
+    ActiveBurst, AnchorClaim, ClassSet, ContribKey, CorrelationId, DedupKey, DescentState,
+    Diagnostic, Input, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOwner, Profile,
+    ProfileId, ProfileMap, ProfileState, PromoterRegistry, PromoterState, ResourceId, StepOutput,
+    Sub, SubAttachRequest, SubId, SubRegistry, TimerId, TimerKind, Tree, compute_config_hash,
 };
 use std::path::Component;
 use std::time::{Duration, Instant};
@@ -56,24 +57,20 @@ pub struct Engine {
     /// registry the Promoter helpers mutate.
     pub(crate) promoters: PromoterRegistry,
     pub(crate) timers: TimerHeap,
-    /// Monotonic counter for [`specter_core::op::ProbeCorrelation`]
-    /// minting. Read and bumped exclusively by
-    /// [`Engine::mint_owner_correlation`] in `probe_channel.rs`. Kept
-    /// in a separate counter from the Effect side so the two token
-    /// spaces never share a numeric range — a misrouted Effect
-    /// completion (`ProbeCorrelation` value flowing into an
-    /// `EffectComplete` filter, or symmetric) cannot accidentally
-    /// match. Saturating arithmetic plus a `debug_assert!` on the mint
-    /// path catches the (unreachable) saturation case.
-    pub(crate) next_probe_correlation: u64,
-    /// Monotonic counter for [`specter_core::CorrelationId`] minting.
-    /// Read and bumped exclusively by `Engine::next_effect_correlation`
-    /// in `transitions.rs`; consumed by `emit_effects` at every
-    /// `Effect` push so the actuator-side coalescer can correlate
-    /// completions back to the originating Effect across the Latest
-    /// dedup. Disjoint from [`Self::next_probe_correlation`] per the
-    /// rationale on that field.
-    pub(crate) next_effect_correlation: u64,
+    /// Monotonic counter for [`ProbeCorrelation`] minting. Read and
+    /// bumped exclusively by [`Engine::mint_owner_correlation`] in
+    /// `probe_channel.rs`. Phantom-typed
+    /// ([`MonotonicCounter<ProbeCorrelation>`]) so cross-counter misuse
+    /// (e.g. attempting to mint a `CorrelationId` from this counter) is
+    /// a compile error.
+    pub(crate) probe_correlations: MonotonicCounter<ProbeCorrelation>,
+    /// Monotonic counter for [`CorrelationId`] minting. Bumped at
+    /// every `Effect` push in `transitions.rs::emit_effects` so the
+    /// actuator-side coalescer can correlate completions back to the
+    /// originating Effect across the Latest dedup. Phantom-typed
+    /// distinct from [`Self::probe_correlations`]: the two id spaces
+    /// stay structurally separate at the type level.
+    pub(crate) effect_correlations: MonotonicCounter<CorrelationId>,
 }
 
 impl Engine {
@@ -875,13 +872,7 @@ impl Engine {
             if top.deadline > now {
                 return None;
             }
-            let entry = self.timers.pop_top().expect(
-                "TimerHeap.pop_top returned None immediately after peek_top \
-                 returned Some — BinaryHeap invariant violated (would require \
-                 concurrent mutation or a borrow-rule breach); structurally \
-                 unreachable under `pop_expired`'s single-threaded \
-                 `&mut self` window",
-            );
+            let entry = self.timers.pop_top().expect("peek_top was Some");
             if Self::is_timer_referenced(&self.profiles, entry.profile, entry.kind, entry.id) {
                 return Some(entry);
             }
@@ -1252,7 +1243,7 @@ mod tests {
     #[test]
     fn mint_probe_correlation_is_monotonic_per_profile() {
         // Three Profiles, each minted once: the
-        // `Engine.next_probe_correlation` counter advances monotonically
+        // `Engine.probe_correlations` counter advances monotonically
         // across mints regardless of which Profile owns each open
         // channel. Pinning to discrete Profiles avoids the I5
         // double-open assertion (one open channel per Profile).
@@ -1321,8 +1312,22 @@ mod tests {
         assert!(e.subs.is_empty());
         assert!(e.timers.is_empty());
         assert!(e.next_deadline().is_none());
-        assert_eq!(e.next_probe_correlation, 0);
-        assert_eq!(e.next_effect_correlation, 0);
+        assert_eq!(e.probe_correlations.peek(), 0);
+        assert_eq!(e.effect_correlations.peek(), 0);
+    }
+
+    /// Counter saturation on the effect side — release-runnable. The
+    /// effect counter has no per-call-site wrapper (Phase 1 inlined the
+    /// minting at the two `emit_effects` push sites in
+    /// `transitions.rs`), so this test exercises the counter directly to
+    /// prove the field is wired up. Pairs with the `MonotonicCounter`
+    /// unit tests in `counter.rs`.
+    #[test]
+    #[should_panic(expected = "MonotonicCounter")]
+    fn effect_correlations_panic_on_counter_saturation() {
+        let mut e = Engine::new();
+        e.effect_correlations.prime(u64::MAX);
+        let _ = e.effect_correlations.next();
     }
 
     // ===== decompose_attach_path =====

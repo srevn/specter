@@ -5,6 +5,7 @@
 
 mod burst;
 mod claims;
+mod counter;
 mod coverage;
 mod descent;
 mod engine;

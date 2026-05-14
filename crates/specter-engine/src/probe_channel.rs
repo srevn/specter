@@ -11,13 +11,12 @@
 //!
 //! This module is the single source of three disciplines:
 //! 1. Counter monotonicity for the probe side — `mint_owner_correlation`
-//!    is the only path that bumps `Engine.next_probe_correlation`. The
-//!    effect side has its own counter (`Engine.next_effect_correlation`,
-//!    bumped by `Engine::next_effect_correlation` in `transitions.rs`);
-//!    the disjoint counters PLUS the typed wrappers (`ProbeCorrelation`
-//!    vs `CorrelationId`) keep the spaces structurally unreachable from
-//!    each other — a misrouted token cannot accidentally numerically
-//!    match across spaces.
+//!    is the only path that drives `Engine.probe_correlations` forward.
+//!    The counter is phantom-typed
+//!    ([`crate::counter::MonotonicCounter<ProbeCorrelation>`]), so a
+//!    misrouted token cannot numerically collide with an effect-side
+//!    [`specter_core::CorrelationId`] — the type system rejects
+//!    cross-counter wiring before the values exist.
 //! 2. Channel-state slot — only `mint_owner_correlation` writes
 //!    `pending_probe = Some(_)`; only `cancel_owner_probe` and the
 //!    `on_probe_response` pre-dispatch clear write `pending_probe = None`.
@@ -85,27 +84,26 @@ impl Engine {
     /// `pending_probe == Some(received)` check at the top of
     /// `on_probe_response` and emit `StaleProbeResponse`. The assertion
     /// is the early-warning signal in CI/dev.
+    ///
+    /// **Saturation.** Counter saturation panics unconditionally via
+    /// [`crate::counter::MonotonicCounter::next`]; release builds are
+    /// not exempt because silent wrap would re-issue an
+    /// already-outstanding correlation and break stale-response
+    /// detection.
     #[must_use]
     pub(crate) fn mint_owner_correlation(&mut self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
         // I5 staleness check. Read-only; the &mut downgrade window for
         // the slot write happens below.
+        let existing = self.pending_slot(owner);
         debug_assert!(
-            self.pending_slot(owner).is_none(),
+            existing.is_none(),
             "I5 violated: minting probe correlation while channel is open \
-             (existing = {:?}, owner = {owner:?})",
-            self.pending_slot(owner),
+             (existing = {existing:?}, owner = {owner:?})",
         );
         // Stale owner — defensive bail before consuming a counter tick.
         self.pending_slot_mut(owner)?;
 
-        debug_assert!(
-            self.next_probe_correlation < u64::MAX,
-            "Engine.next_probe_correlation saturated at u64::MAX; subsequent \
-             probe correlations would collide and break stale-response \
-             detection",
-        );
-        self.next_probe_correlation = self.next_probe_correlation.saturating_add(1);
-        let correlation = ProbeCorrelation(self.next_probe_correlation);
+        let correlation = self.probe_correlations.next();
         if let Some(slot) = self.pending_slot_mut(owner) {
             *slot = Some(correlation);
         }
@@ -307,6 +305,21 @@ mod tests {
             .mint_owner_correlation(owner)
             .expect("first mint succeeds");
         let _ = e.mint_owner_correlation(owner); // panics: I5 violated
+    }
+
+    /// Counter saturation — release-runnable. Distinct from the
+    /// `debug_assert!`-gated I5 test above: the underlying
+    /// [`crate::counter::MonotonicCounter`] uses an unconditional
+    /// `assert!`, so the panic survives the release profile. Pairs with
+    /// the `MonotonicCounter` unit tests in `counter.rs`; this site test
+    /// proves the engine routes through the counter at the `mint`
+    /// boundary rather than reimplementing the bump.
+    #[test]
+    #[should_panic(expected = "MonotonicCounter")]
+    fn mint_owner_correlation_panics_on_counter_saturation() {
+        let (mut e, owner) = fresh_engine_with_idle_profile();
+        e.probe_correlations.prime(u64::MAX);
+        let _ = e.mint_owner_correlation(owner);
     }
 
     /// Closed channel + cancel = no-op. The helper's idempotence is

@@ -217,15 +217,7 @@ impl Engine {
         // Mint→write would leave `pending_probe = Some(_)` with the phase
         // still implicit (Idle), and a stray observer reading both fields
         // would see a live correlation in a non-Verifying state — worse,
-        // a re-entrant mint would trip the I5 debug_assert. Write→mint
-        // leaves `phase = Verifying` momentarily with no correlation
-        // (no live response can land in that window in v1's single-
-        // threaded step), and a re-entrant mint succeeds against an
-        // empty slot — strictly safer. v1 single-threaded step never
-        // observes either window; the doc fixes the ordering at
-        // `transition_to_verifying` / `transition_to_rebasing` /
-        // `start_seed_burst` and lets the future correlation-on-phase
-        // refactor (Axis 2 of the audit) collapse the iff to one write.
+        // a re-entrant mint would trip the I5 debug_assert.
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.state = ProfileState::Active(ActiveBurst::PreFire(PreFireBurst {
                 burst_deadline,
