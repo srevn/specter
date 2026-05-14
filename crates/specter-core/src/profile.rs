@@ -1973,11 +1973,10 @@ mod tests {
         PostFirePhase, PreFireBurst, PreFirePhase, TimerKind,
     };
     use crate::ids::TimerId;
-    use slotmap::KeyData;
     use std::collections::BTreeSet;
 
     fn tid(n: u64) -> TimerId {
-        TimerId::from(KeyData::from_ffi(n))
+        TimerId::from(n)
     }
 
     fn batching_burst(settle: TimerId, deadline: TimerId, anchor: ResourceId) -> PreFireBurst {

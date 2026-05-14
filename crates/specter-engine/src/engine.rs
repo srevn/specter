@@ -1348,7 +1348,7 @@ mod tests {
         let mut e = Engine::new();
         let resp = ProbeResponse {
             owner: ProbeOwner::Profile(ProfileId::default()),
-            correlation: ProbeCorrelation(0),
+            correlation: ProbeCorrelation::from(0),
             outcome: ProbeOutcome::Vanished,
         };
         let out = e.step(Input::ProbeResponse(resp), Instant::now());
@@ -1591,9 +1591,9 @@ mod tests {
             .open(ProbeOwner::Profile(pid3), OpenKind::ProfileVerifying);
         assert!(a < b);
         assert!(b < c);
-        assert_eq!(a, ProbeCorrelation(1));
-        assert_eq!(b, ProbeCorrelation(2));
-        assert_eq!(c, ProbeCorrelation(3));
+        assert_eq!(a, ProbeCorrelation::from(1));
+        assert_eq!(b, ProbeCorrelation::from(2));
+        assert_eq!(c, ProbeCorrelation::from(3));
 
         // Channel populated symmetrically.
         assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid1)), Some(a));

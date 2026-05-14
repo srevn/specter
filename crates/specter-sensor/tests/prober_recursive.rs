@@ -30,7 +30,7 @@ fn segments(
     let p = fresh_profile_id();
     prober.submit(ProbeRequest::Subtree {
         owner: ProbeOwner::Profile(p),
-        correlation: ProbeCorrelation(1),
+        correlation: ProbeCorrelation::from(1),
         target_resource: ResourceId::default(),
         target_path: anchor,
         scan_config: cfg,

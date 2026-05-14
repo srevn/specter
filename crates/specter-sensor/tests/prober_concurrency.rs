@@ -18,14 +18,10 @@ fn fresh_profile_ids(n: usize) -> Vec<ProfileId> {
     (0..n).map(|_| sm.insert(())).collect()
 }
 
-const fn anchor_request(
-    profile: ProfileId,
-    target_path: PathBuf,
-    correlation: u64,
-) -> ProbeRequest {
+fn anchor_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(profile),
-        correlation: ProbeCorrelation(correlation),
+        correlation: ProbeCorrelation::from(correlation),
         target_path,
     }
 }
@@ -56,11 +52,11 @@ fn single_worker_drains_more_than_concurrency_serially() {
     assert_eq!(
         order,
         vec![
-            ProbeCorrelation(1),
-            ProbeCorrelation(2),
-            ProbeCorrelation(3),
-            ProbeCorrelation(4),
-            ProbeCorrelation(5),
+            ProbeCorrelation::from(1),
+            ProbeCorrelation::from(2),
+            ProbeCorrelation::from(3),
+            ProbeCorrelation::from(4),
+            ProbeCorrelation::from(5),
         ]
     );
 

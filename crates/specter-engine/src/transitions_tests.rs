@@ -720,7 +720,7 @@ fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
 fn probe_response_correlation_mismatch_drops_with_diagnostic() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     // Inject a response with the wrong correlation.
-    let bogus = specter_core::ProbeCorrelation(99_999);
+    let bogus = specter_core::ProbeCorrelation::from(99_999);
     let snap = dir_tree_snap(root, vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -751,7 +751,7 @@ fn probe_response_for_idle_profile_drops_with_diagnostic() {
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
-            correlation: specter_core::ProbeCorrelation(1),
+            correlation: specter_core::ProbeCorrelation::from(1),
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
         Instant::now(),
@@ -1343,7 +1343,7 @@ fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
 #[test]
 fn stale_probe_response_emits_exactly_one_diagnostic() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    let bogus = specter_core::ProbeCorrelation(99_999);
+    let bogus = specter_core::ProbeCorrelation::from(99_999);
     let snap = dir_tree_snap(root, vec![]);
 
     let out = e.step(
@@ -1732,8 +1732,7 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
 #[test]
 fn timer_expired_stale_id_emits_diagnostic() {
     let mut e = Engine::new();
-    use slotmap::KeyData;
-    let bogus = specter_core::TimerId::from(KeyData::from_ffi(99_999));
+    let bogus = specter_core::TimerId::from(99_999);
     let out = e.step(
         Input::TimerExpired {
             profile: specter_core::ProfileId::default(),
@@ -4688,7 +4687,7 @@ mod props {
             }
             Action::Probe => {
                 let snap = dir_tree_snap(r, vec![]);
-                let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation(0));
+                let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation::from(0));
                 e.step(
                     Input::ProbeResponse(ProbeResponse {
                         owner: ProbeOwner::Profile(pid),
@@ -4699,7 +4698,7 @@ mod props {
                 )
             }
             Action::ProbeVanished => {
-                let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation(0));
+                let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation::from(0));
                 e.step(
                     Input::ProbeResponse(ProbeResponse {
                         owner: ProbeOwner::Profile(pid),
@@ -4710,7 +4709,7 @@ mod props {
                 )
             }
             Action::ProbeFailed(errno) => {
-                let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation(0));
+                let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation::from(0));
                 e.step(
                     Input::ProbeResponse(ProbeResponse {
                         owner: ProbeOwner::Profile(pid),

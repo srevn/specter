@@ -1642,7 +1642,7 @@ mod tests {
             key,
             target,
             forced: false,
-            correlation: CorrelationId(corr),
+            correlation: CorrelationId::from(corr),
             diff: None,
             capture_output: false,
             sub_name: CompactString::new(""),
@@ -1913,7 +1913,7 @@ mod tests {
             Reaped {
                 key: key.clone(),
                 sub,
-                correlation: CorrelationId(1),
+                correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Failed {
                     exit_code: None,
                     signal: None,
@@ -1977,7 +1977,7 @@ mod tests {
             Reaped {
                 key,
                 sub,
-                correlation: CorrelationId(5),
+                correlation: CorrelationId::from(5),
                 outcome: EffectOutcome::Failed {
                     exit_code: None,
                     signal: None,
@@ -2030,7 +2030,7 @@ mod tests {
             Reaped {
                 key: key.clone(),
                 sub,
-                correlation: CorrelationId(7),
+                correlation: CorrelationId::from(7),
                 outcome: EffectOutcome::Ok,
             },
             &tx,
@@ -2080,7 +2080,7 @@ mod tests {
             Reaped {
                 key,
                 sub,
-                correlation: CorrelationId(11),
+                correlation: CorrelationId::from(11),
                 outcome: EffectOutcome::Failed {
                     exit_code: None,
                     signal: None,
@@ -2132,7 +2132,7 @@ mod tests {
             Reaped {
                 key: key.clone(),
                 sub,
-                correlation: CorrelationId(1),
+                correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Ok,
             },
             &tx,
@@ -2189,7 +2189,7 @@ mod tests {
             Reaped {
                 key,
                 sub,
-                correlation: CorrelationId(1),
+                correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Failed {
                     exit_code: Some(2),
                     signal: None,
@@ -2245,7 +2245,7 @@ mod tests {
             Reaped {
                 key,
                 sub,
-                correlation: CorrelationId(1),
+                correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Ok,
             },
             &tx,
@@ -2301,7 +2301,7 @@ mod tests {
             Reaped {
                 key: key.clone(),
                 sub,
-                correlation: CorrelationId(1),
+                correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Ok,
             },
             &tx,
@@ -2366,7 +2366,7 @@ mod tests {
         let pending = slot_after.pending.as_ref().expect("pending set");
         assert_eq!(
             pending.correlation,
-            CorrelationId(99),
+            CorrelationId::from(99),
             "pending replaced by new submit",
         );
     }
@@ -2402,7 +2402,7 @@ mod tests {
             Reaped {
                 key,
                 sub,
-                correlation: CorrelationId(1),
+                correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Ok,
             },
             &tx,
@@ -2453,7 +2453,7 @@ mod tests {
             Reaped {
                 key,
                 sub,
-                correlation: CorrelationId(1),
+                correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Ok,
             },
             &tx,

@@ -4,9 +4,9 @@
 //! grows phase-by-phase as new drop paths land. Each variant is light-weight
 //! (a few small fields) and carries enough context to log meaningfully.
 
-use crate::ids::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
+use crate::ids::{ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
 use crate::input::{FsEvent, OverflowScope};
-use crate::op::{ProbeCorrelation, ProbeOwner, WatchFailure};
+use crate::op::{ProbeOwner, WatchFailure};
 use crate::profile::{BurstIntent, ProfileStateDiscriminant};
 use crate::resource::ResourceKind;
 use compact_str::CompactString;

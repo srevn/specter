@@ -718,7 +718,7 @@ fn descent_state_helper_returns_none_for_idle() {
         .step(
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(pid),
-                correlation: specter_core::ProbeCorrelation(1),
+                correlation: specter_core::ProbeCorrelation::from(1),
                 outcome: ProbeOutcome::Vanished,
             }),
             Instant::now(),

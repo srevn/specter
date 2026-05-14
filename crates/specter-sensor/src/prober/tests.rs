@@ -31,7 +31,7 @@ fn fresh_expected() -> ExpectedMap {
 fn seed(map: &ExpectedMap, p: ProfileId, c: u64) {
     map.lock()
         .unwrap()
-        .insert(ProbeOwner::Profile(p), ProbeCorrelation(c));
+        .insert(ProbeOwner::Profile(p), ProbeCorrelation::from(c));
 }
 
 // ---------------------------------------------------------------- helpers
@@ -44,7 +44,7 @@ fn fresh_profile_ids(n: usize) -> Vec<ProfileId> {
 fn req_anchor(profile: ProfileId, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(profile),
-        correlation: ProbeCorrelation(correlation),
+        correlation: ProbeCorrelation::from(correlation),
         target_path: PathBuf::from("/dev/null"),
     }
 }
@@ -1439,7 +1439,7 @@ fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
 
     let leaf_req = ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(p),
-        correlation: ProbeCorrelation(1),
+        correlation: ProbeCorrelation::from(1),
         target_path: file_path,
     };
     assert!(matches!(run_probe(&leaf_req), ProbeOutcome::AnchorOk(_)));
@@ -1447,7 +1447,7 @@ fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
     // AnchorFile against a directory: kind mismatch ⇒ Vanished.
     let dir_req = ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(p),
-        correlation: ProbeCorrelation(2),
+        correlation: ProbeCorrelation::from(2),
         target_path: tmp.path().to_path_buf(),
     };
     assert!(matches!(run_probe(&dir_req), ProbeOutcome::Vanished));
@@ -1463,7 +1463,7 @@ fn run_probe_dispatches_descent_to_probe_descent() {
 
     let req = ProbeRequest::Descent {
         owner: ProbeOwner::Profile(p),
-        correlation: ProbeCorrelation(1),
+        correlation: ProbeCorrelation::from(1),
         target_resource: ResourceId::default(),
         target_path: tmp.path().to_path_buf(),
     };
@@ -1570,7 +1570,7 @@ fn run_worker_runs_when_correlation_matches() {
     });
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0].owner, ProbeOwner::Profile(p));
-    assert_eq!(responses[0].correlation, ProbeCorrelation(7));
+    assert_eq!(responses[0].correlation, ProbeCorrelation::from(7));
     assert!(matches!(responses[0].outcome, ProbeOutcome::Vanished));
 }
 
@@ -1669,13 +1669,13 @@ fn run_worker_post_run_cleanup_preserves_resubmit() {
         inner_for_probe
             .lock()
             .unwrap()
-            .insert(ProbeOwner::Profile(p), ProbeCorrelation(2));
+            .insert(ProbeOwner::Profile(p), ProbeCorrelation::from(2));
         ProbeOutcome::Vanished
     });
     assert_eq!(responses.len(), 1);
     assert_eq!(
         inner.lock().unwrap().get(&ProbeOwner::Profile(p)).copied(),
-        Some(ProbeCorrelation(2))
+        Some(ProbeCorrelation::from(2))
     );
 }
 
@@ -1706,14 +1706,14 @@ fn lock_expected_recovers_from_poisoned_mutex() {
     let pid = fresh_profile_ids(1)[0];
     {
         let mut guard = lock_expected(&map);
-        guard.insert(ProbeOwner::Profile(pid), ProbeCorrelation(42));
+        guard.insert(ProbeOwner::Profile(pid), ProbeCorrelation::from(42));
     }
 
     // A second call observes the post-poison write — the map is
     // structurally consistent across the recovery boundary. Lift the
     // value out so the guard drops at end-of-statement.
     let recovered = lock_expected(&map).get(&ProbeOwner::Profile(pid)).copied();
-    assert_eq!(recovered, Some(ProbeCorrelation(42)));
+    assert_eq!(recovered, Some(ProbeCorrelation::from(42)));
 }
 
 // ---------------------------------------------------------------- pool: WorkerProber
@@ -1737,7 +1737,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
 
     let request = ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(pids[0]),
-        correlation: ProbeCorrelation(42),
+        correlation: ProbeCorrelation::from(42),
         target_path: path,
     };
     prober.submit(request);
@@ -1750,7 +1750,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
         other => panic!("unexpected: {other:?}"),
     };
     assert_eq!(resp.owner, ProbeOwner::Profile(pids[0]));
-    assert_eq!(resp.correlation, ProbeCorrelation(42));
+    assert_eq!(resp.correlation, ProbeCorrelation::from(42));
     assert!(matches!(resp.outcome, ProbeOutcome::AnchorOk(_)));
 
     // Cleanup ran.
@@ -1806,7 +1806,7 @@ fn worker_prober_resubmit_after_cancel_runs() {
     // won't be cleared by anything before the worker pops it).
     let mk_req = |c: u64| ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(p),
-        correlation: ProbeCorrelation(c),
+        correlation: ProbeCorrelation::from(c),
         target_path: path.clone(),
     };
     prober.submit(mk_req(1));
@@ -1819,7 +1819,7 @@ fn worker_prober_resubmit_after_cancel_runs() {
     while std::time::Instant::now() < deadline && !got_c2 {
         if let Ok(Input::ProbeResponse(r)) = out_rx.recv_timeout(Duration::from_millis(200)) {
             total += 1;
-            if r.correlation == ProbeCorrelation(2) {
+            if r.correlation == ProbeCorrelation::from(2) {
                 got_c2 = true;
             }
         }
@@ -1859,7 +1859,7 @@ fn worker_prober_concurrent_submit_is_safe() {
                 };
                 prober.submit(ProbeRequest::AnchorFile {
                     owner: ProbeOwner::Profile(p),
-                    correlation: ProbeCorrelation(c),
+                    correlation: ProbeCorrelation::from(c),
                     target_path: path.clone(),
                 });
             }

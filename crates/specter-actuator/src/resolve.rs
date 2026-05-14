@@ -576,7 +576,7 @@ fn build_env<'a>(
     });
     env.push(EnvVar {
         key: "SPECTER_CORRELATION",
-        value: Cow::Owned(effect.correlation.0.to_string()),
+        value: Cow::Owned(effect.correlation.as_u64().to_string()),
     });
     env.push(EnvVar {
         key: "SPECTER_CREATED",

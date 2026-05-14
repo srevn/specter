@@ -29,13 +29,12 @@ mod tree;
 
 pub use diag::{BurstHelper, ClaimKind, Diagnostic, LcaIntegritySource, PromoterClaimKind};
 pub use diff::{Diff, EntryRef, Rename};
-pub use effect::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome};
+pub use effect::{CommandResolved, DedupKey, Effect, EffectOutcome};
 pub use fs_id::FsIdentity;
-pub use ids::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
+pub use ids::{CorrelationId, ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
 pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};
 pub use op::{
-    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, WatchFailure,
-    WatchOp,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, WatchFailure, WatchOp,
 };
 pub use output::StepOutput;
 pub use pattern::{PatternComponent, PatternError, PatternSpec};

@@ -20,14 +20,10 @@ fn fresh_profile_id() -> ProfileId {
     sm.insert(())
 }
 
-const fn anchor_request(
-    profile: ProfileId,
-    target_path: PathBuf,
-    correlation: u64,
-) -> ProbeRequest {
+fn anchor_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(profile),
-        correlation: ProbeCorrelation(correlation),
+        correlation: ProbeCorrelation::from(correlation),
         target_path,
     }
 }
@@ -35,7 +31,7 @@ const fn anchor_request(
 fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
     ProbeRequest::Subtree {
         owner: ProbeOwner::Profile(profile),
-        correlation: ProbeCorrelation(correlation),
+        correlation: ProbeCorrelation::from(correlation),
         target_resource: ResourceId::default(),
         target_path,
         scan_config: ScanConfig::builder().recursive(true).build(),
@@ -70,7 +66,7 @@ fn anchor_file_round_trip_emits_anchor_ok_with_leaf() {
 
     let resp = recv_response(&rx);
     assert_eq!(resp.owner, ProbeOwner::Profile(p));
-    assert_eq!(resp.correlation, ProbeCorrelation(1));
+    assert_eq!(resp.correlation, ProbeCorrelation::from(1));
     let ProbeOutcome::AnchorOk(leaf) = resp.outcome else {
         panic!("expected AnchorOk, got {:?}", resp.outcome);
     };
@@ -94,7 +90,7 @@ fn subtree_round_trip_emits_subtree_ok_with_children() {
     prober.submit(subtree_request(p, tmp.path().to_path_buf(), 7));
 
     let resp = recv_response(&rx);
-    assert_eq!(resp.correlation, ProbeCorrelation(7));
+    assert_eq!(resp.correlation, ProbeCorrelation::from(7));
     let ProbeOutcome::SubtreeOk(arc) = resp.outcome else {
         panic!("expected SubtreeOk");
     };
@@ -195,7 +191,7 @@ fn correlation_is_echoed_unchanged() {
     prober.submit(anchor_request(p, path, 99));
 
     let resp = recv_response(&rx);
-    assert_eq!(resp.correlation, ProbeCorrelation(99));
+    assert_eq!(resp.correlation, ProbeCorrelation::from(99));
     assert_eq!(resp.owner, ProbeOwner::Profile(p));
 
     let _ = prober.shutdown();

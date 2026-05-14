@@ -656,7 +656,7 @@ mod tests {
     fn mk_req(profile: ProfileId, c: u64) -> ProbeRequest {
         ProbeRequest::AnchorFile {
             owner: ProbeOwner::Profile(profile),
-            correlation: ProbeCorrelation(c),
+            correlation: ProbeCorrelation::from(c),
             target_path: PathBuf::from("/dev/null"),
         }
     }
@@ -670,7 +670,7 @@ mod tests {
         let drained = mp.take_submitted();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].owner(), ProbeOwner::Profile(pids[0]));
-        assert_eq!(drained[0].correlation(), ProbeCorrelation(1));
+        assert_eq!(drained[0].correlation(), ProbeCorrelation::from(1));
     }
 
     #[test]

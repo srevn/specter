@@ -85,10 +85,12 @@ impl TimerHeap {
     /// and which transition to dispatch — without it, the engine would
     /// re-derive from state on every fire.
     ///
-    /// The minted id is unique within this heap's lifetime. The counter
-    /// minting via [`MonotonicCounter`] sidesteps `slotmap`'s generation
-    /// re-use semantics: the heap stores raw `u64`-derived
-    /// [`slotmap::KeyData`] without a backing slot allocation.
+    /// The minted id is unique within this heap's lifetime.
+    /// [`TimerId`] is a plain `u64` wrapper minted by
+    /// [`MonotonicCounter`] (see [`specter_core::ids`]); the heap
+    /// stores it directly without a backing slotmap allocation, and
+    /// lazy invalidation makes the per-id state cheap (one heap entry
+    /// per schedule; no per-mint slot to free on cancel).
     pub fn schedule(&mut self, deadline: Instant, profile: ProfileId, kind: TimerKind) -> TimerId {
         let id = self.counter.next();
         self.inner.push(Reverse(TimerEntry {
@@ -242,8 +244,10 @@ mod tests {
     #[test]
     fn pop_breaks_ties_by_id_within_same_profile() {
         // Same deadline, same profile, two timers: the smaller-Ord TimerId
-        // pops first. Don't assume the direction of TimerId's Ord (slotmap's
-        // KeyData encoding is opaque); verify smaller-of-the-two-comes-first.
+        // pops first. TimerId is a plain u64 wrapper so Ord is u64::cmp,
+        // but the test compares the actual minted ids rather than assuming
+        // a mint order — keeps the assertion robust if MonotonicCounter's
+        // semantics ever change.
         let mut h = TimerHeap::default();
         let when = Instant::now();
         let p = pid(1);

@@ -31,7 +31,7 @@ pub fn tmp_path(correlation: CorrelationId) -> PathBuf {
     std::env::temp_dir().join(format!(
         "specter-{pid}-{corr:016x}.diff",
         pid = std::process::id(),
-        corr = correlation.0,
+        corr = correlation.as_u64(),
     ))
 }
 
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn tmp_path_includes_pid_and_correlation() {
-        let p = tmp_path(CorrelationId(0xab));
+        let p = tmp_path(CorrelationId::from(0xab));
         let s = p.to_string_lossy();
         assert!(s.contains(&format!("specter-{}-", std::process::id())));
         assert!(s.ends_with("00000000000000ab.diff"));

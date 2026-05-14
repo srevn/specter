@@ -2,7 +2,9 @@
 //! correlation-token mint site — probe correlations
 //! ([`specter_core::ProbeCorrelation`]), effect correlations
 //! ([`specter_core::CorrelationId`]), and timer ids
-//! ([`specter_core::TimerId`]).
+//! ([`specter_core::TimerId`]). The three id types are declared by the
+//! `monotonic_id!` macro in `specter_core::ids`; their shared
+//! `From<u64>` impl is what this counter mints through.
 //!
 //! Counter saturation is treated as fatal. A 64-bit counter advanced one
 //! tick per nanosecond saturates after ~580 years, so the assertion exists

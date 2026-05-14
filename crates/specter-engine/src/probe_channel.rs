@@ -445,7 +445,7 @@ mod tests {
     fn close_if_mismatch_preserves_entry() {
         let (mut e, owner) = fresh_engine_with_idle_profile();
         let corr = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
-        let bogus = ProbeCorrelation(corr.0 + 9_999);
+        let bogus = ProbeCorrelation::from(corr.as_u64() + 9_999);
         assert!(
             e.probe_channel.close_if(owner, bogus).is_none(),
             "mismatched correlation returns None",
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn close_if_closed_returns_none() {
         let (mut e, owner) = fresh_engine_with_idle_profile();
-        let bogus = ProbeCorrelation(42);
+        let bogus = ProbeCorrelation::from(42);
         assert!(e.probe_channel.close_if(owner, bogus).is_none());
         assert!(e.pending_probe_for(owner).is_none());
     }

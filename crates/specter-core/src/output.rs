@@ -39,8 +39,8 @@ impl StepOutput {
 mod tests {
     use super::*;
     use crate::diff::Diff;
-    use crate::effect::{CorrelationId, DedupKey};
-    use crate::ids::{ProfileId, ResourceId, SubId};
+    use crate::effect::DedupKey;
+    use crate::ids::{CorrelationId, ProbeCorrelation, ProfileId, ResourceId, SubId};
     use crate::op::ProbeRequest;
     use crate::program::{
         ActionProgram, ArgPart, ArgTemplate, BranchTarget, ExecAction, ProgramBuilder, SpawnBody,
@@ -129,7 +129,7 @@ mod tests {
         out.probe_ops.push(ProbeOp::Probe {
             request: ProbeRequest::AnchorFile {
                 owner: ProbeOwner::Profile(p1),
-                correlation: crate::op::ProbeCorrelation(7),
+                correlation: ProbeCorrelation::from(7),
                 target_path: PathBuf::from("/y"),
             },
         });

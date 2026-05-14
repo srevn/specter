@@ -20,10 +20,10 @@ fn fresh_profile_id() -> ProfileId {
     sm.insert(())
 }
 
-const fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
+fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(profile),
-        correlation: ProbeCorrelation(correlation),
+        correlation: ProbeCorrelation::from(correlation),
         target_path,
     }
 }
@@ -83,7 +83,7 @@ fn resubmit_after_cancel_runs_with_new_correlation() {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < deadline && !got_c2 {
         if let Ok(Input::ProbeResponse(r)) = rx.recv_timeout(Duration::from_millis(200))
-            && r.correlation == ProbeCorrelation(2)
+            && r.correlation == ProbeCorrelation::from(2)
         {
             got_c2 = true;
         }

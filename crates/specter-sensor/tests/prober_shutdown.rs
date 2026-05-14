@@ -19,10 +19,10 @@ fn fresh_profile_id() -> ProfileId {
     sm.insert(())
 }
 
-const fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
+fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(profile),
-        correlation: ProbeCorrelation(correlation),
+        correlation: ProbeCorrelation::from(correlation),
         target_path,
     }
 }

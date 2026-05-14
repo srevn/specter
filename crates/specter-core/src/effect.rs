@@ -7,7 +7,7 @@
 //! Sub's scope is `PerStableFile`; otherwise `None`.
 
 use crate::diff::Diff;
-use crate::ids::{ProfileId, ResourceId, SubId};
+use crate::ids::{CorrelationId, ProfileId, ResourceId, SubId};
 use crate::program::ActionProgram;
 use crate::resource::ResourceKind;
 use compact_str::CompactString;
@@ -104,16 +104,6 @@ pub struct Effect {
     pub anchor_kind: ResourceKind,
     pub target_relative: CompactString,
     pub exclude: Arc<[CompactString]>,
-}
-
-/// Per-Effect correlation token. Engine-monotonic in v1.
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct CorrelationId(pub u64);
-
-impl From<u64> for CorrelationId {
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
 }
 
 /// Coalescing identity.

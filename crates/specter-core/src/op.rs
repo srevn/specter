@@ -1,6 +1,6 @@
 //! Watch and Probe ops, plus their request/response payloads.
 
-use crate::ids::{ProfileId, PromoterId, ResourceId};
+use crate::ids::{ProbeCorrelation, ProfileId, PromoterId, ResourceId};
 use crate::resource::ResourceKind;
 use crate::scan_config::ScanConfig;
 use crate::snapshot::tree::{DirSnapshot, LeafEntry};
@@ -8,17 +8,6 @@ use crate::sub::ClassSet;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Engine-monotonic correlation token — pairs each `ProbeRequest` with the
-/// `ProbeResponse` that answers it.
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ProbeCorrelation(pub u64);
-
-impl From<u64> for ProbeCorrelation {
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
-}
 
 /// Probe-channel owner — the engine-resident entity that minted a probe.
 ///

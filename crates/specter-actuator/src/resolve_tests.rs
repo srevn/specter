@@ -124,7 +124,7 @@ fn resolve_simple_literal_passes_through() {
         Path::new("/proj"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _env) = resolve(&e);
@@ -140,7 +140,7 @@ fn resolve_with_path_placeholder() {
         Path::new("/proj"),
         "src/a.c",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _env) = resolve(&e);
@@ -159,7 +159,7 @@ fn resolve_with_relative_placeholder() {
         Path::new("/proj"),
         "src/a.c",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _env) = resolve(&e);
@@ -175,7 +175,7 @@ fn resolve_with_anchor_placeholder() {
         Path::new("/proj"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _env) = resolve(&e);
@@ -199,7 +199,7 @@ fn resolve_excluded_one_arg_per_pattern() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     e.exclude = vec![
@@ -236,7 +236,7 @@ fn resolve_excluded_empty_drops_slot() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     // exclude defaults empty in make_effect.
@@ -260,7 +260,7 @@ fn env_exclude_newline_separated() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     e.exclude = vec![
@@ -290,7 +290,7 @@ fn env_exclude_empty_is_empty_string() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -320,7 +320,7 @@ fn resolve_time_uses_injected_now() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _) = super::resolve_step(&e, exec_of(&e), now, None, &empty_env())
@@ -338,7 +338,7 @@ fn env_specter_time_uses_injected_now() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = super::resolve_step(&e, exec_of(&e), now, None, &empty_env())
@@ -363,7 +363,7 @@ fn format_now_clamps_pre_epoch() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _) = super::resolve_step(&e, exec_of(&e), pre, None, &empty_env())
@@ -390,7 +390,7 @@ fn resolve_parent_is_target_dir_for_perfile() {
         Path::new("/anchor"),
         "foo.rs",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _) = resolve(&e);
@@ -408,7 +408,7 @@ fn resolve_parent_is_anchor_parent_for_subtree() {
         Path::new("/proj/sub"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _) = resolve(&e);
@@ -427,7 +427,7 @@ fn resolve_parent_for_perfile_at_root_is_root() {
         Path::new("/"),
         "foo.rs",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _) = resolve(&e);
@@ -445,7 +445,7 @@ fn resolve_parent_empty_only_for_subtree_at_root() {
         Path::new("/"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _) = resolve(&e);
@@ -466,7 +466,7 @@ fn env_parent_empty_only_for_subtree_at_root() {
         Path::new("/"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -488,7 +488,7 @@ fn env_parent_for_perfile_is_target_directory() {
         Path::new("/anchor"),
         "src/foo.rs",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -515,7 +515,7 @@ fn resolve_substitutes_watch_name() {
         Path::new("/proj"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _env) = resolve(&e);
@@ -534,7 +534,7 @@ fn resolve_with_concatenated_literal_and_placeholder() {
         Path::new("/proj"),
         "a.c",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _env) = resolve(&e);
@@ -558,7 +558,7 @@ fn resolve_with_created_expands_to_n_argv() {
         Path::new("/proj"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (cmd, _env) = resolve(&e);
@@ -586,7 +586,7 @@ fn resolve_with_deleted_expands_to_n_argv() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (cmd, _) = resolve(&e);
@@ -606,7 +606,7 @@ fn resolve_with_modified_expands_to_n_argv() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (cmd, _) = resolve(&e);
@@ -639,7 +639,7 @@ fn resolve_with_renamed_from_and_to_expands_independently() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (cmd, _) = resolve(&e);
@@ -664,7 +664,7 @@ fn resolve_with_diff_placeholder_and_no_diff_yields_zero_args() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _) = resolve(&e);
@@ -680,7 +680,7 @@ fn resolve_with_empty_diff_placeholder_yields_zero_args() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(Diff::default())),
     );
     let (cmd, _) = resolve(&e);
@@ -704,7 +704,7 @@ fn resolve_with_multivalue_in_separate_args_emits_literals_as_standalone_slots()
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (cmd, _) = resolve(&e);
@@ -732,7 +732,7 @@ fn resolve_with_multivalue_having_prefix_literal_tiles_per_value() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (cmd, _) = resolve(&e);
@@ -748,7 +748,7 @@ fn resolve_with_multivalue_having_prefix_and_empty_diff_yields_zero_slots() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(Diff::default())),
     );
     let (cmd, _) = resolve(&e);
@@ -777,7 +777,7 @@ fn env_specter_created_newline_separated() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (_, env) = resolve(&e);
@@ -808,7 +808,7 @@ fn env_specter_deleted_and_modified_render_their_categories() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (_, env) = resolve(&e);
@@ -861,7 +861,7 @@ fn env_specter_renamed_from_and_to_use_correct_sides() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (_, env) = resolve(&e);
@@ -897,7 +897,7 @@ fn env_diff_lists_empty_when_no_diff() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -927,7 +927,7 @@ fn env_contains_specter_path_for_subtree_root() {
         Path::new("/proj"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -944,7 +944,7 @@ fn env_contains_specter_path_for_per_stable_file() {
         Path::new("/proj"),
         "a.c",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -961,7 +961,7 @@ fn env_specter_relative_path_empty_for_subtree_root() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -983,7 +983,7 @@ fn env_specter_relative_path_for_per_stable_file() {
         Path::new("/p"),
         "src/a.c",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -1006,7 +1006,7 @@ fn env_specter_anchor_for_both_scopes() {
             Path::new("/anchor/dir"),
             "",
             false,
-            CorrelationId(1),
+            CorrelationId::from(1),
             None,
         );
         let (_, env) = resolve(&e);
@@ -1024,7 +1024,7 @@ fn env_specter_watch_uses_sub_name() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -1043,7 +1043,7 @@ fn env_specter_forced_zero_when_unforced() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -1065,7 +1065,7 @@ fn env_specter_forced_one_when_forced() {
         Path::new("/p"),
         "",
         true,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -1087,7 +1087,7 @@ fn env_specter_event_kind_dir_subtree_for_subtree_root() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -1109,7 +1109,7 @@ fn env_specter_event_kind_file_for_per_stable_file() {
         Path::new("/p"),
         "a",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -1131,7 +1131,7 @@ fn env_specter_correlation_decimal_for_v1() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(42),
+        CorrelationId::from(42),
         None,
     );
     let (_, env) = resolve(&e);
@@ -1157,7 +1157,7 @@ fn env_does_not_contain_specter_diff_path() {
         Path::new("/p"),
         "a",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         Some(Arc::new(diff)),
     );
     let (_, env) = resolve(&e);
@@ -1173,7 +1173,7 @@ fn env_order_is_alphabetical() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (_, env) = resolve(&e);
@@ -1213,7 +1213,7 @@ fn env_order_with_diff_path_is_alphabetical() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let diff_path = Path::new("/tmp/specter-1234-deadbeef.diff");
@@ -1274,7 +1274,7 @@ fn resolve_env_var_substitutes_from_snapshot() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _) = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
@@ -1298,7 +1298,7 @@ fn resolve_env_var_unset_without_default_returns_unset_env_var_error() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let err = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
@@ -1332,7 +1332,7 @@ fn resolve_env_var_unset_with_default_renders_default() {
         Path::new("/p"),
         "",
         false,
-        CorrelationId(1),
+        CorrelationId::from(1),
         None,
     );
     let (cmd, _) = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)

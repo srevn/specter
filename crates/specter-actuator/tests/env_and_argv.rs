@@ -108,7 +108,7 @@ fn child_receives_specter_correlation_decimal() {
     assert_env_var_received(
         "SPECTER_CORRELATION",
         |_dir| "12345".to_owned(),
-        |e| e.correlation = CorrelationId(12345),
+        |e| e.correlation = CorrelationId::from(12345),
     );
 }
 
