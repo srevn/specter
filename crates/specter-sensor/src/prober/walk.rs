@@ -13,7 +13,9 @@
 //! - `baseline_subtree`: the engine's last-known view of the target's
 //!   subtree. Equal `(mtime, fs_id)` against the freshly `lstat`-ed
 //!   directory ⇒ return `Arc::clone(prior)` (mtime-skip). The skip
-//!   cascades into recursion via `entries[name].subtree`.
+//!   cascades into recursion via each child's
+//!   `DirChild::Covered(arc)`, looked up by name through
+//!   [`specter_core::DirSnapshot::lookup_covered_dir`].
 //! - `force_walk`: a `BTreeSet<PathBuf>` of paths the walker must
 //!   enumerate regardless of mtime — populated by the engine from
 //!   kqueue-driven `dirty_resources`. The walker tests "is any forced path
@@ -32,7 +34,7 @@
 //! appear as `EntryKind::Symlink` leaves when encountered as direct
 //! children. v1 has no `follow_symlinks` opt-in. Cross-filesystem descent
 //! is refused: subdir entries with a `dev` differing from the root anchor's
-//! `dev` are emitted as `DirChild { subtree: None }` (uncovered-by-mount).
+//! `dev` are emitted as `DirChild::Uncovered(fs_id)` (uncovered-by-mount).
 //!
 //! `exclude` and `pattern` are tested against the *cumulative relative path*
 //! from the anchor (`subdir/file.c`, not just `file.c`). This matches the
@@ -102,9 +104,9 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
 /// → `Vanished`, anything else → `Failed { errno }`). Mid-walk
 /// `read_dir` errors on a *subdirectory* (EACCES, EIO, ENOENT after a
 /// raced delete) skip-and-continue with `tracing::warn!`; the affected
-/// subtree becomes `DirChild { subtree: Some(empty_or_partial_arc) }` —
-/// *covered-but-empty*. The uncovered sentinel
-/// `DirChild { subtree: None }` is reserved for `recursive=false`,
+/// subtree becomes `DirChild::Covered(empty_or_partial_arc)` —
+/// *covered-but-empty*. The uncovered variant
+/// `DirChild::Uncovered(fs_id)` is reserved for `recursive=false`,
 /// beyond `max_depth`, cross-filesystem (`dev` differs from
 /// `root_dev`), and mid-walk `lstat`/kind-flip failures on the subdir
 /// itself.
@@ -211,11 +213,11 @@ fn any_forced_under(path: &Path, force_walk: &BTreeSet<PathBuf>) -> bool {
 /// errored mid-walk after some entries had already been folded in. The
 /// caller ([`walk_subdir`] or [`probe_subtree`]) wraps the result in
 /// `Arc::new(DirSnapshot::new(…))`, so the parent emits
-/// `DirChild { subtree: Some(empty_or_partial_arc) }` — covered-but-
-/// empty, distinct from the uncovered `DirChild { subtree: None }`
-/// sentinel reserved for `recursive=false`, beyond `max_depth`,
-/// cross-filesystem boundaries, and mid-walk `lstat`/kind-flip failures
-/// on a subdir itself.
+/// `DirChild::Covered(empty_or_partial_arc)` — covered-but-empty,
+/// distinct from the uncovered variant `DirChild::Uncovered(fs_id)`
+/// reserved for `recursive=false`, beyond `max_depth`, cross-filesystem
+/// boundaries, and mid-walk `lstat`/kind-flip failures on a subdir
+/// itself.
 fn enumerate_dir(
     path: &Path,
     anchor_path: &Path,
@@ -305,8 +307,8 @@ fn enumerate_dir(
 
 /// Build a `ChildEntry::Dir` for one directory dirent. Recurses via
 /// [`walk_subdir`] when the entry is in-scope (recursive walk, within
-/// `max_depth`, same filesystem); emits `subtree: None` for uncovered
-/// branches.
+/// `max_depth`, same filesystem); emits `DirChild::Uncovered(fs_id)`
+/// otherwise.
 #[allow(clippy::too_many_arguments)]
 fn build_dir_child(
     child_path: &Path,
@@ -321,30 +323,24 @@ fn build_dir_child(
     cmeta: &std::fs::Metadata,
     name: &str,
 ) -> ChildEntry {
+    let fs_id = FsIdentity {
+        inode: cmeta.ino(),
+        device: cmeta.dev(),
+    };
     let recurse = config.recursive
         && depth + 1 < config.max_depth.unwrap_or(u32::MAX)
         && cmeta.dev() == root_dev;
     if !recurse {
         // Uncovered branch: not recursive, beyond max_depth, or cross-fs.
         // Walker stores the entry but does not recurse.
-        return ChildEntry::Dir(DirChild {
-            fs_id: FsIdentity {
-                inode: cmeta.ino(),
-                device: cmeta.dev(),
-            },
-            subtree: None,
-        });
+        return ChildEntry::Dir(DirChild::Uncovered(fs_id));
     }
     // Pull the child's prior subtree from baseline so mtime-skip composes
     // recursively. BTreeMap key match by string segment is the snapshot's
-    // native lookup.
-    let child_baseline = baseline
-        .and_then(|b| b.entries.get(name))
-        .and_then(|c| match c {
-            ChildEntry::Dir(dc) => dc.subtree.as_ref(),
-            ChildEntry::Leaf(_) => None,
-        });
-    let sub = walk_subdir(
+    // native lookup; `lookup_covered_dir` collapses the "Dir entry + covered"
+    // gate into one named operation.
+    let child_baseline = baseline.and_then(|b| b.lookup_covered_dir(name));
+    match walk_subdir(
         child_path,
         anchor_path,
         config,
@@ -354,22 +350,21 @@ fn build_dir_child(
         forced,
         depth + 1,
         root_dev,
-    );
-    ChildEntry::Dir(DirChild {
-        fs_id: FsIdentity {
-            inode: cmeta.ino(),
-            device: cmeta.dev(),
-        },
-        subtree: sub,
-    })
+    ) {
+        Some(arc) => ChildEntry::Dir(DirChild::Covered(arc)),
+        // Mid-walk `lstat` / kind-flip failure on the subdir itself —
+        // surface as uncovered so the parent's hash fold sees a
+        // distinct shape from a covered-but-empty subtree.
+        None => ChildEntry::Dir(DirChild::Uncovered(fs_id)),
+    }
 }
 
-/// Build a `ChildEntry::Leaf` for one non-directory dirent. Transfers
-/// the baseline's cached `leaf_hash` when the prior entry's identity
-/// matches — re-enumeration of an unchanged leaf skips the SipHash24
-/// fold the engine would otherwise pay during stability comparison.
-/// Cache miss falls back to lazy compute on the engine thread, identical
-/// to pre-optimisation behaviour.
+/// Build a `ChildEntry::Leaf` for one non-directory dirent. Inherits
+/// the baseline leaf's `leaf_hash` when the prior entry's identity
+/// matches — re-enumeration of an unchanged leaf elides the SipHash24
+/// fold the walker would otherwise pay at construction. Identity
+/// mismatch falls back to fresh `LeafEntry::new`, which computes the
+/// real hash from the freshly-`lstat`ed fields.
 fn build_leaf_child(
     cmeta: &std::fs::Metadata,
     file_type: std::fs::FileType,
@@ -383,7 +378,8 @@ fn build_leaf_child(
     } else {
         EntryKind::Other
     };
-    let leaf = LeafEntry::new(
+    let baseline_leaf = baseline.and_then(|b| b.lookup_leaf(name));
+    let leaf = LeafEntry::new_or_inherit(
         kind,
         cmeta.len(),
         cmeta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
@@ -391,11 +387,8 @@ fn build_leaf_child(
             inode: cmeta.ino(),
             device: cmeta.dev(),
         },
+        baseline_leaf,
     );
-    let leaf = match baseline.and_then(|b| b.leaf_hash_if_unchanged(name, &leaf)) {
-        Some(h) => leaf.with_cached_hash(h),
-        None => leaf,
-    };
     ChildEntry::Leaf(leaf)
 }
 
@@ -404,7 +397,7 @@ fn build_leaf_child(
 /// Returns `Some(Arc<DirSnapshot>)` on success (including partial
 /// enumeration after a `read_dir` warn) and `None` for mid-walk
 /// `Vanished` / `Failed` / kind-flip cases — the parent emits
-/// `DirChild { subtree: None }` for `None` returns.
+/// `DirChild::Uncovered(fs_id)` for `None` returns.
 fn walk_subdir(
     path: &Path,
     anchor_path: &Path,

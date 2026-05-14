@@ -10,10 +10,12 @@
 //!   of direct children (string-keyed, not interner-relative — keeps the
 //!   hash cross-process stable).
 //! - Children are either [`LeafEntry`] (file/symlink/other; no recursion)
-//!   or [`DirChild`] (directory; carries an `Option<Arc<DirSnapshot>>`).
-//!   `subtree: None` means *uncovered* — the walker stored the entry but
-//!   did not recurse (excluded glob, beyond `max_depth`, or
-//!   `recursive=false`).
+//!   or [`DirChild`] (directory; a sum type with two variants —
+//!   `Covered(Arc<DirSnapshot>)` and `Uncovered(FsIdentity)`).
+//!   `Uncovered` means the walker stored the entry but did not recurse
+//!   (`recursive=false`, beyond `max_depth`, or cross-filesystem); the
+//!   sum makes the coverage discrimination structural rather than
+//!   `Option`-tagged.
 //! - A `DirSnapshot` carries no engine-side identity. The walker speaks
 //!   paths; the engine speaks resources; navigation helpers
 //!   ([`subtree_at_dir`], [`TreeSnapshot::subtree_at`]) take an explicit
@@ -22,21 +24,39 @@
 //!
 //! ## Hashing
 //!
-//! - [`LeafEntry::leaf_hash`] folds `(kind, size, mtime, fs_id)` to a
-//!   128-bit signature, cached in `OnceLock`. A leaf's mtime is its
-//!   per-file content fingerprint, so it belongs in the identity.
+//! - [`LeafEntry::leaf_hash`] is a 128-bit fingerprint of `(kind, size,
+//!   mtime, fs_id)`. A leaf's mtime is its per-file content fingerprint,
+//!   so it belongs in the identity.
 //! - [`DirSnapshot::dir_hash`] folds `captured_with`, the directory's own
 //!   `fs_id`, an entry-count length-prefix, then each `(name,
-//!   ChildEntry)` pair in lex order. Per-`Dir` child carries `(fs_id,
-//!   subtree.dir_hash())`; subtree=None contributes a constant `0u128`.
-//!   `root_meta.mtime` is **not** folded — `dir_hash` is filter-aware
-//!   identity ("are these snapshots observably the same to the user?"),
+//!   ChildEntry)` pair in lex order, with a per-variant tag distinguishing
+//!   the three child shapes: `Leaf` contributes `leaf_hash`,
+//!   `Dir(Covered)` contributes the subtree's `dir_hash`, and
+//!   `Dir(Uncovered)` contributes the raw `fs_id` (the walker has no
+//!   observation beyond the directory's identity). `root_meta.mtime` is
+//!   **not** folded — `dir_hash` is filter-aware identity ("are these
+//!   snapshots observably the same to the user?"),
 //!   and a directory's mtime bumps on every dirent-block change including
 //!   filtered-out entries (`.DS_Store`, hidden files, excluded paths) the
 //!   user-configured filter would never present. The walker's mtime-skip
 //!   optimisation reads `root_meta.mtime` as a struct field on
 //!   [`DirSnapshot`] (its own kernel-aware identity); no consumer needs
 //!   the value composed into the hash.
+//! - Both hashes are computed **eagerly at construction** and stored as
+//!   plain `u128` fields. The walker pays SipHash24 on its worker thread
+//!   (parallel pool); the engine driver reads the field via a `const fn`
+//!   accessor. Eager construction collapses the prior `OnceLock<u128>`
+//!   cache discipline (manual `Clone` / `PartialEq` / `Debug` impls,
+//!   `with_cached_hash` poisoning hazard) into a function-of-data
+//!   invariant: `leaf_hash(l) == compute_leaf_hash(l.fields)` and
+//!   `dir_hash(d) == compute_dir_hash(d.fields)` hold by construction,
+//!   not by convention.
+//! - The walker may inherit a baseline leaf's hash via
+//!   [`LeafEntry::new_or_inherit`] when identity fields match — a pure
+//!   performance optimisation (skips one SipHash24 fold per unchanged
+//!   leaf in a dirent-bumped directory), semantically equivalent to
+//!   recomputing since the inherited value is identical to what
+//!   recomputation would produce.
 //! - 128-bit width (`siphasher::sip128`): pair-comparison space at scale
 //!   (`O(levels × bursts × profiles)`) makes 64-bit collision probability
 //!   uncomfortable; 128 bits is astronomically safe.
@@ -49,10 +69,10 @@
 //!
 //! ## Mutability and concurrency
 //!
-//! - `DirSnapshot` and `LeafEntry` are immutable post-construction. The
-//!   only interior mutability is each one's `OnceLock<u128>` hash cache.
-//! - `OnceLock<u128>` is `Sync` (and `Send`); both types are `Send + Sync`
-//!   (compile-time pinned via `_SEND_SYNC` in tests).
+//! - `DirSnapshot` and `LeafEntry` are fully immutable post-construction
+//!   — every field is a plain value or an `Arc<...>`, with no interior
+//!   mutability. Both types are `Send + Sync` trivially; compile-time
+//!   pinned via `_SEND_SYNC` in tests.
 //! - Splice and graft build *new* `Arc<DirSnapshot>`s — never
 //!   mutate-through-Arc — so engine and walker can share `Arc<DirSnapshot>`
 //!   handles without locks.
@@ -67,7 +87,7 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hash;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 // ---------------------------------------------------------------------------
@@ -94,101 +114,80 @@ pub struct DirMeta {
 
 /// Direct child that is *not* a directory: file, symlink, or other.
 ///
-/// `leaf_hash` is the lazy 128-bit signature of `(kind, size, mtime,
-/// fs_id)` — see [`LeafEntry::leaf_hash`]. Cached on first read; `Clone`
-/// preserves the cache.
+/// `leaf_hash` is the 128-bit fingerprint of `(kind, size, mtime, fs_id)`
+/// — see [`LeafEntry::leaf_hash`]. Computed eagerly in the constructor
+/// from the identity fields; stored as a plain field, so `Clone` /
+/// `PartialEq` / `Debug` auto-derive correctly (the hash is a pure
+/// function of the data, so deriving on it is equivalent to deriving on
+/// the four identity fields alone).
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeafEntry {
     pub kind: EntryKind,
     pub size: u64,
     pub mtime: SystemTime,
     pub fs_id: FsIdentity,
-    leaf_hash: OnceLock<u128>,
+    leaf_hash: u128,
 }
 
 impl LeafEntry {
+    /// Construct from the four identity fields, computing `leaf_hash`
+    /// eagerly. The hash is a pure function of the inputs — call this
+    /// when no baseline is available.
     #[must_use]
-    pub const fn new(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> Self {
+    pub fn new(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> Self {
+        let leaf_hash = compute_leaf_hash(kind, size, mtime, fs_id);
         Self {
             kind,
             size,
             mtime,
             fs_id,
-            leaf_hash: OnceLock::new(),
+            leaf_hash,
         }
     }
 
-    /// Lazy 128-bit signature; cached for the entry's lifetime.
+    /// Construct from the four identity fields, inheriting `baseline`'s
+    /// `leaf_hash` iff every identity field matches. Otherwise falls
+    /// back to [`Self::new`] — equivalent observable behaviour, since
+    /// the inherited value equals what fresh computation would produce.
+    ///
+    /// The inheritance is a pure walker-thread optimisation: when a
+    /// directory's mtime bumps because of a sibling change but a child
+    /// leaf is observably unchanged, the prior leaf's hash flows
+    /// through without paying the SipHash24 fold. The identity-match
+    /// gate at the constructor makes "transferring the wrong hash"
+    /// unrepresentable — there is no public surface that can install a
+    /// hash that disagrees with the identity fields.
     #[must_use]
-    pub fn leaf_hash(&self) -> u128 {
-        *self.leaf_hash.get_or_init(|| compute_leaf_hash(self))
-    }
-
-    /// Pre-populate the lazy `leaf_hash` cache with `h` and return `self`.
-    ///
-    /// Sole intended caller is the walker, which transfers a cached hash
-    /// from a prior `LeafEntry` whose identity fields are known to match
-    /// (the lookup goes through [`DirSnapshot::leaf_hash_if_unchanged`]).
-    /// Skips the SipHash24 fold the engine would otherwise pay on the
-    /// next stability comparison (and on the parent's `dir_hash` fold,
-    /// which reads each child leaf's hash transitively).
-    ///
-    /// **Precondition.** `h` must equal `compute_leaf_hash(self)` for
-    /// `self`'s identity fields (kind, size, mtime, fs_id). Passing any
-    /// other value poisons the cache permanently — every
-    /// subsequent [`leaf_hash`](Self::leaf_hash) reads the stale value,
-    /// breaking stability comparison and parent `dir_hash` folds.
-    ///
-    /// Idempotent: setting an already-populated cell discards the new
-    /// value (the `Err` arm of `OnceLock::set`); call sites prepopulate
-    /// the cache before any reader has had a chance to fill it via
-    /// [`leaf_hash`](Self::leaf_hash).
-    #[must_use]
-    pub fn with_cached_hash(self, h: u128) -> Self {
-        // OnceLock::set on a fresh cell never errors. The discard is
-        // intentional — preserving the cached value is an optimisation,
-        // not load-bearing for correctness.
-        let _ = self.leaf_hash.set(h);
-        self
-    }
-}
-
-impl Clone for LeafEntry {
-    fn clone(&self) -> Self {
-        let out = Self::new(self.kind, self.size, self.mtime, self.fs_id);
-        if let Some(&v) = self.leaf_hash.get() {
-            // OnceLock::set on a fresh cell never errors. The discard is
-            // intentional — preserving the cached value is an optimisation,
-            // not load-bearing for correctness.
-            let _ = out.leaf_hash.set(v);
+    pub fn new_or_inherit(
+        kind: EntryKind,
+        size: u64,
+        mtime: SystemTime,
+        fs_id: FsIdentity,
+        baseline: Option<&Self>,
+    ) -> Self {
+        if let Some(b) = baseline
+            && b.kind == kind
+            && b.size == size
+            && b.mtime == mtime
+            && b.fs_id == fs_id
+        {
+            return Self {
+                kind,
+                size,
+                mtime,
+                fs_id,
+                leaf_hash: b.leaf_hash,
+            };
         }
-        out
+        Self::new(kind, size, mtime, fs_id)
     }
-}
 
-impl PartialEq for LeafEntry {
-    fn eq(&self, other: &Self) -> bool {
-        // Equality is over data, not the derived cache: two LeafEntries
-        // with identical fields but only one with a populated leaf_hash
-        // must compare equal.
-        self.kind == other.kind
-            && self.size == other.size
-            && self.mtime == other.mtime
-            && self.fs_id == other.fs_id
-    }
-}
-impl Eq for LeafEntry {}
-
-impl std::fmt::Debug for LeafEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Excludes `leaf_hash` (cached derived view); use
-        // `finish_non_exhaustive` so the manual impl truthfully states
-        // it doesn't enumerate every field.
-        f.debug_struct("LeafEntry")
-            .field("kind", &self.kind)
-            .field("size", &self.size)
-            .field("mtime", &self.mtime)
-            .field("fs_id", &self.fs_id)
-            .finish_non_exhaustive()
+    /// 128-bit fingerprint of `(kind, size, mtime, fs_id)`. Computed at
+    /// construction time; this accessor is `const fn` and reads the
+    /// stored field.
+    #[must_use]
+    pub const fn leaf_hash(&self) -> u128 {
+        self.leaf_hash
     }
 }
 
@@ -196,37 +195,61 @@ impl std::fmt::Debug for LeafEntry {
 // DirChild
 // ---------------------------------------------------------------------------
 
-/// Direct child that *is* a directory. Carries the kernel identity for
-/// rename detection and an optional `Arc<DirSnapshot>` for the recursive
-/// subtree.
+/// Direct child that *is* a directory.
 ///
-/// `subtree: None` means *uncovered*: `recursive=false`, beyond
-/// `max_depth`, cross-filesystem boundary (the child's `fs_id.device`
-/// differs from the anchor's `root_dev`), or a mid-walk `lstat`/
-/// kind-flip failure on the subdir itself. The walker stored the entry
-/// but did not recurse; the parent's [`DirSnapshot::dir_hash`]
-/// contributes `(fs_id, 0u128)` for the subtree slot.
+/// Sum type encoding the walker's covered/uncovered distinction
+/// structurally — `Covered` carries the recursive `Arc<DirSnapshot>`
+/// (whose `root_meta.fs_id` is the kernel identity); `Uncovered`
+/// carries the `FsIdentity` directly.
+///
+/// `Uncovered` means *the walker stored the entry but did not recurse*:
+/// `recursive=false`, beyond `max_depth`, cross-filesystem boundary
+/// (the child's `fs_id.device` differs from the anchor's `root_dev`),
+/// or a mid-walk `lstat` / kind-flip failure on the subdir itself.
 ///
 /// Two boundary cases to keep distinct:
 /// - **`exclude` glob**: filtered entries are absent from the parent's
 ///   `entries` map entirely — the walker never constructs a `DirChild`
-///   for them, so `subtree: None` is the wrong mental model.
+///   for them, so neither variant applies.
 /// - **`read_dir` failure (EACCES, EIO, …)**: the parent's `lstat`
 ///   succeeded but enumeration of *this* directory's contents failed.
-///   The walker emits a *covered-but-empty* `DirChild { subtree:
-///   Some(empty_arc) }` — the engine sees a known-empty subtree, not an
-///   uncovered slot. The walker contract in
+///   The walker emits a *covered-but-empty* `DirChild::Covered(arc)`
+///   where `arc.entries` is empty — the engine sees a known-empty
+///   subtree, not an uncovered slot. The walker contract in
 ///   `specter-sensor::prober::walk::probe_subtree` is authoritative.
 ///
 /// Subtree mtime is **not** stored on `DirChild` — the canonical mtime
-/// lives at `subtree.root_meta.mtime` and is consumed by the walker's
+/// lives at `Covered(_).root_meta.mtime` and is consumed by the walker's
 /// mtime-skip directly off the [`DirSnapshot`] struct field. The parent
 /// `dir_hash` fold deliberately omits subtree mtime (filter-aware
 /// identity is independent of kernel-side dirent-block churn).
+///
+/// Both variants project a uniform `fs_id()` (sourced from the
+/// subtree's `root_meta.fs_id` on `Covered`, or stored directly on
+/// `Uncovered`); the hash fold uses a per-variant tag so the two
+/// shapes contribute distinct payloads even when their identities
+/// coincide.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DirChild {
-    pub fs_id: FsIdentity,
-    pub subtree: Option<Arc<DirSnapshot>>,
+pub enum DirChild {
+    /// The walker recursed and stored the directory's snapshot. The
+    /// kernel identity lives at `arc.root_meta.fs_id`.
+    Covered(Arc<DirSnapshot>),
+    /// The walker stored the entry but did not recurse (config or
+    /// mid-walk failure). Carries the kernel identity directly.
+    Uncovered(FsIdentity),
+}
+
+impl DirChild {
+    /// Kernel identity of the directory. For `Covered`, sourced from
+    /// the subtree's `root_meta.fs_id`; for `Uncovered`, the stored
+    /// value. Single source of truth per variant.
+    #[must_use]
+    pub fn fs_id(&self) -> FsIdentity {
+        match self {
+            Self::Covered(s) => s.root_meta.fs_id,
+            Self::Uncovered(id) => *id,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -245,10 +268,10 @@ impl ChildEntry {
     /// and Dir. Used by the engine reconciler for fs_id-stable Dir pairs
     /// and by `diff_tree`'s rename pairing.
     #[must_use]
-    pub const fn fs_id(&self) -> FsIdentity {
+    pub fn fs_id(&self) -> FsIdentity {
         match self {
             Self::Leaf(l) => l.fs_id,
-            Self::Dir(d) => d.fs_id,
+            Self::Dir(d) => d.fs_id(),
         }
     }
 
@@ -271,110 +294,87 @@ impl ChildEntry {
 /// `Option<Arc<DirSnapshot>>`. The `Arc` discipline lets splice and the
 /// walker's mtime-skip share subtrees across snapshots without copying.
 ///
-/// All public fields except `dir_hash` are immutable post-construction.
-/// `dir_hash: OnceLock<u128>` is the only interior mutability. Both
-/// `OnceLock` and `u128` are `Send + Sync`, so `DirSnapshot` is too
-/// (compile-time pinned in tests).
+/// Every field is immutable post-construction. `dir_hash` is computed
+/// eagerly from the directory's identity and entries in [`Self::new`]
+/// and stored as a plain field, so `Clone` / `PartialEq` / `Debug`
+/// auto-derive correctly (the hash is a pure function of the data).
+/// `Send + Sync` are trivially derived (all fields are themselves
+/// `Send + Sync`); compile-time pinned in tests.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirSnapshot {
     pub root_meta: DirMeta,
     pub captured_with: u64,
     pub entries: BTreeMap<CompactString, ChildEntry>,
-    dir_hash: OnceLock<u128>,
+    dir_hash: u128,
 }
 
 impl DirSnapshot {
     /// Sole constructor. Takes already-built entries; doesn't sort
-    /// (`BTreeMap` is sorted-by-key by construction). The hash cache
-    /// starts empty and fills on first read.
+    /// (`BTreeMap` is sorted-by-key by construction). Folds the
+    /// 128-bit `dir_hash` over the inputs eagerly — every child
+    /// `Arc<DirSnapshot>` in `entries` already carries its own
+    /// eagerly-computed hash, so the fold is a pure read.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         root_meta: DirMeta,
         captured_with: u64,
         entries: BTreeMap<CompactString, ChildEntry>,
     ) -> Self {
+        let dir_hash = compute_dir_hash(&root_meta, captured_with, &entries);
         Self {
             root_meta,
             captured_with,
             entries,
-            dir_hash: OnceLock::new(),
+            dir_hash,
         }
     }
 
-    /// Lazy 128-bit signature of `(captured_with, root_meta.fs_id,
+    /// 128-bit fingerprint of `(captured_with, root_meta.fs_id,
     /// entries)`. `root_meta.mtime` is intentionally absent from the
     /// fold — `dir_hash` is filter-aware identity, while the raw `lstat`
     /// mtime lives on the [`DirSnapshot::root_meta`] struct field for
-    /// kernel-aware comparisons (the walker's mtime-skip). The cache is
-    /// process-local and never invalidated; the snapshot is immutable
-    /// post-construction.
+    /// kernel-aware comparisons (the walker's mtime-skip). Computed at
+    /// construction; this accessor is `const fn` and reads the stored
+    /// field.
     #[must_use]
-    pub fn dir_hash(&self) -> u128 {
-        *self.dir_hash.get_or_init(|| compute_dir_hash(self))
+    pub const fn dir_hash(&self) -> u128 {
+        self.dir_hash
     }
 
-    /// Look up `name` and return the prior leaf's cached `leaf_hash` iff
-    /// the prior entry is a `Leaf`, its identity fields match `fresh`,
-    /// and its hash cache is already populated.
+    /// Look up `name` and return the entry's `LeafEntry` iff present
+    /// and the entry is a leaf. Returns `None` for missing entries and
+    /// for `Dir` entries.
     ///
-    /// Used by the walker to transfer cache across re-enumeration: when
-    /// a parent directory's mtime bumps but a child leaf is observably
-    /// unchanged, the prior leaf's hash is reusable for the freshly-
-    /// `lstat`ed leaf. The result composes with
-    /// [`LeafEntry::with_cached_hash`].
-    ///
-    /// Returns `None` for: missing entry, kind mismatch (`Dir` at this
-    /// name), any identity-field difference (the leaf changed), or a
-    /// prior leaf whose hash was never computed (rare — most baselines
-    /// have had `dir_hash()` called on the parent, which forces every
-    /// child leaf hash; the no-cache case falls back to lazy computation
-    /// in the engine, identical to the pre-optimization behaviour).
-    ///
-    /// Identity equality goes through [`LeafEntry`]'s `PartialEq`, which
-    /// deliberately excludes the cache.
+    /// Sole intended caller is the walker's per-leaf cache-transfer
+    /// site, which feeds the result into [`LeafEntry::new_or_inherit`]
+    /// to elide the SipHash24 fold on identity-matching baselines. The
+    /// identity check that gates the inheritance lives in
+    /// `new_or_inherit`, not here — this primitive returns the raw
+    /// reference; callers compose the gate.
     #[must_use]
-    pub fn leaf_hash_if_unchanged(&self, name: &str, fresh: &LeafEntry) -> Option<u128> {
-        let ChildEntry::Leaf(prior) = self.entries.get(name)? else {
-            return None;
-        };
-        if prior == fresh {
-            prior.leaf_hash.get().copied()
-        } else {
-            None
+    pub fn lookup_leaf(&self, name: &str) -> Option<&LeafEntry> {
+        match self.entries.get(name)? {
+            ChildEntry::Leaf(l) => Some(l),
+            ChildEntry::Dir(_) => None,
         }
     }
-}
 
-impl Clone for DirSnapshot {
-    fn clone(&self) -> Self {
-        let out = Self::new(self.root_meta, self.captured_with, self.entries.clone());
-        if let Some(&v) = self.dir_hash.get() {
-            let _ = out.dir_hash.set(v);
+    /// Look up `name` and return the covered subtree iff present and
+    /// the entry is a `Dir(Covered(_))`. Returns `None` for missing
+    /// entries, for `Leaf` entries, and for `Dir(Uncovered(_))`.
+    ///
+    /// Three call sites consume the covered-dir slot: the walker's
+    /// recursive baseline lookup, [`subtree_at_dir`]'s descent step,
+    /// and [`splice_dir`]'s prior-child resolution. Each needs
+    /// "`Dir` entry that is `Covered`" → `Arc<DirSnapshot>` as a single
+    /// named operation; this primitive collapses the `entries.get(name)`
+    /// + variant match into one call.
+    #[must_use]
+    pub fn lookup_covered_dir(&self, name: &str) -> Option<&Arc<Self>> {
+        match self.entries.get(name)? {
+            ChildEntry::Dir(DirChild::Covered(s)) => Some(s),
+            ChildEntry::Dir(DirChild::Uncovered(_)) | ChildEntry::Leaf(_) => None,
         }
-        out
-    }
-}
-
-impl PartialEq for DirSnapshot {
-    fn eq(&self, other: &Self) -> bool {
-        // Excludes the `dir_hash` cache (derived view). Equality is
-        // content-only — agrees with `dir_hash`, which is also folded
-        // over content alone.
-        self.root_meta == other.root_meta
-            && self.captured_with == other.captured_with
-            && self.entries == other.entries
-    }
-}
-impl Eq for DirSnapshot {}
-
-impl std::fmt::Debug for DirSnapshot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Excludes `dir_hash` (cached derived view); `finish_non_exhaustive`
-        // states the omission honestly.
-        f.debug_struct("DirSnapshot")
-            .field("root_meta", &self.root_meta)
-            .field("captured_with", &self.captured_with)
-            .field("entries", &self.entries)
-            .finish_non_exhaustive()
     }
 }
 
@@ -425,8 +425,8 @@ impl TreeSnapshot {
     /// - `TreeSnapshot::File` (no recursion possible).
     /// - `target` outside `anchor`'s subtree (the parent walk bottoms out
     ///   before reaching `anchor`).
-    /// - The chain crosses a `Leaf` or an uncovered `Dir`
-    ///   (`subtree: None`).
+    /// - The chain crosses a `Leaf` or a `DirChild::Uncovered(_)`
+    ///   intermediate.
     /// - Any segment fails to resolve via `tree.name` (slot reaped).
     ///
     /// `anchor` is the engine-side `ResourceId` the caller knows the
@@ -451,29 +451,28 @@ impl TreeSnapshot {
 // Hash helpers
 // ---------------------------------------------------------------------------
 
-/// `1u8` for Leaf, `2u8` for Dir. Defends against the (theoretical)
-/// collision where a name + leaf-fields hash equals a name + dir-fields
-/// hash; one byte per entry.
+/// Per-child variant discriminator folded into `compute_dir_hash`.
+/// `0u8` is reserved (never emitted) — the gap defends against
+/// zero-padded inputs masquerading as a real tag and leaves room for
+/// future variants without renumbering the existing ones.
 const LEAF_TAG: u8 = 1;
-const DIR_TAG: u8 = 2;
+const DIR_COVERED_TAG: u8 = 2;
+const DIR_UNCOVERED_TAG: u8 = 3;
 
-/// Constant `subtree_hash` contribution for an uncovered branch
-/// (`subtree: None`). The engine has no observation about uncovered
-/// subtrees, so the contribution is constant. A config reload that
-/// changes the rule produces a different `Profile` (different
-/// `config_hash`), which seeds fresh.
-const UNCOVERED_SUBTREE_HASH: u128 = 0;
-
-fn compute_leaf_hash(l: &LeafEntry) -> u128 {
+fn compute_leaf_hash(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> u128 {
     let mut h = hasher_128();
-    (l.kind as u8).hash(&mut h);
-    l.size.hash(&mut h);
-    hash_systemtime_into(l.mtime, &mut h);
-    l.fs_id.hash(&mut h);
+    (kind as u8).hash(&mut h);
+    size.hash(&mut h);
+    hash_systemtime_into(mtime, &mut h);
+    fs_id.hash(&mut h);
     h.finish_128_u128()
 }
 
-fn compute_dir_hash(d: &DirSnapshot) -> u128 {
+fn compute_dir_hash(
+    root_meta: &DirMeta,
+    captured_with: u64,
+    entries: &BTreeMap<CompactString, ChildEntry>,
+) -> u128 {
     let mut h = hasher_128();
 
     // Header: ScanConfig hash + the directory's own kernel identity.
@@ -482,42 +481,43 @@ fn compute_dir_hash(d: &DirSnapshot) -> u128 {
     // entries bump mtime without changing the user-visible state).
     // The walker reads `root_meta.mtime` directly off the struct
     // field for its mtime-skip; no consumer needs it via the hash.
-    d.captured_with.hash(&mut h);
-    d.root_meta.fs_id.hash(&mut h);
+    captured_with.hash(&mut h);
+    root_meta.fs_id.hash(&mut h);
 
     // Length prefix: belt-and-suspenders alongside SipHash24's
     // prefix-freeness. Keeps the golden test legible.
-    (d.entries.len() as u64).hash(&mut h);
+    (entries.len() as u64).hash(&mut h);
 
     // Sequential lex-order fold (BTreeMap iterates in lex order). XOR
     // was rejected: sequential preserves ordering information and avoids
     // commutative-fold subtleties at no real cost (entries are already
     // sorted by construction).
-    for (name, child) in &d.entries {
+    //
+    // Per-variant tags keep the three child shapes unambiguous at the
+    // hash level — without a tag, a `Leaf` with `leaf_hash = X` and a
+    // `Dir(Covered)` whose subtree's `dir_hash = X` would fold
+    // identically into the parent (vanishingly unlikely under
+    // SipHash24, but the tag makes the discrimination structural):
+    // - `Leaf`          contributes `leaf_hash` (transitively folds
+    //                   `(kind, size, mtime, fs_id)`).
+    // - `Dir(Covered)`   contributes `dir_hash` (transitively folds
+    //                   `(root_meta.fs_id, entries...)`).
+    // - `Dir(Uncovered)` contributes the raw `fs_id` — the walker has
+    //                   no observation beyond the directory's identity.
+    for (name, child) in entries {
         name.as_str().hash(&mut h);
         match child {
             ChildEntry::Leaf(l) => {
                 LEAF_TAG.hash(&mut h);
                 l.leaf_hash().hash(&mut h);
             }
-            ChildEntry::Dir(c) => {
-                // `fs_id` is folded twice on the `Some(subtree)` path:
-                // once via the DirChild and once transitively through
-                // the subtree's `root_meta` inside `dir_hash`. The values
-                // agree by walker construction (both lstats target the
-                // same dirent), so the duplication is harmless. The
-                // asymmetry is necessary: when `subtree = None`
-                // (uncovered), only the DirChild fold contributes
-                // `fs_id`, since `UNCOVERED_SUBTREE_HASH` is a constant.
-                // Folding the DirChild's `fs_id` unconditionally keeps
-                // the covered/uncovered cases distinguishable.
-                DIR_TAG.hash(&mut h);
-                c.fs_id.hash(&mut h);
-                let sub: u128 = c
-                    .subtree
-                    .as_ref()
-                    .map_or(UNCOVERED_SUBTREE_HASH, |s| s.dir_hash());
-                sub.hash(&mut h);
+            ChildEntry::Dir(DirChild::Covered(s)) => {
+                DIR_COVERED_TAG.hash(&mut h);
+                s.dir_hash().hash(&mut h);
+            }
+            ChildEntry::Dir(DirChild::Uncovered(fs_id)) => {
+                DIR_UNCOVERED_TAG.hash(&mut h);
+                fs_id.hash(&mut h);
             }
         }
     }
@@ -552,7 +552,7 @@ fn compute_dir_hash(d: &DirSnapshot) -> u128 {
 ///   out before reaching `anchor`).
 /// - The chain crosses a [`ChildEntry::Leaf`] (snapshot identity flip
 ///   at an intermediate segment).
-/// - The chain crosses an uncovered [`DirChild`] (`subtree: None`).
+/// - The chain crosses a [`DirChild::Uncovered`] intermediate.
 /// - Any segment fails to resolve via [`Tree::name`] (slot reaped).
 #[must_use]
 pub fn subtree_at_dir(
@@ -564,14 +564,13 @@ pub fn subtree_at_dir(
     let chain = ancestor_chain(target, anchor, tree)?;
 
     // Descend from `root` by following segment names. `chain[0] == anchor`
-    // matches `root` already, so we start at `chain[1]`.
+    // matches `root` already, so we start at `chain[1]`. Any non-covered
+    // intermediate (Leaf, Uncovered Dir, or missing entry) yields None
+    // via `lookup_covered_dir`'s unified gate.
     let mut current: Arc<DirSnapshot> = Arc::clone(root);
     for &id in chain.iter().skip(1) {
         let name = tree.name(id)?;
-        let next = match current.entries.get(name)? {
-            ChildEntry::Dir(dc) => dc.subtree.as_ref()?,
-            ChildEntry::Leaf(_) => return None,
-        };
+        let next = current.lookup_covered_dir(name)?;
         current = Arc::clone(next);
     }
     Some(current)
@@ -623,9 +622,10 @@ pub enum SpliceResult {
     Spliced(TreeSnapshot),
     /// Splice could not navigate from the prior anchor down to `target`
     /// (target outside anchor's tree subtree, or path crossed a
-    /// `subtree: None` intermediate). The caller leaves its prior view
-    /// in place and emits [`crate::Diagnostic::SpliceCrossedUncovered`]
-    /// so the contract violation is visible in operator logs.
+    /// [`DirChild::Uncovered`] intermediate). The caller leaves its
+    /// prior view in place and emits
+    /// [`crate::Diagnostic::SpliceCrossedUncovered`] so the contract
+    /// violation is visible in operator logs.
     ///
     /// Engine contract: "graft only into observed subtrees". Reaching
     /// this variant in v1 implies a state-machine bug; the variant
@@ -669,8 +669,9 @@ pub enum SpliceResult {
 /// only into observed subtrees" contract is violated:
 /// - `target` is outside the anchor's tree subtree (parent walk bottoms
 ///   out before reaching `anchor`).
-/// - The path from anchor to target crosses a `subtree: None` intermediate
-///   (snapshot coverage gap), a missing entry, or a slot reaped mid-graft.
+/// - The path from anchor to target crosses a [`DirChild::Uncovered`]
+///   intermediate (snapshot coverage gap), a missing entry, or a slot
+///   reaped mid-graft.
 ///
 /// Structurally unreachable in v1. The caller's prior handle stays alive
 /// across the breach (it's an independent Arc clone), so no integration
@@ -753,14 +754,11 @@ fn splice_dir(
     // Slot reaped mid-graft. Engine contract says this can't happen for
     // an observed subtree; surface as CrossedUncovered.
     let name = tree.name(next_id)?;
-    // Path crossed an uncovered branch (subtree=None) or missing entry.
-    // We don't synthesise empty intermediates — that would lie to
-    // dir_hash. Surface as CrossedUncovered; the engine keeps its prior
-    // view and converges on the next probe.
-    let pc: Arc<DirSnapshot> = prior.entries.get(name).and_then(|c| match c {
-        ChildEntry::Dir(dc) => dc.subtree.clone(),
-        ChildEntry::Leaf(_) => None,
-    })?;
+    // Path crossed an uncovered branch (DirChild::Uncovered) or missing
+    // entry. We don't synthesise empty intermediates — that would lie
+    // to dir_hash. Surface as CrossedUncovered; the engine keeps its
+    // prior view and converges on the next probe.
+    let pc: Arc<DirSnapshot> = Arc::clone(prior.lookup_covered_dir(name)?);
     let new_child = splice_dir(&pc, deeper, replacement, tree)?;
 
     // G7 per-level: child unchanged ⇒ parent unchanged; propagate
@@ -772,10 +770,7 @@ fn splice_dir(
     let mut new_entries = prior.entries.clone();
     new_entries.insert(
         CompactString::new(name),
-        ChildEntry::Dir(DirChild {
-            fs_id: new_child.root_meta.fs_id,
-            subtree: Some(new_child),
-        }),
+        ChildEntry::Dir(DirChild::Covered(new_child)),
     );
     // Preserve prior's `captured_with` on the rebuilt parent: it is
     // conceptually "still the same observation as prior, with one child
@@ -966,22 +961,31 @@ fn diff_same_name(
             }
         }
         (ChildEntry::Dir(p), ChildEntry::Dir(n)) => {
-            if p.fs_id == n.fs_id {
-                match (p.subtree.as_deref(), n.subtree.as_deref()) {
-                    (Some(ps), Some(ns)) if ps.dir_hash() != ns.dir_hash() => {
-                        collect_dir_pair(ps, ns, &rel, modified, staged_created, staged_deleted);
+            if p.fs_id() == n.fs_id() {
+                match (p, n) {
+                    (DirChild::Covered(ps), DirChild::Covered(ns)) => {
+                        if ps.dir_hash() != ns.dir_hash() {
+                            collect_dir_pair(
+                                ps,
+                                ns,
+                                &rel,
+                                modified,
+                                staged_created,
+                                staged_deleted,
+                            );
+                        }
                     }
-                    (Some(_), Some(_)) | (None, None) => {
-                        // Hashes match (covered both sides) or both sides
-                        // uncovered: no delta to emit at this Dir slot.
+                    (DirChild::Uncovered(_), DirChild::Uncovered(_)) => {
+                        // Both sides uncovered: no observation, no delta.
                     }
-                    (Some(_), None) | (None, Some(_)) => {
+                    (DirChild::Covered(_), DirChild::Uncovered(_))
+                    | (DirChild::Uncovered(_), DirChild::Covered(_)) => {
                         // Coverage flip on the same Dir slot. Structurally
                         // unreachable in v1: a Profile's coverage rule is
                         // pinned by `config_hash`, so a scope change forks
-                        // a new Profile rather than flipping subtree
-                        // presence at the same slot. Mirrors the assert in
-                        // the engine's `walk_pair`.
+                        // a new Profile rather than flipping coverage at
+                        // the same slot. Mirrors the assert in the
+                        // engine's `walk_pair`.
                         debug_assert!(
                             false,
                             "diff_same_name: coverage flip on same Dir slot is unreachable in v1",
@@ -999,13 +1003,13 @@ fn diff_same_name(
                 staged_deleted.push(StagedEntry {
                     rel: rel.clone(),
                     kind: EntryKind::Dir,
-                    fs_id: p.fs_id,
+                    fs_id: p.fs_id(),
                     pair_eligible: false,
                 });
                 staged_created.push(StagedEntry {
                     rel: rel.clone(),
                     kind: EntryKind::Dir,
-                    fs_id: n.fs_id,
+                    fs_id: n.fs_id(),
                     pair_eligible: false,
                 });
                 stage_descendants_deleted(&rel, pc, staged_deleted);
@@ -1043,9 +1047,7 @@ fn diff_same_name(
 /// `diff_same_name`'s ineligible-parent paths (kind change, Dir-replace
 /// at different inode). Leaves and uncovered Dirs are no-ops.
 fn stage_descendants_deleted(parent_rel: &str, parent: &ChildEntry, staged: &mut Vec<StagedEntry>) {
-    if let ChildEntry::Dir(d) = parent
-        && let Some(sub) = d.subtree.as_deref()
-    {
+    if let ChildEntry::Dir(DirChild::Covered(sub)) = parent {
         for (cname, cchild) in &sub.entries {
             stage_deleted(cname, cchild, parent_rel, staged);
         }
@@ -1054,9 +1056,7 @@ fn stage_descendants_deleted(parent_rel: &str, parent: &ChildEntry, staged: &mut
 
 /// Symmetric counterpart of [`stage_descendants_deleted`].
 fn stage_descendants_created(parent_rel: &str, parent: &ChildEntry, staged: &mut Vec<StagedEntry>) {
-    if let ChildEntry::Dir(d) = parent
-        && let Some(sub) = d.subtree.as_deref()
-    {
+    if let ChildEntry::Dir(DirChild::Covered(sub)) = parent {
         for (cname, cchild) in &sub.entries {
             stage_created(cname, cchild, parent_rel, staged);
         }
@@ -1079,9 +1079,7 @@ fn stage_deleted(
     // For Dir deletions, recurse to emit each descendant as Deleted.
     // Output is a flat Diff for the Effect API; it doesn't care about
     // reap order. The recursive walk preserves lex within each level.
-    if let ChildEntry::Dir(d) = pc
-        && let Some(sub) = d.subtree.as_deref()
-    {
+    if let ChildEntry::Dir(DirChild::Covered(sub)) = pc {
         for (cname, cchild) in &sub.entries {
             stage_deleted(cname, cchild, &rel, staged);
         }
@@ -1101,9 +1099,7 @@ fn stage_created(
         fs_id: nc.fs_id(),
         pair_eligible: true,
     });
-    if let ChildEntry::Dir(d) = nc
-        && let Some(sub) = d.subtree.as_deref()
-    {
+    if let ChildEntry::Dir(DirChild::Covered(sub)) = nc {
         for (cname, cchild) in &sub.entries {
             stage_created(cname, cchild, &rel, staged);
         }

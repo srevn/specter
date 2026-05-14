@@ -45,10 +45,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild {
-                fs_id: FsIdentity { inode, device: 0 },
-                subtree: None,
-            }),
+            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device: 0 })),
             _ => ChildEntry::Leaf(LeafEntry::new(
                 kind,
                 0,

@@ -7,8 +7,8 @@
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
 use specter_core::{
-    ChildEntry, DirSnapshot, GlobPattern, Input, ProbeCorrelation, ProbeOutcome, ProbeOwner,
-    ProbeRequest, ProfileId, ScanConfig,
+    ChildEntry, DirChild, DirSnapshot, GlobPattern, Input, ProbeCorrelation, ProbeOutcome,
+    ProbeOwner, ProbeRequest, ProfileId, ScanConfig,
 };
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
@@ -58,9 +58,7 @@ fn collect_paths(d: &DirSnapshot, prefix: &str, out: &mut BTreeSet<String>) {
             format!("{prefix}/{name}")
         };
         out.insert(composed.clone());
-        if let ChildEntry::Dir(dc) = child
-            && let Some(sub) = dc.subtree.as_deref()
-        {
+        if let ChildEntry::Dir(DirChild::Covered(sub)) = child {
             collect_paths(sub, &composed, out);
         }
     }

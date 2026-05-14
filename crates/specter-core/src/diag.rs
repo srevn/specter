@@ -335,8 +335,9 @@ pub enum Diagnostic {
     /// - `target` is outside the anchor's tree subtree (e.g., stale
     ///   `ResourceId`, or a scope contraction that revoked coverage of
     ///   the probed path).
-    /// - The path crossed a `subtree: None` intermediate (snapshot
-    ///   coverage gap — the walker stored the entry but did not recurse).
+    /// - The path crossed a `DirChild::Uncovered(_)` intermediate
+    ///   (snapshot coverage gap — the walker stored the entry but did
+    ///   not recurse).
     ///
     /// Engine contract is "graft only into observed subtrees", so this
     /// path indicates a contract violation. The variant exists to

@@ -36,10 +36,10 @@ fn leaf(kind: EntryKind, size: u64, mtime_secs: u64, inode: u64, device: u64) ->
 }
 
 fn dir(inode: u64, device: u64, subtree: Option<Arc<DirSnapshot>>) -> ChildEntry {
-    ChildEntry::Dir(DirChild {
-        fs_id: FsIdentity { inode, device },
-        subtree,
-    })
+    match subtree {
+        Some(s) => ChildEntry::Dir(DirChild::Covered(s)),
+        None => ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device })),
+    }
 }
 
 fn make_dir(
@@ -55,11 +55,12 @@ fn name(s: &str) -> CompactString {
 }
 
 /// Extract the inner `Arc<DirSnapshot>` from a `ChildEntry`. Panics if
-/// the entry is a Leaf or has no subtree — only used in fixtures where
-/// the structure is statically known.
+/// the entry is a Leaf or an uncovered Dir — only used in fixtures
+/// where the structure is statically known.
 fn dir_subtree(c: &ChildEntry) -> &Arc<DirSnapshot> {
     match c {
-        ChildEntry::Dir(dc) => dc.subtree.as_ref().expect("Dir entry has subtree"),
+        ChildEntry::Dir(DirChild::Covered(s)) => s,
+        ChildEntry::Dir(DirChild::Uncovered(_)) => panic!("expected covered Dir entry"),
         ChildEntry::Leaf(_) => panic!("expected Dir entry, got Leaf"),
     }
 }
@@ -93,34 +94,31 @@ fn dir_snapshot_new_empty_well_formed() {
 }
 
 #[test]
-fn dir_snapshot_clone_preserves_cached_hash() {
+fn dir_snapshot_clone_preserves_dir_hash() {
+    // Eager construction makes `dir_hash` a plain field on the snapshot;
+    // auto-derived `Clone` copies the field. This test pins that the
+    // derived clone preserves the data-derived hash.
     let d = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
     let h = d.dir_hash();
     let cloned = (*d).clone();
-    // Inspect the cache without forcing a recomputation by calling `dir_hash`:
-    // the field is private but the cache observation is via a re-read that
-    // must yield the *same* value (a fresh fold could match by coincidence
-    // for the empty case, so we rely on the public API being stable).
     assert_eq!(cloned.dir_hash(), h);
 }
 
 #[test]
-fn leaf_entry_clone_preserves_cache() {
+fn leaf_entry_clone_preserves_leaf_hash() {
     let original = leaf(EntryKind::File, 10, 1, 42, 0);
     let h = original.leaf_hash();
     let cloned = original.clone();
-    // Read from `cloned` first to confirm the clone preserved the cached
-    // hash, then re-read from `original` so it stays observably live.
     assert_eq!(cloned.leaf_hash(), h);
     assert_eq!(original.leaf_hash(), h);
 }
 
-// Compile-time assertion: the load-bearing concurrency properties of the
-// new types. `OnceLock<u128>` is `Sync`; if someone replaces it with
-// `Cell<...>` the build breaks here. `Diff` and friends are pinned too —
-// `Effect.diff: Option<Arc<Diff>>` shares them across threads, so a
-// regression that introduces an `Rc` or `*const` member here trips this
-// assertion at compile time rather than racing in production.
+// Compile-time assertion: the load-bearing concurrency properties of
+// `DirSnapshot` / `LeafEntry` and the `Diff` types. Both snapshot types
+// are fully immutable post-construction with no interior mutability, so
+// `Send + Sync` follow trivially from each field being `Send + Sync`;
+// this assertion guards against a future regression that introduces an
+// `Rc`, a `*const`, or a `Cell<...>` field into any of them.
 #[allow(dead_code)]
 const _SEND_SYNC: fn() = || {
     fn assert_send<T: Send>() {}
@@ -162,7 +160,7 @@ fn dir_hash_deterministic_same_input() {
 }
 
 #[test]
-fn dir_hash_idempotent_via_oncelock() {
+fn dir_hash_idempotent_across_calls() {
     let d = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
     let h1 = d.dir_hash();
     let h2 = d.dir_hash();
@@ -400,109 +398,258 @@ fn leaf_hash_known_good_golden() {
 const GOLDEN_LEAF_HASH: u128 = 0x8b04_357b_6b61_4546_6947_f1f3_280d_d31b;
 
 // ---------------------------------------------------------------------------
-// Leaf-hash cache transfer
+// LeafEntry::new_or_inherit
 //
-// Pin the contract that lets the walker reuse a baseline leaf's
-// `leaf_hash` cache when the freshly-stat'd leaf has identical identity
-// fields. The poison sentinel `POISON` is intentionally NOT the hash any
-// real fold would produce — observing it on a downstream read proves the
-// cached value flowed through (rather than being recomputed by accident).
+// Under eager construction, `new_or_inherit` is the single safe public
+// surface for the walker's per-leaf cache-transfer optimisation. The
+// inherited hash is semantically equivalent to a recomputed hash (both
+// are pure functions of the identity fields), so positive-case tests
+// pin the no-op observable behaviour and negative-case tests pin that
+// identity-mismatched baselines do not leak.
 // ---------------------------------------------------------------------------
 
-const POISON: u128 = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
-
-#[test]
-fn with_cached_hash_populates_uncached_cell() {
-    let l = leaf(EntryKind::File, 10, 1, 7, 0).with_cached_hash(POISON);
-    // `leaf_hash()` must read the prepopulated value, not recompute.
-    assert_eq!(l.leaf_hash(), POISON);
+fn fields() -> (EntryKind, u64, std::time::SystemTime, FsIdentity) {
+    (
+        EntryKind::File,
+        10,
+        UNIX_EPOCH + Duration::from_secs(1),
+        FsIdentity {
+            inode: 7,
+            device: 0,
+        },
+    )
 }
 
 #[test]
-fn with_cached_hash_no_op_when_cache_already_filled() {
-    // OnceLock::set's `Err` arm is silently discarded — first writer wins.
-    // The doc comment on `with_cached_hash` calls this out; pin it.
-    let l = leaf(EntryKind::File, 10, 1, 7, 0);
-    let real = l.leaf_hash();
-    let l = l.with_cached_hash(POISON);
-    assert_eq!(l.leaf_hash(), real);
-    assert_ne!(l.leaf_hash(), POISON);
+fn new_or_inherit_no_baseline_equals_new() {
+    let (kind, size, mtime, fs_id) = fields();
+    let fresh = LeafEntry::new(kind, size, mtime, fs_id);
+    let inherited = LeafEntry::new_or_inherit(kind, size, mtime, fs_id, None);
+    assert_eq!(fresh.leaf_hash(), inherited.leaf_hash());
 }
 
 #[test]
-fn leaf_hash_if_unchanged_returns_cached_on_match() {
+fn new_or_inherit_matches_baseline_hash_on_identity_match() {
+    let (kind, size, mtime, fs_id) = fields();
+    let baseline = LeafEntry::new(kind, size, mtime, fs_id);
+    let inherited = LeafEntry::new_or_inherit(kind, size, mtime, fs_id, Some(&baseline));
+    assert_eq!(inherited.leaf_hash(), baseline.leaf_hash());
+}
+
+#[test]
+fn new_or_inherit_returns_fresh_hash_on_any_field_mismatch() {
+    // Construct a baseline whose hash genuinely differs from the fresh
+    // fields' canonical hash: each call varies exactly one field. The
+    // assertion shape is "fresh result equals `LeafEntry::new(fresh fields)`,
+    // not baseline" — the constructor must NOT inherit when identity
+    // differs, regardless of which field flipped.
+    fn assert_fresh(
+        baseline_fields: (EntryKind, u64, std::time::SystemTime, FsIdentity),
+        fresh_fields: (EntryKind, u64, std::time::SystemTime, FsIdentity),
+        label: &str,
+    ) {
+        let baseline = LeafEntry::new(
+            baseline_fields.0,
+            baseline_fields.1,
+            baseline_fields.2,
+            baseline_fields.3,
+        );
+        let fresh_canonical = LeafEntry::new(
+            fresh_fields.0,
+            fresh_fields.1,
+            fresh_fields.2,
+            fresh_fields.3,
+        );
+        let inherited = LeafEntry::new_or_inherit(
+            fresh_fields.0,
+            fresh_fields.1,
+            fresh_fields.2,
+            fresh_fields.3,
+            Some(&baseline),
+        );
+        assert_eq!(
+            inherited.leaf_hash(),
+            fresh_canonical.leaf_hash(),
+            "{label}: inherited must equal fresh canonical hash",
+        );
+        assert_ne!(
+            inherited.leaf_hash(),
+            baseline.leaf_hash(),
+            "{label}: inherited must NOT equal baseline hash",
+        );
+    }
+
+    let base = fields();
+    assert_fresh(
+        base,
+        (EntryKind::Symlink, base.1, base.2, base.3),
+        "kind mismatch",
+    );
+    assert_fresh(
+        base,
+        (base.0, base.1.wrapping_add(1), base.2, base.3),
+        "size mismatch",
+    );
+    assert_fresh(
+        base,
+        (base.0, base.1, base.2 + Duration::from_secs(1), base.3),
+        "mtime mismatch",
+    );
+    assert_fresh(
+        base,
+        (
+            base.0,
+            base.1,
+            base.2,
+            FsIdentity {
+                inode: base.3.inode + 1,
+                device: base.3.device,
+            },
+        ),
+        "inode mismatch",
+    );
+    assert_fresh(
+        base,
+        (
+            base.0,
+            base.1,
+            base.2,
+            FsIdentity {
+                inode: base.3.inode,
+                device: base.3.device + 1,
+            },
+        ),
+        "device mismatch",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DirSnapshot::lookup_leaf
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lookup_leaf_returns_leaf_when_present() {
     let mut entries = BTreeMap::new();
-    let prior = leaf(EntryKind::File, 10, 1, 7, 0);
-    let cached = prior.leaf_hash();
-    entries.insert(name("a.c"), ChildEntry::Leaf(prior));
+    let l = leaf(EntryKind::File, 10, 1, 7, 0);
+    let h = l.leaf_hash();
+    entries.insert(name("a.c"), ChildEntry::Leaf(l));
     let d = make_dir(meta(1, 100, 1), 0, entries);
-
-    let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
-    assert_eq!(d.leaf_hash_if_unchanged("a.c", &fresh), Some(cached));
+    let got = d.lookup_leaf("a.c").expect("a.c present");
+    assert_eq!(got.leaf_hash(), h);
 }
 
 #[test]
-fn leaf_hash_if_unchanged_returns_none_when_missing() {
+fn lookup_leaf_returns_none_when_missing() {
     let d = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
-    let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
-    assert!(d.leaf_hash_if_unchanged("missing", &fresh).is_none());
+    assert!(d.lookup_leaf("missing").is_none());
 }
 
 #[test]
-fn leaf_hash_if_unchanged_returns_none_when_entry_is_dir() {
+fn lookup_leaf_returns_none_for_dir_entry() {
     let mut entries = BTreeMap::new();
     entries.insert(name("a"), dir(7, 0, None));
     let d = make_dir(meta(1, 100, 1), 0, entries);
-    let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
-    assert!(d.leaf_hash_if_unchanged("a", &fresh).is_none());
+    assert!(d.lookup_leaf("a").is_none());
 }
 
-#[test]
-fn leaf_hash_if_unchanged_returns_none_on_any_field_mismatch() {
-    fn lookup(prior: LeafEntry, fresh: &LeafEntry) -> Option<u128> {
-        let _ = prior.leaf_hash(); // populate cache so a missing return value
-        // unambiguously means identity-mismatch, not uncached prior.
-        let mut entries = BTreeMap::new();
-        entries.insert(name("a.c"), ChildEntry::Leaf(prior));
-        let d = make_dir(meta(1, 100, 1), 0, entries);
-        d.leaf_hash_if_unchanged("a.c", fresh)
-    }
-
-    let baseline = || leaf(EntryKind::File, 10, 1, 7, 0);
-    assert!(
-        lookup(baseline(), &leaf(EntryKind::Symlink, 10, 1, 7, 0)).is_none(),
-        "kind mismatch must defeat inheritance"
-    );
-    assert!(
-        lookup(baseline(), &leaf(EntryKind::File, 11, 1, 7, 0)).is_none(),
-        "size mismatch must defeat inheritance"
-    );
-    assert!(
-        lookup(baseline(), &leaf(EntryKind::File, 10, 2, 7, 0)).is_none(),
-        "mtime mismatch must defeat inheritance"
-    );
-    assert!(
-        lookup(baseline(), &leaf(EntryKind::File, 10, 1, 8, 0)).is_none(),
-        "inode mismatch must defeat inheritance"
-    );
-    assert!(
-        lookup(baseline(), &leaf(EntryKind::File, 10, 1, 7, 1)).is_none(),
-        "device mismatch must defeat inheritance"
-    );
-}
+// ---------------------------------------------------------------------------
+// DirSnapshot::lookup_covered_dir
+// ---------------------------------------------------------------------------
 
 #[test]
-fn leaf_hash_if_unchanged_returns_none_when_prior_uncached() {
-    // A baseline whose leaf was never folded — `dir_hash()` not called
-    // on the parent. This is rare in production but documented as the
-    // graceful fallback to lazy compute on the engine thread.
+fn lookup_covered_dir_returns_inner_arc_when_covered() {
+    let inner = make_dir(meta(2, 200, 1), 0, BTreeMap::new());
     let mut entries = BTreeMap::new();
-    let prior = leaf(EntryKind::File, 10, 1, 7, 0);
-    // Deliberately do NOT call `prior.leaf_hash()`; cache stays empty.
-    entries.insert(name("a.c"), ChildEntry::Leaf(prior));
-    let d = make_dir(meta(1, 100, 1), 0, entries);
-    let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
-    assert!(d.leaf_hash_if_unchanged("a.c", &fresh).is_none());
+    entries.insert(name("d"), dir(200, 1, Some(Arc::clone(&inner))));
+    let parent = make_dir(meta(1, 100, 1), 0, entries);
+    let got = parent.lookup_covered_dir("d").expect("covered dir present");
+    assert!(Arc::ptr_eq(got, &inner));
+}
+
+#[test]
+fn lookup_covered_dir_returns_none_when_missing() {
+    let parent = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
+    assert!(parent.lookup_covered_dir("missing").is_none());
+}
+
+#[test]
+fn lookup_covered_dir_returns_none_for_uncovered_dir() {
+    let mut entries = BTreeMap::new();
+    entries.insert(name("d"), dir(200, 1, None));
+    let parent = make_dir(meta(1, 100, 1), 0, entries);
+    assert!(parent.lookup_covered_dir("d").is_none());
+}
+
+#[test]
+fn lookup_covered_dir_returns_none_for_leaf_entry() {
+    let mut entries = BTreeMap::new();
+    entries.insert(
+        name("d"),
+        ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 7, 0)),
+    );
+    let parent = make_dir(meta(1, 100, 1), 0, entries);
+    assert!(parent.lookup_covered_dir("d").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// DirChild::fs_id projection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dirchild_fs_id_covered_sources_from_root_meta() {
+    let inner = make_dir(meta(2, 200, 1), 0, BTreeMap::new());
+    let dc = DirChild::Covered(inner);
+    assert_eq!(
+        dc.fs_id(),
+        FsIdentity {
+            inode: 200,
+            device: 1,
+        },
+    );
+}
+
+#[test]
+fn dirchild_fs_id_uncovered_returns_stored_value() {
+    let dc = DirChild::Uncovered(FsIdentity {
+        inode: 42,
+        device: 99,
+    });
+    assert_eq!(
+        dc.fs_id(),
+        FsIdentity {
+            inode: 42,
+            device: 99,
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// compute_dir_hash — per-variant tag discrimination
+// ---------------------------------------------------------------------------
+//
+// The three-tag encoding makes covered/uncovered structurally
+// distinguishable in the fold. Verify that the discrimination survives
+// a "naïve" attack: two snapshots whose `Covered` and `Uncovered`
+// payloads coincidentally hash to the same value at the slot, but
+// whose variant tags differ.
+
+#[test]
+fn dir_hash_distinguishes_covered_empty_from_uncovered_same_fs_id() {
+    // Covered with an empty subtree at fs_id (200, 1) — `dir_hash` of
+    // the inner is *not* equal to 0 in general, but specifically it
+    // differs from the raw fs_id fold the Uncovered arm emits.
+    let inner_empty = make_dir(meta(2, 200, 1), 0, BTreeMap::new());
+    let mut ea = BTreeMap::new();
+    ea.insert(name("d"), dir(200, 1, Some(inner_empty)));
+    let mut eb = BTreeMap::new();
+    eb.insert(name("d"), dir(200, 1, None));
+    let a = make_dir(meta(1, 100, 1), 0, ea);
+    let b = make_dir(meta(1, 100, 1), 0, eb);
+    assert_ne!(
+        a.dir_hash(),
+        b.dir_hash(),
+        "Covered(empty) and Uncovered at the same fs_id must hash distinctly",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -662,8 +809,9 @@ fn subtree_at_target_path_through_uncovered_returns_none() {
     let a = ids[1];
     let b = ids[2];
 
-    // TreeSnapshot represents anchor with `a` as a Dir but `subtree=None`
-    // (uncovered). Asking for `b` (under uncovered `a`) must return None.
+    // TreeSnapshot represents anchor with `a` as `DirChild::Uncovered(_)`
+    // — the walker stored "a" but did not recurse. Asking for `b`
+    // (under uncovered `a`) must return None.
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, None));
     let root = make_dir(meta(1, 1, 0), 7, root_entries);
@@ -816,7 +964,6 @@ fn splice_three_levels_deep_off_path_arc_ptr_eq() {
     let ids = ensure_chain(&mut tree, &["anchor", "a", "b", "c"]);
     let anchor = ids[0];
     let a = ids[1];
-    let _b = ids[2];
     let c = ids[3];
 
     // Build a sibling "top_sib" under anchor, and "mid_sib" under a, to
@@ -892,7 +1039,6 @@ fn splice_equal_hash_at_intermediate_keeps_prior_spine() {
     let mut tree = Tree::new();
     let ids = ensure_chain(&mut tree, &["anchor", "a", "b"]);
     let anchor = ids[0];
-    let _a = ids[1];
     let b = ids[2];
     let b_snap = make_dir(meta(3, 3, 0), 0, BTreeMap::new());
     let mut a_entries = BTreeMap::new();
@@ -1810,9 +1956,9 @@ fn diff_all_deleted_single_leaf_emits_one_deleted_entry() {
 
 #[test]
 fn diff_all_created_uncovered_dir_emits_dir_only_no_descendants() {
-    // DirChild with subtree=None ⇒ "uncovered" — the walker stored the
-    // entry but didn't recurse. all_created emits the Dir entry itself
-    // but cannot synthesise descendants it never saw.
+    // `DirChild::Uncovered(_)` — the walker stored the entry but
+    // didn't recurse. all_created emits the Dir entry itself but
+    // cannot synthesise descendants it never saw.
     let mut entries = BTreeMap::new();
     entries.insert(name("sub"), dir(7, 0, None));
     let snap = DirSnapshot::new(meta(1, 100, 0), 0, entries);

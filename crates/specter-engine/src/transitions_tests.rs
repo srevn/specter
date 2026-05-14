@@ -89,18 +89,16 @@ fn engine_with_attached_sub() -> (
 
 /// V5-native test helper: build a `TreeSnapshot::Dir` with the supplied
 /// single-component children. Each child is `(name, EntryKind, inode)`;
-/// Dirs are emitted with `subtree: None` (uncovered). Tests that need
-/// nested subtrees should use `dir_with_subtree`. Returns
-/// `Arc<DirSnapshot>` directly — the typed `ProbeOutcome::SubtreeOk`
-/// variant carries an `Arc<DirSnapshot>`, not a wrapping `TreeSnapshot`.
+/// Dirs are emitted as `DirChild::Uncovered(_)` (the walker stored the
+/// entry but did not recurse). Tests that need nested subtrees should
+/// use `dir_with_subtree`. Returns `Arc<DirSnapshot>` directly — the
+/// typed `ProbeOutcome::SubtreeOk` variant carries an
+/// `Arc<DirSnapshot>`, not a wrapping `TreeSnapshot`.
 fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild {
-                fs_id: FsIdentity { inode, device: 0 },
-                subtree: None,
-            }),
+            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device: 0 })),
             _ => ChildEntry::Leaf(LeafEntry::new(
                 kind,
                 0,

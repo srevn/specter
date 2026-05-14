@@ -76,9 +76,7 @@ fn collect_paths(d: &DirSnapshot, prefix: &str, out: &mut Vec<String>) {
             format!("{prefix}/{name}")
         };
         out.push(composed.clone());
-        if let ChildEntry::Dir(dc) = child
-            && let Some(sub) = dc.subtree.as_deref()
-        {
+        if let ChildEntry::Dir(DirChild::Covered(sub)) = child {
             collect_paths(sub, &composed, out);
         }
     }
@@ -389,12 +387,12 @@ fn probe_subtree_skips_unreadable_subdir_emits_remaining() {
 }
 
 /// EACCES contract: `read_dir` failure on a subdir produces
-/// `DirChild { subtree: Some(empty_arc) }` — covered-but-empty. The
-/// `None` sentinel is reserved for uncovered slots (`recursive=false`,
+/// `DirChild::Covered(empty_arc)` — covered-but-empty. The
+/// `Uncovered` variant is reserved for uncovered slots (`recursive=false`,
 /// `max_depth`, cross-filesystem, mid-walk `lstat`/kind-flip on the
 /// subdir itself). The engine's reconcile path debug-asserts on
-/// (Some, None) | (None, Some) coverage flips, so collapsing the
-/// EACCES'd `Some(empty)` into a `None` would route a perms-change
+/// (Covered, Uncovered) | (Uncovered, Covered) coverage flips, so collapsing
+/// the EACCES'd `Covered(empty)` into an `Uncovered` would route a perms-change
 /// through an unreachable arm.
 #[test]
 fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
@@ -418,16 +416,17 @@ fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
         .entries
         .get("forbidden")
         .expect("forbidden entry present in parent map");
-    let ChildEntry::Dir(DirChild { subtree, .. }) = forbidden_entry else {
+    let ChildEntry::Dir(dc) = forbidden_entry else {
         panic!("forbidden must be a Dir entry, got {forbidden_entry:?}");
     };
-    let sub = subtree.as_ref().unwrap_or_else(|| {
-        panic!(
-            "EACCES'd subdir must emit Some(empty_arc), not None — \
-             None is reserved for uncovered slots (config / cross-fs / \
+    let sub = match dc {
+        DirChild::Covered(s) => s,
+        DirChild::Uncovered(_) => panic!(
+            "EACCES'd subdir must emit DirChild::Covered(empty_arc), not Uncovered — \
+             Uncovered is reserved for uncovered slots (config / cross-fs / \
              mid-walk lstat-or-kind failure)",
-        )
-    });
+        ),
+    };
     assert!(
         sub.entries.is_empty(),
         "EACCES read_dir produces an empty entries map; got {} entries",
@@ -566,10 +565,11 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
     let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
-    let prior_sub_arc = match baseline.entries.get("sub").expect("sub child") {
-        ChildEntry::Dir(dc) => dc.subtree.clone().expect("sub subtree present"),
-        ChildEntry::Leaf(_) => panic!("sub should be a Dir"),
-    };
+    let prior_sub_arc = Arc::clone(
+        baseline
+            .lookup_covered_dir("sub")
+            .expect("sub subtree present"),
+    );
     let second = probe_subtree(
         tmp.path(),
         &cfg,
@@ -584,10 +584,7 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
     // Top is the baseline Arc (mtime matched) ⇒ ptr_eq.
     assert!(Arc::ptr_eq(&baseline, &top));
     // The child subtree is shared transitively (it lives inside `top`).
-    let new_sub_arc = match top.entries.get("sub").expect("sub child").clone() {
-        ChildEntry::Dir(dc) => dc.subtree.expect("sub subtree present"),
-        ChildEntry::Leaf(_) => panic!("sub should be a Dir"),
-    };
+    let new_sub_arc = Arc::clone(top.lookup_covered_dir("sub").expect("sub subtree present"));
     assert!(Arc::ptr_eq(&prior_sub_arc, &new_sub_arc));
 }
 
@@ -670,10 +667,7 @@ fn force_walk_propagates_through_recursion_to_descendant() {
     let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
-    let prior_dir_c_arc = match baseline.entries.get("dir_c").unwrap() {
-        ChildEntry::Dir(dc) => dc.subtree.clone().unwrap(),
-        ChildEntry::Leaf(_) => panic!(),
-    };
+    let prior_dir_c_arc = Arc::clone(baseline.lookup_covered_dir("dir_c").unwrap());
     let mut force = BTreeSet::new();
     force.insert(tmp.path().join("dir_a").join("dir_b"));
     let second = probe_subtree(tmp.path(), &cfg, 0, Some(&baseline), &force, false);
@@ -682,10 +676,7 @@ fn force_walk_propagates_through_recursion_to_descendant() {
     };
     // dir_c was untouched and not under a forced path; the recursion
     // should mtime-skip and reuse the baseline Arc.
-    let new_dir_c_arc = match top.entries.get("dir_c").unwrap().clone() {
-        ChildEntry::Dir(dc) => dc.subtree.unwrap(),
-        ChildEntry::Leaf(_) => panic!(),
-    };
+    let new_dir_c_arc = Arc::clone(top.lookup_covered_dir("dir_c").unwrap());
     assert!(Arc::ptr_eq(&prior_dir_c_arc, &new_dir_c_arc));
 }
 
@@ -741,10 +732,7 @@ fn forced_true_bypasses_mtime_skip_in_recursion() {
     let ProbeOutcome::SubtreeOk(baseline) = first else {
         panic!("first probe failed");
     };
-    let prior_sub_arc = match baseline.entries.get("sub").unwrap() {
-        ChildEntry::Dir(dc) => dc.subtree.clone().unwrap(),
-        ChildEntry::Leaf(_) => panic!(),
-    };
+    let prior_sub_arc = Arc::clone(baseline.lookup_covered_dir("sub").unwrap());
     let second = probe_subtree(
         tmp.path(),
         &cfg,
@@ -756,10 +744,7 @@ fn forced_true_bypasses_mtime_skip_in_recursion() {
     let ProbeOutcome::SubtreeOk(top) = second else {
         panic!("re-probe failed");
     };
-    let new_sub_arc = match top.entries.get("sub").unwrap().clone() {
-        ChildEntry::Dir(dc) => dc.subtree.unwrap(),
-        ChildEntry::Leaf(_) => panic!(),
-    };
+    let new_sub_arc = Arc::clone(top.lookup_covered_dir("sub").unwrap());
     assert!(
         !Arc::ptr_eq(&prior_sub_arc, &new_sub_arc),
         "forced=true must thread through recursion"
@@ -782,34 +767,39 @@ fn forced_false_default_path_unaffected() {
 // ---------------------------------------------------------------- walk: leaf-hash cache transfer
 //
 // When mtime-skip fails for a directory but a child leaf is observably
-// unchanged, the walker transfers the baseline leaf's cached `leaf_hash`
-// to the freshly-stat'd leaf — no SipHash24 re-fold on the engine
-// thread. The poison sentinel `POISON` proves the cached value flowed
-// through (a re-fold would never produce it).
+// unchanged, the walker constructs the fresh leaf via
+// `LeafEntry::new_or_inherit`, which inherits the baseline leaf's
+// `leaf_hash` when every identity field matches. Under eager
+// construction the inherited value is byte-equal to what fresh
+// computation would produce (both are pure functions of the fields),
+// so the inheritance is unobservable at the hash level; these tests
+// pin the integration shape and the identity-gate's negative arm — a
+// baseline whose identity fields disagree must NOT leak its hash into
+// the freshly-stat'd output.
 
-const POISON: u128 = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
-
-/// Forge a baseline whose `a.c` entry carries `POISON` as its cached
-/// hash, defeating root mtime-skip via UNIX_EPOCH on `root_meta.mtime`.
-/// `leaf_override` lets a test inject a leaf with deliberately mismatched
-/// identity fields to exercise the negative path.
-fn poison_baseline(real: &Arc<DirSnapshot>, leaf_override: Option<LeafEntry>) -> Arc<DirSnapshot> {
+/// Forge a baseline whose `a.c` entry has the contents `leaf_override`
+/// (defaulting to a leaf with the same identity as the disk file).
+/// `root_meta.mtime` is set to `UNIX_EPOCH` to defeat the walker's
+/// top-level mtime-skip, forcing the per-child cache-transfer path to
+/// run.
+fn baseline_at_unix_epoch(
+    real: &Arc<DirSnapshot>,
+    leaf_override: Option<LeafEntry>,
+) -> Arc<DirSnapshot> {
     let real_leaf = match real.entries.get("a.c").expect("fixture has a.c") {
         ChildEntry::Leaf(l) => l.clone(),
         ChildEntry::Dir(_) => panic!("a.c expected to be a leaf"),
     };
-    let poisoned = leaf_override
-        .unwrap_or_else(|| {
-            LeafEntry::new(
-                real_leaf.kind,
-                real_leaf.size,
-                real_leaf.mtime,
-                real_leaf.fs_id,
-            )
-        })
-        .with_cached_hash(POISON);
+    let overlay = leaf_override.unwrap_or_else(|| {
+        LeafEntry::new(
+            real_leaf.kind,
+            real_leaf.size,
+            real_leaf.mtime,
+            real_leaf.fs_id,
+        )
+    });
     let mut entries = real.entries.clone();
-    entries.insert(CompactString::new("a.c"), ChildEntry::Leaf(poisoned));
+    entries.insert(CompactString::new("a.c"), ChildEntry::Leaf(overlay));
     Arc::new(DirSnapshot::new(
         DirMeta {
             mtime: std::time::UNIX_EPOCH,
@@ -821,7 +811,7 @@ fn poison_baseline(real: &Arc<DirSnapshot>, leaf_override: Option<LeafEntry>) ->
 }
 
 #[test]
-fn cache_transfer_inherits_baseline_leaf_hash_on_identity_match() {
+fn cache_transfer_matches_baseline_hash_on_identity_match() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"hello").unwrap();
     let cfg = ScanConfig::builder().build();
@@ -829,13 +819,17 @@ fn cache_transfer_inherits_baseline_leaf_hash_on_identity_match() {
     let ProbeOutcome::SubtreeOk(real) = first else {
         panic!("first probe failed");
     };
+    let baseline_leaf_hash = match real.entries.get("a.c").unwrap() {
+        ChildEntry::Leaf(l) => l.leaf_hash(),
+        ChildEntry::Dir(_) => panic!(),
+    };
 
-    let poisoned = poison_baseline(&real, None);
+    let baseline = baseline_at_unix_epoch(&real, None);
     let result = probe_subtree(
         tmp.path(),
         &cfg,
         0,
-        Some(&poisoned),
+        Some(&baseline),
         &BTreeSet::new(),
         false,
     );
@@ -848,8 +842,8 @@ fn cache_transfer_inherits_baseline_leaf_hash_on_identity_match() {
     };
     assert_eq!(
         fresh.leaf_hash(),
-        POISON,
-        "fresh leaf must inherit baseline's cached hash on identity match"
+        baseline_leaf_hash,
+        "identity-matching baseline must yield the same leaf_hash",
     );
 }
 
@@ -866,22 +860,26 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
         ChildEntry::Leaf(l) => l.clone(),
         ChildEntry::Dir(_) => panic!(),
     };
-    // Forge an identity-mismatched override (size differs by 1). Identity
-    // check rejects the inheritance; the fresh leaf must compute its real
-    // hash and report something other than POISON.
+    // Forge an identity-mismatched override (size differs by 1). The
+    // baseline's hash differs from the canonical hash of the disk's
+    // fields; the walker must NOT inherit the baseline's stale hash
+    // — the freshly-stat'd leaf must report its true (real-fields)
+    // hash, equal to `real_leaf.leaf_hash()` and unequal to the
+    // mismatched baseline's hash.
     let mismatch = LeafEntry::new(
         real_leaf.kind,
         real_leaf.size.wrapping_add(1),
         real_leaf.mtime,
         real_leaf.fs_id,
     );
-    let poisoned = poison_baseline(&real, Some(mismatch));
+    let mismatch_hash = mismatch.leaf_hash();
+    let baseline = baseline_at_unix_epoch(&real, Some(mismatch));
 
     let result = probe_subtree(
         tmp.path(),
         &cfg,
         0,
-        Some(&poisoned),
+        Some(&baseline),
         &BTreeSet::new(),
         false,
     );
@@ -892,17 +890,23 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
         ChildEntry::Leaf(l) => l,
         ChildEntry::Dir(_) => panic!(),
     };
+    assert_eq!(
+        fresh.leaf_hash(),
+        real_leaf.leaf_hash(),
+        "fresh leaf must reflect the disk's real fields",
+    );
     assert_ne!(
         fresh.leaf_hash(),
-        POISON,
-        "identity mismatch must defeat cache inheritance"
+        mismatch_hash,
+        "identity mismatch must defeat cache inheritance",
     );
 }
 
 #[test]
 fn cache_transfer_threads_through_recursion() {
     // Bumping both root and sub mtimes forces enumeration at every level;
-    // the deep leaf still inherits via the threaded baseline subtree.
+    // the deep leaf still has the right hash via the threaded baseline
+    // subtree.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"hello").unwrap();
@@ -911,29 +915,24 @@ fn cache_transfer_threads_through_recursion() {
     let ProbeOutcome::SubtreeOk(real) = first else {
         panic!("first probe failed");
     };
-    let real_sub = match real.entries.get("sub").unwrap() {
-        ChildEntry::Dir(dc) => dc.subtree.as_ref().unwrap().clone(),
-        ChildEntry::Leaf(_) => panic!(),
-    };
+    let real_sub = Arc::clone(real.lookup_covered_dir("sub").unwrap());
     let real_leaf = match real_sub.entries.get("file.c").unwrap() {
         ChildEntry::Leaf(l) => l.clone(),
         ChildEntry::Dir(_) => panic!(),
     };
+    let baseline_leaf_hash = real_leaf.leaf_hash();
 
     let mut sub_entries = real_sub.entries.clone();
     sub_entries.insert(
         CompactString::new("file.c"),
-        ChildEntry::Leaf(
-            LeafEntry::new(
-                real_leaf.kind,
-                real_leaf.size,
-                real_leaf.mtime,
-                real_leaf.fs_id,
-            )
-            .with_cached_hash(POISON),
-        ),
+        ChildEntry::Leaf(LeafEntry::new(
+            real_leaf.kind,
+            real_leaf.size,
+            real_leaf.mtime,
+            real_leaf.fs_id,
+        )),
     );
-    let poisoned_sub = Arc::new(DirSnapshot::new(
+    let baseline_sub = Arc::new(DirSnapshot::new(
         DirMeta {
             mtime: std::time::UNIX_EPOCH,
             ..real_sub.root_meta
@@ -944,12 +943,9 @@ fn cache_transfer_threads_through_recursion() {
     let mut root_entries = real.entries.clone();
     root_entries.insert(
         CompactString::new("sub"),
-        ChildEntry::Dir(DirChild {
-            fs_id: poisoned_sub.root_meta.fs_id,
-            subtree: Some(Arc::clone(&poisoned_sub)),
-        }),
+        ChildEntry::Dir(DirChild::Covered(Arc::clone(&baseline_sub))),
     );
-    let poisoned = Arc::new(DirSnapshot::new(
+    let baseline = Arc::new(DirSnapshot::new(
         DirMeta {
             mtime: std::time::UNIX_EPOCH,
             ..real.root_meta
@@ -962,25 +958,22 @@ fn cache_transfer_threads_through_recursion() {
         tmp.path(),
         &cfg,
         0,
-        Some(&poisoned),
+        Some(&baseline),
         &BTreeSet::new(),
         false,
     );
     let ProbeOutcome::SubtreeOk(top) = result else {
         panic!("re-probe failed");
     };
-    let new_sub = match top.entries.get("sub").unwrap() {
-        ChildEntry::Dir(dc) => dc.subtree.as_deref().unwrap(),
-        ChildEntry::Leaf(_) => panic!(),
-    };
+    let new_sub = top.lookup_covered_dir("sub").unwrap().as_ref();
     let fresh = match new_sub.entries.get("file.c").unwrap() {
         ChildEntry::Leaf(l) => l,
         ChildEntry::Dir(_) => panic!(),
     };
     assert_eq!(
         fresh.leaf_hash(),
-        POISON,
-        "deep leaf must inherit through recursion"
+        baseline_leaf_hash,
+        "deep leaf hash must match baseline",
     );
 }
 
@@ -1031,8 +1024,8 @@ fn dir_snapshot_uncovered_branches_have_subtree_none() {
     match arc.entries.get("sub").unwrap() {
         ChildEntry::Dir(dc) => {
             assert!(
-                dc.subtree.is_none(),
-                "depth-1 dir uncovered (max_depth=1) ⇒ subtree=None"
+                matches!(dc, DirChild::Uncovered(_)),
+                "depth-1 dir uncovered (max_depth=1) ⇒ DirChild::Uncovered"
             );
         }
         ChildEntry::Leaf(_) => panic!(),
@@ -1075,7 +1068,8 @@ fn dir_snapshot_excluded_paths_absent() {
     // (the prober_recursive integration test pins the same).
     let target_present = arc.entries.contains_key("target");
     let target_uncov = match arc.entries.get("target") {
-        Some(ChildEntry::Dir(dc)) => dc.subtree.as_ref().is_none_or(|s| s.entries.is_empty()),
+        Some(ChildEntry::Dir(DirChild::Covered(s))) => s.entries.is_empty(),
+        Some(ChildEntry::Dir(DirChild::Uncovered(_))) => true,
         _ => true,
     };
     assert!(

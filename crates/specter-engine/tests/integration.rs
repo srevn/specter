@@ -185,10 +185,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
             "dir_snap takes single-component children; nested paths must be built explicitly",
         );
         let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild {
-                fs_id: FsIdentity { inode, device: 0 },
-                subtree: None,
-            }),
+            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device: 0 })),
             _ => ChildEntry::Leaf(LeafEntry::new(
                 kind,
                 0,

@@ -562,11 +562,12 @@ mod tests {
         ))
     }
 
-    fn dir_child(inode: u64, subtree: Option<Arc<DirSnapshot>>) -> ChildEntry {
-        ChildEntry::Dir(DirChild {
-            fs_id: FsIdentity { inode, device: 0 },
-            subtree,
-        })
+    fn dir_uncovered(inode: u64) -> ChildEntry {
+        ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device: 0 }))
+    }
+
+    fn dir_covered(subtree: Arc<DirSnapshot>) -> ChildEntry {
+        ChildEntry::Dir(DirChild::Covered(subtree))
     }
 
     fn dir_snap(inode: u64, entries: Vec<(&str, ChildEntry)>) -> Arc<DirSnapshot> {
@@ -636,7 +637,7 @@ mod tests {
             100,
             vec![
                 ("a.rs", leaf(EntryKind::File, 1)),
-                ("sub", dir_child(2, None)),
+                ("sub", dir_uncovered(2)),
             ],
         );
         let diff = Diff::all_created(&response);
@@ -663,7 +664,7 @@ mod tests {
             100,
             vec![
                 ("a.rs", leaf(EntryKind::File, 1)),
-                ("sub", dir_child(2, None)),
+                ("sub", dir_uncovered(2)),
             ],
         );
         let diff = Diff::all_created(&response);
@@ -1188,22 +1189,24 @@ mod tests {
     #[test]
     fn graft_emits_diagnostic_when_path_crosses_uncovered_intermediate() {
         // Setup: Tree has root → a → b (all live slots). The Profile's
-        // `current` snapshot is anchored at root with entry "a" carrying
-        // `subtree=None` (uncovered — engine never observed below "a").
+        // `current` snapshot is anchored at root with entry "a" stored
+        // as `DirChild::Uncovered(_)` (engine never observed below "a").
         // A probe response arrives for target `b`. Splice navigates the
         // tree chain anchor→a→b successfully but cannot navigate the
-        // *snapshot*'s coverage path — `prior.entries["a"].subtree`
-        // is None — so it returns CrossedUncovered. Graft must emit
-        // Diagnostic::SpliceCrossedUncovered AND keep the prior `current`
-        // unchanged so the anchor-rooted invariant on `Profile.current`
-        // is preserved.
+        // *snapshot*'s coverage path —
+        // `prior.lookup_covered_dir("a")` returns `None` because "a"
+        // is `Uncovered`, not `Covered` — so splice returns
+        // CrossedUncovered. Graft must emit
+        // Diagnostic::SpliceCrossedUncovered AND keep the prior
+        // `current` unchanged so the anchor-rooted invariant on
+        // `Profile.current` is preserved.
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let a_id = tree.ensure(Some(root), "a", ResourceRole::User);
         tree.set_kind(a_id, ResourceKind::Dir);
         let b_id = tree.ensure(Some(a_id), "b", ResourceRole::User);
         tree.set_kind(b_id, ResourceKind::Dir);
 
-        let prior_current = dir_snap(100, vec![("a", dir_child(2, None))]);
+        let prior_current = dir_snap(100, vec![("a", dir_uncovered(2))]);
         profiles.get_mut(pid).unwrap().current =
             Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
 
@@ -1297,13 +1300,17 @@ mod tests {
             Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
 
         // Build response: root has covered Dir `foo` at the SAME inode
-        // (42), with one descendant File `nested.rs` under it.
+        // (42), with one descendant File `nested.rs` under it. The
+        // covered subtree's `root_meta.fs_id` IS the `foo` directory's
+        // kernel identity under the sum-type encoding, so it must be
+        // stamped with inode 42 for the kind-flip-with-inode-reuse
+        // invariant to hold.
         let nested_subtree = {
             let mut entries: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
             entries.insert(CompactString::new("nested.rs"), leaf(EntryKind::File, 99));
-            Arc::new(DirSnapshot::new(meta(7), 0, entries))
+            Arc::new(DirSnapshot::new(meta(42), 0, entries))
         };
-        let response = dir_snap(200, vec![("foo", dir_child(42, Some(nested_subtree)))]);
+        let response = dir_snap(200, vec![("foo", dir_covered(nested_subtree))]);
 
         // Sanity: prior and new "foo" entries share `(inode, device)`
         // ⇒ this is the kind-flip-with-inode-reuse case that

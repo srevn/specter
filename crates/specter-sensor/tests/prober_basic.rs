@@ -6,8 +6,8 @@
 use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
 use specter_core::{
-    ChildEntry, EntryKind, Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest,
-    ProfileId, ScanConfig,
+    EntryKind, Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId,
+    ScanConfig,
 };
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
@@ -100,16 +100,10 @@ fn subtree_round_trip_emits_subtree_ok_with_children() {
         .collect();
     assert!(names.contains(&"a.c"));
     assert!(names.contains(&"sub"));
-    let sub_arc = match arc.entries.get("sub").expect("sub entry") {
-        ChildEntry::Dir(dc) => dc.subtree.as_ref().expect("recursive subtree present"),
-        ChildEntry::Leaf(_) => panic!("`sub` should be a Dir"),
-    };
-    let sub_names: Vec<&str> = sub_arc
-        .entries
-        .keys()
-        .map(compact_str::CompactString::as_str)
-        .collect();
-    assert!(sub_names.contains(&"b.c"));
+    let sub_arc = arc
+        .lookup_covered_dir("sub")
+        .expect("recursive subtree present");
+    assert!(sub_arc.entries.contains_key("b.c"));
 
     let _ = prober.shutdown();
 }

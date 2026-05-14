@@ -94,9 +94,11 @@ pub enum ProbeRequest {
         /// divergent in-scope content.
         captured_with: u64,
         /// Engine's last-known view of `target_path`'s subtree. The
-        /// walker consults `baseline_subtree.root_meta` for mtime-skip and
-        /// propagates child baselines via `entries[name].subtree`. `None`
-        /// means "no prior observation": first Seed of a fresh Profile.
+        /// walker consults `baseline_subtree.root_meta` for mtime-skip
+        /// and propagates child baselines via each child's
+        /// `DirChild::Covered(arc)`, resolved by name through
+        /// [`crate::DirSnapshot::lookup_covered_dir`]. `None` means
+        /// "no prior observation": first Seed of a fresh Profile.
         ///
         /// Cheap to ship — `Arc::clone` on the channel send. Multiple
         /// workers may hold the same Arc concurrently (immutable
