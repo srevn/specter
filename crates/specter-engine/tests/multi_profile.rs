@@ -23,7 +23,7 @@ use specter_core::{
     ActionProgram, ActiveBurst, BurstFinish, ChildEntry, ClassSet, Diff, DirChild, DirMeta,
     DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry, PostFireBurst,
     PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig, StepOutput,
     SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
@@ -43,10 +43,7 @@ fn empty_program() -> Arc<ActionProgram> {
 
 /// V5-native helper: build a `TreeSnapshot::Dir` with flat single-component
 /// children. Tests in this file use leaf-name segments only (no `/`).
-fn dir_snap(
-    root: ResourceId,
-    children: Vec<(&str, EntryKind, u64)>,
-) -> std::sync::Arc<DirSnapshot> {
+fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -64,7 +61,6 @@ fn dir_snap(
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -174,7 +170,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_parent),
             correlation: parent_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(src, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -209,7 +205,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: child_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(foo, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -270,7 +266,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_parent),
             correlation: parent_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(src, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -296,7 +292,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: child_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(foo, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -348,7 +344,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_parent),
             correlation: parent_probe_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(src, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         t2,
     );
@@ -376,7 +372,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: child_probe_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(foo, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         t2,
     );
@@ -441,7 +437,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(foo, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         t2,
     );
@@ -534,7 +530,7 @@ fn co_located_profiles_share_suppress_count() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_a),
             correlation: corr_a,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -551,7 +547,7 @@ fn co_located_profiles_share_suppress_count() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_b),
             correlation: corr_b,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );

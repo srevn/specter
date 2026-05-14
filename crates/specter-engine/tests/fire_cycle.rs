@@ -51,10 +51,7 @@ fn empty_program() -> Arc<ActionProgram> {
     single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn dir_snap(
-    root: ResourceId,
-    children: Vec<(&str, EntryKind, u64)>,
-) -> std::sync::Arc<DirSnapshot> {
+fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -72,7 +69,6 @@ fn dir_snap(
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -266,7 +262,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
-    let snap = dir_snap(r, vec![]);
+    let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
 
     // Standard burst → Awaiting.
@@ -352,7 +348,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
     let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
-    let snap_with_child = dir_snap(r, vec![("child", EntryKind::Dir, 7)]);
+    let snap_with_child = dir_snap(vec![("child", EntryKind::Dir, 7)]);
     let (_sid, pid) = attach_and_complete_seed_with(
         &mut e,
         subtree_request_with_content("test", r),
@@ -419,7 +415,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
     let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
-    let snap = dir_snap(r, vec![("child", EntryKind::Dir, 7)]);
+    let snap = dir_snap(vec![("child", EntryKind::Dir, 7)]);
     let (sid, pid) = attach_and_complete_seed_with(
         &mut e,
         subtree_request_with_content("test", r),
@@ -502,7 +498,7 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
-    let snap = dir_snap(r, vec![]);
+    let snap = dir_snap(vec![]);
     let (_sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let _stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
 
@@ -560,7 +556,7 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
-    let snap = dir_snap(r, vec![]);
+    let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
     let effect_key = stable_out.effects[0].key.clone();
@@ -626,7 +622,7 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
-    let snap = dir_snap(r, vec![]);
+    let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
     let effect_key = stable_out.effects[0].key.clone();
@@ -682,7 +678,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
-    let snap = dir_snap(r, vec![]);
+    let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
     let effect_key = stable_out.effects[0].key.clone();
@@ -745,7 +741,7 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now + Duration::from_millis(1),
     );
@@ -772,7 +768,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
-    let snap = dir_snap(r, vec![]);
+    let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
 
     // First fire cycle.
@@ -857,16 +853,16 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
 
     // Standard burst with two files in the response.
-    let snap_with_files = dir_snap(
-        r,
-        vec![("a.txt", EntryKind::File, 1), ("b.txt", EntryKind::File, 2)],
-    );
+    let snap_with_files = dir_snap(vec![
+        ("a.txt", EntryKind::File, 1),
+        ("b.txt", EntryKind::File, 2),
+    ]);
     let stable_out = drive_to_awaiting(
         &mut e,
         pid,
@@ -945,7 +941,7 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
-    let snap = dir_snap(r, vec![]);
+    let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
     let effect_key = stable_out.effects[0].key.clone();
@@ -998,7 +994,7 @@ fn fire_cycle_event_at_unsuppressed_descendant_during_awaiting_absorbs() {
     let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
-    let snap_with_child = dir_snap(r, vec![("child", EntryKind::Dir, 7)]);
+    let snap_with_child = dir_snap(vec![("child", EntryKind::Dir, 7)]);
     let (_sid, pid) = attach_and_complete_seed_with(
         &mut e,
         subtree_request_with_content("test", r),
@@ -1056,7 +1052,7 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
-    let snap = dir_snap(r, vec![]);
+    let snap = dir_snap(vec![]);
     let (_sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let _ = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
     let pending_probe_before = e.pending_probe_for(ProbeOwner::Profile(pid));
@@ -1112,7 +1108,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
-    let snap_initial = dir_snap(r, vec![("child", EntryKind::Dir, 7)]);
+    let snap_initial = dir_snap(vec![("child", EntryKind::Dir, 7)]);
     let (sid, pid) = attach_and_complete_seed_with(
         &mut e,
         subtree_request_with_content("test", r),
@@ -1154,13 +1150,10 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     // Rebase probe response carries a DIFFERENT snapshot (the user's
     // edit changed the directory). The post-rebase baseline reflects
     // the new state.
-    let snap_after_edit = dir_snap(
-        r,
-        vec![
-            ("child", EntryKind::Dir, 7),
-            ("user_edit.txt", EntryKind::File, 99),
-        ],
-    );
+    let snap_after_edit = dir_snap(vec![
+        ("child", EntryKind::Dir, 7),
+        ("user_edit.txt", EntryKind::File, 99),
+    ]);
     let final_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -1207,8 +1200,8 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
     let r = anchor(&mut e, "src");
     let now = Instant::now();
 
-    let pre_emit = dir_snap(r, vec![]);
-    let post_effect = dir_snap(r, vec![("post.rs", EntryKind::File, 42)]);
+    let pre_emit = dir_snap(vec![]);
+    let post_effect = dir_snap(vec![("post.rs", EntryKind::File, 42)]);
     assert_ne!(
         pre_emit.dir_hash(),
         post_effect.dir_hash(),
@@ -1308,7 +1301,6 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     // the same `inode`. `dir_snap` (file-level helper) bakes
     // `size = 0` and offers no override.
     fn dir_snap_one_file(
-        root: ResourceId,
         name: &str,
         kind: EntryKind,
         inode: u64,
@@ -1325,7 +1317,6 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
             )),
         );
         Arc::new(DirSnapshot::new(
-            root,
             DirMeta {
                 mtime: UNIX_EPOCH,
                 fs_id: FsIdentity {
@@ -1363,7 +1354,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -1371,7 +1362,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     // Burst 1 — verify response = pre_emit (foo.rs at inode 42,
     // size 0). The Seed → Standard diff (created foo.rs) drives one
     // PerFile Effect.
-    let pre_emit = dir_snap_one_file(r, "foo.rs", EntryKind::File, 42, 0);
+    let pre_emit = dir_snap_one_file("foo.rs", EntryKind::File, 42, 0);
     let stable_out = drive_to_awaiting(
         &mut e,
         pid,
@@ -1400,7 +1391,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     // Rebase response: foo.rs at the **same inode 42** (in-place
     // formatter rewrite, slot identity preserved) but `size = 1` —
     // changes the leaf hash without triggering a delete/create cycle.
-    let post_effect = dir_snap_one_file(r, "foo.rs", EntryKind::File, 42, 1);
+    let post_effect = dir_snap_one_file("foo.rs", EntryKind::File, 42, 1);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),

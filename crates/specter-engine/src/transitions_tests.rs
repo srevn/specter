@@ -93,7 +93,7 @@ fn engine_with_attached_sub() -> (
 /// nested subtrees should use `dir_with_subtree`. Returns
 /// `Arc<DirSnapshot>` directly — the typed `ProbeOutcome::SubtreeOk`
 /// variant carries an `Arc<DirSnapshot>`, not a wrapping `TreeSnapshot`.
-fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
+fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -111,7 +111,6 @@ fn dir_tree_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -133,13 +132,12 @@ fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> 
 }
 
 /// Drive the Profile from fresh-attach through Seed-Ok → Idle (post-Seed
-/// state). Returns the response correlation. After this, Profile.current
-/// and Profile.baseline are set.
-fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId, root: ResourceId) {
+/// state). After this, Profile.current and Profile.baseline are set.
+fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId) {
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verifying probe in flight");
-    let snap = dir_tree_snap(root, vec![]);
+    let snap = dir_tree_snap(vec![]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -222,7 +220,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Seed verify probe in flight");
-    let snap = dir_tree_snap(r, vec![]);
+    let snap = dir_tree_snap(vec![]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -277,7 +275,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Seed verify probe in flight");
-    let snap = dir_tree_snap(r, vec![]);
+    let snap = dir_tree_snap(vec![]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -499,7 +497,7 @@ fn dispatch_standard_ok_with_kind_mismatched_response_routes_through_finalize_an
 
     // Inject the kind-mismatched response: a SubtreeOk (Dir) for a
     // File-kinded Profile. The boundary check fires the debug_assert.
-    let dir = dir_tree_snap(r, vec![]);
+    let dir = dir_tree_snap(vec![]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -522,7 +520,7 @@ fn dispatch_standard_ok_with_kind_mismatched_response_routes_through_finalize_an
 #[test]
 fn standard_burst_on_unknown_anchor_emits_subtree_probe() {
     let (mut e, pid, _sid, r, now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, r);
+    complete_seed_burst(&mut e, pid);
     // After Seed completes, Profile.kind = Some(Dir). Reset to None to
     // simulate the corner case where a Standard burst runs before any
     // probe has classified the anchor (e.g., a future code path that
@@ -610,12 +608,12 @@ fn attach_sub_existing_profile_bumps_refcount() {
 /// coverage.
 #[test]
 fn engine_dispatch_through_shim_matches_v4_behaviour() {
-    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verifying probe in flight");
     // One-Leaf TreeSnapshot — the shim flattens to one V4 Entry.
-    let snap = dir_tree_snap(root, vec![("main.rs", EntryKind::File, 100)]);
+    let snap = dir_tree_snap(vec![("main.rs", EntryKind::File, 100)]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -632,11 +630,11 @@ fn engine_dispatch_through_shim_matches_v4_behaviour() {
 
 #[test]
 fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
-    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verifying probe in flight");
-    let snap = dir_tree_snap(root, vec![]);
+    let snap = dir_tree_snap(vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -718,10 +716,10 @@ fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
 
 #[test]
 fn probe_response_correlation_mismatch_drops_with_diagnostic() {
-    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
     // Inject a response with the wrong correlation.
     let bogus = specter_core::ProbeCorrelation::from(99_999);
-    let snap = dir_tree_snap(root, vec![]);
+    let snap = dir_tree_snap(vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -744,10 +742,10 @@ fn probe_response_correlation_mismatch_drops_with_diagnostic() {
 
 #[test]
 fn probe_response_for_idle_profile_drops_with_diagnostic() {
-    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
     // Profile is Idle; injecting a ProbeResponse drops with diagnostic.
-    let snap = dir_tree_snap(root, vec![]);
+    let snap = dir_tree_snap(vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -779,7 +777,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
     // returning to Idle. Idle means "nothing in flight" — outstanding
     // Effects keep the burst Active until they report back.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     let now = Instant::now();
     // FsEvent at anchor → Standard Settling.
     e.step(
@@ -806,7 +804,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         .expect("Verifying probe in flight");
     // Reproduce the seed-burst's empty snapshot — both shim to the same
     // V4 content_hash (entries.len() == 0), so `stable_against` holds.
-    let snap = dir_tree_snap(root, vec![]);
+    let snap = dir_tree_snap(vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -889,7 +887,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
 #[test]
 fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
 
     // Precondition: post-Seed Profile has baseline = current and no
     // fire history. The phantom condition (`baseline.hash() ==
@@ -930,7 +928,7 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verifying probe in flight");
-    let phantom_snap = dir_tree_snap(root, vec![]);
+    let phantom_snap = dir_tree_snap(vec![]);
     assert_eq!(
         phantom_snap.dir_hash(),
         baseline_hash,
@@ -1163,8 +1161,8 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     match &p.current {
         Some(TreeSnapshot::File(_)) => {} // navigation invariant preserved
         Some(TreeSnapshot::Dir(arc)) => panic!(
-            "Profile.current corrupted to Dir(root_resource={:?}); expected File(leaf)",
-            arc.root_resource,
+            "Profile.current corrupted to Dir(root_meta={:?}); expected File(leaf)",
+            arc.root_meta,
         ),
         None => panic!("Profile.current must be Some(File(leaf)) post-Standard"),
     }
@@ -1189,7 +1187,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
 #[test]
 fn standard_burst_force_fires_on_max_settle() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     let now = Instant::now();
     e.step(
         Input::FsEvent {
@@ -1215,7 +1213,7 @@ fn standard_burst_force_fires_on_max_settle() {
     // response back if needed.
     if let Some(correlation) = e.pending_probe_for(ProbeOwner::Profile(pid)) {
         // Inject a not-stable response to test the forced effect emission.
-        let snap = dir_tree_snap(root, vec![("new.rs", EntryKind::File, 99)]);
+        let snap = dir_tree_snap(vec![("new.rs", EntryKind::File, 99)]);
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(pid),
@@ -1342,9 +1340,9 @@ fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
 /// the sole gate — exactly one diagnostic per stale response.
 #[test]
 fn stale_probe_response_emits_exactly_one_diagnostic() {
-    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
     let bogus = specter_core::ProbeCorrelation::from(99_999);
-    let snap = dir_tree_snap(root, vec![]);
+    let snap = dir_tree_snap(vec![]);
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -1380,7 +1378,7 @@ fn stale_probe_response_emits_exactly_one_diagnostic() {
 #[test]
 fn fs_event_metadatachanged_at_anchor_bypasses_class_filter() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     let out = e.step(
         Input::FsEvent {
             resource: root,
@@ -1411,7 +1409,7 @@ fn fs_event_metadatachanged_at_anchor_bypasses_class_filter() {
 #[test]
 fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
 
     // Materialize a covered descendant. Bump `watch_demand` so the event
     // passes the `EventOnUnwatchedResource` head guard. The Profile's
@@ -1480,7 +1478,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
-    complete_seed_burst(&mut e, pid, r);
+    complete_seed_burst(&mut e, pid);
 
     let child = e.tree.ensure(Some(r), "f.txt", ResourceRole::User);
     e.tree.set_kind(child, ResourceKind::File);
@@ -1528,7 +1526,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
 #[test]
 fn fs_event_anchor_terminal_bypasses_class_filter() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     assert_eq!(
         e.profiles.get(pid).unwrap().anchor_claim,
         AnchorClaim::Held,
@@ -1623,7 +1621,7 @@ fn fs_event_at_watched_resource_with_no_consumer_emits_event_no_consumer_not_unw
 #[test]
 fn fs_event_removed_at_anchor_active_terminates() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     // Drive a Standard burst.
     let now = Instant::now();
     e.step(
@@ -1668,7 +1666,7 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
     // (`on_fs_event`'s `start_pending_recovery`) detect "anchor is gone"
     // via `current.is_none()`.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     assert_eq!(e.tree.get(root).unwrap().watch_demand(), 1);
     assert!(e.profiles.get(pid).unwrap().current.is_some());
 
@@ -1697,7 +1695,7 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
 #[test]
 fn timer_expired_settle_in_settling_transitions_to_probing() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     let now = Instant::now();
     e.step(
         Input::FsEvent {
@@ -1764,8 +1762,8 @@ fn effect_complete_ok_in_idle_diagnoses_outside_awaiting() {
     // landing in Idle is therefore unexpected (gate-deadline force-
     // transition or anchor-loss) — emit `EffectCompleteOutsideAwaiting`
     // and drop without state change.
-    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    let (mut e, pid, sid, _root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
     let out = e.step(
         Input::EffectComplete {
             sub: sid,
@@ -1802,8 +1800,8 @@ fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
     // phase — a failed Effect leaves no observable state to dedupe
     // against. In Idle the completion is also "late" (the engine isn't
     // tracking it), so it diagnoses with EffectCompleteOutsideAwaiting.
-    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    let (mut e, pid, sid, _root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
     let pre_baseline = e.profiles.get(pid).unwrap().baseline.is_some();
     let out = e.step(
         Input::EffectComplete {
@@ -1863,7 +1861,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
     assert!(e.subs.get(sid).unwrap().needs_diff);
 
     // Seed burst → baseline = empty snapshot.
-    complete_seed_burst(&mut e, pid, r);
+    complete_seed_burst(&mut e, pid);
 
     // Standard burst, first round: FsEvent → settle → probe → snapshot with
     // a new entry. The first response is *not stable* (current was empty),
@@ -1875,7 +1873,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
         },
         now,
     );
-    let snap_with_entry = dir_tree_snap(r, vec![("new.rs", EntryKind::File, 5)]);
+    let snap_with_entry = dir_tree_snap(vec![("new.rs", EntryKind::File, 5)]);
 
     // Iteratively drain settle timers and inject probe responses until the
     // burst stabilizes (one Effect emitted).
@@ -1922,17 +1920,17 @@ fn effect_emission_carries_diff_when_needs_diff() {
 
 #[test]
 fn seed_burst_descendants_watched_via_first_probe() {
-    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verifying probe in flight");
     // First-probe response with one File and one Dir descendant.
     // Only the Dir gets a Watch op; the File materializes without an FD
     // contribution.
-    let snap = dir_tree_snap(
-        root,
-        vec![("a.rs", EntryKind::File, 1), ("subdir", EntryKind::Dir, 2)],
-    );
+    let snap = dir_tree_snap(vec![
+        ("a.rs", EntryKind::File, 1),
+        ("subdir", EntryKind::Dir, 2),
+    ]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -2285,8 +2283,8 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
     // Idle Profile (post-`complete_seed_burst`): an overflow drives a
     // direct `start_seed_burst` call; the Profile transitions to
     // `Active(Seed)` and a fresh probe is in flight.
-    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
     assert!(matches!(
         e.profiles.get(pid).unwrap().state,
         ProfileState::Idle
@@ -2327,7 +2325,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
     // `Active(Seed)`. The Standard burst's `dirty_resources` /
     // `force_walk_resources` are discarded — the seed re-baselines.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     let now = Instant::now();
     e.step(
         Input::FsEvent {
@@ -2464,8 +2462,8 @@ fn sensor_overflow_resource_scope_filters_profiles() {
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid_a = e.subs.get(sid_a).unwrap().profile;
     let pid_b = e.subs.get(sid_b).unwrap().profile;
-    complete_seed_burst(&mut e, pid_a, a);
-    complete_seed_burst(&mut e, pid_b, b);
+    complete_seed_burst(&mut e, pid_a);
+    complete_seed_burst(&mut e, pid_b);
     assert!(matches!(
         e.profiles.get(pid_a).unwrap().state,
         ProfileState::Idle
@@ -2542,7 +2540,7 @@ fn anchor_terminal_event_clears_anchor_claim() {
     // After on_anchor_terminal_event releases the anchor, a subsequent
     // reap must NOT double-release it (the claim is cleared to None).
     let (mut e, pid, _sid, r, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, r);
+    complete_seed_burst(&mut e, pid);
     assert_eq!(e.profiles.get(pid).unwrap().anchor_claim, AnchorClaim::Held,);
 
     // Inject a Removed event at the anchor: the terminal event releases
@@ -2571,7 +2569,7 @@ fn anchor_terminal_event_clears_anchor_claim() {
 #[test]
 fn detach_sub_idle_profile_reaps_immediately() {
     let (mut e, pid, sid, r, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, r);
+    complete_seed_burst(&mut e, pid);
     // Profile is now Idle.
     assert!(matches!(
         e.profiles.get(pid).unwrap().state,
@@ -2609,7 +2607,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
     // Sub on Active(Standard, stable) Profile; detach mid-burst; finish
     // burst — no Effect emitted; Profile reaped.
     let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
 
     // Drive Standard burst.
     let t1 = Instant::now();
@@ -2645,7 +2643,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
         .expect("Verifying probe in flight");
 
     // Inject stable response. Profile should reap; no Effect emitted.
-    let snap = dir_tree_snap(root, vec![]);
+    let snap = dir_tree_snap(vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -2765,8 +2763,8 @@ fn config_diff_removed_then_added_atomic() {
     // Engine has Sub A at /anchor; ConfigDiff removes A and adds B
     // (path-based, anchored at /anchor — re-creates the slot if A's
     // detach reaped it).
-    let (mut e, pid_a, sid_a, r, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid_a, r);
+    let (mut e, pid_a, sid_a, _r, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid_a);
 
     // Path-based add — the engine re-materializes if needed.
     let req_b = SubAttachRequest::for_path(
@@ -3137,7 +3135,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(vec![])),
         }),
         now,
     );
@@ -3169,10 +3167,10 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         .expect("Verifying probe in flight");
 
     // Inject stable response with 2 file entries.
-    let snap = dir_tree_snap(
-        r,
-        vec![("a.rs", EntryKind::File, 1), ("b.rs", EntryKind::File, 2)],
-    );
+    let snap = dir_tree_snap(vec![
+        ("a.rs", EntryKind::File, 1),
+        ("b.rs", EntryKind::File, 2),
+    ]);
     // Send same snap twice via state cycling: first probe sees the
     // change; second confirms stable. Simplify by re-routing — the
     // engine's Standard dispatch needs `current` set to the same snap
@@ -3280,7 +3278,7 @@ fn per_stable_file_skips_dir_entries() {
     let seed_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verifying probe in flight");
-    let seed_snap = dir_tree_snap(r, vec![("subdir", EntryKind::Dir, 10)]);
+    let seed_snap = dir_tree_snap(vec![("subdir", EntryKind::Dir, 10)]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -3317,15 +3315,12 @@ fn per_stable_file_skips_dir_entries() {
     // Mixed snapshot: subdir (modified — different mtime), newdir (new
     // Dir), main.rs (new File). Diff = created=[newdir, main.rs],
     // modified=[subdir]. Only main.rs should fire.
-    let mixed_snap = dir_tree_snap(
-        r,
-        vec![
-            ("main.rs", EntryKind::File, 1),
-            ("newdir", EntryKind::Dir, 11),
-            // subdir has different mtime ⇒ counted as Modified.
-            ("subdir", EntryKind::Dir, 10),
-        ],
-    );
+    let mixed_snap = dir_tree_snap(vec![
+        ("main.rs", EntryKind::File, 1),
+        ("newdir", EntryKind::Dir, 11),
+        // subdir has different mtime ⇒ counted as Modified.
+        ("subdir", EntryKind::Dir, 10),
+    ]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -3388,7 +3383,7 @@ fn drive_to_first_effect(
     now: Instant,
 ) -> StepOutput {
     // Complete Seed.
-    complete_seed_burst(e, pid, root);
+    complete_seed_burst(e, pid);
     // Inject FsEvent → Standard burst at root.
     let _ = e.step(
         Input::FsEvent {
@@ -3418,7 +3413,7 @@ fn drive_to_first_effect(
         .expect("Verifying probe in flight");
     // First probe — response differs from Seed baseline ⇒ not-stable ⇒
     // Batching.
-    let snap1 = dir_tree_snap(root, vec![("a.rs", EntryKind::File, 1)]);
+    let snap1 = dir_tree_snap(vec![("a.rs", EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -3447,7 +3442,7 @@ fn drive_to_first_effect(
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verifying probe in flight");
     // Second probe — same content ⇒ stable ⇒ Effect.
-    let snap2 = dir_tree_snap(root, vec![("a.rs", EntryKind::File, 1)]);
+    let snap2 = dir_tree_snap(vec![("a.rs", EntryKind::File, 1)]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -3543,7 +3538,7 @@ fn per_file_effect_target_matches_dedup_key_resource() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(vec![])),
         }),
         now,
     );
@@ -3574,10 +3569,10 @@ fn per_file_effect_target_matches_dedup_key_resource() {
     let std_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verifying probe in flight");
-    let snap = dir_tree_snap(
-        r,
-        vec![("a.rs", EntryKind::File, 1), ("b.rs", EntryKind::File, 2)],
-    );
+    let snap = dir_tree_snap(vec![
+        ("a.rs", EntryKind::File, 1),
+        ("b.rs", EntryKind::File, 2),
+    ]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -3666,11 +3661,11 @@ fn recovery_seed_no_prior_emit_does_not_fire() {
     // Fresh attach → Seed-Ok → no prior `fired_subs` ⇒
     // seed_drift_observed returns an empty key set ⇒ no Effect
     // (preserves "fresh Seed never fires Effect").
-    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verifying probe in flight");
-    let snap = dir_tree_snap(root, vec![]);
+    let snap = dir_tree_snap(vec![]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -3716,7 +3711,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(vec![])),
         }),
         now,
     );
@@ -3731,7 +3726,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
     );
     let mut t = now;
     let mut effect_out = None;
-    let snap_with_file = dir_tree_snap(r, vec![("new.rs", EntryKind::File, 5)]);
+    let snap_with_file = dir_tree_snap(vec![("new.rs", EntryKind::File, 5)]);
     for _ in 0..6 {
         t += SETTLE * 4;
         while let Some(entry) = e.pop_expired(t) {
@@ -3872,7 +3867,7 @@ fn drive_to_standard_verifying(
     root: ResourceId,
     now: Instant,
 ) -> specter_core::ProbeCorrelation {
-    complete_seed_burst(e, pid, root);
+    complete_seed_burst(e, pid);
     let _ = e.step(
         Input::FsEvent {
             resource: root,
@@ -4066,7 +4061,7 @@ fn dispatch_rebase_failed_clears_profile_kind() {
 fn finalize_anchor_lost_clears_profile_kind() {
     // Anchor terminal event during a materialised burst.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     assert_eq!(
         e.profiles.get(pid).unwrap().kind,
         Some(ResourceKind::Dir),
@@ -4094,7 +4089,7 @@ fn finalize_anchor_lost_clears_profile_kind() {
 #[test]
 fn finalize_anchor_lost_was_active_pre_helper_ordering() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid, root);
+    complete_seed_burst(&mut e, pid);
     // Re-enter Active by injecting an FsEvent → Standard Batching.
     let _ = e.step(
         Input::FsEvent {
@@ -4369,17 +4364,13 @@ fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
     );
     if let Some(p) = e.profiles.get_mut(pid) {
         p.last_settled_hash_at_loss = Some(0xdead_beef);
-        p.baseline = Some(TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])));
-        p.current = Some(TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])));
+        p.baseline = Some(TreeSnapshot::Dir(dir_tree_snap(vec![])));
+        p.current = Some(TreeSnapshot::Dir(dir_tree_snap(vec![])));
         p.state = state;
     }
 
     let mut out = StepOutput::default();
-    e.dispatch_rebase_ok(
-        pid,
-        TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])),
-        &mut out,
-    );
+    e.dispatch_rebase_ok(pid, TreeSnapshot::Dir(dir_tree_snap(vec![])), &mut out);
 
     let p = e.profiles.get(pid).expect("Profile lives");
     assert!(
@@ -4411,12 +4402,7 @@ fn dispatch_seed_ok_no_drift_branch_clears_last_settled_hash_at_loss() {
     }
 
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(
-        pid,
-        TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])),
-        now,
-        &mut out,
-    );
+    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(dir_tree_snap(vec![])), now, &mut out);
 
     assert!(
         e.profiles
@@ -4464,12 +4450,7 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
     }
 
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(
-        pid,
-        TreeSnapshot::Dir(dir_tree_snap(anchor, vec![])),
-        now,
-        &mut out,
-    );
+    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(dir_tree_snap(vec![])), now, &mut out);
 
     // Drift branch must have fired one Effect.
     assert_eq!(out.effects.len(), 1, "drift branch emitted one Effect");
@@ -4521,8 +4502,8 @@ fn seed_drift_observed_returns_false_for_fresh_profile() {
 /// the witness-consultation arm.
 #[test]
 fn seed_drift_observed_returns_true_on_post_recovery_drift() {
-    let (mut e, pid, sid, anchor, _now) = engine_with_attached_sub();
-    let snap = dir_tree_snap(anchor, vec![("file", EntryKind::File, 1)]);
+    let (mut e, pid, sid, _anchor, _now) = engine_with_attached_sub();
+    let snap = dir_tree_snap(vec![("file", EntryKind::File, 1)]);
     let curr_hash = snap.dir_hash();
 
     if let Some(p) = e.profiles.get_mut(pid) {
@@ -4555,9 +4536,9 @@ fn seed_drift_observed_returns_true_on_post_recovery_drift() {
 /// based drift performed.
 #[test]
 fn seed_drift_observed_returns_true_on_active_mode_drift() {
-    let (mut e, pid, sid, anchor, _now) = engine_with_attached_sub();
-    let baseline_snap = dir_tree_snap(anchor, vec![("a", EntryKind::File, 1)]);
-    let current_snap = dir_tree_snap(anchor, vec![("b", EntryKind::File, 1)]);
+    let (mut e, pid, sid, _anchor, _now) = engine_with_attached_sub();
+    let baseline_snap = dir_tree_snap(vec![("a", EntryKind::File, 1)]);
+    let current_snap = dir_tree_snap(vec![("b", EntryKind::File, 1)]);
     assert_ne!(
         baseline_snap.dir_hash(),
         current_snap.dir_hash(),
@@ -4589,8 +4570,8 @@ fn seed_drift_observed_returns_true_on_active_mode_drift() {
 /// No conservative re-fire — `baseline` still represents reality.
 #[test]
 fn seed_drift_observed_returns_false_when_active_mode_baseline_matches_current() {
-    let (mut e, pid, sid, anchor, _now) = engine_with_attached_sub();
-    let snap = dir_tree_snap(anchor, vec![("file", EntryKind::File, 1)]);
+    let (mut e, pid, sid, _anchor, _now) = engine_with_attached_sub();
+    let snap = dir_tree_snap(vec![("file", EntryKind::File, 1)]);
 
     if let Some(p) = e.profiles.get_mut(pid) {
         p.fired_subs.insert(DedupKey::Subtree {
@@ -4686,7 +4667,7 @@ mod props {
                 combined
             }
             Action::Probe => {
-                let snap = dir_tree_snap(r, vec![]);
+                let snap = dir_tree_snap(vec![]);
                 let corr = last_correlation.unwrap_or(specter_core::ProbeCorrelation::from(0));
                 e.step(
                     Input::ProbeResponse(ProbeResponse {
@@ -4912,12 +4893,12 @@ mod props {
                 Just(2),  // Failed
             ],
         ) {
-            let (mut e, sid, r, now, last_correlation) =
+            let (mut e, sid, _r, now, last_correlation) =
                 fresh_engine_with_sub();
             let pid = e.subs.get(sid).unwrap().profile;
             let corr = last_correlation.expect("seed probe correlation");
             let outcome = match seed_outcome {
-                0 => ProbeOutcome::SubtreeOk(dir_tree_snap(r, vec![])),
+                0 => ProbeOutcome::SubtreeOk(dir_tree_snap(vec![])),
                 1 => ProbeOutcome::Vanished,
                 _ => ProbeOutcome::Failed { errno: 13 },
             };

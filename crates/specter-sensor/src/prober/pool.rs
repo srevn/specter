@@ -235,7 +235,6 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
         ProbeRequest::AnchorFile { target_path, .. } => probe_anchor_file(target_path),
         ProbeRequest::Subtree {
             target_path,
-            target_resource,
             scan_config,
             captured_with,
             baseline_subtree,
@@ -244,18 +243,13 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
             ..
         } => probe_subtree(
             target_path,
-            *target_resource,
             scan_config,
             *captured_with,
             baseline_subtree.as_ref(),
             force_walk,
             *forced,
         ),
-        ProbeRequest::Descent {
-            target_path,
-            target_resource,
-            ..
-        } => probe_descent(target_path, *target_resource),
+        ProbeRequest::Descent { target_path, .. } => probe_descent(target_path),
     }
 }
 

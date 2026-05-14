@@ -17,7 +17,7 @@
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ClassSet, DirMeta, DirSnapshot, EffectScope, FsIdentity, Input, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ResourceKind, ResourceRole, ScanConfig,
     SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
@@ -35,10 +35,9 @@ fn empty_program() -> Arc<ActionProgram> {
     ])])
 }
 
-/// Empty `TreeSnapshot::Dir` rooted at `root`.
-fn dir_snap(root: ResourceId) -> std::sync::Arc<DirSnapshot> {
+/// Empty `TreeSnapshot::Dir`.
+fn dir_snap() -> std::sync::Arc<DirSnapshot> {
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -155,7 +154,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(src)),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap()),
         }),
         now,
     );

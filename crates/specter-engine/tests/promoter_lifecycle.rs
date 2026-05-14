@@ -69,14 +69,11 @@ fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
     }
 }
 
-/// Build a `DirSnapshot` whose `root_resource` is `target` (the
-/// proxy slot or descent prefix the engine probed). The walker
-/// stamps `target_resource` from the request onto
-/// `DirSnapshot.root_resource`; descent dispatch's
-/// `debug_assert_eq!` pins `snapshot.root_resource ==
-/// descent.current_prefix()`. Pass the right `target` per phase or
-/// the assert panics.
-fn dir_snap_with(target: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
+/// Build a `DirSnapshot` with the given children — used by tests that
+/// need a synthetic enumeration response. The walker speaks paths;
+/// engine identity stays engine-side, so the snapshot carries pure
+/// content.
+fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -94,7 +91,6 @@ fn dir_snap_with(target: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> A
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        target,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -107,11 +103,12 @@ fn dir_snap_with(target: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> A
     ))
 }
 
-/// Helper: pick the most recent outstanding probe target from a
-/// step's [`ProbeOp::Probe`] emissions.
-fn last_probe_target(out: &specter_core::StepOutput) -> Option<ResourceId> {
+/// Helper: pick the most recent outstanding probe target-path from a
+/// step's [`ProbeOp::Probe`] emissions. The wire is path-only; tests
+/// compare via `e.tree().path_of(<id>)`.
+fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf> {
     out.probe_ops.iter().rev().find_map(|op| match op {
-        ProbeOp::Probe { request } => request.target_resource(),
+        ProbeOp::Probe { request } => Some(request.target_path().to_path_buf()),
         ProbeOp::Cancel { .. } => None,
     })
 }
@@ -205,8 +202,8 @@ fn full_lifecycle_attach_promote_seed_reap() {
         ),
     }
     assert_eq!(
-        last_probe_target(&attach_out),
-        Some(var_log),
+        last_probe_path(&attach_out),
+        e.tree().path_of(var_log),
         "enumeration probe targets /var/log",
     );
     let enum_corr = e
@@ -218,13 +215,10 @@ fn full_lifecycle_attach_promote_seed_reap() {
     // Inject a directory listing with one *.log match (foo.log) and
     // one non-matching entry (bar.txt). The match promotes; the
     // non-match doesn't.
-    let snap_var_log = dir_snap_with(
-        var_log,
-        vec![
-            ("foo.log", EntryKind::File, 10),
-            ("bar.txt", EntryKind::File, 11),
-        ],
-    );
+    let snap_var_log = dir_snap_with(vec![
+        ("foo.log", EntryKind::File, 10),
+        ("bar.txt", EntryKind::File, 11),
+    ]);
     let promote_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -507,7 +501,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     // calls `enter_active`, which materialises /a/b as the first proxy
     // (User-roled, +1 STRUCTURE) and queues an enumeration probe at
     // /a/b.
-    let snap_a = dir_snap_with(a, vec![("b", EntryKind::Dir, 1)]);
+    let snap_a = dir_snap_with(vec![("b", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
@@ -801,7 +795,7 @@ fn sensor_overflow_reseeds_active_promoter() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
             correlation: initial_enum_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(var_log, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
         }),
         now,
     );
@@ -851,10 +845,11 @@ fn sensor_overflow_reseeds_active_promoter() {
         e.pending_probe_for(ProbeOwner::Promoter(qid)).is_some(),
         "fresh enumeration probe in flight after overflow reseed",
     );
+    let var_log_path = e.tree().path_of(var_log).expect("var_log path resolves");
     let probe_at_var_log = overflow_out.probe_ops.iter().any(|op| {
         matches!(
             op,
-            ProbeOp::Probe { request } if request.target_resource() == Some(var_log),
+            ProbeOp::Probe { request } if request.target_path() == var_log_path,
         )
     });
     assert!(probe_at_var_log, "probe targets /var/log");
@@ -929,10 +924,11 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
         e.pending_probe_for(ProbeOwner::Promoter(qid)).is_some(),
         "fresh descent probe in flight after overflow reseed",
     );
+    let a_path = e.tree().path_of(a).expect("a path resolves");
     let probe_at_a = overflow_out.probe_ops.iter().any(|op| {
         matches!(
             op,
-            ProbeOp::Probe { request } if request.target_resource() == Some(a),
+            ProbeOp::Probe { request } if request.target_path() == a_path,
         )
     });
     assert!(probe_at_a, "descent probe targets /a");
@@ -1020,7 +1016,7 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
 fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     let mut e = Engine::new();
 
-    let var_log = pre_place_dir(&mut e, &["var", "log"]);
+    let _var_log = pre_place_dir(&mut e, &["var", "log"]);
     let _ = pre_place_file(&mut e, &["var", "log"], "foo.log");
 
     // Far enough into the future that any accidental `Instant::now()`
@@ -1045,7 +1041,7 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     // pre-placed leaf makes `attach_sub_inner` go immediate-Materialize,
     // which calls `start_seed_burst(now)` — scheduling the
     // `BurstDeadline` we assert against below.
-    let snap = dir_snap_with(var_log, vec![("foo.log", EntryKind::File, 10)]);
+    let snap = dir_snap_with(vec![("foo.log", EntryKind::File, 10)]);
     let _promote_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),

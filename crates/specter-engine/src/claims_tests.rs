@@ -36,7 +36,7 @@ fn empty_program() -> Arc<ActionProgram> {
     single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
+fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -54,7 +54,6 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirS
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -108,7 +107,7 @@ fn engine_with_materialised_profile(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(anchor, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         Instant::now(),
     );
@@ -390,7 +389,7 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
-    let snap = dir_snap(anchor, vec![("nested", EntryKind::Dir, 1)]);
+    let snap = dir_snap(vec![("nested", EntryKind::Dir, 1)]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -481,7 +480,7 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
 
     // Seed-Ok response materialises descendant /a/b as a Dir.
     let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
-    let snap = dir_snap(anchor, vec![("b", EntryKind::Dir, 7)]);
+    let snap = dir_snap(vec![("b", EntryKind::Dir, 7)]);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),

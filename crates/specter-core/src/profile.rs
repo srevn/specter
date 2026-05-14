@@ -1707,9 +1707,8 @@ mod tests {
     // rebase_baseline / capture_witness_at_loss
     // -----------------------------------------------------------------------
 
-    fn empty_dir_snapshot(resource: ResourceId) -> Arc<DirSnapshot> {
+    fn empty_dir_snapshot() -> Arc<DirSnapshot> {
         Arc::new(DirSnapshot::new(
-            resource,
             DirMeta {
                 mtime: UNIX_EPOCH,
                 fs_id: FsIdentity {
@@ -1739,7 +1738,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
-        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot(r)));
+        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
         assert!(p.baseline.is_none());
 
         p.rebase_baseline();
@@ -1757,7 +1756,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
-        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot(r)));
+        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
         p.last_settled_hash_at_loss = Some(0xdead_beef);
 
         p.rebase_baseline();
@@ -1773,7 +1772,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
-        let snap = TreeSnapshot::Dir(empty_dir_snapshot(r));
+        let snap = TreeSnapshot::Dir(empty_dir_snapshot());
         let expected = snap.hash();
         p.baseline = Some(snap);
 
@@ -1808,7 +1807,7 @@ mod tests {
         assert!(p.kind.is_none(), "fresh Profile has unprobed kind");
         assert!(p.current.is_none());
 
-        p.install_dir_current(empty_dir_snapshot(r));
+        p.install_dir_current(empty_dir_snapshot());
 
         assert_eq!(
             p.kind,
@@ -1837,10 +1836,10 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
-        p.install_dir_current(empty_dir_snapshot(r));
+        p.install_dir_current(empty_dir_snapshot());
 
         // Second install with a fresh snapshot.
-        p.install_dir_current(empty_dir_snapshot(r));
+        p.install_dir_current(empty_dir_snapshot());
 
         assert_eq!(p.kind, Some(crate::resource::ResourceKind::Dir));
     }
@@ -1862,7 +1861,7 @@ mod tests {
         p.install_file_current(empty_leaf_entry());
         // Boundary-bypass: a future caller skips
         // `kind_agrees_or_finalize`; the setter's debug_assert fires.
-        p.install_dir_current(empty_dir_snapshot(r));
+        p.install_dir_current(empty_dir_snapshot());
     }
 
     #[test]
@@ -1875,7 +1874,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure(None, "anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
-        p.install_dir_current(empty_dir_snapshot(r));
+        p.install_dir_current(empty_dir_snapshot());
         p.install_file_current(empty_leaf_entry());
     }
 

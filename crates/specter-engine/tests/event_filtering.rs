@@ -47,10 +47,7 @@ fn empty_program() -> Arc<ActionProgram> {
     single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn dir_snap(
-    root: ResourceId,
-    children: Vec<(&str, EntryKind, u64)>,
-) -> std::sync::Arc<DirSnapshot> {
+fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -68,7 +65,6 @@ fn dir_snap(
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -179,7 +175,7 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
     // prior=None ⇒ pure-create path. With has_per_file_fds=true the File
     // child gets a Watch op.
     let corr = first_probe_corr(&attach_out).expect("Seed probe");
-    let snap = dir_snap(root, vec![("file.txt", EntryKind::File, 1)]);
+    let snap = dir_snap(vec![("file.txt", EntryKind::File, 1)]);
     let seed_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -230,7 +226,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
     );
 
     let corr = first_probe_corr(&attach_out).expect("Seed probe");
-    let snap = dir_snap(root, vec![("file.txt", EntryKind::File, 1)]);
+    let snap = dir_snap(vec![("file.txt", EntryKind::File, 1)]);
     let seed_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -344,7 +340,7 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
         cfg,
     );
     // Drive both Seeds → Idle.
-    let snap = dir_snap(root, vec![]);
+    let snap = dir_snap(vec![]);
     complete_seed_burst(&mut e, pid_a, &attach_a, snap.clone());
     complete_seed_burst(&mut e, pid_b, &attach_b, snap);
 
@@ -469,7 +465,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
         ClassSet::CONTENT,
         ScanConfig::builder().recursive(true).build(),
     );
-    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(anchor, vec![]));
+    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
 
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim,
@@ -541,7 +537,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
         ClassSet::CONTENT,
         ScanConfig::builder().recursive(true).build(),
     );
-    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(root, vec![]));
+    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
 
     // Materialize a covered descendant File. Bump watch_demand so the
     // event passes the EventOnUnwatchedResource head guard.
@@ -602,7 +598,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
         ClassSet::CONTENT,
         ScanConfig::builder().recursive(true).build(),
     );
-    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(root, vec![]));
+    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
 
     let child = e
         .tree_mut()
@@ -975,7 +971,7 @@ fn setup_with_surviving_child(
     // Seed with a Dir child — its slot will outlive the Profile reap
     // (the dir's `watch_demand` survives until the Profile's release
     // walks `walk_pair`'s delete path, which doesn't run on Vanished).
-    let snap = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
+    let snap = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
     complete_seed_burst(e, pid, &attach_out, snap);
 
     let child = e
@@ -1242,9 +1238,9 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
 
     // Drive both to Idle via a Seed burst so the surviving-child
     // invariant holds.
-    let snap_p = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
+    let snap_p = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
     complete_seed_burst(&mut e, pid_p, &attach_out_p, snap_p);
-    let snap_q = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
+    let snap_q = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
     complete_seed_burst(&mut e, pid_q, &attach_out_q, snap_q);
 
     // Kick off a Standard burst on P.
@@ -1407,7 +1403,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
     assert!(e.profiles().get(pid).unwrap().has_per_file_fds);
 
     // Seed with one File leaf — has_per_file_fds=true ⇒ leaf gets FD.
-    let snap = dir_snap(root, vec![("a.rs", EntryKind::File, 1)]);
+    let snap = dir_snap(vec![("a.rs", EntryKind::File, 1)]);
     complete_seed_burst(&mut e, pid, &attach_out, snap);
     let leaf = e.tree().lookup(Some(root), "a.rs").expect("leaf seeded");
     assert!(e.tree().get(leaf).unwrap().watch_demand() >= 1);
@@ -1579,7 +1575,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: verify_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(root, vec![("subdir", EntryKind::Dir, 99)])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![("subdir", EntryKind::Dir, 99)])),
         }),
         t2,
     );
@@ -1698,9 +1694,9 @@ fn release_descendant_claim_multi_profile_preserves_others() {
 
     // Drive both to Idle with a shared seeded Dir descendant. Each
     // Profile's create_child contributed +1 to subdir.watch_demand().
-    let snap_p = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
+    let snap_p = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
     complete_seed_burst(&mut e, pid_p, &attach_out_p, snap_p);
-    let snap_q = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
+    let snap_q = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
     complete_seed_burst(&mut e, pid_q, &attach_out_q, snap_q);
 
     let subdir = e
@@ -1827,9 +1823,9 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         .map(|(pid, _)| pid)
         .expect("Q profile minted");
 
-    let snap_p = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
+    let snap_p = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
     complete_seed_burst(&mut e, pid_p, &attach_out_p, snap_p);
-    let snap_q = dir_snap(root, vec![("subdir", EntryKind::Dir, 99)]);
+    let snap_q = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
     complete_seed_burst(&mut e, pid_q, &attach_out_q, snap_q);
 
     let subdir = e
@@ -1872,7 +1868,6 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     // delete_child fires `sub_watch` for subdir keyed by
     // `ContribKey::ProfileDescendant(pid_p)`.
     let response = Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {

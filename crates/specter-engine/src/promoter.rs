@@ -35,8 +35,10 @@
 //!   (`dispatch_promoter_enumeration_*`); each response either
 //!   registers sub-proxies (intermediate components), mints dynamic
 //!   Subs (final component), or unregisters proxies that no longer
-//!   correspond to a directory entry. The `Vanished` / `Failed` arms
-//!   read `target` directly off the channel's variant payload.
+//!   correspond to a directory entry. All three response arms read
+//!   `target` directly off the channel's variant payload — the wire
+//!   carries paths only, so the channel state is the single
+//!   authoritative source for the proxy `ResourceId`.
 
 use crate::Engine;
 use crate::descent::{MaterializeResult, kind_from_entry};
@@ -205,7 +207,7 @@ impl Engine {
                 let owner = ProbeOwner::Promoter(promoter_id);
                 let correlation = self.probe_channel.open(owner, OpenKind::PromoterDescent);
                 let target_path = self.tree.path_of(prefix).unwrap_or_default();
-                Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
+                Self::emit_descent_probe(owner, correlation, target_path, out);
             }
         }
 
@@ -563,12 +565,12 @@ impl Engine {
             }
 
             // ----- PromoterEnumerating -----
-            (OpenKind::PromoterEnumerating { .. }, ProbeOutcome::SubtreeOk(arc)) => {
-                // The `Ok` arm reads `arc.root_resource` (walker's
-                // stamp) as the proxy id; the channel's `target` is
-                // redundant here but kept on the variant so the
-                // `Vanished` / `Failed` arms can read it.
-                self.dispatch_promoter_enumeration_ok(promoter_id, &arc, now, out);
+            (OpenKind::PromoterEnumerating { target }, ProbeOutcome::SubtreeOk(arc)) => {
+                // The channel's `target` is the canonical dispatch key
+                // across all three response outcomes — the wire is
+                // path-only, so the snapshot itself carries no engine
+                // identity to read.
+                self.dispatch_promoter_enumeration_ok(promoter_id, *target, &arc, now, out);
             }
             (OpenKind::PromoterEnumerating { target }, ProbeOutcome::Vanished) => {
                 self.dispatch_promoter_enumeration_vanished(promoter_id, *target, out);
@@ -608,12 +610,12 @@ impl Engine {
     /// queue is empty.
     ///
     /// Opens the channel with
-    /// [`OpenKind::PromoterEnumerating { target }`] — the proxy
-    /// `target` lives on the variant payload so `Vanished` / `Failed`
-    /// responses (which carry no wire payload) can identify the proxy
-    /// at dispatch time. The `Ok` arm reads `snapshot.root_resource`
-    /// per [C-1] and the variant's value is redundant there; closure
-    /// happens uniformly via `close_if` in `on_promoter_probe_response`.
+    /// [`OpenKind::PromoterEnumerating { target }`]. The variant
+    /// payload is the canonical dispatch key for every response
+    /// outcome (`SubtreeOk` / `Vanished` / `Failed`) — the wire
+    /// carries only `target_path`, so the channel state is the single
+    /// authority for the proxy [`ResourceId`]. Closure happens
+    /// uniformly via `close_if` in `on_promoter_probe_response`.
     pub(crate) fn dispatch_next_enumeration(
         &mut self,
         promoter_id: PromoterId,
@@ -637,23 +639,19 @@ impl Engine {
         };
 
         // Open the channel with the typed `PromoterEnumerating` kind:
-        // the proxy `target` lives on the variant so `Vanished` /
-        // `Failed` responses (which carry no wire payload) can
-        // identify the proxy without a separate per-Promoter slot.
+        // the proxy `target` lives on the variant — single source of
+        // truth across all three response outcomes.
         let correlation = self
             .probe_channel
             .open(owner, OpenKind::PromoterEnumerating { target });
 
         let target_path = self.tree.path_of(target).unwrap_or_default();
-        // [C-1] target_resource carried on the wire so the `Ok` arm
-        // reads `snapshot.root_resource` to identify which proxy this
-        // response corresponds to.
-        Self::emit_descent_probe(owner, correlation, target, target_path, out);
+        Self::emit_descent_probe(owner, correlation, target_path, out);
     }
 
     /// Successful enumeration response — the walker enumerated one
-    /// level of the proxy at `snapshot.root_resource` and returned its
-    /// children. Two passes:
+    /// level of the proxy at `target` and returned its children. Two
+    /// passes:
     ///
     /// - **Forward pass** (additions): walk `snapshot.entries`; for
     ///   each entry matching the proxy's pattern component, either
@@ -665,18 +663,19 @@ impl Engine {
     ///   cascade-clean stale state. Dynamic Subs whose anchor is
     ///   under the unregistered subtree reap via their own
     ///   anchor-terminal events.
+    ///
+    /// `target` is the proxy [`ResourceId`] read from
+    /// [`OpenKind::PromoterEnumerating { target }`] at the dispatcher
+    /// — the wire is path-only, so the channel state is the single
+    /// authoritative source for the dispatch key.
     pub(crate) fn dispatch_promoter_enumeration_ok(
         &mut self,
         promoter_id: PromoterId,
+        target: ResourceId,
         snapshot: &DirSnapshot,
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // [C-1] target is the walker's stamp — the proxy id we
-        // probed. Reading from the snapshot lets the dispatcher work
-        // without a per-Promoter "current enumeration target" slot.
-        let target = snapshot.root_resource;
-
         // Look up this proxy's pattern_component_index.
         let proxy_state = self.promoters.get(promoter_id).and_then(|q| {
             if let PromoterState::Active { proxies } = &q.state {

@@ -21,7 +21,7 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope,
     FsEvent, FsIdentity, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -35,9 +35,8 @@ fn empty_program() -> Arc<ActionProgram> {
     single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn empty_dir_snap(root: ResourceId) -> Arc<DirSnapshot> {
+fn empty_dir_snap() -> Arc<DirSnapshot> {
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -101,7 +100,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     let pid = e.subs().get(sid).expect("sub").profile;
     let seed_correlation =
         first_probe_correlation(&attach_out).expect("Seed probe fires immediately");
-    let snap = empty_dir_snap(r);
+    let snap = empty_dir_snap();
     complete_seed(&mut e, pid, seed_correlation, snap.clone(), now);
 
     // Storm: 8 modify events at 100 ms intervals, t0..=t0+700 ms.
@@ -209,7 +208,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
     let pid = e.subs().get(sid).expect("sub").profile;
     let seed_correlation =
         first_probe_correlation(&attach_out).expect("Seed probe fires immediately");
-    complete_seed(&mut e, pid, seed_correlation, empty_dir_snap(r), now);
+    complete_seed(&mut e, pid, seed_correlation, empty_dir_snap(), now);
 
     // Kick off a Standard burst with one event.
     let t_event = now + Duration::from_millis(10);
@@ -257,7 +256,6 @@ fn sustained_unstable_response_storm_paces_at_settle() {
             )),
         );
         let unstable_snap = Arc::new(DirSnapshot::new(
-            r,
             DirMeta {
                 mtime: UNIX_EPOCH,
                 fs_id: FsIdentity {

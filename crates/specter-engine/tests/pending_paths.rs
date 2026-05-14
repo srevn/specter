@@ -18,8 +18,8 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry, ProbeCorrelation, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, StepOutput, SubAttachRequest,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachRequest,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -37,16 +37,11 @@ fn empty_program() -> Arc<ActionProgram> {
     ])])
 }
 
-/// V5-native helper: build a `DirSnapshot` rooted at `target` (the
-/// descent prefix or burst probe target the snapshot is responding to)
-/// with single-component children. The walker stamps `target` onto
-/// `DirSnapshot.root_resource`; descent's `dispatch_descent_ok`
-/// debug_assert pins it equal to `descent.current_prefix()`. Tests in
-/// this file use leaf-name segments only.
-fn dir_snap_with(
-    target: ResourceId,
-    children: Vec<(&str, EntryKind, u64)>,
-) -> std::sync::Arc<DirSnapshot> {
+/// V5-native helper: build a `DirSnapshot` with single-component
+/// children. The walker speaks paths; engine identity stays engine-side,
+/// so the snapshot carries pure content. Tests in this file use
+/// leaf-name segments only.
+fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -64,7 +59,6 @@ fn dir_snap_with(
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        target,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -133,7 +127,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: var_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(var, vec![("log", EntryKind::Dir, 1)])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![("log", EntryKind::Dir, 1)])),
         }),
         now,
     );
@@ -144,10 +138,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: log_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(
-                log,
-                vec![("myapp", EntryKind::Dir, 2)],
-            )),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![("myapp", EntryKind::Dir, 2)])),
         }),
         now,
     );
@@ -174,7 +165,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(myapp, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
         }),
         now,
     );
@@ -259,10 +250,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(
-                var,
-                vec![("other", EntryKind::File, 99)],
-            )),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![("other", EntryKind::File, 99)])),
         }),
         Instant::now(),
     );
@@ -319,7 +307,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(src, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
         }),
         now,
     );
@@ -561,10 +549,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_a),
             correlation: a_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(
-                root_dir,
-                vec![("bar", EntryKind::Dir, 1)],
-            )),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![("bar", EntryKind::Dir, 1)])),
         }),
         now,
     );
@@ -598,7 +583,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_b),
             correlation: b_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(bar, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
         }),
         now,
     );
@@ -640,7 +625,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_c),
             correlation: c_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(elsewhere, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
         }),
         now,
     );

@@ -177,10 +177,7 @@ fn diff_aware_command() -> Arc<ActionProgram> {
 /// V5-native helper: build a `TreeSnapshot::Dir` from a list of
 /// `(name, kind, inode)` triples. Multi-segment names (e.g. "sub/foo.rs")
 /// are *not* supported — tests in this file use leaf-name segments only.
-fn dir_snap(
-    root: ResourceId,
-    children: Vec<(&str, EntryKind, u64)>,
-) -> std::sync::Arc<DirSnapshot> {
+fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         debug_assert!(
@@ -202,7 +199,6 @@ fn dir_snap(
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -310,7 +306,7 @@ fn golden_path_full_lifecycle() {
     assert!(attach_out.effects.is_empty());
 
     // Seed Ok → baseline = current = empty snapshot; → Idle; Unsuppress.
-    let snap_seed = dir_snap(r, vec![]);
+    let snap_seed = dir_snap(vec![]);
     let seed_resp = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_of(&e, sid)),
@@ -456,7 +452,7 @@ fn pending_event_race_late_probe_response_discarded() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: stale_correlation,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now + Duration::from_millis(1),
     );
@@ -491,10 +487,10 @@ fn seed_burst_descendants_watched_via_first_probe() {
     let pid = pid_of(&e, sid);
     let correlation = first_probe_correlation(&attach_out).unwrap();
 
-    let snap = dir_snap(
-        r,
-        vec![("foo.rs", EntryKind::File, 1), ("bar", EntryKind::Dir, 2)],
-    );
+    let snap = dir_snap(vec![
+        ("foo.rs", EntryKind::File, 1),
+        ("bar", EntryKind::Dir, 2),
+    ]);
     let resp_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -542,7 +538,7 @@ fn force_fire_emits_effect_with_forced_true() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now + Duration::from_millis(1),
     );
@@ -563,7 +559,7 @@ fn force_fire_emits_effect_with_forced_true() {
 
     if let Some(corr) = probe_corr {
         // Inject a not-stable response — different snapshot.
-        let snap = dir_snap(r, vec![("x", EntryKind::File, 99)]);
+        let snap = dir_snap(vec![("x", EntryKind::File, 99)]);
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(pid),
@@ -609,7 +605,6 @@ fn step_output_is_sorted() {
         .map(|i| (format!("file-{i}"), EntryKind::File, 100 + i))
         .collect();
     let snap = dir_snap(
-        r,
         leaves
             .iter()
             .map(|(s, k, i)| (s.as_str(), *k, *i))

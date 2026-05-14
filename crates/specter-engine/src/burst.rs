@@ -1056,12 +1056,11 @@ impl Engine {
                 let baseline_subtree = p
                     .current
                     .as_ref()
-                    .and_then(|s| s.subtree_at(target, &self.tree));
+                    .and_then(|s| s.subtree_at(p.resource, target, &self.tree));
                 let force_walk_paths = build_force_walk(force_walk_resources, target, &self.tree);
                 Self::emit_subtree_probe(
                     owner,
                     correlation,
-                    target,
                     target_path,
                     p.config.clone(),
                     p.config_hash,
@@ -2353,15 +2352,19 @@ mod tests {
             })
             .expect("Standard probe emitted");
         // a + b's LCA is root (the anchor) because they're siblings under root.
-        // Subtree variant carries `target_resource` and `force_walk` directly;
+        // Subtree variant carries `target_path` and `force_walk` directly;
         // a Standard burst on a Dir-anchored Profile must produce this variant.
+        let anchor_path = e
+            .tree
+            .path_of(e.profiles.get(pid).unwrap().resource)
+            .expect("anchor path resolves");
         match req {
             ProbeRequest::Subtree {
-                target_resource,
+                target_path,
                 force_walk,
                 ..
             } => {
-                assert_eq!(*target_resource, e.profiles.get(pid).unwrap().resource);
+                assert_eq!(*target_path, anchor_path);
                 assert_eq!(force_walk.len(), 2);
             }
             other => panic!(

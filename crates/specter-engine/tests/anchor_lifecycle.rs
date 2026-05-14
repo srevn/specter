@@ -41,7 +41,7 @@ fn empty_program() -> Arc<ActionProgram> {
     single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
+fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -59,7 +59,6 @@ fn dir_snap(root: ResourceId, children: Vec<(&str, EntryKind, u64)>) -> Arc<DirS
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -257,7 +256,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_q),
             correlation: q_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(anchor, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         Instant::now(),
     );

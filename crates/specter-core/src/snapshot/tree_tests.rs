@@ -43,17 +43,11 @@ fn dir(inode: u64, device: u64, subtree: Option<Arc<DirSnapshot>>) -> ChildEntry
 }
 
 fn make_dir(
-    resource: ResourceId,
     root_meta: DirMeta,
     captured_with: u64,
     entries: BTreeMap<CompactString, ChildEntry>,
 ) -> Arc<DirSnapshot> {
-    Arc::new(DirSnapshot::new(
-        resource,
-        root_meta,
-        captured_with,
-        entries,
-    ))
+    Arc::new(DirSnapshot::new(root_meta, captured_with, entries))
 }
 
 fn name(s: &str) -> CompactString {
@@ -91,10 +85,8 @@ fn ensure_chain(tree: &mut Tree, segments: &[&str]) -> Vec<ResourceId> {
 
 #[test]
 fn dir_snapshot_new_empty_well_formed() {
-    let r = ResourceId::default();
     let m = meta(1, 100, 1);
-    let d = make_dir(r, m, 7, BTreeMap::new());
-    assert_eq!(d.root_resource, r);
+    let d = make_dir(m, 7, BTreeMap::new());
     assert_eq!(d.root_meta, m);
     assert_eq!(d.captured_with, 7);
     assert!(d.entries.is_empty());
@@ -102,7 +94,7 @@ fn dir_snapshot_new_empty_well_formed() {
 
 #[test]
 fn dir_snapshot_clone_preserves_cached_hash() {
-    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
+    let d = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
     let h = d.dir_hash();
     let cloned = (*d).clone();
     // Inspect the cache without forcing a recomputation by calling `dir_hash`:
@@ -164,14 +156,14 @@ fn dir_hash_deterministic_same_input() {
         name("foo"),
         ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 1, 0)),
     );
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, e.clone());
-    let b = make_dir(ResourceId::default(), meta(1, 100, 1), 0, e);
+    let a = make_dir(meta(1, 100, 1), 0, e.clone());
+    let b = make_dir(meta(1, 100, 1), 0, e);
     assert_eq!(a.dir_hash(), b.dir_hash());
 }
 
 #[test]
 fn dir_hash_idempotent_via_oncelock() {
-    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
+    let d = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
     let h1 = d.dir_hash();
     let h2 = d.dir_hash();
     let h3 = d.dir_hash();
@@ -187,29 +179,29 @@ fn dir_hash_invariant_under_root_meta_mtime() {
     // (including filtered-out entries the user-configured filter removes
     // from `entries`). Two snapshots whose `(captured_with, inode,
     // device, entries)` agree must hash equal regardless of mtime.
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
-    let b = make_dir(ResourceId::default(), meta(2, 100, 1), 0, BTreeMap::new());
+    let a = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
+    let b = make_dir(meta(2, 100, 1), 0, BTreeMap::new());
     assert_eq!(a.dir_hash(), b.dir_hash());
 }
 
 #[test]
 fn dir_hash_distinguishes_root_meta_inode() {
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
-    let b = make_dir(ResourceId::default(), meta(1, 101, 1), 0, BTreeMap::new());
+    let a = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
+    let b = make_dir(meta(1, 101, 1), 0, BTreeMap::new());
     assert_ne!(a.dir_hash(), b.dir_hash());
 }
 
 #[test]
 fn dir_hash_distinguishes_root_meta_device() {
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
-    let b = make_dir(ResourceId::default(), meta(1, 100, 2), 0, BTreeMap::new());
+    let a = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
+    let b = make_dir(meta(1, 100, 2), 0, BTreeMap::new());
     assert_ne!(a.dir_hash(), b.dir_hash());
 }
 
 #[test]
 fn dir_hash_distinguishes_captured_with() {
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
-    let b = make_dir(ResourceId::default(), meta(1, 100, 1), 1, BTreeMap::new());
+    let a = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
+    let b = make_dir(meta(1, 100, 1), 1, BTreeMap::new());
     assert_ne!(a.dir_hash(), b.dir_hash());
 }
 
@@ -225,8 +217,8 @@ fn dir_hash_distinguishes_entry_name() {
         name("bar"),
         ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 1, 0)),
     );
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, ea);
-    let b = make_dir(ResourceId::default(), meta(1, 100, 1), 0, eb);
+    let a = make_dir(meta(1, 100, 1), 0, ea);
+    let b = make_dir(meta(1, 100, 1), 0, eb);
     assert_ne!(a.dir_hash(), b.dir_hash());
 }
 
@@ -242,8 +234,8 @@ fn dir_hash_distinguishes_entry_count() {
         name("bar"),
         ChildEntry::Leaf(leaf(EntryKind::File, 20, 2, 2, 0)),
     );
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, ea);
-    let b = make_dir(ResourceId::default(), meta(1, 100, 1), 0, eb);
+    let a = make_dir(meta(1, 100, 1), 0, ea);
+    let b = make_dir(meta(1, 100, 1), 0, eb);
     assert_ne!(a.dir_hash(), b.dir_hash());
 }
 
@@ -256,20 +248,20 @@ fn dir_hash_distinguishes_leaf_vs_dir_at_same_name() {
     );
     let mut eb = BTreeMap::new();
     eb.insert(name("x"), dir(5, 0, None));
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, ea);
-    let b = make_dir(ResourceId::default(), meta(1, 100, 1), 0, eb);
+    let a = make_dir(meta(1, 100, 1), 0, ea);
+    let b = make_dir(meta(1, 100, 1), 0, eb);
     assert_ne!(a.dir_hash(), b.dir_hash());
 }
 
 #[test]
 fn dir_hash_distinguishes_subtree_present_vs_none() {
-    let inner = make_dir(ResourceId::default(), meta(2, 200, 1), 0, BTreeMap::new());
+    let inner = make_dir(meta(2, 200, 1), 0, BTreeMap::new());
     let mut ea = BTreeMap::new();
     ea.insert(name("d"), dir(200, 1, Some(inner)));
     let mut eb = BTreeMap::new();
     eb.insert(name("d"), dir(200, 1, None));
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, ea);
-    let b = make_dir(ResourceId::default(), meta(1, 100, 1), 0, eb);
+    let a = make_dir(meta(1, 100, 1), 0, ea);
+    let b = make_dir(meta(1, 100, 1), 0, eb);
     assert_ne!(a.dir_hash(), b.dir_hash());
 }
 
@@ -280,29 +272,19 @@ fn dir_hash_distinguishes_subtree_content() {
         name("file"),
         ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 7, 0)),
     );
-    let left_inner = make_dir(
-        ResourceId::default(),
-        meta(2, 200, 1),
-        0,
-        left_inner_entries,
-    );
+    let left_inner = make_dir(meta(2, 200, 1), 0, left_inner_entries);
     let mut right_inner_entries = BTreeMap::new();
     right_inner_entries.insert(
         name("file"),
         ChildEntry::Leaf(leaf(EntryKind::File, 99, 1, 7, 0)), // different size
     );
-    let right_inner = make_dir(
-        ResourceId::default(),
-        meta(2, 200, 1),
-        0,
-        right_inner_entries,
-    );
+    let right_inner = make_dir(meta(2, 200, 1), 0, right_inner_entries);
     let mut ea = BTreeMap::new();
     ea.insert(name("d"), dir(200, 1, Some(left_inner)));
     let mut eb = BTreeMap::new();
     eb.insert(name("d"), dir(200, 1, Some(right_inner)));
-    let a = make_dir(ResourceId::default(), meta(1, 100, 1), 0, ea);
-    let b = make_dir(ResourceId::default(), meta(1, 100, 1), 0, eb);
+    let a = make_dir(meta(1, 100, 1), 0, ea);
+    let b = make_dir(meta(1, 100, 1), 0, eb);
     assert_ne!(a.dir_hash(), b.dir_hash());
 }
 
@@ -326,7 +308,6 @@ fn dir_hash_known_good_golden() {
         )),
     );
     let d = make_dir(
-        ResourceId::default(),
         DirMeta {
             mtime: UNIX_EPOCH + Duration::from_secs(7),
             fs_id: FsIdentity {
@@ -454,7 +435,7 @@ fn leaf_hash_if_unchanged_returns_cached_on_match() {
     let prior = leaf(EntryKind::File, 10, 1, 7, 0);
     let cached = prior.leaf_hash();
     entries.insert(name("a.c"), ChildEntry::Leaf(prior));
-    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, entries);
+    let d = make_dir(meta(1, 100, 1), 0, entries);
 
     let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
     assert_eq!(d.leaf_hash_if_unchanged("a.c", &fresh), Some(cached));
@@ -462,7 +443,7 @@ fn leaf_hash_if_unchanged_returns_cached_on_match() {
 
 #[test]
 fn leaf_hash_if_unchanged_returns_none_when_missing() {
-    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
+    let d = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
     let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
     assert!(d.leaf_hash_if_unchanged("missing", &fresh).is_none());
 }
@@ -471,7 +452,7 @@ fn leaf_hash_if_unchanged_returns_none_when_missing() {
 fn leaf_hash_if_unchanged_returns_none_when_entry_is_dir() {
     let mut entries = BTreeMap::new();
     entries.insert(name("a"), dir(7, 0, None));
-    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, entries);
+    let d = make_dir(meta(1, 100, 1), 0, entries);
     let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
     assert!(d.leaf_hash_if_unchanged("a", &fresh).is_none());
 }
@@ -483,7 +464,7 @@ fn leaf_hash_if_unchanged_returns_none_on_any_field_mismatch() {
         // unambiguously means identity-mismatch, not uncached prior.
         let mut entries = BTreeMap::new();
         entries.insert(name("a.c"), ChildEntry::Leaf(prior));
-        let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, entries);
+        let d = make_dir(meta(1, 100, 1), 0, entries);
         d.leaf_hash_if_unchanged("a.c", fresh)
     }
 
@@ -519,7 +500,7 @@ fn leaf_hash_if_unchanged_returns_none_when_prior_uncached() {
     let prior = leaf(EntryKind::File, 10, 1, 7, 0);
     // Deliberately do NOT call `prior.leaf_hash()`; cache stays empty.
     entries.insert(name("a.c"), ChildEntry::Leaf(prior));
-    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, entries);
+    let d = make_dir(meta(1, 100, 1), 0, entries);
     let fresh = leaf(EntryKind::File, 10, 1, 7, 0);
     assert!(d.leaf_hash_if_unchanged("a.c", &fresh).is_none());
 }
@@ -530,7 +511,7 @@ fn leaf_hash_if_unchanged_returns_none_when_prior_uncached() {
 
 #[test]
 fn stable_against_self_dir() {
-    let d = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
+    let d = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
     let s = TreeSnapshot::Dir(d);
     assert!(s.stable_against(&s));
 }
@@ -550,18 +531,8 @@ fn stable_against_distinct_dir_hashes_false() {
         name("foo"),
         ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 7, 0)),
     );
-    let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
-        meta(1, 100, 1),
-        0,
-        entries_a,
-    ));
-    let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
-        meta(1, 100, 1),
-        0,
-        BTreeMap::new(),
-    ));
+    let a = TreeSnapshot::Dir(make_dir(meta(1, 100, 1), 0, entries_a));
+    let b = TreeSnapshot::Dir(make_dir(meta(1, 100, 1), 0, BTreeMap::new()));
     assert!(!a.stable_against(&b));
 }
 
@@ -574,12 +545,7 @@ fn stable_against_distinct_leaf_hashes_false() {
 
 #[test]
 fn stable_against_kind_mismatch_false() {
-    let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
-        meta(1, 100, 1),
-        0,
-        BTreeMap::new(),
-    ));
+    let a = TreeSnapshot::Dir(make_dir(meta(1, 100, 1), 0, BTreeMap::new()));
     let b = TreeSnapshot::File(leaf(EntryKind::File, 0, 0, 0, 0));
     assert!(!a.stable_against(&b));
     assert!(!b.stable_against(&a));
@@ -594,21 +560,17 @@ fn stable_against_kind_mismatch_false() {
 fn build_4_level_tree() -> (TreeSnapshot, Tree, Vec<ResourceId>) {
     let mut tree = Tree::new();
     let ids = ensure_chain(&mut tree, &["anchor", "a", "b", "c"]);
-    let anchor = ids[0];
-    let a = ids[1];
-    let b = ids[2];
-    let c = ids[3];
 
     // c (leaf dir, no children)
-    let c_snap = make_dir(c, meta(4, 4, 0), 7, BTreeMap::new());
+    let c_snap = make_dir(meta(4, 4, 0), 7, BTreeMap::new());
     // b contains c
     let mut b_entries = BTreeMap::new();
     b_entries.insert(name("c"), dir(4, 0, Some(Arc::clone(&c_snap))));
-    let b_snap = make_dir(b, meta(3, 3, 0), 7, b_entries);
+    let b_snap = make_dir(meta(3, 3, 0), 7, b_entries);
     // a contains b
     let mut a_entries = BTreeMap::new();
     a_entries.insert(name("b"), dir(3, 0, Some(Arc::clone(&b_snap))));
-    let a_snap = make_dir(a, meta(2, 2, 0), 7, a_entries);
+    let a_snap = make_dir(meta(2, 2, 0), 7, a_entries);
     // anchor contains a + a sibling leaf for off-path testing
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, Some(Arc::clone(&a_snap))));
@@ -616,7 +578,7 @@ fn build_4_level_tree() -> (TreeSnapshot, Tree, Vec<ResourceId>) {
         name("z_leaf"),
         ChildEntry::Leaf(leaf(EntryKind::File, 99, 1, 99, 0)),
     );
-    let root = make_dir(anchor, meta(1, 1, 0), 7, root_entries);
+    let root = make_dir(meta(1, 1, 0), 7, root_entries);
 
     (TreeSnapshot::Dir(root), tree, ids)
 }
@@ -625,7 +587,9 @@ fn build_4_level_tree() -> (TreeSnapshot, Tree, Vec<ResourceId>) {
 fn subtree_at_anchor_returns_root() {
     let (snap, tree, ids) = build_4_level_tree();
     let anchor = ids[0];
-    let got = snap.subtree_at(anchor, &tree).expect("anchor resolves");
+    let got = snap
+        .subtree_at(anchor, anchor, &tree)
+        .expect("anchor resolves");
     if let TreeSnapshot::Dir(root) = &snap {
         assert!(Arc::ptr_eq(&got, root));
     } else {
@@ -636,26 +600,27 @@ fn subtree_at_anchor_returns_root() {
 #[test]
 fn subtree_at_one_level_deep() {
     let (snap, tree, ids) = build_4_level_tree();
+    let anchor = ids[0];
     let a = ids[1];
-    let got = snap.subtree_at(a, &tree).expect("a resolves");
-    assert_eq!(got.root_resource, a);
+    let got = snap.subtree_at(anchor, a, &tree).expect("a resolves");
     assert!(got.entries.contains_key("b"));
 }
 
 #[test]
 fn subtree_at_three_levels_deep() {
     let (snap, tree, ids) = build_4_level_tree();
+    let anchor = ids[0];
     let c = ids[3];
-    let got = snap.subtree_at(c, &tree).expect("c resolves");
-    assert_eq!(got.root_resource, c);
+    let got = snap.subtree_at(anchor, c, &tree).expect("c resolves");
     assert!(got.entries.is_empty());
 }
 
 #[test]
 fn subtree_at_returns_arc_ptr_eq_with_internal_subtree() {
     let (snap, tree, ids) = build_4_level_tree();
+    let anchor = ids[0];
     let b = ids[2];
-    let got = snap.subtree_at(b, &tree).expect("b resolves");
+    let got = snap.subtree_at(anchor, b, &tree).expect("b resolves");
     if let TreeSnapshot::Dir(root) = &snap {
         let internal_a = dir_subtree(root.entries.get("a").unwrap());
         let internal_b = dir_subtree(internal_a.entries.get("b").unwrap());
@@ -667,10 +632,11 @@ fn subtree_at_returns_arc_ptr_eq_with_internal_subtree() {
 
 #[test]
 fn subtree_at_target_outside_anchor_returns_none() {
-    let (snap, mut tree, _ids) = build_4_level_tree();
+    let (snap, mut tree, ids) = build_4_level_tree();
+    let anchor = ids[0];
     // Add a sibling root with no relation to the anchor's chain.
     let stranger = tree.ensure(None, "stranger", ResourceRole::User);
-    assert!(snap.subtree_at(stranger, &tree).is_none());
+    assert!(snap.subtree_at(anchor, stranger, &tree).is_none());
 }
 
 #[test]
@@ -683,7 +649,7 @@ fn subtree_at_target_path_through_leaf_returns_none() {
     let z_leaf_id = tree.ensure(Some(anchor), "z_leaf", ResourceRole::User);
     let inside_leaf = tree.ensure(Some(z_leaf_id), "inside", ResourceRole::User);
     assert!(
-        snap.subtree_at(inside_leaf, &tree).is_none(),
+        snap.subtree_at(anchor, inside_leaf, &tree).is_none(),
         "chain through Leaf must yield None",
     );
 }
@@ -700,10 +666,10 @@ fn subtree_at_target_path_through_uncovered_returns_none() {
     // (uncovered). Asking for `b` (under uncovered `a`) must return None.
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, None));
-    let root = make_dir(anchor, meta(1, 1, 0), 7, root_entries);
+    let root = make_dir(meta(1, 1, 0), 7, root_entries);
     let snap = TreeSnapshot::Dir(root);
-    assert!(snap.subtree_at(a, &tree).is_none());
-    assert!(snap.subtree_at(b, &tree).is_none());
+    assert!(snap.subtree_at(anchor, a, &tree).is_none());
+    assert!(snap.subtree_at(anchor, b, &tree).is_none());
 }
 
 #[test]
@@ -717,14 +683,14 @@ fn subtree_at_stale_target_returns_none() {
     // Build snapshot with anchor → a (no subtree).
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, None));
-    let root = make_dir(anchor, meta(1, 1, 0), 7, root_entries);
+    let root = make_dir(meta(1, 1, 0), 7, root_entries);
     let snap = TreeSnapshot::Dir(root);
 
     // Vacate a and try to reap (children=0, profiles=0 ⇒ reaps clean).
     let reaped = tree.try_reap(a, &mut StepOutput::default());
     assert!(reaped, "a is reapable in this fixture");
     // Now stale is a fresh-looking id with no live slot.
-    assert!(snap.subtree_at(stale, &tree).is_none());
+    assert!(snap.subtree_at(anchor, stale, &tree).is_none());
 }
 
 #[test]
@@ -732,7 +698,7 @@ fn subtree_at_file_snapshot_returns_none() {
     let snap = TreeSnapshot::File(leaf(EntryKind::File, 0, 0, 0, 0));
     let mut tree = Tree::new();
     let id = tree.ensure(None, "anything", ResourceRole::User);
-    assert!(snap.subtree_at(id, &tree).is_none());
+    assert!(snap.subtree_at(id, id, &tree).is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -754,7 +720,7 @@ fn unwrap_spliced(r: SpliceResult) -> TreeSnapshot {
 fn splice_no_prior_returns_replacement() {
     let mut tree = Tree::new();
     let id = tree.ensure(None, "anchor", ResourceRole::User);
-    let r = make_dir(id, meta(1, 1, 0), 0, BTreeMap::new());
+    let r = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
     let s = unwrap_spliced(splice(None, id, id, Arc::clone(&r), &tree));
     if let TreeSnapshot::Dir(d) = s {
         assert!(Arc::ptr_eq(&d, &r));
@@ -767,13 +733,13 @@ fn splice_no_prior_returns_replacement() {
 fn splice_at_anchor_replaces_root() {
     let mut tree = Tree::new();
     let id = tree.ensure(None, "anchor", ResourceRole::User);
-    let prior = make_dir(id, meta(1, 1, 0), 0, BTreeMap::new());
+    let prior = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
     let mut new_entries = BTreeMap::new();
     new_entries.insert(
         name("x"),
         ChildEntry::Leaf(leaf(EntryKind::File, 0, 0, 7, 0)),
     );
-    let replacement = make_dir(id, meta(2, 1, 0), 0, new_entries);
+    let replacement = make_dir(meta(2, 1, 0), 0, new_entries);
     let s = unwrap_spliced(splice(
         Some(Arc::clone(&prior)),
         id,
@@ -792,10 +758,10 @@ fn splice_at_anchor_replaces_root() {
 fn splice_at_anchor_equal_hash_keeps_prior_arc() {
     let mut tree = Tree::new();
     let id = tree.ensure(None, "anchor", ResourceRole::User);
-    let prior = make_dir(id, meta(1, 1, 0), 0, BTreeMap::new());
+    let prior = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
     // Construct a structurally-identical replacement; dir_hash folds the
     // observable identity so hashes match.
-    let replacement = make_dir(id, meta(1, 1, 0), 0, BTreeMap::new());
+    let replacement = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
     assert_eq!(prior.dir_hash(), replacement.dir_hash());
     let s = unwrap_spliced(splice(Some(Arc::clone(&prior)), id, id, replacement, &tree));
     if let TreeSnapshot::Dir(d) = s {
@@ -817,17 +783,12 @@ fn splice_one_level_deep_off_path_arc_ptr_eq() {
 
     // Sibling subtree "off_path"; we'll splice at `a` and assert the
     // sibling's Arc inside the rebuilt root is the *same* Arc as before.
-    let off_path = make_dir(
-        tree.ensure(Some(anchor), "off_path", ResourceRole::User),
-        meta(99, 99, 0),
-        0,
-        BTreeMap::new(),
-    );
-    let prior_a = make_dir(a, meta(2, 2, 0), 0, BTreeMap::new());
+    let off_path = make_dir(meta(99, 99, 0), 0, BTreeMap::new());
+    let prior_a = make_dir(meta(2, 2, 0), 0, BTreeMap::new());
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, Some(Arc::clone(&prior_a))));
     root_entries.insert(name("off_path"), dir(99, 0, Some(Arc::clone(&off_path))));
-    let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
+    let root = make_dir(meta(1, 1, 0), 0, root_entries);
 
     // Replacement at `a` carries a child the prior didn't — observably
     // different snapshots, distinct dir_hash.
@@ -836,7 +797,7 @@ fn splice_one_level_deep_off_path_arc_ptr_eq() {
         name("file"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 7, 0)),
     );
-    let replacement = make_dir(a, meta(2, 2, 0), 0, replacement_entries);
+    let replacement = make_dir(meta(2, 2, 0), 0, replacement_entries);
     assert_ne!(prior_a.dir_hash(), replacement.dir_hash());
     let s = unwrap_spliced(splice(Some(root), anchor, a, replacement, &tree));
     let TreeSnapshot::Dir(new_root) = s else {
@@ -855,30 +816,30 @@ fn splice_three_levels_deep_off_path_arc_ptr_eq() {
     let ids = ensure_chain(&mut tree, &["anchor", "a", "b", "c"]);
     let anchor = ids[0];
     let a = ids[1];
-    let b = ids[2];
+    let _b = ids[2];
     let c = ids[3];
 
     // Build a sibling "top_sib" under anchor, and "mid_sib" under a, to
     // assert spine-rebuild preserves both.
-    let top_sib_id = tree.ensure(Some(anchor), "top_sib", ResourceRole::User);
-    let mid_sib_id = tree.ensure(Some(a), "mid_sib", ResourceRole::User);
-    let top_sib = make_dir(top_sib_id, meta(91, 91, 0), 0, BTreeMap::new());
-    let mid_sib = make_dir(mid_sib_id, meta(92, 92, 0), 0, BTreeMap::new());
+    let _top_sib_id = tree.ensure(Some(anchor), "top_sib", ResourceRole::User);
+    let _mid_sib_id = tree.ensure(Some(a), "mid_sib", ResourceRole::User);
+    let top_sib = make_dir(meta(91, 91, 0), 0, BTreeMap::new());
+    let mid_sib = make_dir(meta(92, 92, 0), 0, BTreeMap::new());
 
-    let prior_c = make_dir(c, meta(4, 4, 0), 0, BTreeMap::new());
+    let prior_c = make_dir(meta(4, 4, 0), 0, BTreeMap::new());
     let mut b_entries = BTreeMap::new();
     b_entries.insert(name("c"), dir(4, 0, Some(Arc::clone(&prior_c))));
-    let b_snap = make_dir(b, meta(3, 3, 0), 0, b_entries);
+    let b_snap = make_dir(meta(3, 3, 0), 0, b_entries);
     let mut a_entries = BTreeMap::new();
     a_entries.insert(name("b"), dir(3, 0, Some(Arc::clone(&b_snap))));
     a_entries.insert(name("mid_sib"), dir(92, 0, Some(Arc::clone(&mid_sib))));
-    let a_snap = make_dir(a, meta(2, 2, 0), 0, a_entries);
+    let a_snap = make_dir(meta(2, 2, 0), 0, a_entries);
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, Some(Arc::clone(&a_snap))));
     root_entries.insert(name("top_sib"), dir(91, 0, Some(Arc::clone(&top_sib))));
-    let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
+    let root = make_dir(meta(1, 1, 0), 0, root_entries);
 
-    let replacement_c = make_dir(c, meta(40, 4, 0), 0, BTreeMap::new());
+    let replacement_c = make_dir(meta(40, 4, 0), 0, BTreeMap::new());
     let s = unwrap_spliced(splice(Some(root), anchor, c, replacement_c, &tree));
     let TreeSnapshot::Dir(new_root) = s else {
         panic!()
@@ -902,13 +863,13 @@ fn splice_equal_hash_at_leaf_keeps_prior() {
     let ids = ensure_chain(&mut tree, &["anchor", "a"]);
     let anchor = ids[0];
     let a = ids[1];
-    let prior_a = make_dir(a, meta(2, 2, 0), 0, BTreeMap::new());
+    let prior_a = make_dir(meta(2, 2, 0), 0, BTreeMap::new());
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, Some(Arc::clone(&prior_a))));
-    let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
+    let root = make_dir(meta(1, 1, 0), 0, root_entries);
 
     // Replacement at `a` is structurally identical (same metadata + entries).
-    let replacement_a = make_dir(a, meta(2, 2, 0), 0, BTreeMap::new());
+    let replacement_a = make_dir(meta(2, 2, 0), 0, BTreeMap::new());
     assert_eq!(prior_a.dir_hash(), replacement_a.dir_hash());
     let s = unwrap_spliced(splice(
         Some(Arc::clone(&root)),
@@ -931,20 +892,20 @@ fn splice_equal_hash_at_intermediate_keeps_prior_spine() {
     let mut tree = Tree::new();
     let ids = ensure_chain(&mut tree, &["anchor", "a", "b"]);
     let anchor = ids[0];
-    let a = ids[1];
+    let _a = ids[1];
     let b = ids[2];
-    let b_snap = make_dir(b, meta(3, 3, 0), 0, BTreeMap::new());
+    let b_snap = make_dir(meta(3, 3, 0), 0, BTreeMap::new());
     let mut a_entries = BTreeMap::new();
     a_entries.insert(name("b"), dir(3, 0, Some(Arc::clone(&b_snap))));
-    let a_snap = make_dir(a, meta(2, 2, 0), 0, a_entries);
+    let a_snap = make_dir(meta(2, 2, 0), 0, a_entries);
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, Some(Arc::clone(&a_snap))));
-    let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
+    let root = make_dir(meta(1, 1, 0), 0, root_entries);
 
     // Replacement at `b` matches prior_b → splice_dir at `b` returns
     // Arc::clone(prior_b); recursion at `a` sees ptr_eq → returns
     // Arc::clone(a); top sees ptr_eq → returns prior root.
-    let replacement_b = make_dir(b, meta(3, 3, 0), 0, BTreeMap::new());
+    let replacement_b = make_dir(meta(3, 3, 0), 0, BTreeMap::new());
     let s = unwrap_spliced(splice(
         Some(Arc::clone(&root)),
         anchor,
@@ -967,10 +928,10 @@ fn splice_replacement_changes_dir_hash_uncached_recompute_correct() {
     let ids = ensure_chain(&mut tree, &["anchor", "a"]);
     let anchor = ids[0];
     let a = ids[1];
-    let prior_a = make_dir(a, meta(2, 2, 0), 0, BTreeMap::new());
+    let prior_a = make_dir(meta(2, 2, 0), 0, BTreeMap::new());
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, Some(Arc::clone(&prior_a))));
-    let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
+    let root = make_dir(meta(1, 1, 0), 0, root_entries);
     let prior_root_hash = root.dir_hash();
 
     // Replacement at `a` carries a child the prior didn't — observably
@@ -980,7 +941,7 @@ fn splice_replacement_changes_dir_hash_uncached_recompute_correct() {
         name("file"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 7, 0)),
     );
-    let replacement_a = make_dir(a, meta(2, 2, 0), 0, replacement_entries);
+    let replacement_a = make_dir(meta(2, 2, 0), 0, replacement_entries);
     let s = unwrap_spliced(splice(Some(root), anchor, a, replacement_a, &tree));
     let TreeSnapshot::Dir(new_root) = s else {
         panic!()
@@ -1002,8 +963,8 @@ fn splice_target_outside_observed_returns_crossed_uncovered() {
     let ids = ensure_chain(&mut tree, &["anchor"]);
     let anchor = ids[0];
     let stranger = tree.ensure(None, "stranger", ResourceRole::User);
-    let prior = make_dir(anchor, meta(1, 1, 0), 0, BTreeMap::new());
-    let replacement = make_dir(stranger, meta(2, 2, 0), 0, BTreeMap::new());
+    let prior = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
+    let replacement = make_dir(meta(2, 2, 0), 0, BTreeMap::new());
     let prior_strong_before = Arc::strong_count(&prior);
     let s = splice(
         Some(Arc::clone(&prior)),
@@ -1040,9 +1001,9 @@ fn splice_target_chain_through_uncovered_returns_crossed_uncovered() {
 
     let mut root_entries = BTreeMap::new();
     root_entries.insert(name("a"), dir(2, 0, None));
-    let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
+    let root = make_dir(meta(1, 1, 0), 0, root_entries);
 
-    let replacement_b = make_dir(b, meta(3, 3, 0), 0, BTreeMap::new());
+    let replacement_b = make_dir(meta(3, 3, 0), 0, BTreeMap::new());
     let root_strong_before = Arc::strong_count(&root);
     let s = splice(Some(Arc::clone(&root)), anchor, b, replacement_b, &tree);
     assert!(
@@ -1062,12 +1023,7 @@ fn splice_target_chain_through_uncovered_returns_crossed_uncovered() {
 
 #[test]
 fn diff_tree_self_is_empty() {
-    let s = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
-        meta(1, 1, 0),
-        0,
-        BTreeMap::new(),
-    ));
+    let s = TreeSnapshot::Dir(make_dir(meta(1, 1, 0), 0, BTreeMap::new()));
     let d = diff_tree(&s, &s);
     assert!(d.is_empty());
 }
@@ -1077,7 +1033,6 @@ fn diff_tree_dir_hash_short_circuit() {
     // Two structurally-equal Dir snapshots must short-circuit and emit
     // an empty Diff regardless of how deep the tree is.
     let inner_a = make_dir(
-        ResourceId::default(),
         meta(2, 2, 0),
         0,
         BTreeMap::from_iter([(
@@ -1086,7 +1041,6 @@ fn diff_tree_dir_hash_short_circuit() {
         )]),
     );
     let inner_b = make_dir(
-        ResourceId::default(),
         meta(2, 2, 0),
         0,
         BTreeMap::from_iter([(
@@ -1095,13 +1049,11 @@ fn diff_tree_dir_hash_short_circuit() {
         )]),
     );
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(name("d"), dir(2, 0, Some(inner_a)))]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(name("d"), dir(2, 0, Some(inner_b)))]),
@@ -1113,7 +1065,6 @@ fn diff_tree_dir_hash_short_circuit() {
 #[test]
 fn diff_tree_single_leaf_modified() {
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1122,7 +1073,6 @@ fn diff_tree_single_leaf_modified() {
         )]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1141,14 +1091,8 @@ fn diff_tree_single_leaf_modified() {
 
 #[test]
 fn diff_tree_single_leaf_created() {
-    let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
-        meta(1, 1, 0),
-        0,
-        BTreeMap::new(),
-    ));
+    let a = TreeSnapshot::Dir(make_dir(meta(1, 1, 0), 0, BTreeMap::new()));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1167,7 +1111,6 @@ fn diff_tree_single_leaf_created() {
 #[test]
 fn diff_tree_single_leaf_deleted() {
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1175,12 +1118,7 @@ fn diff_tree_single_leaf_deleted() {
             ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 7, 0)),
         )]),
     ));
-    let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
-        meta(2, 1, 0),
-        0,
-        BTreeMap::new(),
-    ));
+    let b = TreeSnapshot::Dir(make_dir(meta(2, 1, 0), 0, BTreeMap::new()));
     let d = diff_tree(&a, &b);
     assert_eq!(d.deleted.len(), 1);
     assert_eq!(d.deleted[0].segment.as_str(), "foo");
@@ -1190,7 +1128,6 @@ fn diff_tree_single_leaf_deleted() {
 #[test]
 fn diff_tree_single_dir_created_emits_descendants() {
     let inner = make_dir(
-        ResourceId::default(),
         meta(2, 2, 0),
         0,
         BTreeMap::from_iter([(
@@ -1198,14 +1135,8 @@ fn diff_tree_single_dir_created_emits_descendants() {
             ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 7, 0)),
         )]),
     );
-    let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
-        meta(1, 1, 0),
-        0,
-        BTreeMap::new(),
-    ));
+    let a = TreeSnapshot::Dir(make_dir(meta(1, 1, 0), 0, BTreeMap::new()));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(name("d"), dir(2, 0, Some(inner)))]),
@@ -1224,7 +1155,6 @@ fn diff_tree_single_dir_created_emits_descendants() {
 #[test]
 fn diff_tree_single_dir_deleted_emits_descendants() {
     let inner = make_dir(
-        ResourceId::default(),
         meta(2, 2, 0),
         0,
         BTreeMap::from_iter([(
@@ -1233,17 +1163,11 @@ fn diff_tree_single_dir_deleted_emits_descendants() {
         )]),
     );
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(name("d"), dir(2, 0, Some(inner)))]),
     ));
-    let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
-        meta(2, 1, 0),
-        0,
-        BTreeMap::new(),
-    ));
+    let b = TreeSnapshot::Dir(make_dir(meta(2, 1, 0), 0, BTreeMap::new()));
     let d = diff_tree(&a, &b);
     let segs: Vec<_> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
     assert_eq!(segs, vec!["d", "d/file"]);
@@ -1253,7 +1177,6 @@ fn diff_tree_single_dir_deleted_emits_descendants() {
 fn diff_tree_same_level_rename() {
     // Same inode at name "foo" in baseline → name "bar" in current.
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1262,7 +1185,6 @@ fn diff_tree_same_level_rename() {
         )]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1282,7 +1204,6 @@ fn diff_tree_same_level_rename() {
 fn diff_tree_cross_level_rename() {
     // Baseline: /a/foo (inode 7). Current: /b/foo (same inode).
     let a_inner = make_dir(
-        ResourceId::default(),
         meta(2, 2, 0),
         0,
         BTreeMap::from_iter([(
@@ -1291,7 +1212,6 @@ fn diff_tree_cross_level_rename() {
         )]),
     );
     let b_inner = make_dir(
-        ResourceId::default(),
         meta(2, 3, 0),
         0,
         BTreeMap::from_iter([(
@@ -1300,13 +1220,11 @@ fn diff_tree_cross_level_rename() {
         )]),
     );
     let baseline = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(name("a"), dir(2, 0, Some(a_inner)))]),
     ));
     let current = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(name("b"), dir(3, 0, Some(b_inner)))]),
@@ -1329,7 +1247,6 @@ fn diff_tree_same_name_different_inode_emits_pair() {
     // Same name, different inode: pair_renames sees same `rel` and skips
     // the rename, leaving Created+Deleted unpaired in their lists.
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1338,7 +1255,6 @@ fn diff_tree_same_name_different_inode_emits_pair() {
         )]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1362,9 +1278,8 @@ fn diff_tree_same_name_different_inode_emits_pair() {
 #[test]
 fn diff_tree_same_name_kind_change() {
     // Same name "x", file in baseline, dir in current.
-    let new_dir = make_dir(ResourceId::default(), meta(2, 8, 0), 0, BTreeMap::new());
+    let new_dir = make_dir(meta(2, 8, 0), 0, BTreeMap::new());
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1373,7 +1288,6 @@ fn diff_tree_same_name_kind_change() {
         )]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(name("x"), dir(8, 0, Some(new_dir)))]),
@@ -1392,7 +1306,6 @@ fn diff_tree_same_name_kind_change_dir_with_descendants() {
     // The kind-change arm must recurse into the new Dir's subtree so the
     // descendants surface to the engine's per-stable-file emission path.
     let new_dir = make_dir(
-        ResourceId::default(),
         meta(2, 8, 0),
         0,
         BTreeMap::from_iter([
@@ -1407,7 +1320,6 @@ fn diff_tree_same_name_kind_change_dir_with_descendants() {
         ]),
     );
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1416,7 +1328,6 @@ fn diff_tree_same_name_kind_change_dir_with_descendants() {
         )]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(name("foo"), dir(8, 0, Some(new_dir)))]),
@@ -1440,7 +1351,6 @@ fn diff_tree_same_name_kind_change_dir_to_file_with_prior_descendants() {
     // current /foo (File). The prior subtree's descendants must surface
     // as Deleted so consumers see they're gone.
     let prior_dir = make_dir(
-        ResourceId::default(),
         meta(1, 8, 0),
         0,
         BTreeMap::from_iter([
@@ -1455,13 +1365,11 @@ fn diff_tree_same_name_kind_change_dir_to_file_with_prior_descendants() {
         ]),
     );
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(name("foo"), dir(8, 0, Some(prior_dir)))]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1488,25 +1396,14 @@ fn diff_tree_same_name_kind_change_with_inode_collision() {
     // (Dir → File via kernel inode reuse). The rename pairing layer must
     // NOT collapse them into a (nonsensical) same-name "Rename".
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(
             name("foo"),
-            dir(
-                100,
-                0,
-                Some(make_dir(
-                    ResourceId::default(),
-                    meta(1, 100, 0),
-                    0,
-                    BTreeMap::new(),
-                )),
-            ),
+            dir(100, 0, Some(make_dir(meta(1, 100, 0), 0, BTreeMap::new()))),
         )]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1533,7 +1430,6 @@ fn diff_tree_cross_kind_inode_collision_no_phantom_rename() {
     // Different paths, different kinds, same inode (kernel reuse across
     // unrelated rm + mkdir). Must NOT be paired as a "Rename file → dir".
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(
@@ -1542,21 +1438,11 @@ fn diff_tree_cross_kind_inode_collision_no_phantom_rename() {
         )]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(
             name("beta"),
-            dir(
-                100,
-                0,
-                Some(make_dir(
-                    ResourceId::default(),
-                    meta(2, 100, 0),
-                    0,
-                    BTreeMap::new(),
-                )),
-            ),
+            dir(100, 0, Some(make_dir(meta(2, 100, 0), 0, BTreeMap::new()))),
         )]),
     ));
     let d = diff_tree(&a, &b);
@@ -1581,7 +1467,6 @@ fn diff_tree_dir_replace_at_different_inode_emits_descendants() {
     // structurally different, and the prior children are gone while the
     // new children are new.
     let prior_inner = make_dir(
-        ResourceId::default(),
         meta(1, 200, 0),
         0,
         BTreeMap::from_iter([
@@ -1596,7 +1481,6 @@ fn diff_tree_dir_replace_at_different_inode_emits_descendants() {
         ]),
     );
     let new_inner = make_dir(
-        ResourceId::default(),
         meta(2, 300, 0),
         0,
         BTreeMap::from_iter([
@@ -1611,13 +1495,11 @@ fn diff_tree_dir_replace_at_different_inode_emits_descendants() {
         ]),
     );
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([(name("foo"), dir(200, 0, Some(prior_inner)))]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([(name("foo"), dir(300, 0, Some(new_inner)))]),
@@ -1647,7 +1529,6 @@ fn diff_tree_rename_into_kind_change_slot() {
     // genuine cross-level move must surface as a Rename — neither should
     // be lost or collapsed by the staging architecture.
     let new_inner = make_dir(
-        ResourceId::default(),
         meta(2, 200, 0),
         0,
         BTreeMap::from_iter([(
@@ -1656,7 +1537,6 @@ fn diff_tree_rename_into_kind_change_slot() {
         )]),
     );
     let prior_something = make_dir(
-        ResourceId::default(),
         meta(1, 999, 0),
         0,
         BTreeMap::from_iter([(
@@ -1664,9 +1544,8 @@ fn diff_tree_rename_into_kind_change_slot() {
             ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 500, 0)),
         )]),
     );
-    let new_something = make_dir(ResourceId::default(), meta(2, 999, 0), 0, BTreeMap::new());
+    let new_something = make_dir(meta(2, 999, 0), 0, BTreeMap::new());
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([
@@ -1678,7 +1557,6 @@ fn diff_tree_rename_into_kind_change_slot() {
         ]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([
@@ -1734,7 +1612,6 @@ fn diff_tree_file_pair_device_change_is_delete_create() {
 #[test]
 fn diff_tree_modified_lists_in_lex_order() {
     let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([
@@ -1753,7 +1630,6 @@ fn diff_tree_modified_lists_in_lex_order() {
         ]),
     ));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(1, 1, 0),
         0,
         BTreeMap::from_iter([
@@ -1778,14 +1654,8 @@ fn diff_tree_modified_lists_in_lex_order() {
 
 #[test]
 fn diff_tree_created_lists_in_lex_order() {
-    let a = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
-        meta(1, 1, 0),
-        0,
-        BTreeMap::new(),
-    ));
+    let a = TreeSnapshot::Dir(make_dir(meta(1, 1, 0), 0, BTreeMap::new()));
     let b = TreeSnapshot::Dir(make_dir(
-        ResourceId::default(),
         meta(2, 1, 0),
         0,
         BTreeMap::from_iter([
@@ -1840,7 +1710,6 @@ fn diff_tree_recursive_three_levels_deep_change() {
     // affected leaf.
     fn build(top_mtime: u64, leaf_mtime: u64) -> TreeSnapshot {
         let b = make_dir(
-            ResourceId::default(),
             meta(3, 3, 0),
             0,
             BTreeMap::from_iter([(
@@ -1849,13 +1718,11 @@ fn diff_tree_recursive_three_levels_deep_change() {
             )]),
         );
         let a = make_dir(
-            ResourceId::default(),
             meta(2, 2, 0),
             0,
             BTreeMap::from_iter([(name("b"), dir(3, 0, Some(b)))]),
         );
         let other = make_dir(
-            ResourceId::default(),
             meta(2, 99, 0),
             0,
             BTreeMap::from_iter([(
@@ -1864,7 +1731,6 @@ fn diff_tree_recursive_three_levels_deep_change() {
             )]),
         );
         TreeSnapshot::Dir(make_dir(
-            ResourceId::default(),
             meta(top_mtime, 1, 0),
             0,
             BTreeMap::from_iter([
@@ -1892,14 +1758,14 @@ fn diff_tree_recursive_three_levels_deep_change() {
 
 #[test]
 fn diff_all_created_empty_snapshot_yields_empty_diff() {
-    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, BTreeMap::new());
+    let snap = DirSnapshot::new(meta(1, 100, 0), 0, BTreeMap::new());
     let d = Diff::all_created(&snap);
     assert!(d.is_empty());
 }
 
 #[test]
 fn diff_all_deleted_empty_snapshot_yields_empty_diff() {
-    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, BTreeMap::new());
+    let snap = DirSnapshot::new(meta(1, 100, 0), 0, BTreeMap::new());
     let d = Diff::all_deleted(&snap);
     assert!(d.is_empty());
 }
@@ -1911,7 +1777,7 @@ fn diff_all_created_single_leaf_emits_one_created_entry() {
         name("a.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 42, 0)),
     );
-    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+    let snap = DirSnapshot::new(meta(1, 100, 0), 0, entries);
 
     let d = Diff::all_created(&snap);
     assert_eq!(d.created.len(), 1);
@@ -1930,7 +1796,7 @@ fn diff_all_deleted_single_leaf_emits_one_deleted_entry() {
         name("a.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 10, 1, 42, 0)),
     );
-    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+    let snap = DirSnapshot::new(meta(1, 100, 0), 0, entries);
 
     let d = Diff::all_deleted(&snap);
     assert_eq!(d.deleted.len(), 1);
@@ -1949,7 +1815,7 @@ fn diff_all_created_uncovered_dir_emits_dir_only_no_descendants() {
     // but cannot synthesise descendants it never saw.
     let mut entries = BTreeMap::new();
     entries.insert(name("sub"), dir(7, 0, None));
-    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+    let snap = DirSnapshot::new(meta(1, 100, 0), 0, entries);
 
     let d = Diff::all_created(&snap);
     assert_eq!(d.created.len(), 1);
@@ -1968,7 +1834,7 @@ fn diff_all_created_covered_dir_emits_recursive_entries_depth_first_lex() {
         name("b.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 11, 0)),
     );
-    let inner_snap = make_dir(ResourceId::default(), meta(1, 7, 0), 0, inner);
+    let inner_snap = make_dir(meta(1, 7, 0), 0, inner);
 
     let mut entries = BTreeMap::new();
     entries.insert(name("a"), dir(7, 0, Some(Arc::clone(&inner_snap))));
@@ -1976,7 +1842,7 @@ fn diff_all_created_covered_dir_emits_recursive_entries_depth_first_lex() {
         name("c.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 22, 0)),
     );
-    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+    let snap = DirSnapshot::new(meta(1, 100, 0), 0, entries);
 
     let d = Diff::all_created(&snap);
     let segments: Vec<&str> = d.created.iter().map(|e| e.segment.as_str()).collect();
@@ -1991,7 +1857,7 @@ fn diff_all_deleted_covered_dir_emits_recursive_entries_depth_first_lex() {
         name("b.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 11, 0)),
     );
-    let inner_snap = make_dir(ResourceId::default(), meta(1, 7, 0), 0, inner);
+    let inner_snap = make_dir(meta(1, 7, 0), 0, inner);
 
     let mut entries = BTreeMap::new();
     entries.insert(name("a"), dir(7, 0, Some(Arc::clone(&inner_snap))));
@@ -1999,7 +1865,7 @@ fn diff_all_deleted_covered_dir_emits_recursive_entries_depth_first_lex() {
         name("c.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 22, 0)),
     );
-    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 100, 0), 0, entries);
+    let snap = DirSnapshot::new(meta(1, 100, 0), 0, entries);
 
     let d = Diff::all_deleted(&snap);
     let segments: Vec<&str> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
@@ -2014,15 +1880,15 @@ fn diff_all_created_deep_nesting() {
         name("leaf.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 13, 0)),
     );
-    let l3_snap = make_dir(ResourceId::default(), meta(1, 12, 0), 0, l3);
+    let l3_snap = make_dir(meta(1, 12, 0), 0, l3);
 
     let mut l2 = BTreeMap::new();
     l2.insert(name("y"), dir(12, 0, Some(l3_snap)));
-    let l2_snap = make_dir(ResourceId::default(), meta(1, 11, 0), 0, l2);
+    let l2_snap = make_dir(meta(1, 11, 0), 0, l2);
 
     let mut l1 = BTreeMap::new();
     l1.insert(name("x"), dir(11, 0, Some(l2_snap)));
-    let snap = DirSnapshot::new(ResourceId::default(), meta(1, 10, 0), 0, l1);
+    let snap = DirSnapshot::new(meta(1, 10, 0), 0, l1);
 
     let d = Diff::all_created(&snap);
     let segments: Vec<&str> = d.created.iter().map(|e| e.segment.as_str()).collect();
@@ -2039,7 +1905,7 @@ fn diff_all_created_matches_diff_against_empty_baseline() {
         name("file.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 11, 0)),
     );
-    let inner_snap = make_dir(ResourceId::default(), meta(1, 7, 0), 0, inner);
+    let inner_snap = make_dir(meta(1, 7, 0), 0, inner);
 
     let mut entries = BTreeMap::new();
     entries.insert(name("sub"), dir(7, 0, Some(inner_snap)));
@@ -2047,9 +1913,9 @@ fn diff_all_created_matches_diff_against_empty_baseline() {
         name("top.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 22, 0)),
     );
-    let snap = make_dir(ResourceId::default(), meta(1, 100, 0), 0, entries);
+    let snap = make_dir(meta(1, 100, 0), 0, entries);
 
-    let empty = make_dir(ResourceId::default(), meta(1, 100, 0), 0, BTreeMap::new());
+    let empty = make_dir(meta(1, 100, 0), 0, BTreeMap::new());
     let canonical = diff_tree(
         &TreeSnapshot::Dir(empty),
         &TreeSnapshot::Dir(Arc::clone(&snap)),
@@ -2086,8 +1952,8 @@ fn diff_all_deleted_matches_diff_from_empty_target() {
         name("top.rs"),
         ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 22, 0)),
     );
-    let snap = make_dir(ResourceId::default(), meta(1, 100, 0), 0, entries);
-    let empty = make_dir(ResourceId::default(), meta(1, 100, 0), 0, BTreeMap::new());
+    let snap = make_dir(meta(1, 100, 0), 0, entries);
+    let empty = make_dir(meta(1, 100, 0), 0, BTreeMap::new());
 
     let canonical = diff_tree(
         &TreeSnapshot::Dir(Arc::clone(&snap)),
@@ -2114,7 +1980,7 @@ fn diff_all_deleted_matches_diff_from_empty_target() {
 
 #[test]
 fn tree_snapshot_hash_returns_dir_hash_for_dir_variant() {
-    let arc = make_dir(ResourceId::default(), meta(1, 100, 1), 0, BTreeMap::new());
+    let arc = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
     let snap = TreeSnapshot::Dir(Arc::clone(&arc));
     assert_eq!(snap.hash(), arc.dir_hash());
 }
@@ -2168,8 +2034,8 @@ proptest! {
         e in arb_simple_entries(),
     ) {
         let m = meta(meta_secs, meta_inode, 0);
-        let a = make_dir(ResourceId::default(), m, captured_with, e.clone());
-        let b = make_dir(ResourceId::default(), m, captured_with, e);
+        let a = make_dir(m, captured_with, e.clone());
+        let b = make_dir(m, captured_with, e);
         prop_assert_eq!(a.dir_hash(), b.dir_hash());
     }
 
@@ -2181,12 +2047,12 @@ proptest! {
         e in arb_simple_entries(),
     ) {
         let m = meta(1, 1, 0);
-        let a = make_dir(ResourceId::default(), m, 0, e.clone());
+        let a = make_dir(m, 0, e.clone());
         let mut reversed: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
         for (k, v) in e.into_iter().rev() {
             reversed.insert(k, v);
         }
-        let b = make_dir(ResourceId::default(), m, 0, reversed);
+        let b = make_dir(m, 0, reversed);
         prop_assert_eq!(a.dir_hash(), b.dir_hash());
     }
 
@@ -2201,14 +2067,14 @@ proptest! {
     fn prop_dir_hash_distinguishes_root_meta_inode_field(
         e in arb_simple_entries(),
     ) {
-        let a = make_dir(ResourceId::default(), meta(1, 100, 0), 0, e.clone());
-        let b = make_dir(ResourceId::default(), meta(1, 101, 0), 0, e);
+        let a = make_dir(meta(1, 100, 0), 0, e.clone());
+        let b = make_dir(meta(1, 101, 0), 0, e);
         prop_assert_ne!(a.dir_hash(), b.dir_hash());
     }
 
     #[test]
     fn prop_diff_tree_self_is_empty(e in arb_simple_entries()) {
-        let s = TreeSnapshot::Dir(make_dir(ResourceId::default(), meta(1, 1, 0), 0, e));
+        let s = TreeSnapshot::Dir(make_dir(meta(1, 1, 0), 0, e));
         let d = diff_tree(&s, &s);
         prop_assert!(d.is_empty());
     }
@@ -2220,8 +2086,8 @@ proptest! {
         ea in arb_simple_entries(),
         eb in arb_simple_entries(),
     ) {
-        let a = TreeSnapshot::Dir(make_dir(ResourceId::default(), meta(1, 1, 0), 0, ea));
-        let b = TreeSnapshot::Dir(make_dir(ResourceId::default(), meta(2, 1, 0), 0, eb));
+        let a = TreeSnapshot::Dir(make_dir(meta(1, 1, 0), 0, ea));
+        let b = TreeSnapshot::Dir(make_dir(meta(2, 1, 0), 0, eb));
         let fwd = diff_tree(&a, &b);
         let rev = diff_tree(&b, &a);
 
@@ -2262,18 +2128,18 @@ proptest! {
         let anchor = ids[0];
         let a = ids[1];
 
-        let prior_a = make_dir(a, meta(2, 2, 0), 0, BTreeMap::new());
+        let prior_a = make_dir(meta(2, 2, 0), 0, BTreeMap::new());
         let mut root_entries = BTreeMap::new();
         root_entries.insert(name("a"), dir(2, 0, Some(Arc::clone(&prior_a))));
         let mut siblings: Vec<Arc<DirSnapshot>> = Vec::new();
         for i in 0..sibling_count {
             let sib_name = format!("sib_{i}");
-            let sib_id = tree.ensure(Some(anchor), &sib_name, ResourceRole::User);
-            let sib = make_dir(sib_id, meta(50 + i as u64, 50 + i as u64, 0), 0, BTreeMap::new());
+            let _sib_id = tree.ensure(Some(anchor), &sib_name, ResourceRole::User);
+            let sib = make_dir(meta(50 + i as u64, 50 + i as u64, 0), 0, BTreeMap::new());
             siblings.push(Arc::clone(&sib));
             root_entries.insert(CompactString::new(sib_name), dir(50 + i as u64, 0, Some(sib)));
         }
-        let root = make_dir(anchor, meta(1, 1, 0), 0, root_entries);
+        let root = make_dir(meta(1, 1, 0), 0, root_entries);
 
         // Replacement carries a child whose size is proptest-driven; this
         // yields a structurally distinct snapshot whose dir_hash differs
@@ -2283,7 +2149,7 @@ proptest! {
             name("file"),
             ChildEntry::Leaf(leaf(EntryKind::File, leaf_size, 1, 7, 0)),
         );
-        let replacement = make_dir(a, meta(2, 2, 0), 0, replacement_entries);
+        let replacement = make_dir(meta(2, 2, 0), 0, replacement_entries);
         prop_assert_ne!(prior_a.dir_hash(), replacement.dir_hash());
         let s = splice(Some(root), anchor, a, replacement, &tree);
         let SpliceResult::Spliced(TreeSnapshot::Dir(new_root)) = s else { unreachable!() };
@@ -2304,15 +2170,13 @@ proptest! {
         let anchor = ids[0];
         let b = ids[2];
 
-        let prior_b = make_dir(b, meta(3, 3, 0), 0, BTreeMap::new());
+        let prior_b = make_dir(meta(3, 3, 0), 0, BTreeMap::new());
         let a_snap = make_dir(
-            ids[1],
             meta(2, 2, 0),
             0,
             BTreeMap::from_iter([(name("b"), dir(3, 0, Some(Arc::clone(&prior_b))))]),
         );
         let root = make_dir(
-            anchor,
             meta(1, 1, 0),
             0,
             BTreeMap::from_iter([(name("a"), dir(2, 0, Some(a_snap)))]),
@@ -2325,11 +2189,13 @@ proptest! {
             name("file"),
             ChildEntry::Leaf(leaf(EntryKind::File, leaf_size, 1, 7, 0)),
         );
-        let replacement = make_dir(b, meta(3, 3, 0), 0, replacement_entries);
+        let replacement = make_dir(meta(3, 3, 0), 0, replacement_entries);
         prop_assert_ne!(prior_b.dir_hash(), replacement.dir_hash());
         let s = splice(Some(root), anchor, b, Arc::clone(&replacement), &tree);
         let SpliceResult::Spliced(snap) = s else { unreachable!() };
-        let got = snap.subtree_at(b, &tree).expect("b resolves after splice");
+        let got = snap
+            .subtree_at(anchor, b, &tree)
+            .expect("b resolves after splice");
         prop_assert_eq!(got.dir_hash(), replacement.dir_hash());
     }
 
@@ -2344,15 +2210,14 @@ proptest! {
         let anchor = ids[0];
         let a = ids[1];
         let m = meta(meta_secs, 2, 0);
-        let prior_a = make_dir(a, m, 0, BTreeMap::new());
+        let prior_a = make_dir(m, 0, BTreeMap::new());
         let root = make_dir(
-            anchor,
             meta(1, 1, 0),
             0,
             BTreeMap::from_iter([(name("a"), dir(2, 0, Some(Arc::clone(&prior_a))))]),
         );
         // Equal hash because all data fields agree.
-        let replacement = make_dir(a, m, 0, BTreeMap::new());
+        let replacement = make_dir(m, 0, BTreeMap::new());
         prop_assert_eq!(prior_a.dir_hash(), replacement.dir_hash());
         let s = splice(Some(Arc::clone(&root)), anchor, a, replacement, &tree);
         let SpliceResult::Spliced(TreeSnapshot::Dir(new_root)) = s else { unreachable!() };

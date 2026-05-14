@@ -14,9 +14,11 @@
 //!   `subtree: None` means *uncovered* — the walker stored the entry but
 //!   did not recurse (excluded glob, beyond `max_depth`, or
 //!   `recursive=false`).
-//! - `DirSnapshot::root_resource` is *advisory*. Engine paths that need to
-//!   navigate the snapshot use `&Tree` lookups; a stale id here doesn't
-//!   break correctness, it only makes diagnostics less useful.
+//! - A `DirSnapshot` carries no engine-side identity. The walker speaks
+//!   paths; the engine speaks resources; navigation helpers
+//!   ([`subtree_at_dir`], [`TreeSnapshot::subtree_at`]) take an explicit
+//!   `anchor: ResourceId` so the caller's anchor invariant lives at the
+//!   call site rather than as a stamp on the wire payload.
 //!
 //! ## Hashing
 //!
@@ -274,7 +276,6 @@ impl ChildEntry {
 /// `OnceLock` and `u128` are `Send + Sync`, so `DirSnapshot` is too
 /// (compile-time pinned in tests).
 pub struct DirSnapshot {
-    pub root_resource: ResourceId,
     pub root_meta: DirMeta,
     pub captured_with: u64,
     pub entries: BTreeMap<CompactString, ChildEntry>,
@@ -287,13 +288,11 @@ impl DirSnapshot {
     /// starts empty and fills on first read.
     #[must_use]
     pub const fn new(
-        root_resource: ResourceId,
         root_meta: DirMeta,
         captured_with: u64,
         entries: BTreeMap<CompactString, ChildEntry>,
     ) -> Self {
         Self {
-            root_resource,
             root_meta,
             captured_with,
             entries,
@@ -347,12 +346,7 @@ impl DirSnapshot {
 
 impl Clone for DirSnapshot {
     fn clone(&self) -> Self {
-        let out = Self::new(
-            self.root_resource,
-            self.root_meta,
-            self.captured_with,
-            self.entries.clone(),
-        );
+        let out = Self::new(self.root_meta, self.captured_with, self.entries.clone());
         if let Some(&v) = self.dir_hash.get() {
             let _ = out.dir_hash.set(v);
         }
@@ -362,9 +356,10 @@ impl Clone for DirSnapshot {
 
 impl PartialEq for DirSnapshot {
     fn eq(&self, other: &Self) -> bool {
-        // Excludes the `dir_hash` cache (derived view).
-        self.root_resource == other.root_resource
-            && self.root_meta == other.root_meta
+        // Excludes the `dir_hash` cache (derived view). Equality is
+        // content-only — agrees with `dir_hash`, which is also folded
+        // over content alone.
+        self.root_meta == other.root_meta
             && self.captured_with == other.captured_with
             && self.entries == other.entries
     }
@@ -376,7 +371,6 @@ impl std::fmt::Debug for DirSnapshot {
         // Excludes `dir_hash` (cached derived view); `finish_non_exhaustive`
         // states the omission honestly.
         f.debug_struct("DirSnapshot")
-            .field("root_resource", &self.root_resource)
             .field("root_meta", &self.root_meta)
             .field("captured_with", &self.captured_with)
             .field("entries", &self.entries)
@@ -425,21 +419,31 @@ impl TreeSnapshot {
     }
 
     /// Walk this snapshot down to the directory at `target`, following the
-    /// segment chain `tree.parent(target) → ... → root_resource`. Returns
+    /// segment chain `tree.parent(target) → ... → anchor`. Returns
     /// `None` for any of:
     ///
     /// - `TreeSnapshot::File` (no recursion possible).
-    /// - `target` outside the snapshot's anchor subtree (the parent walk
-    ///   bottoms out before reaching `root_resource`).
+    /// - `target` outside `anchor`'s subtree (the parent walk bottoms out
+    ///   before reaching `anchor`).
     /// - The chain crosses a `Leaf` or an uncovered `Dir`
     ///   (`subtree: None`).
     /// - Any segment fails to resolve via `tree.name` (slot reaped).
     ///
-    /// `DirSnapshot::root_resource` is advisory; navigation uses `&Tree`,
-    /// not snapshot identity.
+    /// `anchor` is the engine-side `ResourceId` the caller knows the
+    /// snapshot is rooted at — for [`crate::Profile::current`], this is
+    /// `profile.resource`. Navigation uses `&Tree` exclusively;
+    /// `DirSnapshot` carries no engine identity of its own.
     #[must_use]
-    pub fn subtree_at(&self, target: ResourceId, tree: &Tree) -> Option<Arc<DirSnapshot>> {
-        subtree_at_impl(self, target, tree)
+    pub fn subtree_at(
+        &self,
+        anchor: ResourceId,
+        target: ResourceId,
+        tree: &Tree,
+    ) -> Option<Arc<DirSnapshot>> {
+        match self {
+            Self::Dir(root) => subtree_at_dir(root, anchor, target, tree),
+            Self::File(_) => None,
+        }
     }
 }
 
@@ -522,19 +526,8 @@ fn compute_dir_hash(d: &DirSnapshot) -> u128 {
 }
 
 // ---------------------------------------------------------------------------
-// subtree_at
+// subtree_at_dir
 // ---------------------------------------------------------------------------
-
-fn subtree_at_impl(
-    snap: &TreeSnapshot,
-    target: ResourceId,
-    tree: &Tree,
-) -> Option<Arc<DirSnapshot>> {
-    match snap {
-        TreeSnapshot::Dir(root) => subtree_at_dir(root, target, tree),
-        TreeSnapshot::File(_) => None,
-    }
-}
 
 /// Descend from `root` (a Dir-shaped anchor snapshot) by following the
 /// segment chain to `target` and return the matching subtree (or
@@ -544,14 +537,19 @@ fn subtree_at_impl(
 /// Dir-only call sites — graft / splice plumbing — so they avoid the
 /// `TreeSnapshot::Dir(Arc::clone(root))` wrapper required to reach the
 /// `&TreeSnapshot`-keyed entry point. The `Arc::clone` at `chain.len()
-/// == 1` (target == anchor's root_resource) is intrinsic: the return
-/// type owns an `Arc<DirSnapshot>`, and at depth 1 we can either clone
-/// the input or have a degenerate path that consumes it. Cloning keeps
-/// the helper non-consuming.
+/// == 1` (target == anchor) is intrinsic: the return type owns an
+/// `Arc<DirSnapshot>`, and at depth 1 we can either clone the input or
+/// have a degenerate path that consumes it. Cloning keeps the helper
+/// non-consuming.
+///
+/// `anchor` is supplied by the caller — typically `profile.resource`
+/// for navigation off [`crate::Profile::current`]. The snapshot itself
+/// carries no engine identity; navigation is `&Tree`-driven from
+/// `anchor` down to `target`.
 ///
 /// `None` arms:
-/// - `target` is outside the anchor's tree subtree (ancestor walk
-///   bottoms out).
+/// - `target` is outside `anchor`'s tree subtree (ancestor walk bottoms
+///   out before reaching `anchor`).
 /// - The chain crosses a [`ChildEntry::Leaf`] (snapshot identity flip
 ///   at an intermediate segment).
 /// - The chain crosses an uncovered [`DirChild`] (`subtree: None`).
@@ -559,10 +557,11 @@ fn subtree_at_impl(
 #[must_use]
 pub fn subtree_at_dir(
     root: &Arc<DirSnapshot>,
+    anchor: ResourceId,
     target: ResourceId,
     tree: &Tree,
 ) -> Option<Arc<DirSnapshot>> {
-    let chain = ancestor_chain(target, root.root_resource, tree)?;
+    let chain = ancestor_chain(target, anchor, tree)?;
 
     // Descend from `root` by following segment names. `chain[0] == anchor`
     // matches `root` already, so we start at `chain[1]`.
@@ -584,8 +583,8 @@ pub fn subtree_at_dir(
 /// before reaching `anchor`).
 ///
 /// Sole helper for navigation that needs to follow the path from an
-/// anchor down to one of its descendants — `subtree_at_impl` consumes
-/// it as the descent guide for snapshot navigation; `splice` consumes
+/// anchor down to one of its descendants — [`subtree_at_dir`] consumes
+/// it as the descent guide for snapshot navigation; [`splice`] consumes
 /// it to know which intermediate `DirSnapshot`s need rebuilding.
 fn ancestor_chain(
     target: ResourceId,
@@ -642,8 +641,10 @@ pub enum SpliceResult {
 /// Rebuilds at most `depth(target)` `DirSnapshot`s along the
 /// path-to-anchor.
 ///
-/// `anchor` is the Profile's anchor `ResourceId`. It locks the prior
-/// `root.root_resource` invariant against any future drift.
+/// `anchor` is the Profile's anchor `ResourceId` — the engine-side
+/// identity the caller knows `prior` is rooted at. It drives
+/// [`ancestor_chain`]'s walk and isn't compared against any snapshot
+/// field; the wire payload is path-and-content only.
 ///
 /// **File-anchored Profiles never call this helper.** Their
 /// `Profile.current` is `TreeSnapshot::File(leaf)`, integrated by an
@@ -656,11 +657,11 @@ pub enum SpliceResult {
 /// Returns [`SpliceResult::Spliced`] with `TreeSnapshot::Dir(replacement)`
 /// (Arc-cheap) for the trivial cases:
 /// - `prior == None` (first graft).
-/// - `target == prior.root_resource` and the hashes differ (new root).
+/// - `target == anchor` and the hashes differ (new root).
 ///
 /// Returns [`SpliceResult::Spliced`] with `TreeSnapshot::Dir(prior)`
 /// (no allocation) when:
-/// - `target == prior.root_resource` and `dir_hash` matches (G7-trivial).
+/// - `target == anchor` and `dir_hash` matches (G7-trivial).
 /// - The recursive splice short-circuited at every level via `Arc::ptr_eq`
 ///   or `dir_hash` equality (G7 propagation).
 ///
@@ -699,10 +700,6 @@ fn splice_dir_prior(
     replacement: Arc<DirSnapshot>,
     tree: &Tree,
 ) -> SpliceResult {
-    debug_assert_eq!(
-        root.root_resource, anchor,
-        "splice: Dir prior's root_resource must match the Profile anchor",
-    );
     if target == anchor {
         if root.dir_hash() == replacement.dir_hash() {
             return SpliceResult::Spliced(TreeSnapshot::Dir(root));
@@ -785,7 +782,6 @@ fn splice_dir(
     // subtree spliced in", and `captured_with` is constant within a
     // Profile by construction.
     Some(Arc::new(DirSnapshot::new(
-        prior.root_resource,
         prior.root_meta,
         prior.captured_with,
         new_entries,

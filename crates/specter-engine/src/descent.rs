@@ -284,7 +284,7 @@ impl crate::Engine {
 
         // Step 4: emit the descent probe at the prefix.
         let target_path = self.tree.path_of(prefix).unwrap_or_default();
-        Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
+        Self::emit_descent_probe(owner, correlation, target_path, out);
     }
 
     /// Dispatch a successful descent response. The walker honoured the
@@ -325,15 +325,12 @@ impl crate::Engine {
         };
         let prefix = descent.current_prefix();
 
-        // Defense-in-depth: the walker stamps `DirSnapshot.root_resource`
-        // with the `target_resource` we placed on the `Descent` request,
-        // which the engine sets to `descent.current_prefix()` at every
-        // `emit_descent_probe` site. Divergence signals a walker bug or
-        // a wire-side regression.
-        debug_assert_eq!(
-            snapshot.root_resource, prefix,
-            "walker stamp diverges from emitted target_resource (owner = {owner:?})",
-        );
+        // The walker echoes `(owner, correlation)` verbatim — the
+        // probe channel's match in `on_*_probe_response` already
+        // enforces request/response pairing, so any divergence would
+        // surface as `StaleProbeResponse`, not reach this point. The
+        // snapshot itself carries pure content; engine identity stays
+        // engine-side (here, `descent.current_prefix()`).
         // `DescentRemaining` is non-empty by type invariant — the prior
         // defensive empty-arm + `descent_invariant_diagnostic` /
         // `release_owner_descent_prefix` recovery is no longer
@@ -442,7 +439,7 @@ impl crate::Engine {
         add_watch(&mut self.tree, new_prefix, key, ClassSet::STRUCTURE, out);
 
         let target_path = self.tree.path_of(new_prefix).unwrap_or_default();
-        Self::emit_descent_probe(owner, correlation, new_prefix, target_path, out);
+        Self::emit_descent_probe(owner, correlation, target_path, out);
     }
 
     /// Owner-polymorphic descent-prefix release. Routes to the per-owner
@@ -642,7 +639,7 @@ impl crate::Engine {
                 add_watch(&mut self.tree, parent_id, key, ClassSet::STRUCTURE, out);
 
                 let target_path = self.tree.path_of(parent_id).unwrap_or_default();
-                Self::emit_descent_probe(owner, correlation, parent_id, target_path, out);
+                Self::emit_descent_probe(owner, correlation, target_path, out);
             }
             None => {
                 // Root prefix vanished — no rewind target. Delegate to
@@ -703,7 +700,7 @@ impl crate::Engine {
 
         let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
         let target_path = self.tree.path_of(prefix).unwrap_or_default();
-        Self::emit_descent_probe(owner, correlation, prefix, target_path, out);
+        Self::emit_descent_probe(owner, correlation, target_path, out);
     }
 }
 

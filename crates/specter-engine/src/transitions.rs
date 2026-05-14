@@ -1195,7 +1195,7 @@ impl Engine {
                         .probe_channel
                         .open(qowner, crate::probe_channel::OpenKind::PromoterDescent);
                     let target_path = self.tree.path_of(prefix).unwrap_or_default();
-                    Self::emit_descent_probe(qowner, correlation, prefix, target_path, out);
+                    Self::emit_descent_probe(qowner, correlation, target_path, out);
                 }
                 PromoterReseedAction::Enumerate(proxy_keys) => {
                     // Enqueue every proxy. Single-slot drain processes

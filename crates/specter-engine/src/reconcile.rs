@@ -371,13 +371,13 @@ pub(crate) fn graft(
 
     // Navigate the typed Dir prior down to `target`. Reused for the
     // equal-hash early-out and as the diff's baseline; cheap Arc::clone
-    // at depth 1 (target == anchor's root) — same shape as the prior
-    // call through `subtree_at_impl`, but without the
+    // at depth 1 (target == anchor) — same shape as the prior call
+    // through the inlined `subtree_at` dispatcher, but without the
     // `TreeSnapshot::Dir(Arc::clone(...))` wrapper allocation the
     // `&TreeSnapshot`-keyed entry point required.
     let prior_at_target = prior
         .as_ref()
-        .and_then(|arc| subtree_at_dir(arc, target, tree));
+        .and_then(|arc| subtree_at_dir(arc, anchor, target, tree));
 
     // O(1) early-out: response equals prior at this target ⇒ no Watch
     // ops, no graft, no allocation.
@@ -517,7 +517,9 @@ pub(crate) fn current_target_hash(
     tree: &Tree,
 ) -> Option<u128> {
     match profile.current.as_ref()? {
-        TreeSnapshot::Dir(root) => subtree_at_dir(root, target, tree).map(|s| s.dir_hash()),
+        TreeSnapshot::Dir(root) => {
+            subtree_at_dir(root, profile.resource, target, tree).map(|s| s.dir_hash())
+        }
         TreeSnapshot::File(leaf) => Some(leaf.leaf_hash()),
     }
 }
@@ -567,16 +569,12 @@ mod tests {
         })
     }
 
-    fn dir_snap(
-        resource: ResourceId,
-        inode: u64,
-        entries: Vec<(&str, ChildEntry)>,
-    ) -> Arc<DirSnapshot> {
+    fn dir_snap(inode: u64, entries: Vec<(&str, ChildEntry)>) -> Arc<DirSnapshot> {
         let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
         for (name, child) in entries {
             map.insert(CompactString::new(name), child);
         }
-        Arc::new(DirSnapshot::new(resource, meta(inode), 0, map))
+        Arc::new(DirSnapshot::new(meta(inode), 0, map))
     }
 
     fn anchor(per_file: bool) -> (Tree, ProfileMap, ResourceId, specter_core::ProfileId) {
@@ -635,7 +633,6 @@ mod tests {
         // gets Watch, Leaf does not.
         let (mut tree, profiles, root, pid) = anchor(false);
         let response = dir_snap(
-            root,
             100,
             vec![
                 ("a.rs", leaf(EntryKind::File, 1)),
@@ -663,7 +660,6 @@ mod tests {
         // has_per_file_fds=true ⇒ Leaf creates *also* get Watch.
         let (mut tree, profiles, root, pid) = anchor(true);
         let response = dir_snap(
-            root,
             100,
             vec![
                 ("a.rs", leaf(EntryKind::File, 1)),
@@ -840,9 +836,9 @@ mod tests {
         // current.subtree_at(target).dir_hash() == response.dir_hash() ⇒
         // zero allocations, zero Watch ops, current unchanged.
         let (mut tree, mut profiles, root, pid) = anchor(false);
-        let snap_a = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        let snap_a = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         profiles.get_mut(pid).unwrap().current = Some(TreeSnapshot::Dir(Arc::clone(&snap_a)));
-        let response = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        let response = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
         let prior_arc_count = Arc::strong_count(&snap_a);
 
@@ -874,7 +870,7 @@ mod tests {
     fn graft_writes_current_at_target() {
         // No prior subtree at target ⇒ graft splices wholesale.
         let (mut tree, mut profiles, root, pid) = anchor(false);
-        let response = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        let response = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
         let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
@@ -918,7 +914,7 @@ mod tests {
 
         // Prior current = root with a.rs as covered leaf; baseline matches
         // so the diff has no ops other than the delete.
-        let prior_current = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         profiles.get_mut(pid).unwrap().current =
             Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
 
@@ -950,7 +946,7 @@ mod tests {
         );
 
         // Probe response: a.rs is gone.
-        let response = dir_snap(root, 200, vec![]);
+        let response = dir_snap(200, vec![]);
 
         let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
@@ -987,7 +983,7 @@ mod tests {
         let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
         tree.set_kind(a_rs_id, ResourceKind::File);
 
-        let prior_current = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         profiles.get_mut(pid).unwrap().current =
             Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
 
@@ -1004,7 +1000,7 @@ mod tests {
 
         // Response: same a.rs name+inode (no delete). Bumped root mtime
         // forces graft to walk the level rather than equal-hash early-out.
-        let response = dir_snap(root, 200, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        let response = dir_snap(200, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
         let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
@@ -1043,7 +1039,7 @@ mod tests {
         let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
         tree.set_kind(a_rs_id, ResourceKind::File);
 
-        let prior_current = dir_snap(root, 100, vec![("a.rs", leaf(EntryKind::File, 1))]);
+        let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         profiles.get_mut(pid).unwrap().current =
             Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
 
@@ -1061,7 +1057,7 @@ mod tests {
 
         // Probe response deletes a.rs. The reap fires; the purge runs;
         // the Subtree entry should survive.
-        let response = dir_snap(root, 200, vec![]);
+        let response = dir_snap(200, vec![]);
 
         let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
@@ -1114,7 +1110,6 @@ mod tests {
         // `emit_effects_per_stable_file` writes in production.
         for &pid in &[pid_a, pid_b] {
             profiles.get_mut(pid).unwrap().current = Some(TreeSnapshot::Dir(dir_snap(
-                root,
                 100,
                 vec![("a.rs", leaf(EntryKind::File, 1))],
             )));
@@ -1138,7 +1133,7 @@ mod tests {
             &mut StepOutput::default(),
         );
 
-        let response = dir_snap(root, 200, vec![]);
+        let response = dir_snap(200, vec![]);
 
         let prior = match profiles.get(pid_a).and_then(|p| p.current.as_ref()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
@@ -1208,11 +1203,11 @@ mod tests {
         let b_id = tree.ensure(Some(a_id), "b", ResourceRole::User);
         tree.set_kind(b_id, ResourceKind::Dir);
 
-        let prior_current = dir_snap(root, 100, vec![("a", dir_child(2, None))]);
+        let prior_current = dir_snap(100, vec![("a", dir_child(2, None))]);
         profiles.get_mut(pid).unwrap().current =
             Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
 
-        let response = dir_snap(b_id, 200, vec![]);
+        let response = dir_snap(200, vec![]);
 
         let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
@@ -1297,7 +1292,7 @@ mod tests {
         );
 
         // Prior snapshot: root with covered Leaf `foo` (inode 42).
-        let prior_current = dir_snap(root, 100, vec![("foo", leaf(EntryKind::File, 42))]);
+        let prior_current = dir_snap(100, vec![("foo", leaf(EntryKind::File, 42))]);
         profiles.get_mut(pid).unwrap().current =
             Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
 
@@ -1306,17 +1301,9 @@ mod tests {
         let nested_subtree = {
             let mut entries: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
             entries.insert(CompactString::new("nested.rs"), leaf(EntryKind::File, 99));
-            // root_resource on a sub-snapshot is advisory only; tests
-            // can use any ResourceId for it. Use the prior_foo_id —
-            // the slot will reap during graft but the snapshot doesn't
-            // resolve through tree, so the stale id is fine.
-            Arc::new(DirSnapshot::new(prior_foo_id, meta(7), 0, entries))
+            Arc::new(DirSnapshot::new(meta(7), 0, entries))
         };
-        let response = dir_snap(
-            root,
-            200,
-            vec![("foo", dir_child(42, Some(nested_subtree)))],
-        );
+        let response = dir_snap(200, vec![("foo", dir_child(42, Some(nested_subtree)))]);
 
         // Sanity: prior and new "foo" entries share `(inode, device)`
         // ⇒ this is the kind-flip-with-inode-reuse case that

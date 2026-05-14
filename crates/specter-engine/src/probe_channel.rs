@@ -2,9 +2,10 @@
 //!
 //! [`ProbeChannel`] owns the per-owner outstanding-probe map, the
 //! correlation counter, and (for [`OpenKind::PromoterEnumerating`]) the
-//! sibling state the dispatcher reads when [`specter_core::ProbeOutcome`]
-//! variants carry no payload. The structure encodes three invariants that
-//! were previously split between core fields and engine helpers:
+//! sibling state the dispatcher reads to identify the proxy across all
+//! three response outcomes (`SubtreeOk`, `Vanished`, `Failed`). The
+//! structure encodes three invariants that were previously split between
+//! core fields and engine helpers:
 //!
 //! 1. **I5 — at most one outstanding probe per [`ProbeOwner`].** Enforced
 //!    structurally: a single [`std::collections::BTreeMap`] entry per
@@ -18,10 +19,11 @@
 //!    or vice versa) is a compile error via the phantom-typed wrapper.
 //! 3. **Per-owner sibling state.** [`OpenKind::PromoterEnumerating`]
 //!    carries the proxy [`ResourceId`] the enumeration response refers
-//!    to (the wire's `Vanished` / `Failed` outcomes echo no payload).
-//!    The kind variant pairs the target with the channel state in one
-//!    structural slot — no second field to drift out of lockstep with
-//!    the correlation.
+//!    to. The wire payload is path-only — the dispatcher reads the
+//!    target off the channel's variant payload uniformly, regardless of
+//!    which `ProbeOutcome` variant came back. Pairing the target with
+//!    the channel state in one structural slot keeps the dispatch key
+//!    in lockstep with the correlation.
 //!
 //! Response dispatchers route on [`Open::kind`] rather than inspecting
 //! Profile / Promoter state, so phase-mismatch cases that used to require
@@ -101,11 +103,10 @@ impl Open {
 /// (`debug_assert!` + [`specter_core::Diagnostic::StaleProbeResponse`]).
 ///
 /// [`Self::PromoterEnumerating`] carries the proxy [`ResourceId`] the
-/// enumeration probe targets so the `Vanished` / `Failed` dispatch can
-/// identify the proxy without a separate per-Promoter slot. If the wire
-/// were ever extended to echo the target on `ProbeOutcome::Vanished` /
-/// `Failed`, this variant would collapse to a unit and the payload
-/// argument would disappear from call sites.
+/// enumeration probe targets. The dispatcher reads it on every outcome
+/// (`SubtreeOk`, `Vanished`, `Failed`) — the wire is path-only, and the
+/// engine's dispatch identity lives on the channel state rather than
+/// being echoed by the walker.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum OpenKind {
     /// Profile pre-fire stability check (Seed or Standard burst).
@@ -121,10 +122,9 @@ pub(crate) enum OpenKind {
     /// `dispatch_descent_*` with `ProbeOwner::Promoter(_)`.
     PromoterDescent,
     /// Promoter proxy enumeration. `target` identifies the proxy the
-    /// probe is enumerating; the dispatcher reads it on
-    /// `ProbeOutcome::{Vanished, Failed}` (those outcomes carry no
-    /// wire payload). On `ProbeOutcome::SubtreeOk(arc)` the dispatcher
-    /// instead reads `arc.root_resource` (the walker's stamp).
+    /// probe is enumerating. The dispatcher reads it on every outcome
+    /// (`SubtreeOk` / `Vanished` / `Failed`) — the wire is path-only,
+    /// so this variant is the canonical source of the dispatch key.
     PromoterEnumerating { target: ResourceId },
 }
 
@@ -289,17 +289,21 @@ impl Engine {
     /// Emit [`ProbeRequest::Subtree`]. Recursive Dir walk honouring
     /// `scan_config`; walker returns
     /// `ProbeOutcome::SubtreeOk(Arc<DirSnapshot>)` rooted at
-    /// `target_resource`.
+    /// `target_path`.
     ///
     /// `scan_config` / `captured_with` come from the Profile — the
     /// caller already holds a `&Profile` borrow at every call site and
     /// threads `(p.config.clone(), p.config_hash)` through here. The
     /// helper does not re-borrow `self` to look them up.
+    ///
+    /// The wire carries `target_path` only. Engine-side identity (the
+    /// `ResourceId` the engine probed) stays on `ProbeChannel`'s open
+    /// kind or on the relevant `Profile` / burst state — the walker
+    /// never needs the engine's `Tree`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_subtree_probe(
         owner: ProbeOwner,
         correlation: ProbeCorrelation,
-        target_resource: ResourceId,
         target_path: PathBuf,
         scan_config: ScanConfig,
         captured_with: u64,
@@ -312,7 +316,6 @@ impl Engine {
             request: ProbeRequest::Subtree {
                 owner,
                 correlation,
-                target_resource,
                 target_path,
                 scan_config,
                 captured_with,
@@ -329,14 +332,14 @@ impl Engine {
     /// `max_depth`) — the Profile's user-facing filters would mask the
     /// very segment descent is searching for.
     ///
-    /// Walker stamps `target_resource` onto
-    /// `DirSnapshot.root_resource` so consumers reading the snapshot
-    /// directly can identify the prefix without consulting per-state
-    /// engine fields.
+    /// The wire carries `target_path` only. The engine reads the
+    /// dispatch identity off its own state at response time:
+    /// `descent.current_prefix()` for Profile / Promoter descent,
+    /// `OpenKind::PromoterEnumerating { target }` for Promoter
+    /// enumeration.
     pub(crate) fn emit_descent_probe(
         owner: ProbeOwner,
         correlation: ProbeCorrelation,
-        target_resource: ResourceId,
         target_path: PathBuf,
         out: &mut StepOutput,
     ) {
@@ -344,7 +347,6 @@ impl Engine {
             request: ProbeRequest::Descent {
                 owner,
                 correlation,
-                target_resource,
                 target_path,
             },
         });

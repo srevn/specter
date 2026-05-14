@@ -34,10 +34,7 @@ fn empty_program() -> Arc<ActionProgram> {
     single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
 }
 
-fn dir_snap(
-    root: ResourceId,
-    children: Vec<(&str, EntryKind, u64)>,
-) -> std::sync::Arc<DirSnapshot> {
+fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -55,7 +52,6 @@ fn dir_snap(
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -126,7 +122,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (sid, pid, attach_out) = attach_subtree_root(&mut e, "build", root, MAX_SETTLE);
-    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(root, vec![]));
+    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim,
         AnchorClaim::Held,
@@ -190,8 +186,8 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
     let (_sid_p, pid_p, out_p) = attach_subtree_root(&mut e, "P", root, MAX_SETTLE);
     let (_sid_q, pid_q, out_q) =
         attach_subtree_root(&mut e, "Q", root, MAX_SETTLE + Duration::from_secs(1));
-    complete_seed_burst(&mut e, pid_p, &out_p, dir_snap(root, vec![]));
-    complete_seed_burst(&mut e, pid_q, &out_q, dir_snap(root, vec![]));
+    complete_seed_burst(&mut e, pid_p, &out_p, dir_snap(vec![]));
+    complete_seed_burst(&mut e, pid_q, &out_q, dir_snap(vec![]));
 
     // Pre-condition: both Profiles cache the anchor's kind.
     assert_eq!(
@@ -248,8 +244,8 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
     let (_sid_q, pid_q, out_q) =
         attach_subtree_root(&mut e, "Q", root, MAX_SETTLE + Duration::from_secs(1));
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 2);
-    complete_seed_burst(&mut e, pid_p, &out_p, dir_snap(root, vec![]));
-    complete_seed_burst(&mut e, pid_q, &out_q, dir_snap(root, vec![]));
+    complete_seed_burst(&mut e, pid_p, &out_p, dir_snap(vec![]));
+    complete_seed_burst(&mut e, pid_q, &out_q, dir_snap(vec![]));
 
     // Reject the kernel watch.
     let purge_out = e.step(
@@ -326,7 +322,7 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let (sid, pid, attach_out) = attach_subtree_root(&mut e, "watch", anchor, MAX_SETTLE);
-    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(anchor, vec![]));
+    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
     // `set_watch_root_parent` ran at attach; parent has +1 STRUCTURE.
     assert_eq!(
         e.profiles().get(pid).unwrap().watch_root_parent,
@@ -613,7 +609,7 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
             correlation: enum_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(a, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -681,7 +677,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
             correlation: enum_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(a, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );

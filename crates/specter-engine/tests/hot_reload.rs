@@ -18,8 +18,8 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, BurstFinish, ChildEntry, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta,
     DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, SubAttachRequest, SubRegistryDiff, WatchOp, WatchRegistryDiff,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ResourceKind, ResourceRole, ScanConfig,
+    SubAttachRequest, SubRegistryDiff, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -39,10 +39,7 @@ fn empty_program() -> Arc<ActionProgram> {
 
 /// V5-native helper: build a `TreeSnapshot::Dir` with single-component
 /// children. Tests in this file use leaf-name segments only (no `/`).
-fn dir_snap(
-    root: ResourceId,
-    children: Vec<(&str, EntryKind, u64)>,
-) -> std::sync::Arc<DirSnapshot> {
+fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
@@ -60,7 +57,6 @@ fn dir_snap(
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        root,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -174,7 +170,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -243,7 +239,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -297,7 +293,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: std_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         t2,
     );
@@ -350,7 +346,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -461,7 +457,7 @@ fn effect_complete_after_detach_drops_silently() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );
@@ -543,7 +539,7 @@ fn config_diff_modified_remove_then_add() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_a),
             correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(r, vec![])),
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
         }),
         now,
     );

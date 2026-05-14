@@ -2062,7 +2062,6 @@ mod tests {
             )),
         );
         let dir = DirSnapshot::new(
-            anchor,
             DirMeta {
                 mtime: UNIX_EPOCH,
                 fs_id: FsIdentity {

@@ -320,7 +320,6 @@ mod tests {
         // `transition_to_draining`).
         let mid_resource = profiles.get(p_mid).unwrap().resource;
         let stable_snapshot = TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
-            mid_resource,
             DirMeta {
                 mtime: UNIX_EPOCH,
                 fs_id: FsIdentity {
@@ -475,11 +474,11 @@ mod tests {
     #[test]
     fn collect_in_subtree_yields_strict_descendant_profiles_only() {
         let (tree, profiles, p_root, p_mid, p_leaf) = three_level_chain();
-        let root_resource = profiles.get(p_root).unwrap().resource;
-        let mid_resource = profiles.get(p_mid).unwrap().resource;
+        let root_anchor = profiles.get(p_root).unwrap().resource;
+        let mid_anchor = profiles.get(p_mid).unwrap().resource;
 
         let mut scratch = Vec::new();
-        collect_in_subtree(&tree, &profiles, root_resource, &mut scratch);
+        collect_in_subtree(&tree, &profiles, root_anchor, &mut scratch);
         assert_eq!(
             scratch
                 .iter()
@@ -490,7 +489,7 @@ mod tests {
         );
 
         scratch.clear();
-        collect_in_subtree(&tree, &profiles, mid_resource, &mut scratch);
+        collect_in_subtree(&tree, &profiles, mid_anchor, &mut scratch);
         assert_eq!(
             scratch
                 .iter()
@@ -506,10 +505,10 @@ mod tests {
     #[test]
     fn collect_in_subtree_clears_scratch_on_entry() {
         let (tree, profiles, p_root, _, _) = three_level_chain();
-        let root_resource = profiles.get(p_root).unwrap().resource;
+        let root_anchor = profiles.get(p_root).unwrap().resource;
 
         let mut scratch: Vec<ProfileId> = vec![ProfileId::default(); 7];
-        collect_in_subtree(&tree, &profiles, root_resource, &mut scratch);
+        collect_in_subtree(&tree, &profiles, root_anchor, &mut scratch);
         // Filled exactly with the strict descendants of root (mid, leaf).
         assert_eq!(scratch.len(), 2);
     }

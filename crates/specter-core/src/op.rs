@@ -6,7 +6,7 @@ use crate::scan_config::ScanConfig;
 use crate::snapshot::tree::{DirSnapshot, LeafEntry};
 use crate::sub::ClassSet;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Probe-channel owner — the engine-resident entity that minted a probe.
@@ -72,23 +72,18 @@ pub enum ProbeRequest {
     /// Subtree verify / Seed / Rebase / Standard. Recursive Dir walk
     /// honouring `scan_config`. Walker returns
     /// `ProbeOutcome::SubtreeOk(Arc<DirSnapshot>)` rooted at
-    /// `target_resource` (or `Vanished` / `Failed`).
+    /// `target_path` (or `Vanished` / `Failed`).
     Subtree {
         /// Owner of the probe channel. Echoed back on `ProbeResponse`
         /// and used by the Sensor's expectation-map insertion.
         owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
-        /// Resource the prober walks. Often `Profile.resource` (Seed
-        /// bursts); for Standard bursts this becomes the LCA of dirty
-        /// resources. The walker stamps it onto `DirSnapshot.root_resource`
-        /// (advisory) but otherwise doesn't consult it — the walker has
-        /// no Tree.
-        target_resource: ResourceId,
-        /// Filesystem path of `target_resource` at probe-emission time.
-        /// Engine builds via `tree.path_of(target_resource)`. Empty
-        /// `PathBuf` is the lone failure mode; the walker treats empty
-        /// as `Vanished`.
+        /// Filesystem path of the directory to walk. Engine builds via
+        /// `tree.path_of(target_resource)` and ships the path on the
+        /// wire — the walker has no `Tree` and never needs the
+        /// engine's `ResourceId`. Empty `PathBuf` is the lone failure
+        /// mode; the walker treats empty as `Vanished`.
         target_path: PathBuf,
         /// `ScanConfig` to honour (recursive, hidden, exclude, pattern,
         /// `max_depth`). Cloned at emit time.
@@ -98,7 +93,7 @@ pub enum ProbeRequest {
         /// with different filters cannot produce identical `dir_hash` for
         /// divergent in-scope content.
         captured_with: u64,
-        /// Engine's last-known view of `target_resource`'s subtree. The
+        /// Engine's last-known view of `target_path`'s subtree. The
         /// walker consults `baseline_subtree.root_meta` for mtime-skip and
         /// propagates child baselines via `entries[name].subtree`. `None`
         /// means "no prior observation": first Seed of a fresh Profile.
@@ -110,9 +105,8 @@ pub enum ProbeRequest {
         baseline_subtree: Option<Arc<DirSnapshot>>,
         /// Set of paths the walker MUST enumerate (refusing mtime-skip)
         /// at any directory whose path equals one of these OR is an
-        /// ancestor of one. Populated from
-        /// `dirty_resources ∩ subtree(target_resource)`: kqueue events
-        /// that arrived since the last probe at this target.
+        /// ancestor of one. Populated from kqueue events that arrived
+        /// since the last probe at this target.
         ///
         /// Walker checks `force_walk.iter().any(|p| p.starts_with(current))`
         /// — O(N) per directory, N = `|force_walk|` (typically 1–5). The
@@ -145,15 +139,12 @@ pub enum ProbeRequest {
         owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
-        /// Resource the prober walks (the descent prefix at emission
-        /// time). The walker stamps this onto the response's
-        /// `DirSnapshot.root_resource` so consumers reading the snapshot
-        /// directly can identify the proxy / prefix without consulting
-        /// engine-side per-state fields. Profile descent dispatch reads
-        /// `descent.current_prefix` as the source of truth and
-        /// `debug_assert!`s the stamp matches.
-        target_resource: ResourceId,
         /// Filesystem path of the descent prefix at probe-emission time.
+        /// The engine routes responses by `(owner, correlation)` and the
+        /// matched [`crate::ProbeOwner`]-specific channel state
+        /// (descent prefix lives on engine-side `DescentState`; promoter
+        /// enumeration target lives on the channel's `OpenKind` variant);
+        /// the walker only needs the path.
         target_path: PathBuf,
     },
 }
@@ -170,24 +161,6 @@ impl ProbeRequest {
         }
     }
 
-    /// Resource the walker should stamp onto the response's
-    /// `DirSnapshot.root_resource`. `None` for [`Self::AnchorFile`] —
-    /// the wire carries `target_path`; the engine's burst state holds
-    /// the anchor's [`ResourceId`] separately. `Some(_)` for
-    /// [`Self::Subtree`] and [`Self::Descent`].
-    #[must_use]
-    pub const fn target_resource(&self) -> Option<ResourceId> {
-        match self {
-            Self::AnchorFile { .. } => None,
-            Self::Subtree {
-                target_resource, ..
-            }
-            | Self::Descent {
-                target_resource, ..
-            } => Some(*target_resource),
-        }
-    }
-
     /// Correlation token. Used by the bin's expectation-map insertion
     /// in the sensor's `Prober::submit` (via `WorkerProber`) and by
     /// the worker's post-run cleanup. Never read by the engine after
@@ -198,6 +171,18 @@ impl ProbeRequest {
             Self::AnchorFile { correlation, .. }
             | Self::Subtree { correlation, .. }
             | Self::Descent { correlation, .. } => *correlation,
+        }
+    }
+
+    /// Filesystem path the walker probes. Every variant carries one;
+    /// returns the borrowed path verbatim. The wire is path-keyed —
+    /// this is the load-bearing identifier the walker dispatches on.
+    #[must_use]
+    pub fn target_path(&self) -> &Path {
+        match self {
+            Self::AnchorFile { target_path, .. }
+            | Self::Subtree { target_path, .. }
+            | Self::Descent { target_path, .. } => target_path.as_path(),
         }
     }
 }
@@ -224,8 +209,10 @@ pub enum ProbeOutcome {
     AnchorOk(LeafEntry),
     /// `Subtree` *or* `Descent` request returned a directory observation.
     /// Descent and Subtree share a wire shape (`Arc<DirSnapshot>`) — what
-    /// differs is the Profile's state at dispatch time, not the data the
-    /// walker hands back.
+    /// differs is the engine-side dispatch state, not the data the walker
+    /// hands back. The snapshot is pure content (`root_meta`,
+    /// `captured_with`, `entries`); engine-side identity stays at the
+    /// dispatch layer (probe channel + Profile state).
     SubtreeOk(Arc<DirSnapshot>),
     /// Path absent (`ENOENT`) or kind mismatch (file probe found dir, dir
     /// probe found file). Routed to whichever `dispatch_*_vanished`

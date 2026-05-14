@@ -68,10 +68,10 @@ fn req_for(name: &str, pattern: &str) -> PromoterAttachRequest {
     }
 }
 
-/// Build an `Arc<DirSnapshot>` whose root-resource is `target` (the proxy
-/// or descent prefix the request named) and whose entries match the
-/// supplied list. Mirrors `descent_tests.rs::dir_snap_with`'s shape.
-fn dir_snap_at(target: ResourceId, children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
+/// Build an `Arc<DirSnapshot>` with the supplied children. The walker
+/// speaks paths; engine identity stays engine-side, so the snapshot
+/// carries pure content.
+fn dir_snap_at(children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children.iter().copied() {
         let child = match kind {
@@ -89,7 +89,6 @@ fn dir_snap_at(target: ResourceId, children: &[(&str, EntryKind, u64)]) -> Arc<D
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        target,
         DirMeta {
             mtime: UNIX_EPOCH,
             fs_id: FsIdentity {
@@ -113,11 +112,12 @@ fn ensure_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     r
 }
 
-/// Read the descent probe target from a probe-ops list (the latest
-/// outstanding descent/subtree probe in emission order).
-fn last_probe_target(out: &specter_core::StepOutput) -> Option<ResourceId> {
+/// Read the descent probe target-path from a probe-ops list (the latest
+/// outstanding descent/subtree probe in emission order). The wire is
+/// path-only; tests compare via `e.tree().path_of(<id>)`.
+fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf> {
     out.probe_ops.iter().rev().find_map(|op| match op {
-        ProbeOp::Probe { request } => request.target_resource(),
+        ProbeOp::Probe { request } => Some(request.target_path().to_path_buf()),
         ProbeOp::Cancel { .. } => None,
     })
 }
@@ -196,7 +196,7 @@ fn attach_immediate_active_at_existing_prefix() {
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
         "enumeration probe in flight",
     );
-    assert_eq!(last_probe_target(&out), Some(var_log));
+    assert_eq!(last_probe_path(&out), e.tree().path_of(var_log));
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn attach_pending_when_literal_prefix_missing() {
     assert_eq!(e.tree().get(fs_root).unwrap().watch_demand(), 1);
 
     // Descent probe in flight at FS-root.
-    assert_eq!(last_probe_target(&out), Some(fs_root));
+    assert_eq!(last_probe_path(&out), e.tree().path_of(fs_root));
     assert!(e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some());
 }
 
@@ -249,11 +249,15 @@ fn descent_advances_one_segment_on_partial_response() {
     let pid =
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
-    assert_eq!(last_probe_target(&out), Some(var), "first probe at /var");
+    assert_eq!(
+        last_probe_path(&out),
+        e.tree().path_of(var),
+        "first probe at /var"
+    );
 
     // Inject SubtreeOk: /var contains "log" as a Dir. Descent should
     // advance to /var/log; remaining = [].
-    let snap = dir_snap_at(var, &[("log", EntryKind::Dir, 1)]);
+    let snap = dir_snap_at(&[("log", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -292,17 +296,14 @@ fn enumeration_ok_promotes_final_match() {
     let pid =
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
-    assert_eq!(last_probe_target(&out), Some(var_log));
+    assert_eq!(last_probe_path(&out), e.tree().path_of(var_log));
 
     // Inject enumeration response listing two files: one matches *.log,
     // one doesn't.
-    let snap = dir_snap_at(
-        var_log,
-        &[
-            ("foo.log", EntryKind::File, 1),
-            ("bar.txt", EntryKind::File, 2),
-        ],
-    );
+    let snap = dir_snap_at(&[
+        ("foo.log", EntryKind::File, 1),
+        ("bar.txt", EntryKind::File, 2),
+    ]);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -359,14 +360,11 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
     // Inject /srv listing: two child Dirs ("alpha", "beta") and a stray
     // File ("noisy.cfg") that the glob would match but should be
     // skipped at non-final position (only Dir matches descend).
-    let snap = dir_snap_at(
-        srv,
-        &[
-            ("alpha", EntryKind::Dir, 1),
-            ("beta", EntryKind::Dir, 2),
-            ("noisy.cfg", EntryKind::File, 3),
-        ],
-    );
+    let snap = dir_snap_at(&[
+        ("alpha", EntryKind::Dir, 1),
+        ("beta", EntryKind::Dir, 2),
+        ("noisy.cfg", EntryKind::File, 3),
+    ]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -426,7 +424,7 @@ fn try_promote_is_idempotent_on_repeated_match() {
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Cycle 1: foo.log matches. Promotion mints SubA.
-    let snap = dir_snap_at(var_log, &[("foo.log", EntryKind::File, 1)]);
+    let snap = dir_snap_at(&[("foo.log", EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -449,7 +447,7 @@ fn try_promote_is_idempotent_on_repeated_match() {
         Instant::now(),
     );
     let corr2 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
-    let snap2 = dir_snap_at(var_log, &[("foo.log", EntryKind::File, 1)]);
+    let snap2 = dir_snap_at(&[("foo.log", EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -478,7 +476,7 @@ fn proxy_event_enqueues_and_dispatches() {
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     // Drain the initial enumeration: respond Ok with empty entries.
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
-    let snap = dir_snap_at(var_log, &[]);
+    let snap = dir_snap_at(&[]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -509,8 +507,8 @@ fn proxy_event_enqueues_and_dispatches() {
         "fresh enumeration probe in flight",
     );
     assert_eq!(
-        last_probe_target(&out),
-        Some(var_log),
+        last_probe_path(&out),
+        e.tree().path_of(var_log),
         "probe target = the proxy that received the event",
     );
 }
@@ -623,7 +621,7 @@ fn descent_vanished_rewinds_to_parent() {
         .pending_probe_for(ProbeOwner::Promoter(pid))
         .expect("fresh probe minted");
     assert_ne!(corr1, corr2, "post-rewind correlation differs from pre");
-    assert_eq!(last_probe_target(&out), Some(fs_root));
+    assert_eq!(last_probe_path(&out), e.tree().path_of(fs_root));
 
     // The vanished /var slot was vacated. Vacate clears
     // watch_demand and kind; the slot itself is retained while it
@@ -668,7 +666,7 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
 
     // Drain the in-flight probe with an empty response (segment not
     // yet present; descent stays PrefixPending awaiting the next event).
-    let snap = dir_snap_at(var, &[]);
+    let snap = dir_snap_at(&[]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -775,7 +773,7 @@ fn prefix_pending_terminal_event_at_prefix_emits_fresh_descent_probe() {
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     // Drain the in-flight probe.
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
-    let snap = dir_snap_at(var, &[]);
+    let snap = dir_snap_at(&[]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -949,7 +947,7 @@ fn pending_enumeration_target_clears_on_response() {
     // the kind tag go away atomically (`close_if` removes the Open
     // entry as one operation).
     let mut e = Engine::new();
-    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let _var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
         Input::AttachPromoter(req_for("logs", "/var/log/*.log")),
         Instant::now(),
@@ -958,7 +956,7 @@ fn pending_enumeration_target_clears_on_response() {
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
-    let snap = dir_snap_at(var_log, &[]);
+    let snap = dir_snap_at(&[]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -1120,7 +1118,7 @@ fn enumeration_vanished_cascades_subproxies() {
     let corr1 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Forward pass at /srv: alpha (Dir) → register sub-proxy at /srv/alpha.
-    let snap = dir_snap_at(srv, &[("alpha", EntryKind::Dir, 1)]);
+    let snap = dir_snap_at(&[("alpha", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -1136,7 +1134,7 @@ fn enumeration_vanished_cascades_subproxies() {
     // Drain the queued enumeration at /srv/alpha by responding empty.
     let alpha = e.tree().lookup(Some(srv), "alpha").expect("alpha present");
     let corr2 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
-    let snap = dir_snap_at(alpha, &[]);
+    let snap = dir_snap_at(&[]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -1329,7 +1327,7 @@ fn reap_promoter_drains_dynamic_subs() {
     // Promoter with one dynamic Sub. `reap_promoter` detaches the
     // Sub and removes the (path, sub) entry from `dynamic_subs`.
     let mut e = Engine::new();
-    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let _var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
         Input::AttachPromoter(req_for("logs", "/var/log/*.log")),
         Instant::now(),
@@ -1339,7 +1337,7 @@ fn reap_promoter_drains_dynamic_subs() {
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Mint a dynamic Sub at /var/log/foo.log.
-    let snap = dir_snap_at(var_log, &[("foo.log", EntryKind::File, 1)]);
+    let snap = dir_snap_at(&[("foo.log", EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -1399,7 +1397,7 @@ fn reap_promoter_active_with_subproxies_clears_all() {
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
     // Forward pass: alpha → sub-proxy at /srv/alpha.
-    let snap = dir_snap_at(srv, &[("alpha", EntryKind::Dir, 1)]);
+    let snap = dir_snap_at(&[("alpha", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
@@ -1455,7 +1453,7 @@ fn promote_one(
     parent_segs: &[&str],
     leaf: &str,
 ) -> (PromoterId, SubId, ResourceId) {
-    let parent = ensure_dir(e, parent_segs);
+    let _parent = ensure_dir(e, parent_segs);
     let anchor_resource = ensure_file(e, parent_segs, leaf);
     let out = e.step(
         Input::AttachPromoter(req_for("test", pattern)),
@@ -1464,7 +1462,7 @@ fn promote_one(
     let pid =
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
-    let snap = dir_snap_at(parent, &[(leaf, EntryKind::File, 1)]);
+    let snap = dir_snap_at(&[(leaf, EntryKind::File, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),

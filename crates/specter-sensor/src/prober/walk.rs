@@ -42,7 +42,7 @@
 use compact_str::CompactString;
 use specter_core::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, LeafEntry, ProbeOutcome,
-    ResourceId, ScanConfig,
+    ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -110,7 +110,6 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
 /// itself.
 pub(super) fn probe_subtree(
     target_path: &Path,
-    target_resource: ResourceId,
     config: &ScanConfig,
     captured_with: u64,
     baseline: Option<&Arc<DirSnapshot>>,
@@ -159,7 +158,6 @@ pub(super) fn probe_subtree(
         root_meta.fs_id.device,
     );
     ProbeOutcome::SubtreeOk(Arc::new(DirSnapshot::new(
-        target_resource,
         root_meta,
         captured_with,
         entries,
@@ -174,32 +172,17 @@ pub(super) fn probe_subtree(
 /// `arc.entries.get(name)` directly and (for Profile descent) discards
 /// the snapshot.
 ///
-/// `target_resource` is stamped onto the response's
-/// `DirSnapshot.root_resource` so consumers reading the snapshot
-/// directly (engine dispatch arms with no per-state target field) can
-/// identify the prefix without an extra channel field. Profile descent
-/// dispatch reads `descent.current_prefix` as the source of truth and
-/// `debug_assert!`s the stamp matches.
-///
 /// `captured_with` is stamped as `0` — descent dispatch never reads the
 /// field (the snapshot is consumed by the engine and dropped before any
 /// consumer compares hashes), so the value is observationally
 /// irrelevant. Callers should not rely on a particular sentinel.
-pub(super) fn probe_descent(target_path: &Path, target_resource: ResourceId) -> ProbeOutcome {
+pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
     let cfg = ScanConfig::builder()
         .recursive(false)
         .hidden(true)
         .max_depth(None)
         .build();
-    probe_subtree(
-        target_path,
-        target_resource,
-        &cfg,
-        0,
-        None,
-        &BTreeSet::new(),
-        false,
-    )
+    probe_subtree(target_path, &cfg, 0, None, &BTreeSet::new(), false)
 }
 
 /// Returns `true` iff any path in `force_walk` is at-or-under `path`.
@@ -468,10 +451,9 @@ fn walk_subdir(
         root_dev,
     );
 
-    // `target_resource` for sub-snapshots is `ResourceId::default()` —
-    // the engine resolves child-resource identity at receive-time.
+    // Sub-snapshots carry pure content — engine-side resource identity
+    // is resolved at receive-time via the engine's `Tree`.
     Some(Arc::new(DirSnapshot::new(
-        ResourceId::default(),
         root_meta,
         captured_with,
         entries,

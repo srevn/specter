@@ -7,7 +7,7 @@ use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, EntryKind, Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest,
-    ProfileId, ResourceId, ScanConfig,
+    ProfileId, ScanConfig,
 };
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
@@ -32,7 +32,6 @@ fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -
     ProbeRequest::Subtree {
         owner: ProbeOwner::Profile(profile),
         correlation: ProbeCorrelation::from(correlation),
-        target_resource: ResourceId::default(),
         target_path,
         scan_config: ScanConfig::builder().recursive(true).build(),
         captured_with: 0,
