@@ -417,10 +417,11 @@ pub(crate) fn graft(
     // `install_dir_current` rebind needed.
     let new_current = match splice(prior, anchor, target, response_arc, tree) {
         SpliceResult::Spliced(snap) => snap,
-        SpliceResult::CrossedUncovered => {
+        SpliceResult::CrossedUncovered(cause) => {
             out.diagnostics.push(Diagnostic::SpliceCrossedUncovered {
                 profile: profile_id,
                 target,
+                cause,
             });
             return;
         }
@@ -1230,14 +1231,20 @@ mod tests {
         let has_diag = out.diagnostics.iter().any(|d| {
             matches!(
                 d,
-                specter_core::Diagnostic::SpliceCrossedUncovered { profile, target }
+                specter_core::Diagnostic::SpliceCrossedUncovered {
+                    profile,
+                    target,
+                    cause: specter_core::SpliceFailureCause::IntermediateUncovered,
+                }
                 if *profile == pid && *target == b_id
             )
         });
         assert!(
             has_diag,
-            "graft must emit SpliceCrossedUncovered when splice can't \
-             navigate the snapshot's coverage path",
+            "graft must emit SpliceCrossedUncovered with \
+             cause=IntermediateUncovered when splice can't navigate the \
+             snapshot's coverage path through a `DirChild::Uncovered` \
+             intermediate",
         );
 
         let p = profiles.get(pid).unwrap();

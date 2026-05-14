@@ -77,6 +77,7 @@
 //!   mutate-through-Arc — so engine and walker can share `Arc<DirSnapshot>`
 //!   handles without locks.
 
+use crate::diag::SpliceFailureCause;
 use crate::diff::{Diff, EntryRef, Rename};
 use crate::fs_id::FsIdentity;
 use crate::hash::{Hasher128Ext, hash_systemtime_into, hasher_128};
@@ -620,27 +621,37 @@ fn ancestor_chain(
 ///
 /// On `Spliced` the caller adopts the carried view as the new current;
 /// on `CrossedUncovered` the caller surfaces a diagnostic and leaves
-/// its own prior handle untouched. The variant carries no payload —
-/// `splice` consumes the caller's `prior` Arc, but `Profile.current`'s
-/// own handle is independent of that (the engine always clones before
-/// calling), so the caller already owns the unchanged prior view.
+/// its own prior handle untouched. `splice` consumes the caller's
+/// `prior` Arc, but `Profile.current`'s own handle is independent of
+/// that (the engine always clones before calling), so the caller
+/// already owns the unchanged prior view across the breach.
 #[derive(Debug)]
 pub enum SpliceResult {
     /// Splice succeeded. The new view integrates `replacement` at
     /// `target` (or is the trivial wholesale-replace when prior was
     /// `None` / target-equals-anchor).
     Spliced(TreeSnapshot),
-    /// Splice could not navigate from the prior anchor down to `target`
-    /// (target outside anchor's tree subtree, or path crossed a
-    /// [`DirChild::Uncovered`] intermediate). The caller leaves its
-    /// prior view in place and emits
-    /// [`crate::Diagnostic::SpliceCrossedUncovered`] so the contract
-    /// violation is visible in operator logs.
+    /// Splice could not navigate from the prior anchor down to `target`.
+    /// The payload demuxes the three structural failure modes:
+    /// [`SpliceFailureCause::TargetOutsideAnchorSubtree`] (target
+    /// outside anchor's tree subtree),
+    /// [`SpliceFailureCause::SlotReapedMidGraft`] (interior slot's
+    /// generation moved mid-graft), and
+    /// [`SpliceFailureCause::IntermediateUncovered`] (path crossed a
+    /// [`DirChild::Uncovered`], a missing entry, or a `Leaf` at an
+    /// interior segment).
     ///
-    /// Engine contract: "graft only into observed subtrees". Reaching
-    /// this variant in v1 implies a state-machine bug; the variant
-    /// exists to surface it without crashing the engine.
-    CrossedUncovered,
+    /// The caller leaves its prior view in place and emits
+    /// [`crate::Diagnostic::SpliceCrossedUncovered`] carrying the cause
+    /// so the contract violation is visible in operator logs with the
+    /// failure mode pre-classified.
+    ///
+    /// Engine contract is "graft only into observed subtrees". After
+    /// the walker-race fix, only [`SpliceFailureCause::IntermediateUncovered`]
+    /// remains reachable through legitimate filesystem state, and only
+    /// via cross-filesystem boundaries. The other two are
+    /// v1-unreachable.
+    CrossedUncovered(SpliceFailureCause),
 }
 
 /// Tree-zipper splice that replaces the subtree at `target` within a
@@ -676,17 +687,23 @@ pub enum SpliceResult {
 ///   or `dir_hash` equality (G7 propagation).
 ///
 /// Returns [`SpliceResult::CrossedUncovered`] when the engine's "graft
-/// only into observed subtrees" contract is violated:
-/// - `target` is outside the anchor's tree subtree (parent walk bottoms
-///   out before reaching `anchor`).
-/// - The path from anchor to target crosses a [`DirChild::Uncovered`]
-///   intermediate (snapshot coverage gap), a missing entry, or a slot
-///   reaped mid-graft.
+/// only into observed subtrees" contract is violated. The carried
+/// [`SpliceFailureCause`] demuxes the three structural triggers:
+/// - [`SpliceFailureCause::TargetOutsideAnchorSubtree`] — parent walk
+///   bottoms out before reaching `anchor`.
+/// - [`SpliceFailureCause::SlotReapedMidGraft`] — an interior
+///   segment's slot was reaped mid-graft (`Tree::name` ⇒ `None`).
+/// - [`SpliceFailureCause::IntermediateUncovered`] — the path from
+///   anchor to target crosses a [`DirChild::Uncovered`] intermediate
+///   (snapshot coverage gap), a missing entry, or a `Leaf` at an
+///   interior segment.
 ///
-/// Structurally unreachable in v1. The caller's prior handle stays alive
-/// across the breach (it's an independent Arc clone), so no integration
-/// occurs; the caller emits a Diagnostic so the contract breach is
-/// observable.
+/// After the walker-race fix, only the cross-fs subset of
+/// [`SpliceFailureCause::IntermediateUncovered`] is reachable through
+/// legitimate filesystem state; the other two remain v1-unreachable.
+/// The caller's prior handle stays alive across the breach (it's an
+/// independent Arc clone), so no integration occurs; the caller emits
+/// a Diagnostic so the contract breach is observable.
 #[must_use]
 pub fn splice(
     prior: Option<Arc<DirSnapshot>>,
@@ -725,56 +742,78 @@ fn splice_dir_prior(
         // `replacement`, leaving `Profile.current` rooted at `target`
         // (not anchor) and violating the snapshot navigation
         // invariants.
-        return SpliceResult::CrossedUncovered;
+        return SpliceResult::CrossedUncovered(SpliceFailureCause::TargetOutsideAnchorSubtree);
     };
 
     // chain is [anchor, mid_1, ..., mid_k, target]; we already consumed
-    // the anchor as `root`, so descend with chain[1..].
+    // the anchor as `root`, so descend with chain[1..]. The recursive
+    // helper threads the typed [`SpliceFailureCause`] up via `?` from
+    // whichever interior site fails; the failure-site discrimination
+    // (slot reaped vs. uncovered intermediate) lives at the recursion
+    // leaves rather than being reconstructed at this dispatcher.
     match splice_dir(&root, &chain[1..], replacement, tree) {
-        Some(new_root) => {
+        Ok(new_root) => {
             if Arc::ptr_eq(&new_root, &root) {
                 SpliceResult::Spliced(TreeSnapshot::Dir(root))
             } else {
                 SpliceResult::Spliced(TreeSnapshot::Dir(new_root))
             }
         }
-        None => SpliceResult::CrossedUncovered,
+        Err(cause) => SpliceResult::CrossedUncovered(cause),
     }
 }
 
-/// Recursive splice helper. Returns `Some(arc)` on a successful per-level
-/// rebuild (or G7 short-circuit); returns `None` when navigation can't
-/// proceed (slot reaped mid-graft, snapshot coverage gap, or missing
-/// entry). The top-level [`splice`] translates `None` into
-/// [`SpliceResult::CrossedUncovered`] preserving the prior unchanged.
+/// Recursive splice helper. Returns `Ok(arc)` on a successful per-level
+/// rebuild (or G7 short-circuit); returns `Err(cause)` when navigation
+/// can't proceed at this level. The two failure modes:
+/// - [`SpliceFailureCause::SlotReapedMidGraft`] — `tree.name(next_id)`
+///   returned `None` for an interior segment; the slot's generation
+///   moved between burst start and graft commit.
+/// - [`SpliceFailureCause::IntermediateUncovered`] — the prior
+///   snapshot's `lookup_covered_dir(name)` returned `None` (entry is
+///   absent, a `Leaf`, or stored as `DirChild::Uncovered`).
+///
+/// The typed error threads through the recursive call via `?`, so
+/// deeper failures surface at the dispatcher with the originating
+/// site's classification intact. [`splice_dir_prior`] wraps the result
+/// into [`SpliceResult::CrossedUncovered`] preserving the prior
+/// unchanged.
 fn splice_dir(
     prior: &Arc<DirSnapshot>,
     rest: &[ResourceId],
     replacement: Arc<DirSnapshot>,
     tree: &Tree,
-) -> Option<Arc<DirSnapshot>> {
+) -> Result<Arc<DirSnapshot>, SpliceFailureCause> {
     let Some((&next_id, deeper)) = rest.split_first() else {
         // We're at target. G7-leaf: hash-equal ⇒ keep prior Arc; the
         // splice is a no-op observationally.
         if prior.dir_hash() == replacement.dir_hash() {
-            return Some(Arc::clone(prior));
+            return Ok(Arc::clone(prior));
         }
-        return Some(replacement);
+        return Ok(replacement);
     };
     // Slot reaped mid-graft. Engine contract says this can't happen for
-    // an observed subtree; surface as CrossedUncovered.
-    let name = tree.name(next_id)?;
-    // Path crossed an uncovered branch (DirChild::Uncovered) or missing
-    // entry. We don't synthesise empty intermediates — that would lie
-    // to dir_hash. Surface as CrossedUncovered; the engine keeps its
-    // prior view and converges on the next probe.
-    let pc: Arc<DirSnapshot> = Arc::clone(prior.lookup_covered_dir(name)?);
+    // an observed subtree; surface as SlotReapedMidGraft so operators
+    // can demux it from the legitimately-reachable IntermediateUncovered.
+    let name = tree
+        .name(next_id)
+        .ok_or(SpliceFailureCause::SlotReapedMidGraft)?;
+    // Path crossed an uncovered branch (DirChild::Uncovered), missing
+    // entry, or a Leaf at this interior segment. We don't synthesise
+    // empty intermediates — that would lie to `dir_hash`. Surface as
+    // IntermediateUncovered; the engine keeps its prior view and
+    // converges on the next probe.
+    let pc: Arc<DirSnapshot> = Arc::clone(
+        prior
+            .lookup_covered_dir(name)
+            .ok_or(SpliceFailureCause::IntermediateUncovered)?,
+    );
     let new_child = splice_dir(&pc, deeper, replacement, tree)?;
 
     // G7 per-level: child unchanged ⇒ parent unchanged; propagate
     // Arc::ptr_eq up the spine without rebuilding.
     if Arc::ptr_eq(&new_child, &pc) || new_child.dir_hash() == pc.dir_hash() {
-        return Some(Arc::clone(prior));
+        return Ok(Arc::clone(prior));
     }
 
     let mut new_entries = prior.entries.clone();
@@ -786,7 +825,7 @@ fn splice_dir(
     // conceptually "still the same observation as prior, with one child
     // subtree spliced in", and `captured_with` is constant within a
     // Profile by construction.
-    Some(Arc::new(DirSnapshot::new(
+    Ok(Arc::new(DirSnapshot::new(
         prior.root_meta,
         prior.captured_with,
         new_entries,

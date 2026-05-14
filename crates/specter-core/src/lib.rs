@@ -27,7 +27,9 @@ mod sub;
 mod time;
 mod tree;
 
-pub use diag::{BurstHelper, ClaimKind, Diagnostic, LcaIntegritySource, PromoterClaimKind};
+pub use diag::{
+    BurstHelper, ClaimKind, Diagnostic, LcaIntegritySource, PromoterClaimKind, SpliceFailureCause,
+};
 pub use diff::{Diff, EntryRef, Rename};
 pub use effect::{CommandResolved, DedupKey, Effect, EffectOutcome};
 pub use fs_id::FsIdentity;

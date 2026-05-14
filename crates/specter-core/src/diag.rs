@@ -87,6 +87,42 @@ pub enum LcaIntegritySource {
     BrokenAncestry,
 }
 
+/// Structural cause behind a [`Diagnostic::SpliceCrossedUncovered`]
+/// emission.
+///
+/// Mirrors the cause-tag precedent set by [`LcaIntegritySource`] —
+/// both demux otherwise-defensive diagnostics into operator-actionable
+/// classes without the operator having to re-trace the failure site.
+/// One variant per structural failure mode inside `splice_dir_prior` /
+/// `splice_dir`:
+///
+/// - [`Self::TargetOutsideAnchorSubtree`] — the parent walk from
+///   `target` did not reach the anchor (`ancestor_chain` bottomed out).
+///   Indicates a stale `ResourceId` upstream or a coverage contraction
+///   that revoked the target's covering Profile.
+/// - [`Self::SlotReapedMidGraft`] — an interior segment's
+///   `Tree::name(next_id)` returned `None`. The slot's generation
+///   advanced between burst start and graft commit (the Resource was
+///   reaped under another Profile's pass).
+/// - [`Self::IntermediateUncovered`] — an interior segment was stored
+///   as [`crate::DirChild::Uncovered`] (or absent, or as a [`crate::ChildEntry::Leaf`])
+///   in the prior snapshot. The walker recorded the slot's identity but
+///   did not recurse, so the splice path cannot navigate through it.
+///
+/// After the walker-race fix that eliminated transient-IO `Uncovered`
+/// emissions, [`Self::IntermediateUncovered`] is the only variant
+/// reachable through legitimate filesystem state — and only via cross-
+/// filesystem boundaries, where the walker stores an intermediate as
+/// `Uncovered` because its `cmeta.dev()` differs from the anchor's
+/// `root_dev`. The other two remain v1-unreachable; reaching them
+/// signals an upstream LCA / Tree lifecycle regression.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpliceFailureCause {
+    TargetOutsideAnchorSubtree,
+    SlotReapedMidGraft,
+    IntermediateUncovered,
+}
+
 /// Subject of a [`Diagnostic::PromoterClaimPurged`] emission.
 ///
 /// Promoter claims are a disjoint set from Profile claims; the
@@ -330,29 +366,40 @@ pub enum Diagnostic {
         prior_kind: ResourceKind,
         response_kind: ResourceKind,
     },
-    /// `splice` could not navigate from the prior snapshot's anchor down
-    /// to `target`. Two structural causes:
-    /// - `target` is outside the anchor's tree subtree (e.g., stale
-    ///   `ResourceId`, or a scope contraction that revoked coverage of
-    ///   the probed path).
-    /// - The path crossed a `DirChild::Uncovered(_)` intermediate
-    ///   (snapshot coverage gap — the walker stored the entry but did
-    ///   not recurse).
+    /// `splice` could not navigate from the prior snapshot's anchor
+    /// down to `target`. `cause` demuxes the three structural failure
+    /// modes (see [`SpliceFailureCause`] for the full description of
+    /// each variant); the short form:
+    /// - [`SpliceFailureCause::TargetOutsideAnchorSubtree`] — `target`
+    ///   is outside the anchor's tree subtree.
+    /// - [`SpliceFailureCause::SlotReapedMidGraft`] — an interior
+    ///   segment's slot was reaped between burst start and graft commit.
+    /// - [`SpliceFailureCause::IntermediateUncovered`] — the path
+    ///   crossed a `DirChild::Uncovered(_)` intermediate (snapshot
+    ///   coverage gap), a missing entry, or a `Leaf` at an interior
+    ///   segment.
     ///
-    /// Engine contract is "graft only into observed subtrees", so this
-    /// path indicates a contract violation. The variant exists to
+    /// Engine contract is "graft only into observed subtrees", so any
+    /// emission indicates a contract violation. The variant exists to
     /// surface the breach in operator logs; the engine falls back to
     /// keeping its prior view (no integration of `replacement`) and
     /// converges on the next probe.
     ///
     /// File-anchored Profiles never call `splice` (their Profile.current
     /// is `TreeSnapshot::File(leaf)`, integrated by an inline write at
-    /// dispatch time, never grafted) — so only the Dir-prior structural
-    /// triggers above remain. Structurally unreachable in v1;
-    /// defense-in-depth against future scope changes.
+    /// dispatch time, never grafted), so only the Dir-prior triggers
+    /// above apply.
+    ///
+    /// After the walker-race fix, [`SpliceFailureCause::IntermediateUncovered`]
+    /// is the only variant reachable through legitimate filesystem
+    /// state, and only via cross-filesystem boundaries (the walker
+    /// stores a mount slot as `Uncovered` per `cmeta.dev() != root_dev`).
+    /// The other two indicate upstream LCA / Tree lifecycle
+    /// regressions and remain v1-unreachable.
     SpliceCrossedUncovered {
         profile: ProfileId,
         target: ResourceId,
+        cause: SpliceFailureCause,
     },
     /// `FsEvent` arrived while the Profile was in
     /// [`crate::PostFirePhase::Awaiting`] or [`crate::PostFirePhase::Rebasing`]

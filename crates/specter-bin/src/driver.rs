@@ -870,9 +870,14 @@ pub fn log_diagnostic(d: &Diagnostic) {
                 "attach path invalid; request dropped",
             );
         }
-        Diagnostic::SpliceCrossedUncovered { profile, target } => tracing::warn!(
+        Diagnostic::SpliceCrossedUncovered {
+            profile,
+            target,
+            cause,
+        } => tracing::warn!(
             ?profile,
             ?target,
+            ?cause,
             "splice crossed uncovered subtree (graft contract violation; \
              prior view kept, response dropped)",
         ),

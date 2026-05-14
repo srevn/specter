@@ -2,6 +2,7 @@ use super::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot, diff_tree,
     splice,
 };
+use crate::diag::SpliceFailureCause;
 use crate::diff::{Diff, EntryRef, Rename};
 use crate::fs_id::FsIdentity;
 use crate::ids::ResourceId;
@@ -856,11 +857,13 @@ fn subtree_at_file_snapshot_returns_none() {
 /// Test helper: unwrap a `SpliceResult::Spliced(_)` to its inner snapshot,
 /// asserting the splice did NOT report a CrossedUncovered contract
 /// violation. Tests that exercise the failure path use the variant match
-/// directly.
+/// directly and pin the carried [`SpliceFailureCause`].
 fn unwrap_spliced(r: SpliceResult) -> TreeSnapshot {
     match r {
         SpliceResult::Spliced(s) => s,
-        SpliceResult::CrossedUncovered => panic!("expected Spliced, got CrossedUncovered"),
+        SpliceResult::CrossedUncovered(cause) => {
+            panic!("expected Spliced, got CrossedUncovered({cause:?})")
+        }
     }
 }
 
@@ -1120,8 +1123,11 @@ fn splice_target_outside_observed_returns_crossed_uncovered() {
         &tree,
     );
     assert!(
-        matches!(s, SpliceResult::CrossedUncovered),
-        "target outside observed subtree ⇒ CrossedUncovered",
+        matches!(
+            s,
+            SpliceResult::CrossedUncovered(SpliceFailureCause::TargetOutsideAnchorSubtree),
+        ),
+        "target outside observed subtree ⇒ TargetOutsideAnchorSubtree (got {s:?})",
     );
     // splice consumed its Arc on the failure path; the caller's handle
     // (`prior`) survives at its pre-call strong count.
@@ -1153,8 +1159,11 @@ fn splice_target_chain_through_uncovered_returns_crossed_uncovered() {
     let root_strong_before = Arc::strong_count(&root);
     let s = splice(Some(Arc::clone(&root)), anchor, b, replacement_b, &tree);
     assert!(
-        matches!(s, SpliceResult::CrossedUncovered),
-        "uncovered intermediate ⇒ CrossedUncovered",
+        matches!(
+            s,
+            SpliceResult::CrossedUncovered(SpliceFailureCause::IntermediateUncovered),
+        ),
+        "uncovered intermediate ⇒ IntermediateUncovered (got {s:?})",
     );
     assert_eq!(
         Arc::strong_count(&root),
