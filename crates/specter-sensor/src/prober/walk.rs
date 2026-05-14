@@ -103,13 +103,15 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
 /// Errors: root errors propagate (`NotFound → Vanished`, kind mismatch
 /// → `Vanished`, anything else → `Failed { errno }`). Mid-walk
 /// `read_dir` errors on a *subdirectory* (EACCES, EIO, ENOENT after a
-/// raced delete) skip-and-continue with `tracing::warn!`; the affected
-/// subtree becomes `DirChild::Covered(empty_or_partial_arc)` —
-/// *covered-but-empty*. The uncovered variant
-/// `DirChild::Uncovered(fs_id)` is reserved for `recursive=false`,
-/// beyond `max_depth`, cross-filesystem (`dev` differs from
-/// `root_dev`), and mid-walk `lstat`/kind-flip failures on the subdir
-/// itself.
+/// raced delete, ENOTDIR after a kind-flip race) skip-and-continue with
+/// `tracing::warn!`; the affected subtree becomes
+/// `DirChild::Covered(empty_or_partial_arc)` — *covered-but-empty*.
+/// The uncovered variant `DirChild::Uncovered(fs_id)` is reserved for
+/// the three statically-knowable gates checked in [`build_dir_child`]:
+/// `!recursive`, `depth + 1 >= max_depth`, or `cmeta.dev() != root_dev`
+/// (cross-filesystem). The walker never mints `Uncovered` for transient
+/// I/O — the redundant per-recursion `lstat` that historically opened
+/// that race surface no longer exists.
 pub(super) fn probe_subtree(
     target_path: &Path,
     config: &ScanConfig,
@@ -207,17 +209,17 @@ fn any_forced_under(path: &Path, force_walk: &BTreeSet<PathBuf>) -> bool {
 /// Dir children. Returns the constructed entries map.
 ///
 /// Errors at this level are skip-and-continue. `read_dir` failure on
-/// `path` (EACCES, EIO, ENOENT after a raced delete, etc.) returns the
-/// already-accumulated `BTreeMap` — empty when the failure was at the
-/// `read_dir` open boundary, partially-populated if dirent iteration
-/// errored mid-walk after some entries had already been folded in. The
-/// caller ([`walk_subdir`] or [`probe_subtree`]) wraps the result in
+/// `path` (EACCES, EIO, ENOENT after a raced delete, ENOTDIR after a
+/// kind-flip race, etc.) returns the already-accumulated `BTreeMap` —
+/// empty when the failure was at the `read_dir` open boundary,
+/// partially-populated if dirent iteration errored mid-walk after some
+/// entries had already been folded in. The caller ([`walk_subdir`] or
+/// [`probe_subtree`]) wraps the result in
 /// `Arc::new(DirSnapshot::new(…))`, so the parent emits
 /// `DirChild::Covered(empty_or_partial_arc)` — covered-but-empty,
 /// distinct from the uncovered variant `DirChild::Uncovered(fs_id)`
-/// reserved for `recursive=false`, beyond `max_depth`, cross-filesystem
-/// boundaries, and mid-walk `lstat`/kind-flip failures on a subdir
-/// itself.
+/// reserved for the static-config gates in [`build_dir_child`]
+/// (`recursive=false`, beyond `max_depth`, cross-filesystem boundary).
 fn enumerate_dir(
     path: &Path,
     anchor_path: &Path,
@@ -309,7 +311,16 @@ fn enumerate_dir(
 /// [`walk_subdir`] when the entry is in-scope (recursive walk, within
 /// `max_depth`, same filesystem); emits `DirChild::Uncovered(fs_id)`
 /// otherwise.
-#[allow(clippy::too_many_arguments)]
+///
+/// `Uncovered(fs_id)` is emitted iff one of three statically-knowable
+/// gates fires at the dirent: `!config.recursive`,
+/// `depth + 1 >= config.max_depth`, or `cmeta.dev() != root_dev`
+/// (cross-filesystem). Every other path enters [`walk_subdir`], whose
+/// infallible return is wrapped unconditionally in
+/// `DirChild::Covered(arc)`. Transient I/O failures inside the
+/// recursive walk surface as `DirChild::Covered(empty_or_partial_arc)`
+/// via [`enumerate_dir`]'s benign-empty contract, never as
+/// `Uncovered`.
 fn build_dir_child(
     child_path: &Path,
     anchor_path: &Path,
@@ -335,28 +346,34 @@ fn build_dir_child(
         // Walker stores the entry but does not recurse.
         return ChildEntry::Dir(DirChild::Uncovered(fs_id));
     }
+    // Reuse the caller-held `cmeta` to build the subdir's `root_meta`
+    // — a second `symlink_metadata(child_path)` inside `walk_subdir`
+    // would be redundant in the happy path and the entire race surface
+    // in the unhappy path (cmeta says is_dir; concurrent unlink /
+    // kind-flip / parent-x-revoke could make the second lstat
+    // disagree). Threading `root_meta` through closes the gap.
+    let root_meta = DirMeta {
+        mtime: cmeta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        fs_id,
+    };
     // Pull the child's prior subtree from baseline so mtime-skip composes
     // recursively. BTreeMap key match by string segment is the snapshot's
     // native lookup; `lookup_covered_dir` collapses the "Dir entry + covered"
     // gate into one named operation.
     let child_baseline = baseline.and_then(|b| b.lookup_covered_dir(name));
-    match walk_subdir(
+    let arc = walk_subdir(
         child_path,
         anchor_path,
         config,
         captured_with,
+        root_meta,
         child_baseline,
         force_walk,
         forced,
         depth + 1,
         root_dev,
-    ) {
-        Some(arc) => ChildEntry::Dir(DirChild::Covered(arc)),
-        // Mid-walk `lstat` / kind-flip failure on the subdir itself —
-        // surface as uncovered so the parent's hash fold sees a
-        // distinct shape from a covered-but-empty subtree.
-        None => ChildEntry::Dir(DirChild::Uncovered(fs_id)),
-    }
+    );
+    ChildEntry::Dir(DirChild::Covered(arc))
 }
 
 /// Build a `ChildEntry::Leaf` for one non-directory dirent. Inherits
@@ -392,44 +409,48 @@ fn build_leaf_child(
     ChildEntry::Leaf(leaf)
 }
 
-/// Recursive helper: probe one level deeper.
+/// Recursive helper: walk one level deeper.
 ///
-/// Returns `Some(Arc<DirSnapshot>)` on success (including partial
-/// enumeration after a `read_dir` warn) and `None` for mid-walk
-/// `Vanished` / `Failed` / kind-flip cases — the parent emits
-/// `DirChild::Uncovered(fs_id)` for `None` returns.
+/// The caller ([`build_dir_child`]) already `lstat`ed the subdir's
+/// dirent inside [`enumerate_dir`] and supplies the resulting
+/// [`DirMeta`] as `root_meta`; this helper therefore skips a redundant
+/// second `lstat` whose two-syscall gap was the race surface that
+/// previously let racy unlink / kind-flip / EACCES outcomes mint
+/// `DirChild::Uncovered` for a subdir whose caller-side `cmeta` had
+/// said `is_dir` microseconds earlier.
+///
+/// Infallible by construction: any failure inside the recursive
+/// [`enumerate_dir`] (raced unlink surfacing as `read_dir` `ENOENT`,
+/// kind-flip surfacing as `ENOTDIR`, EACCES on the subdir's
+/// `read_dir`, etc.) routes through the existing `Covered(empty_arc)`
+/// contract — the same semantic pinned by
+/// `probe_subtree_unreadable_subdir_emits_dir_child_some_empty`. As a
+/// consequence, `DirChild::Uncovered(fs_id)` is reserved for the
+/// static-config gates in [`build_dir_child`] (`recursive=false`,
+/// `max_depth`, cross-fs) and never minted for transient I/O.
+///
+/// Mtime-skip primitive: identical to the root probe's, reading the
+/// caller-supplied `root_meta` instead of re-`lstat`ing.
+#[must_use]
 fn walk_subdir(
     path: &Path,
     anchor_path: &Path,
     config: &ScanConfig,
     captured_with: u64,
+    root_meta: DirMeta,
     baseline: Option<&Arc<DirSnapshot>>,
     force_walk: &BTreeSet<PathBuf>,
     forced: bool,
     depth: u32,
     root_dev: u64,
-) -> Option<Arc<DirSnapshot>> {
-    let Ok(raw) = std::fs::symlink_metadata(path) else {
-        return None;
-    };
-    if !raw.is_dir() {
-        return None;
-    }
-    let root_meta = DirMeta {
-        mtime: raw.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        fs_id: FsIdentity {
-            inode: raw.ino(),
-            device: raw.dev(),
-        },
-    };
-
+) -> Arc<DirSnapshot> {
     // Per-level mtime-skip — same primitive as the root probe.
     if !forced
         && !any_forced_under(path, force_walk)
         && let Some(prior) = baseline
         && prior.root_meta == root_meta
     {
-        return Some(Arc::clone(prior));
+        return Arc::clone(prior);
     }
 
     let entries = enumerate_dir(
@@ -446,9 +467,5 @@ fn walk_subdir(
 
     // Sub-snapshots carry pure content — engine-side resource identity
     // is resolved at receive-time via the engine's `Tree`.
-    Some(Arc::new(DirSnapshot::new(
-        root_meta,
-        captured_with,
-        entries,
-    )))
+    Arc::new(DirSnapshot::new(root_meta, captured_with, entries))
 }

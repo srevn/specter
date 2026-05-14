@@ -202,10 +202,19 @@ impl LeafEntry {
 /// (whose `root_meta.fs_id` is the kernel identity); `Uncovered`
 /// carries the `FsIdentity` directly.
 ///
-/// `Uncovered` means *the walker stored the entry but did not recurse*:
-/// `recursive=false`, beyond `max_depth`, cross-filesystem boundary
-/// (the child's `fs_id.device` differs from the anchor's `root_dev`),
-/// or a mid-walk `lstat` / kind-flip failure on the subdir itself.
+/// `Uncovered` means *the walker stored the entry but did not recurse*
+/// because one of three statically-knowable `ScanConfig` gates fired:
+/// `recursive=false`, beyond `max_depth`, or cross-filesystem boundary
+/// (the child's `fs_id.device` differs from the anchor's `root_dev`).
+/// The walker never mints `Uncovered` for transient I/O failures
+/// (raced unlink, kind-flip, EACCES on the subdir's `read_dir`); those
+/// surface as `Covered(empty_or_partial_arc)` via the walker's
+/// `read_dir` benign-empty contract, distinct from the uncovered
+/// variant. The structural consequence: within a Profile (whose
+/// `config_hash` freezes `recursive` and `max_depth`, and whose
+/// cross-fs identity bifurcates through `fs_id` rather than this
+/// variant), the `(Covered, Uncovered)` and `(Uncovered, Covered)`
+/// transitions on the *same* `fs_id` are unreachable.
 ///
 /// Two boundary cases to keep distinct:
 /// - **`exclude` glob**: filtered entries are absent from the parent's
@@ -234,8 +243,9 @@ pub enum DirChild {
     /// The walker recursed and stored the directory's snapshot. The
     /// kernel identity lives at `arc.root_meta.fs_id`.
     Covered(Arc<DirSnapshot>),
-    /// The walker stored the entry but did not recurse (config or
-    /// mid-walk failure). Carries the kernel identity directly.
+    /// The walker stored the entry but did not recurse — one of the
+    /// three static-config gates fired (`!recursive`, `max_depth`, or
+    /// cross-fs). Carries the kernel identity directly.
     Uncovered(FsIdentity),
 }
 

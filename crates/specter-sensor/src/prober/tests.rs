@@ -388,12 +388,16 @@ fn probe_subtree_skips_unreadable_subdir_emits_remaining() {
 
 /// EACCES contract: `read_dir` failure on a subdir produces
 /// `DirChild::Covered(empty_arc)` — covered-but-empty. The
-/// `Uncovered` variant is reserved for uncovered slots (`recursive=false`,
-/// `max_depth`, cross-filesystem, mid-walk `lstat`/kind-flip on the
-/// subdir itself). The engine's reconcile path debug-asserts on
-/// (Covered, Uncovered) | (Uncovered, Covered) coverage flips, so collapsing
-/// the EACCES'd `Covered(empty)` into an `Uncovered` would route a perms-change
-/// through an unreachable arm.
+/// `Uncovered` variant is reserved for the three static-config gates
+/// (`recursive=false`, `max_depth`, cross-filesystem). Transient I/O
+/// failures inside the recursive walk — EACCES on `read_dir`, ENOENT
+/// after a raced unlink, ENOTDIR after a kind-flip — all surface as
+/// `Covered(empty_or_partial_arc)` via the walker's benign-empty
+/// path. The engine's reconcile path treats `(Covered, Uncovered)` |
+/// `(Uncovered, Covered)` coverage flips on the same `fs_id` as
+/// structurally unreachable, so collapsing a transient failure into
+/// an `Uncovered` would route the perms/race-change through an
+/// unreachable arm.
 #[test]
 fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
     use std::os::unix::fs::PermissionsExt;
@@ -423,14 +427,81 @@ fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
         DirChild::Covered(s) => s,
         DirChild::Uncovered(_) => panic!(
             "EACCES'd subdir must emit DirChild::Covered(empty_arc), not Uncovered — \
-             Uncovered is reserved for uncovered slots (config / cross-fs / \
-             mid-walk lstat-or-kind failure)",
+             Uncovered is reserved for the static-config gates only \
+             (recursive=false / max_depth / cross-fs)",
         ),
     };
     assert!(
         sub.entries.is_empty(),
         "EACCES read_dir produces an empty entries map; got {} entries",
         sub.entries.len(),
+    );
+}
+
+// ---------------------------------------------------------------- walk: static Uncovered emission
+//
+// `DirChild::Uncovered(fs_id)` is reserved for three statically-knowable
+// `ScanConfig` gates checked at the dirent in `build_dir_child`:
+// `!recursive`, `depth + 1 >= max_depth`, and `cmeta.dev() != root_dev`
+// (cross-filesystem). The tests below pin the first two; cross-fs is
+// hard to set up portably and is documented at the rustdoc level on
+// `DirChild`. Read together with
+// `probe_subtree_unreadable_subdir_emits_dir_child_some_empty`: the
+// EACCES test pins the *negative* contract (transient I/O must NOT
+// emit `Uncovered`); the static tests below pin the *positive*
+// contract (these gates DO emit `Uncovered`).
+
+#[test]
+fn probe_subtree_recursive_false_emits_uncovered_at_depth_one_dir_child() {
+    // With `recursive=false`, the walker enumerates the anchor's
+    // direct children but does not descend into any depth-1 directory.
+    // Each depth-1 directory dirent is stored as `DirChild::Uncovered`
+    // — the walker knows it's a directory but its config refuses the
+    // recursion.
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir(tmp.path().join("sub")).unwrap();
+    std::fs::write(tmp.path().join("sub/inside.c"), b"x").unwrap();
+    let cfg = ScanConfig::builder().recursive(false).build();
+    let ProbeOutcome::SubtreeOk(arc) = psub(tmp.path(), &cfg) else {
+        panic!("expected SubtreeOk");
+    };
+    let ChildEntry::Dir(dc) = arc.entries.get("sub").expect("sub entry") else {
+        panic!("sub must be a Dir entry");
+    };
+    assert!(
+        matches!(dc, DirChild::Uncovered(_)),
+        "recursive=false must emit DirChild::Uncovered for the depth-1 \
+         dir, got {dc:?}",
+    );
+}
+
+#[test]
+fn probe_subtree_max_depth_emits_uncovered_at_boundary() {
+    // `max_depth=2` lets the depth=0 frame recurse into `a` (depth 1)
+    // because `0+1 < 2` is true; inside `a` (now at depth 1), the gate
+    // `1+1 < 2` is false, so `b` is stored as `DirChild::Uncovered`.
+    // Pins the `max_depth` arm at the boundary; cross-checks the
+    // gate's "depth+1" half-open semantic.
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
+    let cfg = ScanConfig::builder()
+        .recursive(true)
+        .max_depth(Some(2))
+        .build();
+    let ProbeOutcome::SubtreeOk(arc) = psub(tmp.path(), &cfg) else {
+        panic!("expected SubtreeOk");
+    };
+    let a_sub = arc
+        .lookup_covered_dir("a")
+        .expect("a must be Covered — its depth-1 gate `0+1 < 2` is true");
+    let ChildEntry::Dir(dc) = a_sub.entries.get("b").expect("b entry") else {
+        panic!("b must be a Dir entry");
+    };
+    assert!(
+        matches!(dc, DirChild::Uncovered(_)),
+        "max_depth=2 must emit DirChild::Uncovered at the depth-2 \
+         boundary (gate `depth+1 < max_depth` fails for depth=1), \
+         got {dc:?}",
     );
 }
 
