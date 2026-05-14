@@ -307,9 +307,9 @@ fn dir_hash_distinguishes_subtree_content() {
 }
 
 /// Golden hash — pins the 128-bit `dir_hash` encoding (header layout,
-/// length prefix, leaf vs dir tags, lex-by-name fold). Drift here is a
-/// breaking change for any persisted `dir_hash`; rotate intentionally and
-/// update only this constant.
+/// length prefix, leaf vs dir tags, lex-by-name fold). Drift here changes
+/// every cached `dir_hash` this binary computes; update only this constant
+/// after a deliberate review.
 #[test]
 fn dir_hash_known_good_golden() {
     let mut entries = BTreeMap::new();
@@ -399,8 +399,9 @@ fn leaf_hash_distinguishes_device() {
 }
 
 /// Golden hash — pins the 128-bit `leaf_hash` encoding (kind tag, size,
-/// mtime, inode, device fold). Drift here is breaking for persisted leaf
-/// hashes.
+/// mtime, inode, device fold). Drift here changes every cached `leaf_hash`
+/// this binary computes; update only this constant after a deliberate
+/// review.
 #[test]
 fn leaf_hash_known_good_golden() {
     let l = LeafEntry::new(

@@ -386,9 +386,9 @@ mod tests {
         );
     }
 
-    /// Golden test — pins `SipHash` key + canonical encoding. Drift here is a
-    /// *breaking* change for any persisted Profile hash; rotate intentionally
-    /// and update only this constant.
+    /// Golden test — pins the canonical `compute_config_hash` encoding.
+    /// Drift here changes every Profile's `config_hash` this binary
+    /// computes; update only this constant after a deliberate review.
     #[test]
     fn hash_known_good() {
         let cfg = ScanConfig::builder().build();
