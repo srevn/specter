@@ -44,7 +44,7 @@
 //! change** case (`rm foo (File)` then `mkdir foo (Dir)`): `diff_tree`
 //! stages both delete and create with `pair_eligible: false`. Phase 1
 //! reaps the prior slot (generation-incremented on remove); Phase 2's
-//! `Tree::ensure` returns a fresh slot at the new generation. If we
+//! `ensure_child` returns a fresh slot at the new generation. If we
 //! processed creations first, the slot would be re-typed to Dir, and
 //! the deletion pass would look up the same slot (now Dir) and emit
 //! Unwatch — silently breaking the new directory's watch.
@@ -79,14 +79,14 @@ use std::sync::Arc;
 /// reachable only via spec-violating inputs).
 ///
 /// **Multi-component segments.** `Diff` entries may carry multi-segment
-/// rel-paths like `subdir/file.txt` for recursive Profiles. `Tree::ensure`
+/// rel-paths like `subdir/file.txt` for recursive Profiles. `ensure_child`
 /// is single-component by design (`(parent, segment)` is the slot identity);
 /// this helper walks each segment in lock-step. The Diff's depth-first
 /// lex order over `parent/child` segments ensures parents are processed
 /// before their descendants in Phase 2, so intermediate slots typically
 /// exist before their descendants are touched — but the helper is robust
 /// to out-of-order entries (e.g. `renamed.to` segments) because each
-/// component is `ensure`d on the way through.
+/// component is `ensure_child`d on the way through.
 ///
 /// **Kind refresh.** The leaf is unconditionally `set_kind`-ed to
 /// `leaf_kind` even on a pre-existing slot. The same-segment kind-flip
@@ -94,7 +94,7 @@ use std::sync::Arc;
 /// upstream by `diff_tree`'s `_ =>` arm in `diff_same_name`: both the
 /// prior File and the new Dir are staged with `pair_eligible: false`,
 /// Phase 1 reaps the prior slot (generation increment), and Phase 2's
-/// `Tree::ensure` returns a fresh-generation slot whose kind this call
+/// `ensure_child` returns a fresh-generation slot whose kind this call
 /// then sets to `Dir`. The leaf-kind write is idempotent for the common
 /// (kind-stable) case and load-bearing for the kind-flip case.
 ///
@@ -111,7 +111,9 @@ pub(crate) fn ensure_descendant(
     comps.peek()?;
     let mut cur = anchor;
     while let Some(comp) = comps.next() {
-        cur = tree.ensure(Some(cur), comp, ResourceRole::User);
+        cur = tree
+            .ensure_child(cur, comp, ResourceRole::User)
+            .expect("cur is the anchor or just minted by a prior loop iteration");
         let is_leaf = comps.peek().is_none();
         if is_leaf {
             tree.set_kind(cur, leaf_kind);
@@ -287,7 +289,7 @@ pub(crate) fn apply_diff_to_tree(
     // `diff.created` is in depth-first lex order (parents before
     // descendants). `diff.renamed.to` is in `from`-sorted order, which
     // is not necessarily descendant-aware, but `ensure_descendant`
-    // walks each component via `Tree::ensure` (idempotent on existing
+    // walks each component via `ensure_child` (idempotent on existing
     // slots), so any out-of-order entry only triggers extra slot
     // materialisation up front — the eventual `add_watch` for each
     // explicit entry still lands correctly because contributions are
@@ -582,7 +584,7 @@ mod tests {
     fn anchor(per_file: bool) -> (Tree, ProfileMap, ResourceId, specter_core::ProfileId) {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let r = tree.ensure(None, "root", ResourceRole::User);
+        let r = tree.ensure_root("root", ResourceRole::User);
         tree.set_kind(r, ResourceKind::Dir);
         // `events` chooses the per-leaf gating: CONTENT (or METADATA) ⇒
         // `has_per_file_fds = true` ⇒ Leaves get watch_demand contributions.
@@ -700,7 +702,9 @@ mod tests {
         // something to `sub_watch` against. Pre-populate with the
         // same contribution apply_diff_to_tree will drop on delete (the
         // Profile's events_union, here STRUCTURE).
-        let sub_id = tree.ensure(Some(root), "sub", ResourceRole::User);
+        let sub_id = tree
+            .ensure_child(root, "sub", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(sub_id, ResourceKind::Dir);
         crate::refcounts::add_watch(
             &mut tree,
@@ -740,7 +744,9 @@ mod tests {
         // carries a Watch contribution; delete should release it
         // (symmetric to create).
         let (mut tree, profiles, root, pid) = anchor(true);
-        let leaf_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        let leaf_id = tree
+            .ensure_child(root, "a.rs", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(leaf_id, ResourceKind::File);
         crate::refcounts::add_watch(
             &mut tree,
@@ -786,7 +792,9 @@ mod tests {
         // Unwatch + one Watch.
         let (mut tree, profiles, root, pid) = anchor(false);
         // Pre-materialise the prior Dir slot with the matching mask.
-        let foo_id = tree.ensure(Some(root), "foo", ResourceRole::User);
+        let foo_id = tree
+            .ensure_child(root, "foo", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(foo_id, ResourceKind::Dir);
         crate::refcounts::add_watch(
             &mut tree,
@@ -911,7 +919,9 @@ mod tests {
         // Phase 1 reaps the slot; the scoped purge hook drops the
         // now-stale PerFile entry.
         let (mut tree, mut profiles, root, pid) = anchor(true);
-        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        let a_rs_id = tree
+            .ensure_child(root, "a.rs", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(a_rs_id, ResourceKind::File);
 
         // Prior current = root with a.rs as covered leaf; baseline matches
@@ -982,7 +992,9 @@ mod tests {
         // entries. a.rs's content changes (different leaf hash) but the
         // slot persists — the entry must NOT be purged.
         let (mut tree, mut profiles, root, pid) = anchor(true);
-        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        let a_rs_id = tree
+            .ensure_child(root, "a.rs", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(a_rs_id, ResourceKind::File);
 
         let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
@@ -1038,7 +1050,9 @@ mod tests {
         use specter_core::ProfileId;
 
         let (mut tree, mut profiles, root, pid) = anchor(false);
-        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        let a_rs_id = tree
+            .ensure_child(root, "a.rs", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(a_rs_id, ResourceKind::File);
 
         let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
@@ -1104,7 +1118,9 @@ mod tests {
                 ClassSet::CONTENT,
             ),
         );
-        let a_rs_id = tree.ensure(Some(root), "a.rs", ResourceRole::User);
+        let a_rs_id = tree
+            .ensure_child(root, "a.rs", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(a_rs_id, ResourceKind::File);
 
         // Both Profiles record a PerFile entry against a.rs. Each entry's
@@ -1202,9 +1218,13 @@ mod tests {
         // `current` unchanged so the anchor-rooted invariant on
         // `Profile.current` is preserved.
         let (mut tree, mut profiles, root, pid) = anchor(false);
-        let a_id = tree.ensure(Some(root), "a", ResourceRole::User);
+        let a_id = tree
+            .ensure_child(root, "a", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(a_id, ResourceKind::Dir);
-        let b_id = tree.ensure(Some(a_id), "b", ResourceRole::User);
+        let b_id = tree
+            .ensure_child(a_id, "b", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(b_id, ResourceKind::Dir);
 
         let prior_current = dir_snap(100, vec![("a", dir_uncovered(2))]);
@@ -1291,7 +1311,9 @@ mod tests {
 
         // Pre-materialise the prior File slot at `(root, "foo")` with
         // a watch contribution matching the per-file Profile's mask.
-        let prior_foo_id = tree.ensure(Some(root), "foo", ResourceRole::User);
+        let prior_foo_id = tree
+            .ensure_child(root, "foo", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(prior_foo_id, ResourceKind::File);
         crate::refcounts::add_watch(
             &mut tree,

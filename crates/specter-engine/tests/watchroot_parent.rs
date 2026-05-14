@@ -56,9 +56,12 @@ fn attach_sub_creates_watch_root_parent_contribution() {
     // watch_demand bumps; /root/src watch_demand bumps; Profile records
     // /root as its watch_root_parent.
     let mut e = Engine::new();
-    let root = e.tree_mut().ensure(None, "root", ResourceRole::User);
+    let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
-    let src = e.tree_mut().ensure(Some(root), "src", ResourceRole::User);
+    let src = e
+        .tree_mut()
+        .ensure_child(root, "src", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_resource(
@@ -98,7 +101,7 @@ fn root_anchor_has_no_watch_root_parent() {
     // attach_sub at /src directly (no parent in Tree). watch_root_parent
     // stays None — root rename detection is unavailable.
     let mut e = Engine::new();
-    let src = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let src = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(src, ResourceKind::Dir);
     let req = SubAttachRequest::for_resource(
         "watch".into(),
@@ -120,9 +123,12 @@ fn root_anchor_has_no_watch_root_parent() {
 #[test]
 fn detach_sub_releases_watch_root_parent_contribution() {
     let mut e = Engine::new();
-    let root = e.tree_mut().ensure(None, "root", ResourceRole::User);
+    let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
-    let src = e.tree_mut().ensure(Some(root), "src", ResourceRole::User);
+    let src = e
+        .tree_mut()
+        .ensure_child(root, "src", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let now = Instant::now();
@@ -183,11 +189,17 @@ fn multiple_profiles_share_one_watch_root_parent() {
     // Sub A at /root/srcA, Sub B at /root/srcB. Both register /root as
     // watch_root_parent. /root's watch_demand = 2.
     let mut e = Engine::new();
-    let root = e.tree_mut().ensure(None, "root", ResourceRole::User);
+    let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
-    let src_a = e.tree_mut().ensure(Some(root), "srcA", ResourceRole::User);
+    let src_a = e
+        .tree_mut()
+        .ensure_child(root, "srcA", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(src_a, ResourceKind::Dir);
-    let src_b = e.tree_mut().ensure(Some(root), "srcB", ResourceRole::User);
+    let src_b = e
+        .tree_mut()
+        .ensure_child(root, "srcB", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(src_b, ResourceKind::Dir);
 
     let now = Instant::now();
@@ -232,9 +244,12 @@ fn watch_root_parent_role_stays_user_when_already_user() {
     // /root/src registers /root as watch_root_parent but does NOT
     // demote its role.
     let mut e = Engine::new();
-    let root = e.tree_mut().ensure(None, "root", ResourceRole::User);
+    let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
-    let src = e.tree_mut().ensure(Some(root), "src", ResourceRole::User);
+    let src = e
+        .tree_mut()
+        .ensure_child(root, "src", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let now = Instant::now();

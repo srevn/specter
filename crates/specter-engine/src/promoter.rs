@@ -765,7 +765,11 @@ impl Engine {
                         // that path.
                         let anchor_resource =
                             self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
-                                self.tree.ensure(Some(target), name_str, ResourceRole::User)
+                                self.tree
+                                    .ensure_child(target, name_str, ResourceRole::User)
+                                    .expect(
+                                        "promoter target held alive by anchor / proxy_promoters",
+                                    )
                             });
                         self.tree
                             .set_kind(anchor_resource, kind_from_entry(child_kind));
@@ -795,7 +799,11 @@ impl Engine {
                         // leak after unregister.
                         let child_resource =
                             self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
-                                self.tree.ensure(Some(target), name_str, ResourceRole::User)
+                                self.tree
+                                    .ensure_child(target, name_str, ResourceRole::User)
+                                    .expect(
+                                        "promoter target held alive by anchor / proxy_promoters",
+                                    )
                             });
                         self.tree
                             .set_kind(child_resource, kind_from_entry(child_kind));
@@ -813,7 +821,11 @@ impl Engine {
                     if is_final {
                         let anchor_resource =
                             self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
-                                self.tree.ensure(Some(target), name_str, ResourceRole::User)
+                                self.tree
+                                    .ensure_child(target, name_str, ResourceRole::User)
+                                    .expect(
+                                        "promoter target held alive by anchor / proxy_promoters",
+                                    )
                             });
                         self.tree
                             .set_kind(anchor_resource, kind_from_entry(child_kind));
@@ -832,7 +844,11 @@ impl Engine {
                     } else if matches!(child_kind, EntryKind::Dir) {
                         let child_resource =
                             self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
-                                self.tree.ensure(Some(target), name_str, ResourceRole::User)
+                                self.tree
+                                    .ensure_child(target, name_str, ResourceRole::User)
+                                    .expect(
+                                        "promoter target held alive by anchor / proxy_promoters",
+                                    )
                             });
                         self.tree
                             .set_kind(child_resource, kind_from_entry(child_kind));

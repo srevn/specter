@@ -243,7 +243,7 @@ mod tests {
 
     fn fresh() -> (Tree, specter_core::ResourceId) {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         (tree, r)
     }
 
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn add_watch_stale_resource_is_noop() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "ghost", ResourceRole::User);
+        let r = tree.ensure_root("ghost", ResourceRole::User);
         let mut out = StepOutput::default();
         assert!(tree.try_reap(r, &mut out));
         add_watch(
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn sub_watch_stale_resource_is_noop() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "ghost", ResourceRole::User);
+        let r = tree.ensure_root("ghost", ResourceRole::User);
         let mut out = StepOutput::default();
         assert!(tree.try_reap(r, &mut out));
         sub_watch(
@@ -546,7 +546,7 @@ mod tests {
         // emits `Unwatch` on the empty edge; `try_reap` returns `true`
         // and the slot is gone.
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "parent", ResourceRole::WatchRootParent);
+        let r = tree.ensure_root("parent", ResourceRole::WatchRootParent);
         let mut out = StepOutput::default();
         let key = ContribKey::ProfileParent(ProfileId::default());
         add_watch(&mut tree, r, key, ClassSet::STRUCTURE, &mut out);
@@ -576,7 +576,7 @@ mod tests {
         // a live contribution (one of `has_anchors`'s four retention
         // sources).
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "prefix", ResourceRole::DescentScaffold);
+        let r = tree.ensure_root("prefix", ResourceRole::DescentScaffold);
         let mut out = StepOutput::default();
         let key_a = ContribKey::ProfileDescent(ProfileId::default());
         let key_b = ContribKey::ProfileParent(ProfileId::default());
@@ -610,8 +610,10 @@ mod tests {
         // moment; the subsequent anchor reap then cascades through and
         // frees the parent in the same step.
         let mut tree = Tree::new();
-        let parent = tree.ensure(None, "parent", ResourceRole::WatchRootParent);
-        let _anchor = tree.ensure(Some(parent), "anchor", ResourceRole::User);
+        let parent = tree.ensure_root("parent", ResourceRole::WatchRootParent);
+        let _anchor = tree
+            .ensure_child(parent, "anchor", ResourceRole::User)
+            .expect("test live parent");
         let mut out = StepOutput::default();
         let key = ContribKey::ProfileParent(ProfileId::default());
         add_watch(&mut tree, parent, key, ClassSet::STRUCTURE, &mut out);

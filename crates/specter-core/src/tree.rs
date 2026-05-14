@@ -4,7 +4,8 @@
 //! `Resource`s (`ResourceId`s are generational), and a flat `roots: Vec`.
 //! Identity model: `(parent, segment)` is the slot. Same `(parent, segment)`
 //! always returns the same `ResourceId`. Recreation at a vacated-but-anchored
-//! slot reuses the id. Reaped slots produce fresh ids on the next `ensure`.
+//! slot reuses the id. Reaped slots produce fresh ids on the next
+//! `ensure_root` / `ensure_child`.
 //!
 //! Public API takes `&str` segments; the interner is internal.
 
@@ -71,6 +72,23 @@ impl AttachPathError {
             Self::WindowsPrefix => "Windows path prefix not supported on Unix v1",
         }
     }
+}
+
+/// Structural-precondition fault from [`Tree::ensure_child`] /
+/// [`Tree::ensure_path`].
+///
+/// Production callers reach both methods with live parents and
+/// non-empty inputs by construction and `.expect()` the `Result`; the
+/// typed variant pins which invariant the caller is claiming.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum StaleIdError {
+    /// [`Tree::ensure_child`] called with a `parent` that doesn't name
+    /// a live slot (reaped, never-existed, or the slotmap null key
+    /// `ResourceId::default()`).
+    StaleParent(ResourceId),
+
+    /// [`Tree::ensure_path`] called with `components.is_empty()`.
+    EmptyComponents,
 }
 
 /// Validated Tree-path produced by [`Tree::parse_attach_path`].
@@ -142,7 +160,7 @@ impl Tree {
     /// **Why on [`Tree`].** The validated invariants — non-empty,
     /// root-anchored, segment shape — are Tree-shape invariants, not
     /// engine-lifecycle invariants. The parser lives next to the type
-    /// that consumes the result (`Tree::ensure`, `Tree::lookup`) so a
+    /// that consumes the result (`Tree::ensure_child`, `Tree::lookup`) so a
     /// future core-side path constructor can produce `TreePath`s without
     /// borrowing engine code.
     ///
@@ -196,41 +214,40 @@ impl Tree {
         Ok(TreePath { segments })
     }
 
-    /// Walk `components` from a root downward, ensuring each segment.
-    /// Non-leaf components default to [`ResourceRole::DescentScaffold`]
-    /// when freshly created; existing slots' roles are preserved (the
-    /// `ensure` contract is "role-on-creation only"). The leaf component
-    /// is created with `leaf_role`.
+    /// Walk `components` root-down, ensuring each segment. Non-leaf
+    /// components default to [`ResourceRole::DescentScaffold`] on
+    /// creation; the leaf takes `leaf_role`. Existing slots' roles are
+    /// preserved (role-on-creation contract).
     ///
-    /// Returns the leaf's [`ResourceId`]; returns the default `ResourceId`
-    /// (a stale sentinel) if `components` is empty — debug-asserts in dev.
-    /// Empty input is a caller bug; the engine's pending-path materializer
-    /// guarantees non-empty by validation.
-    ///
-    /// Multi-component sole caller is the engine's path-based attach
-    /// (`Engine::attach_sub` with `SubAttachRequest::for_path`); reconcile
-    /// uses the single-component `ensure` for descendants discovered in
-    /// probe responses.
-    pub fn ensure_path(&mut self, components: &[&str], leaf_role: ResourceRole) -> ResourceId {
-        debug_assert!(
-            !components.is_empty(),
-            "ensure_path: components must be non-empty",
-        );
-        if components.is_empty() {
-            return ResourceId::default();
-        }
-        let last = components.len() - 1;
-        let mut cur: Option<ResourceId> = None;
-        for (i, comp) in components.iter().enumerate() {
-            let role = if i == last {
+    /// Returns [`StaleIdError::EmptyComponents`] iff `components` is
+    /// empty. Production callers pass [`TreePath::segments`] (non-empty
+    /// by type invariant) and `.expect()` the `Result`.
+    pub fn ensure_path(
+        &mut self,
+        components: &[&str],
+        leaf_role: ResourceRole,
+    ) -> Result<ResourceId, StaleIdError> {
+        let (first, rest) = components
+            .split_first()
+            .ok_or(StaleIdError::EmptyComponents)?;
+        let root_role = if rest.is_empty() {
+            leaf_role
+        } else {
+            ResourceRole::DescentScaffold
+        };
+        let mut cur = self.ensure_root(first, root_role);
+        let last_idx = rest.len().saturating_sub(1);
+        for (i, seg) in rest.iter().enumerate() {
+            let role = if i == last_idx {
                 leaf_role
             } else {
                 ResourceRole::DescentScaffold
             };
-            let id = self.ensure(cur, comp, role);
-            cur = Some(id);
+            cur = self
+                .ensure_child(cur, seg, role)
+                .expect("cur was minted by ensure_root or the previous loop iteration");
         }
-        cur.unwrap_or_default()
+        Ok(cur)
     }
 
     /// In-place role mutation. Sole legitimate use: scaffold materialization
@@ -281,47 +298,44 @@ impl Tree {
         }
     }
 
-    /// Get-or-create a Resource at `(parent, segment)`. Idempotent: returns
-    /// the existing slot if one is present at this `(parent, segment)`,
-    /// regardless of `role`. The `role` argument applies *only* on creation.
+    /// Get-or-create a root-level Resource. Idempotent on `segment`;
+    /// `role` applies only on creation. Infallible — a root has no
+    /// parent to be stale against.
+    pub fn ensure_root(&mut self, segment: &str, role: ResourceRole) -> ResourceId {
+        let sym = self.interner.get_or_intern(segment);
+        if let Some(id) = self.find_root(sym) {
+            return id;
+        }
+        let id = self.nodes.insert(Resource::new(None, sym, role));
+        self.roots.push(id);
+        id
+    }
+
+    /// Get-or-create a Resource at `(parent, segment)`. Idempotent;
+    /// `role` applies only on creation. Returns
+    /// [`StaleIdError::StaleParent`] iff `parent` doesn't name a live
+    /// slot (reaped, never-existed, or `ResourceId::default()`).
     ///
-    /// A stale `parent` id (`Some(p)` where the slot was reaped) is a
-    /// caller bug: every production path that reaches `ensure` has a
-    /// live parent by construction (descent materialisation, reconcile's
-    /// `ensure_descendant`, attach-time `ensure_path`). The graceful
-    /// fallback returns the default `ResourceId` sentinel — symmetric
-    /// with [`Tree::ensure_path`]'s empty-input degradation and with
-    /// every other mutator's stale-id contract (`set_role`, `set_kind`,
-    /// `vacate`, `try_reap`, refcount helpers all silently no-op on
-    /// stale ids). The `debug_assert!` pins the contract for tests /
-    /// fuzzers; release builds degrade rather than panic so a single
-    /// upstream regression doesn't abort the daemon.
-    pub fn ensure(
+    /// Production callers `.expect()` the `Result` with a panic
+    /// message pinning whichever structural invariant keeps `parent`
+    /// alive. The staleness check runs before `get_or_intern`, so a
+    /// faulted call cannot grow the interner.
+    pub fn ensure_child(
         &mut self,
-        parent: Option<ResourceId>,
+        parent: ResourceId,
         segment: &str,
         role: ResourceRole,
-    ) -> ResourceId {
-        let sym = self.interner.get_or_intern(segment);
-        if let Some(p) = parent {
-            if self.nodes.get(p).is_none() {
-                debug_assert!(false, "Tree::ensure: stale parent id ({p:?})");
-                return ResourceId::default();
-            }
-            if let Some(child_id) = self.nodes[p].children.get(&sym).copied() {
-                return child_id;
-            }
-            let id = self.nodes.insert(Resource::new(Some(p), sym, role));
-            self.nodes[p].children.insert(sym, id);
-            id
-        } else {
-            if let Some(id) = self.find_root(sym) {
-                return id;
-            }
-            let id = self.nodes.insert(Resource::new(None, sym, role));
-            self.roots.push(id);
-            id
+    ) -> Result<ResourceId, StaleIdError> {
+        if self.nodes.get(parent).is_none() {
+            return Err(StaleIdError::StaleParent(parent));
         }
+        let sym = self.interner.get_or_intern(segment);
+        if let Some(child_id) = self.nodes[parent].children.get(&sym).copied() {
+            return Ok(child_id);
+        }
+        let id = self.nodes.insert(Resource::new(Some(parent), sym, role));
+        self.nodes[parent].children.insert(sym, id);
+        Ok(id)
     }
 
     /// Look up a Resource at `(parent, segment)`. Returns `None` if the
@@ -345,7 +359,7 @@ impl Tree {
     /// Finalise the slot's kernel-watch and sensor-suppress protocols,
     /// emitting any closing ops the slot still owes, and reset `kind` to
     /// `Unknown`. The slot is then ready for [`Tree::try_reap`] (no
-    /// back-refs) or for re-entry via [`Tree::ensure`] (back-refs
+    /// back-refs) or for re-entry via [`Tree::ensure_child`] (back-refs
     /// persist).
     ///
     /// `vacate` is the **protocol terminus** for the per-Resource
@@ -384,6 +398,14 @@ impl Tree {
     /// idempotence absorbs the duplicate — rather than to a panic or
     /// a silent kernel-watch leak.
     ///
+    /// **Op emission order: `Unwatch` then `Unsuppress`.** `Unwatch`
+    /// closes the kernel-watch protocol; `Unsuppress` would re-open
+    /// the event window if it landed first. The relative order
+    /// within a single slot survives
+    /// [`StepOutput::sort_for_emission`]'s stable `ResourceId` sort,
+    /// so the sensor sees the watch torn down before suppression
+    /// lifts.
+    ///
     /// **What survives.** Children, profiles, the `proxy_promoters`
     /// back-ref, `role`, `parent`, and `segment` all stay untouched.
     /// Of those, children, profiles, and `proxy_promoters` (alongside
@@ -393,7 +415,7 @@ impl Tree {
     /// metadata: it records *what* the slot is (User anchor /
     /// watch-root parent / descent scaffold) for diagnostic clarity,
     /// but does not anchor the slot. Vacated-but-anchored slots are
-    /// recreated by [`Tree::ensure`] returning the same
+    /// recreated by [`Tree::ensure_child`] returning the same
     /// [`ResourceId`].
     pub fn vacate(&mut self, id: ResourceId, out: &mut StepOutput) {
         let Some(r) = self.nodes.get_mut(id) else {
@@ -577,12 +599,114 @@ impl Tree {
 
 #[cfg(test)]
 mod tests {
-    use super::Tree;
+    use super::{StaleIdError, Tree};
+    use crate::ids::ResourceId;
     use crate::op::WatchOp;
     use crate::output::StepOutput;
     use crate::resource::ResourceRole;
     use proptest::prelude::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn stale_id_error_variants_are_constructible() {
+        let _ = StaleIdError::EmptyComponents;
+        let _ = StaleIdError::StaleParent(ResourceId::default());
+    }
+
+    #[test]
+    fn ensure_root_is_idempotent_on_segment() {
+        let mut tree = Tree::new();
+        let id1 = tree.ensure_root("alpha", ResourceRole::User);
+        let id2 = tree.ensure_root("alpha", ResourceRole::DescentScaffold);
+        assert_eq!(id1, id2);
+        assert!(matches!(tree.get(id1).unwrap().role, ResourceRole::User));
+        assert_eq!(tree.roots().len(), 1);
+    }
+
+    #[test]
+    fn ensure_root_distinct_segments_distinct_ids() {
+        let mut tree = Tree::new();
+        let a = tree.ensure_root("/alpha", ResourceRole::User);
+        let b = tree.ensure_root("/beta", ResourceRole::User);
+        assert_ne!(a, b);
+        assert_eq!(tree.roots().len(), 2);
+    }
+
+    #[test]
+    fn ensure_root_after_reap_mints_fresh_slot() {
+        let mut tree = Tree::new();
+        let id1 = tree.ensure_root("gamma", ResourceRole::User);
+        assert!(tree.try_reap(id1, &mut discard()));
+        let id2 = tree.ensure_root("gamma", ResourceRole::User);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn ensure_child_creates_and_is_idempotent() {
+        let mut tree = Tree::new();
+        let parent = tree.ensure_root("/p", ResourceRole::User);
+        let id1 = tree
+            .ensure_child(parent, "child", ResourceRole::User)
+            .expect("parent is live");
+        let id2 = tree
+            .ensure_child(parent, "child", ResourceRole::DescentScaffold)
+            .expect("parent is live");
+        assert_eq!(id1, id2);
+        assert!(matches!(tree.get(id1).unwrap().role, ResourceRole::User));
+    }
+
+    #[test]
+    fn ensure_child_returns_stale_parent_for_reaped_id() {
+        let mut tree = Tree::new();
+        let parent = tree.ensure_root("/p", ResourceRole::User);
+        assert!(tree.try_reap(parent, &mut discard()));
+        let err = tree.ensure_child(parent, "child", ResourceRole::User);
+        assert_eq!(err, Err(StaleIdError::StaleParent(parent)));
+    }
+
+    /// The slotmap null key collides with reaped-id semantics — surface
+    /// the disjointness hazard the pre-refactor sentinel return hid.
+    #[test]
+    fn ensure_child_returns_stale_parent_for_default_id() {
+        let mut tree = Tree::new();
+        let null = ResourceId::default();
+        let err = tree.ensure_child(null, "child", ResourceRole::User);
+        assert_eq!(err, Err(StaleIdError::StaleParent(null)));
+    }
+
+    /// Stale-parent check must precede `get_or_intern` so a fuzz
+    /// stream of novel segments at dead parents can't grow the interner.
+    #[test]
+    fn ensure_child_does_not_intern_segment_on_stale_parent() {
+        let mut tree = Tree::new();
+        let parent = tree.ensure_root("/p", ResourceRole::User);
+        assert!(tree.try_reap(parent, &mut StepOutput::default()));
+        let interner_before = tree.interner.len();
+        let _ = tree.ensure_child(parent, "never_interned_segment", ResourceRole::User);
+        assert_eq!(tree.interner.len(), interner_before);
+    }
+
+    #[test]
+    fn ensure_child_returns_existing_slot_after_vacate() {
+        let mut tree = Tree::new();
+        let parent = tree.ensure_root("p", ResourceRole::User);
+        let child = tree
+            .ensure_child(parent, "c", ResourceRole::User)
+            .expect("parent live");
+        tree.vacate(child, &mut discard());
+        let again = tree
+            .ensure_child(parent, "c", ResourceRole::DescentScaffold)
+            .expect("parent still live");
+        assert_eq!(child, again);
+        assert!(matches!(tree.get(again).unwrap().role, ResourceRole::User));
+    }
+
+    #[test]
+    fn ensure_path_returns_empty_components_for_empty_input() {
+        let mut tree = Tree::new();
+        let err = tree.ensure_path(&[], ResourceRole::User);
+        assert_eq!(err, Err(StaleIdError::EmptyComponents));
+    }
 
     /// Throwaway `StepOutput` for tests that don't inspect the emitted
     /// ops. Keeping it as a tiny helper makes the in-file tests below
@@ -607,8 +731,8 @@ mod tests {
         #[test]
         fn prop_ensure_idempotent(seg in any_segment(), role_a in any_role(), role_b in any_role()) {
             let mut tree = Tree::new();
-            let id1 = tree.ensure(None, &seg, role_a);
-            let id2 = tree.ensure(None, &seg, role_b);
+            let id1 = tree.ensure_root(&seg, role_a);
+            let id2 = tree.ensure_root(&seg, role_b);
             prop_assert_eq!(id1, id2);
             prop_assert_eq!(tree.len(), 1);
         }
@@ -617,14 +741,14 @@ mod tests {
         fn prop_lookup_round_trip(seg in any_segment()) {
             let mut tree = Tree::new();
             prop_assert!(tree.lookup(None, &seg).is_none());
-            let id = tree.ensure(None, &seg, ResourceRole::User);
+            let id = tree.ensure_root(&seg, ResourceRole::User);
             prop_assert_eq!(tree.lookup(None, &seg), Some(id));
         }
 
         #[test]
         fn prop_reap_invalidates(seg in any_segment()) {
             let mut tree = Tree::new();
-            let id = tree.ensure(None, &seg, ResourceRole::User);
+            let id = tree.ensure_root(&seg, ResourceRole::User);
             prop_assert!(tree.try_reap(id, &mut discard()));
             prop_assert!(tree.get(id).is_none());
             prop_assert!(tree.lookup(None, &seg).is_none());
@@ -639,11 +763,11 @@ mod tests {
             prop_assume!(s_old != s_new);
             prop_assume!(s_old != "sibling" && s_new != "sibling");
             let mut tree = Tree::new();
-            let parent = tree.ensure(None, "p", ResourceRole::User);
-            let _sibling = tree.ensure(Some(parent), "sibling", ResourceRole::User);
-            let id_old = tree.ensure(Some(parent), &s_old, ResourceRole::User);
+            let parent = tree.ensure_root("p", ResourceRole::User);
+            let _sibling = tree.ensure_child(parent, "sibling", ResourceRole::User).expect("test live parent");
+            let id_old = tree.ensure_child(parent, &s_old, ResourceRole::User).expect("test live parent");
             prop_assert!(tree.try_reap(id_old, &mut discard()));
-            let id_new = tree.ensure(Some(parent), &s_new, ResourceRole::User);
+            let id_new = tree.ensure_child(parent, &s_new, ResourceRole::User).expect("test live parent");
             prop_assert_ne!(id_old, id_new);
         }
 
@@ -652,10 +776,15 @@ mod tests {
             segments in proptest::collection::vec(any_segment(), 1..6),
         ) {
             let mut tree = Tree::new();
-            let mut parent = None;
+            let mut parent: Option<ResourceId> = None;
             let mut last = None;
             for seg in &segments {
-                let id = tree.ensure(parent, seg, ResourceRole::User);
+                let id = match parent {
+                    None => tree.ensure_root(seg, ResourceRole::User),
+                    Some(p) => tree
+                        .ensure_child(p, seg, ResourceRole::User)
+                        .expect("test live parent"),
+                };
                 parent = Some(id);
                 last = Some(id);
             }
@@ -676,7 +805,7 @@ mod tests {
     #[test]
     fn try_reap_succeeds_for_role_only_slot_post_vacate() {
         let mut tree = Tree::new();
-        let id = tree.ensure(None, "watch-root", ResourceRole::WatchRootParent);
+        let id = tree.ensure_root("watch-root", ResourceRole::WatchRootParent);
         assert!(
             tree.try_reap(id, &mut discard()),
             "role is metadata; vacated slot with no structural anchors reaps",
@@ -687,8 +816,10 @@ mod tests {
     #[test]
     fn try_reap_refused_with_children() {
         let mut tree = Tree::new();
-        let parent = tree.ensure(None, "parent", ResourceRole::User);
-        let _child = tree.ensure(Some(parent), "child", ResourceRole::User);
+        let parent = tree.ensure_root("parent", ResourceRole::User);
+        let _child = tree
+            .ensure_child(parent, "child", ResourceRole::User)
+            .expect("test live parent");
         assert!(
             !tree.try_reap(parent, &mut discard()),
             "parent with child must not reap",
@@ -705,7 +836,9 @@ mod tests {
     #[test]
     fn try_reap_cascades_through_role_only_ancestors() {
         let mut tree = Tree::new();
-        let leaf = tree.ensure_path(&["a", "b", "c"], ResourceRole::User);
+        let leaf = tree
+            .ensure_path(&["a", "b", "c"], ResourceRole::User)
+            .expect("non-empty fixture");
         let a = tree.lookup(None, "a").unwrap();
         let b = tree.lookup(Some(a), "b").unwrap();
         assert!(matches!(
@@ -734,10 +867,16 @@ mod tests {
     #[test]
     fn try_reap_cascade_halts_at_anchored_ancestor() {
         let mut tree = Tree::new();
-        let root = tree.ensure(None, "root", ResourceRole::User);
-        let mid = tree.ensure(Some(root), "mid", ResourceRole::DescentScaffold);
-        let a = tree.ensure(Some(mid), "a", ResourceRole::User);
-        let _b = tree.ensure(Some(mid), "b", ResourceRole::User);
+        let root = tree.ensure_root("root", ResourceRole::User);
+        let mid = tree
+            .ensure_child(root, "mid", ResourceRole::DescentScaffold)
+            .expect("test live parent");
+        let a = tree
+            .ensure_child(mid, "a", ResourceRole::User)
+            .expect("test live parent");
+        let _b = tree
+            .ensure_child(mid, "b", ResourceRole::User)
+            .expect("test live parent");
 
         assert!(
             tree.try_reap(a, &mut discard()),
@@ -758,7 +897,7 @@ mod tests {
     #[test]
     fn try_reap_refused_with_live_contribution() {
         let mut tree = Tree::new();
-        let id = tree.ensure(None, "root", ResourceRole::User);
+        let id = tree.ensure_root("root", ResourceRole::User);
         tree.get_mut(id).unwrap().insert_contribution(
             crate::resource::ContribKey::ProfileAnchor(crate::ids::ProfileId::default()),
             crate::sub::ClassSet::STRUCTURE,
@@ -773,8 +912,10 @@ mod tests {
     #[test]
     fn ensure_at_same_slot_after_vacate_keeps_role() {
         let mut tree = Tree::new();
-        let parent = tree.ensure(None, "p", ResourceRole::User);
-        let id_first = tree.ensure(Some(parent), "child", ResourceRole::DescentScaffold);
+        let parent = tree.ensure_root("p", ResourceRole::User);
+        let id_first = tree
+            .ensure_child(parent, "child", ResourceRole::DescentScaffold)
+            .expect("test live parent");
         // First insertion has the DescentScaffold role.
         assert_eq!(
             tree.get(id_first).unwrap().role,
@@ -782,7 +923,9 @@ mod tests {
         );
 
         // ensure again with a different role: must not change the existing role.
-        let id_second = tree.ensure(Some(parent), "child", ResourceRole::User);
+        let id_second = tree
+            .ensure_child(parent, "child", ResourceRole::User)
+            .expect("test live parent");
         assert_eq!(id_first, id_second);
         assert_eq!(
             tree.get(id_first).unwrap().role,
@@ -797,8 +940,10 @@ mod tests {
         // refcounts have already been drained". Children, role, and
         // back-refs survive.
         let mut tree = Tree::new();
-        let parent = tree.ensure(None, "p", ResourceRole::User);
-        let _child = tree.ensure(Some(parent), "c", ResourceRole::User);
+        let parent = tree.ensure_root("p", ResourceRole::User);
+        let _child = tree
+            .ensure_child(parent, "c", ResourceRole::User)
+            .expect("test live parent");
         tree.set_kind(parent, crate::resource::ResourceKind::Dir);
         // `contributions` empty and `suppress == 0` by construction
         // (no refcount edges emitted) — vacate's precondition holds.
@@ -821,7 +966,7 @@ mod tests {
         // so the misuse degrades to "one extra closing op" rather
         // than a panic / silent kernel-watch leak.
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "x", ResourceRole::User);
+        let r = tree.ensure_root("x", ResourceRole::User);
         // Simulate a stranded contribution by inserting directly via
         // the typed mutator — the production path goes through
         // `engine::refcounts::add_watch`.
@@ -851,7 +996,7 @@ mod tests {
         // `Unsuppress` before the slot reaps — keeps the sensor's
         // per-Resource suppress bookkeeping balanced.
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "x", ResourceRole::User);
+        let r = tree.ensure_root("x", ResourceRole::User);
         tree.get_mut(r).unwrap().inc_suppress();
 
         let mut out = StepOutput::default();
@@ -876,7 +1021,7 @@ mod tests {
     #[test]
     fn try_reap_emits_unsuppress_for_drained_slot_with_residual_suppress() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "x", ResourceRole::User);
+        let r = tree.ensure_root("x", ResourceRole::User);
         tree.get_mut(r).unwrap().inc_suppress();
         // Slot is reapable: contributions empty, no children / profiles /
         // proxies, but suppress_count > 0 ⇒ vacate's Unsuppress branch
@@ -903,8 +1048,10 @@ mod tests {
     #[test]
     fn try_reap_cascade_emits_unsuppress_for_each_drained_slot() {
         let mut tree = Tree::new();
-        let parent = tree.ensure(None, "parent", ResourceRole::DescentScaffold);
-        let child = tree.ensure(Some(parent), "child", ResourceRole::User);
+        let parent = tree.ensure_root("parent", ResourceRole::DescentScaffold);
+        let child = tree
+            .ensure_child(parent, "child", ResourceRole::User)
+            .expect("test live parent");
         tree.get_mut(child).unwrap().inc_suppress();
         tree.get_mut(parent).unwrap().inc_suppress();
 
@@ -934,7 +1081,7 @@ mod tests {
         // within a single Resource's ops is preserved by the sort's
         // stability.
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "x", ResourceRole::User);
+        let r = tree.ensure_root("x", ResourceRole::User);
         {
             let res = tree.get_mut(r).unwrap();
             // Two distinct contribution keys ⇒ refcount of 2.
@@ -973,10 +1120,16 @@ mod tests {
     #[test]
     fn ancestors_walks_to_root() {
         let mut tree = Tree::new();
-        let r0 = tree.ensure(None, "root", ResourceRole::User);
-        let r1 = tree.ensure(Some(r0), "a", ResourceRole::User);
-        let r2 = tree.ensure(Some(r1), "b", ResourceRole::User);
-        let r3 = tree.ensure(Some(r2), "c", ResourceRole::User);
+        let r0 = tree.ensure_root("root", ResourceRole::User);
+        let r1 = tree
+            .ensure_child(r0, "a", ResourceRole::User)
+            .expect("test live parent");
+        let r2 = tree
+            .ensure_child(r1, "b", ResourceRole::User)
+            .expect("test live parent");
+        let r3 = tree
+            .ensure_child(r2, "c", ResourceRole::User)
+            .expect("test live parent");
 
         let chain: Vec<_> = tree.ancestors(r3).collect();
         assert_eq!(chain, vec![r2, r1, r0]);
@@ -985,9 +1138,13 @@ mod tests {
     #[test]
     fn path_of_handles_absolute_root_segment() {
         let mut tree = Tree::new();
-        let root = tree.ensure(None, "/home", ResourceRole::User);
-        let user = tree.ensure(Some(root), "user", ResourceRole::User);
-        let project = tree.ensure(Some(user), "project", ResourceRole::User);
+        let root = tree.ensure_root("/home", ResourceRole::User);
+        let user = tree
+            .ensure_child(root, "user", ResourceRole::User)
+            .expect("test live parent");
+        let project = tree
+            .ensure_child(user, "project", ResourceRole::User)
+            .expect("test live parent");
 
         assert_eq!(
             tree.path_of(project),
@@ -998,7 +1155,7 @@ mod tests {
     #[test]
     fn path_of_returns_none_for_stale_id() {
         let mut tree = Tree::new();
-        let id = tree.ensure(None, "x", ResourceRole::User);
+        let id = tree.ensure_root("x", ResourceRole::User);
         assert!(tree.try_reap(id, &mut discard()));
         assert!(tree.path_of(id).is_none());
     }
@@ -1006,17 +1163,18 @@ mod tests {
     #[test]
     fn distinct_roots_are_independent() {
         let mut tree = Tree::new();
-        let r1 = tree.ensure(None, "/a", ResourceRole::User);
-        let r2 = tree.ensure(None, "/b", ResourceRole::User);
+        let r1 = tree.ensure_root("/a", ResourceRole::User);
+        let r2 = tree.ensure_root("/b", ResourceRole::User);
         assert_ne!(r1, r2);
         assert_eq!(tree.roots().len(), 2);
     }
 
     #[test]
     fn ensure_path_creates_intermediate_scaffolds() {
-        // Non-leaf components are DescentScaffold; leaf is User.
         let mut tree = Tree::new();
-        let leaf = tree.ensure_path(&["a", "b", "c"], ResourceRole::User);
+        let leaf = tree
+            .ensure_path(&["a", "b", "c"], ResourceRole::User)
+            .expect("non-empty fixture");
 
         assert_eq!(tree.name(leaf), Some("c"));
         let b = tree.parent(leaf).unwrap();
@@ -1036,22 +1194,22 @@ mod tests {
 
     #[test]
     fn ensure_path_preserves_existing_user_role() {
-        // `Tree::ensure` is role-on-creation only; ensure_path inherits.
         let mut tree = Tree::new();
-        let _a = tree.ensure(None, "a", ResourceRole::User);
-        let leaf = tree.ensure_path(&["a", "b"], ResourceRole::User);
+        let _a = tree.ensure_root("a", ResourceRole::User);
+        let leaf = tree
+            .ensure_path(&["a", "b"], ResourceRole::User)
+            .expect("non-empty fixture");
         let a = tree.lookup(None, "a").unwrap();
-        assert!(
-            matches!(tree.get(a).unwrap().role, ResourceRole::User),
-            "a's role preserved"
-        );
+        assert!(matches!(tree.get(a).unwrap().role, ResourceRole::User));
         assert!(matches!(tree.get(leaf).unwrap().role, ResourceRole::User));
     }
 
     #[test]
     fn ensure_path_single_component_uses_leaf_role() {
         let mut tree = Tree::new();
-        let id = tree.ensure_path(&["only"], ResourceRole::User);
+        let id = tree
+            .ensure_path(&["only"], ResourceRole::User)
+            .expect("non-empty fixture");
         assert!(matches!(tree.get(id).unwrap().role, ResourceRole::User));
     }
 
@@ -1059,33 +1217,15 @@ mod tests {
     fn set_role_promotes_scaffold_to_user() {
         // Scaffold materialization at descent's anchor branch.
         let mut tree = Tree::new();
-        let id = tree.ensure(None, "x", ResourceRole::DescentScaffold);
+        let id = tree.ensure_root("x", ResourceRole::DescentScaffold);
         tree.set_role(id, ResourceRole::User);
         assert!(matches!(tree.get(id).unwrap().role, ResourceRole::User));
-    }
-
-    /// `Tree::ensure` with a stale `parent` returns the default
-    /// `ResourceId` sentinel rather than panicking. Pre-refactor the
-    /// helper indexed `self.nodes[p]` directly and would panic on a
-    /// stale id; the graceful fallback brings it into line with every
-    /// other mutator's stale-id contract. Test is `#[cfg(not(debug_assertions))]`
-    /// because the helper's `debug_assert!` fires in dev / CI builds —
-    /// production paths must never reach it under normal operation.
-    #[cfg(not(debug_assertions))]
-    #[test]
-    fn ensure_with_stale_parent_returns_default_and_does_not_panic() {
-        let mut tree = Tree::new();
-        let parent = tree.ensure(None, "p", ResourceRole::User);
-        let mut out = StepOutput::default();
-        assert!(tree.try_reap(parent, &mut out));
-        let id = tree.ensure(Some(parent), "child", ResourceRole::User);
-        assert_eq!(id, ResourceId::default());
     }
 
     #[test]
     fn set_role_on_stale_id_is_noop() {
         let mut tree = Tree::new();
-        let id = tree.ensure(None, "x", ResourceRole::User);
+        let id = tree.ensure_root("x", ResourceRole::User);
         assert!(tree.try_reap(id, &mut discard()));
         tree.set_role(id, ResourceRole::User);
         // No panic; lookups still return None.

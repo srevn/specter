@@ -83,7 +83,7 @@ fn two_profiles_one_resource_share_watch_demand() {
     // both attaches: anchor.watch_demand == 2; only one Watch op was
     // emitted (the 0→1 edge).
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let cfg_a = ScanConfig::builder().recursive(true).build();
@@ -137,9 +137,12 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
     // Seed bursts establish the baseline and don't count as "dirty" for
     // ancestors.
     let mut e = Engine::new();
-    let src = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let src = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(src, ResourceKind::Dir);
-    let foo = e.tree_mut().ensure(Some(src), "foo", ResourceRole::User);
+    let foo = e
+        .tree_mut()
+        .ensure_child(src, "foo", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let cfg = ScanConfig::builder().recursive(true).build();
@@ -235,9 +238,12 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     // then complete the child — propagate(-1) returns parent's id and
     // the engine emits a reconfirm probe in the same step.
     let mut e = Engine::new();
-    let src = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let src = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(src, ResourceKind::Dir);
-    let foo = e.tree_mut().ensure(Some(src), "foo", ResourceRole::User);
+    let foo = e
+        .tree_mut()
+        .ensure_child(src, "foo", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let cfg = ScanConfig::builder().recursive(true).build();
@@ -468,7 +474,7 @@ fn co_located_profiles_share_suppress_count() {
     // accumulates across the two bursts; Unsuppress emits only on the
     // last-finishing burst's burst-end.
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let cfg_a = ScanConfig::builder().recursive(true).build();

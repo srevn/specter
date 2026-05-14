@@ -115,7 +115,7 @@ fn attach_subtree_root(
 #[test]
 fn anchor_claim_purged_then_detach_no_panic() {
     let mut e = Engine::new();
-    let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (sid, pid, attach_out) = attach_subtree_root(&mut e, "build", root, MAX_SETTLE);
@@ -177,7 +177,7 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
     // subsequent recovery uses the safe Subtree fallback rather than
     // misrouting against a recreated anchor of a different shape.
     let mut e = Engine::new();
-    let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (_sid_p, pid_p, out_p) = attach_subtree_root(&mut e, "P", root, MAX_SETTLE);
@@ -234,7 +234,7 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
 #[test]
 fn anchor_claim_purged_for_two_profiles_each_no_panic() {
     let mut e = Engine::new();
-    let root = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
     let (sid_p, pid_p, out_p) = attach_subtree_root(&mut e, "P", root, MAX_SETTLE);
@@ -313,9 +313,12 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
 fn watch_root_parent_claim_purged_then_reap_no_panic() {
     let mut e = Engine::new();
     // Build a parent / anchor pair.
-    let parent = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
-    let anchor = e.tree_mut().ensure(Some(parent), "log", ResourceRole::User);
+    let anchor = e
+        .tree_mut()
+        .ensure_child(parent, "log", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let (sid, pid, attach_out) = attach_subtree_root(&mut e, "watch", anchor, MAX_SETTLE);
@@ -381,7 +384,10 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     // operator restart is required to recover (no automatic recovery
     // via parent's StructureChanged because the parent watch failed).
     let mut e = Engine::new();
-    let foo = e.tree_mut().ensure_path(&["/", "foo"], ResourceRole::User);
+    let foo = e
+        .tree_mut()
+        .ensure_path(&["/", "foo"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
@@ -482,7 +488,10 @@ fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     let mut comps = Vec::with_capacity(segments.len() + 1);
     comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(segments);
-    let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
+    let r = e
+        .tree_mut()
+        .ensure_path(&comps, ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     r
 }

@@ -1545,9 +1545,9 @@ mod tests {
         // the I5 double-open panic (one open channel per owner).
         use crate::probe_channel::OpenKind;
         let mut e = Engine::new();
-        let r1 = e.tree.ensure(None, "x", specter_core::ResourceRole::User);
-        let r2 = e.tree.ensure(None, "y", specter_core::ResourceRole::User);
-        let r3 = e.tree.ensure(None, "z", specter_core::ResourceRole::User);
+        let r1 = e.tree.ensure_root("x", specter_core::ResourceRole::User);
+        let r2 = e.tree.ensure_root("y", specter_core::ResourceRole::User);
+        let r3 = e.tree.ensure_root("z", specter_core::ResourceRole::User);
         let cfg = ScanConfig::builder().build();
         let pid1 = e.profiles.attach(
             &mut e.tree,
@@ -1777,10 +1777,11 @@ mod tests {
         // set_watch_root_parent must not double-bump the parent's
         // watch_demand.
         let mut e = Engine::new();
-        let parent = e.tree.ensure(None, "p", specter_core::ResourceRole::User);
+        let parent = e.tree.ensure_root("p", specter_core::ResourceRole::User);
         let anchor = e
             .tree
-            .ensure(Some(parent), "a", specter_core::ResourceRole::User);
+            .ensure_child(parent, "a", specter_core::ResourceRole::User)
+            .expect("test live parent");
         let profile = specter_core::Profile::new(
             anchor,
             ScanConfig::builder().build(),
@@ -1847,7 +1848,7 @@ mod tests {
         let mut e = Engine::new();
         let r = e
             .tree
-            .ensure(None, "anchor", specter_core::ResourceRole::User);
+            .ensure_root("anchor", specter_core::ResourceRole::User);
         e.tree.set_kind(r, specter_core::ResourceKind::Dir);
         let now = Instant::now();
 
@@ -1924,7 +1925,7 @@ mod tests {
         let mut e = Engine::new();
         let r = e
             .tree
-            .ensure(None, "anchor", specter_core::ResourceRole::User);
+            .ensure_root("anchor", specter_core::ResourceRole::User);
         e.tree.set_kind(r, specter_core::ResourceKind::Dir);
         let now = Instant::now();
 
@@ -2020,8 +2021,11 @@ mod tests {
         use std::time::UNIX_EPOCH;
 
         let mut e = Engine::new();
-        let parent = e.tree.ensure(None, "parent", ResourceRole::User);
-        let anchor = e.tree.ensure(Some(parent), "anchor", ResourceRole::User);
+        let parent = e.tree.ensure_root("parent", ResourceRole::User);
+        let anchor = e
+            .tree
+            .ensure_child(parent, "anchor", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(parent, ResourceKind::Dir);
         e.tree.set_kind(anchor, ResourceKind::Dir);
 
@@ -2046,7 +2050,10 @@ mod tests {
         // `dispatch_seed_ok` would write at probe completion. One
         // child leaf gives `release_descendant_claim` a non-trivial
         // diff to apply.
-        let child_id = e.tree.ensure(Some(anchor), "child", ResourceRole::User);
+        let child_id = e
+            .tree
+            .ensure_child(anchor, "child", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(child_id, ResourceKind::File);
         let mut entries: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
         entries.insert(

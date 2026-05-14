@@ -226,9 +226,13 @@ mod tests {
     fn three_level_chain() -> (Tree, ProfileMap, ProfileId, ProfileId, ProfileId) {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let root = tree.ensure(None, "root", ResourceRole::User);
-        let mid = tree.ensure(Some(root), "mid", ResourceRole::User);
-        let leaf = tree.ensure(Some(mid), "leaf", ResourceRole::User);
+        let root = tree.ensure_root("root", ResourceRole::User);
+        let mid = tree
+            .ensure_child(root, "mid", ResourceRole::User)
+            .expect("test live parent");
+        let leaf = tree
+            .ensure_child(mid, "leaf", ResourceRole::User)
+            .expect("test live parent");
         for r in [root, mid, leaf] {
             mark_dir(&mut tree, r);
         }
@@ -439,9 +443,13 @@ mod tests {
     fn recompute_for_subset_picks_new_interposing_profile() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let root = tree.ensure(None, "root", ResourceRole::User);
-        let mid = tree.ensure(Some(root), "mid", ResourceRole::User);
-        let leaf = tree.ensure(Some(mid), "leaf", ResourceRole::User);
+        let root = tree.ensure_root("root", ResourceRole::User);
+        let mid = tree
+            .ensure_child(root, "mid", ResourceRole::User)
+            .expect("test live parent");
+        let leaf = tree
+            .ensure_child(mid, "leaf", ResourceRole::User)
+            .expect("test live parent");
         for r in [root, mid, leaf] {
             mark_dir(&mut tree, r);
         }

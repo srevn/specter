@@ -65,9 +65,13 @@ fn covers_drives_nearest_covering_ancestor() {
     {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let root = tree.ensure(None, "root", ResourceRole::User);
-        let a = tree.ensure(Some(root), "a", ResourceRole::User);
-        let b = tree.ensure(Some(a), "b", ResourceRole::User);
+        let root = tree.ensure_root("root", ResourceRole::User);
+        let a = tree
+            .ensure_child(root, "a", ResourceRole::User)
+            .expect("test live parent");
+        let b = tree
+            .ensure_child(a, "b", ResourceRole::User)
+            .expect("test live parent");
         for r in [root, a, b] {
             mark_dir(&mut tree, r);
         }
@@ -94,9 +98,13 @@ fn covers_drives_nearest_covering_ancestor() {
     {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let root = tree.ensure(None, "root", ResourceRole::User);
-        let a = tree.ensure(Some(root), "a", ResourceRole::User);
-        let b = tree.ensure(Some(a), "b", ResourceRole::User);
+        let root = tree.ensure_root("root", ResourceRole::User);
+        let a = tree
+            .ensure_child(root, "a", ResourceRole::User)
+            .expect("test live parent");
+        let b = tree
+            .ensure_child(a, "b", ResourceRole::User)
+            .expect("test live parent");
         for r in [root, a, b] {
             mark_dir(&mut tree, r);
         }
@@ -121,10 +129,16 @@ fn covers_drives_nearest_covering_ancestor() {
 fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
-    let root = tree.ensure(None, "root", ResourceRole::User);
-    let src = tree.ensure(Some(root), "src", ResourceRole::User);
-    let lib_rs = tree.ensure(Some(src), "lib.rs", ResourceRole::User);
-    let lib_c = tree.ensure(Some(src), "lib.c", ResourceRole::User);
+    let root = tree.ensure_root("root", ResourceRole::User);
+    let src = tree
+        .ensure_child(root, "src", ResourceRole::User)
+        .expect("test live parent");
+    let lib_rs = tree
+        .ensure_child(src, "lib.rs", ResourceRole::User)
+        .expect("test live parent");
+    let lib_c = tree
+        .ensure_child(src, "lib.c", ResourceRole::User)
+        .expect("test live parent");
     mark_dir(&mut tree, root);
     mark_dir(&mut tree, src);
     tree.set_kind(lib_rs, ResourceKind::File);
@@ -633,7 +647,7 @@ fn step_output_is_sorted() {
 // ---------- helpers ----------
 
 fn e_anchor(e: &mut Engine, name: &str) -> ResourceId {
-    let r = e.tree_mut().ensure(None, name, ResourceRole::User);
+    let r = e.tree_mut().ensure_root(name, ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     r
 }

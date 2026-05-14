@@ -78,7 +78,7 @@ fn complete_seed(
 #[test]
 fn dense_event_storm_converges_naturally_below_burst_deadline() {
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let now = Instant::now();
@@ -186,7 +186,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
     // arrive in between. Each cycle's next-probe deadline must equal
     // `last_response + settle`, regardless of how many cycles preceded.
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let now = Instant::now();

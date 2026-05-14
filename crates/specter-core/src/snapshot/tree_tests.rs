@@ -74,7 +74,12 @@ fn ensure_chain(tree: &mut Tree, segments: &[&str]) -> Vec<ResourceId> {
     let mut ids = Vec::with_capacity(segments.len());
     let mut cur: Option<ResourceId> = None;
     for s in segments {
-        let id = tree.ensure(cur, s, ResourceRole::User);
+        let id = match cur {
+            None => tree.ensure_root(s, ResourceRole::User),
+            Some(p) => tree
+                .ensure_child(p, s, ResourceRole::User)
+                .expect("test live parent"),
+        };
         ids.push(id);
         cur = Some(id);
     }
@@ -783,7 +788,7 @@ fn subtree_at_target_outside_anchor_returns_none() {
     let (snap, mut tree, ids) = build_4_level_tree();
     let anchor = ids[0];
     // Add a sibling root with no relation to the anchor's chain.
-    let stranger = tree.ensure(None, "stranger", ResourceRole::User);
+    let stranger = tree.ensure_root("stranger", ResourceRole::User);
     assert!(snap.subtree_at(anchor, stranger, &tree).is_none());
 }
 
@@ -794,8 +799,12 @@ fn subtree_at_target_path_through_leaf_returns_none() {
     // Descend into z_leaf (a Leaf entry) — chain anchor → z_leaf — and
     // ask for a child *of* z_leaf, which is impossible in tree terms.
     // Synthesise a tree id under z_leaf to drive the path.
-    let z_leaf_id = tree.ensure(Some(anchor), "z_leaf", ResourceRole::User);
-    let inside_leaf = tree.ensure(Some(z_leaf_id), "inside", ResourceRole::User);
+    let z_leaf_id = tree
+        .ensure_child(anchor, "z_leaf", ResourceRole::User)
+        .expect("test live parent");
+    let inside_leaf = tree
+        .ensure_child(z_leaf_id, "inside", ResourceRole::User)
+        .expect("test live parent");
     assert!(
         snap.subtree_at(anchor, inside_leaf, &tree).is_none(),
         "chain through Leaf must yield None",
@@ -846,7 +855,7 @@ fn subtree_at_stale_target_returns_none() {
 fn subtree_at_file_snapshot_returns_none() {
     let snap = TreeSnapshot::File(leaf(EntryKind::File, 0, 0, 0, 0));
     let mut tree = Tree::new();
-    let id = tree.ensure(None, "anything", ResourceRole::User);
+    let id = tree.ensure_root("anything", ResourceRole::User);
     assert!(snap.subtree_at(id, id, &tree).is_none());
 }
 
@@ -870,7 +879,7 @@ fn unwrap_spliced(r: SpliceResult) -> TreeSnapshot {
 #[test]
 fn splice_no_prior_returns_replacement() {
     let mut tree = Tree::new();
-    let id = tree.ensure(None, "anchor", ResourceRole::User);
+    let id = tree.ensure_root("anchor", ResourceRole::User);
     let r = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
     let s = unwrap_spliced(splice(None, id, id, Arc::clone(&r), &tree));
     if let TreeSnapshot::Dir(d) = s {
@@ -883,7 +892,7 @@ fn splice_no_prior_returns_replacement() {
 #[test]
 fn splice_at_anchor_replaces_root() {
     let mut tree = Tree::new();
-    let id = tree.ensure(None, "anchor", ResourceRole::User);
+    let id = tree.ensure_root("anchor", ResourceRole::User);
     let prior = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
     let mut new_entries = BTreeMap::new();
     new_entries.insert(
@@ -908,7 +917,7 @@ fn splice_at_anchor_replaces_root() {
 #[test]
 fn splice_at_anchor_equal_hash_keeps_prior_arc() {
     let mut tree = Tree::new();
-    let id = tree.ensure(None, "anchor", ResourceRole::User);
+    let id = tree.ensure_root("anchor", ResourceRole::User);
     let prior = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
     // Construct a structurally-identical replacement; dir_hash folds the
     // observable identity so hashes match.
@@ -971,8 +980,12 @@ fn splice_three_levels_deep_off_path_arc_ptr_eq() {
 
     // Build a sibling "top_sib" under anchor, and "mid_sib" under a, to
     // assert spine-rebuild preserves both.
-    let _top_sib_id = tree.ensure(Some(anchor), "top_sib", ResourceRole::User);
-    let _mid_sib_id = tree.ensure(Some(a), "mid_sib", ResourceRole::User);
+    let _top_sib_id = tree
+        .ensure_child(anchor, "top_sib", ResourceRole::User)
+        .expect("test live parent");
+    let _mid_sib_id = tree
+        .ensure_child(a, "mid_sib", ResourceRole::User)
+        .expect("test live parent");
     let top_sib = make_dir(meta(91, 91, 0), 0, BTreeMap::new());
     let mid_sib = make_dir(meta(92, 92, 0), 0, BTreeMap::new());
 
@@ -1111,7 +1124,7 @@ fn splice_target_outside_observed_returns_crossed_uncovered() {
     let mut tree = Tree::new();
     let ids = ensure_chain(&mut tree, &["anchor"]);
     let anchor = ids[0];
-    let stranger = tree.ensure(None, "stranger", ResourceRole::User);
+    let stranger = tree.ensure_root("stranger", ResourceRole::User);
     let prior = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
     let replacement = make_dir(meta(2, 2, 0), 0, BTreeMap::new());
     let prior_strong_before = Arc::strong_count(&prior);
@@ -2289,7 +2302,7 @@ proptest! {
         let mut siblings: Vec<Arc<DirSnapshot>> = Vec::new();
         for i in 0..sibling_count {
             let sib_name = format!("sib_{i}");
-            let _sib_id = tree.ensure(Some(anchor), &sib_name, ResourceRole::User);
+            let _sib_id = tree.ensure_child(anchor, &sib_name, ResourceRole::User).expect("test live parent");
             let sib = make_dir(meta(50 + i as u64, 50 + i as u64, 0), 0, BTreeMap::new());
             siblings.push(Arc::clone(&sib));
             root_entries.insert(CompactString::new(sib_name), dir(50 + i as u64, 0, Some(sib)));

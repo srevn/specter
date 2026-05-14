@@ -122,7 +122,10 @@ fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     let mut comps = Vec::with_capacity(segments.len() + 1);
     comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(segments);
-    let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
+    let r = e
+        .tree_mut()
+        .ensure_path(&comps, ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     r
 }
@@ -140,7 +143,10 @@ fn pre_place_file(e: &mut Engine, dir_segments: &[&str], file_name: &str) -> Res
     comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(dir_segments);
     comps.push(file_name);
-    let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
+    let r = e
+        .tree_mut()
+        .ensure_path(&comps, ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(r, ResourceKind::File);
     r
 }
@@ -280,7 +286,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
     // ---- dynamic Sub's Seed burst (no descent) ----
     //
     // The forward-pass FINAL branch pre-ensured the `foo.log` slot
-    // (via `tree.lookup -> tree.ensure(.., User)`) and stamped its
+    // (via `tree.lookup -> tree.ensure_child(.., User)`) and stamped its
     // kind from the enumeration's `EntryKind::File`. Then
     // `for_resource_dynamic` routes `attach_sub_inner` through the
     // resource-anchored branch (`req.path.is_none()`), so the new
@@ -403,7 +409,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
 #[test]
 fn static_attach_emits_sub_attached_with_no_source_promoter() {
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let req = specter_core::SubAttachRequest::for_resource(

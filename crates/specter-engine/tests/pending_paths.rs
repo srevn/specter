@@ -83,7 +83,10 @@ fn attach_sub_path_pending_then_anchor_appears() {
     // log appears, then myapp appears. Anchor materializes; Seed burst
     // starts.
     let mut e = Engine::new();
-    let var = e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User);
+    let var = e
+        .tree_mut()
+        .ensure_path(&["/", "var"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
@@ -176,7 +179,10 @@ fn attach_sub_path_pending_then_anchor_appears() {
 #[test]
 fn pending_path_failed_probe_retains_state() {
     let mut e = Engine::new();
-    let var = e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User);
+    let var = e
+        .tree_mut()
+        .ensure_path(&["/", "var"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
@@ -223,7 +229,10 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     // with a no-progress response, then inject FsEvent at /var (the
     // prefix) to trigger a fresh probe (no settle).
     let mut e = Engine::new();
-    let var = e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User);
+    let var = e
+        .tree_mut()
+        .ensure_path(&["/", "var"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
@@ -276,11 +285,12 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     // path which re-enters pending descent.
     let mut e = Engine::new();
     // Both / and /src exist; /src is the anchor.
-    let root_dir = e.tree_mut().ensure(None, "root", ResourceRole::User);
+    let root_dir = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root_dir, ResourceKind::Dir);
     let src = e
         .tree_mut()
-        .ensure(Some(root_dir), "src", ResourceRole::User);
+        .ensure_child(root_dir, "src", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_resource(
@@ -350,7 +360,10 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
 #[test]
 fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let mut e = Engine::new();
-    let var = e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User);
+    let var = e
+        .tree_mut()
+        .ensure_path(&["/", "var"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
@@ -510,15 +523,20 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
 fn classifier_routes_descent_and_recovery_in_single_pass() {
     // /root and /root/bar exist; /root/foo does not. /elsewhere exists.
     let mut e = Engine::new();
-    let root_dir = e.tree_mut().ensure_path(&["/", "root"], ResourceRole::User);
+    let root_dir = e
+        .tree_mut()
+        .ensure_path(&["/", "root"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(root_dir, ResourceKind::Dir);
     let bar = e
         .tree_mut()
-        .ensure(Some(root_dir), "bar", ResourceRole::User);
+        .ensure_child(root_dir, "bar", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(bar, ResourceKind::Dir);
     let elsewhere = e
         .tree_mut()
-        .ensure_path(&["/", "elsewhere"], ResourceRole::User);
+        .ensure_path(&["/", "elsewhere"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(elsewhere, ResourceKind::Dir);
 
     // Profile A: Pending at /root, descending toward `foo` (does not

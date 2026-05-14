@@ -82,7 +82,7 @@ impl crate::Engine {
     /// Walk a validated [`TreePath`] into the Tree. The leaf is created
     /// with `ResourceRole::User`; non-leaf components are
     /// `ResourceRole::DescentScaffold` if freshly created (the existing
-    /// `Tree::ensure` contract preserves existing roles, so an already-
+    /// `ensure_root` / `ensure_child` preserve existing roles, so an already-
     /// User parent stays User).
     ///
     /// Returns `Materialized` iff every segment was already a live Tree
@@ -113,12 +113,12 @@ impl crate::Engine {
         let components: Vec<&str> = path.segments().iter().map(CompactString::as_str).collect();
 
         // FS-root bootstrap. Unconditional: [`TreePath`]'s invariant
-        // guarantees `components[0] == FS_ROOT_SEGMENT`, and `Tree::ensure`
-        // is idempotent (returns the existing slot if `(parent=None,
-        // segment="/")` already maps to one). The role is
-        // `DescentScaffold` on first creation; if a prior `User` attach
-        // at `/` already promoted the slot, `ensure`'s
-        // preserve-existing-role contract leaves it alone. Bootstrapping
+        // guarantees `components[0] == FS_ROOT_SEGMENT`, and
+        // `ensure_root` is idempotent (returns the existing slot if a
+        // root at `/` already exists). The role is `DescentScaffold`
+        // on first creation; if a prior `User` attach at `/` already
+        // promoted the slot, the preserve-existing-role contract
+        // leaves it alone. Bootstrapping
         // unconditionally guarantees every Profile's rewind chain
         // terminates at this `/` slot — the kernel always `lstat`s `/`
         // successfully on Unix, so a `Vanished` response from a `/` probe
@@ -126,7 +126,7 @@ impl crate::Engine {
         // (`rm -rf /a/b/c/d`) recoverable: the descent stays Pending at
         // `/` waiting for the cascade's bottom segment to reappear.
         self.tree
-            .ensure(None, FS_ROOT_SEGMENT, ResourceRole::DescentScaffold);
+            .ensure_root(FS_ROOT_SEGMENT, ResourceRole::DescentScaffold);
 
         // Snapshot which segments existed BEFORE the walk so we can tell
         // freshly-scaffolded segments from already-existing ones. The
@@ -146,7 +146,10 @@ impl crate::Engine {
 
         // Now do the walk. `ensure_path` creates non-leaf as
         // `DescentScaffold`, leaf as `User`.
-        let anchor = self.tree.ensure_path(&components, ResourceRole::User);
+        let anchor = self
+            .tree
+            .ensure_path(&components, ResourceRole::User)
+            .expect("TreePath::segments() is non-empty by type invariant");
 
         // Walk forward to find the deepest pre-existing prefix. The
         // bootstrap guarantees `pre_existed[0] == true`, so `prefix_idx`
@@ -360,7 +363,10 @@ impl crate::Engine {
             Some(r) => r,
             None => self
                 .tree
-                .ensure(Some(prefix), &next_segment, ResourceRole::DescentScaffold),
+                .ensure_child(prefix, &next_segment, ResourceRole::DescentScaffold)
+                .expect(
+                    "descent prefix held alive by ProfileDescent / PromoterPrefix contribution",
+                ),
         };
         self.tree
             .set_kind(new_resource, kind_from_entry(entry_kind));
@@ -415,7 +421,7 @@ impl crate::Engine {
     /// the routine release helper would see a non-empty `children` map
     /// and short-circuit anyway, so we skip the call. (Role is metadata
     /// throughout — its tag stays `DescentScaffold` from the initial
-    /// `Tree::ensure` but does not affect retention.)
+    /// `ensure_child` but does not affect retention.)
     fn advance_descent(
         &mut self,
         owner: ProbeOwner,

@@ -78,9 +78,12 @@ fn engine_with_materialised_profile(
     events: ClassSet,
 ) -> (Engine, SubId, ProfileId, ResourceId, ResourceId) {
     let mut e = Engine::new();
-    let parent = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
-    let anchor = e.tree_mut().ensure(Some(parent), "log", ResourceRole::User);
+    let anchor = e
+        .tree_mut()
+        .ensure_child(parent, "log", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_resource(
@@ -368,7 +371,7 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
     // Materialise a Profile with a Dir child; verify the per-descendant
     // contribution is released by the helper.
     let mut e = Engine::new();
-    let anchor = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let anchor = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_resource(
@@ -457,7 +460,7 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
     // `has_per_file_fds = false`, so the descendant clause's Dir branch
     // is the contribution that the regression exercises.
     let mut e = Engine::new();
-    let anchor = e.tree_mut().ensure(None, "a", ResourceRole::User);
+    let anchor = e.tree_mut().ensure_root("a", ResourceRole::User);
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_resource(

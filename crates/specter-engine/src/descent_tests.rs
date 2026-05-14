@@ -83,7 +83,8 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
     // directory the engine has discovered.
     let foo = e
         .tree_mut()
-        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
@@ -161,7 +162,8 @@ fn descent_two_levels_advances_progressively() {
     let mut e = Engine::new();
     let foo = e
         .tree_mut()
-        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_path(
@@ -480,7 +482,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
 }
 
 /// Two absolute attaches share the FS-root via the bootstrap's
-/// idempotence (`Tree::ensure(None, "/")` returns the existing root on
+/// idempotence (`Tree::ensure_root("/")` returns the existing root on
 /// the second call).
 #[test]
 fn second_absolute_attach_reuses_fs_root() {
@@ -563,7 +565,8 @@ fn descent_probe_uses_descent_variant() {
     let mut e = Engine::new();
     let foo = e
         .tree_mut()
-        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User);
+        .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let user_cfg = specter_core::ScanConfig::builder()
@@ -672,7 +675,7 @@ fn reap_pending_profile_releases_only_descent_prefix() {
 fn profile_state_default_is_idle() {
     use specter_core::{Profile, ProfileState, ScanConfig};
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "anchor", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("anchor", ResourceRole::User);
     let p = Profile::new(
         r,
         ScanConfig::builder().build(),
@@ -688,7 +691,7 @@ fn profile_state_default_is_idle() {
 #[test]
 fn descent_state_helper_returns_none_for_idle() {
     let mut e = Engine::new();
-    let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
+    let foo = e.tree_mut().ensure_root("foo", ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_resource(
         "g".into(),
@@ -725,7 +728,7 @@ fn descent_state_helper_returns_none_for_idle() {
 #[test]
 fn descent_state_helper_returns_none_for_active() {
     let mut e = Engine::new();
-    let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
+    let foo = e.tree_mut().ensure_root("foo", ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_resource(
         "g".into(),
@@ -828,7 +831,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     // anchor_claim == Held. Predicate `(none && Held)` matches false →
     // assertion holds.
     let mut e = Engine::new();
-    let foo = e.tree_mut().ensure(None, "foo", ResourceRole::User);
+    let foo = e.tree_mut().ensure_root("foo", ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
     let req = SubAttachRequest::for_resource(
         "g".into(),

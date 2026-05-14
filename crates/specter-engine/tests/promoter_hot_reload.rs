@@ -45,7 +45,7 @@ fn empty_program() -> Arc<ActionProgram> {
 }
 
 fn sub_req_at_root(name: &str, e: &mut Engine) -> SubAttachRequest {
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     SubAttachRequest::for_resource(
         name.to_owned(),

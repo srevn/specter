@@ -137,9 +137,12 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     // of the recreated anchor's shape. Pre-fix the cached `Some(File)`
     // misrouted through `emit_anchor_probe` and wasted a round-trip.
     let mut e = Engine::new();
-    let parent = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
-    let anchor = e.tree_mut().ensure(Some(parent), "log", ResourceRole::User);
+    let anchor = e
+        .tree_mut()
+        .ensure_child(parent, "log", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::File);
 
     // Q first — completes Seed AnchorOk → Idle, kind=Some(File).
@@ -234,11 +237,12 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     // regressions where the recovery path could unintentionally
     // multi-probe.
     let mut e = Engine::new();
-    let parent = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let parent = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
     let anchor = e
         .tree_mut()
-        .ensure(Some(parent), "build", ResourceRole::User);
+        .ensure_child(parent, "build", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let (_sid_q, pid_q, out_q) = attach_at(
@@ -304,9 +308,12 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     // for the Failed dispatch path. dispatch_seed_failed shares the
     // helper; the post-recovery probe must be Subtree.
     let mut e = Engine::new();
-    let parent = e.tree_mut().ensure(None, "var", ResourceRole::User);
+    let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
-    let anchor = e.tree_mut().ensure(Some(parent), "log", ResourceRole::User);
+    let anchor = e
+        .tree_mut()
+        .ensure_child(parent, "log", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::File);
 
     let (_sid_q, pid_q, out_q) = attach_at(

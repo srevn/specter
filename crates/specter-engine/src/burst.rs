@@ -1377,7 +1377,7 @@ mod tests {
     /// Engine + the `ProfileId`.
     fn engine_with_profile() -> (Engine, specter_core::ProfileId) {
         let mut e = Engine::new();
-        let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+        let r = e.tree.ensure_root("anchor", ResourceRole::User);
         e.tree.set_kind(r, ResourceKind::Dir);
         let pid = e.profiles.attach(
             &mut e.tree,
@@ -1883,11 +1883,17 @@ mod tests {
         specter_core::ResourceId,
     ) {
         let mut e = Engine::new();
-        let root = e.tree.ensure(None, "root", ResourceRole::User);
+        let root = e.tree.ensure_root("root", ResourceRole::User);
         e.tree.set_kind(root, ResourceKind::Dir);
-        let a = e.tree.ensure(Some(root), "a", ResourceRole::User);
+        let a = e
+            .tree
+            .ensure_child(root, "a", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(a, ResourceKind::Dir);
-        let b = e.tree.ensure(Some(root), "b", ResourceRole::User);
+        let b = e
+            .tree
+            .ensure_child(root, "b", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(b, ResourceKind::Dir);
         let pid = e.profiles.attach(
             &mut e.tree,
@@ -1985,8 +1991,8 @@ mod tests {
         // descends from), but the diagnostic surfaces the invariant
         // break if a future refactor ever produces multi-root Trees.
         let mut e = Engine::new();
-        let a = e.tree.ensure(None, "alpha", ResourceRole::User);
-        let b = e.tree.ensure(None, "beta", ResourceRole::User);
+        let a = e.tree.ensure_root("alpha", ResourceRole::User);
+        let b = e.tree.ensure_root("beta", ResourceRole::User);
         let pid = specter_core::ProfileId::default();
         let mut out = StepOutput::default();
 
@@ -2208,9 +2214,12 @@ mod tests {
         specter_core::ResourceId,
     ) {
         let mut e = Engine::new();
-        let parent = e.tree.ensure(None, "parentdir", ResourceRole::User);
+        let parent = e.tree.ensure_root("parentdir", ResourceRole::User);
         e.tree.set_kind(parent, ResourceKind::Dir);
-        let file_anchor = e.tree.ensure(Some(parent), "main.rs", ResourceRole::User);
+        let file_anchor = e
+            .tree
+            .ensure_child(parent, "main.rs", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(file_anchor, ResourceKind::File);
         let pid = e.profiles.attach(
             &mut e.tree,
@@ -2235,19 +2244,37 @@ mod tests {
         // reduction must resolve to that ancestor, not collapse to the
         // anchor and not return either leaf.
         let mut e = Engine::new();
-        let l0 = e.tree.ensure(None, "l0", ResourceRole::User);
+        let l0 = e.tree.ensure_root("l0", ResourceRole::User);
         e.tree.set_kind(l0, ResourceKind::Dir);
-        let l1 = e.tree.ensure(Some(l0), "l1", ResourceRole::User);
+        let l1 = e
+            .tree
+            .ensure_child(l0, "l1", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(l1, ResourceKind::Dir);
-        let l2 = e.tree.ensure(Some(l1), "l2", ResourceRole::User);
+        let l2 = e
+            .tree
+            .ensure_child(l1, "l2", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(l2, ResourceKind::Dir);
-        let l3a = e.tree.ensure(Some(l2), "a", ResourceRole::User);
+        let l3a = e
+            .tree
+            .ensure_child(l2, "a", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(l3a, ResourceKind::Dir);
-        let l3b = e.tree.ensure(Some(l2), "b", ResourceRole::User);
+        let l3b = e
+            .tree
+            .ensure_child(l2, "b", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(l3b, ResourceKind::Dir);
-        let leaf_a = e.tree.ensure(Some(l3a), "x", ResourceRole::User);
+        let leaf_a = e
+            .tree
+            .ensure_child(l3a, "x", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(leaf_a, ResourceKind::File);
-        let leaf_b = e.tree.ensure(Some(l3b), "y", ResourceRole::User);
+        let leaf_b = e
+            .tree
+            .ensure_child(l3b, "y", ResourceRole::User)
+            .expect("test live parent");
         e.tree.set_kind(leaf_b, ResourceKind::File);
         let pid = e.profiles.attach(
             &mut e.tree,

@@ -72,7 +72,7 @@ fn config_diff_add_sub_to_existing_profile() {
     // same config — both share one Profile. sub_refcount goes 1 → 2; no
     // new Watch/Probe/Suppress.
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
@@ -136,7 +136,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     // removes A. Profile reaped immediately (sub_refcount → 0, Idle);
     // anchor unwatched.
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_resource(
@@ -204,7 +204,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
     // Engine has Sub A; Standard burst in flight; ConfigDiff removes A.
     // reap_pending=true; on burst-end, no Effect; Profile reaped.
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let attach_out = e.step(
@@ -310,7 +310,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
     // Production path that the user-API tests in `engine.rs` cannot
     // exercise on their own.
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let cfg = ScanConfig::builder().build();
@@ -423,7 +423,7 @@ fn effect_complete_after_detach_drops_silently() {
     // inject EffectComplete for the now-removed Sub. Engine drops with
     // a Diagnostic — no panic, no reseed.
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "src", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let attach_out = e.step(
@@ -504,7 +504,10 @@ fn config_diff_modified_remove_then_add() {
     // gets a fresh Profile (different config_hash) anchored at the same
     // path (path-based add re-materializes if needed).
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure_path(&["/", "src"], ResourceRole::User);
+    let r = e
+        .tree_mut()
+        .ensure_path(&["/", "src"], ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let attach_out = e.step(

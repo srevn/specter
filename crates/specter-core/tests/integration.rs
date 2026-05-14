@@ -40,7 +40,7 @@ fn shared_profile_via_config_hash() {
     let mut profiles = ProfileMap::new();
     let mut subs = SubRegistry::new();
 
-    let r = tree.ensure(None, "/anchor", ResourceRole::User);
+    let r = tree.ensure_root("/anchor", ResourceRole::User);
     let cfg = bare_cfg();
     let hash = compute_config_hash(&cfg, MAX_SETTLE, NO_EVENTS);
 
@@ -84,7 +84,7 @@ fn distinct_profile_for_distinct_max_settle() {
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
 
-    let r = tree.ensure(None, "/anchor", ResourceRole::User);
+    let r = tree.ensure_root("/anchor", ResourceRole::User);
 
     let pid_short = profiles.attach(
         &mut tree,
@@ -105,7 +105,7 @@ fn distinct_profile_for_distinct_pattern() {
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
 
-    let r = tree.ensure(None, "/anchor", ResourceRole::User);
+    let r = tree.ensure_root("/anchor", ResourceRole::User);
 
     let cfg_rs = ScanConfig::builder()
         .pattern(GlobPattern::compile("*.rs").unwrap())
@@ -131,7 +131,7 @@ fn detach_clears_back_references_on_both_sides() {
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
 
-    let r = tree.ensure(None, "/anchor", ResourceRole::User);
+    let r = tree.ensure_root("/anchor", ResourceRole::User);
     let pid = profiles.attach(
         &mut tree,
         Profile::new(r, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
@@ -158,9 +158,11 @@ fn rename_after_detach_yields_fresh_id() {
     // `materialize_path_or_pending`.
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
-    let parent = tree.ensure(None, "/dir", ResourceRole::User);
+    let parent = tree.ensure_root("/dir", ResourceRole::User);
 
-    let id_old = tree.ensure(Some(parent), "foo.c", ResourceRole::User);
+    let id_old = tree
+        .ensure_child(parent, "foo.c", ResourceRole::User)
+        .expect("test live parent");
     let pid = profiles.attach(
         &mut tree,
         Profile::new(id_old, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
@@ -179,8 +181,10 @@ fn rename_after_detach_yields_fresh_id() {
 
     // Re-ensure the path (the engine's own re-attach flow). The fresh
     // `/dir` slot gets a new id; the renamed `bar.c` under it likewise.
-    let parent_fresh = tree.ensure(None, "/dir", ResourceRole::User);
-    let id_new = tree.ensure(Some(parent_fresh), "bar.c", ResourceRole::User);
+    let parent_fresh = tree.ensure_root("/dir", ResourceRole::User);
+    let id_new = tree
+        .ensure_child(parent_fresh, "bar.c", ResourceRole::User)
+        .expect("test live parent");
     assert_ne!(parent, parent_fresh, "parent slot was reaped and re-minted");
     assert_ne!(id_old, id_new, "renamed slot yields fresh id");
 }
@@ -191,8 +195,10 @@ fn recreate_at_anchored_slot_keeps_id() {
     // Profile.
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
-    let parent = tree.ensure(None, "/dir", ResourceRole::User);
-    let id = tree.ensure(Some(parent), "foo.c", ResourceRole::User);
+    let parent = tree.ensure_root("/dir", ResourceRole::User);
+    let id = tree
+        .ensure_child(parent, "foo.c", ResourceRole::User)
+        .expect("test live parent");
     let _pid = profiles.attach(
         &mut tree,
         Profile::new(id, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
@@ -205,6 +211,8 @@ fn recreate_at_anchored_slot_keeps_id() {
     );
 
     // Same (parent, segment) returns the same id.
-    let id_again = tree.ensure(Some(parent), "foo.c", ResourceRole::User);
+    let id_again = tree
+        .ensure_child(parent, "foo.c", ResourceRole::User)
+        .expect("test live parent");
     assert_eq!(id, id_again, "anchored slot reused on re-ensure");
 }

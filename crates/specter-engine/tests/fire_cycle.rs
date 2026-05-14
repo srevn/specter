@@ -86,7 +86,7 @@ fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
 }
 
 fn anchor(e: &mut Engine, name: &str) -> ResourceId {
-    let r = e.tree_mut().ensure(None, name, ResourceRole::User);
+    let r = e.tree_mut().ensure_root(name, ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     r
 }
@@ -342,7 +342,10 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
     // as `EventClassDropped` and never reach the fire-tail.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
-    let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
+    let child = e
+        .tree_mut()
+        .ensure_child(r, "child", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap_with_child = dir_snap(vec![("child", EntryKind::Dir, 7)]);
@@ -409,7 +412,10 @@ fn fire_cycle_absorbs_event_during_rebasing() {
     // reach drive_burst's absorb arm.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
-    let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
+    let child = e
+        .tree_mut()
+        .ensure_child(r, "child", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap = dir_snap(vec![("child", EntryKind::Dir, 7)]);
@@ -988,7 +994,10 @@ fn fire_cycle_event_at_unsuppressed_descendant_during_awaiting_absorbs() {
     // CONTENT events mask so the Modified event passes the class filter.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
-    let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
+    let child = e
+        .tree_mut()
+        .ensure_child(r, "child", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap_with_child = dir_snap(vec![("child", EntryKind::Dir, 7)]);
@@ -1102,7 +1111,10 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     // CONTENT events mask so the Modified event passes the class filter.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
-    let child = e.tree_mut().ensure(Some(r), "child", ResourceRole::User);
+    let child = e
+        .tree_mut()
+        .ensure_child(r, "child", ResourceRole::User)
+        .expect("test live parent");
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap_initial = dir_snap(vec![("child", EntryKind::Dir, 7)]);

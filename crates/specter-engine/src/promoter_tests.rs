@@ -104,7 +104,10 @@ fn ensure_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     let mut comps = Vec::with_capacity(segments.len() + 1);
     comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(segments);
-    let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
+    let r = e
+        .tree_mut()
+        .ensure_path(&comps, ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     r
 }
@@ -518,7 +521,7 @@ fn proxy_event_for_unregistered_promoter_emits_stale_diagnostic() {
     // rather than enqueue garbage.
     use specter_core::PromoterId;
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "phantom", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("phantom", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     // Synthesise a Promoter id that's NOT in the registry; push it
@@ -1437,7 +1440,10 @@ fn ensure_file(e: &mut Engine, parent_segs: &[&str], leaf: &str) -> ResourceId {
     comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(parent_segs);
     comps.push(leaf);
-    let r = e.tree_mut().ensure_path(&comps, ResourceRole::User);
+    let r = e
+        .tree_mut()
+        .ensure_path(&comps, ResourceRole::User)
+        .expect("non-empty fixture");
     e.tree_mut().set_kind(r, ResourceKind::File);
     r
 }
@@ -1610,7 +1616,7 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
     // Profile (which also picks the finalize_anchor_lost branch
     // because all_dynamic is false).
     let mut e = Engine::new();
-    let r = e.tree_mut().ensure(None, "anchor", ResourceRole::User);
+    let r = e.tree_mut().ensure_root("anchor", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let req = SubAttachRequest {
         name: String::from("static"),

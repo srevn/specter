@@ -1495,7 +1495,7 @@ mod tests {
     #[test]
     fn new_profile_starts_idle_with_zero_refcounts() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         assert!(matches!(p.state, ProfileState::Idle));
         assert!(p.baseline.is_none());
@@ -1512,7 +1512,7 @@ mod tests {
     #[test]
     fn new_profile_initialises_fired_subs_empty() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         assert!(p.fired_subs.is_empty());
     }
@@ -1523,7 +1523,7 @@ mod tests {
     #[test]
     fn new_profile_initialises_has_per_file_fds_false_for_empty_events() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         assert!(!p.has_per_file_fds);
         assert_eq!(p.events_union, ClassSet::EMPTY);
@@ -1534,7 +1534,7 @@ mod tests {
     #[test]
     fn new_profile_has_per_file_fds_when_content_in_events() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT);
         assert!(p.has_per_file_fds);
         assert_eq!(p.events_union, ClassSet::CONTENT);
@@ -1545,7 +1545,7 @@ mod tests {
     #[test]
     fn new_profile_has_per_file_fds_when_metadata_in_events() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA);
         assert!(p.has_per_file_fds);
     }
@@ -1555,7 +1555,7 @@ mod tests {
     #[test]
     fn new_profile_has_per_file_fds_false_for_structure_only() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE);
         assert!(!p.has_per_file_fds);
     }
@@ -1563,7 +1563,7 @@ mod tests {
     #[test]
     fn config_hash_matches_compute_config_hash() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let c = cfg();
         let expected = compute_config_hash(&c, MAX_SETTLE, NO_EVENTS);
         let p = Profile::new(r, c, MAX_SETTLE, SETTLE, NO_EVENTS);
@@ -1575,7 +1575,7 @@ mod tests {
     #[test]
     fn config_hash_partitions_by_events() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p_content = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT);
         let p_meta = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA);
         assert_ne!(p_content.config_hash, p_meta.config_hash);
@@ -1585,7 +1585,7 @@ mod tests {
     fn attach_writes_both_indices() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         let h = p.config_hash;
         let pid = profiles.attach(&mut tree, p);
@@ -1598,7 +1598,7 @@ mod tests {
     fn attach_anchors_resource_against_reap() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let _pid = profiles.attach(
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
@@ -1614,7 +1614,7 @@ mod tests {
     fn detach_clears_back_references() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         let h = p.config_hash;
         let pid = profiles.attach(&mut tree, p);
@@ -1629,7 +1629,7 @@ mod tests {
     fn detach_then_reap_succeeds_when_no_other_anchors() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let pid = profiles.attach(
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
@@ -1644,7 +1644,7 @@ mod tests {
     fn at_iterates_profiles_attached_at_resource() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
 
         let pid_a = profiles.attach(
             &mut tree,
@@ -1667,8 +1667,8 @@ mod tests {
     fn distinct_resources_get_distinct_profiles() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let r1 = tree.ensure(None, "a", ResourceRole::User);
-        let r2 = tree.ensure(None, "b", ResourceRole::User);
+        let r1 = tree.ensure_root("a", ResourceRole::User);
+        let r2 = tree.ensure_root("b", ResourceRole::User);
 
         let p1 = profiles.attach(
             &mut tree,
@@ -1691,7 +1691,7 @@ mod tests {
     fn attach_duplicate_panics_in_debug() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
-        let r = tree.ensure(None, "x", ResourceRole::User);
+        let r = tree.ensure_root("x", ResourceRole::User);
         let _pid = profiles.attach(
             &mut tree,
             Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
@@ -1736,7 +1736,7 @@ mod tests {
     #[test]
     fn rebase_baseline_clones_current_into_baseline() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
         assert!(p.baseline.is_none());
@@ -1754,7 +1754,7 @@ mod tests {
     #[test]
     fn rebase_baseline_clears_witness() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
         p.last_settled_hash_at_loss = Some(0xdead_beef);
@@ -1770,7 +1770,7 @@ mod tests {
     #[test]
     fn capture_witness_at_loss_sets_witness_from_baseline_dir_hash() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         let snap = TreeSnapshot::Dir(empty_dir_snapshot());
         let expected = snap.hash();
@@ -1784,7 +1784,7 @@ mod tests {
     #[test]
     fn capture_witness_at_loss_sets_witness_from_baseline_leaf_hash() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "file", ResourceRole::User);
+        let r = tree.ensure_root("file", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         let snap = TreeSnapshot::File(empty_leaf_entry());
         let expected = snap.hash();
@@ -1802,7 +1802,7 @@ mod tests {
     #[test]
     fn install_dir_current_sets_kind_and_current_atomically() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         assert!(p.kind.is_none(), "fresh Profile has unprobed kind");
         assert!(p.current.is_none());
@@ -1820,7 +1820,7 @@ mod tests {
     #[test]
     fn install_file_current_sets_kind_and_current_atomically() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "file", ResourceRole::User);
+        let r = tree.ensure_root("file", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
 
         p.install_file_current(empty_leaf_entry());
@@ -1834,7 +1834,7 @@ mod tests {
     #[test]
     fn install_dir_current_idempotent_on_dir_kind() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         p.install_dir_current(empty_dir_snapshot());
 
@@ -1856,7 +1856,7 @@ mod tests {
     #[should_panic(expected = "install_dir_current: kind mismatch")]
     fn install_dir_current_panics_on_file_kinded_profile_in_debug() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         p.install_file_current(empty_leaf_entry());
         // Boundary-bypass: a future caller skips
@@ -1872,7 +1872,7 @@ mod tests {
     #[should_panic(expected = "install_file_current: kind mismatch")]
     fn install_file_current_panics_on_dir_kinded_profile_in_debug() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         p.install_dir_current(empty_dir_snapshot());
         p.install_file_current(empty_leaf_entry());
@@ -1881,7 +1881,7 @@ mod tests {
     #[test]
     fn capture_witness_at_loss_no_op_when_baseline_none() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         // Pre-populate witness; helper must not overwrite with None.
         p.last_settled_hash_at_loss = Some(0x00c0_ffee);
@@ -1905,7 +1905,7 @@ mod tests {
     #[test]
     fn profile_new_projects_exclude_strings_in_canonical_order() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let cfg = ScanConfig::builder()
             .exclude(glob("z"))
             .exclude(glob("a"))
@@ -1928,7 +1928,7 @@ mod tests {
     #[test]
     fn profile_new_exclude_strings_empty_for_no_excludes() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
         assert!(p.exclude_strings.is_empty());
     }
@@ -1940,7 +1940,7 @@ mod tests {
     #[test]
     fn profile_exclude_strings_arc_shared_across_siblings() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let cfg = ScanConfig::builder()
             .exclude(glob("*.tmp"))
             .exclude(glob("*.bak"))
@@ -2012,7 +2012,7 @@ mod tests {
     #[test]
     fn timer_token_settle_on_batching_returns_settle_timer() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let pre = batching_burst(tid(7), tid(99), r);
         assert_eq!(pre.timer_token(TimerKind::Settle), Some(tid(7)));
     }
@@ -2022,7 +2022,7 @@ mod tests {
     #[test]
     fn timer_token_burst_deadline_lives_on_every_prefire_phase() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         for phase in [
             PreFirePhase::Batching {
                 settle_timer: tid(1),
@@ -2040,7 +2040,7 @@ mod tests {
     #[test]
     fn timer_token_settle_is_none_on_verifying_or_draining() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         for phase in [PreFirePhase::Verifying, PreFirePhase::Draining] {
             let pre = unit_pre(phase, tid(42), r);
             assert!(pre.timer_token(TimerKind::Settle).is_none());
@@ -2051,7 +2051,7 @@ mod tests {
     #[test]
     fn timer_token_await_gate_is_none_on_prefire() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let pre = batching_burst(tid(1), tid(2), r);
         assert!(pre.timer_token(TimerKind::AwaitGateDeadline).is_none());
     }
@@ -2110,7 +2110,7 @@ mod tests {
     #[test]
     fn active_burst_timer_token_dispatches_by_lifecycle() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let pre = ActiveBurst::PreFire(batching_burst(tid(3), tid(4), r));
         assert_eq!(pre.timer_token(TimerKind::Settle), Some(tid(3)));
         assert_eq!(pre.timer_token(TimerKind::BurstDeadline), Some(tid(4)));
@@ -2163,7 +2163,7 @@ mod tests {
     #[test]
     fn profile_state_timer_token_active_delegates_to_burst() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let state = ProfileState::Active(
             ActiveBurst::PreFire(batching_burst(tid(11), tid(12), r)),
             BurstFinish::ReturnToIdle,
@@ -2177,7 +2177,7 @@ mod tests {
     #[test]
     fn is_draining_is_true_only_on_active_prefire_draining() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
 
         // Active PreFire Draining — true.
         let draining = ProfileState::Active(
@@ -2237,7 +2237,7 @@ mod tests {
     #[test]
     fn descent_state_returns_some_only_on_pending() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let descent = DescentState::new(
             r,
             DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
@@ -2258,7 +2258,7 @@ mod tests {
     #[test]
     fn descent_state_mut_lets_caller_advance_pending() {
         let mut tree = Tree::new();
-        let r = tree.ensure(None, "anchor", ResourceRole::User);
+        let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut state = ProfileState::Pending(DescentState::new(
             r,
             DescentRemaining::from_vec(vec![CompactString::from("a"), CompactString::from("b")])

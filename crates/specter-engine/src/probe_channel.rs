@@ -372,7 +372,7 @@ mod tests {
     /// channel state in isolation.
     fn fresh_engine_with_idle_profile() -> (Engine, ProbeOwner) {
         let mut e = Engine::new();
-        let r = e.tree.ensure(None, "anchor", ResourceRole::User);
+        let r = e.tree.ensure_root("anchor", ResourceRole::User);
         let pid = e.profiles.attach(
             &mut e.tree,
             Profile::new(
@@ -500,8 +500,8 @@ mod tests {
     #[test]
     fn cancel_owner_probe_is_per_owner() {
         let mut e = Engine::new();
-        let r1 = e.tree.ensure(None, "a", ResourceRole::User);
-        let r2 = e.tree.ensure(None, "b", ResourceRole::User);
+        let r1 = e.tree.ensure_root("a", ResourceRole::User);
+        let r2 = e.tree.ensure_root("b", ResourceRole::User);
         let cfg = ScanConfig::builder().build();
         let pid1 = e.profiles.attach(
             &mut e.tree,
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn kind_for_round_trips_promoter_enumerating_target() {
         let mut e = Engine::new();
-        let r = e.tree.ensure(None, "proxy", ResourceRole::User);
+        let r = e.tree.ensure_root("proxy", ResourceRole::User);
         let owner = ProbeOwner::Promoter(specter_core::PromoterId::default());
         let _ = e
             .probe_channel

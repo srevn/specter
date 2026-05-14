@@ -100,13 +100,13 @@ pub struct Resource {
     pub proxy_promoters: SmallVec<[PromoterId; 1]>,
     /// Probed kind of this slot. `ResourceKind::Unknown` is the
     /// pre-classification placeholder — fresh slots created by
-    /// `Tree::ensure`, `Tree::vacate`-reset slots, and descent
-    /// scaffolds all start here. The engine writes the classified
-    /// kind via [`crate::Tree::set_kind`] once a probe response or
-    /// reconcile pass observes the inode. Read via [`Resource::kind`]
-    /// (returns `Option<ResourceKind>`, with `Unknown` as `None`) or
-    /// [`Resource::kind_or_file`] (Unknown → File, the backend-mask
-    /// convention).
+    /// `Tree::ensure_root` / `Tree::ensure_child`, `Tree::vacate`-reset
+    /// slots, and descent scaffolds all start here. The engine writes
+    /// the classified kind via [`crate::Tree::set_kind`] once a probe
+    /// response or reconcile pass observes the inode. Read via
+    /// [`Resource::kind`] (returns `Option<ResourceKind>`, with
+    /// `Unknown` as `None`) or [`Resource::kind_or_file`]
+    /// (Unknown → File, the backend-mask convention).
     pub(crate) kind: ResourceKind,
     /// Per-Resource map of contributors to the kernel-watch demand.
     /// `contributions.len()` is the refcount; `OR` over the values is
