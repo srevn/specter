@@ -990,15 +990,17 @@ fn diff_same_name(
                     }
                     (DirChild::Covered(_), DirChild::Uncovered(_))
                     | (DirChild::Uncovered(_), DirChild::Covered(_)) => {
-                        // Coverage flip on the same Dir slot. Structurally
-                        // unreachable in v1: a Profile's coverage rule is
-                        // pinned by `config_hash`, so a scope change forks
-                        // a new Profile rather than flipping coverage at
-                        // the same slot. Mirrors the assert in the
-                        // engine's `walk_pair`.
-                        debug_assert!(
-                            false,
-                            "diff_same_name: coverage flip on same Dir slot is unreachable in v1",
+                        // Same-fs_id coverage flip. Walker's Uncovered gates
+                        // (`!recursive`, `max_depth`, cross-fs) are either
+                        // `config_hash`-frozen for a Profile or change
+                        // `fs_id` (mount-boundary lstat resolves to distinct
+                        // inode/device pairs), so the outer
+                        // `p.fs_id() == n.fs_id()` guard would have failed.
+                        // Reaching this arm would silently drop a coverage
+                        // delta and leak Tree watches; surface as a panic.
+                        unreachable!(
+                            "diff_same_name: same-fs_id (Covered, Uncovered) is impossible \
+                             — Uncovered gates are config-frozen or change fs_id",
                         );
                     }
                 }
