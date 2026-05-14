@@ -19,11 +19,11 @@ use crate::program::ActionProgram;
 use crate::scan_config::ScanConfig;
 use compact_str::CompactString;
 use slotmap::SlotMap;
+use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tinyvec::TinyVec;
 
 /// Public-API request to attach a Sub.
 ///
@@ -396,7 +396,7 @@ impl Sub {
 #[derive(Debug, Default)]
 pub struct SubRegistry {
     subs: SlotMap<SubId, Sub>,
-    by_profile: BTreeMap<ProfileId, TinyVec<[SubId; 2]>>,
+    by_profile: BTreeMap<ProfileId, SmallVec<[SubId; 2]>>,
 }
 
 impl SubRegistry {

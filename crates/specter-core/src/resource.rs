@@ -35,7 +35,6 @@ use crate::sub::ClassSet;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use string_interner::symbol::SymbolU32;
-use tinyvec::TinyVec;
 
 /// Identity of a single contributor to a Resource's contributions map.
 ///
@@ -92,7 +91,7 @@ pub struct Resource {
     pub(crate) parent: Option<ResourceId>,
     pub(crate) segment: SymbolU32,
     pub(crate) children: BTreeMap<SymbolU32, ResourceId>,
-    pub(crate) profiles: TinyVec<[(u64, ProfileId); 1]>,
+    pub(crate) profiles: SmallVec<[(u64, ProfileId); 1]>,
     /// Promoter back-ref. Maintained in lockstep with
     /// `Promoter.proxies` by the engine's promoter-side helpers
     /// (`register_proxy` / `unregister_proxy`). Inline cap 1 covers
@@ -212,7 +211,7 @@ impl Resource {
             parent,
             segment,
             children: BTreeMap::new(),
-            profiles: TinyVec::new(),
+            profiles: SmallVec::new(),
             proxy_promoters: SmallVec::new(),
             kind: ResourceKind::Unknown,
             contributions: BTreeMap::new(),

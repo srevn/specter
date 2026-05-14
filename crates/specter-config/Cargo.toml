@@ -14,7 +14,6 @@ tracing.workspace          = true
 compact_str.workspace      = true
 globset.workspace          = true
 smallvec.workspace         = true
-tinyvec.workspace          = true
 humantime.workspace        = true
 humantime-serde.workspace  = true
 

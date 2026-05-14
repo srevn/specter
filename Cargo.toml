@@ -19,7 +19,6 @@ slotmap         = "1"
 globset         = "0.4"
 compact_str     = "0.9"
 smallvec        = "1"
-tinyvec         = { version = "1", features = ["alloc"] }
 string-interner = "0.20"
 siphasher 	    = "1"
 

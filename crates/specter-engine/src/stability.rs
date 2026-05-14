@@ -28,8 +28,8 @@
 //! after the read-borrow on the gather completes.
 
 use crate::coverage::nearest_covering_ancestor;
+use smallvec::SmallVec;
 use specter_core::{ProfileId, ProfileMap, ResourceId, Tree};
-use tinyvec::TinyVec;
 
 /// Walk parent edges from `source` and apply `delta` to each ancestor's
 /// `dirty_descendants`. Returns ancestors whose count just hit zero
@@ -50,16 +50,16 @@ pub(crate) fn propagate(
     profiles: &mut ProfileMap,
     source: ProfileId,
     delta: i32,
-) -> TinyVec<[ProfileId; 4]> {
+) -> SmallVec<[ProfileId; 4]> {
     // δ=0 is a no-op by construction: every ancestor's count would
     // round-trip through `prev → prev`, the `prev > 0 && new == 0`
     // edge can't cross, and the walk has no observable effect.
     // Short-circuit so callers that pass δ=0 (defensive paths in the
     // dispatcher) don't pay the parent-chain walk.
     if delta == 0 {
-        return TinyVec::new();
+        return SmallVec::new();
     }
-    let mut hit_zero: TinyVec<[ProfileId; 4]> = TinyVec::new();
+    let mut hit_zero: SmallVec<[ProfileId; 4]> = SmallVec::new();
     let mut current = source;
     while let Some(parent) = profiles.get(current).and_then(|p| p.parent_profile) {
         let Some(p) = profiles.get_mut(parent) else {

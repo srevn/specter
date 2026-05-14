@@ -15,10 +15,10 @@ use crate::sub::ClassSet;
 use crate::tree::Tree;
 use compact_str::CompactString;
 use slotmap::{SecondaryMap, SlotMap};
+use smallvec::SmallVec;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tinyvec::TinyVec;
 
 /// One fire cycle, split by the fire-transition boundary.
 ///
@@ -1361,7 +1361,7 @@ impl Profile {
 #[derive(Debug, Default)]
 pub struct ProfileMap {
     profiles: SlotMap<ProfileId, Profile>,
-    by_resource: SecondaryMap<ResourceId, TinyVec<[(u64, ProfileId); 1]>>,
+    by_resource: SecondaryMap<ResourceId, SmallVec<[(u64, ProfileId); 1]>>,
 }
 
 impl ProfileMap {
