@@ -6,7 +6,7 @@
 mod common;
 
 use common::*;
-use specter_core::{EffectOutcome, Input};
+use specter_core::{EffectOutcome, Input, Termination};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -37,8 +37,14 @@ fn shutdown_sigkills_term_resistant_child() {
     assert_eq!(completions.len(), 1);
     match &completions[0] {
         Input::EffectComplete { result, .. } => match result {
-            EffectOutcome::Failed { signal, .. } => {
-                assert_eq!(*signal, Some(9), "SIGKILL delivered");
+            EffectOutcome::Failed(
+                Termination::Signal(signal)
+                | Termination::PipeMixed {
+                    first_signal: signal,
+                    ..
+                },
+            ) => {
+                assert_eq!(*signal, 9, "SIGKILL delivered");
             }
             other => panic!("expected Failed{{signal=9}}; got {other:?}"),
         },

@@ -94,7 +94,7 @@ impl ProgramOp {
     pub const fn target(&self, outcome: &EffectOutcome) -> BranchTarget {
         match outcome {
             EffectOutcome::Ok => self.on_ok,
-            EffectOutcome::Failed { .. } => self.on_failed,
+            EffectOutcome::Failed(_) => self.on_failed,
         }
     }
 
@@ -191,7 +191,7 @@ impl BranchIndex {
 #[cfg(test)]
 mod tests {
     use super::{BranchIndex, BranchTarget, ProgramOp, SpawnBody};
-    use crate::effect::EffectOutcome;
+    use crate::effect::{EffectOutcome, Termination};
     use crate::program::exec::{ArgPart, ArgTemplate, ExecAction, Placeholder};
     use std::sync::Arc;
 
@@ -225,14 +225,8 @@ mod tests {
         );
         // Routing is by-discriminant — exit code / signal don't change
         // the edge selection.
-        let failed_exit = EffectOutcome::Failed {
-            exit_code: Some(1),
-            signal: None,
-        };
-        let failed_signal = EffectOutcome::Failed {
-            exit_code: None,
-            signal: Some(15),
-        };
+        let failed_exit = EffectOutcome::Failed(Termination::Exit(1));
+        let failed_signal = EffectOutcome::Failed(Termination::Signal(15));
         assert_eq!(op.target(&failed_exit), BranchTarget::Terminate);
         assert_eq!(op.target(&failed_signal), BranchTarget::Terminate);
     }

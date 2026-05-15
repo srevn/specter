@@ -36,8 +36,8 @@ use specter_core::{
     Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent,
     FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, TimerKind,
-    TreeSnapshot,
+    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, Termination,
+    TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -913,10 +913,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         Input::EffectComplete {
             sub: sid,
             key: key_b,
-            result: EffectOutcome::Failed {
-                exit_code: Some(1),
-                signal: None,
-            },
+            result: EffectOutcome::Failed(Termination::Exit(1)),
         },
         now + Duration::from_millis(30),
     );

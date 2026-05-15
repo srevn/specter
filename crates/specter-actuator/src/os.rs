@@ -34,7 +34,7 @@ use crate::pipe::{CombinedSignaler, PipeWaiter};
 use crate::spawner::{
     ChildSignaler, ChildWaiter, EnvVar, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
 };
-use specter_core::EffectOutcome;
+use specter_core::{EffectOutcome, Termination};
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -389,14 +389,13 @@ impl ChildWaiter for OsChildWaiter {
         Ok(if status.success() {
             EffectOutcome::Ok
         } else if let Some(sig) = status.signal() {
-            EffectOutcome::Failed {
-                exit_code: None,
-                signal: Some(sig),
-            }
+            EffectOutcome::Failed(Termination::Signal(sig))
         } else {
-            EffectOutcome::Failed {
-                exit_code: status.code(),
-                signal: None,
+            // Non-signal Unix exit always carries a code; the `None`
+            // arm is a defensive fallback, not a reachable state.
+            match status.code() {
+                Some(c) => EffectOutcome::Failed(Termination::Exit(c)),
+                None => EffectOutcome::Failed(Termination::Internal),
             }
         })
     }

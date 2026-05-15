@@ -16,7 +16,7 @@
 
 use crate::spawner::{ChildSignaler, ChildWaiter};
 use crossbeam::channel::{Receiver, unbounded};
-use specter_core::EffectOutcome;
+use specter_core::{EffectOutcome, Termination};
 use std::io;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -124,12 +124,14 @@ impl ChildSignaler for CombinedSignaler {
 ///
 /// Aggregated outcome:
 /// - **all Ok** ⇒ [`EffectOutcome::Ok`].
-/// - **any Failed** ⇒ [`EffectOutcome::Failed`] with
-///   `exit_code` = the *last* non-zero exit in spawn order
-///   (pipefail-on: the last failure observable from a shell's
-///   perspective dominates) and `signal` = the *first* signal seen
-///   in spawn order (so timer-driven SIGTERMs surface in the reported
-///   outcome).
+/// - **any Failed** ⇒ [`EffectOutcome::Failed`] carrying the *last*
+///   non-zero exit in spawn order (pipefail-on: the last failure
+///   observable from a shell's perspective dominates) and/or the
+///   *first* signal seen in spawn order (so timer-driven SIGTERMs
+///   surface). One-or-both present yields
+///   [`Termination::Exit`] / [`Termination::Signal`] /
+///   [`Termination::PipeMixed`]; neither yields
+///   [`Termination::Internal`].
 ///
 /// The spawn-order aggregation is preserved by collecting reports
 /// into a stage-indexed `Vec<Option<EffectOutcome>>` and iterating
@@ -203,10 +205,7 @@ impl ChildWaiter for PipeWaiter {
                 .spawn(move || {
                     let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| w.wait())) {
                         Ok(Ok(o)) => o,
-                        Ok(Err(_)) | Err(_) => EffectOutcome::Failed {
-                            exit_code: None,
-                            signal: None,
-                        },
+                        Ok(Err(_)) | Err(_) => EffectOutcome::Failed(Termination::Internal),
                     };
                     // Channel is unbounded and owned by the
                     // aggregator (this function); send cannot block,
@@ -243,7 +242,7 @@ impl ChildWaiter for PipeWaiter {
         let mut cascade_fired = false;
         while let Ok(StageReport { idx, outcome }) = rx.recv() {
             debug_assert!(reports[idx].is_none(), "duplicate report for stage {idx}");
-            let is_failed = matches!(&outcome, EffectOutcome::Failed { .. });
+            let is_failed = matches!(&outcome, EffectOutcome::Failed(_));
             reports[idx] = Some(outcome);
 
             if is_failed && !cascade_fired {
@@ -286,39 +285,50 @@ fn cascade_sigterm(signalers: &[Arc<dyn ChildSignaler>], failed_idx: usize) {
 /// Aggregate stage-indexed reports into the pipe's [`EffectOutcome`].
 ///
 /// Iterates `0..n` (spawn order) so the outcome is independent of
-/// completion order: `exit_code = last non-zero in spawn order`,
-/// `signal = first observed in spawn order`. A `None` entry is the
-/// "thread panicked before send" case, captured as a silent Failed.
+/// completion order: the last non-zero exit wins (pipefail-on) and the
+/// first observed signal wins. A missing report (`None` — the
+/// wait-thread panicked before send) folds as
+/// [`Termination::Internal`]. Total: every stage `Termination`
+/// projects to an `(exit, signal)` pair, and the aggregate recomposes
+/// from that pair with no unreachable arm.
 fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
     let mut last_failed_exit: Option<i32> = None;
     let mut first_signal: Option<i32> = None;
     let mut any_failed = false;
     for outcome_opt in reports {
-        let outcome = outcome_opt.unwrap_or(EffectOutcome::Failed {
-            exit_code: None,
-            signal: None,
-        });
-        match outcome {
-            EffectOutcome::Ok => {}
-            EffectOutcome::Failed { exit_code, signal } => {
-                any_failed = true;
-                if let Some(c) = exit_code {
-                    last_failed_exit = Some(c);
-                }
-                if first_signal.is_none() && signal.is_some() {
-                    first_signal = signal;
-                }
-            }
+        let outcome = outcome_opt.unwrap_or(EffectOutcome::Failed(Termination::Internal));
+        let EffectOutcome::Failed(term) = outcome else {
+            continue;
+        };
+        any_failed = true;
+        let (exit, signal) = match term {
+            Termination::Internal => (None, None),
+            Termination::Exit(c) => (Some(c), None),
+            Termination::Signal(s) => (None, Some(s)),
+            Termination::PipeMixed {
+                last_exit,
+                first_signal: sig,
+            } => (Some(last_exit), Some(sig)),
+        };
+        if let Some(c) = exit {
+            last_failed_exit = Some(c);
+        }
+        if first_signal.is_none() && signal.is_some() {
+            first_signal = signal;
         }
     }
-    if any_failed {
-        EffectOutcome::Failed {
-            exit_code: last_failed_exit,
-            signal: first_signal,
-        }
-    } else {
-        EffectOutcome::Ok
+    if !any_failed {
+        return EffectOutcome::Ok;
     }
+    EffectOutcome::Failed(match (last_failed_exit, first_signal) {
+        (None, None) => Termination::Internal,
+        (Some(c), None) => Termination::Exit(c),
+        (None, Some(s)) => Termination::Signal(s),
+        (Some(c), Some(s)) => Termination::PipeMixed {
+            last_exit: c,
+            first_signal: s,
+        },
+    })
 }
 
 /// Cleanup path when a stage's wait-thread `Builder::spawn` failed.
@@ -335,8 +345,8 @@ fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
 ///    synchronous `wait()` in this function doesn't reintroduce a
 ///    head-of-line block on a still-running stage.
 ///
-/// Returns the synthesised aggregate outcome `Failed { exit_code:
-/// None, signal: None }` — semantically equivalent to a wait-thread
+/// Returns the synthesised aggregate outcome
+/// [`Termination::Internal`] — semantically equivalent to a wait-thread
 /// spawn failure on a single-process step.
 fn recover_from_spawn_failure(
     failed_idx: usize,
@@ -390,10 +400,7 @@ fn recover_from_spawn_failure(
         let _ = h.join();
     }
 
-    EffectOutcome::Failed {
-        exit_code: None,
-        signal: None,
-    }
+    EffectOutcome::Failed(Termination::Internal)
 }
 
 #[cfg(test)]
@@ -405,7 +412,7 @@ mod tests {
     use super::{CombinedSignaler, PipeWaiter};
     use crate::spawner::{ChildSignaler, ChildWaiter};
     use crossbeam::channel::{Receiver, Sender, bounded};
-    use specter_core::EffectOutcome;
+    use specter_core::{EffectOutcome, Termination};
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -607,14 +614,8 @@ mod tests {
     #[test]
     fn first_failed_cascades_sigterm_to_alive_siblings() {
         let p0 = Arc::new(Probe::new());
-        let (p1, p1_waiter) = BlockingProbe::new(EffectOutcome::Failed {
-            exit_code: None,
-            signal: Some(15),
-        });
-        let (p2, p2_waiter) = BlockingProbe::new(EffectOutcome::Failed {
-            exit_code: None,
-            signal: Some(15),
-        });
+        let (p1, p1_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
+        let (p2, p2_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
         let signalers: Box<[Arc<dyn ChildSignaler>]> = vec![
             Arc::clone(&p0) as Arc<dyn ChildSignaler>,
             Arc::clone(&p1) as Arc<dyn ChildSignaler>,
@@ -624,10 +625,7 @@ mod tests {
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Failed {
-                    exit_code: Some(7),
-                    signal: None,
-                }),
+                outcome: Ok(EffectOutcome::Failed(Termination::Exit(7))),
                 dead: Arc::clone(&p0),
             }),
             Box::new(p1_waiter),
@@ -637,15 +635,17 @@ mod tests {
             .wait()
             .unwrap();
         match outcome {
-            EffectOutcome::Failed { exit_code, signal } => {
-                assert_eq!(exit_code, Some(7), "last non-zero exit propagates");
+            EffectOutcome::Failed(Termination::PipeMixed {
+                last_exit,
+                first_signal,
+            }) => {
+                assert_eq!(last_exit, 7, "last non-zero exit propagates");
                 assert_eq!(
-                    signal,
-                    Some(15),
+                    first_signal, 15,
                     "first observed signal in spawn order (from cascaded siblings)",
                 );
             }
-            EffectOutcome::Ok => panic!("expected Failed; got Ok"),
+            other => panic!("expected Failed(PipeMixed); got {other:?}"),
         }
         // Stage 0 does NOT receive a cascade SIGTERM (it's the
         // failing stage, already reaped). Stages 1 and 2 do.
@@ -664,14 +664,8 @@ mod tests {
     /// PipeWaiter — the test pins the parallel-only invariant.
     #[test]
     fn last_failed_cascades_backward_to_alive_earlier_stages() {
-        let (p0, p0_waiter) = BlockingProbe::new(EffectOutcome::Failed {
-            exit_code: None,
-            signal: Some(15),
-        });
-        let (p1, p1_waiter) = BlockingProbe::new(EffectOutcome::Failed {
-            exit_code: None,
-            signal: Some(15),
-        });
+        let (p0, p0_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
+        let (p1, p1_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
         let p2 = Arc::new(Probe::new());
         let signalers: Box<[Arc<dyn ChildSignaler>]> = vec![
             Arc::clone(&p0) as Arc<dyn ChildSignaler>,
@@ -683,10 +677,7 @@ mod tests {
             Box::new(p0_waiter),
             Box::new(p1_waiter),
             Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Failed {
-                    exit_code: Some(9),
-                    signal: None,
-                }),
+                outcome: Ok(EffectOutcome::Failed(Termination::Exit(9))),
                 dead: Arc::clone(&p2),
             }),
         ];
@@ -694,13 +685,16 @@ mod tests {
             .wait()
             .unwrap();
         match outcome {
-            EffectOutcome::Failed { exit_code, signal } => {
-                // exit_code = last non-zero in spawn order = 9 (stage 2);
-                // signal = first observed in spawn order = 15 (stage 0).
-                assert_eq!(exit_code, Some(9));
-                assert_eq!(signal, Some(15));
+            EffectOutcome::Failed(Termination::PipeMixed {
+                last_exit,
+                first_signal,
+            }) => {
+                // last_exit = last non-zero in spawn order = 9 (stage 2);
+                // first_signal = first observed in spawn order = 15 (stage 0).
+                assert_eq!(last_exit, 9);
+                assert_eq!(first_signal, 15);
             }
-            EffectOutcome::Ok => panic!("expected Failed; got Ok"),
+            other => panic!("expected Failed(PipeMixed); got {other:?}"),
         }
         assert_eq!(
             p0.term.load(Ordering::SeqCst),
@@ -731,10 +725,7 @@ mod tests {
     /// per-test timeout fires.
     #[test]
     fn blocked_first_stage_unblocked_by_cascade_does_not_deadlock() {
-        let (p0, p0_waiter) = BlockingProbe::new(EffectOutcome::Failed {
-            exit_code: None,
-            signal: Some(15),
-        });
+        let (p0, p0_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
         let p1 = Arc::new(Probe::new());
         let signalers: Box<[Arc<dyn ChildSignaler>]> = vec![
             Arc::clone(&p0) as Arc<dyn ChildSignaler>,
@@ -744,10 +735,7 @@ mod tests {
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(p0_waiter),
             Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Failed {
-                    exit_code: Some(3),
-                    signal: None,
-                }),
+                outcome: Ok(EffectOutcome::Failed(Termination::Exit(3))),
                 dead: Arc::clone(&p1),
             }),
         ];
@@ -761,11 +749,14 @@ mod tests {
             "parallel waiter must not block on stage 0 (elapsed = {elapsed:?})",
         );
         match outcome {
-            EffectOutcome::Failed { exit_code, signal } => {
-                assert_eq!(exit_code, Some(3));
-                assert_eq!(signal, Some(15));
+            EffectOutcome::Failed(Termination::PipeMixed {
+                last_exit,
+                first_signal,
+            }) => {
+                assert_eq!(last_exit, 3);
+                assert_eq!(first_signal, 15);
             }
-            EffectOutcome::Ok => panic!("expected Failed; got Ok"),
+            other => panic!("expected Failed(PipeMixed); got {other:?}"),
         }
         assert_eq!(p0.term.load(Ordering::SeqCst), 1, "stage 0 cascaded");
         assert_eq!(
@@ -786,24 +777,18 @@ mod tests {
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: Some(15),
-                }),
+                outcome: Ok(EffectOutcome::Failed(Termination::Signal(15))),
                 dead: Arc::clone(&p0),
             }),
             Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Failed {
-                    exit_code: Some(2),
-                    signal: None,
-                }),
+                outcome: Ok(EffectOutcome::Failed(Termination::Exit(2))),
                 dead: Arc::clone(&p1),
             }),
             Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Failed {
-                    exit_code: Some(7),
-                    signal: Some(11),
-                }),
+                outcome: Ok(EffectOutcome::Failed(Termination::PipeMixed {
+                    last_exit: 7,
+                    first_signal: 11,
+                })),
                 dead: Arc::clone(&p2),
             }),
         ];
@@ -811,11 +796,14 @@ mod tests {
             .wait()
             .unwrap();
         match outcome {
-            EffectOutcome::Failed { exit_code, signal } => {
-                assert_eq!(exit_code, Some(7), "last non-zero exit (stage 2)");
-                assert_eq!(signal, Some(15), "first observed signal (stage 0)");
+            EffectOutcome::Failed(Termination::PipeMixed {
+                last_exit,
+                first_signal,
+            }) => {
+                assert_eq!(last_exit, 7, "last non-zero exit (stage 2)");
+                assert_eq!(first_signal, 15, "first observed signal (stage 0)");
             }
-            EffectOutcome::Ok => panic!("expected Failed; got Ok"),
+            other => panic!("expected Failed(PipeMixed); got {other:?}"),
         }
     }
 
@@ -831,10 +819,7 @@ mod tests {
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Failed {
-                    exit_code: Some(1),
-                    signal: None,
-                }),
+                outcome: Ok(EffectOutcome::Failed(Termination::Exit(1))),
                 dead: Arc::clone(&p0),
             }),
             Box::new(StaticWaiter {

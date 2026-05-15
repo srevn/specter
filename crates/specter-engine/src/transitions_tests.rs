@@ -28,7 +28,8 @@ use specter_core::{
     PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileIdentity,
     ProfileState, PromoterAttachRequest, PromoterId, PromoterRegistryDiff, PromoterState,
     ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, SubParams, TimerKind, TreeSnapshot, WatchOp, WatchRegistryDiff,
+    SubAttachRequest, SubId, SubParams, Termination, TimerKind, TreeSnapshot, WatchOp,
+    WatchRegistryDiff,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -1797,10 +1798,7 @@ fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
                 sub: sid,
                 profile: pid,
             },
-            result: EffectOutcome::Failed {
-                exit_code: Some(1),
-                signal: None,
-            },
+            result: EffectOutcome::Failed(Termination::Exit(1)),
         },
         Instant::now(),
     );
@@ -3565,10 +3563,7 @@ fn clears_fired_subs_on_effect_complete_failed() {
         Input::EffectComplete {
             sub: sid,
             key: dk,
-            result: EffectOutcome::Failed {
-                exit_code: Some(1),
-                signal: None,
-            },
+            result: EffectOutcome::Failed(Termination::Exit(1)),
         },
         now,
     );

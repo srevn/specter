@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use specter_core::{EffectOutcome, Input};
+use specter_core::{EffectOutcome, Input, Termination};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -24,10 +24,7 @@ fn non_existent_command_returns_failed() {
     match &completions[0] {
         Input::EffectComplete { result, .. } => assert!(matches!(
             result,
-            EffectOutcome::Failed {
-                exit_code: None,
-                signal: None
-            }
+            EffectOutcome::Failed(Termination::Internal)
         )),
         other => panic!("expected EffectComplete::Failed; got {other:?}"),
     }
@@ -48,11 +45,10 @@ fn non_zero_exit_returns_failed_with_exit_code() {
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
         Input::EffectComplete { result, .. } => match result {
-            EffectOutcome::Failed { exit_code, signal } => {
-                assert_eq!(*exit_code, Some(42));
-                assert_eq!(*signal, None);
+            EffectOutcome::Failed(Termination::Exit(exit_code)) => {
+                assert_eq!(*exit_code, 42);
             }
-            EffectOutcome::Ok => panic!("expected Failed; got Ok"),
+            other => panic!("expected Failed(Exit(42)); got {other:?}"),
         },
         other => panic!("expected EffectComplete; got {other:?}"),
     }
@@ -93,10 +89,7 @@ fn nonexistent_cwd_returns_failed() {
     match &completions[0] {
         Input::EffectComplete { result, .. } => assert!(matches!(
             result,
-            EffectOutcome::Failed {
-                exit_code: None,
-                signal: None
-            }
+            EffectOutcome::Failed(Termination::Internal)
         )),
         other => panic!("expected EffectComplete::Failed; got {other:?}"),
     }
@@ -111,10 +104,7 @@ fn empty_argv_returns_failed() {
     match &completions[0] {
         Input::EffectComplete { result, .. } => assert!(matches!(
             result,
-            EffectOutcome::Failed {
-                exit_code: None,
-                signal: None
-            }
+            EffectOutcome::Failed(Termination::Internal)
         )),
         other => panic!("expected Failed; got {other:?}"),
     }

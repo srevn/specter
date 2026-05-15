@@ -274,14 +274,36 @@ impl Default for DedupKey {
     }
 }
 
+/// Terminal outcome of an Effect's plan at the engine boundary.
+///
+/// The engine's v1 policy is Ignore — it discriminates only `Ok` vs
+/// `Failed`. The [`Termination`] payload is diagnostic (logging) and
+/// drives the actuator's internal pipe re-aggregation; it is not a
+/// routing input.
 #[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
 pub enum EffectOutcome {
     #[default]
     Ok,
-    Failed {
-        exit_code: Option<i32>,
-        signal: Option<i32>,
-    },
+    Failed(Termination),
+}
+
+/// Why a plan terminated unsuccessfully. The four variants are exactly
+/// the four reachable `(exit_code, signal)` shapes — a total, named
+/// encoding, not a state-space change.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum Termination {
+    /// Resolver/spawn failure, waiter panic, or a synthesised plan
+    /// outcome — no exit code and no signal.
+    Internal,
+    /// Clean non-zero exit: a single process, or a pipe with no
+    /// signalled stage.
+    Exit(i32),
+    /// Killed by signal: a single process, or a pipe with no non-zero
+    /// exit.
+    Signal(i32),
+    /// A pipe where one stage exited non-zero and another was
+    /// signalled (last non-zero exit, first observed signal).
+    PipeMixed { last_exit: i32, first_signal: i32 },
 }
 
 #[cfg(test)]

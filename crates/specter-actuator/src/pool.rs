@@ -263,6 +263,7 @@ mod tests {
     use specter_core::{
         ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon,
         EffectOutcome, EffectTarget, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
+        Termination,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -673,13 +674,7 @@ mod tests {
             // child responding to SIGTERM gracefully.
             thread::sleep(Duration::from_millis(50));
             spawner
-                .complete(
-                    pid,
-                    EffectOutcome::Failed {
-                        exit_code: None,
-                        signal: Some(15),
-                    },
-                )
+                .complete(pid, EffectOutcome::Failed(Termination::Signal(15)))
                 .unwrap();
         });
         shutdown_tx.send(()).unwrap();
@@ -714,13 +709,7 @@ mod tests {
             thread::sleep(Duration::from_millis(300));
             // Complete with signal=9 (the result of SIGKILL).
             spawner
-                .complete(
-                    pid,
-                    EffectOutcome::Failed {
-                        exit_code: None,
-                        signal: Some(9),
-                    },
-                )
+                .complete(pid, EffectOutcome::Failed(Termination::Signal(9)))
                 .unwrap();
         });
         shutdown_tx.send(()).unwrap();
@@ -767,13 +756,7 @@ mod tests {
         let waiter_thread = thread::spawn(move || {
             thread::sleep(Duration::from_millis(300));
             spawner
-                .complete(
-                    pid,
-                    EffectOutcome::Failed {
-                        exit_code: None,
-                        signal: Some(9),
-                    },
-                )
+                .complete(pid, EffectOutcome::Failed(Termination::Signal(9)))
                 .unwrap();
         });
 
@@ -855,10 +838,7 @@ mod tests {
             Input::EffectComplete { result, .. } => {
                 assert!(matches!(
                     result,
-                    EffectOutcome::Failed {
-                        exit_code: None,
-                        signal: None
-                    }
+                    EffectOutcome::Failed(Termination::Internal)
                 ));
             }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
@@ -1033,13 +1013,7 @@ mod tests {
         h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
         let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
         h.spawner
-            .complete(
-                s1[1].pid,
-                EffectOutcome::Failed {
-                    exit_code: Some(7),
-                    signal: None,
-                },
-            )
+            .complete(s1[1].pid, EffectOutcome::Failed(Termination::Exit(7)))
             .unwrap();
 
         // No third spawn — the plan halted on step 1's failure.
@@ -1050,10 +1024,7 @@ mod tests {
         match &completions[0] {
             Input::EffectComplete { result, .. } => assert!(matches!(
                 result,
-                EffectOutcome::Failed {
-                    exit_code: Some(7),
-                    signal: None,
-                }
+                EffectOutcome::Failed(Termination::Exit(7))
             )),
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
@@ -1308,10 +1279,7 @@ mod tests {
         match &completions[0] {
             Input::EffectComplete { result, .. } => assert!(matches!(
                 result,
-                EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: None,
-                }
+                EffectOutcome::Failed(Termination::Internal)
             )),
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
@@ -1427,13 +1395,7 @@ mod tests {
         // recorded `Term`; completing here drains the engine channel
         // so the harness's shutdown drop is clean.
         h.spawner
-            .complete(
-                pid,
-                EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: Some(15),
-                },
-            )
+            .complete(pid, EffectOutcome::Failed(Termination::Signal(15)))
             .unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(1));
         h.shutdown();
@@ -1580,13 +1542,7 @@ mod tests {
 
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
         h.spawner
-            .complete(
-                s0[0].pid,
-                EffectOutcome::Failed {
-                    exit_code: Some(99),
-                    signal: None,
-                },
-            )
+            .complete(s0[0].pid, EffectOutcome::Failed(Termination::Exit(99)))
             .unwrap();
 
         // Predicate Failed → jump to else_start. Else-exec spawns;
@@ -1622,13 +1578,7 @@ mod tests {
 
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
         h.spawner
-            .complete(
-                s0[0].pid,
-                EffectOutcome::Failed {
-                    exit_code: Some(7),
-                    signal: None,
-                },
-            )
+            .complete(s0[0].pid, EffectOutcome::Failed(Termination::Exit(7)))
             .unwrap();
 
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
@@ -1865,13 +1815,7 @@ mod tests {
             h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
             let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
             h.spawner
-                .complete(
-                    s1[1].pid,
-                    EffectOutcome::Failed {
-                        exit_code: Some(1),
-                        signal: None,
-                    },
-                )
+                .complete(s1[1].pid, EffectOutcome::Failed(Termination::Exit(1)))
                 .unwrap();
             // C must not spawn.
             thread::sleep(Duration::from_millis(50));
@@ -1974,13 +1918,7 @@ mod tests {
         // Complete stage 0 Failed; the aggregating waiter will
         // observe this and cascade SIGTERM to stage 1.
         h.spawner
-            .complete(
-                stage0_pid,
-                EffectOutcome::Failed {
-                    exit_code: Some(7),
-                    signal: None,
-                },
-            )
+            .complete(stage0_pid, EffectOutcome::Failed(Termination::Exit(7)))
             .unwrap();
         // Wait for the cascade SIGTERM to land. The mock signaler
         // records Term(pid) on `signal_term`. Poll briefly.
@@ -1999,23 +1937,17 @@ mod tests {
         // Complete stage 1 (as if SIGTERM took effect) so the
         // aggregator's wait finishes and the EffectComplete arrives.
         h.spawner
-            .complete(
-                stage1_pid,
-                EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: Some(15),
-                },
-            )
+            .complete(stage1_pid, EffectOutcome::Failed(Termination::Signal(15)))
             .unwrap();
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
             Input::EffectComplete { result, .. } => {
                 assert!(matches!(
                     result,
-                    EffectOutcome::Failed {
-                        exit_code: Some(7),
-                        signal: Some(15),
-                    }
+                    EffectOutcome::Failed(Termination::PipeMixed {
+                        last_exit: 7,
+                        first_signal: 15,
+                    })
                 ));
             }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
@@ -2042,10 +1974,7 @@ mod tests {
         assert!(matches!(
             completions[0],
             Input::EffectComplete {
-                result: EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: None,
-                },
+                result: EffectOutcome::Failed(Termination::Internal),
                 ..
             }
         ));
@@ -2125,10 +2054,7 @@ mod tests {
             h.spawner
                 .complete(
                     pipe_spawns[0].pid,
-                    EffectOutcome::Failed {
-                        exit_code: Some(1),
-                        signal: None,
-                    },
+                    EffectOutcome::Failed(Termination::Exit(1)),
                 )
                 .unwrap();
             h.spawner
@@ -2138,7 +2064,7 @@ mod tests {
             assert!(matches!(
                 completions[0],
                 Input::EffectComplete {
-                    result: EffectOutcome::Failed { .. },
+                    result: EffectOutcome::Failed(_),
                     ..
                 }
             ));
@@ -2205,13 +2131,7 @@ mod tests {
         // Complete both stages so the aggregator finishes.
         // Stage 1 reports as Failed-by-signal (the timeout took effect).
         h.spawner
-            .complete(
-                stage1_pid,
-                EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: Some(15),
-                },
-            )
+            .complete(stage1_pid, EffectOutcome::Failed(Termination::Signal(15)))
             .unwrap();
         // The aggregator on stage 1's failure cascades SIGTERM to
         // *later* siblings (none here), then continues draining.

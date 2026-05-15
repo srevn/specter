@@ -72,9 +72,8 @@ pub trait Spawner: Send + Sync {
     /// Returns paired handles:
     /// - `waiter` — single aggregating waiter that drains every stage
     ///   sequentially and applies pipefail-on semantics (any non-zero
-    ///   stage exit ⇒ aggregated `Failed`; aggregated `exit_code` is
-    ///   the last non-zero in spawn order, aggregated `signal` is the
-    ///   first observed).
+    ///   stage exit ⇒ aggregated `Failed`, carrying the last non-zero
+    ///   exit in spawn order and the first observed signal).
     /// - `combined_signaler` — fans SIGTERM/SIGKILL out to every stage.
     ///   Used by the controller's shutdown path.
     /// - `stage_signalers` — parallel-indexed with the input stage
@@ -183,7 +182,7 @@ pub trait ChildWaiter: Send {
     /// Block until the child exits; return the outcome. `io::Error` on
     /// system-level wait failure (rare; e.g. ECHILD from external
     /// reaping); the wait thread treats this as
-    /// `Failed { exit_code: None, signal: None }`.
+    /// `Failed(Termination::Internal)`.
     fn wait(self: Box<Self>) -> io::Result<EffectOutcome>;
 }
 

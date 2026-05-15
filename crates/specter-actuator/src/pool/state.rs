@@ -48,7 +48,9 @@ use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, Spawner, StageSpec};
 use crate::timer;
 use crossbeam::channel::Sender;
 use specter_core::program::{BranchTarget, ExecAction, SpawnBody};
-use specter_core::{CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId};
+use specter_core::{
+    CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId, Termination,
+};
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -75,17 +77,17 @@ enum ReapPolicy {
 ///
 /// The `Failed` variant carries a typed [`SpawnFailureCause`]
 /// discriminant: the synth-Failed dispatch sites log it alongside the
-/// synthesised `EffectOutcome::Failed { exit_code: None, signal: None }`
+/// synthesised `EffectOutcome::Failed(Termination::Internal)`
 /// so an operator triaging "this predicate took the else-branch
 /// unexpectedly" can match against the cause-side `error!` log line
 /// (resolver, OS spawn, wait-thread) and tell "predicate binary
 /// missing" from "predicate exited 1 cleanly".
 ///
 /// The cause is **internal-only**: the engine never sees this type. The
-/// wire format remains `EffectOutcome::Failed { exit_code: None,
-/// signal: None }` regardless of cause. Splitting cause from outcome
-/// here is telemetry-only — it lets the synth-Failed log carry a
-/// discriminant without changing engine-side dispatch.
+/// wire outcome is `EffectOutcome::Failed(Termination::Internal)`
+/// regardless of cause. Splitting cause from outcome here is
+/// telemetry-only — it lets the synth-Failed log carry a discriminant
+/// without changing engine-side dispatch.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SpawnError {
     /// Permit semaphore at capacity. The caller defers the instruction
@@ -104,7 +106,7 @@ enum SpawnError {
 /// ([`ActuatorState::start_plan`], [`ActuatorState::spawn_continuation`],
 /// [`ActuatorState::advance_or_terminate`]); each site emits a
 /// `tracing::warn!` carrying this discriminant so the synthesised
-/// `EffectOutcome::Failed { exit_code: None, signal: None }` can be
+/// `EffectOutcome::Failed(Termination::Internal)` can be
 /// correlated against the cause-side `error!` log line.
 ///
 /// **Not part of the engine wire format.** `EffectOutcome::Failed`
@@ -553,10 +555,7 @@ impl ActuatorState {
                                 "synthesised EffectOutcome::Failed (no clean exit); dispatching on op's on_failed edge",
                             );
                             cursor = next;
-                            outcome = EffectOutcome::Failed {
-                                exit_code: None,
-                                signal: None,
-                            };
+                            outcome = EffectOutcome::Failed(Termination::Internal);
                         }
                     }
                 }
@@ -833,10 +832,7 @@ impl ActuatorState {
                     effect,
                     diff_tmp_path,
                     0,
-                    EffectOutcome::Failed {
-                        exit_code: None,
-                        signal: None,
-                    },
+                    EffectOutcome::Failed(Termination::Internal),
                     spawner,
                     reap_tx,
                     engine_in,
@@ -896,10 +892,7 @@ impl ActuatorState {
                     effect,
                     diff_tmp_path,
                     cursor,
-                    EffectOutcome::Failed {
-                        exit_code: None,
-                        signal: None,
-                    },
+                    EffectOutcome::Failed(Termination::Internal),
                     spawner,
                     reap_tx,
                     engine_in,
@@ -1508,17 +1501,11 @@ fn wait_loop(
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             tracing::warn!(?key, ?e, "wait failed");
-            EffectOutcome::Failed {
-                exit_code: None,
-                signal: None,
-            }
+            EffectOutcome::Failed(Termination::Internal)
         }
         Err(_) => {
             tracing::error!(?key, "wait panicked");
-            EffectOutcome::Failed {
-                exit_code: None,
-                signal: None,
-            }
+            EffectOutcome::Failed(Termination::Internal)
         }
     };
     drop(permit);
@@ -1554,7 +1541,7 @@ mod tests {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
     use specter_core::{
         ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Diff, Effect, EffectCommon,
-        EffectOutcome, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
+        EffectOutcome, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId, Termination,
     };
     use std::io;
     use std::num::NonZeroUsize;
@@ -1923,10 +1910,7 @@ mod tests {
                 key,
                 sub,
                 correlation: CorrelationId::from(1),
-                outcome: EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: None,
-                },
+                outcome: EffectOutcome::Failed(Termination::Internal),
             },
             &tx,
             &spawner,
@@ -1950,10 +1934,7 @@ mod tests {
                 assert_eq!(k, key);
                 assert!(matches!(
                     result,
-                    EffectOutcome::Failed {
-                        exit_code: None,
-                        signal: None,
-                    }
+                    EffectOutcome::Failed(Termination::Internal)
                 ));
             }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
@@ -1987,10 +1968,7 @@ mod tests {
                 key,
                 sub,
                 correlation: CorrelationId::from(5),
-                outcome: EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: None,
-                },
+                outcome: EffectOutcome::Failed(Termination::Internal),
             },
             &tx,
             &spawner,
@@ -2090,10 +2068,7 @@ mod tests {
                 key,
                 sub,
                 correlation: CorrelationId::from(11),
-                outcome: EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: None,
-                },
+                outcome: EffectOutcome::Failed(Termination::Internal),
             },
             &tx,
             &spawner,
@@ -2199,10 +2174,7 @@ mod tests {
                 key,
                 sub,
                 correlation: CorrelationId::from(1),
-                outcome: EffectOutcome::Failed {
-                    exit_code: Some(2),
-                    signal: None,
-                },
+                outcome: EffectOutcome::Failed(Termination::Exit(2)),
             },
             &tx,
             &spawner,
@@ -2215,10 +2187,7 @@ mod tests {
         match rx.try_recv() {
             Ok(Input::EffectComplete { result, .. }) => assert!(matches!(
                 result,
-                EffectOutcome::Failed {
-                    exit_code: Some(2),
-                    signal: None,
-                }
+                EffectOutcome::Failed(Termination::Exit(2))
             )),
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
@@ -2476,10 +2445,7 @@ mod tests {
         match rx.try_recv() {
             Ok(Input::EffectComplete { result, .. }) => assert!(matches!(
                 result,
-                EffectOutcome::Failed {
-                    exit_code: None,
-                    signal: None,
-                }
+                EffectOutcome::Failed(Termination::Internal)
             )),
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }

@@ -723,7 +723,7 @@ impl Engine {
         // Failed clears the dedup entry regardless of state. The Failed
         // Effect produced no observation worth deduplicating against, so
         // the next stable verdict at the same key must fire fresh.
-        if matches!(result, EffectOutcome::Failed { .. })
+        if matches!(result, EffectOutcome::Failed(_))
             && let Some(p) = self.profiles.get_mut(profile_id)
         {
             p.fired_subs.remove(key);

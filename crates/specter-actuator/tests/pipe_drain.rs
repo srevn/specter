@@ -16,7 +16,9 @@ mod common;
 
 use common::{Harness, next_corr, perfile_effect_with_program, unique_sub_id};
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
-use specter_core::{ActionProgram, ArgPart, ArgTemplate, EffectOutcome, ExecAction, Input};
+use specter_core::{
+    ActionProgram, ArgPart, ArgTemplate, EffectOutcome, ExecAction, Input, Termination,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -88,11 +90,14 @@ fn pipe_drain_does_not_block_on_hung_stage_0() {
         Input::EffectComplete { sub, result, .. } => {
             assert_eq!(*sub, unique_sub_id(sub_seed));
             match result {
-                EffectOutcome::Failed { exit_code, signal } => {
-                    assert_eq!(*exit_code, Some(7), "stage 1's exit dominates");
-                    assert_eq!(*signal, Some(15), "stage 0's cascade SIGTERM surfaces");
+                EffectOutcome::Failed(Termination::PipeMixed {
+                    last_exit,
+                    first_signal,
+                }) => {
+                    assert_eq!(*last_exit, 7, "stage 1's exit dominates");
+                    assert_eq!(*first_signal, 15, "stage 0's cascade SIGTERM surfaces");
                 }
-                EffectOutcome::Ok => panic!("expected Failed, got Ok"),
+                other => panic!("expected Failed(PipeMixed), got {other:?}"),
             }
         }
         other => panic!("expected EffectComplete, got {other:?}"),
