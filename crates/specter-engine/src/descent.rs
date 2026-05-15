@@ -492,7 +492,7 @@ impl crate::Engine {
     /// Sequence (load-bearing):
     /// 1. Flip the slot's role to `User` (was `DescentScaffold` from the
     ///    descent walk).
-    /// 2. Capture `Profile.events_union` for the anchor's contribution.
+    /// 2. Capture `Profile.events` for the anchor's contribution.
     /// 3. Transition the Profile **before** any refcount op via
     ///    [`specter_core::Profile::materialize_anchor`] — atomic
     ///    `Pending → Idle`, claim install, kind pin. The recompute
@@ -519,7 +519,7 @@ impl crate::Engine {
         let events_union = self
             .profiles
             .get(profile_id)
-            .map_or(ClassSet::EMPTY, |p| p.events_union);
+            .map_or(ClassSet::EMPTY, specter_core::Profile::events);
 
         let anchor_kind = kind_from_entry(entry_kind);
         if let Some(p) = self.profiles.get_mut(profile_id) {

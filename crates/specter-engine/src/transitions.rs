@@ -48,7 +48,7 @@ impl Engine {
     ///    - Anchor events bypass the filter unconditionally — lifecycle
     ///      signal continuity trumps user opt-out.
     ///    - Descendant events whose class (per [`fs_event_to_class`]) is
-    ///      not in the Profile's `events_union` drop with
+    ///      not in the Profile's `events` drop with
     ///      `EventClassDropped` BEFORE driving the burst — the class filter
     ///      sits before dirty-set bumps.
     ///    - Terminal-on-anchor → `on_anchor_terminal_event`. Anything else
@@ -133,7 +133,7 @@ impl Engine {
 
         // Class-aware routing. Compute the event's class once from the
         // resource's kind; per-Profile dispatch consults the Profile's
-        // `events_union` (every Sub on a Profile shares the same mask, so
+        // `events` (every Sub on a Profile shares the same mask, so
         // the union is each Sub's mask).
         //
         // Unprobed slots collapse to File-shape per the backend-mask
@@ -153,7 +153,7 @@ impl Engine {
             let Some((is_anchor, profile_events)) = self
                 .profiles
                 .get(profile_id)
-                .map(|p| (p.resource == resource, p.events_union))
+                .map(|p| (p.resource == resource, p.events()))
             else {
                 continue;
             };
@@ -161,7 +161,7 @@ impl Engine {
             // Anchor events bypass the class filter unconditionally
             // (lifecycle: anchor disappearance recovery, anchor reappearance
             // detection, etc.). Descendant events whose class is not in
-            // the Profile's `events_union` drop here, before `drive_burst`
+            // the Profile's `events` drop here, before `drive_burst`
             // extends `dirty_resources` / `force_walk_resources`.
             if !is_anchor && !profile_events.intersects(event_class) {
                 out.diagnostics.push(Diagnostic::EventClassDropped {

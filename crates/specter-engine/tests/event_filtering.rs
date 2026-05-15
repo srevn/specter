@@ -285,12 +285,9 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
 
     // Both Profiles record their own mask; the per-resource union
     // contains both bits because both contribute to the anchor.
+    assert_eq!(e.profiles().get(pid_a).unwrap().events(), ClassSet::CONTENT,);
     assert_eq!(
-        e.profiles().get(pid_a).unwrap().events_union,
-        ClassSet::CONTENT,
-    );
-    assert_eq!(
-        e.profiles().get(pid_b).unwrap().events_union,
+        e.profiles().get(pid_b).unwrap().events(),
         ClassSet::METADATA,
     );
     assert_eq!(
@@ -423,10 +420,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
     );
     // Profile's events_union still records the user's mask (drives mask
     // on the eventual anchor materialization).
-    assert_eq!(
-        e.profiles().get(pid).unwrap().events_union,
-        ClassSet::CONTENT,
-    );
+    assert_eq!(e.profiles().get(pid).unwrap().events(), ClassSet::CONTENT,);
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -456,7 +450,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     // CONTENT-only mask on a Dir anchor — note: CONTENT registers no
-    // bits on a Dir, but the class routing still uses Profile.events_union
+    // bits on a Dir, but the class routing still uses Profile.events
     // for filtering.
     let (_sid, pid, attach_out) = attach_sub_with_events(
         &mut e,
@@ -1773,7 +1767,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         "subdir.watch_demand() decremented from 2 to 1 by P's release",
     );
     assert_eq!(
-        e.profiles().get(pid_q).unwrap().events_union,
+        e.profiles().get(pid_q).unwrap().events(),
         ClassSet::CONTENT,
         "Q's contribution intact",
     );

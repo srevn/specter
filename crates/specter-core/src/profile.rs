@@ -998,8 +998,8 @@ pub enum TimerKind {
 ///   when the Profile is `Pending` (descent prefix carries the
 ///   STRUCTURE watch instead), `Purged` (`Input::WatchOpRejected`
 ///   clamped the slot), or freshly constructed pre-attach.
-/// - [`Self::Held`] — Profile contributes `+1 events_union` to its
-///   anchor's `watch_demand`. Set on the path that bumped the counter
+/// - [`Self::Held`] — Profile contributes `+1` (at its `events` mask)
+///   to its anchor's `watch_demand`. Set on the path that bumped the counter
 ///   (immediate-Seed in `attach_sub_inner` or descent's anchor
 ///   materialization); cleared on the matching decrement (anchor
 ///   terminal event, reap, clamp purge).
@@ -1202,13 +1202,11 @@ pub struct Profile {
     /// cleared.
     last_settled_hash_at_loss: Option<u128>,
     /// User-declared event-class mask for this Profile. Every Sub on a
-    /// Profile shares the same `events` by construction (mask folds into
-    /// `config_hash`), so this field is the Sub's mask — the "union"
-    /// naming is structural: per-Sub contributions OR onto the
-    /// Profile's mask, even though the OR is a no-op here. The
-    /// per-Resource `events_union` aggregated across covering Profiles
-    /// reads this as the per-Profile contribution.
-    pub events_union: ClassSet,
+    /// Profile shares this by construction (the mask folds into
+    /// `config_hash`), so it is invariant for the Profile's lifetime.
+    /// Module-private — [`Self::events`] is the stable read seam; the
+    /// per-Resource union aggregates this across covering Profiles.
+    events: ClassSet,
     /// True iff covered Leaves need their own FDs. Derived at construction
     /// from `events.intersects(CONTENT | METADATA)` and invariant for the
     /// Profile's lifetime (events are part of `config_hash`, so a mask
@@ -1230,10 +1228,10 @@ impl Profile {
     /// lifetime — there is no path to a Profile with an unset or stale
     /// hash.
     ///
-    /// `events` becomes the Profile's `events_union` and drives
+    /// `events` becomes the Profile's event-class mask and drives
     /// `has_per_file_fds` (true iff CONTENT or METADATA is in the mask).
-    /// Every Sub on a Profile shares the same `events`, so
-    /// `events_union` is invariant for the Profile's lifetime.
+    /// Every Sub on a Profile shares the same `events`, so it is
+    /// invariant for the Profile's lifetime.
     ///
     /// `exclude_strings` is projected once here from `config.exclude` —
     /// the [`ScanConfig`] builder has already sorted the vector by source,
@@ -1277,7 +1275,7 @@ impl Profile {
             anchor_claim: AnchorClaim::None,
             fired_subs: BTreeSet::new(),
             last_settled_hash_at_loss: None,
-            events_union: events,
+            events,
             has_per_file_fds,
         }
     }
@@ -1489,6 +1487,14 @@ impl Profile {
     #[must_use]
     pub const fn kind(&self) -> Option<ResourceKind> {
         self.kind
+    }
+
+    /// The Profile's user-declared event-class mask. Invariant for the
+    /// Profile's lifetime (folds into `config_hash`). Stable read seam
+    /// over the module-private field.
+    #[must_use]
+    pub const fn events(&self) -> ClassSet {
+        self.events
     }
 
     #[must_use]
@@ -1704,7 +1710,7 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(!p.has_per_file_fds);
-        assert_eq!(p.events_union, ClassSet::EMPTY);
+        assert_eq!(p.events(), ClassSet::EMPTY);
     }
 
     /// `has_per_file_fds` is true when CONTENT is in the mask (closes
@@ -1715,7 +1721,7 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
         assert!(p.has_per_file_fds);
-        assert_eq!(p.events_union, ClassSet::CONTENT);
+        assert_eq!(p.events(), ClassSet::CONTENT);
     }
 
     /// `has_per_file_fds` is also true when METADATA is in the mask (a

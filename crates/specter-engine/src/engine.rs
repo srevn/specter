@@ -523,7 +523,7 @@ impl Engine {
         let events_union = self
             .profiles
             .get(profile_id)
-            .map_or(ClassSet::EMPTY, |p| p.events_union);
+            .map_or(ClassSet::EMPTY, Profile::events);
 
         add_watch(
             &mut self.tree,
@@ -835,7 +835,7 @@ impl Engine {
             // Every Sub on a Profile shares the same `events` mask
             // (events folds into `config_hash`); detaching one Sub
             // cannot flip `Profile.has_per_file_fds` or
-            // `Profile.events_union`.
+            // `Profile.events`.
             self.recompute_profile_settle(profile_id);
             return;
         }

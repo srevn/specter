@@ -309,7 +309,7 @@ pub(crate) fn apply_diff_to_tree(
         let want_watch = covers(profile, resource, tree)
             && (matches!(entry.kind, EntryKind::Dir) || profile.has_per_file_fds);
         if want_watch {
-            add_watch(tree, resource, key, profile.events_union, out);
+            add_watch(tree, resource, key, profile.events(), out);
         }
     }
 
@@ -702,7 +702,7 @@ mod tests {
         // Materialise the Dir slot first so the delete path has
         // something to `sub_watch` against. Pre-populate with the
         // same contribution apply_diff_to_tree will drop on delete (the
-        // Profile's events_union, here STRUCTURE).
+        // Profile's events, here STRUCTURE).
         let sub_id = tree
             .ensure_child(root, "sub", ResourceRole::User)
             .expect("test live parent");
@@ -1309,7 +1309,7 @@ mod tests {
         //      with kind = Dir.
         //    - The new slot's contributions include
         //      `ContribKey::ProfileDescendant(pid)` for the per-file
-        //      Profile's events_union.
+        //      Profile's events.
         //    - `out.watch_ops` contains a Watch op at the new slot.
         //
         // The pre-refactor `walk_pair` keyed entity identity on

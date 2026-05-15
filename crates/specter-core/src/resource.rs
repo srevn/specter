@@ -56,7 +56,7 @@ use string_interner::symbol::SymbolU32;
 pub enum ContribKey {
     /// Profile is anchored at this Resource —
     /// `Profile.anchor_claim == AnchorClaim::Held` AND
-    /// `Profile.resource == resource`. Mask is `Profile.events_union`.
+    /// `Profile.resource == resource`. Mask is `Profile.events`.
     ProfileAnchor(ProfileId),
     /// Profile's watch-root parent points at this Resource —
     /// `Profile.watch_root_parent == Some(resource)`. Mask is
@@ -71,7 +71,7 @@ pub enum ContribKey {
     /// (`resource != Profile.resource` AND
     /// `covers(Profile, resource, tree) == true` for a covered Dir,
     /// or under `Profile.has_per_file_fds` for a covered Leaf). Mask
-    /// is `Profile.events_union`. Per-resource fan-out is
+    /// is `Profile.events`. Per-resource fan-out is
     /// 1-to-N across the snapshot but each (Resource, Profile) pair
     /// contributes at most one entry.
     ProfileDescendant(ProfileId),

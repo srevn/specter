@@ -353,7 +353,7 @@ fn discard_anchor_state_preserves_events_union_and_per_file_fds() {
     let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::CONTENT);
     let (events_before, fds_before) = {
         let p = e.profiles().get(pid).expect("Profile lives");
-        (p.events_union, p.has_per_file_fds)
+        (p.events(), p.has_per_file_fds)
     };
     assert_eq!(events_before, ClassSet::CONTENT);
     assert!(fds_before, "CONTENT events ⇒ per-file FDs enabled");
@@ -362,7 +362,7 @@ fn discard_anchor_state_preserves_events_union_and_per_file_fds() {
     e.discard_anchor_state(pid, &mut out);
 
     let p = e.profiles().get(pid).expect("Profile lives");
-    assert_eq!(p.events_union, events_before, "events_union invariant");
+    assert_eq!(p.events(), events_before, "events_union invariant");
     assert_eq!(p.has_per_file_fds, fds_before, "has_per_file_fds invariant");
 }
 

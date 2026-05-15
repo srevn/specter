@@ -795,7 +795,7 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?resource,
             ?event,
             ?profile,
-            "fs event dropped (class not in profile.events_union)",
+            "fs event dropped (class not in profile.events)",
         ),
         Diagnostic::EventOnUnwatchedResource { resource } => {
             tracing::warn!(?resource, "FsEvent on unwatched resource (race; dropped)");

@@ -6,7 +6,7 @@
 //!
 //! 1. **Anchor.** `Profile.anchor_claim == AnchorClaim::Held` ⇒ the
 //!    Profile contributes [`ContribKey::ProfileAnchor`] at
-//!    `Profile.resource` with mask `Profile.events_union`.
+//!    `Profile.resource` with mask `Profile.events`.
 //! 2. **Watch-root parent.** `Profile.watch_root_parent =
 //!    Some(parent)` ⇒ the Profile contributes
 //!    [`ContribKey::ProfileParent`] at `parent` with mask `STRUCTURE`.
@@ -257,7 +257,7 @@ impl Engine {
     ///   the SeedDrift filter narrows to the Subtree subset of
     ///   `fired_subs`. Clearing here would silently fail to re-fire
     ///   emitted-once Effects on every recovery.
-    /// - All other fields (`parent_profile`, `events_union`,
+    /// - All other fields (`parent_profile`, `events`,
     ///   `has_per_file_fds`, `config*`, `resource`, `settle*`). The
     ///   prior `reap_pending: bool` field is gone; the deferred-reap
     ///   directive now rides on `ProfileState::Active`'s payload via
