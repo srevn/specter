@@ -20,8 +20,8 @@ use crate::Engine;
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DedupKey, DirChild,
-    DirMeta, DirSnapshot, EffectScope, EntryKind, FsIdentity, Input, LeafEntry, ProbeCorrelation,
+    ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta,
+    DirSnapshot, EffectScope, EntryKind, FiredKey, FsIdentity, Input, LeafEntry, ProbeCorrelation,
     ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ResourceId, ResourceKind,
     ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
 };
@@ -199,10 +199,7 @@ fn discard_anchor_state_preserves_fired_subs() {
     // Fire history must survive anchor loss for post-recovery drift to
     // re-fire emitted-once Effects.
     let (mut e, sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
-    let key = DedupKey::Subtree {
-        sub: sid,
-        profile: pid,
-    };
+    let key = FiredKey::Subtree(sid);
     if let Some(p) = e.profiles.get_mut(pid) {
         p.fired_subs.insert(key);
     }
@@ -534,7 +531,7 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
             resource: anchor,
             op: WatchOp::Watch {
                 resource: anchor,
-                path: std::path::PathBuf::from("a"),
+                path: std::sync::Arc::from(std::path::Path::new("a")),
                 kind: ResourceKind::Dir,
                 events: ClassSet::STRUCTURE,
             },

@@ -657,7 +657,7 @@ mod tests {
         ProbeRequest::AnchorFile {
             owner: ProbeOwner::Profile(profile),
             correlation: ProbeCorrelation::from(c),
-            target_path: PathBuf::from("/dev/null"),
+            target_path: Arc::from(PathBuf::from("/dev/null")),
         }
     }
 

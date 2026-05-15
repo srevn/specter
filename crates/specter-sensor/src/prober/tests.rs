@@ -17,7 +17,7 @@ use specter_core::{
     LeafEntry, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -44,7 +44,7 @@ fn req_anchor(profile: ProfileId, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(profile),
         correlation: ProbeCorrelation::from(correlation),
-        target_path: PathBuf::from("/dev/null"),
+        target_path: Arc::from(Path::new("/dev/null")),
     }
 }
 
@@ -672,7 +672,7 @@ fn force_walk_with_path_in_set_refuses_skip() {
     };
     // force_walk = {target_path} — refuse the skip even though mtime matches.
     let mut force = BTreeSet::new();
-    force.insert(tmp.path().to_path_buf());
+    force.insert(Arc::from(tmp.path()));
     let second = probe_subtree(tmp.path(), &cfg, 0, Some(&baseline), &force, false);
     let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("re-probe failed");
@@ -696,7 +696,7 @@ fn force_walk_with_descendant_in_set_refuses_skip_at_target() {
     // force_walk = {tmp/sub/file.c}: descendant; root must enumerate so we
     // can recurse into `sub`.
     let mut force = BTreeSet::new();
-    force.insert(tmp.path().join("sub").join("file.c"));
+    force.insert(Arc::from(tmp.path().join("sub").join("file.c")));
     let second = probe_subtree(tmp.path(), &cfg, 0, Some(&baseline), &force, false);
     let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("re-probe failed");
@@ -715,7 +715,7 @@ fn force_walk_with_unrelated_path_does_not_affect_skip() {
     };
     // Path outside target's subtree — skip applies normally.
     let mut force = BTreeSet::new();
-    force.insert(PathBuf::from("/totally/unrelated/path"));
+    force.insert(Arc::from(Path::new("/totally/unrelated/path")));
     let second = probe_subtree(tmp.path(), &cfg, 0, Some(&baseline), &force, false);
     let ProbeOutcome::SubtreeOk(arc2) = second else {
         panic!("re-probe failed");
@@ -740,7 +740,7 @@ fn force_walk_propagates_through_recursion_to_descendant() {
     };
     let prior_dir_c_arc = Arc::clone(baseline.lookup_covered_dir("dir_c").unwrap());
     let mut force = BTreeSet::new();
-    force.insert(tmp.path().join("dir_a").join("dir_b"));
+    force.insert(Arc::from(tmp.path().join("dir_a").join("dir_b")));
     let second = probe_subtree(tmp.path(), &cfg, 0, Some(&baseline), &force, false);
     let ProbeOutcome::SubtreeOk(top) = second else {
         panic!("re-probe failed");
@@ -1211,7 +1211,7 @@ fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
     let leaf_req = ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(p),
         correlation: ProbeCorrelation::from(1),
-        target_path: file_path,
+        target_path: Arc::from(file_path.as_path()),
     };
     assert!(matches!(run_probe(&leaf_req), ProbeOutcome::AnchorOk(_)));
 
@@ -1219,7 +1219,7 @@ fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
     let dir_req = ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(p),
         correlation: ProbeCorrelation::from(2),
-        target_path: tmp.path().to_path_buf(),
+        target_path: Arc::from(tmp.path()),
     };
     assert!(matches!(run_probe(&dir_req), ProbeOutcome::Vanished));
 }
@@ -1235,7 +1235,7 @@ fn run_probe_dispatches_descent_to_probe_descent() {
     let req = ProbeRequest::Descent {
         owner: ProbeOwner::Profile(p),
         correlation: ProbeCorrelation::from(1),
-        target_path: tmp.path().to_path_buf(),
+        target_path: Arc::from(tmp.path()),
     };
     let outcome = run_probe(&req);
     let ProbeOutcome::SubtreeOk(arc) = outcome else {
@@ -1508,7 +1508,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
     let request = ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(pids[0]),
         correlation: ProbeCorrelation::from(42),
-        target_path: path,
+        target_path: Arc::from(path.as_path()),
     };
     prober.submit(request);
 
@@ -1577,7 +1577,7 @@ fn worker_prober_resubmit_after_cancel_runs() {
     let mk_req = |c: u64| ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(p),
         correlation: ProbeCorrelation::from(c),
-        target_path: path.clone(),
+        target_path: Arc::from(path.as_path()),
     };
     prober.submit(mk_req(1));
     prober.cancel(ProbeOwner::Profile(p));
@@ -1630,7 +1630,7 @@ fn worker_prober_concurrent_submit_is_safe() {
                 prober.submit(ProbeRequest::AnchorFile {
                     owner: ProbeOwner::Profile(p),
                     correlation: ProbeCorrelation::from(c),
-                    target_path: path.clone(),
+                    target_path: Arc::from(path.as_path()),
                 });
             }
         }));

@@ -7,7 +7,7 @@
 //! of either index.
 
 use crate::effect::DedupKey;
-use crate::ids::{ProfileId, ResourceId, TimerId};
+use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::resource::ResourceKind;
 use crate::scan_config::{ScanConfig, compute_config_hash};
 use crate::snapshot::tree::TreeSnapshot;
@@ -855,35 +855,53 @@ impl DescentState {
 /// - [`prepend`](Self::prepend) is the rewind path's mutator: a
 ///   `Vanished` response on `current_prefix` re-injects the prefix's own
 ///   segment as the new head while the prefix shifts up one level.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// **Representation.** Components are stored *reverse* of descent order:
+/// the logical head (next to consume) is the `Vec`'s last element. The
+/// only mutated end is therefore the `Vec`'s O(1) tail — [`advance`] is
+/// a `pop`, [`prepend`] a `push` — instead of the O(N) front shifts a
+/// forward-order `Vec` forces (`advance` runs every forward descent
+/// step). The reversal is an internal detail: every accessor keeps its
+/// logical-order signature and semantics; [`iter`](Self::iter) and the
+/// [`Debug`] impl present descent order so diagnostics and tests are
+/// unaffected.
+///
+/// [`advance`]: Self::advance
+/// [`prepend`]: Self::prepend
+#[derive(Clone, Eq, PartialEq)]
 pub struct DescentRemaining {
+    /// Reversed: `inner.last()` is the logical head. Never empty.
     inner: Vec<CompactString>,
 }
 
 impl DescentRemaining {
-    /// Construct from a `Vec`. Returns `None` iff `v` is empty,
-    /// preserving the non-empty invariant. Sole intended producer is
-    /// `materialize_path_or_pending`'s Pending branch, where the
-    /// `prefix_idx + 1 < components.len()` gate already guarantees
+    /// Construct from a `Vec` in descent order. Returns `None` iff `v`
+    /// is empty, preserving the non-empty invariant. Sole intended
+    /// producer is `materialize_path_or_pending`'s Pending branch, where
+    /// the `prefix_idx + 1 < components.len()` gate already guarantees
     /// non-empty; the `None` arm is defense-in-depth against future
-    /// callers.
+    /// callers. The one-time reverse into storage order is O(depth) on
+    /// the cold descent-registration path.
     #[must_use]
     pub fn from_vec(v: Vec<CompactString>) -> Option<Self> {
         if v.is_empty() {
             None
         } else {
-            Some(Self { inner: v })
+            let mut inner = v;
+            inner.reverse();
+            Some(Self { inner })
         }
     }
 
     /// First (next-to-consume) segment. Always present by invariant.
     #[must_use]
     pub fn head(&self) -> &CompactString {
-        // Indexing rather than `first().unwrap()` to encode the invariant
-        // at the access site — a future maintainer can't accidentally
+        // Index the tail (the logical head under the reversed
+        // representation) rather than `last().unwrap()` to encode the
+        // invariant at the access site — a future maintainer can't
         // weaken `head` to a defensive `Option` without also adjusting
         // the type's construction discipline.
-        &self.inner[0]
+        &self.inner[self.inner.len() - 1]
     }
 
     /// Number of remaining segments. Always `>= 1` by invariant.
@@ -910,10 +928,10 @@ impl DescentRemaining {
         self.inner.len() == 1
     }
 
-    /// Consume the head, shifting the tail forward by one. Preserves
-    /// the non-empty invariant by debug-asserting non-terminal at entry;
-    /// release builds clamp on terminal (no-op) rather than violating
-    /// the invariant.
+    /// Consume the logical head (pop the reversed `Vec`'s tail).
+    /// Preserves the non-empty invariant by debug-asserting non-terminal
+    /// at entry; release builds clamp on terminal (no-op) rather than
+    /// violating the invariant.
     ///
     /// Production callers (`advance_descent` in
     /// `specter-engine::descent`) guard the call with
@@ -928,26 +946,35 @@ impl DescentRemaining {
              check is_terminal() and route to materialization instead",
         );
         if self.inner.len() >= 2 {
-            self.inner.remove(0);
+            self.inner.pop();
         }
     }
 
-    /// Rewind by one segment: insert `segment` as the new head. Used by
+    /// Rewind by one segment: re-inject `segment` as the new logical
+    /// head (push onto the reversed `Vec`'s tail). Used by
     /// `dispatch_descent_vanished`'s rewind branch, where a `Vanished`
     /// response on `current_prefix` shifts the descent up one level and
     /// the vanished prefix's own segment becomes the next-to-consume
     /// component on the way back down.
     pub fn prepend(&mut self, segment: CompactString) {
-        self.inner.insert(0, segment);
+        self.inner.push(segment);
     }
 
-    /// Borrow the components for read-only iteration (test assertions,
-    /// diagnostics). Production code uses [`head`](Self::head) /
-    /// [`len`](Self::len) / [`is_terminal`](Self::is_terminal) — direct
-    /// slice access is for fixture / assertion use only.
+    /// Iterate the components in descent (logical) order. For test
+    /// assertions and diagnostics only — production code uses
+    /// [`head`](Self::head) / [`len`](Self::len) /
+    /// [`is_terminal`](Self::is_terminal).
     #[must_use]
-    pub fn as_slice(&self) -> &[CompactString] {
-        &self.inner
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &CompactString> {
+        self.inner.iter().rev()
+    }
+}
+
+impl std::fmt::Debug for DescentRemaining {
+    /// Descent (logical) order, hiding the reversed internal storage so
+    /// diagnostics read the way the path is consumed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
@@ -1017,6 +1044,41 @@ pub enum AnchorClaim {
     #[default]
     None,
     Held,
+}
+
+/// Identity of a past Effect emission *within one Profile's fire
+/// history* ([`Profile::fired_subs`]).
+///
+/// Profile-free by construction: the owning `Profile` is the
+/// `BTreeSet`'s container, so a `profile` discriminator would be
+/// invariant across every entry — pure redundancy in both storage and
+/// `Ord`. Contrast [`DedupKey`], which *does* carry `profile`: it is
+/// the actuator's coalescing identity and credits the per-Profile
+/// `Awaiting` counter on every `EffectComplete` in O(1) across the
+/// actuator boundary, where no container implies the Profile. The two
+/// identities are distinct concerns; conversion is one-way
+/// ([`From<&DedupKey>`](FiredKey::from)) — the fire-history never needs
+/// to reconstruct a routing key.
+///
+/// `Ord` drives the `BTreeSet`. `Hash` is intentionally not derived,
+/// mirroring [`DedupKey`]: `core` bans `hashbrown`, so the only
+/// container is a `BTreeSet`, never a `HashSet`.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum FiredKey {
+    Subtree(SubId),
+    PerFile { sub: SubId, resource: ResourceId },
+}
+
+impl From<&DedupKey> for FiredKey {
+    /// Project the actuator's coalescing identity onto the Profile's
+    /// fire-history identity by dropping the (container-implied)
+    /// `profile`. `DedupKey` is `Copy`, so `*dk` is a cheap read.
+    fn from(dk: &DedupKey) -> Self {
+        match *dk {
+            DedupKey::Subtree { sub, .. } => Self::Subtree(sub),
+            DedupKey::PerFile { sub, resource, .. } => Self::PerFile { sub, resource },
+        }
+    }
 }
 
 /// One stability state machine per `(Resource, ScanConfig)`.
@@ -1169,13 +1231,15 @@ pub struct Profile {
     /// `tree.get(anchor).is_watched()` overcounts in multi-Profile
     /// sharing (would steal another Profile's contribution).
     anchor_claim: AnchorClaim,
-    /// Set of `DedupKey`s for which this Profile has emitted at least one
-    /// Effect that has not been cleared by a `Failed` outcome,
+    /// Set of [`FiredKey`]s for which this Profile has emitted at least
+    /// one Effect that has not been cleared by a `Failed` outcome,
     /// `detach_sub`, or covered-leaf reap. Pure existence — no value
     /// payload. Drives drift recovery's "should we conservative-fire?"
     /// question by gating the `SeedDrift` filter; B1 dedup derives
     /// directly from `baseline.hash() == current.hash()` and does not
-    /// consult this field.
+    /// consult this field. The `profile` axis of [`DedupKey`] is dropped
+    /// on the way in ([`FiredKey::from`]) — this set's owner *is* the
+    /// Profile, so carrying it per entry would be redundant.
     ///
     /// **Lifecycle.** Inserted at successful emit (`emit_effects` Subtree
     /// and PerFile arms). Removed on `EffectComplete::Failed`,
@@ -1183,7 +1247,7 @@ pub struct Profile {
     /// Preserved across anchor loss by `discard_anchor_state` — the fire
     /// history is the answer to "which Subs should re-fire on recovery if
     /// drift is detected?"
-    pub fired_subs: BTreeSet<DedupKey>,
+    pub fired_subs: BTreeSet<FiredKey>,
     /// Anchor-rooted snapshot hash of `baseline` at the moment of
     /// `discard_anchor_state` — the survival witness used by
     /// `seed_drift_observed` to detect post-recovery drift after
@@ -2456,8 +2520,8 @@ mod tests {
 
         let d = state.descent_state().expect("still Pending");
         assert_eq!(
-            d.remaining_components().as_slice(),
-            &[CompactString::from("b")]
+            d.remaining_components().iter().cloned().collect::<Vec<_>>(),
+            vec![CompactString::from("b")]
         );
 
         // Mutator returns None on non-Pending states.
@@ -2753,8 +2817,10 @@ mod tests {
             p.descent_state_mut()
                 .expect("still Pending")
                 .remaining_components()
-                .as_slice(),
-            &[CompactString::from("b")],
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![CompactString::from("b")],
         );
 
         // mark/clear_active_for_reap delegate the bool semantics.

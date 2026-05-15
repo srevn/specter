@@ -6,7 +6,7 @@ use crate::scan_config::ScanConfig;
 use crate::snapshot::tree::{DirSnapshot, LeafEntry};
 use crate::sub::ClassSet;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Probe-channel owner — the engine-resident entity that minted a probe.
@@ -65,9 +65,11 @@ pub enum ProbeRequest {
         owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
-        /// Filesystem path of the anchor at probe-emission time. Engine
-        /// builds via `tree.path_of(profile.resource)`.
-        target_path: PathBuf,
+        /// Filesystem path of the anchor at probe-emission time.
+        /// `Arc::clone` of the slot's materialised path
+        /// (`tree.path_of(profile.resource)`) — a refcount bump, no
+        /// rebuild.
+        target_path: Arc<Path>,
     },
     /// Subtree verify / Seed / Rebase / Standard. Recursive Dir walk
     /// honouring `scan_config`. Walker returns
@@ -79,12 +81,13 @@ pub enum ProbeRequest {
         owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
-        /// Filesystem path of the directory to walk. Engine builds via
-        /// `tree.path_of(target_resource)` and ships the path on the
-        /// wire — the walker has no `Tree` and never needs the
-        /// engine's `ResourceId`. Empty `PathBuf` is the lone failure
-        /// mode; the walker treats empty as `Vanished`.
-        target_path: PathBuf,
+        /// Filesystem path of the directory to walk. `Arc::clone` of
+        /// `tree.path_of(target_resource)` shipped on the wire — the
+        /// walker has no `Tree` and never needs the engine's
+        /// `ResourceId`. An empty path is the lone failure mode (the
+        /// engine's stale-id sentinel); the walker treats empty as
+        /// `Vanished`.
+        target_path: Arc<Path>,
         /// `ScanConfig` to honour (recursive, hidden, exclude, pattern,
         /// `max_depth`). Cloned at emit time.
         scan_config: ScanConfig,
@@ -101,9 +104,9 @@ pub enum ProbeRequest {
         /// "no prior observation": first Seed of a fresh Profile.
         ///
         /// Cheap to ship — `Arc::clone` on the channel send. Multiple
-        /// workers may hold the same Arc concurrently (immutable
-        /// post-construction except for the `OnceLock<u128>` hash cache,
-        /// which is `Sync`).
+        /// workers may hold the same Arc concurrently: `DirSnapshot` is
+        /// fully immutable post-construction (hashes are eager fields,
+        /// not a lazy cache).
         baseline_subtree: Option<Arc<DirSnapshot>>,
         /// Set of paths the walker MUST enumerate (refusing mtime-skip)
         /// at any directory whose path equals one of these OR is an
@@ -116,9 +119,10 @@ pub enum ProbeRequest {
         /// prefix-match covers the "ancestor of forced descendant" case
         /// without engine-side closure construction.
         ///
-        /// `BTreeSet<PathBuf>` (not `Vec<PathBuf>`) so iteration order is
-        /// deterministic for replay.
-        force_walk: BTreeSet<PathBuf>,
+        /// `BTreeSet` (not `Vec`) so iteration order is deterministic
+        /// for replay. `Arc<Path>` entries are `Arc::clone`s of the
+        /// engine's slot paths — shipped without re-allocating.
+        force_walk: BTreeSet<Arc<Path>>,
         /// `true` ⇒ walker bypasses mtime-skip at every directory
         /// regardless of `baseline_subtree` and `force_walk`. Engine sets
         /// this when `PreFireBurst.forced` is true (max-settle deadline
@@ -146,8 +150,9 @@ pub enum ProbeRequest {
         /// matched [`crate::ProbeOwner`]-specific channel state
         /// (descent prefix lives on engine-side `DescentState`; promoter
         /// enumeration target lives on the channel's `OpenKind` variant);
-        /// the walker only needs the path.
-        target_path: PathBuf,
+        /// the walker only needs the path. `Arc::clone` of the slot's
+        /// materialised path — no rebuild.
+        target_path: Arc<Path>,
     },
 }
 
@@ -184,7 +189,7 @@ impl ProbeRequest {
         match self {
             Self::AnchorFile { target_path, .. }
             | Self::Subtree { target_path, .. }
-            | Self::Descent { target_path, .. } => target_path.as_path(),
+            | Self::Descent { target_path, .. } => target_path,
         }
     }
 }
@@ -248,7 +253,7 @@ pub enum WatchOp {
     /// | NOTE_REVOKE`).
     Watch {
         resource: ResourceId,
-        path: PathBuf,
+        path: Arc<Path>,
         kind: ResourceKind,
         events: ClassSet,
     },

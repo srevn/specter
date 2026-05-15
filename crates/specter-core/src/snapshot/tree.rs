@@ -402,11 +402,11 @@ pub enum TreeSnapshot {
 }
 
 impl TreeSnapshot {
-    /// Anchor-rooted snapshot hash. Dispatches to the variant's cached
+    /// Anchor-rooted snapshot hash. Dispatches to the variant's eager
     /// digest: [`DirSnapshot::dir_hash`] for `Dir`, [`LeafEntry::leaf_hash`]
-    /// for `File`. Both are 128-bit SipHash-2-4 digests cached lazily in
-    /// `OnceLock`s on the snapshot itself; first call computes, subsequent
-    /// calls hit the cache.
+    /// for `File`. Both are 128-bit SipHash-2-4 digests computed once at
+    /// snapshot construction and stored as plain fields — the read is a
+    /// field access, not a lazy-cache fill.
     #[must_use]
     pub fn hash(&self) -> u128 {
         match self {

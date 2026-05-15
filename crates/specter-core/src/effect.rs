@@ -149,9 +149,10 @@ impl Effect {
         }
     }
 
-    /// Coalescing identity — the actuator's `BTreeMap<DedupKey, Slot>`
-    /// and the engine's `Profile.fired_subs`. Slotmap keys are `Copy`,
-    /// so this is cheap; callers need it owned anyway.
+    /// Coalescing identity — the actuator's `BTreeMap<DedupKey, Slot>`.
+    /// The engine projects this to the profile-free
+    /// [`FiredKey`](crate::FiredKey) for `Profile.fired_subs`. Slotmap
+    /// keys are `Copy`, so this is cheap; callers need it owned anyway.
     #[must_use]
     pub const fn key(&self) -> DedupKey {
         match &self.target {
@@ -221,8 +222,9 @@ impl Effect {
 /// `PostFirePhase::Awaiting` counter on every `EffectComplete`, so this
 /// lookup is hot.
 ///
-/// `Ord` drives the actuator's `BTreeMap<DedupKey, Slot>` and the
-/// engine's `BTreeSet<DedupKey>` (`Profile::fired_subs`).
+/// `Ord` drives the actuator's `BTreeMap<DedupKey, Slot>`. The engine's
+/// fire-history (`Profile::fired_subs`) keys on the profile-free
+/// [`FiredKey`](crate::FiredKey) projection instead, not this type.
 /// `Hash` is intentionally not derived — no `HashMap`/`HashSet` keys on
 /// this type and `core` bans `hashbrown` outright.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]

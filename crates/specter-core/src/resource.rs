@@ -34,6 +34,8 @@ use crate::ids::{ProfileId, PromoterId, ResourceId};
 use crate::sub::ClassSet;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
 use string_interner::symbol::SymbolU32;
 
 /// Identity of a single contributor to a Resource's contributions map.
@@ -90,6 +92,20 @@ pub enum ContribKey {
 pub struct Resource {
     pub(crate) parent: Option<ResourceId>,
     pub(crate) segment: SymbolU32,
+    /// Path from the root chain down to this slot, materialised once at
+    /// construction. **Function-of-data, by construction**: the
+    /// equality `path == join(root..=self segments)` holds because
+    /// `(parent, segment)` are write-once — set only in
+    /// [`Resource::new`] and never reparented (a rename mints a fresh
+    /// slot under a new `ResourceId`; the chain is append-only). So
+    /// `path` cannot drift from the chain it projects.
+    ///
+    /// `Arc<Path>` so every reader ([`crate::Tree::path_of`], the
+    /// engine's probe / watch emission) is an `Arc::clone` refcount
+    /// bump — never a parent-walk or re-allocation — and the same
+    /// allocation ships read-only across the engine→sensor actor
+    /// boundary.
+    pub(crate) path: Arc<Path>,
     pub(crate) children: BTreeMap<SymbolU32, ResourceId>,
     pub(crate) profiles: SmallVec<[(u64, ProfileId); 1]>,
     /// Promoter back-ref. Maintained in lockstep with
@@ -206,10 +222,16 @@ pub enum ResourceRole {
 }
 
 impl Resource {
-    pub(crate) fn new(parent: Option<ResourceId>, segment: SymbolU32, role: ResourceRole) -> Self {
+    pub(crate) fn new(
+        parent: Option<ResourceId>,
+        segment: SymbolU32,
+        role: ResourceRole,
+        path: Arc<Path>,
+    ) -> Self {
         Self {
             parent,
             segment,
+            path,
             children: BTreeMap::new(),
             profiles: SmallVec::new(),
             proxy_promoters: SmallVec::new(),
@@ -305,6 +327,15 @@ impl Resource {
     #[must_use]
     pub const fn segment(&self) -> SymbolU32 {
         self.segment
+    }
+
+    /// Materialised path from the root chain to this slot. `Arc::clone`
+    /// at the call site is a refcount bump — the join was paid once at
+    /// construction. See the field rustdoc for the by-construction
+    /// invariant.
+    #[must_use]
+    pub const fn path(&self) -> &Arc<Path> {
+        &self.path
     }
 
     #[must_use]
@@ -471,6 +502,10 @@ mod tests {
         interner.get_or_intern("seg")
     }
 
+    fn dummy_path() -> std::sync::Arc<std::path::Path> {
+        std::sync::Arc::from(std::path::Path::new(""))
+    }
+
     /// Role is metadata; a fresh slot with no children, no profiles, no
     /// proxy back-refs, and no contributions has no anchors regardless
     /// of its role tag.
@@ -481,7 +516,7 @@ mod tests {
             ResourceRole::WatchRootParent,
             ResourceRole::DescentScaffold,
         ] {
-            let r = Resource::new(None, dummy_segment(), role);
+            let r = Resource::new(None, dummy_segment(), role, dummy_path());
             assert!(
                 !r.has_anchors(),
                 "role-only retention was dropped; fresh {role:?} slot is not anchored",
@@ -494,7 +529,7 @@ mod tests {
     /// slot is claimed" signal that drives the kernel-watch lifetime.
     #[test]
     fn anchored_when_contribution_present() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         r.insert_contribution(
             ContribKey::ProfileAnchor(ProfileId::default()),
             ClassSet::STRUCTURE,
@@ -504,7 +539,7 @@ mod tests {
 
     #[test]
     fn anchored_when_children_present() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         let child_seg = dummy_segment();
         r.children.insert(child_seg, ResourceId::default());
         assert!(r.has_anchors());
@@ -512,14 +547,14 @@ mod tests {
 
     #[test]
     fn anchored_when_profiles_present() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         r.profiles.push((42, crate::ids::ProfileId::default()));
         assert!(r.has_anchors());
     }
 
     #[test]
     fn anchored_when_proxy_promoters_present() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         r.proxy_promoters.push(crate::ids::PromoterId::default());
         assert!(r.has_anchors());
         assert_eq!(r.proxy_promoters().len(), 1);
@@ -527,7 +562,7 @@ mod tests {
 
     #[test]
     fn fresh_resource_has_empty_proxy_promoters() {
-        let r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         assert!(r.proxy_promoters().is_empty());
     }
 
@@ -582,7 +617,7 @@ mod tests {
     /// / Promoters attach.
     #[test]
     fn fresh_resource_events_union_is_empty() {
-        let r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         assert_eq!(r.events_union(), ClassSet::EMPTY);
         assert_eq!(r.watch_demand(), 0);
         assert!(!r.is_watched());
@@ -593,7 +628,7 @@ mod tests {
     /// produce a union containing both.
     #[test]
     fn contributions_map_yields_count_and_union() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         r.insert_contribution(
             ContribKey::ProfileAnchor(ProfileId::default()),
             ClassSet::CONTENT,
@@ -615,7 +650,7 @@ mod tests {
     /// the union reflect the freshest value.
     #[test]
     fn contributions_same_key_overwrites_mask() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         let key = ContribKey::ProfileAnchor(ProfileId::default());
         let prior = r.insert_contribution(key, ClassSet::CONTENT);
         assert!(prior.is_none(), "fresh key: no prior mask");
@@ -635,7 +670,7 @@ mod tests {
     /// against post-`vacate` slots.
     #[test]
     fn remove_contribution_returns_prior_mask_or_none() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         let key = ContribKey::ProfileAnchor(ProfileId::default());
         assert!(
             r.remove_contribution(key).is_none(),
@@ -650,7 +685,7 @@ mod tests {
     /// terminus uses `> 0` to decide whether to emit `Unwatch`.
     #[test]
     fn clear_contributions_returns_prior_count() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         assert_eq!(r.clear_contributions(), 0, "empty: no-op");
         r.insert_contribution(
             ContribKey::ProfileAnchor(ProfileId::default()),
@@ -669,7 +704,7 @@ mod tests {
     /// uses to decide whether to emit `WatchOp::Suppress`.
     #[test]
     fn inc_suppress_reports_zero_to_one_edge_once() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         assert!(r.inc_suppress(), "0 → 1 edge");
         assert_eq!(r.suppress_count(), 1);
         assert!(!r.inc_suppress(), "1 → 2: intermediate, no edge");
@@ -682,7 +717,7 @@ mod tests {
     /// decrements and the saturating zero-floor path return `false`.
     #[test]
     fn dec_suppress_reports_one_to_zero_edge_and_saturates_at_zero() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         assert!(!r.dec_suppress(), "no-op at 0: no edge, no underflow panic");
         assert_eq!(r.suppress_count(), 0);
         r.inc_suppress();
@@ -697,7 +732,7 @@ mod tests {
     /// decide whether to emit `Unsuppress`.
     #[test]
     fn clear_suppress_returns_prior_count() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User);
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         assert_eq!(r.clear_suppress(), 0, "already zero: no-op");
         r.inc_suppress();
         r.inc_suppress();

@@ -19,7 +19,7 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -132,7 +132,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
             resource: root,
             op: WatchOp::Watch {
                 resource: root,
-                path: PathBuf::from("src"),
+                path: Arc::from(Path::new("src")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
@@ -201,7 +201,7 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
             resource: root,
             op: WatchOp::Watch {
                 resource: root,
-                path: PathBuf::from("src"),
+                path: Arc::from(Path::new("src")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
@@ -250,7 +250,7 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
             resource: root,
             op: WatchOp::Watch {
                 resource: root,
-                path: PathBuf::from("src"),
+                path: Arc::from(Path::new("src")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
@@ -337,7 +337,7 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
             resource: parent,
             op: WatchOp::Watch {
                 resource: parent,
-                path: PathBuf::from("var"),
+                path: Arc::from(Path::new("var")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
@@ -416,7 +416,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
             resource: foo,
             op: WatchOp::Watch {
                 resource: foo,
-                path: PathBuf::from("foo"),
+                path: Arc::from(Path::new("foo")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
@@ -503,7 +503,7 @@ fn watch_op_rejected_input(resource: ResourceId, path: &str) -> Input {
         resource,
         op: WatchOp::Watch {
             resource,
-            path: PathBuf::from(path),
+            path: Arc::from(Path::new(path)),
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         },

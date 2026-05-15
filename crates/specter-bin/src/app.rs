@@ -608,7 +608,7 @@ mod tests {
             &mut watcher,
             WatchOp::Watch {
                 resource: r,
-                path: "/tmp".into(),
+                path: Arc::from(std::path::Path::new("/tmp")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
@@ -630,7 +630,7 @@ mod tests {
             &mut watcher,
             WatchOp::Watch {
                 resource: r,
-                path: "/tmp".into(),
+                path: Arc::from(std::path::Path::new("/tmp")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
@@ -702,7 +702,7 @@ mod tests {
             .watch_ops_tx
             .try_send(WatchOp::Watch {
                 resource: r,
-                path: "/tmp".into(),
+                path: Arc::from(std::path::Path::new("/tmp")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             })

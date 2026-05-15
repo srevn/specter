@@ -42,6 +42,7 @@
 
 use crate::Engine;
 use crate::descent::{MaterializeResult, kind_from_entry};
+use crate::path::empty_path;
 use crate::probe_channel::{Open, OpenKind};
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
@@ -202,7 +203,7 @@ impl Engine {
                 );
                 let owner = ProbeOwner::Promoter(promoter_id);
                 let correlation = self.probe_channel.open(owner, OpenKind::PromoterDescent);
-                let target_path = self.tree.path_of(prefix).unwrap_or_default();
+                let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
                 Self::emit_descent_probe(owner, correlation, target_path, out);
             }
         }
@@ -641,7 +642,7 @@ impl Engine {
             .probe_channel
             .open(owner, OpenKind::PromoterEnumerating { target });
 
-        let target_path = self.tree.path_of(target).unwrap_or_default();
+        let target_path = self.tree.path_of(target).unwrap_or_else(empty_path);
         Self::emit_descent_probe(owner, correlation, target_path, out);
     }
 
@@ -720,17 +721,13 @@ impl Engine {
         let next_index = pattern_component_index + 1;
         let is_final = next_index == components.len();
 
-        // Lift `path_of(target)` outside the per-entry loop. Every
-        // final-position match below joins `name_str` against the same
-        // proxy path, so amortising the Tree walk across N matches
-        // turns a per-match O(depth) ancestor crawl into a single
-        // dispatch-level allocation. `None` is the defensive
-        // target-was-reaped path — within a single step the
-        // `proxy_state` lookup above already proved the slot live, so
-        // it is unreachable under normal operation; the `as_deref()
-        // map().unwrap_or_default()` chain below degrades to an empty
-        // `PathBuf` (rejected by `decompose_attach_path` downstream)
-        // rather than panicking.
+        // Loop-invariant for the Glob arm's per-entry join below; bind
+        // once. `None` is the defensive target-was-reaped path — the
+        // `proxy_state` lookup above already proved the slot live this
+        // step, so it is unreachable under normal operation; the
+        // `as_deref().map().unwrap_or_default()` chain below degrades to
+        // an empty `PathBuf` (rejected downstream by
+        // `decompose_attach_path`) rather than panicking.
         let target_path = self.tree.path_of(target);
 
         // Forward pass: state-keyed dispatch on the next pattern

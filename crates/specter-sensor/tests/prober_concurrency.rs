@@ -10,6 +10,7 @@ use slotmap::SlotMap;
 use specter_core::{Input, ProbeCorrelation, ProbeOwner, ProbeRequest, ProfileId};
 use specter_sensor::{Prober, WorkerProber};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -22,7 +23,7 @@ fn anchor_request(profile: ProfileId, target_path: PathBuf, correlation: u64) ->
     ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(profile),
         correlation: ProbeCorrelation::from(correlation),
-        target_path,
+        target_path: Arc::from(target_path),
     }
 }
 

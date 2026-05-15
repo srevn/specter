@@ -43,7 +43,7 @@ use specter_core::{
 };
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Engine-resident probe-channel state. Owns the open-map and the
@@ -274,7 +274,7 @@ impl Engine {
     pub(crate) fn emit_anchor_probe(
         owner: ProbeOwner,
         correlation: ProbeCorrelation,
-        target_path: PathBuf,
+        target_path: Arc<Path>,
         out: &mut StepOutput,
     ) {
         out.probe_ops.push(ProbeOp::Probe {
@@ -304,11 +304,11 @@ impl Engine {
     pub(crate) fn emit_subtree_probe(
         owner: ProbeOwner,
         correlation: ProbeCorrelation,
-        target_path: PathBuf,
+        target_path: Arc<Path>,
         scan_config: ScanConfig,
         captured_with: u64,
         baseline_subtree: Option<Arc<DirSnapshot>>,
-        force_walk: BTreeSet<PathBuf>,
+        force_walk: BTreeSet<Arc<Path>>,
         forced: bool,
         out: &mut StepOutput,
     ) {
@@ -340,7 +340,7 @@ impl Engine {
     pub(crate) fn emit_descent_probe(
         owner: ProbeOwner,
         correlation: ProbeCorrelation,
-        target_path: PathBuf,
+        target_path: Arc<Path>,
         out: &mut StepOutput,
     ) {
         out.probe_ops.push(ProbeOp::Probe {

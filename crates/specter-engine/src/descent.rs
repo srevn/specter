@@ -47,6 +47,7 @@
 //!    `StructureChanged` at `current_prefix`. I5: drops the event if a
 //!    probe is already in flight (channel open for this owner).
 
+use crate::path::empty_path;
 use crate::probe_channel::OpenKind;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
@@ -286,7 +287,7 @@ impl crate::Engine {
         );
 
         // Step 4: emit the descent probe at the prefix.
-        let target_path = self.tree.path_of(prefix).unwrap_or_default();
+        let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
         Self::emit_descent_probe(owner, correlation, target_path, out);
     }
 
@@ -444,7 +445,7 @@ impl crate::Engine {
         sub_watch(&mut self.tree, old_prefix, key, out);
         add_watch(&mut self.tree, new_prefix, key, ClassSet::STRUCTURE, out);
 
-        let target_path = self.tree.path_of(new_prefix).unwrap_or_default();
+        let target_path = self.tree.path_of(new_prefix).unwrap_or_else(empty_path);
         Self::emit_descent_probe(owner, correlation, target_path, out);
     }
 
@@ -643,7 +644,7 @@ impl crate::Engine {
 
                 add_watch(&mut self.tree, parent_id, key, ClassSet::STRUCTURE, out);
 
-                let target_path = self.tree.path_of(parent_id).unwrap_or_default();
+                let target_path = self.tree.path_of(parent_id).unwrap_or_else(empty_path);
                 Self::emit_descent_probe(owner, correlation, target_path, out);
             }
             None => {
@@ -704,7 +705,7 @@ impl crate::Engine {
         };
 
         let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
-        let target_path = self.tree.path_of(prefix).unwrap_or_default();
+        let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
         Self::emit_descent_probe(owner, correlation, target_path, out);
     }
 }

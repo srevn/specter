@@ -55,7 +55,7 @@
 //!
 //! **File materialization vs Watch.** Every covered diff entry gets a
 //! Tree slot — [`ensure_descendant`] runs unconditionally — so
-//! `DedupKey::PerFile { sub, resource }` always carries a real
+//! `FiredKey::PerFile { sub, resource }` always carries a real
 //! `ResourceId`. The Watch op (`add_watch`) is gated: covered Dirs
 //! always; covered Leaves only when `Profile.has_per_file_fds == true`.
 //! Per-file Effect dispatch (`EffectScope::PerStableFile`) walks the
@@ -65,7 +65,7 @@ use crate::coverage::covers;
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use smallvec::SmallVec;
 use specter_core::{
-    ContribKey, DedupKey, Diagnostic, Diff, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
+    ContribKey, Diagnostic, Diff, DirSnapshot, EntryKind, FiredKey, Profile, ProfileId, ProfileMap,
     ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot,
     diff_dir_pair, splice, subtree_at_dir,
 };
@@ -220,8 +220,8 @@ fn releases_watch(profile: &Profile, r: ResourceId, kind: EntryKind, tree: &Tree
 /// `Engine::release_descendant_claim` to drive the scoped
 /// [`purge_per_file_fired_subs_for_resources`]. Cascade-reaped
 /// ancestors (Dirs) are intentionally not collected — Dir slots are
-/// never `DedupKey::PerFile` targets, so they cannot stale a dedup
-/// entry.
+/// never `FiredKey::PerFile` targets, so they cannot stale a
+/// fire-history entry.
 pub(crate) fn apply_diff_to_tree(
     diff: &Diff,
     profile: &Profile,
@@ -441,7 +441,7 @@ pub(crate) fn graft(
 
     // Apply to Tree. Returns the slots Phase 1 reaped directly; cascade-
     // reaped ancestors (Dirs) are not collected because Dir slots are
-    // never `DedupKey::PerFile` targets.
+    // never `FiredKey::PerFile` targets.
     let reaped = {
         let Some(profile) = profiles.get(profile_id) else {
             return;
@@ -478,12 +478,13 @@ pub(crate) fn graft(
 ///
 /// **Cross-Profile preservation.** One burst's deletes can stale entries
 /// in *any* covering Profile's `fired_subs` map (cross-Profile dedup
-/// sharing under `DedupKey::PerFile`). The loop iterates every Profile;
+/// sharing under `FiredKey::PerFile`). The loop iterates every Profile;
 /// only the membership check is scoped to the reaped set.
 ///
-/// `Subtree`-keyed entries are unaffected — their `(SubId, ProfileId)`
-/// key is bounded by Profile lifecycle (the whole set drops at
-/// `reap_profile`); only `PerFile` keys carry a `ResourceId`.
+/// `Subtree`-keyed entries are unaffected — `FiredKey::Subtree(SubId)`
+/// carries no `ResourceId` and is bounded by Profile lifecycle (the
+/// whole set drops at `reap_profile`); only `FiredKey::PerFile` carries
+/// a `ResourceId`.
 pub(crate) fn purge_per_file_fired_subs_for_resources(
     profiles: &mut ProfileMap,
     reaped: &[ResourceId],
@@ -499,8 +500,8 @@ pub(crate) fn purge_per_file_fired_subs_for_resources(
             continue;
         }
         p.fired_subs.retain(|k| match *k {
-            DedupKey::PerFile { resource, .. } => !set.contains(&resource),
-            DedupKey::Subtree { .. } => true,
+            FiredKey::PerFile { resource, .. } => !set.contains(&resource),
+            FiredKey::Subtree(_) => true,
         });
     }
 }
@@ -534,7 +535,7 @@ mod tests {
     use compact_str::CompactString;
     use smallvec::smallvec;
     use specter_core::{
-        ChildEntry, ClassSet, DedupKey, Diff, DirChild, DirMeta, DirSnapshot, EntryKind, EntryRef,
+        ChildEntry, ClassSet, Diff, DirChild, DirMeta, DirSnapshot, EntryKind, EntryRef, FiredKey,
         FsIdentity, LeafEntry, Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole,
         ScanConfig, StepOutput, SubId, Tree, TreeSnapshot, WatchOp,
     };
@@ -937,12 +938,9 @@ mod tests {
             .install_dir_current(Arc::clone(&prior_current));
 
         // Pre-populate the dedup map. SubId::default() is fine — the
-        // purge filter doesn't inspect the sub field. The `profile` field
-        // mirrors what production would store: the Profile that owns
-        // `fired_subs`.
-        let stale_key = DedupKey::PerFile {
+        // purge filter doesn't inspect the sub field.
+        let stale_key = FiredKey::PerFile {
             sub: SubId::default(),
-            profile: pid,
             resource: a_rs_id,
         };
         profiles.get_mut(pid).unwrap().fired_subs.insert(stale_key);
@@ -1005,9 +1003,8 @@ mod tests {
             .unwrap()
             .install_dir_current(Arc::clone(&prior_current));
 
-        let live_key = DedupKey::PerFile {
+        let live_key = FiredKey::PerFile {
             sub: SubId::default(),
-            profile: pid,
             resource: a_rs_id,
         };
         profiles.get_mut(pid).unwrap().fired_subs.insert(live_key);
@@ -1047,8 +1044,6 @@ mod tests {
         // Subtree-keyed entries are bounded by Profile lifecycle, not
         // Resource lifecycle. The purge hook must leave them alone even
         // when arbitrary descendants get reaped.
-        use specter_core::ProfileId;
-
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let a_rs_id = tree
             .ensure_child(root, "a.rs", ResourceRole::User)
@@ -1061,12 +1056,9 @@ mod tests {
             .unwrap()
             .install_dir_current(Arc::clone(&prior_current));
 
-        // Subtree key references a *Profile*, not a Resource. SubId
-        // and ProfileId values are arbitrary for this test.
-        let subtree_key = DedupKey::Subtree {
-            sub: SubId::default(),
-            profile: ProfileId::default(),
-        };
+        // Subtree key references a *Profile*, not a Resource. The SubId
+        // value is arbitrary for this test.
+        let subtree_key = FiredKey::Subtree(SubId::default());
         profiles
             .get_mut(pid)
             .unwrap()
@@ -1126,8 +1118,7 @@ mod tests {
             .expect("test live parent");
         tree.set_kind(a_rs_id, ResourceKind::File);
 
-        // Both Profiles record a PerFile entry against a.rs. Each entry's
-        // `profile` field is the owning Profile's own id — mirrors what
+        // Both Profiles record a PerFile entry against a.rs — mirrors what
         // `emit_effects_per_stable_file` writes in production.
         for &pid in &[pid_a, pid_b] {
             profiles
@@ -1138,9 +1129,8 @@ mod tests {
                 .get_mut(pid)
                 .unwrap()
                 .fired_subs
-                .insert(DedupKey::PerFile {
+                .insert(FiredKey::PerFile {
                     sub: SubId::default(),
-                    profile: pid,
                     resource: a_rs_id,
                 });
         }
@@ -1172,32 +1162,18 @@ mod tests {
         );
 
         assert!(tree.get(a_rs_id).is_none(), "a.rs reaped");
-        // Each Profile's stale key carries its own `profile` field (matching
-        // what was inserted above), so we look up per Profile.
-        let stale_key_a = DedupKey::PerFile {
+        // The stale key is profile-free; each Profile owns its own
+        // `fired_subs` container, so we look up the same key per Profile.
+        let stale_key = FiredKey::PerFile {
             sub: SubId::default(),
-            profile: pid_a,
-            resource: a_rs_id,
-        };
-        let stale_key_b = DedupKey::PerFile {
-            sub: SubId::default(),
-            profile: pid_b,
             resource: a_rs_id,
         };
         assert!(
-            !profiles
-                .get(pid_a)
-                .unwrap()
-                .fired_subs
-                .contains(&stale_key_a),
+            !profiles.get(pid_a).unwrap().fired_subs.contains(&stale_key),
             "Profile A's stale entry must be purged",
         );
         assert!(
-            !profiles
-                .get(pid_b)
-                .unwrap()
-                .fired_subs
-                .contains(&stale_key_b),
+            !profiles.get(pid_b).unwrap().fired_subs.contains(&stale_key),
             "Profile B's stale entry (cross-Profile) must also be purged",
         );
     }

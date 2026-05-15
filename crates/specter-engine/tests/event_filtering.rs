@@ -771,8 +771,10 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// IT-EF-2 dedup — Subtree-keyed effect uses Profile id, so two Profiles
-// with different masks don't collide on `fired_subs`.
+// IT-EF-2 dedup — the actuator's `DedupKey::Subtree` carries the Profile
+// id, so two Profiles with different masks get distinct coalescing keys.
+// (The fire-history `FiredKey` is profile-free — there it's the
+// per-Profile container, not the key, that keeps the two apart.)
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]

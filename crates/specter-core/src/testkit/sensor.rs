@@ -142,7 +142,8 @@ mod tests {
         ClassSet, Diagnostic, Input, ProbeOp, ResourceId, ResourceKind, StepOutput, WatchOp,
     };
     use slotmap::SlotMap;
-    use std::path::PathBuf;
+    use std::path::Path;
+    use std::sync::Arc;
 
     fn fresh_resource_ids(n: usize) -> Vec<ResourceId> {
         let mut sm = SlotMap::<ResourceId, ()>::with_key();
@@ -157,7 +158,7 @@ mod tests {
         let mut step_one = StepOutput::default();
         step_one.watch_ops.push(WatchOp::Watch {
             resource: ids[0],
-            path: PathBuf::from("/tmp/a"),
+            path: Arc::from(Path::new("/tmp/a")),
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         });
@@ -210,7 +211,7 @@ mod tests {
         let mut out = StepOutput::default();
         out.watch_ops.push(WatchOp::Watch {
             resource: watched,
-            path: PathBuf::from("/tmp/x"),
+            path: Arc::from(Path::new("/tmp/x")),
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         });
@@ -236,7 +237,7 @@ mod tests {
         let mut out = StepOutput::default();
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
-            path: PathBuf::from("/tmp/z"),
+            path: Arc::from(Path::new("/tmp/z")),
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         });
@@ -256,7 +257,7 @@ mod tests {
         let mut out = StepOutput::default();
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
-            path: PathBuf::from("/tmp/w"),
+            path: Arc::from(Path::new("/tmp/w")),
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         });
@@ -277,14 +278,14 @@ mod tests {
         let mut out = StepOutput::default();
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
-            path: PathBuf::from("/tmp/w"),
+            path: Arc::from(Path::new("/tmp/w")),
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         });
         out.watch_ops.push(WatchOp::Unwatch { resource: r });
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
-            path: PathBuf::from("/tmp/w"),
+            path: Arc::from(Path::new("/tmp/w")),
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         });
@@ -346,7 +347,7 @@ mod tests {
         let r = ids[0];
         let op = WatchOp::Watch {
             resource: r,
-            path: PathBuf::from("/tmp/p"),
+            path: Arc::from(Path::new("/tmp/p")),
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         };

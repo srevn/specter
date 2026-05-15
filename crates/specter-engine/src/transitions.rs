@@ -15,19 +15,20 @@
 
 use crate::Engine;
 use crate::engine::is_timer_referenced;
+use crate::path::empty_path;
 use crate::probe_channel::OpenKind;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, AnchorClaim, BurstFinish, BurstIntent, ClaimKind, ClassSet, DedupKey,
-    DescentRemaining, Diagnostic, Effect, EffectCommon, EffectOutcome, EffectScope, FsEvent,
-    OverflowScope, PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileState, PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource, ResourceId,
-    ResourceKind, StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp,
-    WatchRegistryDiff,
+    DescentRemaining, Diagnostic, Effect, EffectCommon, EffectOutcome, EffectScope, FiredKey,
+    FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse,
+    ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource,
+    ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure,
+    WatchOp, WatchRegistryDiff,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -726,7 +727,7 @@ impl Engine {
         if matches!(result, EffectOutcome::Failed(_))
             && let Some(p) = self.profiles.get_mut(profile_id)
         {
-            p.fired_subs.remove(key);
+            p.fired_subs.remove(&FiredKey::from(key));
         }
 
         // Resolve the action under a short read borrow, then mutate.
@@ -1202,7 +1203,7 @@ impl Engine {
                     let correlation = self
                         .probe_channel
                         .open(qowner, crate::probe_channel::OpenKind::PromoterDescent);
-                    let target_path = self.tree.path_of(prefix).unwrap_or_default();
+                    let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
                     Self::emit_descent_probe(qowner, correlation, target_path, out);
                 }
                 PromoterReseedAction::Enumerate(proxy_keys) => {
@@ -1416,13 +1417,13 @@ impl Engine {
             .get(profile_id)
             .map(|p| p.resource)
             .unwrap_or_default();
-        let anchor_path: PathBuf = self.tree.path_of(anchor_resource).unwrap_or_else(|| {
+        let anchor_path: Arc<Path> = self.tree.path_of(anchor_resource).unwrap_or_else(|| {
             debug_assert!(
                 false,
                 "on_anchor_terminal_all_dynamic: tree.path_of returned None for live Profile \
                  anchor (profile = {profile_id:?}, resource = {anchor_resource:?})",
             );
-            PathBuf::new()
+            empty_path()
         });
 
         // 3. Notify each source Promoter; remove each dynamic Sub from
@@ -1612,14 +1613,12 @@ impl Engine {
         // Profile's view here keeps the cross-field invariant intact
         // against any future absorb / rebase path that does read it.
         if self.seed_drift_observed(profile_id) {
-            // Project `DedupKey::Subtree { sub, profile }` → `sub`. The
-            // `profile` field is constant across the iteration (it's
-            // `profile_id`), and the PerFile variant is filtered out
-            // upfront — both of which the `&[SubId]` payload makes
-            // unrepresentable. The resulting slice is sorted by `SubId`
-            // because `fired_subs` is a `BTreeSet<DedupKey>` and
-            // `DedupKey::Subtree`'s `Ord` decomposes to `(sub, profile)`
-            // with profile constant.
+            // Project `FiredKey::Subtree(sub)` → `sub`; PerFile is
+            // filtered out. The result is sorted by `SubId` — the set
+            // is a `BTreeSet<FiredKey>` and `FiredKey::Subtree`'s `Ord`
+            // is `sub` alone (`FiredKey` is profile-free by
+            // construction) — which the `&[SubId]` payload then carries
+            // for deterministic emission order.
             let drifted: SmallVec<[SubId; 2]> = self
                 .profiles
                 .get(profile_id)
@@ -1627,8 +1626,8 @@ impl Engine {
                     p.fired_subs
                         .iter()
                         .filter_map(|k| match k {
-                            DedupKey::Subtree { sub, .. } => Some(*sub),
-                            DedupKey::PerFile { .. } => None,
+                            FiredKey::Subtree(sub) => Some(*sub),
+                            FiredKey::PerFile { .. } => None,
                         })
                         .collect()
                 })
@@ -2154,12 +2153,7 @@ impl Engine {
         // matchers. The projection is sorted at `Profile::new`.
         let exclude_strings = Arc::clone(&p.exclude_strings);
 
-        // One Arc allocation per `emit_effects` call — every Effect we
-        // emit (one per Sub × per matching diff entry for PerFile) Arc-
-        // clones the same path. `Tree::path_of` already builds a fresh
-        // PathBuf on every call; wrapping it once amortises that cost
-        // across the whole burst's emissions.
-        let anchor_path: Arc<Path> = Arc::from(self.tree.path_of(resource).unwrap_or_default());
+        let anchor_path: Arc<Path> = self.tree.path_of(resource).unwrap_or_else(empty_path);
 
         // Lazy-build the Diff Arc only if any Sub needs it AND both a
         // baseline and a current snapshot are present. With baseline pinned
@@ -2177,10 +2171,10 @@ impl Engine {
 
         // Per-Profile structural component of B1 dedup. The full Subtree
         // suppress decision combines `nothing_changed` with a per-Sub
-        // fire-history check (`fired_subs.contains(&dk)`) inside the loop:
+        // fire-history check (`fired_subs.contains(&fk)`) inside the loop:
         // a Sub that has never fired suppresses nothing — it is its own
         // "first emission" — even when the tree happens to match. Both
-        // reads hit the cached `OnceLock<u128>` on each snapshot; same cost
+        // reads hit the snapshot's eager `u128` hash field; same cost
         // class as the per-Sub map value compare it replaces.
         let nothing_changed = baseline_snap
             .as_ref()
@@ -2200,10 +2194,10 @@ impl Engine {
             };
             match scope {
                 EffectScope::SubtreeRoot => {
-                    let dk = DedupKey::Subtree {
-                        sub: sub_id,
-                        profile: profile_id,
-                    };
+                    // Fire-history identity only — the actuator re-derives
+                    // its `DedupKey` from the emitted `Effect`, so no
+                    // profile-carrying key is built here.
+                    let fk = FiredKey::Subtree(sub_id);
                     // SeedDrift narrows to its pre-filtered Sub set; Standard
                     // emits every Sub (modulo the suppress check below).
                     if let EmitMode::SeedDrift { drifted } = mode
@@ -2228,7 +2222,7 @@ impl Engine {
                                 && self
                                     .profiles
                                     .get(profile_id)
-                                    .is_some_and(|p| p.fired_subs.contains(&dk))
+                                    .is_some_and(|p| p.fired_subs.contains(&fk))
                         }
                         EmitMode::SeedDrift { .. } => false,
                     };
@@ -2268,7 +2262,7 @@ impl Engine {
                     count = count.saturating_add(1);
 
                     if let Some(p) = self.profiles.get_mut(profile_id) {
-                        p.fired_subs.insert(dk);
+                        p.fired_subs.insert(fk);
                     }
                 }
                 EffectScope::PerStableFile => {
@@ -2382,9 +2376,10 @@ impl Engine {
                 },
             };
 
-            let dk = DedupKey::PerFile {
+            // Fire-history identity only — the actuator re-derives its
+            // `DedupKey` from the emitted `Effect`.
+            let fk = FiredKey::PerFile {
                 sub: sub_id,
-                profile: profile_id,
                 resource,
             };
 
@@ -2415,7 +2410,7 @@ impl Engine {
             count = count.saturating_add(1);
 
             if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.fired_subs.insert(dk);
+                p.fired_subs.insert(fk);
             }
         }
         count

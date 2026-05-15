@@ -9,6 +9,7 @@ mod counter;
 mod coverage;
 mod descent;
 mod engine;
+mod path;
 mod probe_channel;
 mod promoter;
 mod promoter_claims;

@@ -12,6 +12,7 @@ use specter_core::{
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -24,7 +25,7 @@ fn anchor_request(profile: ProfileId, target_path: PathBuf, correlation: u64) ->
     ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(profile),
         correlation: ProbeCorrelation::from(correlation),
-        target_path,
+        target_path: Arc::from(target_path),
     }
 }
 
@@ -32,7 +33,7 @@ fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -
     ProbeRequest::Subtree {
         owner: ProbeOwner::Profile(profile),
         correlation: ProbeCorrelation::from(correlation),
-        target_path,
+        target_path: Arc::from(target_path),
         scan_config: ScanConfig::builder().recursive(true).build(),
         captured_with: 0,
         baseline_subtree: None,

@@ -23,7 +23,7 @@ use specter_core::{
     ScanConfig, SubAttachAnchor, SubAttachRequest,
 };
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -124,8 +124,12 @@ fn descent_one_level_advances_on_created_entry() {
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("first probe in flight");
     assert_eq!(
-        descent.remaining_components().as_slice(),
-        &[CompactString::from("bar")][..],
+        descent
+            .remaining_components()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![CompactString::from("bar")],
     );
 
     // Inject a probe response showing `bar` now exists.
@@ -185,8 +189,12 @@ fn descent_two_levels_advances_progressively() {
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     let corr1 = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
-        descent.remaining_components().as_slice(),
-        &[CompactString::from("bar"), CompactString::from("baz")][..],
+        descent
+            .remaining_components()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![CompactString::from("bar"), CompactString::from("baz")],
     );
 
     let snap1 = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
@@ -204,8 +212,12 @@ fn descent_two_levels_advances_progressively() {
         .descent_state(ProbeOwner::Profile(pid))
         .expect("still pending");
     assert_eq!(
-        descent.remaining_components().as_slice(),
-        &[CompactString::from("baz")][..],
+        descent
+            .remaining_components()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![CompactString::from("baz")],
     );
     let _bar = e.tree().lookup(Some(foo), "bar").expect("bar materialized");
     let corr2 = e
@@ -248,8 +260,12 @@ fn descent_no_progress_keeps_pending() {
     // Still pending; no new probe.
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
-        descent.remaining_components().as_slice(),
-        &[CompactString::from("bar")][..],
+        descent
+            .remaining_components()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![CompactString::from("bar")],
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
@@ -339,8 +355,12 @@ fn descent_failed_retains_state() {
     // Still pending; no probe in flight.
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(
-        descent.remaining_components().as_slice(),
-        &[CompactString::from("bar")][..],
+        descent
+            .remaining_components()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![CompactString::from("bar")],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_none());
 }
@@ -444,8 +464,12 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         .expect("absolute attach against empty Tree is pending");
     assert_eq!(descent.current_prefix(), root);
     assert_eq!(
-        descent.remaining_components().as_slice(),
-        &[CompactString::from("tmp")][..],
+        descent
+            .remaining_components()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![CompactString::from("tmp")],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
 
@@ -457,12 +481,14 @@ fn absolute_attach_bootstraps_fs_root_segment() {
     // The emitted Watch op carries an *absolute* path — `Tree::path_of`
     // reconstructs `/` because `PathBuf::push("/")` resets to absolute.
     let watch_for_root = out.watch_ops.iter().find_map(|op| match op {
-        specter_core::WatchOp::Watch { resource, path, .. } if *resource == root => Some(path),
+        specter_core::WatchOp::Watch { resource, path, .. } if *resource == root => {
+            Some(path.as_ref())
+        }
         _ => None,
     });
     assert_eq!(
         watch_for_root,
-        Some(&PathBuf::from("/")),
+        Some(Path::new("/")),
         "FS-root Watch op carries an absolute path",
     );
 
@@ -475,10 +501,10 @@ fn absolute_attach_bootstraps_fs_root_segment() {
                     target_path,
                     ..
                 },
-        } if *profile == pid => Some(target_path),
+        } if *profile == pid => Some(target_path.as_ref()),
         _ => None,
     });
-    assert_eq!(probe_path, Some(&PathBuf::from("/")));
+    assert_eq!(probe_path, Some(Path::new("/")));
 }
 
 /// Two absolute attaches share the FS-root via the bootstrap's
@@ -545,12 +571,16 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
     assert_eq!(descent.current_prefix(), root);
     assert_eq!(
-        descent.remaining_components().as_slice(),
-        &[
+        descent
+            .remaining_components()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
             CompactString::from("var"),
             CompactString::from("log"),
             CompactString::from("myapp"),
-        ][..],
+        ],
     );
 }
 
@@ -762,8 +792,12 @@ fn descent_state_helper_returns_some_for_pending() {
         .descent_state(ProbeOwner::Profile(pid))
         .expect("Pending state populated");
     assert_eq!(
-        descent.remaining_components().as_slice(),
-        &[CompactString::from("bar")][..],
+        descent
+            .remaining_components()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![CompactString::from("bar")],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
 }
@@ -955,7 +989,7 @@ fn on_watch_op_rejected_clears_pending_state() {
             resource: foo,
             op: WatchOp::Watch {
                 resource: foo,
-                path: std::path::PathBuf::from("foo"),
+                path: std::sync::Arc::from(std::path::Path::new("foo")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
@@ -1011,7 +1045,7 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
             resource: foo,
             op: WatchOp::Watch {
                 resource: foo,
-                path: PathBuf::from("foo"),
+                path: std::sync::Arc::from(std::path::Path::new("foo")),
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },

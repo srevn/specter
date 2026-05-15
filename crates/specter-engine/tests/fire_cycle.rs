@@ -33,8 +33,8 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, ArgPart, ArgTemplate, BurstFinish, ChildEntry, ClassSet, DedupKey,
-    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent,
-    FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp,
+    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FiredKey,
+    FsEvent, FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
     ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, Termination,
     TimerKind, TreeSnapshot,
@@ -1262,7 +1262,7 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
     assert!(matches!(p.state(), ProfileState::Idle));
     let recorded_key = p.fired_subs.iter().next().expect("fire history recorded");
     assert!(
-        matches!(recorded_key, DedupKey::Subtree { profile, .. } if *profile == pid),
+        matches!(recorded_key, FiredKey::Subtree(_)),
         "fire history records the Subtree key for this Profile",
     );
     assert_eq!(
@@ -1422,7 +1422,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
             .unwrap()
             .fired_subs
             .iter()
-            .any(|k| matches!(k, DedupKey::PerFile { resource, .. } if *resource == foo_resource)),
+            .any(|k| matches!(k, FiredKey::PerFile { resource, .. } if *resource == foo_resource)),
         "fire history records the PerFile key at foo.rs's resource id",
     );
 

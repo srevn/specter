@@ -199,7 +199,10 @@ fn attach_immediate_active_at_existing_prefix() {
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
         "enumeration probe in flight",
     );
-    assert_eq!(last_probe_path(&out), e.tree().path_of(var_log));
+    assert_eq!(
+        last_probe_path(&out).as_deref(),
+        e.tree().path_of(var_log).as_deref()
+    );
 }
 
 #[test]
@@ -226,8 +229,8 @@ fn attach_pending_when_literal_prefix_missing() {
         .expect("FS-root exists");
     assert_eq!(d.current_prefix(), fs_root, "descent at FS-root");
     assert_eq!(
-        d.remaining_components().as_slice(),
-        &[CompactString::from("var"), CompactString::from("log")][..],
+        d.remaining_components().iter().cloned().collect::<Vec<_>>(),
+        vec![CompactString::from("var"), CompactString::from("log")],
         "two literal segments to descend",
     );
 
@@ -235,7 +238,10 @@ fn attach_pending_when_literal_prefix_missing() {
     assert_eq!(e.tree().get(fs_root).unwrap().watch_demand(), 1);
 
     // Descent probe in flight at FS-root.
-    assert_eq!(last_probe_path(&out), e.tree().path_of(fs_root));
+    assert_eq!(
+        last_probe_path(&out).as_deref(),
+        e.tree().path_of(fs_root).as_deref()
+    );
     assert!(e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some());
 }
 
@@ -253,8 +259,8 @@ fn descent_advances_one_segment_on_partial_response() {
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
     assert_eq!(
-        last_probe_path(&out),
-        e.tree().path_of(var),
+        last_probe_path(&out).as_deref(),
+        e.tree().path_of(var).as_deref(),
         "first probe at /var"
     );
 
@@ -299,7 +305,10 @@ fn enumeration_ok_promotes_final_match() {
     let pid =
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
-    assert_eq!(last_probe_path(&out), e.tree().path_of(var_log));
+    assert_eq!(
+        last_probe_path(&out).as_deref(),
+        e.tree().path_of(var_log).as_deref()
+    );
 
     // Inject enumeration response listing two files: one matches *.log,
     // one doesn't.
@@ -510,8 +519,8 @@ fn proxy_event_enqueues_and_dispatches() {
         "fresh enumeration probe in flight",
     );
     assert_eq!(
-        last_probe_path(&out),
-        e.tree().path_of(var_log),
+        last_probe_path(&out).as_deref(),
+        e.tree().path_of(var_log).as_deref(),
         "probe target = the proxy that received the event",
     );
 }
@@ -614,8 +623,8 @@ fn descent_vanished_rewinds_to_parent() {
     let fs_root = e.tree().lookup(None, FS_ROOT_SEGMENT).unwrap();
     assert_eq!(d.current_prefix(), fs_root, "rewind landed at FS-root");
     assert_eq!(
-        d.remaining_components().as_slice(),
-        &[CompactString::from("var"), CompactString::from("log")][..],
+        d.remaining_components().iter().cloned().collect::<Vec<_>>(),
+        vec![CompactString::from("var"), CompactString::from("log")],
         "vanished prefix's segment prepended; original remaining preserved",
     );
 
@@ -624,7 +633,10 @@ fn descent_vanished_rewinds_to_parent() {
         .pending_probe_for(ProbeOwner::Promoter(pid))
         .expect("fresh probe minted");
     assert_ne!(corr1, corr2, "post-rewind correlation differs from pre");
-    assert_eq!(last_probe_path(&out), e.tree().path_of(fs_root));
+    assert_eq!(
+        last_probe_path(&out).as_deref(),
+        e.tree().path_of(fs_root).as_deref()
+    );
 
     // The vanished /var slot was vacated. Vacate clears
     // watch_demand and kind; the slot itself is retained while it

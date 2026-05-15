@@ -207,8 +207,8 @@ fn full_lifecycle_attach_promote_seed_reap() {
         ),
     }
     assert_eq!(
-        last_probe_path(&attach_out),
-        e.tree().path_of(var_log),
+        last_probe_path(&attach_out).as_deref(),
+        e.tree().path_of(var_log).as_deref(),
         "enumeration probe targets /var/log",
     );
     let enum_corr = e
@@ -854,7 +854,7 @@ fn sensor_overflow_reseeds_active_promoter() {
     let probe_at_var_log = overflow_out.probe_ops.iter().any(|op| {
         matches!(
             op,
-            ProbeOp::Probe { request } if request.target_path() == var_log_path,
+            ProbeOp::Probe { request } if *request.target_path() == *var_log_path,
         )
     });
     assert!(probe_at_var_log, "probe targets /var/log");
@@ -933,7 +933,7 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
     let probe_at_a = overflow_out.probe_ops.iter().any(|op| {
         matches!(
             op,
-            ProbeOp::Probe { request } if request.target_path() == a_path,
+            ProbeOp::Probe { request } if *request.target_path() == *a_path,
         )
     });
     assert!(probe_at_a, "descent probe targets /a");

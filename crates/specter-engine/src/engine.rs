@@ -34,7 +34,7 @@ use specter_core::{
 // Per-Resource bookkeeping.
 use specter_core::{ClassSet, ContribKey};
 // Probe + effect correlation.
-use specter_core::{CorrelationId, DedupKey, ProbeOwner};
+use specter_core::{CorrelationId, FiredKey, ProbeOwner};
 // Engine step I/O.
 use specter_core::{Diagnostic, Input, StepOutput};
 use std::time::{Duration, Instant};
@@ -825,9 +825,7 @@ impl Engine {
         if remaining_subs > 0 {
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.fired_subs.retain(|k| match k {
-                    DedupKey::Subtree { sub: s, .. } | DedupKey::PerFile { sub: s, .. } => {
-                        *s != sub
-                    }
+                    FiredKey::Subtree(s) | FiredKey::PerFile { sub: s, .. } => *s != sub,
                 });
             }
             // Recompute Profile.settle = min(remaining_subs.settles).

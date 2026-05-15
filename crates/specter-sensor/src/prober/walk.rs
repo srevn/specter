@@ -16,7 +16,7 @@
 //!   cascades into recursion via each child's
 //!   `DirChild::Covered(arc)`, looked up by name through
 //!   [`specter_core::DirSnapshot::lookup_covered_dir`].
-//! - `force_walk`: a `BTreeSet<PathBuf>` of paths the walker must
+//! - `force_walk`: a `BTreeSet<Arc<Path>>` of paths the walker must
 //!   enumerate regardless of mtime — populated by the engine from
 //!   kqueue-driven `dirty_resources`. The walker tests "is any forced path
 //!   at-or-under this dir?" via `Path::starts_with`.
@@ -49,7 +49,7 @@ use specter_core::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -86,7 +86,7 @@ use std::time::SystemTime;
 struct WalkContext<'a> {
     anchor_path: &'a Path,
     config: &'a ScanConfig,
-    force_walk: &'a BTreeSet<PathBuf>,
+    force_walk: &'a BTreeSet<Arc<Path>>,
     forced: bool,
     captured_with: u64,
     root_dev: u64,
@@ -229,7 +229,7 @@ pub(super) fn probe_subtree(
     config: &ScanConfig,
     captured_with: u64,
     baseline: Option<&Arc<DirSnapshot>>,
-    force_walk: &BTreeSet<PathBuf>,
+    force_walk: &BTreeSet<Arc<Path>>,
     forced: bool,
 ) -> ProbeOutcome {
     let root_meta_raw = match std::fs::symlink_metadata(target_path) {

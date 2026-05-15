@@ -13,6 +13,7 @@ use specter_core::{
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -31,7 +32,7 @@ fn segments(
     prober.submit(ProbeRequest::Subtree {
         owner: ProbeOwner::Profile(p),
         correlation: ProbeCorrelation::from(1),
-        target_path: anchor,
+        target_path: Arc::from(anchor),
         scan_config: cfg,
         captured_with: 0,
         baseline_subtree: None,

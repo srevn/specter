@@ -23,8 +23,8 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, BurstIntent,
     ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry,
-    OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
+    EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FiredKey, FsEvent, FsIdentity, Input,
+    LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
     PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileIdentity,
     ProfileState, PromoterAttachRequest, PromoterId, PromoterRegistryDiff, PromoterState,
     ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
@@ -2007,7 +2007,7 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
             resource: r,
             op: WatchOp::Watch {
                 resource: r,
-                path: std::path::PathBuf::new(),
+                path: std::sync::Arc::from(std::path::Path::new("")),
                 kind: specter_core::ResourceKind::Unknown,
                 events: specter_core::ClassSet::EMPTY,
             },
@@ -2093,7 +2093,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
             resource: foo,
             op: WatchOp::Watch {
                 resource: foo,
-                path: std::path::PathBuf::from("foo"),
+                path: std::sync::Arc::from(std::path::Path::new("foo")),
                 kind: specter_core::ResourceKind::Unknown,
                 events: specter_core::ClassSet::EMPTY,
             },
@@ -2161,7 +2161,7 @@ fn watch_op_rejected_for_anchored_profile_emits_anchor_claim_purged() {
             resource: r,
             op: WatchOp::Watch {
                 resource: r,
-                path: std::path::PathBuf::new(),
+                path: std::sync::Arc::from(std::path::Path::new("")),
                 kind: specter_core::ResourceKind::Unknown,
                 events: specter_core::ClassSet::EMPTY,
             },
@@ -2242,7 +2242,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
             resource: foo,
             op: WatchOp::Watch {
                 resource: foo,
-                path: std::path::PathBuf::from("foo"),
+                path: std::sync::Arc::from(std::path::Path::new("foo")),
                 kind: specter_core::ResourceKind::Unknown,
                 events: specter_core::ClassSet::EMPTY,
             },
@@ -3508,13 +3508,7 @@ fn records_fired_subs_after_subtree_effect() {
     let p = e.profiles.get(pid).unwrap();
     assert_eq!(p.fired_subs.len(), 1);
     let key = p.fired_subs.iter().next().unwrap();
-    assert!(matches!(
-        key,
-        DedupKey::Subtree {
-            profile,
-            ..
-        } if *profile == pid,
-    ));
+    assert!(matches!(key, FiredKey::Subtree(_)));
 }
 
 /// `Effect.target` for a `Subtree`-keyed Effect is the Profile anchor
@@ -4391,10 +4385,7 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
     // boundary — not just at consumption sites.
     let (mut e, pid, sid, anchor, now) = engine_with_attached_sub();
 
-    let dk = DedupKey::Subtree {
-        sub: sid,
-        profile: pid,
-    };
+    let dk = FiredKey::Subtree(sid);
 
     // Survival-mode drift setup: a witness snapshot whose hash won't
     // match the empty post-graft current ⇒ the bool drift signal
@@ -4486,10 +4477,7 @@ fn seed_drift_observed_returns_true_on_post_recovery_drift() {
     // differs from that witness ⇒ drift.
     enter_survival_mode(&mut e, pid, witness_snap);
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.fired_subs.insert(DedupKey::Subtree {
-            sub: sid,
-            profile: pid,
-        });
+        p.fired_subs.insert(FiredKey::Subtree(sid));
         p.install_dir_current(snap);
     }
 
@@ -4521,10 +4509,7 @@ fn seed_drift_observed_returns_true_on_active_mode_drift() {
 
     enter_active_mode(&mut e, pid, baseline_snap, current_snap);
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.fired_subs.insert(DedupKey::Subtree {
-            sub: sid,
-            profile: pid,
-        });
+        p.fired_subs.insert(FiredKey::Subtree(sid));
     }
 
     assert!(
@@ -4545,10 +4530,7 @@ fn seed_drift_observed_returns_false_when_active_mode_baseline_matches_current()
 
     enter_active_mode(&mut e, pid, snap.clone(), snap);
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.fired_subs.insert(DedupKey::Subtree {
-            sub: sid,
-            profile: pid,
-        });
+        p.fired_subs.insert(FiredKey::Subtree(sid));
     }
 
     assert!(

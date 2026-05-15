@@ -51,6 +51,7 @@
 //! stale id here means a logic bug elsewhere; the silent return is
 //! defence-in-depth.
 
+use crate::path::empty_path;
 use specter_core::{ClassSet, ContribKey, ResourceId, StepOutput, Tree, WatchOp};
 
 /// Install or update the contribution at `(r, key)` with `mask`,
@@ -97,7 +98,7 @@ pub(crate) fn add_watch(
         // Reborrow `tree` for `path_of` once the `res` borrow ends
         // (the `kind_raw` read above is the last `res` use).
         let kind = res.kind_raw();
-        let path = tree.path_of(r).unwrap_or_default();
+        let path = tree.path_of(r).unwrap_or_else(empty_path);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,
@@ -140,7 +141,7 @@ pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &m
     let new_union = res.events_union();
     if new_union != prev_union {
         let kind = res.kind_raw();
-        let path = tree.path_of(r).unwrap_or_default();
+        let path = tree.path_of(r).unwrap_or_else(empty_path);
         out.watch_ops.push(WatchOp::Watch {
             resource: r,
             path,

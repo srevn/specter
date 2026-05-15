@@ -16,6 +16,7 @@ use crate::resource::{Resource, ResourceKind, ResourceRole};
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
 
 /// Synthetic segment representing the filesystem root `/`.
@@ -298,6 +299,29 @@ impl Tree {
         }
     }
 
+    /// Path of a freshly-created root: a single pushed segment.
+    /// Byte-identical to what the old parent-walk produced for a
+    /// root-only chain (`PathBuf::new().push(seg)`), so the absolute-
+    /// segment replace semantics of `PathBuf::push` are preserved.
+    fn build_root_path(seg: &str) -> Arc<Path> {
+        let mut pb = PathBuf::new();
+        pb.push(seg);
+        Arc::from(pb.as_path())
+    }
+
+    /// Path of a freshly-created child: the parent's materialised path
+    /// with `seg` pushed. Equivalent by induction to the root→child
+    /// segment join the old `path_of` walked — the parent's `path` is
+    /// itself `join(root..=parent)` by construction, so pushing `seg`
+    /// extends it to `join(root..=child)`. `parent` is guaranteed live
+    /// (the caller's stale check ran first); the `&self` borrow of the
+    /// parent slot ends at the `to_path_buf` clone, before any `&mut`.
+    fn build_child_path(&self, parent: ResourceId, seg: &str) -> Arc<Path> {
+        let mut pb = self.nodes[parent].path.to_path_buf();
+        pb.push(seg);
+        Arc::from(pb.as_path())
+    }
+
     /// Get-or-create a root-level Resource. Idempotent on `segment`;
     /// `role` applies only on creation. Infallible — a root has no
     /// parent to be stale against.
@@ -306,7 +330,8 @@ impl Tree {
         if let Some(id) = self.find_root(sym) {
             return id;
         }
-        let id = self.nodes.insert(Resource::new(None, sym, role));
+        let path = Self::build_root_path(segment);
+        let id = self.nodes.insert(Resource::new(None, sym, role, path));
         self.roots.push(id);
         id
     }
@@ -333,7 +358,12 @@ impl Tree {
         if let Some(child_id) = self.nodes[parent].children.get(&sym).copied() {
             return Ok(child_id);
         }
-        let id = self.nodes.insert(Resource::new(Some(parent), sym, role));
+        // After the existing-child early-return: an idempotent
+        // `ensure_child` does zero path work.
+        let path = self.build_child_path(parent, segment);
+        let id = self
+            .nodes
+            .insert(Resource::new(Some(parent), sym, role, path));
         self.nodes[parent].children.insert(sym, id);
         Ok(id)
     }
@@ -550,26 +580,18 @@ impl Tree {
         self.interner.resolve(sym)
     }
 
-    /// Path formed by joining segments from the root chain down to `id`.
-    /// Returns `None` if `id` is stale or any segment fails to resolve.
+    /// The slot's materialised path (`Arc::clone` of the field set at
+    /// construction). O(1): a slotmap get plus a refcount bump — no
+    /// parent walk, no interner resolves, no allocation.
+    ///
+    /// Stays honestly `Option`: `None` iff `id` is stale. The Resource
+    /// owns its path, so a stale id has no Resource and therefore no
+    /// path — the same `None` the old parent-walk returned for a slot
+    /// that failed to resolve. The empty-path-as-`Vanished` wire
+    /// sentinel is an engine-boundary concern, not this accessor's.
     #[must_use]
-    pub fn path_of(&self, id: ResourceId) -> Option<PathBuf> {
-        let mut segments: Vec<&str> = Vec::new();
-        let mut cur = id;
-        loop {
-            let r = self.nodes.get(cur)?;
-            segments.push(self.interner.resolve(r.segment)?);
-            match r.parent {
-                Some(p) => cur = p,
-                None => break,
-            }
-        }
-        segments.reverse();
-        let mut path = PathBuf::new();
-        for seg in segments {
-            path.push(seg);
-        }
-        Some(path)
+    pub fn path_of(&self, id: ResourceId) -> Option<Arc<Path>> {
+        self.nodes.get(id).map(|r| Arc::clone(&r.path))
     }
 
     #[must_use]
@@ -793,7 +815,8 @@ mod tests {
             for seg in &segments {
                 expected.push(seg);
             }
-            prop_assert_eq!(tree.path_of(id), Some(expected));
+            let actual = tree.path_of(id);
+            prop_assert_eq!(actual.as_deref(), Some(expected.as_path()));
         }
     }
 
@@ -1147,8 +1170,8 @@ mod tests {
             .expect("test live parent");
 
         assert_eq!(
-            tree.path_of(project),
-            Some(PathBuf::from("/home/user/project"))
+            tree.path_of(project).as_deref(),
+            Some(Path::new("/home/user/project"))
         );
     }
 

@@ -53,6 +53,7 @@
 //!   recovers via descent.
 
 use crate::Engine;
+use crate::path::empty_path;
 use crate::probe_channel::OpenKind;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
@@ -62,7 +63,8 @@ use specter_core::{
     ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerKind, Tree, TreeSnapshot,
 };
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 impl Engine {
@@ -1054,7 +1056,7 @@ impl Engine {
             return;
         };
         let owner = ProbeOwner::Profile(profile_id);
-        let target_path = self.tree.path_of(target).unwrap_or_default();
+        let target_path = self.tree.path_of(target).unwrap_or_else(empty_path);
         match p.kind() {
             Some(ResourceKind::File) => {
                 Self::emit_anchor_probe(owner, correlation, target_path, out);
@@ -1340,7 +1342,7 @@ pub(crate) fn build_force_walk(
     set: &BTreeSet<ResourceId>,
     target: ResourceId,
     tree: &Tree,
-) -> BTreeSet<PathBuf> {
+) -> BTreeSet<Arc<Path>> {
     set.iter()
         .copied()
         .filter(|&r| r_is_at_or_under(r, target, tree))

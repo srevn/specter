@@ -1484,7 +1484,7 @@ mod tests {
         for i in 0..n_ops {
             out.watch_ops.push(specter_core::WatchOp::Watch {
                 resource: specter_core::ResourceId::default(),
-                path: PathBuf::from(format!("/p/{i}")),
+                path: Arc::from(PathBuf::from(format!("/p/{i}"))),
                 kind: specter_core::ResourceKind::Unknown,
                 events: specter_core::ClassSet::EMPTY,
             });

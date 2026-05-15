@@ -189,7 +189,7 @@ mod tests {
         out.watch_ops.push(WatchOp::Suppress { resource: r3 });
         out.watch_ops.push(WatchOp::Watch {
             resource: r1,
-            path: PathBuf::from("/x"),
+            path: Arc::from(std::path::Path::new("/x")),
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         });
@@ -214,7 +214,7 @@ mod tests {
             request: ProbeRequest::AnchorFile {
                 owner: ProbeOwner::Profile(p1),
                 correlation: ProbeCorrelation::from(7),
-                target_path: PathBuf::from("/y"),
+                target_path: Arc::from(std::path::Path::new("/y")),
             },
         });
 
