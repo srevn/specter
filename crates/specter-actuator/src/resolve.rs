@@ -290,7 +290,7 @@ fn substitute_argv(
     time_str: &str,
     env_snapshot: &EnvSnapshot,
 ) -> Result<Vec<String>, ResolveError> {
-    let template = &exec.argv;
+    let template = exec.argv();
     let mut argv = Vec::with_capacity(template.len());
     let mut scratch = String::with_capacity(SUBSTITUTE_SCRATCH_CAPACITY);
     for arg in template {
@@ -334,7 +334,7 @@ fn substitute_one(
 ) -> Result<(), ResolveError> {
     scratch.clear();
     let mut emitted_any = false;
-    for part in &arg.parts {
+    for part in arg.parts() {
         match part {
             ArgPart::Literal(s) => scratch.push_str(s),
             ArgPart::Placeholder(p) => match p {
@@ -402,7 +402,7 @@ fn substitute_one(
 }
 
 fn has_multivalue(arg: &ArgTemplate) -> bool {
-    arg.parts.iter().any(ArgPart::is_multivalue)
+    arg.parts().iter().any(ArgPart::is_multivalue)
 }
 
 /// `target_path.parent()` rendered as a UTF-8-lossy [`String`], or empty

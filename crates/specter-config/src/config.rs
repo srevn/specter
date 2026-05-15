@@ -962,11 +962,7 @@ fn validate_exec_argv(
     if any_failed {
         None
     } else {
-        let exec = ExecAction::new(argv);
-        Some(match timeout {
-            Some(d) => exec.with_timeout(d),
-            None => exec,
-        })
+        Some(ExecAction::new(argv, timeout))
     }
 }
 
@@ -1510,10 +1506,10 @@ mod tests {
         assert!(w.scan.exclude.is_empty());
         assert!(w.scan.pattern.is_none());
         assert_eq!(w.scan.max_depth, None);
-        let SpawnBody::Exec(exec) = &w.program.ops()[0].body else {
+        let SpawnBody::Exec(exec) = w.program.ops()[0].body() else {
             panic!("expected SpawnBody::Exec");
         };
-        assert_eq!(exec.argv.len(), 1);
+        assert_eq!(exec.argv().len(), 1);
         assert!(!w.log_output, "log_output defaults to false");
         assert!(w.enabled, "enabled defaults to true (field omitted)");
     }
@@ -1795,15 +1791,18 @@ mod tests {
              actions = [{{ exec = [\"fmt\", \"--input=${{specter.path}}\", \"${{specter.created}}\"] }}]"
         );
         let cfg = Config::from_str(&toml).unwrap();
-        let SpawnBody::Exec(exec) = &cfg.watches[0].program.ops()[0].body else {
+        let SpawnBody::Exec(exec) = cfg.watches[0].program.ops()[0].body() else {
             panic!("expected SpawnBody::Exec");
         };
-        let argv = &exec.argv;
+        let argv = exec.argv();
         assert_eq!(argv.len(), 3);
-        assert_eq!(argv[0].parts[0], ArgPart::literal("fmt"));
-        assert_eq!(argv[1].parts[0], ArgPart::literal("--input="));
-        assert_eq!(argv[1].parts[1], ArgPart::Placeholder(Placeholder::Path));
-        assert_eq!(argv[2].parts[0], ArgPart::Placeholder(Placeholder::Created));
+        assert_eq!(argv[0].parts()[0], ArgPart::literal("fmt"));
+        assert_eq!(argv[1].parts()[0], ArgPart::literal("--input="));
+        assert_eq!(argv[1].parts()[1], ArgPart::Placeholder(Placeholder::Path));
+        assert_eq!(
+            argv[2].parts()[0],
+            ArgPart::Placeholder(Placeholder::Created)
+        );
     }
 
     #[test]

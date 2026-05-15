@@ -162,6 +162,7 @@ pub fn literal_multi_program(steps: Vec<Vec<String>>) -> Arc<ActionProgram> {
         let exec = ExecAction::new(
             argv.into_iter()
                 .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
+            None,
         );
         let h = b.emit(SpawnBody::Exec(exec));
         b.patch_on_failed(h, BranchTarget::Terminate).unwrap();

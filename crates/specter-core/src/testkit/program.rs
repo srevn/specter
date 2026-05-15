@@ -25,7 +25,7 @@ use std::sync::Arc;
 #[must_use]
 pub fn single_exec_program(argv: impl IntoIterator<Item = ArgTemplate>) -> Arc<ActionProgram> {
     let mut b = ProgramBuilder::new();
-    let h = b.emit(SpawnBody::Exec(ExecAction::new(argv)));
+    let h = b.emit(SpawnBody::Exec(ExecAction::new(argv, None)));
     b.patch_on_ok(h, BranchTarget::Escape)
         .expect("Escape target is unconditionally accepted");
     b.patch_on_failed(h, BranchTarget::Terminate)

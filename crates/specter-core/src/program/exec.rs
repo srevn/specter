@@ -10,37 +10,53 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 use std::time::Duration;
 
-/// One leaf-process specification.
+/// One leaf-process specification: a frozen argv plus an optional
+/// per-step timeout.
 ///
-/// `argv` is frozen `Box<[ArgTemplate]>` — once a config is validated,
-/// the argv shape is fixed and `Vec`'s capacity slot is dead weight;
-/// `Box` saves the two extra words per leaf and prevents accidental
-/// push paths.
-///
-/// `timeout` is the deadline applied to the spawned process. `None` ⇒
-/// no timeout. `Some(d)` ⇒ SIGTERM at `now + d`; if still alive after
-/// the actuator's shutdown grace, SIGKILL. Reaped as
+/// `timeout`: `None` ⇒ no deadline; `Some(d)` ⇒ SIGTERM at `now + d`,
+/// SIGKILL after the actuator's shutdown grace, reaped as
 /// `EffectOutcome::Failed { exit_code: None, signal: Some(15 | 9) }`.
+/// No cross-field invariant — an empty argv or a zero timeout is
+/// rejected at config validation, not here — so [`Self::new`] is `pub`
+/// for `specter-config` lowering; fields are private only to force the
+/// constructor (no struct-literal or half-built bypass) and keep the
+/// representation free behind the accessors.
+///
+/// The struct literal is rejected — [`Self::new`] is the only path:
+///
+/// ```compile_fail
+/// // must not compile: `ExecAction` fields are private
+/// let _ = specter_core::program::ExecAction { argv: Box::new([]), timeout: None };
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecAction {
-    pub argv: Box<[ArgTemplate]>,
-    pub timeout: Option<Duration>,
+    argv: Box<[ArgTemplate]>,
+    timeout: Option<Duration>,
 }
 
 impl ExecAction {
+    /// Build a leaf spec. `Option<Duration>` is the timeout's
+    /// with/without encoding — there is no separate setter and no
+    /// partial-construction window.
     #[must_use]
-    pub fn new(argv: impl IntoIterator<Item = ArgTemplate>) -> Self {
+    pub fn new(argv: impl IntoIterator<Item = ArgTemplate>, timeout: Option<Duration>) -> Self {
         Self {
             argv: argv.into_iter().collect::<Vec<_>>().into_boxed_slice(),
-            timeout: None,
+            timeout,
         }
     }
 
-    /// Builder-style setter for the per-step timeout.
+    /// The argv template slice. `Box<[…]>`-backed: the shape is frozen
+    /// at construction, so there is no push path.
     #[must_use]
-    pub const fn with_timeout(mut self, d: Duration) -> Self {
-        self.timeout = Some(d);
-        self
+    pub fn argv(&self) -> &[ArgTemplate] {
+        &self.argv
+    }
+
+    /// The per-step timeout, if any.
+    #[must_use]
+    pub const fn timeout(&self) -> Option<Duration> {
+        self.timeout
     }
 
     /// `true` iff any argv part references a diff-derived placeholder.
@@ -48,13 +64,25 @@ impl ExecAction {
     pub fn references_diff_derived(&self) -> bool {
         self.argv
             .iter()
-            .any(|arg| arg.parts.iter().any(ArgPart::is_diff_derived))
+            .any(|arg| arg.parts().iter().any(ArgPart::is_diff_derived))
     }
 }
 
+/// One argv slot's template — an ordered run of literal / placeholder
+/// / env parts the resolver renders into zero or more argv strings.
+///
+/// Like [`ExecAction`]: no cross-field invariant, so [`Self::new`] is
+/// `pub`; `parts` is private only to force the constructor (no
+/// struct-literal bypass) and free the `SmallVec` representation
+/// behind [`Self::parts`].
+///
+/// ```compile_fail
+/// // must not compile: `ArgTemplate.parts` is private
+/// let _ = specter_core::program::ArgTemplate { parts: Default::default() };
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArgTemplate {
-    pub parts: SmallVec<[ArgPart; 2]>,
+    parts: SmallVec<[ArgPart; 2]>,
 }
 
 impl ArgTemplate {
@@ -63,6 +91,12 @@ impl ArgTemplate {
         Self {
             parts: parts.into_iter().collect(),
         }
+    }
+
+    /// The ordered part slice.
+    #[must_use]
+    pub fn parts(&self) -> &[ArgPart] {
+        &self.parts
     }
 }
 
@@ -216,22 +250,28 @@ mod tests {
     /// (no setter call) leaves `timeout = None`.
     #[test]
     fn exec_action_with_timeout_records_duration() {
-        let exec = ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])])
-            .with_timeout(Duration::from_secs(2));
-        assert_eq!(exec.timeout, Some(Duration::from_secs(2)));
+        let exec = ExecAction::new(
+            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
+            Some(Duration::from_secs(2)),
+        );
+        assert_eq!(exec.timeout(), Some(Duration::from_secs(2)));
 
-        let exec_default = ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])]);
-        assert_eq!(exec_default.timeout, None);
+        let exec_default =
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])], None);
+        assert_eq!(exec_default.timeout(), None);
     }
 
     /// `ExecAction::references_diff_derived` is `true` iff any argv
     /// part is a diff-derived placeholder. Anchor-only argv ⇒ `false`.
     #[test]
     fn exec_action_references_diff_derived_matches_argv() {
-        let anchor_only = ExecAction::new([ArgTemplate::new([
-            ArgPart::literal("/bin/build"),
-            ArgPart::Placeholder(Placeholder::Path),
-        ])]);
+        let anchor_only = ExecAction::new(
+            [ArgTemplate::new([
+                ArgPart::literal("/bin/build"),
+                ArgPart::Placeholder(Placeholder::Path),
+            ])],
+            None,
+        );
         assert!(!anchor_only.references_diff_derived());
 
         for p in [
@@ -241,7 +281,7 @@ mod tests {
             Placeholder::RenamedFrom,
             Placeholder::RenamedTo,
         ] {
-            let exec = ExecAction::new([ArgTemplate::new([ArgPart::Placeholder(p)])]);
+            let exec = ExecAction::new([ArgTemplate::new([ArgPart::Placeholder(p)])], None);
             assert!(
                 exec.references_diff_derived(),
                 "references_diff_derived must be true for argv containing {p:?}"

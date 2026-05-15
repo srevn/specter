@@ -986,7 +986,7 @@ impl ActuatorState {
         let capture_output = effect.capture_output;
 
         let op = &effect.program.ops()[cursor as usize];
-        match &op.body {
+        match op.body() {
             SpawnBody::Exec(exec) => self.spawn_exec_with_permit(
                 key,
                 sub,
@@ -1104,7 +1104,7 @@ impl ActuatorState {
         // timer thread below; cloning before the move into RunningJob
         // keeps the controller's installed-side reference live
         // regardless of whether the timer is armed.
-        let timer_spec: Option<TimerSpec> = exec.timeout.map(|deadline| TimerSpec {
+        let timer_spec: Option<TimerSpec> = exec.timeout().map(|deadline| TimerSpec {
             deadline,
             grace: self.shutdown_grace,
             signaler: Arc::clone(&signaler),
@@ -1156,7 +1156,7 @@ impl ActuatorState {
                     ?key,
                     cursor,
                     pid,
-                    timeout = ?exec.timeout,
+                    timeout = ?exec.timeout(),
                     ?e,
                     "per-step timer thread spawn failed; deadline not enforced",
                 );
@@ -1294,7 +1294,7 @@ impl ActuatorState {
             .zip(stage_signalers.iter())
             .enumerate()
             .filter_map(|(idx, (stage, signaler))| {
-                stage.timeout.map(|deadline| {
+                stage.timeout().map(|deadline| {
                     (
                         idx,
                         TimerSpec {
@@ -1616,9 +1616,10 @@ mod tests {
                 let next = b.continue_to_next();
                 b.patch_on_ok(ph, next).unwrap();
             }
-            let h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/true"),
-            ])])));
+            let h = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/true")])],
+                None,
+            )));
             b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
             prev = Some(h);
         }

@@ -39,8 +39,9 @@ pub use op::{BranchIndex, BranchTarget, ProgramOp, SpawnBody};
 ///
 /// The op slice is `Box<[ProgramOp]>` — the program shape is fixed at
 /// construction time, and the field is private so [`ProgramBuilder`]
-/// is the sole construction path. Combined with the seal on
-/// [`BranchIndex`], every value of this type provably came from a
+/// is the sole construction path. [`ProgramOp`]'s own constructor is
+/// `pub(super)` and [`BranchIndex`] is sealed, so the guarantee holds
+/// at every level: every value of this type provably came from a
 /// builder that validated forward-only edges and in-bounds Continue
 /// targets; the dispatcher does not need to handle backward jumps or
 /// out-of-bounds cursors.
@@ -85,10 +86,13 @@ mod tests {
 
     #[test]
     fn references_diff_derived_false_for_anchor_only_program() {
-        let body = SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-            ArgPart::literal("/bin/build"),
-            ArgPart::Placeholder(Placeholder::Path),
-        ])]));
+        let body = SpawnBody::Exec(ExecAction::new(
+            [ArgTemplate::new([
+                ArgPart::literal("/bin/build"),
+                ArgPart::Placeholder(Placeholder::Path),
+            ])],
+            None,
+        ));
         let program = build_one_op_program(body);
         assert!(!program.references_diff_derived());
     }
@@ -102,10 +106,10 @@ mod tests {
             Placeholder::RenamedFrom,
             Placeholder::RenamedTo,
         ] {
-            let body =
-                SpawnBody::Exec(ExecAction::new([ArgTemplate::new([ArgPart::Placeholder(
-                    p,
-                )])]));
+            let body = SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::Placeholder(p)])],
+                None,
+            ));
             let program = build_one_op_program(body);
             assert!(
                 program.references_diff_derived(),
@@ -121,12 +125,14 @@ mod tests {
     fn action_program_structural_equality() {
         let make = || {
             let mut b = ProgramBuilder::new();
-            let h0 = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/true"),
-            ])])));
-            let h1 = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/false"),
-            ])])));
+            let h0 = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/true")])],
+                None,
+            )));
+            let h1 = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/false")])],
+                None,
+            )));
             b.patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(1)))
                 .unwrap();
             b.patch_on_failed(h0, BranchTarget::Terminate).unwrap();
@@ -149,14 +155,11 @@ mod tests {
         // The lack of `Copy` is enforced by the type system; this test
         // just exercises the `Clone` path so the trait bound stays
         // referenced and any accidental Copy-derive surfaces.
-        let body = SpawnBody::Exec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-            "/bin/true",
-        )])]));
-        let op = ProgramOp {
-            body,
-            on_ok: BranchTarget::Escape,
-            on_failed: BranchTarget::Terminate,
-        };
+        let body = SpawnBody::Exec(ExecAction::new(
+            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
+            None,
+        ));
+        let op = ProgramOp::new(body, BranchTarget::Escape, BranchTarget::Terminate);
         let cloned = op.clone();
         assert_eq!(op, cloned);
     }

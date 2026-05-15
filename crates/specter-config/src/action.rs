@@ -244,7 +244,7 @@ mod tests {
     use std::sync::Arc;
 
     fn exec_with_literal(literal: &str) -> ExecAction {
-        ExecAction::new([ArgTemplate::new([ArgPart::literal(literal)])])
+        ExecAction::new([ArgTemplate::new([ArgPart::literal(literal)])], None)
     }
 
     /// Build a `Continue(idx)` for assertion ergonomics. The
@@ -273,9 +273,9 @@ mod tests {
         let tree = [Action::Exec(exec_with_literal("/bin/build"))];
         let program = lower_to_program(&tree).expect("lowering succeeds");
         assert_eq!(program.ops().len(), 1);
-        assert!(matches!(ops(&program)[0].body, SpawnBody::Exec(_)));
-        assert_eq!(ops(&program)[0].on_ok, BranchTarget::Escape);
-        assert_eq!(ops(&program)[0].on_failed, BranchTarget::Terminate);
+        assert!(matches!(ops(&program)[0].body(), SpawnBody::Exec(_)));
+        assert_eq!(ops(&program)[0].on_ok(), BranchTarget::Escape);
+        assert_eq!(ops(&program)[0].on_failed(), BranchTarget::Terminate);
     }
 
     /// Multiple Execs chain via `Continue` on_ok; the last one escapes.
@@ -290,12 +290,12 @@ mod tests {
         let program = lower_to_program(&tree).expect("lowering succeeds");
         assert_eq!(program.ops().len(), 3);
 
-        assert_continue(ops(&program)[0].on_ok, 1);
-        assert_continue(ops(&program)[1].on_ok, 2);
-        assert_eq!(ops(&program)[2].on_ok, BranchTarget::Escape);
+        assert_continue(ops(&program)[0].on_ok(), 1);
+        assert_continue(ops(&program)[1].on_ok(), 2);
+        assert_eq!(ops(&program)[2].on_ok(), BranchTarget::Escape);
 
         for op in ops(&program) {
-            assert_eq!(op.on_failed, BranchTarget::Terminate);
+            assert_eq!(op.on_failed(), BranchTarget::Terminate);
         }
     }
 
@@ -311,7 +311,7 @@ mod tests {
         let tree = [Action::Pipe { stages }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
         assert_eq!(program.ops().len(), 1);
-        match &ops(&program)[0].body {
+        match ops(&program)[0].body() {
             SpawnBody::Pipe(s) => {
                 assert_eq!(s.len(), 2);
                 assert!(
@@ -321,8 +321,8 @@ mod tests {
             }
             other @ SpawnBody::Exec(_) => panic!("expected SpawnBody::Pipe, got {other:?}"),
         }
-        assert_eq!(ops(&program)[0].on_ok, BranchTarget::Escape);
-        assert_eq!(ops(&program)[0].on_failed, BranchTarget::Terminate);
+        assert_eq!(ops(&program)[0].on_ok(), BranchTarget::Escape);
+        assert_eq!(ops(&program)[0].on_failed(), BranchTarget::Terminate);
     }
 
     /// Pipe and Exec mix freely; each lowers to one op; order preserved.
@@ -339,14 +339,14 @@ mod tests {
         ];
         let program = lower_to_program(&tree).expect("lowering succeeds");
         assert_eq!(program.ops().len(), 3);
-        assert!(matches!(ops(&program)[0].body, SpawnBody::Exec(_)));
-        assert!(matches!(ops(&program)[1].body, SpawnBody::Pipe(_)));
-        assert!(matches!(ops(&program)[2].body, SpawnBody::Exec(_)));
+        assert!(matches!(ops(&program)[0].body(), SpawnBody::Exec(_)));
+        assert!(matches!(ops(&program)[1].body(), SpawnBody::Pipe(_)));
+        assert!(matches!(ops(&program)[2].body(), SpawnBody::Exec(_)));
 
         // Each non-last op chains forward; the last escapes.
-        assert_continue(ops(&program)[0].on_ok, 1);
-        assert_continue(ops(&program)[1].on_ok, 2);
-        assert_eq!(ops(&program)[2].on_ok, BranchTarget::Escape);
+        assert_continue(ops(&program)[0].on_ok(), 1);
+        assert_continue(ops(&program)[1].on_ok(), 2);
+        assert_eq!(ops(&program)[2].on_ok(), BranchTarget::Escape);
     }
 
     /// Conditional with no else: predicate's on_failed = Escape ("branch,
@@ -362,14 +362,14 @@ mod tests {
         }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
         assert_eq!(program.ops().len(), 2);
-        assert_continue(ops(&program)[0].on_ok, 1);
+        assert_continue(ops(&program)[0].on_ok(), 1);
         assert_eq!(
-            ops(&program)[0].on_failed,
+            ops(&program)[0].on_failed(),
             BranchTarget::Escape,
             "no-else predicate falls through to Escape (no propagation)",
         );
-        assert_eq!(ops(&program)[1].on_ok, BranchTarget::Escape);
-        assert_eq!(ops(&program)[1].on_failed, BranchTarget::Terminate);
+        assert_eq!(ops(&program)[1].on_ok(), BranchTarget::Escape);
+        assert_eq!(ops(&program)[1].on_failed(), BranchTarget::Terminate);
     }
 
     /// Conditional with else: predicate routes Ok→then-first,
@@ -385,14 +385,14 @@ mod tests {
         let program = lower_to_program(&tree).expect("lowering succeeds");
         assert_eq!(program.ops().len(), 3);
 
-        assert_continue(ops(&program)[0].on_ok, 1);
-        assert_continue(ops(&program)[0].on_failed, 2);
+        assert_continue(ops(&program)[0].on_ok(), 1);
+        assert_continue(ops(&program)[0].on_failed(), 2);
 
-        assert_eq!(ops(&program)[1].on_ok, BranchTarget::Escape);
-        assert_eq!(ops(&program)[1].on_failed, BranchTarget::Terminate);
+        assert_eq!(ops(&program)[1].on_ok(), BranchTarget::Escape);
+        assert_eq!(ops(&program)[1].on_failed(), BranchTarget::Terminate);
 
-        assert_eq!(ops(&program)[2].on_ok, BranchTarget::Escape);
-        assert_eq!(ops(&program)[2].on_failed, BranchTarget::Terminate);
+        assert_eq!(ops(&program)[2].on_ok(), BranchTarget::Escape);
+        assert_eq!(ops(&program)[2].on_failed(), BranchTarget::Terminate);
     }
 
     /// Conditional with empty then and non-empty else: predicate's
@@ -410,14 +410,14 @@ mod tests {
         assert_eq!(program.ops().len(), 2);
 
         assert_eq!(
-            ops(&program)[0].on_ok,
+            ops(&program)[0].on_ok(),
             BranchTarget::Escape,
             "empty-then: pred.on_ok bypasses to post-conditional slot",
         );
-        assert_continue(ops(&program)[0].on_failed, 1);
+        assert_continue(ops(&program)[0].on_failed(), 1);
 
-        assert_eq!(ops(&program)[1].on_ok, BranchTarget::Escape);
-        assert_eq!(ops(&program)[1].on_failed, BranchTarget::Terminate);
+        assert_eq!(ops(&program)[1].on_ok(), BranchTarget::Escape);
+        assert_eq!(ops(&program)[1].on_failed(), BranchTarget::Terminate);
     }
 
     /// `Some(empty)` else is shape-equivalent to `None`: lowering emits
@@ -434,8 +434,8 @@ mod tests {
         }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
         assert_eq!(program.ops().len(), 2);
-        assert_continue(ops(&program)[0].on_ok, 1);
-        assert_eq!(ops(&program)[0].on_failed, BranchTarget::Escape);
+        assert_continue(ops(&program)[0].on_ok(), 1);
+        assert_eq!(ops(&program)[0].on_failed(), BranchTarget::Escape);
     }
 
     /// Nested conditional in the then-branch produces 5 ops with the
@@ -462,17 +462,17 @@ mod tests {
         assert_eq!(program.ops().len(), 5, "5 ops (was 7 with Jumps)");
 
         // 0: outer pred. on_ok = 1 (inner pred). on_failed = 4 (outer else).
-        assert_continue(ops(&program)[0].on_ok, 1);
-        assert_continue(ops(&program)[0].on_failed, 4);
+        assert_continue(ops(&program)[0].on_ok(), 1);
+        assert_continue(ops(&program)[0].on_failed(), 4);
 
         // 1: inner pred. on_ok = 2 (inner then). on_failed = 3 (inner else).
-        assert_continue(ops(&program)[1].on_ok, 2);
-        assert_continue(ops(&program)[1].on_failed, 3);
+        assert_continue(ops(&program)[1].on_ok(), 2);
+        assert_continue(ops(&program)[1].on_failed(), 3);
 
         // 2-4: bodies, each escape on Ok, terminate on Failed.
         for idx in 2..5 {
-            assert_eq!(ops(&program)[idx].on_ok, BranchTarget::Escape);
-            assert_eq!(ops(&program)[idx].on_failed, BranchTarget::Terminate);
+            assert_eq!(ops(&program)[idx].on_ok(), BranchTarget::Escape);
+            assert_eq!(ops(&program)[idx].on_failed(), BranchTarget::Terminate);
         }
     }
 
@@ -494,16 +494,16 @@ mod tests {
         assert_eq!(program.ops().len(), 3);
 
         // 0: pred. on_ok = 1 (then). on_failed = 2 (post-conditional = after).
-        assert_continue(ops(&program)[0].on_ok, 1);
-        assert_continue(ops(&program)[0].on_failed, 2);
+        assert_continue(ops(&program)[0].on_ok(), 1);
+        assert_continue(ops(&program)[0].on_failed(), 2);
 
         // 1: then. on_ok = 2 (after). on_failed = Terminate.
-        assert_continue(ops(&program)[1].on_ok, 2);
-        assert_eq!(ops(&program)[1].on_failed, BranchTarget::Terminate);
+        assert_continue(ops(&program)[1].on_ok(), 2);
+        assert_eq!(ops(&program)[1].on_failed(), BranchTarget::Terminate);
 
         // 2: after. on_ok = Escape (top-level tail). on_failed = Terminate.
-        assert_eq!(ops(&program)[2].on_ok, BranchTarget::Escape);
-        assert_eq!(ops(&program)[2].on_failed, BranchTarget::Terminate);
+        assert_eq!(ops(&program)[2].on_ok(), BranchTarget::Escape);
+        assert_eq!(ops(&program)[2].on_failed(), BranchTarget::Terminate);
     }
 
     /// Empty surface trees lower to a [`ProgramError::EmptyProgram`].

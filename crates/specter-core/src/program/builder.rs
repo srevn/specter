@@ -83,10 +83,13 @@ impl fmt::Display for Edge {
 
 /// Failure modes for builder operations.
 ///
-/// Every variant here is a builder-hygiene bug — the lowering pass
-/// should never produce them from valid input.
-/// [`Self::EmptyProgram`] is the only one a non-lowering caller can
-/// trigger (calling [`ProgramBuilder::build`] on a fresh builder).
+/// [`ProgramBuilder::build`] is the sole in-workspace path to an
+/// [`ActionProgram`]: the op slice, [`ProgramOp`], and [`BranchIndex`]
+/// constructors are all builder-only. Every variant here is therefore
+/// a builder-hygiene bug — the lowering pass should never produce one
+/// from valid input. [`Self::EmptyProgram`] is the only one a
+/// non-lowering caller can trigger (calling [`ProgramBuilder::build`]
+/// on a fresh builder).
 ///
 /// The "program exceeds `u32::MAX` ops" case is *not* representable
 /// here: [`ProgramBuilder::emit`] enforces `pending.len() <= u32::MAX`
@@ -249,11 +252,7 @@ impl ProgramBuilder {
             // "continue_to_next never filled" case.
             check_final_in_bounds(origin, on_ok, final_len)?;
             check_final_in_bounds(origin, on_failed, final_len)?;
-            ops.push(ProgramOp {
-                body: pending_op.body,
-                on_ok,
-                on_failed,
-            });
+            ops.push(ProgramOp::new(pending_op.body, on_ok, on_failed));
         }
         Ok(ActionProgram {
             ops: ops.into_boxed_slice(),
@@ -320,9 +319,10 @@ mod tests {
     use crate::program::op::{BranchIndex, BranchTarget, SpawnBody};
 
     fn exec_body() -> SpawnBody {
-        SpawnBody::Exec(ExecAction::new([ArgTemplate::new([ArgPart::literal(
-            "/bin/true",
-        )])]))
+        SpawnBody::Exec(ExecAction::new(
+            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
+            None,
+        ))
     }
 
     /// Empty builder → `EmptyProgram` on build.
@@ -375,12 +375,12 @@ mod tests {
         let program = b.build().expect("all edges patched, all targets in bounds");
         assert_eq!(program.ops.len(), 2);
         assert_eq!(
-            program.ops[0].on_ok,
+            program.ops[0].on_ok(),
             BranchTarget::Continue(BranchIndex::new(1))
         );
-        assert_eq!(program.ops[0].on_failed, BranchTarget::Terminate);
-        assert_eq!(program.ops[1].on_ok, BranchTarget::Escape);
-        assert_eq!(program.ops[1].on_failed, BranchTarget::Terminate);
+        assert_eq!(program.ops[0].on_failed(), BranchTarget::Terminate);
+        assert_eq!(program.ops[1].on_ok(), BranchTarget::Escape);
+        assert_eq!(program.ops[1].on_failed(), BranchTarget::Terminate);
     }
 
     /// `patch_on_ok` with a backward `Continue` target → `BackwardEdge`.
@@ -509,7 +509,7 @@ mod tests {
         let program = b.build().expect("deferred slot filled by follow-up emit");
         assert_eq!(program.ops.len(), 2);
         assert_eq!(
-            program.ops[0].on_ok,
+            program.ops[0].on_ok(),
             BranchTarget::Continue(BranchIndex::new(1))
         );
     }
@@ -598,8 +598,8 @@ mod tests {
         b.patch_on_failed(h0, BranchTarget::Terminate).unwrap();
         let program = b.build().expect("Terminate/Escape never bounds-check");
         assert_eq!(program.ops.len(), 1);
-        assert_eq!(program.ops[0].on_ok, BranchTarget::Escape);
-        assert_eq!(program.ops[0].on_failed, BranchTarget::Terminate);
+        assert_eq!(program.ops[0].on_ok(), BranchTarget::Escape);
+        assert_eq!(program.ops[0].on_failed(), BranchTarget::Terminate);
     }
 
     /// Re-patching an edge overwrites the previous value. Documented
@@ -623,7 +623,7 @@ mod tests {
 
         let program = b.build().expect("re-patch resolves to final value");
         assert_eq!(
-            program.ops[0].on_ok,
+            program.ops[0].on_ok(),
             BranchTarget::Continue(BranchIndex::new(1))
         );
     }

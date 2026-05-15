@@ -198,7 +198,7 @@ pub fn parse_arg(s: &str) -> Result<ArgTemplate, TemplateError> {
     if !buf.is_empty() || parts.is_empty() {
         parts.push(ArgPart::Literal(buf));
     }
-    Ok(ArgTemplate { parts })
+    Ok(ArgTemplate::new(parts))
 }
 
 /// Tag identifying which namespace `parse_arg` just opened. The match
@@ -404,8 +404,8 @@ mod tests {
         ArgPart::Placeholder(p)
     }
 
-    fn parts(t: ArgTemplate) -> Vec<ArgPart> {
-        t.parts.into_iter().collect()
+    fn parts(t: &ArgTemplate) -> Vec<ArgPart> {
+        t.parts().to_vec()
     }
 
     // === Catalog membership ===
@@ -426,7 +426,7 @@ mod tests {
             ("${specter.renamed_to}", Placeholder::RenamedTo),
             ("${specter.excluded}", Placeholder::Excluded),
         ] {
-            assert_eq!(parts(parse_arg(s).unwrap()), vec![ph(p)], "input {s}");
+            assert_eq!(parts(&parse_arg(s).unwrap()), vec![ph(p)], "input {s}");
         }
     }
 
@@ -445,25 +445,28 @@ mod tests {
 
     #[test]
     fn pure_literal_input() {
-        assert_eq!(parts(parse_arg("hello").unwrap()), vec![lit("hello")]);
+        assert_eq!(parts(&parse_arg("hello").unwrap()), vec![lit("hello")]);
     }
 
     #[test]
     fn empty_input_is_single_empty_literal() {
-        assert_eq!(parts(parse_arg("").unwrap()), vec![lit("")]);
+        assert_eq!(parts(&parse_arg("").unwrap()), vec![lit("")]);
     }
 
     #[test]
     fn bare_dollar_name_is_literal() {
         // Under the new grammar, `$<name>` is shell territory regardless
         // of catalog membership. The lexer never touches it.
-        assert_eq!(parts(parse_arg("$path").unwrap()), vec![lit("$path")]);
-        assert_eq!(parts(parse_arg("$watch").unwrap()), vec![lit("$watch")]);
-        assert_eq!(parts(parse_arg("$created").unwrap()), vec![lit("$created")]);
-        assert_eq!(parts(parse_arg("$HOME").unwrap()), vec![lit("$HOME")]);
-        assert_eq!(parts(parse_arg("$Path").unwrap()), vec![lit("$Path")]);
-        assert_eq!(parts(parse_arg("$_x").unwrap()), vec![lit("$_x")]);
-        assert_eq!(parts(parse_arg("$5").unwrap()), vec![lit("$5")]);
+        assert_eq!(parts(&parse_arg("$path").unwrap()), vec![lit("$path")]);
+        assert_eq!(parts(&parse_arg("$watch").unwrap()), vec![lit("$watch")]);
+        assert_eq!(
+            parts(&parse_arg("$created").unwrap()),
+            vec![lit("$created")]
+        );
+        assert_eq!(parts(&parse_arg("$HOME").unwrap()), vec![lit("$HOME")]);
+        assert_eq!(parts(&parse_arg("$Path").unwrap()), vec![lit("$Path")]);
+        assert_eq!(parts(&parse_arg("$_x").unwrap()), vec![lit("$_x")]);
+        assert_eq!(parts(&parse_arg("$5").unwrap()), vec![lit("$5")]);
     }
 
     #[test]
@@ -473,8 +476,8 @@ mod tests {
         // requiring the lowercase `specter.` exactly), so the `$`
         // becomes a single literal char and `{HOME}` follows as plain
         // bytes.
-        assert_eq!(parts(parse_arg("${HOME}").unwrap()), vec![lit("${HOME}")]);
-        assert_eq!(parts(parse_arg("${VAR}").unwrap()), vec![lit("${VAR}")]);
+        assert_eq!(parts(&parse_arg("${HOME}").unwrap()), vec![lit("${HOME}")]);
+        assert_eq!(parts(&parse_arg("${VAR}").unwrap()), vec![lit("${VAR}")]);
     }
 
     #[test]
@@ -482,7 +485,7 @@ mod tests {
         // `${specter}` (no dot) is NOT the namespace opener. The dot is
         // load-bearing.
         assert_eq!(
-            parts(parse_arg("${specter}").unwrap()),
+            parts(&parse_arg("${specter}").unwrap()),
             vec![lit("${specter}")]
         );
     }
@@ -492,7 +495,7 @@ mod tests {
         // `${SPECTER.path}` is uppercase; the namespace prefix is
         // lowercase only. Falls through as literal.
         assert_eq!(
-            parts(parse_arg("${SPECTER.path}").unwrap()),
+            parts(&parse_arg("${SPECTER.path}").unwrap()),
             vec![lit("${SPECTER.path}")]
         );
     }
@@ -502,7 +505,7 @@ mod tests {
         // `$ {specter.path}` — must be `${` adjacent. The space breaks
         // the prefix; lone `$` becomes literal.
         assert_eq!(
-            parts(parse_arg("$ {specter.path}").unwrap()),
+            parts(&parse_arg("$ {specter.path}").unwrap()),
             vec![lit("$ {specter.path}")]
         );
     }
@@ -511,8 +514,8 @@ mod tests {
 
     #[test]
     fn double_dollar_collapses_to_literal() {
-        assert_eq!(parts(parse_arg("$$").unwrap()), vec![lit("$")]);
-        assert_eq!(parts(parse_arg("$$$$").unwrap()), vec![lit("$$")]);
+        assert_eq!(parts(&parse_arg("$$").unwrap()), vec![lit("$")]);
+        assert_eq!(parts(&parse_arg("$$$$").unwrap()), vec![lit("$$")]);
     }
 
     #[test]
@@ -520,7 +523,7 @@ mod tests {
         // `$${specter.path}` — `$$` consumes the leading `$`, leaving a
         // literal `$` followed by `{specter.path}` plain bytes.
         assert_eq!(
-            parts(parse_arg("$${specter.path}").unwrap()),
+            parts(&parse_arg("$${specter.path}").unwrap()),
             vec![lit("${specter.path}")]
         );
     }
@@ -531,7 +534,7 @@ mod tests {
         // followed by `{specter.path}` opens the namespace and
         // resolves to a placeholder.
         assert_eq!(
-            parts(parse_arg("$$${specter.path}").unwrap()),
+            parts(&parse_arg("$$${specter.path}").unwrap()),
             vec![lit("$"), ph(Placeholder::Path)]
         );
     }
@@ -541,7 +544,7 @@ mod tests {
     #[test]
     fn literal_prefix_then_placeholder() {
         assert_eq!(
-            parts(parse_arg("--input=${specter.path}").unwrap()),
+            parts(&parse_arg("--input=${specter.path}").unwrap()),
             vec![lit("--input="), ph(Placeholder::Path)]
         );
     }
@@ -549,7 +552,7 @@ mod tests {
     #[test]
     fn placeholder_then_literal_suffix() {
         assert_eq!(
-            parts(parse_arg("${specter.path}/foo").unwrap()),
+            parts(&parse_arg("${specter.path}/foo").unwrap()),
             vec![ph(Placeholder::Path), lit("/foo")]
         );
     }
@@ -559,7 +562,7 @@ mod tests {
         // The adjacent-literal coalescing invariant: one literal before,
         // one placeholder, one literal after — exactly three parts.
         assert_eq!(
-            parts(parse_arg("abc${specter.path}xyz").unwrap()),
+            parts(&parse_arg("abc${specter.path}xyz").unwrap()),
             vec![lit("abc"), ph(Placeholder::Path), lit("xyz")]
         );
     }
@@ -567,7 +570,7 @@ mod tests {
     #[test]
     fn adjacent_placeholders() {
         assert_eq!(
-            parts(parse_arg("${specter.path}${specter.relative}").unwrap()),
+            parts(&parse_arg("${specter.path}${specter.relative}").unwrap()),
             vec![ph(Placeholder::Path), ph(Placeholder::Relative)]
         );
     }
@@ -575,14 +578,14 @@ mod tests {
     #[test]
     fn unicode_literal_preserved() {
         assert_eq!(
-            parts(parse_arg("build-🚀-${specter.path}").unwrap()),
+            parts(&parse_arg("build-🚀-${specter.path}").unwrap()),
             vec![lit("build-🚀-"), ph(Placeholder::Path)]
         );
     }
 
     #[test]
     fn bare_trailing_dollar_is_literal() {
-        assert_eq!(parts(parse_arg("$").unwrap()), vec![lit("$")]);
+        assert_eq!(parts(&parse_arg("$").unwrap()), vec![lit("$")]);
     }
 
     // === Errors inside the namespace ===
@@ -681,7 +684,7 @@ mod tests {
     #[test]
     fn env_var_simple_no_default() {
         assert_eq!(
-            parts(parse_arg("${env.HOME}").unwrap()),
+            parts(&parse_arg("${env.HOME}").unwrap()),
             vec![env("HOME", None)]
         );
     }
@@ -689,7 +692,7 @@ mod tests {
     #[test]
     fn env_var_with_literal_default() {
         assert_eq!(
-            parts(parse_arg("${env.HOME:-/tmp}").unwrap()),
+            parts(&parse_arg("${env.HOME:-/tmp}").unwrap()),
             vec![env("HOME", Some("/tmp"))]
         );
     }
@@ -700,7 +703,7 @@ mod tests {
     #[test]
     fn env_var_empty_default_is_explicit_lenient_opt_in() {
         assert_eq!(
-            parts(parse_arg("${env.HOME:-}").unwrap()),
+            parts(&parse_arg("${env.HOME:-}").unwrap()),
             vec![env("HOME", Some(""))]
         );
     }
@@ -708,7 +711,7 @@ mod tests {
     #[test]
     fn env_var_underscore_name_allowed() {
         assert_eq!(
-            parts(parse_arg("${env._PRIVATE_X}").unwrap()),
+            parts(&parse_arg("${env._PRIVATE_X}").unwrap()),
             vec![env("_PRIVATE_X", None)]
         );
     }
@@ -719,7 +722,7 @@ mod tests {
         // unlike `${specter.…}` (lowercase-only), `${env.…}` accepts
         // any well-formed identifier.
         assert_eq!(
-            parts(parse_arg("${env.PathSeparator2}").unwrap()),
+            parts(&parse_arg("${env.PathSeparator2}").unwrap()),
             vec![env("PathSeparator2", None)]
         );
     }
@@ -875,7 +878,7 @@ mod tests {
             ("${env.LANG:-en_US.UTF-8}", "en_US.UTF-8"),
         ] {
             let parsed = parse_arg(input).unwrap();
-            let env_part = parsed.parts.into_iter().next().expect("at least one part");
+            let env_part = parsed.parts().iter().next().expect("at least one part");
             match env_part {
                 ArgPart::EnvVar { default, .. } => assert_eq!(
                     default.as_deref(),
@@ -900,7 +903,7 @@ mod tests {
             "${Specter.path}",
         ] {
             assert_eq!(
-                parts(parse_arg(s).unwrap()),
+                parts(&parse_arg(s).unwrap()),
                 vec![lit(s)],
                 "unknown namespace `{s}` must pass through"
             );
@@ -912,7 +915,7 @@ mod tests {
         // Operator mixes both namespaces in one argv slot — each
         // resolves independently into its own ArgPart.
         assert_eq!(
-            parts(parse_arg("${specter.path}-${env.USER:-anon}").unwrap()),
+            parts(&parse_arg("${specter.path}-${env.USER:-anon}").unwrap()),
             vec![ph(Placeholder::Path), lit("-"), env("USER", Some("anon")),]
         );
     }
@@ -922,7 +925,7 @@ mod tests {
     #[test]
     fn adjacent_env_var_placeholders() {
         assert_eq!(
-            parts(parse_arg("${env.A}${env.B}").unwrap()),
+            parts(&parse_arg("${env.A}${env.B}").unwrap()),
             vec![env("A", None), env("B", None)]
         );
     }
@@ -933,7 +936,7 @@ mod tests {
     #[test]
     fn double_dollar_then_env_namespace_escapes_namespace() {
         assert_eq!(
-            parts(parse_arg("$${env.HOME}").unwrap()),
+            parts(&parse_arg("$${env.HOME}").unwrap()),
             vec![lit("${env.HOME}")]
         );
     }
@@ -954,7 +957,7 @@ mod tests {
         fn prop_bare_dollar_name_literal(name in "[A-Za-z_][A-Za-z0-9_]{0,15}") {
             let s = format!("${name}");
             let parsed = parse_arg(&s).unwrap();
-            prop_assert_eq!(parts(parsed), vec![lit(&s)]);
+            prop_assert_eq!(parts(&parsed), vec![lit(&s)]);
         }
 
         /// `${VAR}` braced shell-style expansion is literal regardless of
@@ -963,7 +966,7 @@ mod tests {
         fn prop_brace_non_namespace_literal(name in "[A-Z_][A-Z0-9_]{0,15}") {
             let s = format!("${{{name}}}");
             let parsed = parse_arg(&s).unwrap();
-            prop_assert_eq!(parts(parsed), vec![lit(&s)]);
+            prop_assert_eq!(parts(&parsed), vec![lit(&s)]);
         }
 
         /// Every well-formed `${env.<NAME>}` round-trips to an
@@ -975,7 +978,7 @@ mod tests {
             let s = format!("${{env.{name}}}");
             let parsed = parse_arg(&s).unwrap();
             prop_assert_eq!(
-                parts(parsed),
+                parts(&parsed),
                 vec![ArgPart::EnvVar {
                     name: CompactString::from(name.as_str()),
                     default: None,

@@ -47,18 +47,18 @@ fn full_fixture_round_trips_every_field() {
     assert_eq!(w.scan.exclude.len(), 2);
     assert_eq!(w.scan.max_depth, Some(5));
     assert_eq!(w.events, ClassSet::STRUCTURE | ClassSet::CONTENT);
-    let SpawnBody::Exec(exec) = &w.program.ops()[0].body else {
+    let SpawnBody::Exec(exec) = &w.program.ops()[0].body() else {
         panic!("expected SpawnBody::Exec");
     };
-    assert_eq!(exec.argv.len(), 3);
-    assert_eq!(exec.argv[0].parts[0], ArgPart::literal("make"));
-    assert_eq!(exec.argv[1].parts[0], ArgPart::literal("--input="));
+    assert_eq!(exec.argv().len(), 3);
+    assert_eq!(exec.argv()[0].parts()[0], ArgPart::literal("make"));
+    assert_eq!(exec.argv()[1].parts()[0], ArgPart::literal("--input="));
     assert_eq!(
-        exec.argv[1].parts[1],
+        exec.argv()[1].parts()[1],
         ArgPart::Placeholder(Placeholder::Path)
     );
     assert_eq!(
-        exec.argv[2].parts[0],
+        exec.argv()[2].parts()[0],
         ArgPart::Placeholder(Placeholder::Created)
     );
 }
@@ -184,8 +184,8 @@ fn exec_timeout_threads_per_action_via_humantime_serde() {
         .program
         .ops()
         .iter()
-        .map(|op| match &op.body {
-            SpawnBody::Exec(e) => e.timeout,
+        .map(|op| match op.body() {
+            SpawnBody::Exec(e) => e.timeout(),
             other @ SpawnBody::Pipe(_) => panic!("expected SpawnBody::Exec, got {other:?}"),
         })
         .collect();
@@ -223,11 +223,11 @@ fn exec_env_placeholder_lowers_into_program() {
     let toml = "[[watch]]\nname = \"e\"\npath = \"/\"\n\
                 actions = [{ exec = [\"echo\", \"${env.HOME:-/tmp}\"] }]";
     let cfg = Config::from_str(toml).unwrap();
-    let exec = match &cfg.watches[0].program.ops()[0].body {
+    let exec = match cfg.watches[0].program.ops()[0].body() {
         SpawnBody::Exec(e) => e,
         other @ SpawnBody::Pipe(_) => panic!("expected SpawnBody::Exec, got {other:?}"),
     };
-    match &exec.argv[1].parts[0] {
+    match &exec.argv()[1].parts()[0] {
         ArgPart::EnvVar { name, default } => {
             assert_eq!(name, "HOME");
             assert_eq!(default.as_deref(), Some("/tmp"));
@@ -273,17 +273,17 @@ fn conditional_when_then_lowers_to_predicate_plus_then() {
     assert_eq!(p.ops().len(), 2);
     // Predicate op (cursor 0): Exec body; on_ok continues to then-branch
     // (op 1); on_failed = Escape (no-else: terminate Ok without propagation).
-    assert!(matches!(p.ops()[0].body, SpawnBody::Exec(_)));
-    match p.ops()[0].on_ok {
+    assert!(matches!(p.ops()[0].body(), SpawnBody::Exec(_)));
+    match p.ops()[0].on_ok() {
         BranchTarget::Continue(idx) => assert_eq!(idx.get(), 1, "predicate Ok enters then"),
         other => panic!("expected Continue(1), got {other:?}"),
     }
-    assert_eq!(p.ops()[0].on_failed, BranchTarget::Escape);
+    assert_eq!(p.ops()[0].on_failed(), BranchTarget::Escape);
     // Then-exec (cursor 1): on_ok = Escape (top-level natural completion);
     // on_failed = Terminate (stop-on-failure, outcome propagates).
-    assert!(matches!(p.ops()[1].body, SpawnBody::Exec(_)));
-    assert_eq!(p.ops()[1].on_ok, BranchTarget::Escape);
-    assert_eq!(p.ops()[1].on_failed, BranchTarget::Terminate);
+    assert!(matches!(p.ops()[1].body(), SpawnBody::Exec(_)));
+    assert_eq!(p.ops()[1].on_ok(), BranchTarget::Escape);
+    assert_eq!(p.ops()[1].on_failed(), BranchTarget::Terminate);
 }
 
 /// Conditional with `when` + `then` + `else` lowers to a three-op
@@ -307,23 +307,23 @@ fn conditional_with_else_lowers_to_predicate_then_else_via_edges() {
     let p = &cfg.watches[0].program;
     assert_eq!(p.ops().len(), 3);
     // op 0: predicate
-    assert!(matches!(p.ops()[0].body, SpawnBody::Exec(_)));
-    match p.ops()[0].on_ok {
+    assert!(matches!(p.ops()[0].body(), SpawnBody::Exec(_)));
+    match p.ops()[0].on_ok() {
         BranchTarget::Continue(idx) => assert_eq!(idx.get(), 1),
         other => panic!("expected Continue(1), got {other:?}"),
     }
-    match p.ops()[0].on_failed {
+    match p.ops()[0].on_failed() {
         BranchTarget::Continue(idx) => assert_eq!(idx.get(), 2),
         other => panic!("expected Continue(2), got {other:?}"),
     }
     // op 1: then-Exec; on_ok = Escape skips past else.
-    assert!(matches!(p.ops()[1].body, SpawnBody::Exec(_)));
-    assert_eq!(p.ops()[1].on_ok, BranchTarget::Escape);
-    assert_eq!(p.ops()[1].on_failed, BranchTarget::Terminate);
+    assert!(matches!(p.ops()[1].body(), SpawnBody::Exec(_)));
+    assert_eq!(p.ops()[1].on_ok(), BranchTarget::Escape);
+    assert_eq!(p.ops()[1].on_failed(), BranchTarget::Terminate);
     // op 2: else-Exec
-    assert!(matches!(p.ops()[2].body, SpawnBody::Exec(_)));
-    assert_eq!(p.ops()[2].on_ok, BranchTarget::Escape);
-    assert_eq!(p.ops()[2].on_failed, BranchTarget::Terminate);
+    assert!(matches!(p.ops()[2].body(), SpawnBody::Exec(_)));
+    assert_eq!(p.ops()[2].on_ok(), BranchTarget::Escape);
+    assert_eq!(p.ops()[2].on_failed(), BranchTarget::Terminate);
 }
 
 /// `when` carries its own per-step `timeout` inside the nested
@@ -341,10 +341,10 @@ fn conditional_predicate_carries_per_step_timeout() {
     // The predicate op (cursor 0) carries an Exec body whose timeout
     // round-trips from TOML through validation into ExecAction.timeout.
     let p = &cfg.watches[0].program;
-    let SpawnBody::Exec(exec) = &p.ops()[0].body else {
+    let SpawnBody::Exec(exec) = &p.ops()[0].body() else {
         panic!("expected SpawnBody::Exec for predicate");
     };
-    assert_eq!(exec.timeout, Some(Duration::from_secs(2)));
+    assert_eq!(exec.timeout(), Some(Duration::from_secs(2)));
 }
 
 /// `when` without `then` is rejected at the variant-completeness
@@ -411,20 +411,20 @@ fn conditional_empty_then_nonempty_else_is_allowed() {
     let p = &cfg.watches[0].program;
     assert_eq!(p.ops().len(), 2);
     // op 0: predicate
-    assert!(matches!(p.ops()[0].body, SpawnBody::Exec(_)));
+    assert!(matches!(p.ops()[0].body(), SpawnBody::Exec(_)));
     // The empty then-block has no ops — predicate on_ok resolves
     // to Escape (skip past else on the Ok path).
-    assert_eq!(p.ops()[0].on_ok, BranchTarget::Escape);
-    match p.ops()[0].on_failed {
+    assert_eq!(p.ops()[0].on_ok(), BranchTarget::Escape);
+    match p.ops()[0].on_failed() {
         BranchTarget::Continue(idx) => {
             assert_eq!(idx.get(), 1, "predicate Failed enters else-branch");
         }
         other => panic!("expected Continue(1), got {other:?}"),
     }
     // op 1: else-Exec
-    assert!(matches!(p.ops()[1].body, SpawnBody::Exec(_)));
-    assert_eq!(p.ops()[1].on_ok, BranchTarget::Escape);
-    assert_eq!(p.ops()[1].on_failed, BranchTarget::Terminate);
+    assert!(matches!(p.ops()[1].body(), SpawnBody::Exec(_)));
+    assert_eq!(p.ops()[1].on_ok(), BranchTarget::Escape);
+    assert_eq!(p.ops()[1].on_failed(), BranchTarget::Terminate);
 }
 
 /// Conditional with both `exec` and `when` set is ambiguous — flagged
@@ -491,23 +491,23 @@ fn nested_conditional_inside_then_lowers_recursively() {
     let p = &cfg.watches[0].program;
     assert_eq!(p.ops().len(), 3);
     for op in p.ops() {
-        assert!(matches!(op.body, SpawnBody::Exec(_)));
+        assert!(matches!(op.body(), SpawnBody::Exec(_)));
     }
     // Outer predicate's on_failed is Escape (no-else "branch, not guard").
-    assert_eq!(p.ops()[0].on_failed, BranchTarget::Escape);
-    match p.ops()[0].on_ok {
+    assert_eq!(p.ops()[0].on_failed(), BranchTarget::Escape);
+    match p.ops()[0].on_ok() {
         BranchTarget::Continue(idx) => assert_eq!(idx.get(), 1),
         other => panic!("op 0 on_ok: expected Continue(1), got {other:?}"),
     }
     // Inner predicate's on_failed is also Escape (its own no-else branch).
-    assert_eq!(p.ops()[1].on_failed, BranchTarget::Escape);
-    match p.ops()[1].on_ok {
+    assert_eq!(p.ops()[1].on_failed(), BranchTarget::Escape);
+    match p.ops()[1].on_ok() {
         BranchTarget::Continue(idx) => assert_eq!(idx.get(), 2),
         other => panic!("op 1 on_ok: expected Continue(2), got {other:?}"),
     }
     // Inner-then Exec terminates the plan.
-    assert_eq!(p.ops()[2].on_ok, BranchTarget::Escape);
-    assert_eq!(p.ops()[2].on_failed, BranchTarget::Terminate);
+    assert_eq!(p.ops()[2].on_ok(), BranchTarget::Escape);
+    assert_eq!(p.ops()[2].on_failed(), BranchTarget::Terminate);
 }
 
 /// Empty `else` array (explicit `else = []`) is normalised to "no
@@ -523,16 +523,16 @@ fn conditional_explicit_empty_else_normalises_to_no_else() {
     let cfg = Config::from_str(toml).unwrap();
     let p = &cfg.watches[0].program;
     assert_eq!(p.ops().len(), 2);
-    assert!(matches!(p.ops()[0].body, SpawnBody::Exec(_)));
+    assert!(matches!(p.ops()[0].body(), SpawnBody::Exec(_)));
     // Predicate on_failed escapes (no-else "branch, not guard").
-    assert_eq!(p.ops()[0].on_failed, BranchTarget::Escape);
-    match p.ops()[0].on_ok {
+    assert_eq!(p.ops()[0].on_failed(), BranchTarget::Escape);
+    match p.ops()[0].on_ok() {
         BranchTarget::Continue(idx) => assert_eq!(idx.get(), 1),
         other => panic!("expected Continue(1), got {other:?}"),
     }
-    assert!(matches!(p.ops()[1].body, SpawnBody::Exec(_)));
-    assert_eq!(p.ops()[1].on_ok, BranchTarget::Escape);
-    assert_eq!(p.ops()[1].on_failed, BranchTarget::Terminate);
+    assert!(matches!(p.ops()[1].body(), SpawnBody::Exec(_)));
+    assert_eq!(p.ops()[1].on_ok(), BranchTarget::Escape);
+    assert_eq!(p.ops()[1].on_failed(), BranchTarget::Terminate);
 }
 
 /// Two-stage pipe lowers to a single op with `SpawnBody::Pipe` carrying
@@ -549,19 +549,19 @@ fn pipe_two_stages_lowers_to_single_op() {
     let cfg = Config::from_str(toml).unwrap();
     let p = &cfg.watches[0].program;
     assert_eq!(p.ops().len(), 1);
-    match &p.ops()[0].body {
+    match &p.ops()[0].body() {
         SpawnBody::Pipe(stages) => {
             assert_eq!(stages.len(), 2);
-            assert_eq!(stages[0].argv.len(), 2);
-            assert_eq!(stages[1].argv.len(), 1);
-            assert_eq!(stages[0].argv[0].parts[0], ArgPart::literal("grep"));
-            assert_eq!(stages[1].argv[0].parts[0], ArgPart::literal("sort"));
+            assert_eq!(stages[0].argv().len(), 2);
+            assert_eq!(stages[1].argv().len(), 1);
+            assert_eq!(stages[0].argv()[0].parts()[0], ArgPart::literal("grep"));
+            assert_eq!(stages[1].argv()[0].parts()[0], ArgPart::literal("sort"));
         }
         other @ SpawnBody::Exec(_) => panic!("expected SpawnBody::Pipe; got {other:?}"),
     }
     // Top-level pipe is the only op — on_ok escapes, on_failed terminates.
-    assert_eq!(p.ops()[0].on_ok, BranchTarget::Escape);
-    assert_eq!(p.ops()[0].on_failed, BranchTarget::Terminate);
+    assert_eq!(p.ops()[0].on_ok(), BranchTarget::Escape);
+    assert_eq!(p.ops()[0].on_failed(), BranchTarget::Terminate);
 }
 
 /// Each pipe stage carries its own per-stage `timeout`. Validation
@@ -578,12 +578,12 @@ fn pipe_stage_timeouts_threaded_per_stage() {
                   ] },\n\
                 ]";
     let cfg = Config::from_str(toml).unwrap();
-    let SpawnBody::Pipe(stages) = &cfg.watches[0].program.ops()[0].body else {
+    let SpawnBody::Pipe(stages) = &cfg.watches[0].program.ops()[0].body() else {
         panic!("expected SpawnBody::Pipe");
     };
-    assert_eq!(stages[0].timeout, Some(Duration::from_millis(500)));
-    assert_eq!(stages[1].timeout, None);
-    assert_eq!(stages[2].timeout, Some(Duration::from_secs(2)));
+    assert_eq!(stages[0].timeout(), Some(Duration::from_millis(500)));
+    assert_eq!(stages[1].timeout(), None);
+    assert_eq!(stages[2].timeout(), Some(Duration::from_secs(2)));
 }
 
 /// Empty pipe is rejected as `IssueKind::EmptyPipe`.

@@ -32,6 +32,7 @@ fn pipe_program(stages: Vec<Vec<String>>) -> Arc<ActionProgram> {
             ExecAction::new(
                 argv.into_iter()
                     .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
+                None,
             )
         })
         .collect::<Vec<_>>()

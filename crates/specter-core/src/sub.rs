@@ -428,16 +428,20 @@ mod tests {
     }
 
     fn anchor_only_program() -> Arc<ActionProgram> {
-        single_exec_program(ExecAction::new([ArgTemplate::new([
-            ArgPart::literal("/bin/build"),
-            ArgPart::Placeholder(Placeholder::Path),
-        ])]))
+        single_exec_program(ExecAction::new(
+            [ArgTemplate::new([
+                ArgPart::literal("/bin/build"),
+                ArgPart::Placeholder(Placeholder::Path),
+            ])],
+            None,
+        ))
     }
 
     fn program_with(p: Placeholder) -> Arc<ActionProgram> {
-        single_exec_program(ExecAction::new([ArgTemplate::new([ArgPart::Placeholder(
-            p,
-        )])]))
+        single_exec_program(ExecAction::new(
+            [ArgTemplate::new([ArgPart::Placeholder(p)])],
+            None,
+        ))
     }
 
     #[test]

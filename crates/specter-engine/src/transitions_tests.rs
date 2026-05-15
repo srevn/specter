@@ -765,12 +765,12 @@ fn standard_burst_stable_emits_effect_and_awaits() {
     // argv at spawn time. Assert on the template's literal-only first arg
     // instead of the resolved argv. (`/bin/true` is the test's stub
     // command — see `empty_program()`.)
-    let SpawnBody::Exec(exec) = &eff.program.ops()[0].body else {
+    let SpawnBody::Exec(exec) = &eff.program.ops()[0].body() else {
         panic!("expected SpawnBody::Exec");
     };
-    assert_eq!(exec.argv.len(), 1);
+    assert_eq!(exec.argv().len(), 1);
     assert!(matches!(
-        exec.argv[0].parts.as_slice(),
+        exec.argv()[0].parts(),
         [specter_core::ArgPart::Literal(s)] if s.as_str() == "/bin/true"
     ));
     // Substitution-domain inputs that the actuator-side resolver renders
@@ -3179,14 +3179,16 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         // runs in the actuator. Assert the template references the
         // diff-derived `${specter.created}` placeholder (the test fixture's
         // `diff_program()`).
-        let SpawnBody::Exec(exec) = &eff.program.ops()[0].body else {
+        let SpawnBody::Exec(exec) = &eff.program.ops()[0].body() else {
             panic!("expected SpawnBody::Exec");
         };
         assert!(
-            exec.argv.iter().any(|a| a.parts.iter().any(|p| matches!(
-                p,
-                specter_core::ArgPart::Placeholder(specter_core::Placeholder::Created)
-            ))),
+            exec.argv()
+                .iter()
+                .any(|a| a.parts().iter().any(|p| matches!(
+                    p,
+                    specter_core::ArgPart::Placeholder(specter_core::Placeholder::Created)
+                ))),
             "diff_program's template references ${{specter.created}}"
         );
         // anchor_path + anchor_kind ⇒ actuator's compute_cwd("anchor", Dir) = "anchor".

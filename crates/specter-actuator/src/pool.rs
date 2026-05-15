@@ -304,9 +304,10 @@ mod tests {
                 let next = b.continue_to_next();
                 b.patch_on_ok(ph, next).unwrap();
             }
-            let h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/true"),
-            ])])));
+            let h = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/true")])],
+                None,
+            )));
             b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
             prev = Some(h);
         }
@@ -1365,9 +1366,10 @@ mod tests {
     /// config layer would emit for `{ exec = ["..."], timeout = "..." }`.
     fn timeout_program(d: Duration) -> Arc<ActionProgram> {
         let mut b = ProgramBuilder::new();
-        let h = b.emit(SpawnBody::Exec(
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])]).with_timeout(d),
-        ));
+        let h = b.emit(SpawnBody::Exec(ExecAction::new(
+            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
+            Some(d),
+        )));
         b.patch_on_ok(h, BranchTarget::Escape).unwrap();
         b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
         Arc::new(b.build().unwrap())
@@ -1471,8 +1473,8 @@ mod tests {
     /// without propagation), then the then-Exec.
     fn predicate_then_no_else(when_label: &str, then_label: &str) -> Arc<ActionProgram> {
         predicate_then_program(
-            ExecAction::new([ArgTemplate::new([ArgPart::literal(when_label)])]),
-            ExecAction::new([ArgTemplate::new([ArgPart::literal(then_label)])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal(when_label)])], None),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal(then_label)])], None),
         )
     }
 
@@ -1491,24 +1493,27 @@ mod tests {
         else_label: &str,
     ) -> Arc<ActionProgram> {
         let mut b = ProgramBuilder::new();
-        let pred = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-            ArgPart::literal(when_label),
-        ])])));
+        let pred = b.emit(SpawnBody::Exec(ExecAction::new(
+            [ArgTemplate::new([ArgPart::literal(when_label)])],
+            None,
+        )));
         // then enters at cursor 1
         let then_first = b.continue_to_next();
         b.patch_on_ok(pred, then_first).unwrap();
-        let then_h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-            ArgPart::literal(then_label),
-        ])])));
+        let then_h = b.emit(SpawnBody::Exec(ExecAction::new(
+            [ArgTemplate::new([ArgPart::literal(then_label)])],
+            None,
+        )));
         // else enters at cursor 2 — patch predicate's on_failed to it,
         // and then-Exec's on_ok is Escape (skip past else).
         let else_first = b.continue_to_next();
         b.patch_on_failed(pred, else_first).unwrap();
         b.patch_on_ok(then_h, BranchTarget::Escape).unwrap();
         b.patch_on_failed(then_h, BranchTarget::Terminate).unwrap();
-        let else_h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-            ArgPart::literal(else_label),
-        ])])));
+        let else_h = b.emit(SpawnBody::Exec(ExecAction::new(
+            [ArgTemplate::new([ArgPart::literal(else_label)])],
+            None,
+        )));
         b.patch_on_ok(else_h, BranchTarget::Escape).unwrap();
         b.patch_on_failed(else_h, BranchTarget::Terminate).unwrap();
         Arc::new(b.build().unwrap())
@@ -1711,24 +1716,27 @@ mod tests {
         // on_failed = Terminate.
         let program = {
             let mut b = ProgramBuilder::new();
-            let pred = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::EnvVar {
+            let pred = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::EnvVar {
                     name: CompactString::new("MISSING"),
                     default: None,
-                },
-            ])])));
+                }])],
+                None,
+            )));
             let then_first = b.continue_to_next();
             b.patch_on_ok(pred, then_first).unwrap();
-            let then_h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/then"),
-            ])])));
+            let then_h = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/then")])],
+                None,
+            )));
             let else_first = b.continue_to_next();
             b.patch_on_failed(pred, else_first).unwrap();
             b.patch_on_ok(then_h, BranchTarget::Escape).unwrap();
             b.patch_on_failed(then_h, BranchTarget::Terminate).unwrap();
-            let else_h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/else"),
-            ])])));
+            let else_h = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/else")])],
+                None,
+            )));
             b.patch_on_ok(else_h, BranchTarget::Escape).unwrap();
             b.patch_on_failed(else_h, BranchTarget::Terminate).unwrap();
             Arc::new(b.build().unwrap())
@@ -1792,21 +1800,24 @@ mod tests {
             //                       on_failed = Escape (no-else branch elision)
             //   op 2: Exec(c) — on_ok = Escape, on_failed = Terminate
             let mut b = ProgramBuilder::new();
-            let a = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/a"),
-            ])])));
+            let a = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/a")])],
+                None,
+            )));
             let after_a = b.continue_to_next();
             b.patch_on_ok(a, after_a).unwrap();
             b.patch_on_failed(a, BranchTarget::Terminate).unwrap();
-            let pred = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/b"),
-            ])])));
+            let pred = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/b")])],
+                None,
+            )));
             let after_pred = b.continue_to_next();
             b.patch_on_ok(pred, after_pred).unwrap();
             b.patch_on_failed(pred, BranchTarget::Escape).unwrap();
-            let c = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/c"),
-            ])])));
+            let c = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/c")])],
+                None,
+            )));
             b.patch_on_ok(c, BranchTarget::Escape).unwrap();
             b.patch_on_failed(c, BranchTarget::Terminate).unwrap();
             Arc::new(b.build().unwrap())
@@ -1898,8 +1909,8 @@ mod tests {
     #[test]
     fn pipe_two_stages_both_ok_emits_single_ok_completion() {
         let stages: Arc<[ExecAction]> = Arc::from(vec![
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])], None),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])], None),
         ]);
         let program = pipe_program(stages);
 
@@ -1939,8 +1950,8 @@ mod tests {
     #[test]
     fn pipe_first_stage_failed_cascades_sigterm_to_siblings() {
         let stages: Arc<[ExecAction]> = Arc::from(vec![
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])], None),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])], None),
         ]);
         let program = pipe_program(stages);
 
@@ -2009,8 +2020,8 @@ mod tests {
     #[test]
     fn pipe_spawn_failure_terminates_plan_failed() {
         let stages: Arc<[ExecAction]> = Arc::from(vec![
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])], None),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])], None),
         ]);
         let program = pipe_program(stages);
 
@@ -2044,8 +2055,8 @@ mod tests {
     #[test]
     fn pipe_followed_by_exec_runs_only_on_pipe_ok() {
         let pipe_stages: Arc<[ExecAction]> = Arc::from(vec![
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])], None),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])], None),
         ]);
         let program = {
             let mut b = ProgramBuilder::new();
@@ -2053,9 +2064,10 @@ mod tests {
             let after = b.continue_to_next();
             b.patch_on_ok(p, after).unwrap();
             b.patch_on_failed(p, BranchTarget::Terminate).unwrap();
-            let exec_after = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-                ArgPart::literal("/bin/after"),
-            ])])));
+            let exec_after = b.emit(SpawnBody::Exec(ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/after")])],
+                None,
+            )));
             b.patch_on_ok(exec_after, BranchTarget::Escape).unwrap();
             b.patch_on_failed(exec_after, BranchTarget::Terminate)
                 .unwrap();
@@ -2141,8 +2153,11 @@ mod tests {
     fn pipe_stage_timeout_sigterms_unfinished_stage() {
         let timeout = Duration::from_millis(60);
         let stages: Arc<[ExecAction]> = Arc::from(vec![
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])]),
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])]).with_timeout(timeout),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])], None),
+            ExecAction::new(
+                [ArgTemplate::new([ArgPart::literal("/bin/b")])],
+                Some(timeout),
+            ),
         ]);
         let program = pipe_program(stages);
 

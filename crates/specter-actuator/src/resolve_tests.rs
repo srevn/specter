@@ -45,7 +45,7 @@ fn resolve(e: &Effect) -> (CommandResolved, Vec<EnvVar<'_>>) {
 /// build effects with exactly one `SpawnBody::Exec` op; this is a
 /// fixture-side accessor, not a production API.
 fn exec_of(e: &Effect) -> &ExecAction {
-    match &e.program.ops()[0].body {
+    match &e.program.ops()[0].body() {
         SpawnBody::Exec(exec) => exec,
         SpawnBody::Pipe(_) => panic!("test fixtures use only Exec body"),
     }

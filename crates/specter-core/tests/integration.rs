@@ -25,10 +25,13 @@ fn bare_cfg() -> ScanConfig {
 
 fn build_program() -> Arc<ActionProgram> {
     let mut b = ProgramBuilder::new();
-    let h = b.emit(SpawnBody::Exec(ExecAction::new([ArgTemplate::new([
-        ArgPart::literal("/bin/build"),
-        ArgPart::Placeholder(Placeholder::Path),
-    ])])));
+    let h = b.emit(SpawnBody::Exec(ExecAction::new(
+        [ArgTemplate::new([
+            ArgPart::literal("/bin/build"),
+            ArgPart::Placeholder(Placeholder::Path),
+        ])],
+        None,
+    )));
     b.patch_on_ok(h, BranchTarget::Escape).unwrap();
     b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
     Arc::new(b.build().unwrap())

@@ -26,18 +26,65 @@ use std::sync::Arc;
 /// One CFG node — a spawn body plus the two edges the dispatcher reads
 /// on outcome.
 ///
+/// Builder-only: [`Self::new`] is `pub(super)`, so a `ProgramOp` is
+/// minted solely by [`super::ProgramBuilder::build`]. A bare op
+/// outside a built [`super::ActionProgram`] is inert — nothing
+/// consumes one — so exposing a public constructor would be a
+/// dead-end affordance. Reads go through [`Self::target`] (semantic,
+/// outcome-routed) or the structural [`Self::body`] / [`Self::on_ok`]
+/// / [`Self::on_failed`] accessors.
+///
 /// Structural `Eq` propagates from [`SpawnBody`] and [`BranchTarget`];
 /// consumed by `SubRegistryDiff` for hot-reload no-op suppression
 /// (two `Arc<ActionProgram>`s with byte-equal ops compare equal even
 /// when the Arc allocations differ).
+///
+/// ```compile_fail
+/// use specter_core::program::{ProgramOp, SpawnBody, ExecAction, ArgTemplate, ArgPart, BranchTarget};
+/// // must not compile: `ProgramOp` fields are private, no `pub` constructor
+/// let _ = ProgramOp {
+///     body: SpawnBody::Exec(ExecAction::new([ArgTemplate::new([ArgPart::literal("x")])], None)),
+///     on_ok: BranchTarget::Escape,
+///     on_failed: BranchTarget::Terminate,
+/// };
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProgramOp {
-    pub body: SpawnBody,
-    pub on_ok: BranchTarget,
-    pub on_failed: BranchTarget,
+    body: SpawnBody,
+    on_ok: BranchTarget,
+    on_failed: BranchTarget,
 }
 
 impl ProgramOp {
+    /// Assemble a node. Builder-only — see [`Self`] for why no public
+    /// constructor exists.
+    #[must_use]
+    pub(super) const fn new(body: SpawnBody, on_ok: BranchTarget, on_failed: BranchTarget) -> Self {
+        Self {
+            body,
+            on_ok,
+            on_failed,
+        }
+    }
+
+    /// The spawn body — single `Exec` or N-stage `Pipe`.
+    #[must_use]
+    pub const fn body(&self) -> &SpawnBody {
+        &self.body
+    }
+
+    /// The `on_ok` edge — taken when the spawned process reaps `Ok`.
+    #[must_use]
+    pub const fn on_ok(&self) -> BranchTarget {
+        self.on_ok
+    }
+
+    /// The `on_failed` edge — taken when the process reaps `Failed`.
+    #[must_use]
+    pub const fn on_failed(&self) -> BranchTarget {
+        self.on_failed
+    }
+
     /// Pick the edge that matches `outcome`.
     ///
     /// `Ok ⇒ on_ok`, `Failed ⇒ on_failed`. The exit-code / signal
@@ -116,6 +163,12 @@ pub enum BranchTarget {
 /// is the type-level enforcement of the forward-only-and-in-bounds
 /// invariant: every `Continue` in a built program was patched by
 /// [`super::ProgramBuilder`], which validated the index.
+///
+/// ```compile_fail
+/// use specter_core::program::{BranchTarget, BranchIndex};
+/// // must not compile: `BranchIndex::new` is `pub(super)`
+/// let _ = BranchTarget::Continue(BranchIndex::new(0));
+/// ```
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct BranchIndex(u32);
 
@@ -143,15 +196,11 @@ mod tests {
     use std::sync::Arc;
 
     fn exec_with(part: ArgPart) -> ExecAction {
-        ExecAction::new([ArgTemplate::new([part])])
+        ExecAction::new([ArgTemplate::new([part])], None)
     }
 
     fn op_with_edges(body: SpawnBody, on_ok: BranchTarget, on_failed: BranchTarget) -> ProgramOp {
-        ProgramOp {
-            body,
-            on_ok,
-            on_failed,
-        }
+        ProgramOp::new(body, on_ok, on_failed)
     }
 
     #[test]
