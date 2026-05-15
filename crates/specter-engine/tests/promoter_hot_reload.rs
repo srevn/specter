@@ -27,9 +27,9 @@
 
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ClassSet, Diagnostic, EffectScope, Input, PatternSpec, PromoterAttachRequest,
-    PromoterRegistryDiff, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
-    SubAttachRequest, SubParams, SubRegistryDiff, WatchRegistryDiff,
+    ActionProgram, ClassSet, Diagnostic, EffectScope, Input, PatternSpec, ProfileIdentity,
+    PromoterAttachRequest, PromoterRegistryDiff, ResourceKind, ResourceRole, ScanConfig,
+    SubAttachAnchor, SubAttachRequest, SubParams, SubRegistryDiff, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::sync::Arc;
@@ -64,12 +64,14 @@ fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
     PromoterAttachRequest {
         name: name.to_owned(),
         pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
-        config: ScanConfig::builder().recursive(true).build(),
-        max_settle: MAX_SETTLE,
+        identity: ProfileIdentity {
+            config: ScanConfig::builder().recursive(true).build(),
+            max_settle: MAX_SETTLE,
+            events: ClassSet::EMPTY,
+        },
         settle: SETTLE,
         program: empty_program(),
         scope: EffectScope::SubtreeRoot,
-        events: ClassSet::EMPTY,
         log_output: false,
     }
 }

@@ -47,8 +47,8 @@ use crate::ids::{PromoterId, ResourceId, SubId};
 use crate::pattern::PatternSpec;
 use crate::profile::DescentState;
 use crate::program::ActionProgram;
-use crate::scan_config::ScanConfig;
-use crate::sub::{ClassSet, EffectScope};
+use crate::scan_config::ProfileIdentity;
+use crate::sub::EffectScope;
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,42 +57,38 @@ use std::time::Duration;
 
 /// Pre-id spec carried on `WatchRegistryDiff::promoters.{added,modified}`.
 ///
-/// Mirrors `SubAttachRequest`'s role for the static side: the config
-/// layer materialises this from a `[[promoter]]` (or auto-detected
-/// `[[watch]]`) block; the engine assigns a `PromoterId` at attach.
-///
-/// `Clone` is derived for the same reason as `SubAttachRequest`: rare
-/// fan-out call sites that send the spec to multiple Engines.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Mirrors [`SubAttachRequest`](crate::SubAttachRequest)'s role for the
+/// static side: the config layer materialises this from a `[[promoter]]`
+/// (or auto-detected `[[watch]]`) block; the engine assigns a
+/// [`PromoterId`] at attach. `Clone` serves the rare multi-Engine
+/// fan-out. No `Eq`/`PartialEq`: [`ProfileIdentity::config_hash`] is the
+/// only identity comparison, never a structural derive.
+#[derive(Clone, Debug)]
 pub struct PromoterAttachRequest {
     pub name: String,
     pub pattern_spec: PatternSpec,
-    pub config: ScanConfig,
-    pub max_settle: Duration,
+    pub identity: ProfileIdentity,
     pub settle: Duration,
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
-    pub events: ClassSet,
     pub log_output: bool,
 }
 
 /// Engine-resident Promoter.
 ///
-/// Mirrors `Profile`'s registry-stored shape: the `id` field is embedded
-/// by `PromoterRegistry::insert`'s `insert_with_key` closure so
-/// self-references inside helper code work without round-tripping
-/// through the registry.
+/// Mirrors `Profile`'s registry-stored shape. No `id` field — the
+/// slotmap [`PromoterId`] is the identity authority; helper code that
+/// needs the id receives it as a parameter. `identity` is the
+/// Sub-spec's Profile partition key, threaded verbatim into every
+/// synthesised dynamic Sub.
 #[derive(Debug)]
 pub struct Promoter {
-    pub id: PromoterId,
     pub name: CompactString,
     pub pattern: Arc<PatternSpec>,
-    pub config: ScanConfig,
-    pub max_settle: Duration,
-    pub settle: Duration,
+    pub identity: ProfileIdentity,
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
-    pub events: ClassSet,
+    pub settle: Duration,
     pub log_output: bool,
 
     pub state: PromoterState,
@@ -196,15 +192,13 @@ impl PromoterRegistry {
         Self::default()
     }
 
-    /// Insert a Promoter built from the freshly-minted `PromoterId`. The
-    /// closure receives the minted key so the Promoter embeds its own
-    /// id; mirrors [`SubRegistry::insert`](crate::sub::SubRegistry::insert).
-    pub fn insert<F>(&mut self, build: F) -> PromoterId
-    where
-        F: FnOnce(PromoterId) -> Promoter,
-    {
-        let id = self.promoters.insert_with_key(build);
-        let name = self.promoters[id].name.clone();
+    /// Insert a Promoter; the returned slotmap [`PromoterId`] is its
+    /// identity authority (the Promoter carries no `id` field). The
+    /// `by_name` index is updated in lockstep. Mirrors
+    /// [`SubRegistry::insert`](crate::sub::SubRegistry::insert).
+    pub fn insert(&mut self, promoter: Promoter) -> PromoterId {
+        let name = promoter.name.clone();
+        let id = self.promoters.insert(promoter);
         self.by_name.insert(name, id);
         id
     }
@@ -277,7 +271,7 @@ mod tests {
         ActionProgram, ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder,
         SpawnBody,
     };
-    use crate::scan_config::ScanConfig;
+    use crate::scan_config::{ProfileIdentity, ScanConfig};
     use crate::sub::{ClassSet, EffectScope};
     use compact_str::CompactString;
     use std::collections::{BTreeMap, BTreeSet};
@@ -301,17 +295,18 @@ mod tests {
         Arc::new(b.build().unwrap())
     }
 
-    fn build_promoter(id: PromoterId, name: &str, pattern: &str) -> Promoter {
+    fn build_promoter(name: &str, pattern: &str) -> Promoter {
         Promoter {
-            id,
             name: CompactString::from(name),
             pattern: Arc::new(PatternSpec::parse(pattern).expect("valid pattern")),
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            settle: SETTLE,
+            identity: ProfileIdentity {
+                config: ScanConfig::builder().recursive(true).build(),
+                max_settle: MAX_SETTLE,
+                events: ClassSet::DEFAULT_SUBTREE_ROOT,
+            },
             program: program(),
             scope: EffectScope::SubtreeRoot,
-            events: ClassSet::DEFAULT_SUBTREE_ROOT,
+            settle: SETTLE,
             log_output: false,
             state: PromoterState::Active {
                 proxies: BTreeMap::new(),
@@ -322,17 +317,16 @@ mod tests {
         }
     }
 
-    /// `insert` minted a key, embedded it into the value, and registered
-    /// the `by_name` mapping. `find_by_name` round-trips on the same
-    /// name. `get` returns the embedded Promoter.
+    /// `insert` minted a key and registered the `by_name` mapping;
+    /// `find_by_name` round-trips on the same name and `get` returns
+    /// the stored Promoter.
     #[test]
     fn registry_insert_round_trip() {
         let mut reg = PromoterRegistry::new();
-        let id = reg.insert(|id| build_promoter(id, "logs", "/var/log/*.log"));
+        let id = reg.insert(build_promoter("logs", "/var/log/*.log"));
         assert_eq!(reg.len(), 1);
         assert!(!reg.is_empty());
         let stored = reg.get(id).expect("Promoter stored");
-        assert_eq!(stored.id, id, "embedded id matches minted key");
         assert_eq!(stored.name, "logs");
         assert_eq!(reg.find_by_name("logs"), Some(id));
     }
@@ -340,9 +334,8 @@ mod tests {
     #[test]
     fn registry_remove_clears_by_name() {
         let mut reg = PromoterRegistry::new();
-        let id = reg.insert(|id| build_promoter(id, "logs", "/var/log/*.log"));
-        let removed = reg.remove(id).expect("returned the Promoter");
-        assert_eq!(removed.id, id);
+        let id = reg.insert(build_promoter("logs", "/var/log/*.log"));
+        reg.remove(id).expect("returned the Promoter");
         assert!(reg.get(id).is_none());
         assert!(reg.find_by_name("logs").is_none());
         assert_eq!(reg.len(), 0);
@@ -357,8 +350,8 @@ mod tests {
     #[test]
     fn registry_iter_yields_all_promoters() {
         let mut reg = PromoterRegistry::new();
-        reg.insert(|id| build_promoter(id, "a", "/srv/*"));
-        reg.insert(|id| build_promoter(id, "b", "/var/*"));
+        reg.insert(build_promoter("a", "/srv/*"));
+        reg.insert(build_promoter("b", "/var/*"));
         let mut names: Vec<String> = reg.iter().map(|(_, p)| p.name.to_string()).collect();
         names.sort();
         assert_eq!(names, vec!["a", "b"]);
@@ -385,12 +378,14 @@ mod tests {
         let req = PromoterAttachRequest {
             name: "logs".to_owned(),
             pattern_spec: PatternSpec::parse("/var/log/*.log").expect("valid"),
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
+            identity: ProfileIdentity {
+                config: ScanConfig::builder().recursive(true).build(),
+                max_settle: MAX_SETTLE,
+                events: ClassSet::DEFAULT_SUBTREE_ROOT,
+            },
             settle: SETTLE,
             program: program(),
             scope: EffectScope::SubtreeRoot,
-            events: ClassSet::DEFAULT_SUBTREE_ROOT,
             log_output: false,
         };
         let d = PromoterRegistryDiff {
@@ -448,7 +443,7 @@ mod tests {
     /// (cheaper to store, no path-string allocation per entry).
     #[test]
     fn promoter_dynamic_subs_round_trip() {
-        let mut p = build_promoter(PromoterId::default(), "logs", "/var/log/*.log");
+        let mut p = build_promoter("logs", "/var/log/*.log");
         let resource = ResourceId::default();
         let sid = SubId::default();
         p.dynamic_subs.insert(resource, sid);

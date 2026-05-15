@@ -13,9 +13,9 @@ use specter_core::{
     ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClaimKind, ClassSet, Diagnostic,
     DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity,
     Input, LeafEntry, PatternSpec, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileId, ProfileState, PromoterAttachRequest, PromoterClaimKind,
-    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, WatchFailure, WatchOp,
+    ProbeResponse, ProfileId, ProfileIdentity, ProfileState, PromoterAttachRequest,
+    PromoterClaimKind, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchFailure, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -474,12 +474,14 @@ fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
     PromoterAttachRequest {
         name: name.to_owned(),
         pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
-        config: ScanConfig::builder().recursive(true).build(),
-        max_settle: MAX_SETTLE,
+        identity: ProfileIdentity {
+            config: ScanConfig::builder().recursive(true).build(),
+            max_settle: MAX_SETTLE,
+            events: ClassSet::EMPTY,
+        },
         settle: SETTLE,
         program: empty_program(),
         scope: EffectScope::SubtreeRoot,
-        events: ClassSet::EMPTY,
         log_output: false,
     }
 }

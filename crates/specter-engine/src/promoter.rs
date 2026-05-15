@@ -49,7 +49,7 @@ use specter_core::{
     ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
     PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, Promoter, PromoterAttachRequest,
     PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, Tree,
+    SubAttachRequest, SubId, SubParams, Tree,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -100,7 +100,6 @@ impl Engine {
     /// observed in a transient placeholder shape (no `Active{empty}`
     /// stand-in for a `PrefixPending` Promoter that downstream
     /// owner-state readers could see mid-mutation).
-    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn attach_promoter_inner(
         &mut self,
         req: PromoterAttachRequest,
@@ -144,23 +143,20 @@ impl Engine {
             } => PromoterState::PrefixPending(DescentState::new(*prefix, remaining.clone())),
         };
 
-        // 6. Mint the Promoter with the final state. `insert_with_key`
-        // closure embeds the freshly-minted id into the value.
-        // `pattern_spec` moves into a fresh `Arc` — the hot dispatcher
-        // bumps the refcount per enumeration response to release the
-        // registry's read borrow before the forward pass takes `&mut
-        // self`. Cloning the `PatternSpec` here (rather than moving)
-        // would allocate per `Glob` component on every attach.
-        let promoter_id = self.promoters.insert(|id| Promoter {
-            id,
+        // 6. Mint the Promoter with the final state. The slotmap key is
+        // the identity authority — no id is embedded. `pattern_spec`
+        // and `identity` move in (no clone); `program`'s Arc moves in —
+        // the hot dispatcher bumps the refcount per enumeration response
+        // to release the registry's read borrow before the forward pass
+        // takes `&mut self`. Cloning the `PatternSpec` here (rather than
+        // moving) would allocate per `Glob` component on every attach.
+        let promoter_id = self.promoters.insert(Promoter {
             name: CompactString::from(req.name.as_str()),
             pattern: Arc::new(req.pattern_spec),
-            config: req.config.clone(),
-            max_settle: req.max_settle,
-            settle: req.settle,
-            program: Arc::clone(&req.program),
+            identity: req.identity,
+            program: req.program,
             scope: req.scope,
-            events: req.events,
+            settle: req.settle,
             log_output: req.log_output,
             state: initial_state,
             pending_enumerations: BTreeSet::new(),
@@ -962,7 +958,7 @@ impl Engine {
     /// Tree slot the forward-pass call site looked up or freshly
     /// `ensure_child`'d as [`specter_core::ResourceRole::User`] before
     /// invoking `try_promote`. The request is built via
-    /// [`SubAttachRequest::for_anchor_dynamic`] with a
+    /// [`SubAttachRequest::from_parts`] with a
     /// [`SubAttachAnchor::Resource`]; the engine's Resource-arm
     /// liveness check passes on a slot this freshly minted, so
     /// `attach_sub_inner` cannot return `None` — the `.expect` records
@@ -993,19 +989,17 @@ impl Engine {
         }
 
         // Capture spec fields BEFORE the &mut borrow chain on
-        // attach_sub_inner. Cloning the heavy fields once (config /
-        // program) is cheaper than re-borrowing the registry across
-        // each access. `program` Arc-clones — refcount bump only.
-        let Some((promoter_name, config, max_settle, settle, program, scope, events, log_output)) =
+        // attach_sub_inner. `identity` is cloned once (its `ScanConfig`
+        // is the only heap field) and `program` Arc-cloned (refcount
+        // bump) — cheaper than re-borrowing the registry per access.
+        let Some((promoter_name, identity, settle, program, scope, log_output)) =
             self.promoters.get(promoter_id).map(|q| {
                 (
                     q.name.clone(),
-                    q.config.clone(),
-                    q.max_settle,
+                    q.identity.clone(),
                     q.settle,
                     Arc::clone(&q.program),
                     q.scope,
-                    q.events,
                     q.log_output,
                 )
             })
@@ -1018,18 +1012,19 @@ impl Engine {
         // Resource-anchored: `anchor_resource` is the slot the
         // forward-pass just looked up or `ensure_child`'d as `User`, so
         // the engine's Resource-arm liveness check passes and
-        // `attach_sub_inner` cannot return `None` here.
-        let req = SubAttachRequest::for_anchor_dynamic(
-            synthesized,
+        // `attach_sub_inner` cannot return `None` here. `identity` is
+        // moved straight through — no flat round-trip.
+        let req = SubAttachRequest::from_parts(
             SubAttachAnchor::Resource(anchor_resource),
-            config,
-            max_settle,
-            settle,
-            program,
-            scope,
-            events,
-            log_output,
-            promoter_id,
+            identity,
+            SubParams {
+                name: synthesized,
+                program,
+                scope,
+                settle,
+                log_output,
+                source_promoter: Some(promoter_id),
+            },
         );
 
         let sub_id = self.attach_sub_inner(req, now, out).expect(

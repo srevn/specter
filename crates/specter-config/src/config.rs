@@ -7,7 +7,8 @@ use crate::template;
 use compact_str::CompactString;
 use specter_core::{
     self as core, ActionProgram, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    PatternSpec, PromoterAttachRequest, ScanConfig, SubAttachAnchor, SubAttachRequest,
+    PatternSpec, ProfileIdentity, PromoterAttachRequest, ScanConfig, SubAttachAnchor,
+    SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -239,12 +240,14 @@ impl PromoterSpec {
         PromoterAttachRequest {
             name: self.name.to_string(),
             pattern_spec: self.pattern.clone(),
-            config: self.scan.clone(),
-            max_settle: self.max_settle,
+            identity: ProfileIdentity {
+                config: self.scan.clone(),
+                max_settle: self.max_settle,
+                events: self.events,
+            },
             settle: self.settle,
             program: Arc::clone(&self.program),
             scope: self.scope,
-            events: self.events,
             log_output: self.log_output,
         }
     }
@@ -2253,12 +2256,12 @@ mod tests {
         assert_eq!(req.pattern_spec.source(), "/var/log/*");
         assert_eq!(req.scope, EffectScope::PerStableFile);
         assert_eq!(req.settle, Duration::from_millis(300));
-        assert_eq!(req.max_settle, Duration::from_millis(1200));
-        assert_eq!(req.events, ClassSet::CONTENT);
+        assert_eq!(req.identity.max_settle, Duration::from_millis(1200));
+        assert_eq!(req.identity.events, ClassSet::CONTENT);
         assert!(req.log_output);
-        assert!(!req.config.recursive);
-        assert!(req.config.hidden);
-        assert!(req.config.pattern.is_some());
+        assert!(!req.identity.config.recursive);
+        assert!(req.identity.config.hidden);
+        assert!(req.identity.config.pattern.is_some());
     }
 
     /// Dynamic watches accept `pattern` (per-Sub include filter) and
