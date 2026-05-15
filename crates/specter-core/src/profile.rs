@@ -1081,13 +1081,141 @@ impl From<&DedupKey> for FiredKey {
     }
 }
 
+/// The settled reference a *classified* anchor compares fresh probes
+/// against, in the one window each variant owns:
+///
+/// - [`Self::Unset`] — no settled baseline yet. A freshly-classified
+///   anchor (resource attach against a known-kind slot, or descent
+///   materialisation) before its first successful graft. There is
+///   nothing to drift against; the first graft installs the baseline.
+/// - [`Self::Snapshot`] — active mode. The last settled snapshot; the
+///   drift verdict is `current.hash() != settled.hash()`.
+/// - [`Self::Witness`] — loss→recovery window. The anchor vanished and
+///   its baseline snapshot was dropped, but the pre-loss
+///   anchor-rooted hash is retained so the post-recovery Seed-Ok can
+///   still decide whether the tree drifted while the anchor was gone.
+///   Consumed (overwritten by [`Self::Snapshot`]) at the next rebase.
+///
+/// `Snapshot` and `Witness` are mutually exclusive *by construction* —
+/// there is no representable value carrying both a live baseline and a
+/// survival witness. The "a present baseline implies no survival
+/// witness" rule is therefore a type property, not a checked
+/// convention.
+#[derive(Debug, Clone)]
+enum SettledState<S> {
+    Unset,
+    Snapshot(S),
+    Witness(u128),
+}
+
+/// The per-payload operations the generic [`SettledState`] /
+/// [`AnchorClassification`] projections need without re-wrapping a
+/// [`TreeSnapshot`] just to read it. Implemented once per concrete
+/// anchor payload (`LeafEntry` for File anchors, `Arc<DirSnapshot>`
+/// for Dir anchors); keeps the per-kind hash route and the owned
+/// re-wrap localised instead of fanned out across the accessors.
+trait AnchorPayload {
+    /// Anchor-rooted digest — `LeafEntry::leaf_hash` for File,
+    /// `DirSnapshot::dir_hash` for Dir.
+    fn payload_hash(&self) -> u128;
+    /// Owned [`TreeSnapshot`] re-wrap (`Arc` bump for Dir, copy for
+    /// File). The sum stores the inner payload, never a
+    /// `TreeSnapshot`, so the owned-projection accessors mint the
+    /// wrapper on demand.
+    fn rewrap(&self) -> TreeSnapshot;
+}
+
+impl AnchorPayload for crate::snapshot::tree::LeafEntry {
+    fn payload_hash(&self) -> u128 {
+        self.leaf_hash()
+    }
+    fn rewrap(&self) -> TreeSnapshot {
+        TreeSnapshot::File(self.clone())
+    }
+}
+
+impl AnchorPayload for Arc<crate::snapshot::tree::DirSnapshot> {
+    fn payload_hash(&self) -> u128 {
+        self.dir_hash()
+    }
+    fn rewrap(&self) -> TreeSnapshot {
+        TreeSnapshot::Dir(self.clone())
+    }
+}
+
+impl<S: AnchorPayload> SettledState<S> {
+    /// The settled anchor-rooted hash, or `None` when no settled
+    /// reference exists yet ([`Self::Unset`]). `Snapshot` digests its
+    /// payload; `Witness` returns the retained pre-loss hash directly.
+    /// This is also the witness a clear captures: the value that must
+    /// survive into [`AnchorClassification::Unclassified`] so a later
+    /// recovery can still detect drift.
+    fn to_hash(&self) -> Option<u128> {
+        match self {
+            Self::Unset => None,
+            Self::Snapshot(s) => Some(s.payload_hash()),
+            Self::Witness(h) => Some(*h),
+        }
+    }
+
+    /// The owned baseline snapshot — `Some` only in active mode
+    /// ([`Self::Snapshot`]). `Unset` (no baseline yet) and `Witness`
+    /// (baseline dropped at loss) have no snapshot to lend.
+    fn snapshot(&self) -> Option<TreeSnapshot> {
+        match self {
+            Self::Snapshot(s) => Some(s.rewrap()),
+            Self::Unset | Self::Witness(_) => None,
+        }
+    }
+}
+
+/// The anchor's on-disk classification and its settled reference, as
+/// one sum.
+///
+/// The discriminant *is* the anchor kind: there is no separately
+/// stored `kind` to disagree with the snapshot variant.
+/// `current = Dir ⇒ kind = Dir`, `current = File ⇒ kind = File`, and
+/// `unclassified ⇒ no snapshot` are structural — an ill-shaped pair
+/// cannot be constructed, so the engine's typed probe-dispatch chain
+/// is the *only* place kind agreement is decided, and a clear /
+/// install sequence cannot leave the pair half-written.
+///
+/// **`Dir.current` is dual-purpose.** Besides the drift-comparison
+/// snapshot, its entries *are* the covered-descendant watch-claim
+/// membership set: [`Profile::take_current`] hands the live `Dir`
+/// snapshot to the wholesale-deletion walk that releases every
+/// per-descendant contribution. A parallel descendant-id collection
+/// would duplicate exactly what the snapshot already encodes (and
+/// re-introduce the drift surface this sum removes); the live `Dir`
+/// snapshot is the single source of that membership.
+#[derive(Debug, Clone)]
+enum AnchorClassification {
+    /// Kind not yet known, or cleared at anchor loss. No snapshot is
+    /// representable here. `witness` carries the pre-loss
+    /// anchor-rooted hash across the loss window (set when the cleared
+    /// anchor had a settled reference; `None` for a fresh,
+    /// never-classified Profile).
+    Unclassified { witness: Option<u128> },
+    File {
+        current: Option<crate::snapshot::tree::LeafEntry>,
+        settled: SettledState<crate::snapshot::tree::LeafEntry>,
+    },
+    Dir {
+        current: Option<Arc<crate::snapshot::tree::DirSnapshot>>,
+        settled: SettledState<Arc<crate::snapshot::tree::DirSnapshot>>,
+    },
+}
+
 /// One stability state machine per `(Resource, ScanConfig)`.
 ///
-/// The six state-machine fields (`state`, `anchor_claim`, `kind`,
-/// `baseline`, `current`, `last_settled_hash_at_loss`) are
-/// module-private — their cross-field invariants are enforced by the
+/// The state-machine fields (`anchor`, `state`, `anchor_claim`) are
+/// module-private — their invariants are enforced by the
 /// setter/accessor API below, which is the only cross-crate write
-/// surface (`specter-engine` cannot assign them directly). The
+/// surface (`specter-engine` cannot assign them directly). `anchor`
+/// folds the anchor's kind, settled baseline, live snapshot, and
+/// survival witness into one [`AnchorClassification`] sum so the
+/// snapshot-shape and baseline/witness-exclusion invariants are
+/// structural rather than enforced by convention at clear sites. The
 /// remaining fields stay `pub` for engine read/write.
 #[derive(Debug)]
 pub struct Profile {
@@ -1095,92 +1223,42 @@ pub struct Profile {
     pub config: ScanConfig,
     pub exclude_strings: Arc<[CompactString]>,
     pub config_hash: u64,
-    /// Cached classification of the anchor — the on-disk shape Specter
-    /// observed at the resource. Set on the path that first learned the
-    /// kind (resource-based attach with a classified slot, descent
-    /// materialization, or first Seed-Ok response) and invariant for the
-    /// rest of the Profile's lifetime: anchor kind changes on disk surface
-    /// as `Vanished` at probe time, never as a mid-life mutation here.
+    /// The anchor's classification and settled reference, as one sum
+    /// (kind ⊕ live snapshot ⊕ settled baseline ⊕ survival witness).
     ///
-    /// **Lifecycle.**
-    /// - `None` while the Profile's `state` is `Pending` (descent has not
-    ///   yet materialised the anchor) **or** while a fresh resource-based
-    ///   attach hasn't yet seen its first probe response (the Resource
-    ///   slot was `Unknown` at attach-time and no probe has classified it).
-    /// - `None` after anchor loss (`Vanished` / `Failed` /
-    ///   `WatchOpRejected` on the anchor) — `Engine::discard_anchor_state`
-    ///   clears the cache so the next Seed burst routes through the
-    ///   kind-agnostic Subtree probe and avoids a wasted round-trip
-    ///   against a recreated anchor of a different on-disk shape.
-    /// - `Some(kind)` from the materialisation moment (descent → Idle, or
-    ///   first Seed-Ok dispatch, or resource-based attach against a
-    ///   classified slot) until the next anchor loss.
+    /// The discriminant *is* the anchor kind: there is no parallel
+    /// `kind` field to drift from the snapshot variant, and the
+    /// "no snapshot while unclassified" / "no baseline while a
+    /// survival witness is held" rules hold by construction. Reads go
+    /// through [`Self::kind`] / [`Self::current`] / [`Self::baseline`]
+    /// / [`Self::current_dir`] / [`Self::baseline_dir`] /
+    /// [`Self::settled_hash`] / [`Self::current_is_some`]; writes
+    /// through [`Self::install_dir_current`] /
+    /// [`Self::install_file_current`] (graft), [`Self::rebase_baseline`]
+    /// (settle the current snapshot as the baseline),
+    /// [`Self::take_current`] (release the covered-descendant claim),
+    /// [`Self::clear_anchor_classification`] (anchor loss — captures
+    /// the survival witness), and [`Self::materialize_anchor`]
+    /// (descent materialisation — carries the witness forward).
     ///
-    /// The "first observation wins" invariant applies **within a single
-    /// materialised epoch**. Across recovery cycles the cache is
-    /// deliberately invalidated so the kind-shape dispatch doesn't
-    /// misroute against a recreated anchor of a different shape.
+    /// **Lifecycle.** `Unclassified` while the anchor's kind is
+    /// unknown (descent in flight, fresh resource-attach against an
+    /// `Unknown` slot, or after anchor loss). `File` / `Dir` from the
+    /// materialisation moment until the next loss. The kind is fixed
+    /// for a materialised epoch — an on-disk kind change surfaces as a
+    /// probe `Vanished`, recovers through descent, and re-materialises
+    /// the sum, never mutates the discriminant in place.
     ///
-    /// **Why a Profile field, not a Tree lookup.** Engine-side dispatch
-    /// sites need the anchor's kind on the hot path: the burst-launch
-    /// helpers (`start_seed_burst`, `transition_to_verifying`,
-    /// `transition_to_rebasing`) read it to choose between
-    /// `emit_anchor_probe` and `emit_subtree_probe`, and `emit_effects`
-    /// reads it via `compute_cwd`. Each previously did
-    /// `tree.get(profile.resource).and_then(Resource::kind)` with a
-    /// hand-rolled fallback for the unprobed case. Caching once on the
-    /// Profile removes the per-dispatch lookup, lets the call sites read
-    /// the invariant directly, and centralises the fallback rationale on
-    /// this field's documentation rather than repeating it at each reader.
-    ///
-    /// **Reader convention.** Probe-shape dispatch matches the variant
-    /// directly (`Some(File) ⇒ AnchorFile`,
-    /// `Some(Dir | Unknown) | None ⇒ Subtree`); `Vanished` from a
-    /// kind-mismatched `Subtree` probe routes to descent recovery. The
-    /// `compute_cwd` reader uses `kind.unwrap_or(Dir)` since a Dir cwd at
-    /// the path itself is recoverable via `EffectOutcome::Failed` if the
-    /// path turns out to be a File.
-    ///
-    /// **Coherence with `Resource.kind`.** The Tree slot's `kind` field
-    /// (`Resource::kind`) is a parallel cache of the same observation,
-    /// updated by reconcile and explicit `Tree::set_kind` calls. The
-    /// engine reads `Profile.kind` for anchor-kind decisions; it does
-    /// not consult `Tree.kind` for the anchor in any post-attach path.
-    /// The Tree-side cache may stay stale across an
-    /// anchor-loss-recover cycle for shared anchors (the slot survives
-    /// because other Profiles anchor it). No production reader sees
-    /// the stale value because no engine path consults
-    /// `tree.get(anchor).kind` for the anchor's own kind in the
-    /// post-loss window — the invariant is "engine reads
-    /// `Profile.kind`, never `Tree.kind` for the anchor's kind."
-    /// Future write sites that introduce such a reader must
-    /// invalidate the Tree-side cache at the appropriate sites.
-    ///
-    /// **Snapshot-shape invariant.** When `current.is_some()`, the
-    /// `TreeSnapshot` variant must agree with `kind`:
-    /// `current = Some(TreeSnapshot::File(_)) ⇒ kind == Some(File)`;
-    /// `current = Some(TreeSnapshot::Dir(_)) ⇒ kind == Some(Dir)`. The
-    /// engine's typed [`crate::ProbeRequest`] / [`crate::ProbeOutcome`]
-    /// dispatch chain enforces this at runtime — not at compile time —
-    /// so the invariant is narrative; a sum-typed `current` would
-    /// type-enforce it but at the cost of every kind-agnostic reader of
-    /// `current` and `baseline` paying a per-variant dispatch tax. Any
-    /// future write site that mutates `current` and `kind` independently
-    /// must preserve the agreement; `Engine::discard_anchor_state`
-    /// clears both atomically inside one `Engine::step`.
-    kind: Option<ResourceKind>,
+    /// **Coherence with `Resource.kind`.** The Tree slot's `kind` is a
+    /// parallel cache updated by reconcile / `Tree::set_kind`; the
+    /// engine reads the anchor's kind here, never `Tree.kind` for the
+    /// anchor's own kind in any post-attach path, so a slot left stale
+    /// across a loss/recover cycle for a shared anchor is never
+    /// observed.
+    anchor: AnchorClassification,
     /// Sole post-construction writer: [`Self::transition_state`]; read
     /// via [`Self::state`].
     state: ProfileState,
-    /// Written via [`Self::rebase_baseline`] (set) and
-    /// [`Self::clear_anchor_classification`] (clear); read via
-    /// [`Self::baseline`].
-    baseline: Option<TreeSnapshot>,
-    /// Written via [`Self::install_dir_current`] /
-    /// [`Self::install_file_current`] (set) and [`Self::take_current`] /
-    /// [`Self::clear_anchor_classification`] (clear); read via
-    /// [`Self::current`].
-    current: Option<TreeSnapshot>,
     /// Cached nearest covering ancestor Profile — the parent edge
     /// `propagate` walks at burst-start (`+1`) and burst-end (`-1`).
     /// `None` for root Profiles whose ancestor chain holds no
@@ -1248,23 +1326,6 @@ pub struct Profile {
     /// history is the answer to "which Subs should re-fire on recovery if
     /// drift is detected?"
     pub fired_subs: BTreeSet<FiredKey>,
-    /// Anchor-rooted snapshot hash of `baseline` at the moment of
-    /// `discard_anchor_state` — the survival witness used by
-    /// `seed_drift_observed` to detect post-recovery drift after
-    /// `baseline` has been cleared. `None` whenever `baseline.is_some()`.
-    ///
-    /// **Lifecycle.** Set by [`Profile::capture_witness_at_loss`] (called
-    /// from `discard_anchor_state`, only when `baseline` was `Some` at the
-    /// time of loss). Cleared by [`Profile::rebase_baseline`] (called
-    /// from `dispatch_seed_ok` — both branches — and `dispatch_rebase_ok`).
-    ///
-    /// **Cross-field invariant.** `baseline.is_some() ⇒
-    /// last_settled_hash_at_loss.is_none()`. The witness exists *only*
-    /// during the survival window between anchor loss and recovery.
-    /// Active-mode drift detection consults `baseline` directly; the
-    /// witness substitutes for `baseline.hash()` once `baseline` is
-    /// cleared.
-    last_settled_hash_at_loss: Option<u128>,
     /// User-declared event-class mask for this Profile. Every Sub on a
     /// Profile shares this by construction (the mask folds into
     /// `config_hash`), so it is invariant for the Profile's lifetime.
@@ -1301,11 +1362,19 @@ impl Profile {
     /// the [`ScanConfig`] builder has already sorted the vector by source,
     /// so the projection is canonical without re-sorting.
     ///
-    /// `kind` is the anchor's classified shape at construction: `None`
-    /// for a `DescentScaffold` or freshly-`ensure`d-but-unprobed slot
-    /// (descent materialisation classifies it via
-    /// [`Self::materialize_anchor`]; the first Seed-Ok via
-    /// [`Self::install_dir_current`] / [`Self::install_file_current`]).
+    /// `kind` is the anchor's classified shape at construction,
+    /// projected into the [`AnchorClassification`] sum: `None` ⇒
+    /// `Unclassified` (a `DescentScaffold` or freshly-`ensure`d slot;
+    /// descent materialisation classifies it via
+    /// [`Self::materialize_anchor`], the first Seed-Ok via
+    /// [`Self::install_dir_current`] / [`Self::install_file_current`]);
+    /// `Some(Dir)` / `Some(File)` ⇒ a classified anchor with no
+    /// snapshot or baseline yet (the first probe response grafts the
+    /// current snapshot). `Some(Unknown)` is defensively dead:
+    /// `Resource::kind()` maps `Unknown → None`, so the sole production
+    /// caller never threads `Some(Unknown)`; the arm is debug-asserted
+    /// and degrades to `Unclassified` (the same shape as `None`) in
+    /// release rather than panicking or constructing an illegal state.
     #[must_use]
     pub fn new(
         resource: ResourceId,
@@ -1322,15 +1391,31 @@ impl Profile {
             .iter()
             .map(|g| CompactString::from(g.source()))
             .collect();
+        let anchor = match kind {
+            None => AnchorClassification::Unclassified { witness: None },
+            Some(ResourceKind::Dir) => AnchorClassification::Dir {
+                current: None,
+                settled: SettledState::Unset,
+            },
+            Some(ResourceKind::File) => AnchorClassification::File {
+                current: None,
+                settled: SettledState::Unset,
+            },
+            Some(ResourceKind::Unknown) => {
+                debug_assert!(
+                    false,
+                    "Profile::new: Resource::kind() yields Unknown→None, never Some(Unknown)",
+                );
+                AnchorClassification::Unclassified { witness: None }
+            }
+        };
         Self {
             resource,
             config,
             exclude_strings,
             config_hash,
-            kind,
+            anchor,
             state: ProfileState::Idle,
-            baseline: None,
-            current: None,
             parent_profile: None,
             dirty_descendants: 0,
             max_settle,
@@ -1338,137 +1423,153 @@ impl Profile {
             watch_root_parent: None,
             anchor_claim: AnchorClaim::None,
             fired_subs: BTreeSet::new(),
-            last_settled_hash_at_loss: None,
             events,
             has_per_file_fds,
         }
     }
 
-    /// Install a Dir-shaped `current`, atomically setting `kind =
-    /// Some(Dir)` alongside. Sole legitimate writer of
-    /// `(kind, current)` on the Dir arm — `grep -rnE 'p\.current
-    /// = '` on `crates/` should turn up only `Profile::*`
-    /// internals and this helper's call sites.
+    /// Graft a Dir-shaped `current` into the anchor classification.
+    /// Sole legitimate writer of the Dir `current` slot.
     ///
-    /// Atomic write here means: callers that observe `current` as
-    /// `Some(Dir)` are guaranteed to observe `kind` as `Some(Dir)` in
-    /// the same step. The setter encodes the [`Profile::kind`]
-    /// rustdoc's snapshot-shape invariant —
-    /// `current = Some(TreeSnapshot::Dir(_)) ⇒ kind == Some(Dir)` —
-    /// at the write API, not just in prose.
-    ///
-    /// **Precondition.** `kind.is_none() || kind == Some(Dir)`. A
-    /// `File`-kinded Profile receiving a Dir install is a walker /
-    /// dispatcher routing breach; the engine's dispatcher boundary
-    /// (`Engine::kind_agrees_or_finalize`) catches this case and
-    /// routes through `finalize_anchor_lost`, so the setter's
-    /// `debug_assert!` is a defensive backstop against a future caller
-    /// bypassing the boundary.
-    ///
-    /// **Baseline shape.** Production paths preserve `baseline` /
-    /// `current` shape agreement automatically: `rebase_baseline`
-    /// clones `current` into `baseline` (shape matches by construction);
-    /// `Engine::discard_anchor_state` clears both atomically. The
-    /// `debug_assert!` on baseline shape catches any direct-write
-    /// regression in tests; production paths never trigger it.
+    /// - From `Unclassified`: classify as `Dir`, carrying any survival
+    ///   witness forward into `settled` (recovery: `Witness(h)`; fresh:
+    ///   `Unset`). The witness must survive classification so the
+    ///   post-recovery drift verdict still has a reference.
+    /// - From `Dir`: overwrite `current`, leaving `settled` untouched
+    ///   (a re-graft within the same materialised epoch — fresh or
+    ///   mid-recovery).
+    /// - From `File`: a `File`-kinded Profile receiving a `Dir` graft
+    ///   is a dispatcher routing breach. The engine's
+    ///   `kind_agrees_or_finalize` boundary catches this and routes
+    ///   through `finalize_anchor_lost` (which clears to `Unclassified`)
+    ///   *before* any graft, so this arm is defensively dead;
+    ///   `debug_assert!` flags a future boundary bypass and release
+    ///   builds re-classify rather than construct an illegal pair.
     pub fn install_dir_current(&mut self, snapshot: Arc<crate::snapshot::tree::DirSnapshot>) {
-        debug_assert!(
-            self.kind.is_none() || self.kind == Some(ResourceKind::Dir),
-            "install_dir_current: kind mismatch (existing = {:?})",
-            self.kind,
-        );
-        debug_assert!(
-            self.baseline
-                .as_ref()
-                .is_none_or(|b| matches!(b, TreeSnapshot::Dir(_))),
-            "install_dir_current: baseline shape disagrees with new current (Dir)",
-        );
-        self.kind = Some(ResourceKind::Dir);
-        self.current = Some(TreeSnapshot::Dir(snapshot));
-    }
-
-    /// Install a File-shaped `current`, atomically setting `kind =
-    /// Some(File)` alongside. Sole legitimate writer of `(kind,
-    /// current)` on the File arm — symmetric with
-    /// [`Self::install_dir_current`].
-    ///
-    /// **Precondition.** `kind.is_none() || kind == Some(File)`. A
-    /// `Dir`-kinded Profile receiving a File install is the symmetric
-    /// dispatcher routing breach; `Engine::kind_agrees_or_finalize`
-    /// catches it and routes through `finalize_anchor_lost`.
-    pub fn install_file_current(&mut self, leaf: crate::snapshot::tree::LeafEntry) {
-        debug_assert!(
-            self.kind.is_none() || self.kind == Some(ResourceKind::File),
-            "install_file_current: kind mismatch (existing = {:?})",
-            self.kind,
-        );
-        debug_assert!(
-            self.baseline
-                .as_ref()
-                .is_none_or(|b| matches!(b, TreeSnapshot::File(_))),
-            "install_file_current: baseline shape disagrees with new current (File)",
-        );
-        self.kind = Some(ResourceKind::File);
-        self.current = Some(TreeSnapshot::File(leaf));
-    }
-
-    /// Reassert active mode after a rebase: lift `current` into `baseline`
-    /// (Arc bump on `Dir`, copy on `File`) and clear the survival witness.
-    /// Called from `dispatch_rebase_ok` and from both branches of
-    /// `dispatch_seed_ok` after a successful graft.
-    ///
-    /// **Post-condition.** Cross-field invariant
-    /// `baseline.is_some() ⇒ last_settled_hash_at_loss.is_none()` holds at
-    /// exit (assuming `current.is_some()` at entry, which holds at every
-    /// post-graft call site).
-    pub fn rebase_baseline(&mut self) {
-        self.baseline = self.current.clone();
-        self.last_settled_hash_at_loss = None;
-    }
-
-    /// Capture the survival witness from `baseline` at anchor loss. Called
-    /// from `discard_anchor_state` immediately before the helper clears
-    /// `baseline = None`. Idempotent against `baseline.is_none()` —
-    /// leaves any previously-captured witness in place rather than
-    /// overwriting with `None`.
-    ///
-    /// **Post-condition (when `baseline.is_some()` at entry).**
-    /// `last_settled_hash_at_loss == Some(baseline.hash())` at exit; the
-    /// caller then clears `baseline` to honour the cross-field invariant.
-    pub fn capture_witness_at_loss(&mut self) {
-        if let Some(b) = self.baseline.as_ref() {
-            self.last_settled_hash_at_loss = Some(b.hash());
+        match &mut self.anchor {
+            AnchorClassification::Dir { current, .. } => {
+                *current = Some(snapshot);
+            }
+            AnchorClassification::Unclassified { witness } => {
+                let settled = witness.map_or(SettledState::Unset, SettledState::Witness);
+                self.anchor = AnchorClassification::Dir {
+                    current: Some(snapshot),
+                    settled,
+                };
+            }
+            AnchorClassification::File { .. } => {
+                debug_assert!(
+                    false,
+                    "install_dir_current: kind mismatch (File-kinded Profile \
+                     received a Dir graft — dispatcher boundary bypassed)",
+                );
+                self.anchor = AnchorClassification::Dir {
+                    current: Some(snapshot),
+                    settled: SettledState::Unset,
+                };
+            }
         }
     }
 
-    /// Atomically clear the anchor classification triple
-    /// `(kind, baseline, current)`. Captures the survival witness from
-    /// `baseline` *first*, so the cross-field invariant
-    /// `baseline.is_some() ⇒ last_settled_hash_at_loss.is_none()` holds
-    /// at every step boundary. `current` is already `None` at every
-    /// production caller (`discard_anchor_state` runs
-    /// [`Self::take_current`] first); the write here backstops a future
-    /// caller that skips the take. The witness is *not* cleared — it is
-    /// consumed later by [`Self::rebase_baseline`]. Inverse of
+    /// Graft a File-shaped `current` into the anchor classification.
+    /// Symmetric with [`Self::install_dir_current`]: carries the
+    /// survival witness forward from `Unclassified`, overwrites
+    /// `current` from `File` leaving `settled` untouched, and treats a
+    /// `Dir`-kinded Profile as the defensively-dead dispatcher breach.
+    pub fn install_file_current(&mut self, leaf: crate::snapshot::tree::LeafEntry) {
+        match &mut self.anchor {
+            AnchorClassification::File { current, .. } => {
+                *current = Some(leaf);
+            }
+            AnchorClassification::Unclassified { witness } => {
+                let settled = witness.map_or(SettledState::Unset, SettledState::Witness);
+                self.anchor = AnchorClassification::File {
+                    current: Some(leaf),
+                    settled,
+                };
+            }
+            AnchorClassification::Dir { .. } => {
+                debug_assert!(
+                    false,
+                    "install_file_current: kind mismatch (Dir-kinded Profile \
+                     received a File graft — dispatcher boundary bypassed)",
+                );
+                self.anchor = AnchorClassification::File {
+                    current: Some(leaf),
+                    settled: SettledState::Unset,
+                };
+            }
+        }
+    }
+
+    /// Settle the live `current` snapshot as the new baseline: `settled
+    /// := Snapshot(current)`. Any survival witness is *consumed* — the
+    /// `Witness → Snapshot` move is the structural end of the
+    /// loss→recovery window (no separate witness-clear step exists).
+    /// Called from `dispatch_rebase_ok` and from both branches of
+    /// `dispatch_seed_ok` after a successful graft, where
+    /// `current.is_some()` holds.
+    pub fn rebase_baseline(&mut self) {
+        match &mut self.anchor {
+            AnchorClassification::Dir { current, settled } => {
+                debug_assert!(
+                    current.is_some(),
+                    "rebase_baseline: Dir current must be set at every post-graft caller",
+                );
+                if let Some(c) = current {
+                    *settled = SettledState::Snapshot(Arc::clone(c));
+                }
+            }
+            AnchorClassification::File { current, settled } => {
+                debug_assert!(
+                    current.is_some(),
+                    "rebase_baseline: File current must be set at every post-graft caller",
+                );
+                if let Some(c) = current {
+                    *settled = SettledState::Snapshot(c.clone());
+                }
+            }
+            AnchorClassification::Unclassified { .. } => {
+                debug_assert!(
+                    false,
+                    "rebase_baseline: called on an Unclassified anchor (no current to settle)",
+                );
+            }
+        }
+    }
+
+    /// Clear the anchor classification at anchor loss, capturing the
+    /// survival witness in one move: `File`/`Dir` ⇒ `Unclassified {
+    /// witness: settled.to_hash() }`. The witness is the settled
+    /// reference's hash (`Snapshot` digests; `Witness` passes through;
+    /// `Unset` ⇒ `None`), so a post-recovery Seed-Ok can still detect
+    /// drift after the baseline snapshot is gone. Idempotent against
+    /// an already-`Unclassified` anchor: the prior witness is
+    /// preserved, never overwritten with `None`. Inverse of
     /// [`Self::materialize_anchor`].
     pub fn clear_anchor_classification(&mut self) {
-        self.capture_witness_at_loss();
-        self.baseline = None;
-        self.current = None;
-        self.kind = None;
+        let witness = match &self.anchor {
+            AnchorClassification::Unclassified { witness } => *witness,
+            AnchorClassification::File { settled, .. } => settled.to_hash(),
+            AnchorClassification::Dir { settled, .. } => settled.to_hash(),
+        };
+        self.anchor = AnchorClassification::Unclassified { witness };
     }
 
     /// Atomically install a descent-materialised anchor: transition
-    /// `Pending → Idle`, install the claim, pin the discovered kind. Sole
-    /// caller `Engine::materialize_profile_anchor`, which launches the
-    /// Seed burst on the next statement — the `Idle` written here is a
-    /// structural intermediate, never observed. Inverse of
-    /// [`Self::clear_anchor_classification`].
+    /// `Pending → Idle`, install the claim, and classify the anchor
+    /// with the discovered `kind`, **carrying the survival witness
+    /// forward** (`Unclassified { witness } ⇒ File/Dir { current:
+    /// None, settled: Witness(h) | Unset }`). Sole caller
+    /// `Engine::materialize_profile_anchor`, which launches the Seed
+    /// burst on the next statement — the `Idle` written here is a
+    /// structural intermediate, never observed. The whole sequence
+    /// runs under one `&mut self` so no reader sees a partial write.
+    /// Inverse of [`Self::clear_anchor_classification`].
     ///
     /// Debug-asserts the fresh-materialisation preconditions
-    /// (`state == Pending`, no claim, unprobed kind); release builds
-    /// compile the asserts out and still write the triple atomically (a
-    /// breach is the same shape as an `install_*_current` kind mismatch).
+    /// (`state == Pending`, no claim, anchor `Unclassified`); release
+    /// builds compile the asserts out and still classify atomically.
     pub fn materialize_anchor(&mut self, kind: ResourceKind) {
         debug_assert!(
             matches!(self.state, ProfileState::Pending(_)),
@@ -1480,12 +1581,64 @@ impl Profile {
             "materialize_anchor: anchor_claim must be None",
         );
         debug_assert!(
-            self.kind.is_none(),
-            "materialize_anchor: kind must be unprobed",
+            matches!(self.anchor, AnchorClassification::Unclassified { .. }),
+            "materialize_anchor: anchor must be Unclassified (already classified)",
         );
+        let witness = match &self.anchor {
+            AnchorClassification::Unclassified { witness } => *witness,
+            AnchorClassification::File { .. } | AnchorClassification::Dir { .. } => None,
+        };
         self.state = ProfileState::Idle;
         self.anchor_claim = AnchorClaim::Held;
-        self.kind = Some(kind);
+        self.anchor = match kind {
+            ResourceKind::Dir => AnchorClassification::Dir {
+                current: None,
+                settled: witness.map_or(SettledState::Unset, SettledState::Witness),
+            },
+            ResourceKind::File => AnchorClassification::File {
+                current: None,
+                settled: witness.map_or(SettledState::Unset, SettledState::Witness),
+            },
+            ResourceKind::Unknown => {
+                debug_assert!(
+                    false,
+                    "materialize_anchor: kind Unknown (descent feeds a real dirent kind)",
+                );
+                AnchorClassification::Unclassified { witness }
+            }
+        };
+        self.debug_assert_anchor_coherent();
+    }
+
+    /// Debug-time coherence tripwire for the multi-field
+    /// classification coordinators (this `materialize_anchor` and the
+    /// engine's `discard_anchor_state`).
+    ///
+    /// The snapshot-shape (`kind ⇔ current` variant) and
+    /// baseline/witness-exclusion invariants are *structural* — no
+    /// representable [`AnchorClassification`] violates them, so there
+    /// is nothing to check there. What remains is the pair of
+    /// one-directional cross-axis invariants the type system does not
+    /// cover, asserted here so a future coordinator that leaves a
+    /// `Pending` Profile classified (or holding the anchor claim)
+    /// trips at the write site rather than latently at the next
+    /// dispatch / reap:
+    /// - `Pending ⇒ Unclassified` — during descent the anchor is not
+    ///   probed; the descent prefix, not the anchor, carries the watch.
+    /// - `Pending ⇒ ¬AnchorClaim::Held` — the descent prefix carries
+    ///   the STRUCTURE watch; the anchor claim is installed only at
+    ///   materialisation. (`reap_profile`'s trichotomy depends on this.)
+    pub fn debug_assert_anchor_coherent(&self) {
+        if matches!(self.state, ProfileState::Pending(_)) {
+            debug_assert!(
+                matches!(self.anchor, AnchorClassification::Unclassified { .. }),
+                "anchor coherence: a Pending Profile must be Unclassified",
+            );
+            debug_assert!(
+                matches!(self.anchor_claim, AnchorClaim::None),
+                "anchor coherence: a Pending Profile must not hold the anchor claim",
+            );
+        }
     }
 
     /// Sole legitimate post-construction writer of `state`. Returns the
@@ -1548,9 +1701,16 @@ impl Profile {
         self.anchor_claim
     }
 
+    /// Anchor kind discriminant — the sum's variant projected back to
+    /// the engine's `Option<ResourceKind>` shape. `Unclassified ⇒
+    /// None`; `File ⇒ Some(File)`; `Dir ⇒ Some(Dir)`.
     #[must_use]
     pub const fn kind(&self) -> Option<ResourceKind> {
-        self.kind
+        match &self.anchor {
+            AnchorClassification::Unclassified { .. } => None,
+            AnchorClassification::File { .. } => Some(ResourceKind::File),
+            AnchorClassification::Dir { .. } => Some(ResourceKind::Dir),
+        }
     }
 
     /// The Profile's user-declared event-class mask. Invariant for the
@@ -1561,19 +1721,100 @@ impl Profile {
         self.events
     }
 
+    /// The settled baseline as an owned [`TreeSnapshot`] — `Some` only
+    /// in active mode (a settled `Snapshot`). The sum stores the inner
+    /// payload, not a `TreeSnapshot`, so this mints the wrapper (Arc
+    /// bump for Dir, copy for File). `Unclassified`, a not-yet-settled
+    /// anchor, and the loss-window witness all yield `None`.
     #[must_use]
-    pub const fn baseline(&self) -> Option<&TreeSnapshot> {
-        self.baseline.as_ref()
+    pub fn baseline(&self) -> Option<TreeSnapshot> {
+        match &self.anchor {
+            AnchorClassification::Unclassified { .. } => None,
+            AnchorClassification::File { settled, .. } => settled.snapshot(),
+            AnchorClassification::Dir { settled, .. } => settled.snapshot(),
+        }
     }
 
+    /// The live `current` snapshot as an owned [`TreeSnapshot`].
+    /// Minted on demand (Arc bump for Dir, copy for File) — the sum
+    /// cannot lend a `&TreeSnapshot` it does not store in that shape.
+    /// Hot Dir readers that only need the inner `Arc` should prefer
+    /// [`Self::current_dir`] (no re-wrap); presence-only readers
+    /// [`Self::current_is_some`].
     #[must_use]
-    pub const fn current(&self) -> Option<&TreeSnapshot> {
-        self.current.as_ref()
+    pub fn current(&self) -> Option<TreeSnapshot> {
+        match &self.anchor {
+            AnchorClassification::Unclassified { .. } => None,
+            AnchorClassification::File { current, .. } => {
+                current.as_ref().map(AnchorPayload::rewrap)
+            }
+            AnchorClassification::Dir { current, .. } => {
+                current.as_ref().map(AnchorPayload::rewrap)
+            }
+        }
     }
 
+    /// Borrow the live Dir `current` snapshot's `Arc` directly — the
+    /// reconcile / probe hot path that wants `Arc::clone`, not an
+    /// owned `TreeSnapshot` re-wrap. `None` for File-kinded,
+    /// Unclassified, or current-absent anchors.
     #[must_use]
-    pub const fn last_settled_hash_at_loss(&self) -> Option<u128> {
-        self.last_settled_hash_at_loss
+    pub const fn current_dir(&self) -> Option<&Arc<crate::snapshot::tree::DirSnapshot>> {
+        match &self.anchor {
+            AnchorClassification::Dir {
+                current: Some(arc), ..
+            } => Some(arc),
+            _ => None,
+        }
+    }
+
+    /// Borrow the settled Dir baseline's `Arc` directly — symmetric
+    /// with [`Self::current_dir`] for the settled `Snapshot`. `None`
+    /// unless the anchor is `Dir` in active mode.
+    #[must_use]
+    pub const fn baseline_dir(&self) -> Option<&Arc<crate::snapshot::tree::DirSnapshot>> {
+        match &self.anchor {
+            AnchorClassification::Dir {
+                settled: SettledState::Snapshot(arc),
+                ..
+            } => Some(arc),
+            _ => None,
+        }
+    }
+
+    /// The settled anchor-rooted hash the post-recovery drift verdict
+    /// compares `current` against — one total function over the sum:
+    /// active-mode `Snapshot` digests its payload, the loss-window
+    /// `Witness` passes its retained hash through, the
+    /// `Unclassified` arm yields its carried witness, and a
+    /// not-yet-settled anchor yields `None`. Replaces the separate
+    /// witness accessor plus the ad-hoc baseline-hash branch at the
+    /// drift reader.
+    #[must_use]
+    pub fn settled_hash(&self) -> Option<u128> {
+        match &self.anchor {
+            AnchorClassification::Unclassified { witness } => *witness,
+            AnchorClassification::File { settled, .. } => settled.to_hash(),
+            AnchorClassification::Dir { settled, .. } => settled.to_hash(),
+        }
+    }
+
+    /// Whether a live `current` snapshot is present, without minting
+    /// (or `Arc`-bumping) one. The zero-cost presence check for
+    /// readers that branch on "has the anchor been grafted yet?"
+    /// rather than consuming the snapshot.
+    #[must_use]
+    pub const fn current_is_some(&self) -> bool {
+        matches!(
+            &self.anchor,
+            AnchorClassification::File {
+                current: Some(_),
+                ..
+            } | AnchorClassification::Dir {
+                current: Some(_),
+                ..
+            }
+        )
     }
 
     /// Mutable descent payload — thin delegator to
@@ -1596,14 +1837,23 @@ impl Profile {
         self.state.clear_active_reap()
     }
 
-    /// Take `current`, leaving `None` — the descendant-claim-release
-    /// primitive. Sole caller `Engine::release_descendant_claim`;
-    /// idempotent (a second call finds `None`). Not subsumed by
+    /// Take the live `current` snapshot, leaving the arm's `current`
+    /// `None` and `settled` untouched — the covered-descendant
+    /// claim-release primitive. The returned `Dir` snapshot's entries
+    /// *are* the descendant membership set the caller
+    /// (`Engine::release_descendant_claim`) walks via wholesale
+    /// deletion. Idempotent (a second call finds `None`); `File` has
+    /// no descendants and `Unclassified` has no snapshot, both
+    /// short-circuit to `None`. Not subsumed by
     /// [`Self::clear_anchor_classification`]: it runs first and is also
     /// called standalone from the `dispatch_*_vanished/failed` +
     /// `reap_profile` sites.
-    pub const fn take_current(&mut self) -> Option<TreeSnapshot> {
-        self.current.take()
+    pub fn take_current(&mut self) -> Option<TreeSnapshot> {
+        match &mut self.anchor {
+            AnchorClassification::Dir { current, .. } => current.take().map(TreeSnapshot::Dir),
+            AnchorClassification::File { current, .. } => current.take().map(TreeSnapshot::File),
+            AnchorClassification::Unclassified { .. } => None,
+        }
     }
 }
 
@@ -1715,7 +1965,10 @@ impl ProfileMap {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassSet, Profile, ProfileMap, ProfileState, ScanConfig, compute_config_hash};
+    use super::{
+        AnchorClassification, ClassSet, Profile, ProfileMap, ProfileState, ScanConfig,
+        SettledState, compute_config_hash,
+    };
     use crate::fs_id::FsIdentity;
     use crate::ids::ResourceId;
     use crate::output::StepOutput;
@@ -1747,8 +2000,8 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(matches!(p.state, ProfileState::Idle));
-        assert!(p.baseline.is_none());
-        assert!(p.current.is_none());
+        assert!(p.baseline().is_none());
+        assert!(!p.current_is_some());
         assert!(p.parent_profile.is_none());
         assert_eq!(p.dirty_descendants, 0);
         assert_eq!(p.max_settle, MAX_SETTLE);
@@ -1982,120 +2235,138 @@ mod tests {
     }
 
     #[test]
-    fn rebase_baseline_clones_current_into_baseline() {
+    fn rebase_baseline_settles_current_as_baseline() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
-        assert!(p.baseline.is_none());
+        p.install_dir_current(empty_dir_snapshot());
+        assert!(p.baseline().is_none(), "no baseline pre-rebase");
+        let current_hash = p.current().expect("current set").hash();
 
         p.rebase_baseline();
 
-        assert!(p.baseline.is_some());
         assert_eq!(
-            p.baseline.as_ref().unwrap().hash(),
-            p.current.as_ref().unwrap().hash(),
-            "baseline matches current",
+            p.baseline().expect("baseline settled").hash(),
+            current_hash,
+            "baseline matches the rebased current",
         );
     }
 
     #[test]
-    fn rebase_baseline_clears_witness() {
+    fn rebase_baseline_consumes_survival_witness() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
-        p.last_settled_hash_at_loss = Some(0xdead_beef);
+        // Recovery shape: a classified Dir carrying a live current and a
+        // survival witness (baseline cleared at the prior loss).
+        let snap = empty_dir_snapshot();
+        p.anchor = AnchorClassification::Dir {
+            current: Some(Arc::clone(&snap)),
+            settled: SettledState::Witness(0xdead_beef),
+        };
+        assert_eq!(p.settled_hash(), Some(0xdead_beef), "witness pre-rebase");
 
         p.rebase_baseline();
 
-        assert!(
-            p.last_settled_hash_at_loss.is_none(),
-            "rebase clears the witness",
+        assert_eq!(
+            p.settled_hash(),
+            Some(TreeSnapshot::Dir(snap).hash()),
+            "rebase replaces the witness with the settled current hash",
         );
-    }
-
-    #[test]
-    fn capture_witness_at_loss_sets_witness_from_baseline_dir_hash() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        let snap = TreeSnapshot::Dir(empty_dir_snapshot());
-        let expected = snap.hash();
-        p.baseline = Some(snap);
-
-        p.capture_witness_at_loss();
-
-        assert_eq!(p.last_settled_hash_at_loss, Some(expected));
-    }
-
-    #[test]
-    fn capture_witness_at_loss_sets_witness_from_baseline_leaf_hash() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("file", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        let snap = TreeSnapshot::File(empty_leaf_entry());
-        let expected = snap.hash();
-        p.baseline = Some(snap);
-
-        p.capture_witness_at_loss();
-
-        assert_eq!(p.last_settled_hash_at_loss, Some(expected));
+        assert!(p.baseline().is_some(), "active mode after rebase");
     }
 
     // -----------------------------------------------------------------------
-    // install_dir_current / install_file_current — atomic kind+current write
+    // install_dir_current / install_file_current — classifying graft
     // -----------------------------------------------------------------------
 
     #[test]
-    fn install_dir_current_sets_kind_and_current_atomically() {
+    fn install_dir_current_classifies_and_sets_current() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        assert!(p.kind.is_none(), "fresh Profile has unprobed kind");
-        assert!(p.current.is_none());
+        assert_eq!(p.kind(), None, "fresh Profile is unclassified");
+        assert!(!p.current_is_some());
 
         p.install_dir_current(empty_dir_snapshot());
 
         assert_eq!(
-            p.kind,
+            p.kind(),
             Some(crate::resource::ResourceKind::Dir),
-            "kind set atomically with current",
+            "kind is the sum discriminant after the graft",
         );
-        assert!(matches!(p.current, Some(TreeSnapshot::Dir(_))));
+        assert!(p.current_dir().is_some(), "Dir current borrowable");
+        assert!(matches!(p.current(), Some(TreeSnapshot::Dir(_))));
     }
 
     #[test]
-    fn install_file_current_sets_kind_and_current_atomically() {
+    fn install_file_current_classifies_and_sets_current() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("file", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         p.install_file_current(empty_leaf_entry());
 
-        assert_eq!(p.kind, Some(crate::resource::ResourceKind::File));
-        assert!(matches!(p.current, Some(TreeSnapshot::File(_))));
+        assert_eq!(p.kind(), Some(crate::resource::ResourceKind::File));
+        assert!(matches!(p.current(), Some(TreeSnapshot::File(_))));
+        assert!(p.current_dir().is_none(), "File has no Dir borrow");
     }
 
-    /// Setter is idempotent on `kind`: re-installing a Dir current on a
-    /// Dir-kinded Profile keeps `kind = Some(Dir)` and updates `current`.
+    /// Re-grafting a Dir current on a Dir-classified Profile keeps the
+    /// discriminant and leaves `settled` untouched (a within-epoch
+    /// re-graft, fresh or mid-recovery).
     #[test]
-    fn install_dir_current_idempotent_on_dir_kind() {
+    fn install_dir_current_reinstall_preserves_settled() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_dir_current(empty_dir_snapshot());
+        p.rebase_baseline();
+        let settled = p.settled_hash();
 
-        // Second install with a fresh snapshot.
+        // Second graft with a fresh (equal-content) snapshot.
         p.install_dir_current(empty_dir_snapshot());
 
-        assert_eq!(p.kind, Some(crate::resource::ResourceKind::Dir));
+        assert_eq!(p.kind(), Some(crate::resource::ResourceKind::Dir));
+        assert_eq!(
+            p.settled_hash(),
+            settled,
+            "re-graft leaves the settled baseline untouched",
+        );
     }
 
-    /// Cross-arm misuse: installing a `Dir` on a `File`-kinded Profile
-    /// panics in debug builds. Production paths never reach this branch
-    /// — `Engine::kind_agrees_or_finalize` catches the routing breach
-    /// at the dispatcher boundary before any caller invokes the setter.
+    /// Grafting onto an `Unclassified` anchor that carries a survival
+    /// witness (the post-loss recovery shape) classifies it *and*
+    /// carries the witness forward into `settled`, so the
+    /// post-recovery drift verdict still has a reference.
+    #[test]
+    fn install_dir_current_carries_witness_from_unclassified() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.anchor = AnchorClassification::Unclassified {
+            witness: Some(0x00c0_ffee),
+        };
+
+        p.install_dir_current(empty_dir_snapshot());
+
+        assert_eq!(p.kind(), Some(crate::resource::ResourceKind::Dir));
+        assert!(p.current_is_some());
+        assert_eq!(
+            p.settled_hash(),
+            Some(0x00c0_ffee),
+            "witness carried forward as Witness(settled)",
+        );
+        assert!(
+            p.baseline().is_none(),
+            "a carried witness is not an active baseline",
+        );
+    }
+
+    /// Cross-arm misuse: grafting a `Dir` onto a `File`-classified
+    /// Profile panics in debug builds. Production paths never reach
+    /// this branch — `Engine::kind_agrees_or_finalize` catches the
+    /// routing breach at the dispatcher boundary first.
     #[test]
     #[cfg_attr(
         not(debug_assertions),
@@ -2108,7 +2379,7 @@ mod tests {
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_file_current(empty_leaf_entry());
         // Boundary-bypass: a future caller skips
-        // `kind_agrees_or_finalize`; the setter's debug_assert fires.
+        // `kind_agrees_or_finalize`; the graft's debug_assert fires.
         p.install_dir_current(empty_dir_snapshot());
     }
 
@@ -2124,23 +2395,6 @@ mod tests {
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_dir_current(empty_dir_snapshot());
         p.install_file_current(empty_leaf_entry());
-    }
-
-    #[test]
-    fn capture_witness_at_loss_no_op_when_baseline_none() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        // Pre-populate witness; helper must not overwrite with None.
-        p.last_settled_hash_at_loss = Some(0x00c0_ffee);
-
-        p.capture_witness_at_loss();
-
-        assert_eq!(
-            p.last_settled_hash_at_loss,
-            Some(0x00c0_ffee),
-            "no-op preserves prior witness",
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -2581,31 +2835,37 @@ mod tests {
     }
 
     #[test]
-    fn read_accessors_mirror_fields() {
+    fn read_accessors_project_the_sum() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
+        // Fresh: Unclassified — every anchor projection empty.
         assert!(matches!(p.state(), ProfileState::Idle));
         assert_eq!(p.anchor_claim(), AnchorClaim::None);
         assert_eq!(p.kind(), None);
         assert!(p.baseline().is_none());
         assert!(p.current().is_none());
-        assert_eq!(p.last_settled_hash_at_loss(), None);
+        assert!(!p.current_is_some());
+        assert!(p.current_dir().is_none());
+        assert!(p.baseline_dir().is_none());
+        assert_eq!(p.settled_hash(), None);
 
-        let snap = TreeSnapshot::Dir(empty_dir_snapshot());
-        let h = snap.hash();
-        p.baseline = Some(snap.clone());
-        p.current = Some(snap);
-        p.kind = Some(ResourceKind::Dir);
-        p.anchor_claim = AnchorClaim::Held;
-        p.last_settled_hash_at_loss = Some(h);
+        // Graft + rebase: Dir in active mode (state E).
+        let snap = empty_dir_snapshot();
+        let h = TreeSnapshot::Dir(Arc::clone(&snap)).hash();
+        p.install_dir_current(snap);
+        p.rebase_baseline();
+        p.install_anchor_claim_held();
 
         assert_eq!(p.anchor_claim(), AnchorClaim::Held);
         assert_eq!(p.kind(), Some(ResourceKind::Dir));
         assert!(matches!(p.baseline(), Some(TreeSnapshot::Dir(_))));
         assert!(matches!(p.current(), Some(TreeSnapshot::Dir(_))));
-        assert_eq!(p.last_settled_hash_at_loss(), Some(h));
+        assert!(p.current_is_some());
+        assert!(p.current_dir().is_some(), "Dir current borrowable");
+        assert!(p.baseline_dir().is_some(), "Dir baseline borrowable");
+        assert_eq!(p.settled_hash(), Some(h), "settled hash = baseline hash");
     }
 
     #[test]
@@ -2624,49 +2884,75 @@ mod tests {
     }
 
     #[test]
-    fn clear_anchor_classification_clears_triple_and_captures_witness() {
+    fn clear_anchor_classification_unclassifies_and_captures_witness() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        let snap = TreeSnapshot::Dir(empty_dir_snapshot());
-        let expected = snap.hash();
-        p.kind = Some(ResourceKind::Dir);
-        p.baseline = Some(snap.clone());
-        p.current = Some(snap);
+        let snap = empty_dir_snapshot();
+        let expected = TreeSnapshot::Dir(Arc::clone(&snap)).hash();
+        // Active-mode Dir (state E): graft then settle the baseline.
+        p.install_dir_current(snap);
+        p.rebase_baseline();
 
         p.clear_anchor_classification();
 
-        assert_eq!(p.kind(), None);
+        assert_eq!(p.kind(), None, "unclassified after loss");
         assert!(p.baseline().is_none());
-        assert!(p.current().is_none());
+        assert!(!p.current_is_some());
         assert_eq!(
-            p.last_settled_hash_at_loss(),
+            p.settled_hash(),
             Some(expected),
-            "witness captured from baseline before the clear",
+            "witness captured from the settled baseline in one move",
         );
     }
 
     #[test]
-    fn clear_anchor_classification_preserves_prior_witness_when_baseline_none() {
+    fn clear_anchor_classification_from_file_baseline_captures_leaf_hash() {
         let mut tree = Tree::new();
-        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let r = tree.ensure_root("file", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        // Already-lost shape: no baseline, witness already held.
-        p.last_settled_hash_at_loss = Some(0x00c0_ffee);
-        p.kind = Some(ResourceKind::Dir);
+        let leaf = empty_leaf_entry();
+        let expected = TreeSnapshot::File(leaf.clone()).hash();
+        p.install_file_current(leaf);
+        p.rebase_baseline();
 
         p.clear_anchor_classification();
 
-        assert_eq!(
-            p.last_settled_hash_at_loss(),
-            Some(0x00c0_ffee),
-            "capture is a no-op against None baseline — prior witness survives",
-        );
         assert_eq!(p.kind(), None);
+        assert_eq!(
+            p.settled_hash(),
+            Some(expected),
+            "File baseline hash captured as the witness",
+        );
     }
 
     #[test]
-    fn materialize_anchor_installs_triple_from_pending() {
+    fn clear_anchor_classification_is_idempotent_preserving_witness() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        // Already-lost shape: classified but baseline cleared at the
+        // prior loss, only the survival witness remains.
+        p.anchor = AnchorClassification::Dir {
+            current: None,
+            settled: SettledState::Witness(0x00c0_ffee),
+        };
+
+        p.clear_anchor_classification();
+        assert_eq!(p.kind(), None);
+        assert_eq!(p.settled_hash(), Some(0x00c0_ffee), "witness carried");
+
+        // Second clear (already Unclassified) must preserve, not null.
+        p.clear_anchor_classification();
+        assert_eq!(
+            p.settled_hash(),
+            Some(0x00c0_ffee),
+            "idempotent clear preserves the prior witness",
+        );
+    }
+
+    #[test]
+    fn materialize_anchor_classifies_from_pending() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
@@ -2677,6 +2963,34 @@ mod tests {
         assert!(matches!(p.state(), ProfileState::Idle));
         assert_eq!(p.anchor_claim(), AnchorClaim::Held);
         assert_eq!(p.kind(), Some(ResourceKind::Dir));
+        assert!(!p.current_is_some(), "materialised, not yet grafted");
+        assert_eq!(p.settled_hash(), None, "fresh: no witness, no baseline");
+    }
+
+    /// Recovery path: descent re-materialises an anchor that lost its
+    /// baseline. The survival witness held on the `Unclassified`
+    /// anchor must survive classification so the post-recovery Seed-Ok
+    /// drift verdict still has a reference (states B → C).
+    #[test]
+    fn materialize_anchor_carries_survival_witness() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.state = pending(r);
+        p.anchor = AnchorClassification::Unclassified {
+            witness: Some(0xfeed_face),
+        };
+
+        p.materialize_anchor(ResourceKind::Dir);
+
+        assert_eq!(p.kind(), Some(ResourceKind::Dir));
+        assert!(!p.current_is_some());
+        assert_eq!(
+            p.settled_hash(),
+            Some(0xfeed_face),
+            "witness carried forward through materialisation",
+        );
+        assert!(p.baseline().is_none(), "witness is not an active baseline");
     }
 
     #[test]
@@ -2713,13 +3027,16 @@ mod tests {
         not(debug_assertions),
         ignore = "debug_assert! is compiled out in release"
     )]
-    #[should_panic(expected = "kind must be unprobed")]
-    fn materialize_anchor_panics_when_kind_probed() {
+    #[should_panic(expected = "anchor must be Unclassified")]
+    fn materialize_anchor_panics_when_already_classified() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.state = pending(r);
-        p.kind = Some(ResourceKind::Dir);
+        p.anchor = AnchorClassification::Dir {
+            current: None,
+            settled: SettledState::Unset,
+        };
         p.materialize_anchor(ResourceKind::Dir);
     }
 
@@ -2835,28 +3152,43 @@ mod tests {
     }
 
     #[test]
-    fn take_current_takes_and_is_idempotent() {
+    fn take_current_takes_leaves_settled_and_is_idempotent() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
+        p.install_dir_current(empty_dir_snapshot());
+        p.rebase_baseline();
+        let settled = p.settled_hash();
 
         let taken = p.take_current();
         assert!(matches!(taken, Some(TreeSnapshot::Dir(_))));
-        assert!(p.current().is_none(), "take leaves None");
+        assert!(!p.current_is_some(), "take leaves current None");
+        assert_eq!(
+            p.settled_hash(),
+            settled,
+            "take_current does not disturb the settled baseline",
+        );
         assert!(p.take_current().is_none(), "second take is idempotent");
+
+        // Unclassified short-circuits to None.
+        let mut q = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert!(q.take_current().is_none(), "Unclassified has no current");
     }
 
-    /// Guarded random walk over the public state-machine mutators,
-    /// asserting after every op: `baseline`/`current` share a
-    /// `TreeSnapshot` variant when both set; `kind` agrees with
-    /// `current`'s variant; a present `baseline` implies no survival
-    /// witness. Guards read the live accessors so a step never trips a
-    /// precondition instead of the invariant under test. Deterministic
-    /// xorshift64 PRNG, seed pinned in the fn name; 16 fresh Profiles so
-    /// the one-shot `materialize_anchor` is exercised.
+    /// Guarded random walk over the public anchor mutators, asserting
+    /// after every op that the projection surface stays consistent
+    /// with the underlying sum and that every reachable shape is one
+    /// of the documented states. The snapshot-shape and
+    /// baseline/witness-exclusion invariants are *structural* (no
+    /// representable `AnchorClassification` violates them) — these
+    /// assertions are the defense-in-depth tripwire that would catch a
+    /// future flat-field regression or a projection bug. Guards
+    /// respect each mutator's documented precondition so a step trips
+    /// the consistency check, never a precondition `debug_assert!`.
+    /// Deterministic xorshift64 PRNG, seed pinned in the fn name; 16
+    /// fresh Profiles so the one-shot `materialize_anchor` is exercised.
     #[test]
-    fn cross_field_invariants_hold_under_random_api_walk_seed_0x5eed_f00d() {
+    fn anchor_projection_consistent_under_random_api_walk_seed_0x5eed_f00d() {
         struct XorShift64(u64);
         impl XorShift64 {
             fn next_u64(&mut self) -> u64 {
@@ -2876,26 +3208,105 @@ mod tests {
             matches!(s, TreeSnapshot::Dir(_))
         }
 
+        // Every public projection must agree with the underlying sum,
+        // and the shape must be one of the eight reachable rows.
         fn assert_invariants(p: &Profile, op: &str) {
-            if let (Some(b), Some(c)) = (p.baseline(), p.current()) {
-                assert_eq!(
-                    is_dir(b),
-                    is_dir(c),
-                    "inv1 (baseline/current share a variant) violated after {op}",
-                );
+            let current = p.current();
+            let baseline = p.baseline();
+
+            // Snapshot-shape: when both present they share a variant;
+            // kind tracks the current variant.
+            if let (Some(b), Some(c)) = (&baseline, &current) {
+                assert_eq!(is_dir(b), is_dir(c), "baseline/current variant after {op}");
             }
-            if let (Some(k), Some(c)) = (p.kind(), p.current()) {
+            if let (Some(k), Some(c)) = (p.kind(), &current) {
                 assert_eq!(
                     matches!(k, ResourceKind::Dir),
                     is_dir(c),
-                    "inv2 (kind matches current variant) violated after {op}",
+                    "kind/current variant after {op}",
                 );
             }
-            if p.baseline().is_some() {
-                assert!(
-                    p.last_settled_hash_at_loss().is_none(),
-                    "inv3 (baseline ⇒ no survival witness) violated after {op}",
+
+            // Cheap predicate ⇔ owned accessor.
+            assert_eq!(
+                p.current_is_some(),
+                current.is_some(),
+                "current_is_some disagrees with current() after {op}",
+            );
+
+            // Typed-borrow projections agree with the owned views.
+            assert_eq!(
+                p.current_dir().is_some(),
+                matches!(&current, Some(TreeSnapshot::Dir(_))),
+                "current_dir disagrees with current() after {op}",
+            );
+            assert_eq!(
+                p.baseline_dir().is_some(),
+                matches!(&baseline, Some(TreeSnapshot::Dir(_))),
+                "baseline_dir disagrees with baseline() after {op}",
+            );
+            if let Some(d) = p.current_dir() {
+                assert_eq!(
+                    TreeSnapshot::Dir(Arc::clone(d)).hash(),
+                    current.as_ref().unwrap().hash(),
+                    "current_dir hash disagrees with current() after {op}",
                 );
+            }
+
+            // Reachable-state membership + projection ⇔ sum coherence.
+            match &p.anchor {
+                AnchorClassification::Unclassified { witness } => {
+                    assert_eq!(p.kind(), None, "Unclassified ⇒ kind None after {op}");
+                    assert!(
+                        baseline.is_none() && current.is_none(),
+                        "Unclassified ⇒ no snapshot after {op}",
+                    );
+                    assert_eq!(
+                        p.settled_hash(),
+                        *witness,
+                        "Unclassified settled_hash is the carried witness after {op}",
+                    );
+                }
+                // `baseline` is exposed iff `settled` is an active
+                // `Snapshot`; a `Witness` is a survival hash, not a
+                // live baseline. `Snapshot` xor `Witness` is
+                // structural, so this can never observe both. The
+                // File / Dir arms differ only in the `settled`
+                // payload type, so each computes its own expectation.
+                AnchorClassification::File { settled, .. } => {
+                    assert_eq!(
+                        baseline.is_some(),
+                        matches!(settled, SettledState::Snapshot(_)),
+                        "baseline() ⇔ settled Snapshot (File) after {op}",
+                    );
+                    let expected = match settled {
+                        SettledState::Unset => None,
+                        SettledState::Snapshot(_) => baseline.as_ref().map(TreeSnapshot::hash),
+                        SettledState::Witness(h) => Some(*h),
+                    };
+                    assert_eq!(
+                        p.settled_hash(),
+                        expected,
+                        "settled_hash disagrees with settled (File) after {op}",
+                    );
+                }
+                AnchorClassification::Dir { settled, .. } => {
+                    assert_eq!(
+                        baseline.is_some(),
+                        matches!(settled, SettledState::Snapshot(_)),
+                        "baseline() ⇔ settled Snapshot (Dir) after {op}",
+                    );
+                    let expected = match settled {
+                        SettledState::Unset => None,
+                        SettledState::Snapshot(_) => baseline.as_ref().map(TreeSnapshot::hash),
+                        SettledState::Witness(h) => Some(*h),
+                    };
+                    assert_eq!(
+                        p.settled_hash(),
+                        expected,
+                        "settled_hash disagrees with settled (Dir) after {op}",
+                    );
+                }
             }
         }
 
@@ -2911,21 +3322,15 @@ mod tests {
             for _ in 0..512 {
                 match rng.below(9) {
                     0 => {
-                        let kind_ok = matches!(p.kind(), None | Some(ResourceKind::Dir));
-                        let base_ok = p
-                            .baseline()
-                            .is_none_or(|b| matches!(b, TreeSnapshot::Dir(_)));
-                        if kind_ok && base_ok {
+                        // Precondition: not File-classified (cross-arm
+                        // graft is a dispatcher-boundary breach).
+                        if !matches!(p.kind(), Some(ResourceKind::File)) {
                             p.install_dir_current(empty_dir_snapshot());
                             assert_invariants(&p, "install_dir_current");
                         }
                     }
                     1 => {
-                        let kind_ok = matches!(p.kind(), None | Some(ResourceKind::File));
-                        let base_ok = p
-                            .baseline()
-                            .is_none_or(|b| matches!(b, TreeSnapshot::File(_)));
-                        if kind_ok && base_ok {
+                        if !matches!(p.kind(), Some(ResourceKind::Dir)) {
                             p.install_file_current(empty_leaf_entry());
                             assert_invariants(&p, "install_file_current");
                         }
@@ -2935,6 +3340,7 @@ mod tests {
                         assert_invariants(&p, "clear_anchor_classification");
                     }
                     3 => {
+                        // Precondition: Pending, no claim, Unclassified.
                         let pending = matches!(p.state(), ProfileState::Pending(_));
                         if pending && p.anchor_claim() == AnchorClaim::None && p.kind().is_none() {
                             let k = if rng.below(2) == 0 {
@@ -2947,8 +3353,11 @@ mod tests {
                         }
                     }
                     4 => {
-                        p.rebase_baseline();
-                        assert_invariants(&p, "rebase_baseline");
+                        // Precondition: a live current to settle.
+                        if p.current_is_some() {
+                            p.rebase_baseline();
+                            assert_invariants(&p, "rebase_baseline");
+                        }
                     }
                     5 => {
                         p.transition_state(ProfileState::Idle);
@@ -2969,5 +3378,141 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `Profile::new`'s `kind` → sum projection is total: `None` ⇒
+    /// `Unclassified` (state A), `Some(Dir)` / `Some(File)` ⇒ a
+    /// classified anchor with no snapshot or baseline (state C′).
+    #[test]
+    fn profile_new_projects_kind_to_initial_state() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+
+        let a = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert!(matches!(
+            a.anchor,
+            AnchorClassification::Unclassified { witness: None }
+        ));
+        assert_eq!(a.kind(), None);
+        assert_eq!(a.settled_hash(), None);
+
+        let c_dir = Profile::new(
+            r,
+            cfg(),
+            MAX_SETTLE,
+            SETTLE,
+            NO_EVENTS,
+            Some(ResourceKind::Dir),
+        );
+        assert!(matches!(
+            c_dir.anchor,
+            AnchorClassification::Dir {
+                current: None,
+                settled: SettledState::Unset
+            }
+        ));
+        assert_eq!(c_dir.kind(), Some(ResourceKind::Dir));
+        assert!(!c_dir.current_is_some());
+        assert_eq!(c_dir.settled_hash(), None);
+
+        let c_file = Profile::new(
+            r,
+            cfg(),
+            MAX_SETTLE,
+            SETTLE,
+            NO_EVENTS,
+            Some(ResourceKind::File),
+        );
+        assert!(matches!(
+            c_file.anchor,
+            AnchorClassification::File {
+                current: None,
+                settled: SettledState::Unset
+            }
+        ));
+        assert_eq!(c_file.kind(), Some(ResourceKind::File));
+    }
+
+    /// `Some(ResourceKind::Unknown)` is defensively dead — the sole
+    /// production caller threads `Resource::kind()` which maps
+    /// `Unknown → None`. Release builds degrade to `Unclassified`
+    /// (same shape as `None`) rather than constructing an illegal
+    /// state; debug builds trip the `debug_assert!`.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "Resource::kind() yields Unknown→None")]
+    fn profile_new_unknown_kind_is_defensively_dead() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let _ = Profile::new(
+            r,
+            cfg(),
+            MAX_SETTLE,
+            SETTLE,
+            NO_EVENTS,
+            Some(ResourceKind::Unknown),
+        );
+    }
+
+    /// `settled_hash` is the one total drift reference across the sum:
+    /// not-yet-settled ⇒ `None`; active baseline ⇒ its digest;
+    /// loss-window witness ⇒ the retained hash; carried after a clear.
+    #[test]
+    fn settled_hash_is_total_across_the_sum() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert_eq!(p.settled_hash(), None, "Unclassified, no witness");
+
+        let snap = empty_dir_snapshot();
+        let h = TreeSnapshot::Dir(Arc::clone(&snap)).hash();
+        p.install_dir_current(snap);
+        assert_eq!(p.settled_hash(), None, "grafted but not settled (Unset)");
+
+        p.rebase_baseline();
+        assert_eq!(p.settled_hash(), Some(h), "active baseline digest");
+
+        p.clear_anchor_classification();
+        assert_eq!(p.settled_hash(), Some(h), "witness carried across loss");
+        assert_eq!(p.kind(), None);
+    }
+
+    /// `debug_assert_anchor_coherent` enforces the residual
+    /// cross-axis invariant `Pending ⇒ Unclassified ∧ ¬Held`. The
+    /// happy path (every shape outside `Pending`, or `Pending` while
+    /// `Unclassified`) is silent; a classified `Pending` trips.
+    #[test]
+    fn anchor_coherent_is_silent_on_reachable_shapes() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+
+        p.debug_assert_anchor_coherent(); // Idle + Unclassified
+        p.state = pending(r);
+        p.debug_assert_anchor_coherent(); // Pending + Unclassified ✓
+        p.transition_state(ProfileState::Idle);
+        p.install_dir_current(empty_dir_snapshot());
+        p.debug_assert_anchor_coherent(); // Idle + classified ✓
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "Pending Profile must be Unclassified")]
+    fn anchor_coherent_trips_on_classified_pending() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.state = pending(r);
+        p.anchor = AnchorClassification::Dir {
+            current: None,
+            settled: SettledState::Unset,
+        };
+        p.debug_assert_anchor_coherent();
     }
 }
