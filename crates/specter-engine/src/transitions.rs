@@ -21,10 +21,11 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, AnchorClaim, BurstFinish, BurstIntent, ClaimKind, ClassSet, DedupKey,
-    DescentRemaining, Diagnostic, Effect, EffectOutcome, EffectScope, FsEvent, OverflowScope,
-    PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
-    PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource, ResourceId, ResourceKind,
-    StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
+    DescentRemaining, Diagnostic, Effect, EffectCommon, EffectOutcome, EffectScope, FsEvent,
+    OverflowScope, PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
+    ProfileState, PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource, ResourceId,
+    ResourceKind, StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp,
+    WatchRegistryDiff,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -2244,29 +2245,26 @@ impl Engine {
                     let Some(sub) = self.subs.get(sub_id) else {
                         continue;
                     };
-                    out.effects.push(Effect {
-                        key: dk.clone(),
-                        // Subtree's target is the anchor — `resource` was
-                        // captured at the function head from
-                        // `Profile.resource`. Frozen-at-emit so sort
-                        // survives any post-emit state churn without a
-                        // ProfileMap lookup.
-                        target: resource,
-                        forced: effect_forced,
-                        correlation,
-                        diff: diff_for_effect,
-                        capture_output: log_output,
-                        sub_name: sub.name.clone(),
-                        program: Arc::clone(&sub.program),
-                        anchor_path: Arc::clone(&anchor_path),
-                        anchor_kind,
-                        // Subtree: no per-entry segment. The resolver
-                        // derives `${specter.path}` (and `SPECTER_PATH`)
-                        // from `anchor_path` directly when
-                        // `target_relative` is empty.
-                        target_relative: CompactString::new(""),
-                        exclude: Arc::clone(&exclude_strings),
-                    });
+                    out.effects.push(Effect::subtree(
+                        EffectCommon {
+                            sub: sub_id,
+                            profile: profile_id,
+                            // `resource` was captured at the function
+                            // head from `Profile.resource`; frozen at
+                            // emit so the sort survives post-emit churn
+                            // without a ProfileMap lookup.
+                            anchor: resource,
+                            correlation,
+                            forced: effect_forced,
+                            capture_output: log_output,
+                            sub_name: sub.name.clone(),
+                            program: Arc::clone(&sub.program),
+                            anchor_path: Arc::clone(&anchor_path),
+                            anchor_kind,
+                            exclude: Arc::clone(&exclude_strings),
+                        },
+                        diff_for_effect,
+                    ));
                     count = count.saturating_add(1);
 
                     if let Some(p) = self.profiles.get_mut(profile_id) {
@@ -2396,29 +2394,24 @@ impl Engine {
                 continue;
             };
             let log_output = sub.log_output;
-            out.effects.push(Effect {
-                key: dk.clone(),
-                // PerFile's target is the file resource — same value as
-                // `dk.resource` by construction. Carried separately so
-                // sort doesn't have to peek inside the variant; the pair
-                // `(sub_of_key, target)` is uniform across both arms.
-                target: resource,
-                forced,
-                correlation,
-                diff: Some(diff.clone()),
-                capture_output: log_output,
-                sub_name: sub.name.clone(),
-                program: Arc::clone(&sub.program),
-                anchor_path: Arc::clone(anchor_path),
-                anchor_kind,
-                // PerFile: the file segment. The resolver derives
-                // `${specter.path}` (and `SPECTER_PATH`) by joining
-                // `anchor_path` with this at spawn time — deferring the
-                // `PathBuf` allocation past the actuator's Latest-coalesce
-                // so dropped Effects don't pay for it.
-                target_relative: entry.segment.clone(),
-                exclude: Arc::clone(exclude_strings),
-            });
+            out.effects.push(Effect::per_file(
+                EffectCommon {
+                    sub: sub_id,
+                    profile: profile_id,
+                    anchor,
+                    correlation,
+                    forced,
+                    capture_output: log_output,
+                    sub_name: sub.name.clone(),
+                    program: Arc::clone(&sub.program),
+                    anchor_path: Arc::clone(anchor_path),
+                    anchor_kind,
+                    exclude: Arc::clone(exclude_strings),
+                },
+                resource,
+                entry.segment.clone(),
+                diff.clone(),
+            ));
             count = count.saturating_add(1);
 
             if let Some(p) = self.profiles.get_mut(profile_id) {

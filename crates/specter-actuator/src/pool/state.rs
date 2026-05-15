@@ -232,7 +232,7 @@ impl std::fmt::Debug for RunningJob {
         f.debug_struct("RunningJob")
             .field("pid", &self.pid)
             .field("cursor", &self.cursor)
-            .field("sub", &self.effect.key.sub())
+            .field("sub", &self.effect.sub)
             .field("correlation", &self.effect.correlation)
             .finish_non_exhaustive()
     }
@@ -308,9 +308,9 @@ impl ActuatorState {
         reap_tx: &Sender<super::Reaped>,
         engine_in: &Sender<Input>,
     ) {
-        let key = effect.key.clone();
+        let key = effect.key();
         tracing::trace!(?key, "submit");
-        let slot = self.slots.entry(key.clone()).or_default();
+        let slot = self.slots.entry(key).or_default();
         if slot.running.is_some() || slot.plan_continue.is_some() {
             // Plan in flight; Latest-coalesce — drop old pending if
             // present. Never touches `running` or `plan_continue`: the
@@ -608,7 +608,7 @@ impl ActuatorState {
     ) {
         let _ = engine_in.send(Input::EffectComplete {
             sub,
-            key: key.clone(),
+            key,
             result: outcome,
         });
         if let Some(c) = self.running_per_sub.get_mut(&sub) {
@@ -780,7 +780,7 @@ impl ActuatorState {
         // with `None`, the resolver omits the env var. The path lives
         // for the whole plan's lifetime — every instruction shares it;
         // cleaned exactly once at terminate_plan.
-        let diff_tmp_path = effect.diff.as_ref().and_then(|diff| {
+        let diff_tmp_path = effect.diff().and_then(|diff| {
             let path = crate::tmp::tmp_path(effect.correlation);
             match crate::tmp::write_diff_file(&path, diff) {
                 Ok(()) => Some(path),
@@ -1395,7 +1395,7 @@ impl ActuatorState {
         reap_tx: &Sender<super::Reaped>,
     ) -> Result<(), SpawnFailureCause> {
         let reap_tx_for_thread = reap_tx.clone();
-        let wait_key = key.clone();
+        let wait_key = *key;
         if let Err(e) = std::thread::Builder::new()
             // Linux pthread_setname_np truncates to 15 chars + null;
             // `act-wait-` is 9 chars, leaving room for a 6-digit pid
@@ -1553,8 +1553,8 @@ mod tests {
     use crossbeam::channel::{Sender, unbounded};
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
     use specter_core::{
-        ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
-        ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
+        ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Diff, Effect, EffectCommon,
+        EffectOutcome, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::io;
     use std::num::NonZeroUsize;
@@ -1639,20 +1639,28 @@ mod tests {
         corr: u64,
         steps: usize,
     ) -> Effect {
-        Effect {
-            key,
-            target,
-            forced: false,
+        // Every caller passes a `perfile_key(N, N, N)` whose `resource`
+        // equals the `target` (both `unique_resource_id(N)`), so the
+        // derived `key()` reproduces the original `perfile_key`.
+        let common = EffectCommon {
+            sub: key.sub(),
+            profile: key.profile(),
+            anchor: target,
             correlation: CorrelationId::from(corr),
-            diff: None,
+            forced: false,
             capture_output: false,
             sub_name: CompactString::new(""),
             program: n_step_program(steps),
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
-            target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
-        }
+        };
+        Effect::per_file(
+            common,
+            target,
+            CompactString::new(""),
+            Arc::new(Diff::default()),
+        )
     }
 
     /// No-op Spawner stub for tests that go through `handle_reap_inner`
@@ -1905,14 +1913,14 @@ mod tests {
         let mut state = test_state(nz(2));
         let key = perfile_key(1, 1, 1);
         let sub = unique_sub_id(1);
-        state.slots.insert(key.clone(), Slot::default());
+        state.slots.insert(key, Slot::default());
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
         state.handle_reap_inner(
             Reaped {
-                key: key.clone(),
+                key,
                 sub,
                 correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Failed {
@@ -1963,12 +1971,12 @@ mod tests {
         let sub = unique_sub_id(2);
         let res = unique_resource_id(2);
         let signaler = Arc::new(CountingSignaler::default());
-        let effect = Arc::new(dummy_effect(key.clone(), res, 5));
+        let effect = Arc::new(dummy_effect(key, res, 5));
         let slot = Slot {
             running: Some(stub_running_job(effect, Arc::clone(&signaler))),
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
+        state.slots.insert(key, slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
@@ -2015,13 +2023,13 @@ mod tests {
         let sub = unique_sub_id(3);
         let res = unique_resource_id(3);
         let signaler = Arc::new(CountingSignaler::default());
-        let effect = Arc::new(dummy_effect(key.clone(), res, 7));
+        let effect = Arc::new(dummy_effect(key, res, 7));
         let slot = Slot {
             running: Some(stub_running_job(effect, signaler)),
-            pending: Some(dummy_effect(key.clone(), res, 8)),
+            pending: Some(dummy_effect(key, res, 8)),
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
+        state.slots.insert(key, slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, _rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
@@ -2029,7 +2037,7 @@ mod tests {
 
         state.handle_reap_inner(
             Reaped {
-                key: key.clone(),
+                key,
                 sub,
                 correlation: CorrelationId::from(7),
                 outcome: EffectOutcome::Ok,
@@ -2065,13 +2073,13 @@ mod tests {
         let sub = unique_sub_id(4);
         let res = unique_resource_id(4);
         let signaler = Arc::new(CountingSignaler::default());
-        let effect = Arc::new(dummy_effect(key.clone(), res, 11));
+        let effect = Arc::new(dummy_effect(key, res, 11));
         let slot = Slot {
             running: Some(stub_running_job(effect, signaler)),
-            pending: Some(dummy_effect(key.clone(), res, 12)),
+            pending: Some(dummy_effect(key, res, 12)),
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
+        state.slots.insert(key, slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, _rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
@@ -2111,7 +2119,7 @@ mod tests {
         let key = perfile_key(10, 10, 10);
         let sub = unique_sub_id(10);
         let res = unique_resource_id(10);
-        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
+        let effect = Arc::new(dummy_effect_with_steps(key, res, 1, 3));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
             running: Some(RunningJob {
@@ -2123,7 +2131,7 @@ mod tests {
             }),
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
+        state.slots.insert(key, slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
@@ -2131,7 +2139,7 @@ mod tests {
 
         state.handle_reap_inner(
             Reaped {
-                key: key.clone(),
+                key,
                 sub,
                 correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Ok,
@@ -2168,7 +2176,7 @@ mod tests {
         let key = perfile_key(11, 11, 11);
         let sub = unique_sub_id(11);
         let res = unique_resource_id(11);
-        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
+        let effect = Arc::new(dummy_effect_with_steps(key, res, 1, 3));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
             running: Some(RunningJob {
@@ -2180,7 +2188,7 @@ mod tests {
             }),
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
+        state.slots.insert(key, slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
@@ -2224,7 +2232,7 @@ mod tests {
         let key = perfile_key(12, 12, 12);
         let sub = unique_sub_id(12);
         let res = unique_resource_id(12);
-        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
+        let effect = Arc::new(dummy_effect_with_steps(key, res, 1, 3));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
             running: Some(RunningJob {
@@ -2236,7 +2244,7 @@ mod tests {
             }),
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
+        state.slots.insert(key, slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
@@ -2280,7 +2288,7 @@ mod tests {
         let key = perfile_key(13, 13, 13);
         let sub = unique_sub_id(13);
         let res = unique_resource_id(13);
-        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 2));
+        let effect = Arc::new(dummy_effect_with_steps(key, res, 1, 2));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
             running: Some(RunningJob {
@@ -2292,7 +2300,7 @@ mod tests {
             }),
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
+        state.slots.insert(key, slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
@@ -2300,7 +2308,7 @@ mod tests {
 
         state.handle_reap_inner(
             Reaped {
-                key: key.clone(),
+                key,
                 sub,
                 correlation: CorrelationId::from(1),
                 outcome: EffectOutcome::Ok,
@@ -2337,7 +2345,7 @@ mod tests {
         let key = perfile_key(14, 14, 14);
         let sub = unique_sub_id(14);
         let res = unique_resource_id(14);
-        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 2));
+        let effect = Arc::new(dummy_effect_with_steps(key, res, 1, 2));
         let slot = Slot {
             plan_continue: Some(PlanContinuation {
                 effect: Arc::clone(&effect),
@@ -2347,15 +2355,15 @@ mod tests {
             in_ready_queue: true,
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
-        state.ready_queue.push_back(key.clone());
+        state.slots.insert(key, slot);
+        state.ready_queue.push_back(key);
         state.running_per_sub.insert(sub, 1);
         let (tx, _rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
         // Submit a new effect for the same key.
-        let new_effect = dummy_effect(key.clone(), res, 99);
+        let new_effect = dummy_effect(key, res, 99);
         state.handle_submit(new_effect, &spawner, &reap_tx, &tx);
 
         let slot_after = state.slots.get(&key).expect("slot preserved");
@@ -2381,7 +2389,7 @@ mod tests {
         let key = perfile_key(15, 15, 15);
         let sub = unique_sub_id(15);
         let res = unique_resource_id(15);
-        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 3));
+        let effect = Arc::new(dummy_effect_with_steps(key, res, 1, 3));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
             running: Some(RunningJob {
@@ -2393,7 +2401,7 @@ mod tests {
             }),
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
+        state.slots.insert(key, slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
@@ -2431,7 +2439,7 @@ mod tests {
         let key = perfile_key(16, 16, 16);
         let sub = unique_sub_id(16);
         let res = unique_resource_id(16);
-        let effect = Arc::new(dummy_effect_with_steps(key.clone(), res, 1, 2));
+        let effect = Arc::new(dummy_effect_with_steps(key, res, 1, 2));
         let signaler = Arc::new(CountingSignaler::default());
         let slot = Slot {
             running: Some(RunningJob {
@@ -2443,7 +2451,7 @@ mod tests {
             }),
             ..Slot::default()
         };
-        state.slots.insert(key.clone(), slot);
+        state.slots.insert(key, slot);
         state.running_per_sub.insert(sub, 1);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();

@@ -261,8 +261,8 @@ mod tests {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
     use specter_core::testkit::{predicate_then_program, single_exec_program};
     use specter_core::{
-        ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, EffectOutcome,
-        ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
+        ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon,
+        EffectOutcome, EffectTarget, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -329,44 +329,42 @@ mod tests {
         program: Arc<ActionProgram>,
     ) -> Effect {
         let resource = unique_resource_id(res_seed);
-        Effect {
-            key: DedupKey::PerFile {
-                sub: unique_sub_id(sub_seed),
-                profile: unique_profile_id(profile_seed),
-                resource,
-            },
-            target: resource,
-            forced: false,
+        let common = EffectCommon {
+            sub: unique_sub_id(sub_seed),
+            profile: unique_profile_id(profile_seed),
+            anchor: resource,
             correlation: CorrelationId::from(corr),
-            diff: None,
+            forced: false,
             capture_output: false,
             sub_name: CompactString::new(""),
             program,
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
-            target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
-        }
+        };
+        Effect::per_file(
+            common,
+            resource,
+            CompactString::new(""),
+            Arc::new(Diff::default()),
+        )
     }
 
     fn make_effect_subtree(sub_seed: u64, profile_seed: u64, corr: u64) -> Effect {
-        Effect {
-            key: DedupKey::Subtree {
-                sub: unique_sub_id(sub_seed),
-                profile: unique_profile_id(profile_seed),
-            },
-            target: unique_resource_id(profile_seed),
-            forced: false,
+        let common = EffectCommon {
+            sub: unique_sub_id(sub_seed),
+            profile: unique_profile_id(profile_seed),
+            anchor: unique_resource_id(profile_seed),
             correlation: CorrelationId::from(corr),
-            diff: None,
+            forced: false,
             capture_output: false,
             sub_name: CompactString::new(""),
             program: literal_program(),
             anchor_path: Arc::from(PathBuf::from("/tmp")),
             anchor_kind: ResourceKind::Dir,
-            target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
-        }
+        };
+        Effect::subtree(common, None)
     }
 
     /// Spawn the controller in a thread; return the channels + a join
@@ -923,7 +921,7 @@ mod tests {
     fn effect_with_diff_passes_specter_diff_path() {
         use compact_str::CompactString;
         use smallvec::smallvec;
-        use specter_core::{Diff, EntryKind, EntryRef, FsIdentity};
+        use specter_core::{EntryKind, EntryRef, FsIdentity};
 
         let mut h = Harness::new(4);
         let diff = Arc::new(Diff {
@@ -938,7 +936,13 @@ mod tests {
             ..Default::default()
         });
         let mut e = make_effect_perfile(1, 1, 1, 7);
-        e.diff = Some(Arc::clone(&diff));
+        let resource = e.sort_key().1;
+        let segment = CompactString::from(e.relative());
+        e.target = EffectTarget::PerFile {
+            resource,
+            segment,
+            diff: Arc::clone(&diff),
+        };
         h.submit(e);
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         let env = &s[0].env;
@@ -966,7 +970,7 @@ mod tests {
     #[test]
     fn effect_without_diff_does_not_set_specter_diff_path() {
         let mut h = Harness::new(4);
-        let e = make_effect_perfile(1, 1, 1, 1); // diff: None
+        let e = make_effect_subtree(1, 1, 1);
         h.submit(e);
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         assert!(s[0].env.iter().all(|(k, _)| k != "SPECTER_DIFF_PATH"));
@@ -1063,7 +1067,7 @@ mod tests {
     fn multi_step_plan_shares_tmp_diff_path_and_cleans_at_terminus() {
         use compact_str::CompactString;
         use smallvec::smallvec;
-        use specter_core::{Diff, EntryKind, EntryRef, FsIdentity};
+        use specter_core::{EntryKind, EntryRef, FsIdentity};
 
         let mut h = Harness::new(4);
         let diff = Arc::new(Diff {
@@ -1079,7 +1083,13 @@ mod tests {
         });
         let plan = n_step_program(2);
         let mut e = make_effect_perfile_with_program(3, 3, 3, 7, plan);
-        e.diff = Some(Arc::clone(&diff));
+        let resource = e.sort_key().1;
+        let segment = CompactString::from(e.relative());
+        e.target = EffectTarget::PerFile {
+            resource,
+            segment,
+            diff: Arc::clone(&diff),
+        };
         h.submit(e);
 
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));

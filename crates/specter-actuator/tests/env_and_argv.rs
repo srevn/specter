@@ -8,11 +8,29 @@ use common::*;
 use compact_str::CompactString;
 use smallvec::smallvec;
 use specter_core::{
-    CorrelationId, Diff, Effect, EffectOutcome, EntryKind, EntryRef, FsIdentity, Input,
+    CorrelationId, Diff, Effect, EffectOutcome, EffectTarget, EntryKind, EntryRef, FsIdentity,
+    Input,
 };
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Build a `setup` closure that rewrites a PerFile [`Effect`]'s segment
+/// so the resolver-derived `relative()` / `target_path()` reflect `seg`.
+/// `relative` is no longer a stored field — it is the
+/// [`EffectTarget::PerFile`] segment — so the closure rebuilds the
+/// target in place, preserving the fixture's resource and (empty) diff.
+fn set_relative(seg: &'static str) -> impl FnOnce(&mut Effect) {
+    move |e: &mut Effect| {
+        let resource = e.sort_key().1;
+        let diff = Arc::clone(e.diff().expect("perfile_effect carries a diff"));
+        e.target = EffectTarget::PerFile {
+            resource,
+            segment: CompactString::from(seg),
+            diff,
+        };
+    }
+}
 
 /// Spawn a script that writes the given env-var to a captured file, then
 /// asserts on its content.
@@ -76,7 +94,7 @@ fn child_receives_specter_path() {
     assert_env_var_received(
         "SPECTER_PATH",
         |dir| dir.join("src/a.c").to_string_lossy().into_owned(),
-        |e| e.target_relative = CompactString::from("src/a.c"),
+        set_relative("src/a.c"),
     );
 }
 
@@ -99,7 +117,7 @@ fn child_receives_specter_relative_path() {
     assert_env_var_received(
         "SPECTER_RELATIVE_PATH",
         |_dir| "src/a.c".to_owned(),
-        |e| e.target_relative = CompactString::from("src/a.c"),
+        set_relative("src/a.c"),
     );
 }
 
@@ -168,7 +186,11 @@ fn child_receives_specter_created_newline_separated() {
         vec!["/bin/sh".into(), "-c".into(), script],
         cwd,
     );
-    e.diff = Some(diff);
+    e.target = EffectTarget::PerFile {
+        resource: e.sort_key().1,
+        segment: CompactString::from(e.relative()),
+        diff,
+    };
     h.submit(e);
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
@@ -217,7 +239,11 @@ fn child_receives_specter_diff_path_when_diff_present() {
         vec!["/bin/sh".into(), "-c".into(), script],
         cwd,
     );
-    e.diff = Some(diff);
+    e.target = EffectTarget::PerFile {
+        resource: e.sort_key().1,
+        segment: CompactString::from(e.relative()),
+        diff,
+    };
     h.submit(e);
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     let dbg_content =
@@ -244,7 +270,10 @@ fn child_does_not_receive_specter_diff_path_without_diff() {
         out = out_path.display()
     );
     let mut h = Harness::new(2);
-    let e = perfile_effect(1, 1, 1, 1, vec!["/bin/sh".into(), "-c".into(), script], cwd);
+    // Subtree is the only shape that can carry no diff: a PerFile
+    // effect's diff is mandatory, so "no diff" is exercised here via a
+    // diff-less Subtree fire.
+    let e = subtree_effect(1, 1, 1, vec!["/bin/sh".into(), "-c".into(), script], cwd);
     h.submit(e);
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
@@ -253,7 +282,10 @@ fn child_does_not_receive_specter_diff_path_without_diff() {
     }
     h.shutdown();
     let captured = std::fs::read_to_string(&out_path).expect("read captured");
-    assert_eq!(captured, "", "SPECTER_DIFF_PATH unset when diff is None");
+    assert_eq!(
+        captured, "",
+        "SPECTER_DIFF_PATH unset when the effect carries no diff"
+    );
 }
 
 #[test]
@@ -286,7 +318,11 @@ fn tmp_diff_file_cleaned_up_after_completion() {
         vec!["/bin/sh".into(), "-c".into(), script],
         cwd,
     );
-    e.diff = Some(diff);
+    e.target = EffectTarget::PerFile {
+        resource: e.sort_key().1,
+        segment: CompactString::from(e.relative()),
+        diff,
+    };
     h.submit(e);
     h.wait_for_effect_completes(1, Duration::from_secs(5));
     h.shutdown();

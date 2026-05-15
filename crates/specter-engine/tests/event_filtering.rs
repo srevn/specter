@@ -1660,7 +1660,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     let _ = e.step(
         Input::EffectComplete {
             sub: sid,
-            key: effect.key,
+            key: effect.key(),
             result: specter_core::EffectOutcome::Ok,
         },
         t2,

@@ -1,16 +1,17 @@
 //! `Effect` and friends.
 //!
-//! No `baseline_snapshot` / `captured_current` on `Effect`: the
-//! Engine re-probes after `EffectComplete::Ok` rather than trust a
-//! snapshot taken at emission time. The `diff` field is populated only
-//! when the Sub's program references diff-derived placeholders or the
-//! Sub's scope is `PerStableFile`; otherwise `None`.
+//! No baseline/current snapshot on `Effect`: the engine re-probes after
+//! `EffectComplete::Ok` rather than trust a snapshot taken at emission
+//! time. A diff is carried only when the Sub's program references
+//! diff-derived placeholders (Subtree, optional) or the fire is
+//! per-stable-file (mandatory).
 
 use crate::diff::Diff;
 use crate::ids::{CorrelationId, ProfileId, ResourceId, SubId};
 use crate::program::ActionProgram;
 use crate::resource::ResourceKind;
 use compact_str::CompactString;
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,88 +23,193 @@ pub struct CommandResolved {
     pub argv: Vec<String>,
 }
 
-/// Effect — a command-to-be plus engine bookkeeping.
+/// Effect — a command-to-be plus the bookkeeping needed to spawn and
+/// coalesce it.
 ///
-/// **Coalescing identity + bookkeeping.**
-/// `key` drives `DedupKey`-based coalescing; `forced` mirrors
-/// `PreFireBurst.forced` at emission time (every Standard burst Effect carries
-/// the deadline-crossed flag, regardless of whether the eventual probe
-/// verdict was stable). `diff` is `Some` iff `sub.needs_diff` AND the
-/// diff source (a `baseline` snapshot) was present.
+/// The flat fields are irreducible identity scalars (frozen at emit
+/// time; `(sub, profile, anchor)` survives any post-emit state churn)
+/// plus the substitution payload the actuator-side resolver reads to
+/// render argv/env/cwd. The fire *shape* — whole-subtree vs
+/// per-stable-file — is the [`EffectTarget`] sum. Every cross-cutting
+/// concern ([`key`](Effect::key), [`sort_key`](Effect::sort_key),
+/// [`target_path`](Effect::target_path), [`diff`](Effect::diff),
+/// [`relative`](Effect::relative)) is a derived method, never a stored
+/// field, so a stored projection cannot drift from the shape.
 ///
-/// `target` is the Resource this Effect addresses — the anchor directory
-/// for `DedupKey::Subtree`, or the file resource for `DedupKey::PerFile`
-/// (where it duplicates `key.resource` by construction). Captured at
-/// emission time; the pair `(self.key.sub(), self.target)` is the
-/// total-ordered sort key for [`crate::output::StepOutput::effects`]
-/// applied by [`crate::StepOutput::sort_for_emission`]. Carried on the
-/// Effect rather than derived from a Profile lookup at sort time: a
-/// frozen value survives any state churn between `emit_effects` and
-/// `sort_for_emission`.
-///
-/// `capture_output` mirrors the Sub's `log_output` at emission time. The
-/// actuator reads it to choose between `Stdio::null()` (the default —
-/// child output is discarded) and `Stdio::inherit()` (child output is
-/// forwarded to Specter's own stdout/stderr, where the supervisor's
-/// log facility — systemd journal, launchd `StandardOutPath`, FreeBSD
-/// `daemon -o` — captures it).
-///
-/// **Substitution-domain projection of `(Sub, Profile, Tree)`.**
-/// The remaining fields are everything the actuator-side resolver reads
-/// to render argv + env + cwd at spawn time. Frozen at emit time;
-/// consumed at spawn time. Flat (not nested in an `EffectContext`)
-/// because there is no second consumer for the group, and a name for a
-/// group of fields that has no second consumer is overhead.
-///
-/// - `sub_name` — `${specter.watch}` substitute and `SPECTER_WATCH` env
-///   value. Owned `CompactString` rather than `Arc<str>` so the resolver
-///   reaches it via `Deref<Target = str>` without naming the type.
-/// - `program` — the lowered CFG-shaped op IR, Arc-cloned from
-///   `Sub.program` at emit time so coalesced Effects share one
-///   allocation. Validation guarantees at least one op; the actuator
-///   walks ops via a `u32` cursor, reading each op's `on_ok` /
-///   `on_failed` edge after the spawned child reaps.
-/// - `anchor_path`, `anchor_kind` — the anchor's filesystem path and
-///   classification. `anchor_path` is `Arc<Path>` so the engine builds
-///   it once per `emit_effects` call and every Effect emitted from that
-///   call (one per Sub × Diff entry) Arc-clones the same allocation.
-///   The actuator computes `cwd` from these via
-///   `compute_cwd(anchor_path, anchor_kind)`. `anchor_kind` is one byte;
-///   carrying it lets the actuator pick the correct cwd shape (parent
-///   dir for File anchors, the path itself for Dir / Unknown) without a
-///   round-trip to the engine.
-/// - `target_relative` — `${specter.relative}` substitute and the
-///   per-entry segment used by the resolver to derive `target_path`
-///   (`${specter.path}` / `SPECTER_PATH`) at spawn time. Empty for `DedupKey::Subtree`
-///   (target_path == anchor_path); the file segment for
-///   `DedupKey::PerFile` (target_path == anchor_path.join(segment)).
-///   Carrying only the relative — not the joined path — defers the
-///   `PathBuf` allocation to the spawn boundary, where Latest-coalesce
-///   has already filtered Effects that won't reach a syscall.
-/// - `exclude` — Arc-clone of `Profile.exclude_strings`. Carried so
-///   the resolver can render the `${specter.excluded}` placeholder and
-///   `SPECTER_EXCLUDED` env value without a back-channel to the engine.
-///
-/// `SPECTER_EVENT_KIND` (`dir-subtree` vs `file`) and the resolver-side
-/// dispatch on scope are derived from `key`'s variant — no separate
-/// scope field is carried. `key` already partitions Effects into
-/// `Subtree` and `PerFile` arms by construction; storing the scope a
-/// second time invites drift.
+/// `capture_output` mirrors the Sub's `log_output` at emit time: the
+/// actuator picks `Stdio::null()` (discard) vs `Stdio::inherit()`
+/// (forward to Specter's stdout/stderr, where the supervisor's log
+/// facility captures it). `program` / `anchor_path` / `exclude` are
+/// `Arc`-shared so coalesced Effects from one emit call reuse one
+/// allocation each.
 #[derive(Clone, Debug)]
 pub struct Effect {
-    pub key: DedupKey,
-    pub target: ResourceId,
-    pub forced: bool,
+    pub sub: SubId,
+    pub profile: ProfileId,
+    /// The Profile's anchor resource (frozen `Profile.resource`). Not
+    /// derivable from [`Effect::key`] — `DedupKey::Subtree` does not
+    /// carry it — so it is an irreducible identity scalar.
+    pub anchor: ResourceId,
     pub correlation: CorrelationId,
-    pub diff: Option<Arc<Diff>>,
+    pub forced: bool,
     pub capture_output: bool,
-
     pub sub_name: CompactString,
     pub program: Arc<ActionProgram>,
     pub anchor_path: Arc<Path>,
     pub anchor_kind: ResourceKind,
-    pub target_relative: CompactString,
     pub exclude: Arc<[CompactString]>,
+    pub target: EffectTarget,
+}
+
+/// The fire shape of an [`Effect`].
+///
+/// Named `EffectTarget` (not `EffectScope` — that is `sub.rs`'s
+/// user-intent axis) so the two Subtree/PerFile vocabularies stay
+/// distinct. Carries the only fields whose meaning differs per shape;
+/// shared identity/payload stays flat on [`Effect`].
+#[derive(Clone, Debug)]
+pub enum EffectTarget {
+    /// Whole-subtree fire. `target_path == anchor_path`. `diff` is
+    /// `Some` iff the Sub needs a diff-derived placeholder and a
+    /// baseline existed.
+    Subtree { diff: Option<Arc<Diff>> },
+    /// Per-stable-file fire. `target_path == anchor_path.join(segment)`.
+    /// `diff` is mandatory: the type guarantees what
+    /// `PerStableFile ⇒ needs_diff` previously enforced by convention.
+    PerFile {
+        resource: ResourceId,
+        segment: CompactString,
+        diff: Arc<Diff>,
+    },
+}
+
+/// Constructor input for [`Effect`].
+///
+/// Destructured into the flat identity/payload fields, never stored.
+/// Shared by both engine emit arms and every test fixture; the multiple
+/// consumers earn it a name (a stored field group with no second
+/// consumer would not).
+#[derive(Debug)]
+pub struct EffectCommon {
+    pub sub: SubId,
+    pub profile: ProfileId,
+    pub anchor: ResourceId,
+    pub correlation: CorrelationId,
+    pub forced: bool,
+    pub capture_output: bool,
+    pub sub_name: CompactString,
+    pub program: Arc<ActionProgram>,
+    pub anchor_path: Arc<Path>,
+    pub anchor_kind: ResourceKind,
+    pub exclude: Arc<[CompactString]>,
+}
+
+impl Effect {
+    /// Whole-subtree Effect. `diff` is `Some` iff the Sub needs a
+    /// diff-derived placeholder and a baseline existed.
+    #[must_use]
+    pub fn subtree(common: EffectCommon, diff: Option<Arc<Diff>>) -> Self {
+        Self::from_common(common, EffectTarget::Subtree { diff })
+    }
+
+    /// Per-stable-file Effect. `diff` is mandatory.
+    #[must_use]
+    pub fn per_file(
+        common: EffectCommon,
+        resource: ResourceId,
+        segment: CompactString,
+        diff: Arc<Diff>,
+    ) -> Self {
+        Self::from_common(
+            common,
+            EffectTarget::PerFile {
+                resource,
+                segment,
+                diff,
+            },
+        )
+    }
+
+    /// Single construction choke: destructure the parameter struct into
+    /// the flat fields and attach the shape.
+    fn from_common(common: EffectCommon, target: EffectTarget) -> Self {
+        Self {
+            sub: common.sub,
+            profile: common.profile,
+            anchor: common.anchor,
+            correlation: common.correlation,
+            forced: common.forced,
+            capture_output: common.capture_output,
+            sub_name: common.sub_name,
+            program: common.program,
+            anchor_path: common.anchor_path,
+            anchor_kind: common.anchor_kind,
+            exclude: common.exclude,
+            target,
+        }
+    }
+
+    /// Coalescing identity — the actuator's `BTreeMap<DedupKey, Slot>`
+    /// and the engine's `Profile.fired_subs`. Slotmap keys are `Copy`,
+    /// so this is cheap; callers need it owned anyway.
+    #[must_use]
+    pub const fn key(&self) -> DedupKey {
+        match &self.target {
+            EffectTarget::Subtree { .. } => DedupKey::Subtree {
+                sub: self.sub,
+                profile: self.profile,
+            },
+            EffectTarget::PerFile { resource, .. } => DedupKey::PerFile {
+                sub: self.sub,
+                profile: self.profile,
+                resource: *resource,
+            },
+        }
+    }
+
+    /// Total order for [`crate::output::StepOutput`] effects: Subtree
+    /// keys on the anchor resource, PerFile on the file resource.
+    /// Replay determinism depends on this being stable.
+    #[must_use]
+    pub const fn sort_key(&self) -> (SubId, ResourceId) {
+        let resource = match &self.target {
+            EffectTarget::Subtree { .. } => self.anchor,
+            EffectTarget::PerFile { resource, .. } => *resource,
+        };
+        (self.sub, resource)
+    }
+
+    /// Spawn `target_path`. Subtree borrows `anchor_path` (no alloc);
+    /// PerFile joins the segment at call time, keeping the `PathBuf`
+    /// allocation at the resolve boundary (post-coalesce).
+    #[must_use]
+    pub fn target_path(&self) -> Cow<'_, Path> {
+        match &self.target {
+            EffectTarget::Subtree { .. } => Cow::Borrowed(&*self.anchor_path),
+            EffectTarget::PerFile { segment, .. } => {
+                Cow::Owned(self.anchor_path.join(segment.as_str()))
+            }
+        }
+    }
+
+    /// `${specter.relative}` / `SPECTER_RELATIVE_PATH` source: empty for
+    /// Subtree, the file segment for PerFile.
+    #[must_use]
+    pub fn relative(&self) -> &str {
+        match &self.target {
+            EffectTarget::Subtree { .. } => "",
+            EffectTarget::PerFile { segment, .. } => segment.as_str(),
+        }
+    }
+
+    /// Uniform diff access: PerFile always `Some`, Subtree conditional.
+    #[must_use]
+    pub const fn diff(&self) -> Option<&Arc<Diff>> {
+        match &self.target {
+            EffectTarget::Subtree { diff } => diff.as_ref(),
+            EffectTarget::PerFile { diff, .. } => Some(diff),
+        }
+    }
 }
 
 /// Coalescing identity.
@@ -119,7 +225,7 @@ pub struct Effect {
 /// engine's `BTreeSet<DedupKey>` (`Profile::fired_subs`).
 /// `Hash` is intentionally not derived — no `HashMap`/`HashSet` keys on
 /// this type and `core` bans `hashbrown` outright.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub enum DedupKey {
     PerFile {
         sub: SubId,

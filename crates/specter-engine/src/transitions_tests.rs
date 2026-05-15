@@ -812,13 +812,13 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         "SPECTER_FORCED == \"0\" derives from forced=false"
     );
     assert!(
-        matches!(eff.key, specter_core::DedupKey::Subtree { .. }),
+        matches!(eff.key(), specter_core::DedupKey::Subtree { .. }),
         "EVENT_KIND=dir-subtree derives from DedupKey::Subtree variant",
     );
     // SPECTER_DIFF_PATH is an actuator-side augmentation; engine's Effect
-    // doesn't carry it. The structural witness is `eff.diff`:
+    // doesn't carry it. The structural witness is `eff.diff()`:
     assert!(
-        eff.diff.is_none(),
+        eff.diff().is_none(),
         "engine doesn't include diff for non-needs_diff Sub"
     );
     // cwd derives from (anchor_path, anchor_kind) at spawn time. Pin both:
@@ -1009,9 +1009,9 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     assert_eq!(eff.anchor_kind, specter_core::ResourceKind::File);
     // SPECTER_PATH and SPECTER_ANCHOR both derive from `anchor_path`
     // for a File-anchor Subtree Effect: the resolver returns
-    // `Cow::Borrowed(&anchor_path)` when `target_relative` is empty,
+    // `Cow::Borrowed(&anchor_path)` when `relative()` is empty,
     // so both env values share the same byte sequence.
-    assert_eq!(eff.target_relative.as_str(), "");
+    assert_eq!(eff.relative(), "");
 }
 
 #[test]
@@ -1896,8 +1896,11 @@ fn effect_emission_carries_diff_when_needs_diff() {
     let out = effect_out.expect("burst stabilized and emitted an Effect");
     assert_eq!(out.effects.len(), 1);
     let effect = &out.effects[0];
-    assert!(effect.diff.is_some(), "needs_diff Effect carries the Diff");
-    let diff = effect.diff.as_ref().unwrap();
+    assert!(
+        effect.diff().is_some(),
+        "needs_diff Effect carries the Diff"
+    );
+    let diff = effect.diff().unwrap();
     assert_eq!(diff.created.len(), 1);
     assert_eq!(diff.created[0].segment.as_str(), "new.rs");
 }
@@ -3244,7 +3247,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     let per_file_effects: Vec<&specter_core::Effect> = out
         .effects
         .iter()
-        .filter(|e| matches!(&e.key, DedupKey::PerFile { sub, .. } if *sub == sid))
+        .filter(|e| matches!(&e.key(), DedupKey::PerFile { sub, .. } if *sub == sid))
         .collect();
     assert_eq!(per_file_effects.len(), 2, "one Effect per created file");
     for eff in &per_file_effects {
@@ -3267,18 +3270,18 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         // anchor_path + anchor_kind ⇒ actuator's compute_cwd("anchor", Dir) = "anchor".
         assert_eq!(eff.anchor_path.as_os_str(), "anchor");
         assert_eq!(eff.anchor_kind, specter_core::ResourceKind::Dir);
-        // target_relative ⇒ SPECTER_RELATIVE_PATH source. The resolver
-        // derives SPECTER_PATH = anchor_path.join(target_relative) at
+        // relative() ⇒ SPECTER_RELATIVE_PATH source. The resolver
+        // derives SPECTER_PATH = anchor_path.join(relative()) at
         // spawn time; this assertion implicitly pins target_path to
         // "anchor/a.rs" or "anchor/b.rs".
         assert!(
-            eff.target_relative == "a.rs" || eff.target_relative == "b.rs",
-            "target_relative = {:?}",
-            eff.target_relative,
+            eff.relative() == "a.rs" || eff.relative() == "b.rs",
+            "relative() = {:?}",
+            eff.relative(),
         );
         // SPECTER_EVENT_KIND="file" derives from the DedupKey::PerFile
         // variant.
-        assert!(matches!(eff.key, specter_core::DedupKey::PerFile { .. }));
+        assert!(matches!(eff.key(), specter_core::DedupKey::PerFile { .. }));
     }
 }
 
@@ -3393,7 +3396,7 @@ fn per_stable_file_skips_dir_entries() {
     let per_file_effects: Vec<&specter_core::Effect> = out
         .effects
         .iter()
-        .filter(|e| matches!(&e.key, DedupKey::PerFile { sub, .. } if *sub == sid))
+        .filter(|e| matches!(&e.key(), DedupKey::PerFile { sub, .. } if *sub == sid))
         .collect();
     assert_eq!(
         per_file_effects.len(),
@@ -3401,7 +3404,7 @@ fn per_stable_file_skips_dir_entries() {
         "exactly ONE Effect for the File entry; Dir entries skipped"
     );
     // SPECTER_RELATIVE_PATH source.
-    assert_eq!(per_file_effects[0].target_relative, "main.rs");
+    assert_eq!(per_file_effects[0].relative(), "main.rs");
 }
 
 // ---------- Dedup-hash + drift suppression ----------
@@ -3525,11 +3528,12 @@ fn subtree_effect_target_is_anchor_at_emission() {
 
     assert_eq!(out.effects.len(), 1, "Subtree-Ok fires one Effect");
     assert!(
-        matches!(&out.effects[0].key, DedupKey::Subtree { profile, .. } if *profile == pid),
+        matches!(&out.effects[0].key(), DedupKey::Subtree { profile, .. } if *profile == pid),
         "Effect is keyed Subtree at the burst's Profile",
     );
     assert_eq!(
-        out.effects[0].target, root,
+        out.effects[0].sort_key().1,
+        root,
         "Subtree.target is the Profile anchor at emission time",
     );
     assert_eq!(
@@ -3537,133 +3541,6 @@ fn subtree_effect_target_is_anchor_at_emission() {
         root,
         "anchor is unchanged post-emit (sanity)",
     );
-}
-
-/// `Effect.target` for a `PerFile`-keyed Effect is the file resource
-/// — same value as `DedupKey::PerFile.resource` by construction. Pins
-/// the redundancy: if `target` and `key.resource` ever diverge for
-/// PerFile, sort and coalescing-identity would tell different stories.
-#[test]
-fn per_file_effect_target_matches_dedup_key_resource() {
-    // Reuse the standard PerStableFile fixture: empty baseline, two
-    // created Files, stable response → two PerFile Effects.
-    let mut e = Engine::new();
-    let r = e.tree.ensure_root("anchor", ResourceRole::User);
-    e.tree.set_kind(r, ResourceKind::Dir);
-    let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
-        params: SubParams {
-            name: "fmt".into(),
-            program: diff_program(),
-            scope: EffectScope::PerStableFile,
-            settle: SETTLE,
-            log_output: false,
-            source_promoter: None,
-        },
-    };
-    let attach_out = e.step(Input::AttachSub(req), now);
-    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
-
-    // Complete Seed with empty baseline.
-    let seed_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Verifying probe in flight");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(vec![])),
-        }),
-        now,
-    );
-
-    // FsEvent → Standard burst.
-    let t1 = now + Duration::from_millis(10);
-    e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::Modified,
-        },
-        t1,
-    );
-
-    // Drain settle.
-    let t2 = t1 + SETTLE * 2;
-    while let Some(entry) = e.pop_expired(t2) {
-        e.step(
-            Input::TimerExpired {
-                profile: entry.profile,
-                kind: entry.kind,
-                id: entry.id,
-            },
-            t2,
-        );
-    }
-
-    let std_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Verifying probe in flight");
-    let snap = dir_tree_snap(vec![
-        ("a.rs", EntryKind::File, 1),
-        ("b.rs", EntryKind::File, 2),
-    ]);
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: std_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
-        }),
-        t2,
-    );
-
-    // Drain rescheduled settle, send same snapshot for stability.
-    let t3 = t2 + SETTLE * 2;
-    while let Some(entry) = e.pop_expired(t3) {
-        e.step(
-            Input::TimerExpired {
-                profile: entry.profile,
-                kind: entry.kind,
-                id: entry.id,
-            },
-            t3,
-        );
-    }
-    let std_corr2 = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Verifying probe in flight");
-    let out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: std_corr2,
-            outcome: ProbeOutcome::SubtreeOk(snap),
-        }),
-        t3,
-    );
-
-    let per_file: Vec<&specter_core::Effect> = out
-        .effects
-        .iter()
-        .filter(|e| matches!(&e.key, DedupKey::PerFile { sub, .. } if *sub == sid))
-        .collect();
-    assert_eq!(per_file.len(), 2, "two created files ⇒ two PerFile Effects");
-    for eff in &per_file {
-        match &eff.key {
-            DedupKey::PerFile { resource, .. } => {
-                assert_eq!(
-                    eff.target, *resource,
-                    "PerFile.target == DedupKey::PerFile.resource by construction",
-                );
-            }
-            DedupKey::Subtree { .. } => unreachable!("filtered above"),
-        }
-    }
 }
 
 #[test]
@@ -3964,7 +3841,7 @@ fn drive_to_rebasing(
         "Standard stable verdict fires one Effect; got {:?}",
         stable_out.effects,
     );
-    let key = stable_out.effects[0].key.clone();
+    let key = stable_out.effects[0].key();
     let rebase_out = e.step(
         Input::EffectComplete {
             sub: sid,
@@ -4219,7 +4096,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
 
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
     assert_eq!(stable_out.effects.len(), 1, "stable verdict fires Effect");
-    let key = stable_out.effects[0].key.clone();
+    let key = stable_out.effects[0].key();
 
     // Look up the descendant the standard burst's reconcile created.
     // `drive_to_first_effect` ships `[("a.rs", File, 1)]` as the
@@ -4317,7 +4194,7 @@ fn rebasing_without_absorbed_events_ships_empty_force_walk() {
     let (mut e, pid, sid, root, _now0) = engine_with_attached_sub();
     let now = Instant::now();
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
-    let key = stable_out.effects[0].key.clone();
+    let key = stable_out.effects[0].key();
 
     // No FsEvent during Awaiting — drive directly to EffectComplete.
     let rebase_out = e.step(
@@ -4535,7 +4412,7 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.fired_subs.insert(dk.clone());
+        p.fired_subs.insert(dk);
         p.fired_subs.insert(dk);
         p.transition_state(state);
     }

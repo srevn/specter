@@ -22,16 +22,16 @@ pub struct StepOutput {
 impl StepOutput {
     /// Sort the three slices to the engine's determinism contract:
     /// `watch_ops` by [`WatchOp::resource`]; `probe_ops` by
-    /// [`ProbeOp::owner`]; `effects` by `(key.sub(), target)`.
+    /// [`ProbeOp::owner`]; `effects` by [`Effect::sort_key`].
     /// `diagnostics` follow insertion order — they are not part of the
     /// user-visible sort guarantee.
     ///
-    /// Pure: every key is captured on the op/effect at construction
-    /// time, so this method needs no engine state.
+    /// Pure: every key is derived from the op/effect's own fields, so
+    /// this method needs no engine state.
     pub fn sort_for_emission(&mut self) {
         self.watch_ops.sort_by_key(WatchOp::resource);
         self.probe_ops.sort_by_key(ProbeOp::owner);
-        self.effects.sort_by_key(|e| (e.key.sub(), e.target));
+        self.effects.sort_by_key(Effect::sort_key);
     }
 }
 
@@ -39,7 +39,7 @@ impl StepOutput {
 mod tests {
     use super::*;
     use crate::diff::Diff;
-    use crate::effect::DedupKey;
+    use crate::effect::{DedupKey, EffectCommon};
     use crate::ids::{CorrelationId, ProbeCorrelation, ProfileId, ResourceId, SubId};
     use crate::op::ProbeRequest;
     use crate::program::{
@@ -80,20 +80,33 @@ mod tests {
 
     /// Test fixture for an [`Effect`] when only `(key, target)` matter
     /// (sort tests). Other fields take their natural empty values.
+    /// `anchor` doubles as the Subtree sort resource: setting it to
+    /// `target` keeps `sort_key().1 == target` for the Subtree arm,
+    /// matching the old flat `Effect.target` behaviour. The PerFile arm
+    /// keys on its own `resource`, which the test always passes equal to
+    /// `target`.
     fn effect(key: DedupKey, target: ResourceId) -> Effect {
-        Effect {
-            key,
-            target,
-            forced: false,
+        let common = EffectCommon {
+            sub: key.sub(),
+            profile: key.profile(),
+            anchor: target,
             correlation: CorrelationId::default(),
-            diff: None::<Arc<Diff>>,
+            forced: false,
             capture_output: false,
             sub_name: CompactString::new(""),
             program: fixture_program(),
             anchor_path: Arc::from(PathBuf::new()),
             anchor_kind: ResourceKind::Dir,
-            target_relative: CompactString::new(""),
             exclude: Arc::from(Vec::<CompactString>::new()),
+        };
+        match key {
+            DedupKey::Subtree { .. } => Effect::subtree(common, None::<Arc<Diff>>),
+            DedupKey::PerFile { resource, .. } => Effect::per_file(
+                common,
+                resource,
+                CompactString::new(""),
+                Arc::new(Diff::default()),
+            ),
         }
     }
 
@@ -186,11 +199,7 @@ mod tests {
 
         out.sort_for_emission();
 
-        let keys: Vec<(SubId, ResourceId)> = out
-            .effects
-            .iter()
-            .map(|e| (e.key.sub(), e.target))
-            .collect();
+        let keys: Vec<(SubId, ResourceId)> = out.effects.iter().map(Effect::sort_key).collect();
         assert_eq!(keys, vec![(sub_a, r_lo), (sub_a, r_hi), (sub_b, r_hi)]);
     }
 }

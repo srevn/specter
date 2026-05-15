@@ -417,7 +417,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     let rebase_out = e.step(
         Input::EffectComplete {
             sub: sid_c,
-            key: child_effect.key.clone(),
+            key: child_effect.key(),
             result: specter_core::EffectOutcome::Ok,
         },
         t2,

@@ -21,7 +21,7 @@ slotmap.workspace = true
 
 [features]
 default = []
-testkit = []
+testkit = ["specter-core/testkit"]
 
 [lints]
 workspace = true

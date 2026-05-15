@@ -304,23 +304,27 @@ mod tests {
     fn new_creates_bounded_effects_at_1024() {
         use compact_str::CompactString;
         use specter_core::testkit::single_exec_program;
-        use specter_core::{ArgPart, ArgTemplate, CorrelationId, DedupKey, ResourceKind};
+        use specter_core::{
+            ArgPart, ArgTemplate, CorrelationId, EffectCommon, ProfileId, ResourceKind, SubId,
+        };
         use std::path::PathBuf;
         use std::sync::Arc;
         let chans = Channels::new();
-        let dummy = || Effect {
-            key: DedupKey::default(),
-            target: ResourceId::default(),
-            forced: false,
-            correlation: CorrelationId::default(),
-            diff: None,
-            capture_output: false,
-            sub_name: CompactString::new(""),
-            program: single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])]),
-            anchor_path: Arc::from(PathBuf::new()),
-            anchor_kind: ResourceKind::Dir,
-            target_relative: CompactString::new(""),
-            exclude: Arc::from(Vec::<CompactString>::new()),
+        let dummy = || {
+            let common = EffectCommon {
+                sub: SubId::default(),
+                profile: ProfileId::default(),
+                anchor: ResourceId::default(),
+                correlation: CorrelationId::default(),
+                forced: false,
+                capture_output: false,
+                sub_name: CompactString::new(""),
+                program: single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])]),
+                anchor_path: Arc::from(PathBuf::new()),
+                anchor_kind: ResourceKind::Dir,
+                exclude: Arc::from(Vec::<CompactString>::new()),
+            };
+            Effect::subtree(common, None)
         };
         for _ in 0..1024 {
             chans.effects_tx.try_send(dummy()).expect("first 1024 fit");

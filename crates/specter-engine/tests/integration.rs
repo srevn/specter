@@ -370,7 +370,7 @@ fn golden_path_full_lifecycle() {
     let post_effect = e.step(
         Input::EffectComplete {
             sub: sid,
-            key: stable_out.effects[0].key.clone(),
+            key: stable_out.effects[0].key(),
             result: EffectOutcome::Ok,
         },
         t1 + SETTLE * 16,

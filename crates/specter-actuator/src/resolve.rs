@@ -123,7 +123,7 @@ use crate::env::EnvSnapshot;
 use crate::spawner::EnvVar;
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, CommandResolved, DedupKey, Diff, Effect, ExecAction, Placeholder,
+    ArgPart, ArgTemplate, CommandResolved, Diff, Effect, EffectTarget, ExecAction, Placeholder,
     ResourceKind,
 };
 use std::borrow::Cow;
@@ -192,7 +192,7 @@ pub(crate) fn resolve_step<'a>(
     env_snapshot: &EnvSnapshot,
 ) -> Result<(CommandResolved, Vec<EnvVar<'a>>), ResolveError> {
     // Materialise once, share with both surfaces.
-    let target_path = compute_target_path(effect);
+    let target_path = effect.target_path();
     let parent_str = parent_string(&target_path);
     let time_str = format_now(now);
 
@@ -248,25 +248,6 @@ pub(crate) fn compute_cwd(anchor_path: &Path, kind: ResourceKind) -> &Path {
     }
 }
 
-/// Derive `target_path` from `(anchor_path, target_relative)`.
-///
-/// Subtree fires set `target_relative` to empty (no per-entry segment) —
-/// `target_path` is then the anchor itself, borrowed as `Cow::Borrowed`
-/// to avoid a `PathBuf` allocation. PerFile fires set `target_relative`
-/// to the diff entry's segment — `target_path = anchor_path.join(segment)`,
-/// owned as `Cow::Owned`.
-///
-/// The empty-segment dispatch is invariant-preserving: it matches the
-/// `DedupKey` variant by construction (Subtree ⇒ empty; PerFile ⇒
-/// non-empty diff segment) without re-matching the variant here.
-fn compute_target_path(effect: &Effect) -> Cow<'_, Path> {
-    if effect.target_relative.is_empty() {
-        Cow::Borrowed(&*effect.anchor_path)
-    } else {
-        Cow::Owned(effect.anchor_path.join(effect.target_relative.as_str()))
-    }
-}
-
 /// Initial capacity for the resolver's per-resolve scratch buffer
 /// ([`substitute_argv`]). Sized for "typical short argv slot" — long
 /// enough that most slots accumulate in-place without growth, small
@@ -300,7 +281,7 @@ fn substitute_argv(
             target_path,
             parent_str,
             time_str,
-            effect.diff.as_deref(),
+            effect.diff().map(|d| &**d),
             env_snapshot,
             &mut argv,
             &mut scratch,
@@ -339,7 +320,7 @@ fn substitute_one(
             ArgPart::Literal(s) => scratch.push_str(s),
             ArgPart::Placeholder(p) => match p {
                 Placeholder::Path => scratch.push_str(&target_path.to_string_lossy()),
-                Placeholder::Relative => scratch.push_str(&effect.target_relative),
+                Placeholder::Relative => scratch.push_str(effect.relative()),
                 Placeholder::Anchor => scratch.push_str(&effect.anchor_path.to_string_lossy()),
                 Placeholder::Watch => scratch.push_str(&effect.sub_name),
                 Placeholder::Parent => scratch.push_str(parent_str),
@@ -558,14 +539,14 @@ fn build_env<'a>(
     time_str: String,
     diff_path: Option<&'a Path>,
 ) -> Vec<EnvVar<'a>> {
-    // `event_kind` derives from the DedupKey variant — Subtree/PerFile
-    // by construction agree with the originating Sub's EffectScope, so
-    // there is no second source-of-truth to consult.
-    let event_kind: &'static str = match effect.key {
-        DedupKey::Subtree { .. } => "dir-subtree",
-        DedupKey::PerFile { .. } => "file",
+    // `event_kind` derives from the fire shape — Subtree/PerFile agree
+    // with the originating Sub's EffectScope by construction, so there
+    // is no second source-of-truth to consult.
+    let event_kind: &'static str = match effect.target {
+        EffectTarget::Subtree { .. } => "dir-subtree",
+        EffectTarget::PerFile { .. } => "file",
     };
-    let diff = effect.diff.as_deref();
+    let diff = effect.diff().map(|d| &**d);
     // 15 keys + optional SPECTER_DIFF_PATH. Pre-size to avoid the
     // resize churn under push.
     let cap = if diff_path.is_some() { 16 } else { 15 };
@@ -618,7 +599,7 @@ fn build_env<'a>(
     });
     env.push(EnvVar {
         key: "SPECTER_RELATIVE_PATH",
-        value: Cow::Borrowed(effect.target_relative.as_str()),
+        value: Cow::Borrowed(effect.relative()),
     });
     env.push(EnvVar {
         key: "SPECTER_RENAMED_FROM",

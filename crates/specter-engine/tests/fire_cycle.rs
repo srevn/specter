@@ -276,7 +276,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         1,
         "one Effect emitted at stable verdict"
     );
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
     let phase = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!("expected Active(Awaiting)"),
@@ -436,7 +436,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         snap.clone(),
         now + Duration::from_millis(10),
     );
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
 
     // EffectComplete::Ok → Rebasing.
     e.step(
@@ -563,7 +563,7 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
 
     // Force gate-deadline.
     let gate_t = now + Duration::from_millis(10) + MAX_SETTLE * 8;
@@ -629,7 +629,7 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
     let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
 
     // Anchor terminal event → finalize_anchor_lost → finish_burst_to_idle.
     let lost_out = e.step(
@@ -685,7 +685,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
 
     // EffectComplete::Ok → Rebasing.
     e.step(
@@ -783,7 +783,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
         snap.clone(),
         now + Duration::from_millis(10),
     );
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
     let rebase_out = e.step(
         Input::EffectComplete {
             sub: sid,
@@ -887,8 +887,8 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         phase,
         PostFirePhase::Awaiting { outstanding: 2, .. }
     ));
-    let key_a = stable_out.effects[0].key.clone();
-    let key_b = stable_out.effects[1].key.clone();
+    let key_a = stable_out.effects[0].key();
+    let key_b = stable_out.effects[1].key();
 
     // First completion: Ok → outstanding=1.
     e.step(
@@ -948,7 +948,7 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
 
     // Detach the only Sub. Profile is Active(Awaiting) → reap_pending=true.
     let _detach_out = e.step(Input::DetachSub(sid), Instant::now());
@@ -1134,7 +1134,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
         snap_initial.clone(),
         now + Duration::from_millis(10),
     );
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
 
     // User edits the child (concurrent with the in-flight Effect).
     e.step(
@@ -1232,7 +1232,7 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
         now + Duration::from_millis(10),
     );
     assert_eq!(stable_out.effects.len(), 1, "burst 1 fires one Effect");
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
 
     // EffectComplete::Ok → Rebasing → rebase probe in flight.
     let rebase_out = e.step(
@@ -1381,7 +1381,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         now + Duration::from_millis(10),
     );
     assert_eq!(stable_out.effects.len(), 1, "one PerFile Effect for foo.rs");
-    let effect_key = stable_out.effects[0].key.clone();
+    let effect_key = stable_out.effects[0].key();
     let foo_resource = match &effect_key {
         DedupKey::PerFile { resource, .. } => *resource,
         DedupKey::Subtree { .. } => panic!("expected PerFile key"),

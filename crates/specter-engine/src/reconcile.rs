@@ -945,11 +945,7 @@ mod tests {
             profile: pid,
             resource: a_rs_id,
         };
-        profiles
-            .get_mut(pid)
-            .unwrap()
-            .fired_subs
-            .insert(stale_key.clone());
+        profiles.get_mut(pid).unwrap().fired_subs.insert(stale_key);
 
         // a.rs needs a watch contribution so `delete_child`'s
         // `sub_watch` path is reachable; the per-file Profile would
@@ -1014,11 +1010,7 @@ mod tests {
             profile: pid,
             resource: a_rs_id,
         };
-        profiles
-            .get_mut(pid)
-            .unwrap()
-            .fired_subs
-            .insert(live_key.clone());
+        profiles.get_mut(pid).unwrap().fired_subs.insert(live_key);
 
         // Response: same a.rs name+inode (no delete). Bumped root mtime
         // forces graft to walk the level rather than equal-hash early-out.
@@ -1079,7 +1071,7 @@ mod tests {
             .get_mut(pid)
             .unwrap()
             .fired_subs
-            .insert(subtree_key.clone());
+            .insert(subtree_key);
 
         // Probe response deletes a.rs. The reap fires; the purge runs;
         // the Subtree entry should survive.

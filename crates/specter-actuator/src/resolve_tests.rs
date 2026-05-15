@@ -14,7 +14,7 @@ use smallvec::smallvec;
 use specter_core::program::SpawnBody;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ArgPart, ArgTemplate, CommandResolved, CorrelationId, DedupKey, Diff, Effect, EffectScope,
+    ArgPart, ArgTemplate, CommandResolved, CorrelationId, Diff, Effect, EffectCommon, EffectScope,
     EntryKind, EntryRef, ExecAction, FsIdentity, Placeholder, ProfileId, Rename, ResourceId,
     ResourceKind, SubId,
 };
@@ -52,12 +52,12 @@ fn exec_of(e: &Effect) -> &ExecAction {
 }
 
 /// `target_path` is no longer a field on [`Effect`] — the resolver
-/// derives it from `(anchor_path, target_relative)` at spawn time. Tests
+/// derives it from `(anchor_path, relative())` at spawn time. Tests
 /// pass the anchor + relative pair; the helper does no extra dispatch.
 ///
-/// `scope` selects the [`DedupKey`] variant (Subtree ⇒ no per-file
-/// resource, PerStableFile ⇒ default per-file resource); the resolver
-/// then derives `SPECTER_EVENT_KIND` from the variant.
+/// `scope` selects the `EffectTarget` shape (Subtree ⇒ no per-file
+/// segment, PerStableFile ⇒ per-file segment); the resolver then
+/// derives `SPECTER_EVENT_KIND` from the shape.
 fn make_effect(
     sub_name: &str,
     scope: EffectScope,
@@ -68,30 +68,34 @@ fn make_effect(
     correlation: CorrelationId,
     diff: Option<Arc<Diff>>,
 ) -> Effect {
-    let key = match scope {
-        EffectScope::SubtreeRoot => DedupKey::Subtree {
-            sub: SubId::default(),
-            profile: ProfileId::default(),
-        },
-        EffectScope::PerStableFile => DedupKey::PerFile {
-            sub: SubId::default(),
-            profile: ProfileId::default(),
-            resource: ResourceId::default(),
-        },
-    };
-    Effect {
-        key,
-        target: ResourceId::default(),
-        forced,
+    let common = EffectCommon {
+        sub: SubId::default(),
+        profile: ProfileId::default(),
+        anchor: ResourceId::default(),
         correlation,
-        diff,
+        forced,
         capture_output: false,
         sub_name: CompactString::from(sub_name),
         program: single_exec_program(argv),
         anchor_path: Arc::from(anchor_path.to_path_buf()),
         anchor_kind: ResourceKind::Dir,
-        target_relative: CompactString::from(target_relative),
         exclude: Arc::from(Vec::<CompactString>::new()),
+    };
+    match scope {
+        EffectScope::SubtreeRoot => Effect::subtree(common, diff),
+        EffectScope::PerStableFile => {
+            // PerFile diff is mandatory. Callers that passed `None` did
+            // not reference a diff-derived placeholder; an empty
+            // `Diff::default()` renders those placeholders identically
+            // to the old absent-diff path.
+            let diff = diff.unwrap_or_else(|| Arc::new(Diff::default()));
+            Effect::per_file(
+                common,
+                ResourceId::default(),
+                CompactString::from(target_relative),
+                diff,
+            )
+        }
     }
 }
 

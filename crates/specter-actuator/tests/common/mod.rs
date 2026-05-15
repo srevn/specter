@@ -18,8 +18,8 @@ use specter_actuator::{OsSpawner, SubprocessActuator};
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Effect, ExecAction, Input,
-    ProfileId, ResourceId, ResourceKind, SubId,
+    ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon, ExecAction,
+    Input, ProfileId, ResourceId, ResourceKind, SubId,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -188,24 +188,25 @@ pub fn perfile_effect_with_program(
     cwd: PathBuf,
 ) -> Effect {
     let resource = unique_resource_id(res_seed);
-    Effect {
-        key: DedupKey::PerFile {
-            sub: unique_sub_id(sub_seed),
-            profile: unique_profile_id(profile_seed),
-            resource,
-        },
-        target: resource,
-        forced: false,
+    let common = EffectCommon {
+        sub: unique_sub_id(sub_seed),
+        profile: unique_profile_id(profile_seed),
+        anchor: resource,
         correlation: CorrelationId::from(corr),
-        diff: None,
+        forced: false,
         capture_output: false,
         sub_name: CompactString::new(""),
         program,
         anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
-        target_relative: CompactString::new(""),
         exclude: Arc::from(Vec::<CompactString>::new()),
-    }
+    };
+    Effect::per_file(
+        common,
+        resource,
+        CompactString::new(""),
+        Arc::new(Diff::default()),
+    )
 }
 
 /// Build a PerFile Effect with a literal `argv` and the given correlation.
@@ -229,24 +230,25 @@ pub fn perfile_effect(
     cwd: PathBuf,
 ) -> Effect {
     let resource = unique_resource_id(res_seed);
-    Effect {
-        key: DedupKey::PerFile {
-            sub: unique_sub_id(sub_seed),
-            profile: unique_profile_id(profile_seed),
-            resource,
-        },
-        target: resource,
-        forced: false,
+    let common = EffectCommon {
+        sub: unique_sub_id(sub_seed),
+        profile: unique_profile_id(profile_seed),
+        anchor: resource,
         correlation: CorrelationId::from(corr),
-        diff: None,
+        forced: false,
         capture_output: false,
         sub_name: CompactString::new(""),
         program: literal_program(argv),
         anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
-        target_relative: CompactString::new(""),
         exclude: Arc::from(Vec::<CompactString>::new()),
-    }
+    };
+    Effect::per_file(
+        common,
+        resource,
+        CompactString::new(""),
+        Arc::new(Diff::default()),
+    )
 }
 
 /// Build a Subtree Effect with a literal `argv`.
@@ -262,21 +264,18 @@ pub fn subtree_effect(
     argv: Vec<String>,
     cwd: PathBuf,
 ) -> Effect {
-    Effect {
-        key: DedupKey::Subtree {
-            sub: unique_sub_id(sub_seed),
-            profile: unique_profile_id(profile_seed),
-        },
-        target: unique_resource_id(profile_seed),
-        forced: false,
+    let common = EffectCommon {
+        sub: unique_sub_id(sub_seed),
+        profile: unique_profile_id(profile_seed),
+        anchor: unique_resource_id(profile_seed),
         correlation: CorrelationId::from(corr),
-        diff: None,
+        forced: false,
         capture_output: false,
         sub_name: CompactString::new(""),
         program: literal_program(argv),
         anchor_path: Arc::from(cwd),
         anchor_kind: ResourceKind::Dir,
-        target_relative: CompactString::new(""),
         exclude: Arc::from(Vec::<CompactString>::new()),
-    }
+    };
+    Effect::subtree(common, None)
 }
