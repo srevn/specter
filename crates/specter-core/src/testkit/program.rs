@@ -16,7 +16,7 @@ use std::sync::Arc;
 ///
 /// Covers the common fixture shape used across engine and actuator
 /// tests. The returned `Arc` is the same shape `lower_to_program` mints,
-/// so it can flow directly into [`crate::Sub::new`] /
+/// so it can flow directly into [`crate::Sub::from_request`] /
 /// [`crate::SubAttachRequest`] / [`crate::Effect`].
 ///
 /// Edges:

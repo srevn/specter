@@ -29,8 +29,8 @@ use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, BurstIntent, ChildEntry, ClassSet, Diagnostic, DirChild,
     DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity, Input,
     LeafEntry, Placeholder, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachAnchor, SubAttachRequest, Tree, WatchOp,
+    Profile, ProfileIdentity, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachAnchor, SubAttachRequest, SubParams, Tree, WatchOp,
 };
 use specter_engine::{Engine, covers, nearest_covering_ancestor};
 use std::collections::BTreeMap;
@@ -286,16 +286,20 @@ fn golden_path_full_lifecycle() {
     let r = e_anchor(&mut e, "src");
     let now = Instant::now();
     let req = SubAttachRequest {
-        name: "build".into(),
         anchor: SubAttachAnchor::Resource(r),
-        config: cfg_recursive(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: NO_EVENTS,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: cfg_recursive(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
+        params: SubParams {
+            name: "build".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -392,16 +396,20 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
     let r = e_anchor(&mut e, "log.txt");
     e.tree_mut().set_kind(r, ResourceKind::File);
     let req = SubAttachRequest {
-        name: "fmt".into(),
         anchor: SubAttachAnchor::Resource(r),
-        config: ScanConfig::builder().build(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: NO_EVENTS,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: ScanConfig::builder().build(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
+        params: SubParams {
+            name: "fmt".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -431,16 +439,20 @@ fn pending_event_race_late_probe_response_discarded() {
     let r = e_anchor(&mut e, "src");
     let now = Instant::now();
     let req = SubAttachRequest {
-        name: "build".into(),
         anchor: SubAttachAnchor::Resource(r),
-        config: cfg_recursive(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: NO_EVENTS,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: cfg_recursive(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
+        params: SubParams {
+            name: "build".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -480,16 +492,20 @@ fn seed_burst_descendants_watched_via_first_probe() {
     let mut e = Engine::new();
     let r = e_anchor(&mut e, "src");
     let req = SubAttachRequest {
-        name: "build".into(),
         anchor: SubAttachAnchor::Resource(r),
-        config: cfg_recursive(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: NO_EVENTS,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: cfg_recursive(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
+        params: SubParams {
+            name: "build".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -525,16 +541,20 @@ fn force_fire_emits_effect_with_forced_true() {
     let r = e_anchor(&mut e, "src");
     let now = Instant::now();
     let req = SubAttachRequest {
-        name: "build".into(),
         anchor: SubAttachAnchor::Resource(r),
-        config: cfg_recursive(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: NO_EVENTS,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: cfg_recursive(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
+        params: SubParams {
+            name: "build".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -593,16 +613,20 @@ fn step_output_is_sorted() {
     let mut e = Engine::new();
     let r = e_anchor(&mut e, "root");
     let req = SubAttachRequest {
-        name: "build".into(),
         anchor: SubAttachAnchor::Resource(r),
-        config: cfg_recursive(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: NO_EVENTS,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: cfg_recursive(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
+        params: SubParams {
+            name: "build".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");

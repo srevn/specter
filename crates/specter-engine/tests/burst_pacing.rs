@@ -21,7 +21,8 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope,
     FsEvent, FsIdentity, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest,
+    ProfileIdentity, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
+    SubAttachRequest, SubParams,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -83,16 +84,20 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
 
     let now = Instant::now();
     let req = SubAttachRequest {
-        name: "build".into(),
         anchor: SubAttachAnchor::Resource(r),
-        config: ScanConfig::builder().recursive(true).build(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: ClassSet::CONTENT,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: ScanConfig::builder().recursive(true).build(),
+            max_settle: MAX_SETTLE,
+            events: ClassSet::CONTENT,
+        },
+        params: SubParams {
+            name: "build".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -190,16 +195,20 @@ fn sustained_unstable_response_storm_paces_at_settle() {
 
     let now = Instant::now();
     let req = SubAttachRequest {
-        name: "build".into(),
         anchor: SubAttachAnchor::Resource(r),
-        config: ScanConfig::builder().recursive(true).build(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: ClassSet::CONTENT,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: ScanConfig::builder().recursive(true).build(),
+            max_settle: MAX_SETTLE,
+            events: ClassSet::CONTENT,
+        },
+        params: SubParams {
+            name: "build".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");

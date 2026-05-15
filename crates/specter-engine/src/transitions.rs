@@ -2281,8 +2281,8 @@ impl Engine {
                     if matches!(mode, EmitMode::SeedDrift { .. }) {
                         continue;
                     }
-                    // PerStableFile implies `needs_diff = true` at Sub::new;
-                    // diff is always built.
+                    // PerStableFile implies `needs_diff = true` at
+                    // Sub::from_request; diff is always built.
                     let Some(diff) = ensure_diff(&mut diff_arc) else {
                         continue;
                     };

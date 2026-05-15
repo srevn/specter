@@ -1531,7 +1531,7 @@ mod tests {
         let cfg = Config::from_str(&minimal_toml("log_output = true\n")).unwrap();
         let req = cfg.watches[0].to_attach_request();
         assert!(
-            req.log_output,
+            req.params.log_output,
             "SubSpec.log_output reaches SubAttachRequest.log_output via to_attach_request",
         );
     }
@@ -1834,7 +1834,7 @@ mod tests {
     fn to_attach_request_uses_path_anchor_with_canonicalized_path() {
         let cfg = Config::from_str(&minimal_toml("")).unwrap();
         let req = cfg.watches[0].to_attach_request();
-        assert_eq!(req.name, "build");
+        assert_eq!(req.params.name, "build");
         assert!(matches!(req.anchor, SubAttachAnchor::Path(_)));
         let SubAttachAnchor::Path(p) = &req.anchor else {
             panic!("expected Path anchor")
@@ -1844,7 +1844,7 @@ mod tests {
             "request carries the same path stored in SubSpec"
         );
         assert_eq!(
-            req.events,
+            req.identity.events,
             ClassSet::DEFAULT_SUBTREE_ROOT,
             "to_attach_request threads the parsed events ClassSet through \
              into the engine surface",

@@ -9,8 +9,8 @@
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    Placeholder, Profile, ProfileMap, ResourceRole, ScanConfig, StepOutput, Sub, SubRegistry, Tree,
-    compute_config_hash,
+    Placeholder, Profile, ProfileIdentity, ProfileMap, ResourceRole, ScanConfig, StepOutput, Sub,
+    SubParams, SubRegistry, Tree,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +45,12 @@ fn shared_profile_via_config_hash() {
 
     let r = tree.ensure_root("/anchor", ResourceRole::User);
     let cfg = bare_cfg();
-    let hash = compute_config_hash(&cfg, MAX_SETTLE, NO_EVENTS);
+    let hash = ProfileIdentity {
+        config: cfg.clone(),
+        max_settle: MAX_SETTLE,
+        events: NO_EVENTS,
+    }
+    .config_hash();
 
     // Sub A: creates the Profile (find = None).
     let pid_a = profiles.find(r, hash).unwrap_or_else(|| {
@@ -54,20 +59,17 @@ fn shared_profile_via_config_hash() {
             Profile::new(r, cfg.clone(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         )
     });
-    let _sid_a = subs.insert(|id| {
-        Sub::new(
-            id,
-            "build-a",
-            pid_a,
-            build_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            MAX_SETTLE,
-            NO_EVENTS,
-            false,
-            None,
-        )
-    });
+    let _sid_a = subs.insert(Sub::from_request(
+        pid_a,
+        SubParams {
+            name: "build-a".to_string(),
+            program: build_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
+    ));
 
     // Sub B: same (resource, hash); reuses the Profile.
     let pid_b = profiles
@@ -156,7 +158,15 @@ fn detach_clears_back_references_on_both_sides() {
     assert!(profiles.get(pid).is_none());
     assert!(
         profiles
-            .find(r, compute_config_hash(&bare_cfg(), MAX_SETTLE, NO_EVENTS))
+            .find(
+                r,
+                ProfileIdentity {
+                    config: bare_cfg(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                }
+                .config_hash()
+            )
             .is_none()
     );
     assert!(tree.get(r).unwrap().profiles().is_empty());

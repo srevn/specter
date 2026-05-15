@@ -16,7 +16,7 @@
 
 use crate::ids::{ProfileId, PromoterId, ResourceId, SubId};
 use crate::program::ActionProgram;
-use crate::scan_config::ScanConfig;
+use crate::scan_config::{ProfileIdentity, ScanConfig};
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
@@ -38,59 +38,73 @@ pub enum SubAttachAnchor {
     Path(PathBuf),
 }
 
-/// Public-API request to attach a Sub.
+/// The per-Sub reaction declaration: everything that is *not* Profile
+/// identity or the anchor.
 ///
-/// Carries everything `Engine::attach_sub` needs to either reuse an
-/// existing Profile (matching `(anchor, config_hash)`) or create a fresh
-/// one. The [`SubAttachAnchor`] sum makes the resource-vs-path choice
-/// exclusive by construction — a request names exactly one, and the
-/// engine dispatches on it with an exhaustive `match`.
-///
-/// `name` is `String` so callers don't need a `compact_str` dependency at
-/// this seam — `Sub::new` converts via `Into<CompactString>` internally.
-///
-/// Lives in `core::sub` rather than `engine::engine` so
-/// [`SubRegistryDiff`] (a `core` type, consumed via
-/// [`crate::Input::ConfigDiff`]) can carry pre-id `SubAttachRequest`s without
-/// introducing a `core → engine` cycle. `Clone` is derived for the
-/// (rare) call sites that fan a request out to multiple Engines —
-/// production paths consume by value. `program` is `Arc<ActionProgram>`
-/// so the Arc travels straight from the config layer's
-/// `lower_to_program` into the engine's `Sub.program` without a
-/// re-allocation: one Arc per Sub, refcount-bumped on each emitted
-/// `Effect`.
+/// `name` is `String` so callers need no `compact_str` dependency at
+/// this seam ([`Sub::from_request`] converts via `Into<CompactString>`).
+/// `program` is `Arc<ActionProgram>` so the Arc minted by the config
+/// layer's `lower_to_program` flows through to `Sub.program` without a
+/// re-allocation.
 #[derive(Clone, Debug)]
-pub struct SubAttachRequest {
+pub struct SubParams {
     pub name: String,
-    pub anchor: SubAttachAnchor,
-    pub config: ScanConfig,
-    pub max_settle: Duration,
-    pub settle: Duration,
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
-    /// Event-class mask the user opted into. The engine folds this into
-    /// `config_hash` so two Subs differing only on classes fork separate
-    /// Profiles. The config layer is responsible for materializing the
-    /// scope-conditional default before constructing the request — this
-    /// struct does no defaulting.
-    pub events: ClassSet,
-    /// Forward subprocess stdout/stderr to Specter's own stdout/stderr
-    /// (`Stdio::inherit()`); when `false`, child output goes to
-    /// `/dev/null`. Threaded through to `Effect.capture_output` at
-    /// emission time. Not folded into `config_hash` — flipping it
-    /// changes how the actuator spawns, not which Profile a Sub
-    /// belongs to.
+    /// Per-Sub debounce floor — min-folded across the Profile's Subs by
+    /// the engine's `recompute_profile_settle`. Distinct from
+    /// `max_settle`, which is identity (folds into `config_hash`) and
+    /// lives on [`ProfileIdentity`].
+    pub settle: Duration,
+    /// Forward subprocess stdout/stderr to Specter's own stdio
+    /// (`Stdio::inherit()`); `false` routes child output to
+    /// `/dev/null`. Threaded to `Effect.capture_output`; not identity.
     pub log_output: bool,
     /// Promoter that synthesised this Sub — `None` for static
-    /// (operator-declared) Subs, `Some(pid)` for dynamic Subs spawned by
-    /// a Promoter's `try_promote`. Routed through the engine's recovery
-    /// fan-out at `on_anchor_terminal_event`: a Profile whose Subs are
-    /// all `Some(_)` reaps wholesale on anchor loss; mixed/static-only
-    /// Profiles preserve the existing recovery channel.
+    /// (operator-declared) Subs, `Some(pid)` for dynamic Subs. Read at
+    /// the engine's recovery fan-out (`on_anchor_terminal_event`) to
+    /// distinguish all-dynamic Profiles (wholesale teardown) from
+    /// mixed/static ones.
     pub source_promoter: Option<PromoterId>,
 }
 
+/// Public-API request to attach a Sub.
+///
+/// Three orthogonal parts: *where* ([`SubAttachAnchor`]), *which
+/// Profile* ([`ProfileIdentity`]), *what the Sub does* ([`SubParams`]).
+/// Identity decides Profile partitioning; the anchor resolves
+/// separately (not in the hash preimage); params are per-Sub. The
+/// split makes a Sub leaking a sibling's identity field structurally
+/// unrepresentable.
+///
+/// Lives in `core::sub` (not `engine`) so [`SubRegistryDiff`] can carry
+/// pre-id requests via [`crate::Input::ConfigDiff`] without a
+/// `core → engine` cycle. `Clone` serves the rare multi-Engine
+/// fan-out; production consumes by value.
+#[derive(Clone, Debug)]
+pub struct SubAttachRequest {
+    pub anchor: SubAttachAnchor,
+    pub identity: ProfileIdentity,
+    pub params: SubParams,
+}
+
 impl SubAttachRequest {
+    /// Canonical constructor. [`Self::for_anchor`] /
+    /// [`Self::for_anchor_dynamic`] are flat-argument ergonomics over
+    /// this for the config layer and tests.
+    #[must_use]
+    pub const fn from_parts(
+        anchor: SubAttachAnchor,
+        identity: ProfileIdentity,
+        params: SubParams,
+    ) -> Self {
+        Self {
+            anchor,
+            identity,
+            params,
+        }
+    }
+
     /// Build a static (operator-declared) attach request.
     /// `source_promoter` is `None`; use [`Self::for_anchor_dynamic`]
     /// when a Promoter is the source.
@@ -107,26 +121,27 @@ impl SubAttachRequest {
         events: ClassSet,
         log_output: bool,
     ) -> Self {
-        Self {
-            name,
+        Self::from_parts(
             anchor,
-            config,
-            max_settle,
-            settle,
-            program,
-            scope,
-            events,
-            log_output,
-            source_promoter: None,
-        }
+            ProfileIdentity {
+                config,
+                max_settle,
+                events,
+            },
+            SubParams {
+                name,
+                program,
+                scope,
+                settle,
+                log_output,
+                source_promoter: None,
+            },
+        )
     }
 
     /// Promoter-synthesised counterpart to [`Self::for_anchor`].
     /// `source` is non-optional — a dynamic Sub always has an
-    /// originating promoter. Delegates to [`Self::for_anchor`] and
-    /// stamps `source_promoter`; the engine reads the stamp at recovery
-    /// time (`on_anchor_terminal_event`) to distinguish all-dynamic
-    /// Profiles (wholesale teardown) from mixed/static ones.
+    /// originating promoter.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub const fn for_anchor_dynamic(
@@ -141,11 +156,22 @@ impl SubAttachRequest {
         log_output: bool,
         source: PromoterId,
     ) -> Self {
-        let mut req = Self::for_anchor(
-            name, anchor, config, max_settle, settle, program, scope, events, log_output,
-        );
-        req.source_promoter = Some(source);
-        req
+        Self::from_parts(
+            anchor,
+            ProfileIdentity {
+                config,
+                max_settle,
+                events,
+            },
+            SubParams {
+                name,
+                program,
+                scope,
+                settle,
+                log_output,
+                source_promoter: Some(source),
+            },
+        )
     }
 }
 
@@ -186,8 +212,9 @@ pub enum EffectScope {
 ///   timestamps). Both Files and Dirs.
 ///
 /// The set is backed by a `u8` bitmask — `bits()` is the canonical
-/// representation folded into [`compute_config_hash`](crate::compute_config_hash)
-/// (two Subs differing only on classes fork separate Profiles).
+/// representation folded into the Profile config hash via
+/// [`ProfileIdentity::config_hash`] (two Subs differing only on classes
+/// fork separate Profiles).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ClassSet(u8);
 
@@ -267,22 +294,19 @@ impl std::ops::BitAndAssign for ClassSet {
 
 #[derive(Debug)]
 pub struct Sub {
-    pub id: SubId,
     pub name: CompactString,
     pub profile: ProfileId,
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
+    /// Per-Sub debounce floor. `max_settle` and `events` are *not*
+    /// stored here — they are Profile identity (fold into `config_hash`,
+    /// invariant for the Profile's lifetime); read them off the Profile.
     pub settle: Duration,
-    pub max_settle: Duration,
     pub needs_diff: bool,
-    /// User-declared event-class mask. Folded into the Profile's
-    /// `config_hash`; every Sub on a Profile shares the same `events`
-    /// by construction.
-    pub events: ClassSet,
     /// Forward subprocess stdout/stderr to Specter's own stdio. Threaded
     /// onto each emitted [`crate::Effect`] as `capture_output`; the actuator
     /// switches between `Stdio::null()` (false, the default) and
-    /// `Stdio::inherit()` (true). Not folded into `config_hash`.
+    /// `Stdio::inherit()` (true).
     pub log_output: bool,
     /// Promoter that synthesised this Sub — `None` for static
     /// (operator-declared) Subs, `Some(pid)` for dynamic Subs spawned by
@@ -292,41 +316,28 @@ pub struct Sub {
 }
 
 impl Sub {
-    /// Construct a Sub. `needs_diff` is derived: true iff
-    /// `scope == PerStableFile` OR the program references any diff-derived
-    /// placeholder. Pre-computed once; never re-evaluated.
+    /// Construct a Sub from its [`ProfileId`] and the per-Sub
+    /// [`SubParams`]. `needs_diff` is derived: true iff
+    /// `scope == PerStableFile` OR the program references any
+    /// diff-derived placeholder. Pre-computed once; never re-evaluated.
     ///
-    /// `program` is taken as `Arc<ActionProgram>` so the Arc minted by
-    /// the config layer's `lower_to_program` flows through unchanged —
-    /// the constructor does not re-wrap. One Arc per Sub, refcount-bumped
-    /// on each emitted [`crate::Effect`].
+    /// The slotmap key is the Sub's identity authority — there is no
+    /// `id` field. `params.program`'s Arc flows through unchanged (no
+    /// re-wrap); one Arc per Sub, refcount-bumped on each emitted
+    /// [`crate::Effect`].
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        id: SubId,
-        name: impl Into<CompactString>,
-        profile: ProfileId,
-        program: Arc<ActionProgram>,
-        scope: EffectScope,
-        settle: Duration,
-        max_settle: Duration,
-        events: ClassSet,
-        log_output: bool,
-        source_promoter: Option<PromoterId>,
-    ) -> Self {
-        let needs_diff = scope == EffectScope::PerStableFile || program.references_diff_derived();
+    pub fn from_request(profile: ProfileId, params: SubParams) -> Self {
+        let needs_diff =
+            params.scope == EffectScope::PerStableFile || params.program.references_diff_derived();
         Self {
-            id,
-            name: name.into(),
+            name: params.name.into(),
             profile,
-            program,
-            scope,
-            settle,
-            max_settle,
+            program: params.program,
+            scope: params.scope,
+            settle: params.settle,
             needs_diff,
-            events,
-            log_output,
-            source_promoter,
+            log_output: params.log_output,
+            source_promoter: params.source_promoter,
         }
     }
 }
@@ -343,14 +354,12 @@ impl SubRegistry {
         Self::default()
     }
 
-    /// Insert a Sub built from the freshly-minted `SubId`. The Sub stores
-    /// its own id; the closure embeds the minted key into the Sub.
-    pub fn insert<F>(&mut self, build: F) -> SubId
-    where
-        F: FnOnce(SubId) -> Sub,
-    {
-        let id = self.subs.insert_with_key(build);
-        let profile = self.subs[id].profile;
+    /// Insert a Sub; the returned slotmap [`SubId`] is its identity
+    /// authority (the Sub carries no `id` field). The `by_profile`
+    /// index is updated in lockstep.
+    pub fn insert(&mut self, sub: Sub) -> SubId {
+        let profile = sub.profile;
+        let id = self.subs.insert(sub);
         self.by_profile.entry(profile).or_default().push(id);
         id
     }
@@ -405,8 +414,8 @@ impl SubRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionProgram, ClassSet, EffectScope, Sub, SubRegistry};
-    use crate::ids::{ProfileId, SubId};
+    use super::{ActionProgram, EffectScope, Sub, SubParams, SubRegistry};
+    use crate::ids::ProfileId;
     use crate::program::{
         ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder, SpawnBody,
     };
@@ -414,8 +423,6 @@ mod tests {
     use std::time::Duration;
 
     const SETTLE: Duration = Duration::from_millis(100);
-    const MAX_SETTLE: Duration = Duration::from_secs(6);
-    const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     /// Build a one-op program holding a single Exec body. Equivalent to
     /// the lowering of a single `[[watch.actions]] exec = [...]` entry.
@@ -487,77 +494,50 @@ mod tests {
 
     #[test]
     fn needs_diff_set_for_per_stable_file_scope() {
-        let sub = Sub::new(
-            SubId::default(),
-            "fmt",
+        let sub = Sub::from_request(
             ProfileId::default(),
-            anchor_only_program(),
-            EffectScope::PerStableFile,
-            SETTLE,
-            MAX_SETTLE,
-            NO_EVENTS,
-            false,
-            None,
+            SubParams {
+                name: "fmt".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::PerStableFile,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
         );
         assert!(sub.needs_diff);
     }
 
     #[test]
     fn needs_diff_set_for_diff_placeholder_in_subtree_scope() {
-        let sub = Sub::new(
-            SubId::default(),
-            "report",
+        let sub = Sub::from_request(
             ProfileId::default(),
-            program_with(Placeholder::Created),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            MAX_SETTLE,
-            NO_EVENTS,
-            false,
-            None,
+            SubParams {
+                name: "report".to_string(),
+                program: program_with(Placeholder::Created),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
         );
         assert!(sub.needs_diff);
     }
 
     #[test]
     fn needs_diff_false_for_anchor_subtree_combo() {
-        let sub = Sub::new(
-            SubId::default(),
-            "build",
+        let sub = Sub::from_request(
             ProfileId::default(),
-            anchor_only_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            MAX_SETTLE,
-            NO_EVENTS,
-            false,
-            None,
+            SubParams {
+                name: "build".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
         );
         assert!(!sub.needs_diff);
-    }
-
-    #[test]
-    fn registry_insert_embeds_minted_id() {
-        let mut reg = SubRegistry::new();
-        let pid = ProfileId::default();
-        let sid = reg.insert(|id| {
-            Sub::new(
-                id,
-                "build",
-                pid,
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                MAX_SETTLE,
-                NO_EVENTS,
-                false,
-                None,
-            )
-        });
-
-        let sub = reg.get(sid).expect("Sub stored");
-        assert_eq!(sub.id, sid, "Sub.id matches the minted key");
-        assert_eq!(sub.name, "build");
     }
 
     #[test]
@@ -565,34 +545,28 @@ mod tests {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
 
-        let s1 = reg.insert(|id| {
-            Sub::new(
-                id,
-                "a",
-                pid,
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                MAX_SETTLE,
-                NO_EVENTS,
-                false,
-                None,
-            )
-        });
-        let s2 = reg.insert(|id| {
-            Sub::new(
-                id,
-                "b",
-                pid,
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                MAX_SETTLE,
-                NO_EVENTS,
-                false,
-                None,
-            )
-        });
+        let s1 = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "a".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
+        let s2 = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "b".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
 
         let mut got = reg.at(pid).to_vec();
         got.sort();
@@ -611,20 +585,17 @@ mod tests {
     fn find_by_name_returns_some_for_match() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let id = reg.insert(|id| {
-            Sub::new(
-                id,
-                "build",
-                pid,
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                MAX_SETTLE,
-                NO_EVENTS,
-                false,
-                None,
-            )
-        });
+        let id = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "build".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
         assert_eq!(reg.find_by_name("build"), Some(id));
     }
 
@@ -638,20 +609,17 @@ mod tests {
     fn find_by_name_returns_none_after_remove() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let id = reg.insert(|id| {
-            Sub::new(
-                id,
-                "build",
-                pid,
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                MAX_SETTLE,
-                NO_EVENTS,
-                false,
-                None,
-            )
-        });
+        let id = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "build".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
         reg.remove(id);
         assert!(reg.find_by_name("build").is_none());
     }
@@ -660,34 +628,28 @@ mod tests {
     fn find_by_name_resolves_one_of_duplicates() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let a = reg.insert(|id| {
-            Sub::new(
-                id,
-                "shared",
-                pid,
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                MAX_SETTLE,
-                NO_EVENTS,
-                false,
-                None,
-            )
-        });
-        let b = reg.insert(|id| {
-            Sub::new(
-                id,
-                "shared",
-                pid,
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                MAX_SETTLE,
-                NO_EVENTS,
-                false,
-                None,
-            )
-        });
+        let a = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "shared".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
+        let b = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "shared".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
         let found = reg.find_by_name("shared").expect("at least one match");
         assert!(found == a || found == b, "find returns one of the matches");
     }
@@ -696,20 +658,17 @@ mod tests {
     fn registry_remove_clears_by_profile_and_drops_empty_bucket() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let sid = reg.insert(|id| {
-            Sub::new(
-                id,
-                "build",
-                pid,
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                MAX_SETTLE,
-                NO_EVENTS,
-                false,
-                None,
-            )
-        });
+        let sid = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "build".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
 
         let removed = reg.remove(sid);
         assert!(removed.is_some());
@@ -722,17 +681,16 @@ mod tests {
     /// strong count without copying the inner [`ActionProgram`].
     #[test]
     fn sub_program_is_arc_wrapped() {
-        let sub = Sub::new(
-            SubId::default(),
-            "build",
+        let sub = Sub::from_request(
             ProfileId::default(),
-            anchor_only_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            MAX_SETTLE,
-            NO_EVENTS,
-            false,
-            None,
+            SubParams {
+                name: "build".to_string(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
         );
 
         let initial = Arc::strong_count(&sub.program);
@@ -748,47 +706,28 @@ mod tests {
         );
     }
 
-    /// `Sub::new` does not re-wrap the program: the caller's Arc is the
-    /// same allocation the Sub stores. The minted Arc from the config
-    /// layer's `lower_to_program` flows through without churn.
+    /// `Sub::from_request` does not re-wrap the program: the caller's Arc
+    /// is the same allocation the Sub stores. The minted Arc from the
+    /// config layer's `lower_to_program` flows through without churn.
     #[test]
     fn sub_new_does_not_rewrap_program_arc() {
         let program = anchor_only_program();
         let before = Arc::as_ptr(&program);
-        let sub = Sub::new(
-            SubId::default(),
-            "build",
+        let sub = Sub::from_request(
             ProfileId::default(),
-            Arc::clone(&program),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            MAX_SETTLE,
-            NO_EVENTS,
-            false,
-            None,
+            SubParams {
+                name: "build".to_string(),
+                program: Arc::clone(&program),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
         );
         assert!(
             std::ptr::eq(before, Arc::as_ptr(&sub.program)),
-            "Sub::new must not allocate a new ActionProgram",
+            "Sub::from_request must not allocate a new ActionProgram",
         );
-    }
-
-    /// `Sub::new` threads `events` through to the constructed Sub.
-    #[test]
-    fn sub_new_records_events() {
-        let sub = Sub::new(
-            SubId::default(),
-            "x",
-            ProfileId::default(),
-            anchor_only_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            MAX_SETTLE,
-            ClassSet::CONTENT | ClassSet::METADATA,
-            false,
-            None,
-        );
-        assert_eq!(sub.events, ClassSet::CONTENT | ClassSet::METADATA);
     }
 }
 

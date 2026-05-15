@@ -33,9 +33,9 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, PatternSpec,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, PromoterAttachRequest, PromoterId,
-    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
-    SubAttachRequest, SubId,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, PromoterAttachRequest,
+    PromoterId, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
+    SubAttachRequest, SubId, SubParams,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1547,16 +1547,20 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
     let (pid, dyn_sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
     let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile;
     let static_req = SubAttachRequest {
-        name: String::from("static-foo"),
         anchor: SubAttachAnchor::Resource(anchor),
-        config: cfg(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: ClassSet::EMPTY,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: cfg(),
+            max_settle: MAX_SETTLE,
+            events: ClassSet::EMPTY,
+        },
+        params: SubParams {
+            name: String::from("static-foo"),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let attach_out = e.step(Input::AttachSub(static_req), Instant::now());
     let static_sid =
@@ -1619,16 +1623,20 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
     let r = e.tree_mut().ensure_root("anchor", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let req = SubAttachRequest {
-        name: String::from("static"),
         anchor: SubAttachAnchor::Resource(r),
-        config: cfg(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: ClassSet::EMPTY,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: cfg(),
+            max_settle: MAX_SETTLE,
+            events: ClassSet::EMPTY,
+        },
+        params: SubParams {
+            name: String::from("static"),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -1665,16 +1673,20 @@ fn anchor_terminal_predicate_static_sub_makes_mixed() {
     let (pid, dyn_sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
     let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile;
     let req = SubAttachRequest {
-        name: String::from("static"),
         anchor: SubAttachAnchor::Resource(anchor),
-        config: cfg(),
-        max_settle: MAX_SETTLE,
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        events: ClassSet::EMPTY,
-        log_output: false,
-        source_promoter: None,
+        identity: ProfileIdentity {
+            config: cfg(),
+            max_settle: MAX_SETTLE,
+            events: ClassSet::EMPTY,
+        },
+        params: SubParams {
+            name: String::from("static"),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
     };
     let _ = e.step(Input::AttachSub(req), Instant::now());
 

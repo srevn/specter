@@ -29,7 +29,7 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ClassSet, Diagnostic, EffectScope, Input, PatternSpec, PromoterAttachRequest,
     PromoterRegistryDiff, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
-    SubAttachRequest, SubRegistryDiff, WatchRegistryDiff,
+    SubAttachRequest, SubParams, SubRegistryDiff, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::sync::Arc;
@@ -164,8 +164,12 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
     // fresh id regardless on modify). The Promoter changes its
     // pattern (pattern source changed).
     let modify_sub_req = SubAttachRequest {
-        name: "build".to_owned(),
-        ..sub_req
+        anchor: sub_req.anchor,
+        identity: sub_req.identity,
+        params: SubParams {
+            name: "build".to_owned(),
+            ..sub_req.params
+        },
     };
     let modify_promoter_req = promoter_req("logs", "/var/log/*.json");
 

@@ -245,8 +245,8 @@ mod tests {
 
         let d = diff_subs_only(&old, &new, &BTreeMap::new());
         assert_eq!(d.subs.added.len(), 2);
-        assert_eq!(d.subs.added[0].name, "a");
-        assert_eq!(d.subs.added[1].name, "b");
+        assert_eq!(d.subs.added[0].params.name, "a");
+        assert_eq!(d.subs.added[1].params.name, "b");
         assert!(d.subs.removed.is_empty());
         assert!(d.subs.modified.is_empty());
     }
@@ -290,7 +290,7 @@ mod tests {
         assert!(d.subs.removed.is_empty());
         assert_eq!(d.subs.modified.len(), 1);
         assert_eq!(d.subs.modified[0].0, sid(1));
-        assert_eq!(d.subs.modified[0].1.name, "a");
+        assert_eq!(d.subs.modified[0].1.params.name, "a");
     }
 
     #[test]
@@ -304,13 +304,13 @@ mod tests {
         let d = diff_subs_only(&old, &new, &ids);
 
         assert_eq!(d.subs.added.len(), 1);
-        assert_eq!(d.subs.added[0].name, "d");
+        assert_eq!(d.subs.added[0].params.name, "d");
 
         assert_eq!(d.subs.removed, vec![sid(2)]);
 
         assert_eq!(d.subs.modified.len(), 1);
         assert_eq!(d.subs.modified[0].0, sid(1));
-        assert_eq!(d.subs.modified[0].1.name, "a");
+        assert_eq!(d.subs.modified[0].1.params.name, "a");
     }
 
     #[test]
@@ -337,7 +337,7 @@ mod tests {
         let ids = sub_ids_of(&[("a", sid(1))]);
         let d = diff_subs_only(&old, &new, &ids);
         assert_eq!(d.subs.added.len(), 1);
-        assert_eq!(d.subs.added[0].name, "z");
+        assert_eq!(d.subs.added[0].params.name, "z");
         assert_eq!(d.subs.removed, vec![sid(1)]);
         assert!(d.subs.modified.is_empty());
     }
@@ -416,7 +416,10 @@ mod tests {
         assert!(d.subs.removed.is_empty());
         assert_eq!(d.subs.modified.len(), 1);
         assert_eq!(d.subs.modified[0].0, sid(1));
-        assert_eq!(d.subs.modified[0].1.events, specter_core::ClassSet::CONTENT);
+        assert_eq!(
+            d.subs.modified[0].1.identity.events,
+            specter_core::ClassSet::CONTENT
+        );
     }
 
     #[test]
@@ -656,7 +659,7 @@ mod tests {
         assert!(d.promoters.added.is_empty());
         assert!(d.promoters.modified.is_empty());
         assert_eq!(d.subs.added.len(), 1);
-        assert_eq!(d.subs.added[0].name, "foo");
+        assert_eq!(d.subs.added[0].params.name, "foo");
         assert!(d.subs.removed.is_empty());
         assert!(d.subs.modified.is_empty());
     }
@@ -735,7 +738,7 @@ mod tests {
         let new = cfg(&[block_with_enabled("a", "echo", true).as_str()]);
         let d = diff_subs_only(&old, &new, &BTreeMap::new());
         assert_eq!(d.subs.added.len(), 1);
-        assert_eq!(d.subs.added[0].name, "a");
+        assert_eq!(d.subs.added[0].params.name, "a");
         assert!(d.subs.removed.is_empty());
         assert!(d.subs.modified.is_empty());
     }

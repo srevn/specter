@@ -27,15 +27,16 @@ use specter_core::{
     ProfileState, ReapTrigger, TimerKind,
 };
 // Registries.
-use specter_core::{PromoterRegistry, Sub, SubAttachAnchor, SubAttachRequest, SubRegistry};
+use specter_core::{
+    ProfileIdentity, PromoterRegistry, Sub, SubAttachAnchor, SubAttachRequest, SubParams,
+    SubRegistry,
+};
 // Per-Resource bookkeeping.
 use specter_core::{ClassSet, ContribKey};
 // Probe + effect correlation.
 use specter_core::{CorrelationId, DedupKey, ProbeOwner};
 // Engine step I/O.
 use specter_core::{Diagnostic, Input, StepOutput};
-// Helpers.
-use specter_core::compute_config_hash;
 use std::time::{Duration, Instant};
 
 /// Per-call stale-drain bound for [`Engine::pop_expired`].
@@ -288,17 +289,21 @@ impl Engine {
         //   bump yet) vs `Pending` revival (descent prefix carried it
         //   instead). The fresh-Profile arm structurally cannot mean
         //   "Profile existed but its anchor was unbumped."
-        let resolved = self.resolve_attach_anchor(&req, out)?;
-        let anchor = resolved.anchor();
-        let cfg_hash = compute_config_hash(&req.config, req.max_settle, req.events);
-        let (profile_id, origin) = self.find_or_create_profile(anchor, &req, cfg_hash);
+        let SubAttachRequest {
+            anchor,
+            identity,
+            params,
+        } = req;
+        let resolved = self.resolve_attach_anchor(&anchor, out)?;
+        let resolved_anchor = resolved.anchor();
+        let (profile_id, origin) = self.find_or_create_profile(resolved_anchor, identity, &params);
 
-        // Phase 2 — Sub registration. Consumes `req` for the
-        // `Sub::new` move; captures `settle` first for the
-        // `ExistingJoin` arm below (the request is no longer
-        // accessible after this point).
-        let attach_settle = req.settle;
-        let sub_id = self.register_sub(req, profile_id, out);
+        // Phase 2 — Sub registration. Consumes `params` for the
+        // `Sub::from_request` move; captures `settle` first for the
+        // `ExistingJoin` arm below (params is no longer accessible
+        // after this point).
+        let attach_settle = params.settle;
+        let sub_id = self.register_sub(params, profile_id, out);
 
         // Phase 3 — Per-origin bookkeeping. Existing-Profile arms run
         // their targeted cleanup and stop; the `Fresh` arm dispatches
@@ -354,10 +359,10 @@ impl Engine {
     /// slot becomes live on disk.
     fn resolve_attach_anchor(
         &mut self,
-        req: &SubAttachRequest,
+        anchor: &SubAttachAnchor,
         out: &mut StepOutput,
     ) -> Option<AnchorResolution> {
-        let resolved = match &req.anchor {
+        let resolved = match anchor {
             SubAttachAnchor::Path(path) => {
                 let parsed = match Tree::parse_attach_path(path) {
                     Ok(p) => p,
@@ -414,37 +419,23 @@ impl Engine {
     /// Phase 2 of `attach_sub_inner` — register the Sub and emit
     /// [`Diagnostic::SubAttached`].
     ///
-    /// Consumes `req` for the [`Sub::new`] move; captures diagnostic
-    /// fields up front so the closure can take `req.name` and
-    /// `req.source_promoter` by value. Cheap: a `CompactString` copy
-    /// of a typically-short user name (inline storage at ≤24 bytes)
-    /// and an `Option<PromoterId>` Copy.
+    /// Consumes `params` for the [`Sub::from_request`] move; captures
+    /// the diagnostic name + source-promoter first (cheap
+    /// `CompactString` / `Option<PromoterId>` copies) since
+    /// `from_request` then takes `params` by value.
     ///
     /// Sole emitter of `SubAttached`; downstream Phase-3 helpers
     /// never re-emit, and the bin's `loader.subs.name → SubId` map
     /// derives exclusively from this diagnostic stream.
     fn register_sub(
         &mut self,
-        req: SubAttachRequest,
+        params: SubParams,
         profile_id: ProfileId,
         out: &mut StepOutput,
     ) -> SubId {
-        let diag_name = CompactString::from(req.name.as_str());
-        let diag_source_promoter = req.source_promoter;
-        let sub_id = self.subs.insert(|sid| {
-            Sub::new(
-                sid,
-                req.name,
-                profile_id,
-                req.program,
-                req.scope,
-                req.settle,
-                req.max_settle,
-                req.events,
-                req.log_output,
-                req.source_promoter,
-            )
-        });
+        let diag_name = CompactString::from(params.name.as_str());
+        let diag_source_promoter = params.source_promoter;
+        let sub_id = self.subs.insert(Sub::from_request(profile_id, params));
         out.diagnostics.push(Diagnostic::SubAttached {
             sub: sub_id,
             name: diag_name,
@@ -578,11 +569,15 @@ impl Engine {
         self.enter_pending_descent(profile_id, prefix, remaining, out);
     }
 
-    /// Find an existing Profile at `(anchor, cfg_hash)` or create a
-    /// fresh one. Returns the [`ProfileId`] and a [`ProfileOrigin`]
-    /// classifying the outcome — `Fresh`, `ExistingJoin`, or
-    /// `ZombieRevival` (existing Profile carrying
+    /// Find an existing Profile at `(anchor, identity.config_hash())`
+    /// or create a fresh one. Returns the [`ProfileId`] and a
+    /// [`ProfileOrigin`] classifying the outcome — `Fresh`,
+    /// `ExistingJoin`, or `ZombieRevival` (existing Profile carrying
     /// [`BurstFinish::Reap`]).
+    ///
+    /// `identity` is taken by value: the `Fresh` arm moves its fields
+    /// straight into [`Profile::new`] (no clone); the existing-Profile
+    /// arms drop it. The canonical hash is computed once here.
     ///
     /// The slim three-variant enum supersedes the prior
     /// `is_fresh_profile + was_zombie` two-read pattern: the
@@ -599,9 +594,10 @@ impl Engine {
     fn find_or_create_profile(
         &mut self,
         anchor: ResourceId,
-        req: &SubAttachRequest,
-        cfg_hash: u64,
+        identity: ProfileIdentity,
+        params: &SubParams,
     ) -> (ProfileId, ProfileOrigin) {
+        let cfg_hash = identity.config_hash();
         if let Some(pid) = self.profiles.find(anchor, cfg_hash) {
             let zombie = self
                 .profiles
@@ -623,10 +619,10 @@ impl Engine {
         let anchor_kind = self.tree.get(anchor).and_then(specter_core::Resource::kind);
         let p = Profile::new(
             anchor,
-            req.config.clone(),
-            req.max_settle,
-            req.settle,
-            req.events,
+            identity.config,
+            identity.max_settle,
+            params.settle,
+            identity.events,
             anchor_kind,
         );
         let pid = self.profiles.attach(&mut self.tree, p);

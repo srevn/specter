@@ -247,7 +247,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
 // ───────────────────────────────────────────────────────────────────────
 // IT-EF-2 — Two Subs with different masks fork separate Profiles
 //
-// `events` folds into `compute_config_hash`, so two Subs at the same
+// `events` folds into `ProfileIdentity::config_hash`, so two Subs at the same
 // resource that differ only on `events` partition into two distinct
 // Profiles. This guards against the "Profile-union infection" problem:
 // a chmod on a Sub asking only for CONTENT must not fire that Sub's

@@ -156,9 +156,10 @@ pub enum ConfigError {
     InvalidGlob { source: String, message: String },
 }
 
-/// Canonical hash of `(ScanConfig, max_settle, events)`.
-/// The single hashing entry point in `core`/`engine` — all other paths
-/// route through this for `config_hash` derivation.
+/// Canonical hash of `(ScanConfig, max_settle, events)` — the
+/// crate-internal hashing kernel. [`ProfileIdentity::config_hash`] is
+/// the sole public route; production threads a `ProfileIdentity`
+/// through that rather than calling this directly.
 ///
 /// Inputs are folded in fixed order through [`crate::hash::hasher`]:
 ///   `recursive`, `hidden`, `len(exclude)` as `u32`, each `exclude.source`,
@@ -168,7 +169,11 @@ pub enum ConfigError {
 /// `events` is folded last so two Subs differing only on event-class mask
 /// fork separate Profiles ("Profile-union infection" defence).
 #[must_use]
-pub fn compute_config_hash(scan: &ScanConfig, max_settle: Duration, events: ClassSet) -> u64 {
+pub(crate) fn compute_config_hash(
+    scan: &ScanConfig,
+    max_settle: Duration,
+    events: ClassSet,
+) -> u64 {
     let mut h = hasher();
 
     scan.recursive.hash(&mut h);
@@ -200,15 +205,13 @@ pub fn compute_config_hash(scan: &ScanConfig, max_settle: Duration, events: Clas
     h.finish()
 }
 
-/// The Profile partition key's config half, reified: the inputs whose
-/// canonical hash decides which Profile a Sub joins. Subs whose
-/// identities hash equal share one Profile, one snapshot, one burst
-/// lifecycle.
+/// The Profile partition key's config half, reified.
 ///
-/// Deliberately neither `Hash` nor `Eq`/`Ord`: [`Self::config_hash`] is
-/// the sole identity operation. A structural derive would be a second
-/// identity route that could diverge from the canonical hash the
-/// partition actually keys on.
+/// The inputs whose canonical hash decides which Profile a Sub joins
+/// (equal hash ⇒ shared Profile/snapshot/burst). Deliberately neither
+/// `Hash` nor `Eq`/`Ord`: [`Self::config_hash`] is the sole identity
+/// operation — a structural derive would be a second identity route
+/// that could diverge from the hash the partition actually keys on.
 #[derive(Clone, Debug)]
 pub struct ProfileIdentity {
     pub config: ScanConfig,
