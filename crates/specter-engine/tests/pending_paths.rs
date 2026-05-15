@@ -401,7 +401,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     // Profile is reaped.
     assert!(
         e.profiles().get(pid).is_none(),
-        "Profile reaped on detach (Pending+sub_refcount==0)",
+        "Profile reaped on detach (Pending + last Sub detached)",
     );
     // ProbeOp::Cancel emitted for the in-flight descent probe.
     let cancel_present = detach_out

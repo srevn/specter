@@ -255,9 +255,8 @@ impl Engine {
     ///    classifies the `(anchor, config_hash)` lookup into a
     ///    [`ProfileOrigin`] trichotomy.
     /// 2. **Sub registration.** `register_sub` consumes the request to
-    ///    mint the [`Sub`], bumps `Profile.sub_refcount`, and emits
-    ///    [`Diagnostic::SubAttached`] — the single point at which a
-    ///    SubId enters the registry.
+    ///    mint the [`Sub`] and emit [`Diagnostic::SubAttached`] — the
+    ///    single point at which a SubId enters the registry.
     /// 3. **Per-origin bookkeeping.** Existing-Profile arms run their
     ///    targeted cleanup (`revive_zombie` /
     ///    `join_existing`); the `Fresh` arm dispatches on the
@@ -285,10 +284,11 @@ impl Engine {
         // structural source of truth for "what state is this Profile
         // entering on this attach?". Two predicates the pre-Phase-4
         // shape derived ambiguously are now exhaustively typed:
-        // - `sub_refcount == 0` is ambiguous against `ZombieRevival`
-        //   (the prior burst hasn't released its anchor claim yet) —
-        //   the origin tells you whether the Sub is the *first* on the
-        //   Profile or the *first since reap was deferred*.
+        // - "no live Subs on the Profile" is ambiguous against
+        //   `ZombieRevival` (the prior burst hasn't released its anchor
+        //   claim yet) — the origin tells you whether the Sub is the
+        //   *first* on the Profile or the *first since reap was
+        //   deferred*.
         // - `anchor_claim == None` is ambiguous against `Fresh` (no
         //   bump yet) vs `Pending` revival (descent prefix carried it
         //   instead). The fresh-Profile arm structurally cannot mean
@@ -405,8 +405,7 @@ impl Engine {
         Some(resolved)
     }
 
-    /// Phase 2 of `attach_sub_inner` — register the Sub, bump
-    /// `Profile.sub_refcount`, and emit
+    /// Phase 2 of `attach_sub_inner` — register the Sub and emit
     /// [`Diagnostic::SubAttached`].
     ///
     /// Consumes `req` for the [`Sub::new`] move; captures diagnostic
@@ -440,9 +439,6 @@ impl Engine {
                 req.source_promoter,
             )
         });
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.sub_refcount = p.sub_refcount.saturating_add(1);
-        }
         out.diagnostics.push(Diagnostic::SubAttached {
             sub: sub_id,
             name: diag_name,
@@ -540,7 +536,7 @@ impl Engine {
             out,
         );
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.anchor_claim = AnchorClaim::Held;
+            p.install_anchor_claim_held();
         }
         self.set_watch_root_parent(profile_id, anchor, out);
         self.install_parent_edges_for(profile_id);
@@ -766,8 +762,8 @@ impl Engine {
 
     /// Detach a Sub by id.
     ///
-    /// Decrements `Profile.sub_refcount`; recomputes `Profile.settle =
-    /// min(remaining_subs.settles)`. If the count reaches zero:
+    /// Recomputes `Profile.settle = min(remaining_subs.settles)`. If no
+    /// Subs remain on the Profile (`subs.at(pid)` empty):
     /// - **Idle / Pending Profile:** reap immediately. Release anchor
     ///   `watch_demand` (1→0 emits Unwatch), release
     ///   `watch_root_parent` contribution, clear parent edge,
@@ -803,19 +799,25 @@ impl Engine {
             }
         };
 
-        let Some(p) = self.profiles.get_mut(profile_id) else {
+        // A live Sub's `.profile` is live by the attach invariant; this
+        // guard is defence-in-depth — same effect as the get_mut-borrow
+        // bail it replaces, but no Profile write happens here (the
+        // post-detach count is derived from the registry).
+        if self.profiles.get(profile_id).is_none() {
             return;
-        };
-        p.sub_refcount = p.sub_refcount.saturating_sub(1);
-        let new_refcount = p.sub_refcount;
+        }
+        // Post-`remove` count, read straight from the Sub registry —
+        // `Profile.sub_refcount` was a denormalised mirror of this and
+        // has been removed.
+        let remaining_subs = self.subs.at(profile_id).len();
 
         // Purge `fired_subs` entries keyed by the detached Sub. The fire
         // history must drop with the Sub: a future drift verdict on the
         // Profile must not re-fire an Effect for a Sub the user has
         // detached. The full reap path below drops the whole set
         // alongside the Profile, so this targeted purge runs only on the
-        // refcount-still-positive branch.
-        if new_refcount > 0 {
+        // subs-remaining branch.
+        if remaining_subs > 0 {
             if let Some(p) = self.profiles.get_mut(profile_id) {
                 p.fired_subs.retain(|k| match k {
                     DedupKey::Subtree { sub: s, .. } | DedupKey::PerFile { sub: s, .. } => {
@@ -833,7 +835,7 @@ impl Engine {
             return;
         }
 
-        // new_refcount == 0: classify the reap path via the typed
+        // No Subs remain: classify the reap path via the typed
         // [`ProfileState::detach_lifecycle`] projection — `ReapNow` for
         // Idle / Pending Profiles (no burst to drain), `DeferToBurstEnd`
         // for Active Profiles (the burst's `propagate(-1) / sub_suppress`

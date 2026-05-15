@@ -51,7 +51,6 @@ fn shared_profile_via_config_hash() {
             Profile::new(r, cfg.clone(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         )
     });
-    profiles.get_mut(pid_a).unwrap().sub_refcount += 1;
     let _sid_a = subs.insert(|id| {
         Sub::new(
             id,
@@ -72,9 +71,7 @@ fn shared_profile_via_config_hash() {
         .find(r, hash)
         .expect("Profile exists from Sub A's attach");
     assert_eq!(pid_a, pid_b, "shared Profile across matching configs");
-    profiles.get_mut(pid_b).unwrap().sub_refcount += 1;
 
-    assert_eq!(profiles.get(pid_a).unwrap().sub_refcount, 2);
     assert_eq!(profiles.len(), 1);
     assert_eq!(tree.get(r).unwrap().profiles().len(), 1);
 }

@@ -2100,16 +2100,16 @@ impl Engine {
     ///   skipped — Seed-time drift is Subtree-only), and
     /// - the [`Effect::forced`] value carried into the spawned process.
     ///
-    /// `Profile.reap_pending` suppresses all emission — the Profile is on its
-    /// way out and any remaining Subs (none, by construction of
-    /// `reap_pending = sub_refcount == 0`) would fire against a Sub registry
-    /// that no longer holds them.
+    /// A burst flagged [`BurstFinish::Reap`] suppresses all emission —
+    /// the Profile is on its way out (its last Sub detached mid-burst)
+    /// and any Effect would fire against a Sub registry that no longer
+    /// holds the Subs.
     ///
     /// Returns an [`EmitOutcome`] whose `count` is the number of Effects
     /// pushed onto `out.effects`. Callers consume this to decide whether
     /// to enter the `Awaiting` phase (`count > 0`) or short-circuit to
     /// `finish_burst_to_idle` (dedup-hash suppressed everything, no Subs
-    /// matched, or `reap_pending`).
+    /// matched, or the burst is flagged [`BurstFinish::Reap`]).
     fn emit_effects(
         &mut self,
         profile_id: ProfileId,

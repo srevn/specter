@@ -51,9 +51,9 @@ use crate::probe_channel::OpenKind;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
-    AnchorClaim, ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, DirSnapshot,
-    EntryKind, FS_ROOT_SEGMENT, ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, StepOutput, TreePath,
+    ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, DirSnapshot, EntryKind,
+    FS_ROOT_SEGMENT, ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
+    StepOutput, TreePath,
 };
 use std::time::Instant;
 
@@ -493,12 +493,13 @@ impl crate::Engine {
     /// 1. Flip the slot's role to `User` (was `DescentScaffold` from the
     ///    descent walk).
     /// 2. Capture `Profile.events_union` for the anchor's contribution.
-    /// 3. Transition the Profile **before** any refcount op:
-    ///    `anchor_claim = Held`, `state = Idle`, `kind = Some(anchor_kind)`.
-    ///    The recompute (multi-contributor case) reads `Profile.state` and
-    ///    `Profile.anchor_claim` to attribute contributions; the post-flip
-    ///    world has the prefix's STRUCTURE source gone (state no longer
-    ///    Pending) and the anchor's mask source owed.
+    /// 3. Transition the Profile **before** any refcount op via
+    ///    [`specter_core::Profile::materialize_anchor`] — atomic
+    ///    `Pending → Idle`, claim install, kind pin. The recompute
+    ///    (multi-contributor case) reads `Profile.state` and
+    ///    `Profile.anchor_claim` to attribute contributions; the
+    ///    post-flip world has the prefix's STRUCTURE source gone (state
+    ///    no longer Pending) and the anchor's mask source owed.
     /// 4. Sub the prefix's STRUCTURE; add the anchor's mask.
     /// 5. Install the watch-root-parent contribution (deferred from
     ///    `attach_sub_inner` because the parent didn't exist on disk
@@ -522,9 +523,7 @@ impl crate::Engine {
 
         let anchor_kind = kind_from_entry(entry_kind);
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.anchor_claim = AnchorClaim::Held;
-            p.state = ProfileState::Idle;
-            p.kind = Some(anchor_kind);
+            p.materialize_anchor(anchor_kind);
         }
 
         // Profile.resource was assigned to the anchor's slot at attach

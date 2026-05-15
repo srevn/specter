@@ -573,7 +573,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
         ProfileState::Active(_, _)
     );
     assert!(pre_state, "first attach went Active");
-    let pre_refcount = e.profiles.get(pid).unwrap().sub_refcount;
+    let pre_count = e.subs.at(pid).len();
 
     // Second attach with the same config_hash.
     let req = SubAttachRequest {
@@ -591,7 +591,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
     };
     let out = e.step(Input::AttachSub(req), now);
     let sid2 = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    assert_eq!(e.profiles.get(pid).unwrap().sub_refcount, pre_refcount + 1);
+    assert_eq!(e.subs.at(pid).len(), pre_count + 1);
     assert_eq!(e.subs.get(sid2).unwrap().profile, pid, "shared Profile");
     // No fresh watch/probe/suppress emitted: existing Profile already has
     // them.
@@ -2618,7 +2618,10 @@ fn detach_sub_active_profile_marks_reap_pending() {
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     let p = e.profiles.get(pid).expect("profile alive until burst ends");
     assert!(matches!(p.state.burst_finish(), Some(BurstFinish::Reap)));
-    assert_eq!(p.sub_refcount, 0);
+    assert!(
+        e.subs.at(pid).is_empty(),
+        "no Subs remain after detaching the sole Sub"
+    );
 }
 
 #[test]
@@ -3839,9 +3842,9 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     let _ = e.step(Input::AttachSub(req2), Instant::now());
     assert!(e.profiles.get(pid).unwrap().has_per_file_fds);
 
-    // Detaching the second Sub leaves the Profile alive (sub_refcount > 0
-    // before detach); the flag still doesn't flip because the Profile's
-    // events mask is invariant.
+    // Detaching the second Sub leaves the Profile alive (a Sub still
+    // remains before detach); the flag still doesn't flip because the
+    // Profile's events mask is invariant.
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles.get(pid).unwrap().has_per_file_fds);
 }

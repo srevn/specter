@@ -69,7 +69,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
 #[test]
 fn config_diff_add_sub_to_existing_profile() {
     // Engine has Sub A; ConfigDiff adds Sub B at the same anchor with the
-    // same config — both share one Profile. sub_refcount goes 1 → 2; no
+    // same config — both share one Profile. The Profile's Sub count goes 1 → 2; no
     // new Watch/Probe/Suppress.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
@@ -92,7 +92,7 @@ fn config_diff_add_sub_to_existing_profile() {
     );
     let sid_a = specter_core::testkit::first_attached_sub(&attach).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
-    assert_eq!(e.profiles().get(pid).unwrap().sub_refcount, 1);
+    assert_eq!(e.subs().at(pid).len(), 1);
 
     // ConfigDiff with one added Sub at the same anchor + same cfg.
     let mut diff = SubRegistryDiff::default();
@@ -115,7 +115,7 @@ fn config_diff_add_sub_to_existing_profile() {
         now,
     );
 
-    assert_eq!(e.profiles().get(pid).unwrap().sub_refcount, 2);
+    assert_eq!(e.subs().at(pid).len(), 2);
     let new_watches = out
         .watch_ops
         .iter()
@@ -133,7 +133,7 @@ fn config_diff_add_sub_to_existing_profile() {
 #[test]
 fn config_diff_remove_sole_sub_reaps_profile() {
     // Engine has Sub A on its own Profile, post-Seed Idle. ConfigDiff
-    // removes A. Profile reaped immediately (sub_refcount → 0, Idle);
+    // removes A. Profile reaped immediately (no Subs remain, Idle);
     // anchor unwatched.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
@@ -393,7 +393,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
         !matches!(p.state.burst_finish(), Some(BurstFinish::Reap)),
         "reap_pending cleared by revival"
     );
-    assert_eq!(p.sub_refcount, 1, "exactly one live Sub (B)");
+    assert_eq!(e.subs().at(pid).len(), 1, "exactly one live Sub (B)");
     assert_eq!(
         e.tree().get(r).unwrap().watch_demand(),
         watch_demand_before,

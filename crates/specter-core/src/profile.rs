@@ -443,7 +443,7 @@ pub enum BurstFinish {
     Reap,
 }
 
-/// Where should a Profile's `sub_refcount == 0` arrival land?
+/// Where should a Profile land when its last Sub detaches?
 ///
 /// Computed by [`ProfileState::detach_lifecycle`] at the moment the
 /// last Sub is removed. The two arms encode the only paths that
@@ -462,7 +462,7 @@ pub enum BurstFinish {
 ///
 /// Lives in core (not in the engine) because the classification is a
 /// projection over [`ProfileState`] — the state knows what its
-/// `sub_refcount == 0` outcome must be.
+/// last-Sub-detached outcome must be.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum DetachLifecycle {
     /// Profile has no burst — reap synchronously.
@@ -585,8 +585,8 @@ impl ProfileState {
         }
     }
 
-    /// Classify a `sub_refcount == 0` arrival's reap path. Called by
-    /// `detach_sub_inner` once the refcount actually hits zero — the
+    /// Classify the reap path when a Profile's last Sub detaches. Called
+    /// by `detach_sub_inner` once no Subs remain on the Profile — the
     /// result chooses between immediate `reap_profile` and
     /// deferred-to-burst-end via [`Self::mark_active_for_reap`].
     ///
@@ -1117,7 +1117,6 @@ pub struct Profile {
     /// is reserved for testkit / unit-test setup.
     pub parent_profile: Option<ProfileId>,
     pub dirty_descendants: u32,
-    pub sub_refcount: u32,
     pub max_settle: Duration,
     /// Settle interval driving `start_standard_burst` and the backoff base.
     /// Cached on construction from the first attached Sub; the engine
@@ -1208,8 +1207,8 @@ pub struct Profile {
 
 impl Profile {
     /// Construct a fresh Profile: state `Idle` (so no burst-finish
-    /// directive exists yet), no baseline/current, refcounts at zero,
-    /// no watch-root parent recorded. `config_hash` is computed from
+    /// directive exists yet), no baseline/current, no watch-root parent
+    /// recorded. `config_hash` is computed from
     /// `(config, max_settle, events)` and is stable for the Profile's
     /// lifetime — there is no path to a Profile with an unset or stale
     /// hash.
@@ -1255,7 +1254,6 @@ impl Profile {
             current: None,
             parent_profile: None,
             dirty_descendants: 0,
-            sub_refcount: 0,
             max_settle,
             settle,
             watch_root_parent: None,
@@ -1666,7 +1664,6 @@ mod tests {
         assert!(p.current.is_none());
         assert!(p.parent_profile.is_none());
         assert_eq!(p.dirty_descendants, 0);
-        assert_eq!(p.sub_refcount, 0);
         assert_eq!(p.max_settle, MAX_SETTLE);
         assert_eq!(p.settle, SETTLE);
     }

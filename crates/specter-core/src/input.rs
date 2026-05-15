@@ -122,11 +122,11 @@ pub enum Input {
     /// The bin's loader keys its `name → SubId` map off the diagnostic
     /// stream rather than the (deleted) synchronous-return shape.
     AttachSub(SubAttachRequest),
-    /// Detach a Sub. The engine drops the Sub from the registry,
-    /// decrements `Profile.sub_refcount`, and either reaps the
-    /// Profile (Idle/Pending: immediate) or marks it for
-    /// deferred-reap (Active: [`crate::BurstFinish::Reap`]). Stale
-    /// [`SubId`] yields a [`crate::Diagnostic::DetachUnknownSub`].
+    /// Detach a Sub. The engine drops the Sub from the registry and
+    /// either reaps the Profile (Idle/Pending: immediate, once no Subs
+    /// remain) or marks it for deferred-reap (Active:
+    /// [`crate::BurstFinish::Reap`]). Stale [`SubId`] yields a
+    /// [`crate::Diagnostic::DetachUnknownSub`].
     DetachSub(SubId),
     /// Attach a Promoter. The engine renders the literal-prefix path,
     /// materialises the Tree, opens the probe channel, and starts the
