@@ -164,32 +164,33 @@ fn discard_anchor_state_preserves_watch_root_parent() {
 }
 
 #[test]
-fn discard_anchor_state_captures_last_settled_hash_at_loss() {
+fn discard_anchor_state_carries_settled_hash_through_loss() {
     let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
 
     let pre_loss_hash = e
         .profiles()
         .get(pid)
-        .and_then(|p| p.baseline().map(specter_core::TreeSnapshot::hash))
+        .and_then(|p| p.baseline().map(|s| s.hash()))
         .expect("fixture must produce baseline");
-    assert!(
-        e.profiles()
-            .get(pid)
-            .unwrap()
-            .last_settled_hash_at_loss()
-            .is_none(),
-        "active mode: witness must be None pre-loss",
+    // Active mode: the settled reference *is* the live baseline — a
+    // separate survival witness alongside a held baseline is not
+    // representable in the anchor sum.
+    assert_eq!(
+        e.profiles().get(pid).unwrap().settled_hash(),
+        Some(pre_loss_hash),
+        "active mode: settled reference is the live baseline hash",
     );
 
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
 
     let p = e.profiles().get(pid).unwrap();
-    assert!(p.baseline().is_none(), "discard cleared baseline");
+    assert!(p.baseline().is_none(), "discard cleared the baseline");
     assert_eq!(
-        p.last_settled_hash_at_loss(),
+        p.settled_hash(),
         Some(pre_loss_hash),
-        "witness captured pre-loss baseline hash",
+        "the survival witness carries the pre-loss baseline hash through \
+         the loss window so post-recovery drift still has a reference",
     );
 }
 
@@ -213,24 +214,25 @@ fn discard_anchor_state_preserves_fired_subs() {
 }
 
 #[test]
-fn discard_anchor_state_no_witness_when_baseline_already_none() {
+fn discard_anchor_state_idempotent_preserves_witness() {
     let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
 
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
-    let witness_after_first = e.profiles().get(pid).unwrap().last_settled_hash_at_loss();
+    let witness_after_first = e.profiles().get(pid).unwrap().settled_hash();
     assert!(
         witness_after_first.is_some(),
-        "first discard captures witness",
+        "first discard captures the survival witness",
     );
 
     let mut out2 = StepOutput::default();
     e.discard_anchor_state(pid, &mut out2);
 
     assert_eq!(
-        e.profiles().get(pid).unwrap().last_settled_hash_at_loss(),
+        e.profiles().get(pid).unwrap().settled_hash(),
         witness_after_first,
-        "second discard with baseline = None preserves prior witness",
+        "second discard against an already-Unclassified anchor preserves \
+         the prior witness rather than overwriting it with None",
     );
 }
 

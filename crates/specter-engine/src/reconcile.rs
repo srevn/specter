@@ -456,10 +456,10 @@ pub(crate) fn graft(
         purge_per_file_fired_subs_for_resources(profiles, &reaped);
     }
 
-    // Atomic commit: `Profile.current` and `Profile.kind` are written
-    // together via the setter. The setter's debug_assert pins the
-    // cross-field invariant (`current = Some(Dir) ⇒ kind == Some(Dir)`)
-    // at the only Dir-current write site.
+    // Classify-and-graft in one move. The anchor sum's discriminant
+    // *is* the kind, so `current = Some(Dir) ⇒ kind == Some(Dir)` is
+    // structural — there is no separate `kind` field to write or to
+    // disagree with the snapshot variant.
     if let Some(p) = profiles.get_mut(profile_id) {
         p.install_dir_current(new_arc);
     }
@@ -520,9 +520,14 @@ pub(crate) fn current_target_hash(
     target: ResourceId,
     tree: &Tree,
 ) -> Option<u128> {
+    // Both arms consume the owned projection: the Dir arm navigates to
+    // `target` via `subtree_at_dir`, the File arm reads the leaf digest.
+    // `current_dir()` would serve only the Dir arm, so the owned
+    // `current()` (Arc bump for Dir, leaf copy for File) is the right
+    // shape here.
     match profile.current()? {
         TreeSnapshot::Dir(root) => {
-            subtree_at_dir(root, profile.resource, target, tree).map(|s| s.dir_hash())
+            subtree_at_dir(&root, profile.resource, target, tree).map(|s| s.dir_hash())
         }
         TreeSnapshot::File(leaf) => Some(leaf.leaf_hash()),
     }
@@ -857,10 +862,7 @@ mod tests {
 
         let prior_arc_count = Arc::strong_count(&snap_a);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current()) {
-            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
-            _ => None,
-        };
+        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -887,10 +889,7 @@ mod tests {
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let response = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current()) {
-            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
-            _ => None,
-        };
+        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -960,10 +959,7 @@ mod tests {
         // Probe response: a.rs is gone.
         let response = dir_snap(200, vec![]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current()) {
-            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
-            _ => None,
-        };
+        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -1013,10 +1009,7 @@ mod tests {
         // forces graft to walk the level rather than equal-hash early-out.
         let response = dir_snap(200, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current()) {
-            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
-            _ => None,
-        };
+        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -1069,10 +1062,7 @@ mod tests {
         // the Subtree entry should survive.
         let response = dir_snap(200, vec![]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current()) {
-            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
-            _ => None,
-        };
+        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -1146,10 +1136,7 @@ mod tests {
 
         let response = dir_snap(200, vec![]);
 
-        let prior = match profiles.get(pid_a).and_then(|p| p.current()) {
-            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
-            _ => None,
-        };
+        let prior = profiles.get(pid_a).and_then(|p| p.current_dir().cloned());
         let mut out = StepOutput::default();
         graft(
             pid_a,
@@ -1214,10 +1201,7 @@ mod tests {
 
         let response = dir_snap(200, vec![]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current()) {
-            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
-            _ => None,
-        };
+        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
         let mut out = StepOutput::default();
         graft(
             pid,
@@ -1249,9 +1233,7 @@ mod tests {
         );
 
         let p = profiles.get(pid).unwrap();
-        let TreeSnapshot::Dir(current_arc) = p.current().unwrap() else {
-            panic!("expected Dir snapshot");
-        };
+        let current_arc = p.current_dir().expect("expected Dir snapshot");
         assert!(
             Arc::ptr_eq(current_arc, &prior_current),
             "graft leaves Profile.current's Arc handle untouched on CrossedUncovered \
@@ -1338,10 +1320,7 @@ mod tests {
             "regression invariant: prior File + new Dir at the same inode",
         );
 
-        let prior = match profiles.get(pid).and_then(|p| p.current()) {
-            Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
-            _ => None,
-        };
+        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
         let mut out = StepOutput::default();
         graft(
             pid,

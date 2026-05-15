@@ -395,17 +395,15 @@ impl Engine {
     /// `AnchorOk → TreeSnapshot::File`, `SubtreeOk → TreeSnapshot::Dir`,
     /// `Vanished` / `Failed` to the per-intent failure helpers.
     ///
-    /// **First-classify is delegated.** `Profile.kind` is set
-    /// atomically with `Profile.current` by
+    /// **First-classify is delegated.**
     /// [`specter_core::Profile::install_dir_current`] /
-    /// [`specter_core::Profile::install_file_current`] — the per-intent
-    /// dispatchers call these setters (directly or through
-    /// [`Engine::apply_snapshot`]) at the snapshot commit point, so the
-    /// fallback's `if p.kind.is_none()` write is structurally
-    /// redundant. Removing it removes the cross-field invariant
-    /// hazard: any read site between the dispatch entry and the
-    /// setter call now sees either both fields set or neither, never
-    /// a torn write.
+    /// [`specter_core::Profile::install_file_current`] classify the
+    /// anchor and graft `current` in one move — the sum's discriminant
+    /// *is* the kind, so there are no separate kind/current fields to
+    /// write out of step. The per-intent dispatchers call these
+    /// (directly or through [`Engine::apply_snapshot`]) at the snapshot
+    /// commit point; a kind/current disagreement is unrepresentable, not
+    /// merely avoided, so no fallback classify write is needed.
     ///
     /// **Boundary kind-mismatch check.** The walker is contracted to
     /// return a `ProbeOutcome` whose variant matches the request's
@@ -484,26 +482,15 @@ impl Engine {
     ) {
         match snapshot {
             TreeSnapshot::Dir(arc) => {
-                // Extract typed prior under one Profile borrow. The
-                // `File` arm is structurally unreachable when the
-                // dispatcher honoured `kind_agrees_or_finalize` (a Dir
-                // response on a `Some(File)`-kinded Profile would have
-                // routed through `finalize_anchor_lost` first); the
-                // `debug_assert!` is defense-in-depth against a future
-                // caller bypassing that boundary.
-                let prior = match self.profiles.get(profile_id).and_then(|p| p.current()) {
-                    Some(TreeSnapshot::Dir(prior_arc)) => Some(Arc::clone(prior_arc)),
-                    None => None,
-                    Some(TreeSnapshot::File(_)) => {
-                        debug_assert!(
-                            false,
-                            "apply_snapshot: File-shaped Profile.current paired with \
-                             Dir response — kind_agrees_or_finalize boundary breached \
-                             (profile = {profile_id:?})",
-                        );
-                        None
-                    }
-                };
+                // `current_dir()` borrows the prior Dir snapshot
+                // directly — `None` for an unclassified, File-kinded, or
+                // not-yet-grafted Profile. The anchor sum makes a
+                // kind-mismatched prior unrepresentable, so the old
+                // kind-agreement defensive arm is now structural.
+                let prior = self
+                    .profiles
+                    .get(profile_id)
+                    .and_then(|p| p.current_dir().cloned());
                 graft(
                     profile_id,
                     target,
@@ -1312,7 +1299,7 @@ impl Engine {
         };
         match p.state() {
             ProfileState::Idle => {
-                if p.current().is_some() {
+                if p.current_is_some() {
                     self.start_standard_burst(profile_id, event_resource, now, out);
                 } else {
                     self.start_seed_burst(profile_id, now, out);
@@ -1584,12 +1571,12 @@ impl Engine {
         self.apply_snapshot(profile_id, target, snapshot, out);
 
         // Fire Effects only for the Subtree subset of `fired_subs` when
-        // drift is observed (post-graft current.hash() differs from the
-        // last settled state — `baseline.hash()` in active mode or the
-        // `last_settled_hash_at_loss` witness in survival mode). Every
-        // Sub that has a fire history on this Profile re-fires once,
-        // unconditionally — drift is a per-Profile signal under the
-        // cross-field invariant; per-key narrowing is gone.
+        // drift is observed (post-graft current.hash() differs from
+        // `settled_hash()` — the active-mode baseline digest or, across
+        // the loss→recovery window, the survival witness). Every Sub
+        // that has a fire history on this Profile re-fires once,
+        // unconditionally — drift is a per-Profile signal; per-key
+        // narrowing is gone.
         //
         // **Why two rebases on the drift branch.** Seed's semantic is
         // `baseline := observed`; the drift detection fires the
@@ -1659,28 +1646,23 @@ impl Engine {
         self.finish_burst_to_idle(profile_id, out);
     }
 
-    /// Decide whether a Seed-Ok should fire conservative-recovery Effects.
-    /// Returns `true` iff the Profile has fired before AND the post-graft
-    /// `current` snapshot's anchor-rooted hash differs from the most
-    /// recent settled state.
+    /// Decide whether a Seed-Ok should fire conservative-recovery
+    /// Effects: `true` iff the Profile has fired before AND the
+    /// post-graft `current` snapshot's anchor-rooted hash differs from
+    /// the settled reference.
     ///
-    /// Source of "most recent settled state" depends on mode (mutually
-    /// exclusive under the cross-field invariant
-    /// `baseline.is_some() ⇒ last_settled_hash_at_loss.is_none()`):
-    /// - **Active mode** (`baseline.is_some()`, witness `None`):
-    ///   `baseline.hash()` is the witness directly. Covers
-    ///   `on_sensor_overflow` reseed, where the prior baseline persists
-    ///   across the overflow but `current` is freshly captured.
-    /// - **Survival mode** (`baseline.is_none()`, witness `Some`):
-    ///   [`crate::claims::Engine::discard_anchor_state`] stashed the
-    ///   pre-loss `baseline.hash()` into `last_settled_hash_at_loss`.
-    ///   Covers anchor-loss recovery via descent → Seed-Ok.
-    ///
-    /// The witness is checked first because, when populated, the cross-
-    /// field invariant guarantees baseline is `None` — survival mode is
-    /// authoritative. The fresh-attach case (both `None`, `fired_subs`
-    /// empty by construction) returns `false` and preserves "fresh Seed
-    /// never fires Effect".
+    /// [`Profile::settled_hash`] is the single settled-reference oracle:
+    /// in active mode it digests the baseline snapshot; across the
+    /// loss→recovery window it returns the survival witness the anchor
+    /// carried through the loss (covering anchor-loss recovery via
+    /// descent → Seed-Ok, and `on_sensor_overflow` reseed); a
+    /// not-yet-settled anchor yields `None`. The settled snapshot and
+    /// the survival witness are mutually exclusive *in the anchor sum*,
+    /// so the survival-mode-authoritative priority is structural — there
+    /// is no ordering to maintain here and the witness cannot be
+    /// silently lost on recovery. `None` (fresh attach; `fired_subs`
+    /// empty by construction) preserves "a fresh Seed never fires an
+    /// Effect".
     ///
     /// The boolean answer is per-Profile; the caller
     /// ([`Engine::dispatch_seed_ok`]) builds the SeedDrift fire filter
@@ -1696,11 +1678,8 @@ impl Engine {
             return false;
         };
         let curr = current.hash();
-        if let Some(witness) = p.last_settled_hash_at_loss() {
-            return witness != curr;
-        }
-        match p.baseline() {
-            Some(b) => b.hash() != curr,
+        match p.settled_hash() {
+            Some(settled) => settled != curr,
             None => false,
         }
     }
@@ -2136,8 +2115,8 @@ impl Engine {
             return EmitOutcome::default();
         }
         let resource = p.resource;
-        let baseline_snap = p.baseline().cloned();
-        let current_snap = p.current().cloned();
+        let baseline_snap = p.baseline();
+        let current_snap = p.current();
         let pattern = p.config.pattern.clone();
         // Read the cached anchor classification. `None` falls back to
         // `Dir` — the actuator's `compute_cwd` then anchors at the path
@@ -2489,7 +2468,7 @@ impl Engine {
                     out.descents.push(ProbeOwner::Profile(pid));
                 }
                 ProfileState::Idle
-                    if p.watch_root_parent == Some(resource) && p.current().is_none() =>
+                    if p.watch_root_parent == Some(resource) && !p.current_is_some() =>
                 {
                     out.recoveries.push(pid);
                 }

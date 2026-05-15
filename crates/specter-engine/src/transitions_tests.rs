@@ -4280,11 +4280,12 @@ fn active_post_fire_burst(
 }
 
 /// Drive an attached Profile into **survival mode** — the post
-/// anchor-loss shape (`baseline` / `current` / `kind` cleared,
-/// `last_settled_hash_at_loss = Some(witness_snap.dir_hash())`) using
-/// only the production `Profile` API. Mirrors the engine's own
-/// take-then-clear loss sequence, so the captured witness is exactly
-/// `witness_snap`'s hash.
+/// anchor-loss shape: the anchor collapses to `Unclassified` with the
+/// pre-loss baseline hash retained as the survival witness
+/// (`settled_hash() == Some(witness_snap.dir_hash())`; `baseline()` and
+/// `current()` both `None`). Built only from the production `Profile`
+/// API, mirroring the engine's take-then-clear loss sequence, so the
+/// captured witness is exactly `witness_snap`'s hash.
 fn enter_survival_mode(
     e: &mut Engine,
     pid: specter_core::ProfileId,
@@ -4313,10 +4314,12 @@ fn enter_active_mode(
 }
 
 #[test]
-fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
+fn dispatch_rebase_ok_consumes_survival_witness() {
     let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
 
-    enter_survival_mode(&mut e, pid, dir_tree_snap(vec![]));
+    let witness_snap = dir_tree_snap(vec![]);
+    let witness_hash = witness_snap.dir_hash();
+    enter_survival_mode(&mut e, pid, witness_snap);
     let state = active_post_fire_burst(
         &mut e,
         pid,
@@ -4326,32 +4329,52 @@ fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
+        assert_eq!(
+            p.settled_hash(),
+            Some(witness_hash),
+            "precondition: survival mode retains the pre-loss hash as the witness",
+        );
         assert!(
-            p.last_settled_hash_at_loss().is_some(),
-            "precondition: survival mode populated the witness",
+            p.baseline().is_none(),
+            "precondition: survival mode has no live baseline",
         );
         p.transition_state(state);
     }
 
+    // Rebase grafts a snapshot distinct from the witness so the
+    // Witness → Snapshot consume is observable in `settled_hash()`.
+    let rebased = dir_tree_snap(vec![("rebased", EntryKind::File, 7)]);
+    let rebased_hash = rebased.dir_hash();
+    assert_ne!(
+        rebased_hash, witness_hash,
+        "test setup: rebased snapshot must differ from the witness",
+    );
     let mut out = StepOutput::default();
-    e.dispatch_rebase_ok(pid, TreeSnapshot::Dir(dir_tree_snap(vec![])), &mut out);
+    e.dispatch_rebase_ok(pid, TreeSnapshot::Dir(rebased), &mut out);
 
     let p = e.profiles.get(pid).expect("Profile lives");
     assert!(
-        p.last_settled_hash_at_loss().is_none(),
-        "witness cleared on rebase",
+        p.baseline().is_some(),
+        "rebase settled the grafted current as the new baseline",
     );
-    assert!(p.baseline().is_some(), "baseline set to current");
+    assert_eq!(
+        p.settled_hash(),
+        Some(rebased_hash),
+        "rebase consumed the survival witness: the settled reference now \
+         tracks the new baseline, not the stale pre-loss witness",
+    );
 }
 
 #[test]
-fn dispatch_seed_ok_no_drift_branch_clears_last_settled_hash_at_loss() {
+fn dispatch_seed_ok_no_drift_branch_consumes_survival_witness() {
     let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
 
-    // Survival mode at entry (baseline = None, witness populated);
-    // empty fired_subs ⇒ no drift — but Seed still rebases, clearing
+    // Survival mode at entry (no live baseline, witness populated);
+    // empty fired_subs ⇒ no drift — but Seed still rebases, consuming
     // the witness.
-    enter_survival_mode(&mut e, pid, dir_tree_snap(vec![]));
+    let witness_snap = dir_tree_snap(vec![]);
+    let witness_hash = witness_snap.dir_hash();
+    enter_survival_mode(&mut e, pid, witness_snap);
     let state = active_pre_fire_burst(
         &mut e,
         pid,
@@ -4364,38 +4387,45 @@ fn dispatch_seed_ok_no_drift_branch_clears_last_settled_hash_at_loss() {
         p.transition_state(state);
     }
 
+    let rebased = dir_tree_snap(vec![("rebased", EntryKind::File, 7)]);
+    let rebased_hash = rebased.dir_hash();
+    assert_ne!(
+        rebased_hash, witness_hash,
+        "test setup: rebased snapshot must differ from the witness",
+    );
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(dir_tree_snap(vec![])), now, &mut out);
+    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(rebased), now, &mut out);
 
+    let p = e.profiles.get(pid).unwrap();
     assert!(
-        e.profiles
-            .get(pid)
-            .unwrap()
-            .last_settled_hash_at_loss()
-            .is_none(),
-        "no-drift Seed-Ok cleared witness",
+        p.baseline().is_some(),
+        "no-drift Seed-Ok rebased the grafted current",
+    );
+    assert_eq!(
+        p.settled_hash(),
+        Some(rebased_hash),
+        "no-drift Seed-Ok consumed the survival witness (settled now \
+         tracks the new baseline)",
     );
 }
 
 #[test]
-fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
+fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
     // Sub fired pre-loss; anchor lost; recovery Seed-Ok with drift.
-    // The eager clear (on the drift branch, before transition_to_awaiting)
-    // is what gives us the strict cross-field invariant at every step
-    // boundary — not just at consumption sites.
+    // The eager consume on the drift branch (before
+    // transition_to_awaiting) keeps the baseline ⊕ witness exclusivity
+    // holding at every step boundary, not just at later consume sites.
     let (mut e, pid, sid, anchor, now) = engine_with_attached_sub();
 
     let dk = FiredKey::Subtree(sid);
 
     // Survival-mode drift setup: a witness snapshot whose hash won't
-    // match the empty post-graft current ⇒ the bool drift signal
-    // triggers; pre-loss fire history in `fired_subs` narrows the
-    // SeedDrift filter to `dk`.
-    enter_survival_mode(
-        &mut e,
-        pid,
-        dir_tree_snap(vec![("pre", EntryKind::File, 1)]),
-    );
+    // match the post-graft current ⇒ the drift signal triggers;
+    // pre-loss fire history in `fired_subs` narrows the SeedDrift
+    // filter to `dk`.
+    let witness_snap = dir_tree_snap(vec![("pre", EntryKind::File, 1)]);
+    let witness_hash = witness_snap.dir_hash();
+    enter_survival_mode(&mut e, pid, witness_snap);
     let state = active_pre_fire_burst(
         &mut e,
         pid,
@@ -4410,40 +4440,48 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
         p.transition_state(state);
     }
 
+    let regrafted = dir_tree_snap(vec![]);
+    let regrafted_hash = regrafted.dir_hash();
+    assert_ne!(
+        regrafted_hash, witness_hash,
+        "test setup: post-graft current must differ from the witness to drift",
+    );
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(dir_tree_snap(vec![])), now, &mut out);
+    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(regrafted), now, &mut out);
 
     // Drift branch must have fired one Effect.
     assert_eq!(out.effects().len(), 1, "drift branch emitted one Effect");
 
     let p = e.profiles.get(pid).unwrap();
     assert!(
-        p.last_settled_hash_at_loss().is_none(),
-        "drift Seed-Ok cleared witness eagerly",
-    );
-    assert!(
         p.baseline().is_some(),
-        "drift branch rebased baseline = current",
+        "drift branch rebased the grafted current as baseline",
+    );
+    assert_eq!(
+        p.settled_hash(),
+        Some(regrafted_hash),
+        "drift Seed-Ok eagerly consumed the survival witness (settled now \
+         tracks the new baseline)",
     );
 }
 
 // ---- seed_drift_observed: baseline-or-witness contract ----
 
 /// Fresh Profile reports no drift: `fired_subs` is empty by
-/// construction, baseline/witness are both `None`. Pins the
+/// construction and there is no settled reference yet. Pins the
 /// "fresh Seed never fires Effect" contract — without the
-/// `fired_subs.is_empty()` short-circuit, a Profile with a None
-/// baseline AND a None witness AND a Some current would still
-/// fall through to the `match p.baseline` arm; the short-circuit
-/// is the load-bearing guard for the fresh-attach case.
+/// `fired_subs.is_empty()` short-circuit, a Profile with no settled
+/// reference AND a Some current would still fall through to the
+/// `match p.settled_hash()` arm; the short-circuit is the
+/// load-bearing guard for the fresh-attach case.
 #[test]
 fn seed_drift_observed_returns_false_for_fresh_profile() {
     let (e, pid, _sid, _anchor, _now) = engine_with_attached_sub();
     let p = e.profiles.get(pid).expect("Profile lives post-attach");
     assert!(p.fired_subs.is_empty(), "precondition: no fire history");
     assert!(
-        p.last_settled_hash_at_loss().is_none(),
-        "precondition: no witness"
+        p.settled_hash().is_none(),
+        "precondition: no settled reference"
     );
     assert!(
         p.baseline().is_none(),
@@ -4456,11 +4494,11 @@ fn seed_drift_observed_returns_false_for_fresh_profile() {
     );
 }
 
-/// Survival-mode drift: `discard_anchor_state` stashed the pre-loss
-/// `baseline.hash()` into `last_settled_hash_at_loss`. The recovery
-/// Seed-Ok lands a new `current` whose hash differs from the
-/// witness — drift detected, conservative re-fire required. Pins
-/// the witness-consultation arm.
+/// Survival-mode drift: anchor loss collapsed the anchor to
+/// `Unclassified`, retaining the pre-loss baseline hash as the
+/// survival witness. The recovery Seed-Ok lands a new `current` whose
+/// hash differs from that witness — drift detected, conservative
+/// re-fire required. Pins the witness arm of `settled_hash()`.
 #[test]
 fn seed_drift_observed_returns_true_on_post_recovery_drift() {
     let (mut e, pid, sid, _anchor, _now) = engine_with_attached_sub();
@@ -4487,15 +4525,15 @@ fn seed_drift_observed_returns_true_on_post_recovery_drift() {
     );
 }
 
-/// Active-mode drift: `baseline.is_some()` (no anchor loss has
-/// occurred), `last_settled_hash_at_loss` is `None` per the
-/// cross-field invariant. Drift derives from `baseline.hash() !=
-/// current.hash()`. Covers the `on_sensor_overflow` reseed path —
-/// the witness-only design would have lost this case (overflow
-/// doesn't go through `discard_anchor_state`, so the witness stays
-/// `None`); the baseline-or-witness arm preserves the conservative
-/// re-fire contract that the original `fired_subs`-
-/// based drift performed.
+/// Active-mode drift: `baseline().is_some()` (no anchor loss has
+/// occurred), so `settled_hash()` returns the live baseline's hash —
+/// a separate survival witness alongside a held baseline is not
+/// representable in the anchor sum. Drift derives from
+/// `baseline.hash() != current.hash()`. Covers the
+/// `on_sensor_overflow` reseed path: overflow does not go through
+/// `discard_anchor_state`, so the baseline (hence the settled
+/// reference) persists and the single `settled_hash()` oracle still
+/// yields the conservative re-fire verdict.
 #[test]
 fn seed_drift_observed_returns_true_on_active_mode_drift() {
     let (mut e, pid, sid, _anchor, _now) = engine_with_attached_sub();

@@ -228,21 +228,21 @@ impl Engine {
     /// re-classifies `kind` from the parent's directory listing).
     ///
     /// **Cleared.**
-    /// - `Profile.current` — taken by [`Engine::release_descendant_claim`]
-    ///   before this helper runs; the atomic clear below is a no-op
-    ///   backstop over the already-`None` field.
-    /// - `(Profile.baseline, Profile.current, Profile.kind)` — nulled
-    ///   atomically by
-    ///   [`specter_core::Profile::clear_anchor_classification`] (survival
-    ///   witness captured first; see below). `kind` resets because the
-    ///   anchor's on-disk shape may have changed across the
-    ///   lost-recovered cycle; the cache must not misroute the next Seed
-    ///   burst's probe-shape dispatch. With `kind = None`,
-    ///   `start_seed_burst` falls through to its `Subtree` arm — a
-    ///   kind-mismatched `Vanished` then routes through the normal
-    ///   descent-recovery path in either direction (`Some(File)` against
-    ///   a now-Dir slot is the path that would otherwise misroute as
-    ///   `AnchorFile` and waste a round-trip).
+    /// - The anchor classification (kind ⊕ live snapshot ⊕ settled
+    ///   baseline) collapses to `Unclassified` via
+    ///   [`specter_core::Profile::clear_anchor_classification`], which
+    ///   captures the survival witness in the same move (see below).
+    ///   [`Engine::release_descendant_claim`] has already `take()`d the
+    ///   live `current` before this helper runs, so the collapse only
+    ///   has the kind discriminant and settled reference left to reset.
+    ///   The kind must reset because the anchor's on-disk shape may have
+    ///   changed across the lost→recovered cycle and a stale discriminant
+    ///   would misroute the next Seed burst's probe-shape dispatch:
+    ///   `Unclassified` makes `start_seed_burst` fall through to its
+    ///   `Subtree` arm, and a kind-mismatched `Vanished` then routes
+    ///   through the normal descent-recovery path in either direction
+    ///   (`Some(File)` against a now-Dir slot is the case that would
+    ///   otherwise misroute as `AnchorFile` and waste a round-trip).
     /// - `Profile.anchor_claim = AnchorClaim::None` — via
     ///   [`Engine::release_anchor_claim`].
     ///
@@ -265,17 +265,19 @@ impl Engine {
     ///   recovery is part of `state`'s preservation (the helper does
     ///   not write `state`).
     ///
-    /// **Captured then later cleared on recovery.**
-    /// - `Profile.last_settled_hash_at_loss` — set from
-    ///   `baseline.hash()` immediately before this helper clears
-    ///   `baseline` (via [`specter_core::Profile::capture_witness_at_loss`]).
-    ///   The witness substitutes for the now-cleared `baseline.hash()`
-    ///   in the next Seed-Ok's drift verdict; both branches of
+    /// **Captured here, consumed on recovery.**
+    /// - The survival witness — `clear_anchor_classification` derives it
+    ///   from the settled reference's hash and stores it in the
+    ///   collapsed `Unclassified` arm, substituting for the dropped
+    ///   baseline in the next Seed-Ok's drift verdict
+    ///   ([`Engine::seed_drift_observed`] reads it via
+    ///   [`specter_core::Profile::settled_hash`]). Both branches of
     ///   `dispatch_seed_ok` and `dispatch_rebase_ok` call
-    ///   [`specter_core::Profile::rebase_baseline`], which clears it on
-    ///   consume. The cross-field invariant
-    ///   `baseline.is_some() ⇒ last_settled_hash_at_loss.is_none()`
-    ///   holds at every step boundary outside this helper's lifetime.
+    ///   [`specter_core::Profile::rebase_baseline`], which consumes it
+    ///   (the `Witness → Snapshot` move). A live baseline and a survival
+    ///   witness are mutually exclusive *by construction* in the anchor
+    ///   sum — the old `baseline.is_some() ⇒ …is_none()` rule is a type
+    ///   property now, not a step-boundary invariant.
     ///
     /// **Pre-condition.** The probe channel must already be closed.
     /// Callers either took the response-dispatch path (which closes
@@ -287,9 +289,9 @@ impl Engine {
     ///
     /// **Idempotence.** Each step short-circuits on already-cleared
     /// state: `release_descendant_claim` finds `current.is_none()` and
-    /// returns; `baseline = None` and `kind = None` are no-ops against
-    /// already-`None` fields; `release_anchor_claim` sees
-    /// `AnchorClaim::None` and short-circuits.
+    /// returns; `clear_anchor_classification` on an already-`Unclassified`
+    /// anchor preserves the carried witness rather than overwriting it;
+    /// `release_anchor_claim` sees `AnchorClaim::None` and short-circuits.
     ///
     /// **Safe in any post-vacate state.** Inherits from
     /// [`Engine::release_anchor_claim`]'s tolerance —
@@ -297,23 +299,22 @@ impl Engine {
     /// ([`specter_core::Tree::vacate`] from `Input::WatchOpRejected`
     /// is the dominant source of this state).
     ///
-    /// **Snapshot-shape invariant.**
-    /// [`specter_core::Profile::kind`]'s rustdoc pins
-    /// `current = Some(File) ⇒ kind == Some(File)` and
-    /// `current = Some(Dir) ⇒ kind == Some(Dir)`. The invariant holds
-    /// because the `(baseline, current, kind)` triple is cleared
-    /// atomically by [`specter_core::Profile::clear_anchor_classification`]
-    /// in step 2 (after `current`'s take in step 1), before any reader
-    /// can observe an intermediate state (the helper runs synchronously
-    /// inside one `Engine::step` under `&mut self`).
+    /// **Snapshot-shape coherence is structural.** The anchor sum's
+    /// discriminant *is* the kind, so `current = Some(K) ⇒ kind ==
+    /// Some(K)` cannot be violated by any representable value — there is
+    /// no separate kind/baseline/current triple to keep in agreement.
+    /// [`specter_core::Profile::clear_anchor_classification`] (step 2)
+    /// collapses the classification to `Unclassified` in one move; it
+    /// runs synchronously inside one `Engine::step` under `&mut self`,
+    /// so no reader observes an intermediate.
     ///
     /// **Sole call sites.** The seven `dispatch_*_vanished/failed` +
     /// `finalize_anchor_lost` sites in `transitions.rs`. **Not** called
     /// by [`Engine::reap_profile`] — the reap path performs the same
     /// two release calls inline rather than via this helper. "Profile
-    /// dies" has no next Seed burst, so the `kind` and `baseline`
-    /// writes would be wasted on a struct about to drop; see
-    /// `reap_profile`'s rustdoc for the asymmetry rationale.
+    /// dies" has no next Seed burst, so resetting the classification
+    /// would be wasted on a struct about to drop; see `reap_profile`'s
+    /// rustdoc for the asymmetry rationale.
     pub(crate) fn discard_anchor_state(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Order:
         //   1. release_descendant_claim runs first — it `take()`s
@@ -322,11 +323,12 @@ impl Engine {
         //      (including release_anchor_claim's `events_union` walk)
         //      must see the post-take world with this Profile's
         //      descendant contributions already gone.
-        //   2. clear_anchor_classification atomically captures the
-        //      survival witness then nulls the `(baseline, current,
-        //      kind)` triple — pure Profile-state writes; no Tree-side
-        //      recompute reads them. `current` is already `None` (step
-        //      1 took it); the helper's write is a no-op backstop.
+        //   2. clear_anchor_classification collapses File/Dir →
+        //      Unclassified, atomically capturing the survival witness
+        //      from the settled reference. Step 1's take_current left
+        //      `current` None but `settled` intact, so the witness is
+        //      still available — pure Profile-state writes, no Tree-side
+        //      recompute reads them.
         //   3. release_anchor_claim runs last so its recompute walks
         //      a fully-cleared Profile.
         self.release_descendant_claim(pid, out);

@@ -61,6 +61,7 @@ use specter_core::{
     ActiveBurst, BurstFinish, BurstHelper, BurstIntent, Diagnostic, FsEvent, LcaIntegritySource,
     PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOwner, Profile, ProfileId,
     ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerKind, Tree, TreeSnapshot,
+    subtree_at_dir,
 };
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -1069,8 +1070,8 @@ impl Engine {
             // dispatch_*_vanished paths to recover via descent.
             Some(ResourceKind::Dir | ResourceKind::Unknown) | None => {
                 let baseline_subtree = p
-                    .current()
-                    .and_then(|s| s.subtree_at(p.resource, target, &self.tree));
+                    .current_dir()
+                    .and_then(|root| subtree_at_dir(root, p.resource, target, &self.tree));
                 let force_walk_paths = build_force_walk(force_walk_resources, target, &self.tree);
                 Self::emit_subtree_probe(
                     owner,
