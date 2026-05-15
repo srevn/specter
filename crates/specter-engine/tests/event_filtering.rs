@@ -297,6 +297,61 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
     );
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// IT-EF-2b — Profile.events() is invariant across multi-Sub churn
+//
+// Two Subs at the same resource with identical (config, max_settle,
+// events) share ONE Profile. The Profile's mask is fixed at
+// construction and survives both a sibling join (the join does not
+// re-derive it) and a sibling detach (the Profile lives while ≥1 Sub
+// remains). Closes F-HIGH-3's unchecked hypothesis that the
+// per-Profile mask is invariant under Sub churn.
+// ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn it_ef_2b_profile_events_invariant_across_sub_attach_detach() {
+    let mut e = Engine::new();
+    let root = e.tree_mut().ensure_root("src", ResourceRole::User);
+    e.tree_mut().set_kind(root, ResourceKind::Dir);
+
+    let mask = ClassSet::CONTENT | ClassSet::METADATA;
+    let cfg = || ScanConfig::builder().recursive(true).build();
+
+    let (sid_a, pid_a, _) =
+        attach_sub_with_events(&mut e, "a", root, EffectScope::SubtreeRoot, mask, cfg());
+    assert_eq!(
+        e.profiles().get(pid_a).unwrap().events(),
+        mask,
+        "fresh Profile records the attaching Sub's mask",
+    );
+
+    // A sibling with identical identity joins the SAME Profile.
+    let (sid_b, pid_b, _) =
+        attach_sub_with_events(&mut e, "b", root, EffectScope::SubtreeRoot, mask, cfg());
+    assert_eq!(pid_a, pid_b, "identical identity ⇒ one shared Profile");
+    assert_eq!(
+        e.profiles().get(pid_a).unwrap().events(),
+        mask,
+        "the join does not re-derive events()",
+    );
+
+    // Detaching one sibling leaves the Profile alive (b still attached)
+    // with its mask unchanged.
+    let _ = e.step(Input::DetachSub(sid_a), Instant::now());
+    let p = e
+        .profiles()
+        .get(pid_a)
+        .expect("Profile lives while ≥1 Sub remains");
+    assert_eq!(
+        p.events(),
+        mask,
+        "events() is invariant across a sibling detach",
+    );
+
+    // The surviving Sub still belongs to that same Profile.
+    assert_eq!(e.subs().get(sid_b).unwrap().profile, pid_a);
+}
+
 #[test]
 fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
     // Concrete chmod scenario: Sub A wants CONTENT, Sub B wants METADATA.

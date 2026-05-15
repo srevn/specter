@@ -230,7 +230,9 @@ impl ProfileIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassSet, ConfigError, GlobPattern, ScanConfig, compute_config_hash};
+    use super::{
+        ClassSet, ConfigError, GlobPattern, ProfileIdentity, ScanConfig, compute_config_hash,
+    };
     use std::time::Duration;
 
     fn glob(source: &str) -> GlobPattern {
@@ -422,6 +424,19 @@ mod tests {
         let cfg = ScanConfig::builder().build();
         let h = compute_config_hash(&cfg, Duration::from_secs(1), ClassSet::EMPTY);
         assert_eq!(h, GOLDEN_HASH);
+    }
+
+    /// The public route (`ProfileIdentity::config_hash`) and the sealed
+    /// kernel agree bit-for-bit on the golden preimage — sealing the
+    /// kernel did not perturb the canonical encoding.
+    #[test]
+    fn profile_identity_config_hash_matches_golden() {
+        let identity = ProfileIdentity {
+            config: ScanConfig::builder().build(),
+            max_settle: Duration::from_secs(1),
+            events: ClassSet::EMPTY,
+        };
+        assert_eq!(identity.config_hash(), GOLDEN_HASH);
     }
 
     const GOLDEN_HASH: u64 = 0x35A4_7E13_BE87_7324;

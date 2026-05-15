@@ -363,6 +363,44 @@ mod tests {
         assert!(reg.remove(PromoterId::default()).is_none());
     }
 
+    /// After a multi-insert/remove sequence, every key `iter()` yields
+    /// re-looks-up via `get` and `find_by_name` round-trips. The
+    /// slotmap key is the sole identity authority (a `Promoter` carries
+    /// no `id`) — this replaces the removed `Promoter.id == minted key`
+    /// assertion.
+    #[test]
+    fn registry_iter_keys_round_trip_through_get() {
+        let mut reg = PromoterRegistry::new();
+        let a = reg.insert(build_promoter("a", "/a/*"));
+        let b = reg.insert(build_promoter("b", "/b/*"));
+        let c = reg.insert(build_promoter("c", "/c/*"));
+        reg.remove(b);
+
+        let mut iter_keys: Vec<PromoterId> = reg
+            .iter()
+            .map(|(k, p)| {
+                assert_eq!(
+                    reg.get(k).expect("iter key resolves via get").name,
+                    p.name,
+                    "get(k) returns the same entry iter yielded",
+                );
+                assert_eq!(
+                    reg.find_by_name(p.name.as_str()),
+                    Some(k),
+                    "by_name round-trips on the iterated key",
+                );
+                k
+            })
+            .collect();
+        iter_keys.sort();
+
+        let mut want = vec![a, c];
+        want.sort();
+        assert_eq!(iter_keys, want, "iter yields exactly the live keys");
+        assert!(reg.get(b).is_none(), "removed key no longer resolves");
+        assert_eq!(reg.len(), 2);
+    }
+
     /// Diff is plain data — exercise field construction so changes to
     /// the shape break this test loudly.
     #[test]

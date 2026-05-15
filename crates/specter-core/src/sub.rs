@@ -46,6 +46,15 @@ pub enum SubAttachAnchor {
 /// `program` is `Arc<ActionProgram>` so the Arc minted by the config
 /// layer's `lower_to_program` flows through to `Sub.program` without a
 /// re-allocation.
+///
+/// Carries no Profile-identity field, so a Sub cannot express (or
+/// leak) a sibling Profile's config/mask — demonstrated
+/// unrepresentable:
+///
+/// ```compile_fail
+/// use specter_core::SubParams;
+/// let _ = |p: SubParams| p.events;
+/// ```
 #[derive(Clone, Debug)]
 pub struct SubParams {
     pub name: String,
@@ -415,7 +424,7 @@ impl SubRegistry {
 #[cfg(test)]
 mod tests {
     use super::{ActionProgram, EffectScope, Sub, SubParams, SubRegistry};
-    use crate::ids::ProfileId;
+    use crate::ids::{ProfileId, SubId};
     use crate::program::{
         ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder, SpawnBody,
     };
@@ -579,6 +588,58 @@ mod tests {
     fn registry_at_empty_for_unknown_profile() {
         let reg = SubRegistry::new();
         assert!(reg.at(ProfileId::default()).is_empty());
+    }
+
+    /// After a multi-insert/remove sequence, every key `iter()` yields
+    /// re-looks-up via `get` to the same Sub, and `at(profile)` equals
+    /// the live key set. The slotmap key is the sole identity authority
+    /// (a `Sub` carries no `id`) — this replaces the removed
+    /// `Sub.id == minted key` test.
+    #[test]
+    fn registry_iter_keys_round_trip_through_get() {
+        let mut reg = SubRegistry::new();
+        let pid = ProfileId::default();
+        let mk = |name: &str| {
+            Sub::from_request(
+                pid,
+                SubParams {
+                    name: name.to_string(),
+                    program: anchor_only_program(),
+                    scope: EffectScope::SubtreeRoot,
+                    settle: SETTLE,
+                    log_output: false,
+                    source_promoter: None,
+                },
+            )
+        };
+        let a = reg.insert(mk("a"));
+        let b = reg.insert(mk("b"));
+        let c = reg.insert(mk("c"));
+        reg.remove(b);
+
+        let mut iter_keys: Vec<SubId> = reg
+            .iter()
+            .map(|(k, s)| {
+                assert_eq!(
+                    reg.get(k).expect("iter key resolves via get").name,
+                    s.name,
+                    "get(k) returns the same entry iter yielded",
+                );
+                k
+            })
+            .collect();
+        iter_keys.sort();
+
+        let mut want = vec![a, c];
+        want.sort();
+        assert_eq!(iter_keys, want, "iter yields exactly the live keys");
+
+        let mut at = reg.at(pid).to_vec();
+        at.sort();
+        assert_eq!(at, want, "at(profile) agrees with the live key set");
+
+        assert!(reg.get(b).is_none(), "removed key no longer resolves");
+        assert_eq!(reg.len(), 2);
     }
 
     #[test]
