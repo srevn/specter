@@ -263,7 +263,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
     );
     assert!(
         matches!(
-            e.profiles().get(pid).unwrap().state.burst_finish(),
+            e.profiles().get(pid).unwrap().state().burst_finish(),
             Some(BurstFinish::Reap)
         ),
         "reap deferred to burst end",
@@ -390,7 +390,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
     assert_eq!(pid_b, pid, "B revives A's Profile (same config_hash)");
     let p = e.profiles().get(pid).unwrap();
     assert!(
-        !matches!(p.state.burst_finish(), Some(BurstFinish::Reap)),
+        !matches!(p.state().burst_finish(), Some(BurstFinish::Reap)),
         "reap_pending cleared by revival"
     );
     assert_eq!(e.subs().at(pid).len(), 1, "exactly one live Sub (B)");

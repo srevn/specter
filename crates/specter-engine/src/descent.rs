@@ -273,7 +273,7 @@ impl crate::Engine {
         // Profile's claim shape that the contribution will attribute
         // to (matches `materialize_profile_anchor`'s sequencing).
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.state = ProfileState::Pending(DescentState::new(prefix, remaining));
+            p.transition_state(ProfileState::Pending(DescentState::new(prefix, remaining)));
         }
 
         // Step 3: install the prefix's STRUCTURE contribution.

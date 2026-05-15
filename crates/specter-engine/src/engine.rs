@@ -1868,7 +1868,7 @@ mod tests {
         // `BurstFinish::Reap`; anchor watch unchanged.
         let _ = e.step(Input::DetachSub(sid_a), Instant::now());
         assert!(matches!(
-            e.profiles().get(pid).unwrap().state.burst_finish(),
+            e.profiles().get(pid).unwrap().state().burst_finish(),
             Some(BurstFinish::Reap),
         ));
         assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
@@ -1891,10 +1891,14 @@ mod tests {
         );
         let p = e.profiles().get(pid).unwrap();
         assert!(
-            !matches!(p.state.burst_finish(), Some(BurstFinish::Reap)),
+            !matches!(p.state().burst_finish(), Some(BurstFinish::Reap)),
             "BurstFinish flipped back to ReturnToIdle",
         );
-        assert_eq!(p.anchor_claim, AnchorClaim::Held, "anchor_claim stays Held");
+        assert_eq!(
+            p.anchor_claim(),
+            AnchorClaim::Held,
+            "anchor_claim stays Held"
+        );
         assert_eq!(
             p.settle,
             Duration::from_millis(200),
@@ -2016,7 +2020,7 @@ mod tests {
     fn build_materialised_profile_for_permutation() -> (Engine, ProfileId, ResourceId, ResourceId) {
         use specter_core::{
             ChildEntry, ClassSet, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ResourceKind,
-            ResourceRole, TreeSnapshot,
+            ResourceRole,
         };
         use std::collections::BTreeMap;
         use std::sync::Arc;
@@ -2081,8 +2085,10 @@ mod tests {
             0,
             entries,
         );
-        let snapshot = TreeSnapshot::Dir(Arc::new(dir));
-        e.profiles.get_mut(pid).expect("Profile alive").current = Some(snapshot);
+        e.profiles
+            .get_mut(pid)
+            .expect("Profile alive")
+            .install_dir_current(Arc::new(dir));
 
         // Drop the auto-emitted Watch operations from attach — the
         // permutation test only cares about deltas across release
@@ -2111,9 +2117,9 @@ mod tests {
             anchor_claim: e
                 .profiles
                 .get(pid)
-                .map_or(AnchorClaim::None, |p| p.anchor_claim),
+                .map_or(AnchorClaim::None, specter_core::Profile::anchor_claim),
             watch_root_parent: e.profiles.get(pid).and_then(|p| p.watch_root_parent),
-            current_is_none: e.profiles.get(pid).is_none_or(|p| p.current.is_none()),
+            current_is_none: e.profiles.get(pid).is_none_or(|p| p.current().is_none()),
             anchor_watch_demand: e
                 .tree
                 .get(anchor)

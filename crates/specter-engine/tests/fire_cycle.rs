@@ -148,7 +148,7 @@ fn attach_and_complete_seed_with(
         now,
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
     let _ = pid_resource;
@@ -175,7 +175,7 @@ fn attach_and_complete_seed(
         now,
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
     (sid, pid)
@@ -235,7 +235,7 @@ fn drive_to_awaiting(
                 t_drain,
             );
             // Done when an Effect fires OR the burst returned to Idle.
-            let is_idle = matches!(e.profiles().get(pid).unwrap().state, ProfileState::Idle);
+            let is_idle = matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle);
             if !out.effects.is_empty() || is_idle {
                 return out;
             }
@@ -276,7 +276,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         "one Effect emitted at stable verdict"
     );
     let effect_key = stable_out.effects[0].key.clone();
-    let phase = match &e.profiles().get(pid).unwrap().state {
+    let phase = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!("expected Active(Awaiting)"),
     };
@@ -295,7 +295,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         now + Duration::from_millis(20),
     );
     let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe emitted");
-    let phase = match &e.profiles().get(pid).unwrap().state {
+    let phase = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!("expected Active(Rebasing)"),
     };
@@ -311,10 +311,10 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         now + Duration::from_millis(30),
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
-    assert!(e.profiles().get(pid).unwrap().baseline.is_some());
+    assert!(e.profiles().get(pid).unwrap().baseline().is_some());
 
     // Fresh FsEvent identical to the first → Standard burst starts but
     // hash dedup suppresses the Effect (current == fired_subs).
@@ -325,7 +325,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     );
     // Burst returned to Idle directly (no Awaiting because count==0).
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
 }
@@ -365,7 +365,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
         snap_with_child,
         now + Duration::from_millis(10),
     );
-    let phase_before = match &e.profiles().get(pid).unwrap().state {
+    let phase_before = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => format!("{:?}", post.phase),
         _ => panic!("expected Active(Awaiting)"),
     };
@@ -396,7 +396,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
     );
 
     // Phase is unchanged.
-    let phase_after = match &e.profiles().get(pid).unwrap().state {
+    let phase_after = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => format!("{:?}", post.phase),
         _ => panic!("expected Active(Awaiting) post-absorb"),
     };
@@ -450,7 +450,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("rebase probe correlation");
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
                 phase: PostFirePhase::Rebasing,
@@ -487,7 +487,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         now + Duration::from_millis(30),
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
 }
@@ -533,7 +533,7 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
         "gate-deadline elapsed diagnostic emitted",
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
                 phase: PostFirePhase::Rebasing,
@@ -577,7 +577,7 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
         );
     }
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
                 phase: PostFirePhase::Rebasing,
@@ -606,7 +606,7 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     );
     // Phase unchanged (still Rebasing).
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
                 phase: PostFirePhase::Rebasing,
@@ -650,10 +650,10 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
     );
     // Profile is Idle, baseline cleared.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
-    assert!(e.profiles().get(pid).unwrap().baseline.is_none());
+    assert!(e.profiles().get(pid).unwrap().baseline().is_none());
 
     // Late EffectComplete → diagnoses (Profile Idle now).
     let late_out = e.step(
@@ -696,7 +696,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
         now + Duration::from_millis(20),
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
                 phase: PostFirePhase::Rebasing,
@@ -722,7 +722,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
         .count();
     assert_eq!(cancels, 1, "Rebasing probe cancelled on anchor loss");
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
 }
@@ -753,7 +753,7 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
         "fresh Seed never fires Effects"
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
     assert!(
@@ -801,7 +801,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
         now + Duration::from_millis(30),
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
     assert_eq!(
@@ -819,7 +819,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
     );
     // Profile finished directly to Idle; no Awaiting.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
 }
@@ -878,7 +878,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         2,
         "two PerStableFile Effects emitted",
     );
-    let phase = match &e.profiles().get(pid).unwrap().state {
+    let phase = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!(),
     };
@@ -898,7 +898,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         },
         now + Duration::from_millis(20),
     );
-    let phase = match &e.profiles().get(pid).unwrap().state {
+    let phase = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!(),
     };
@@ -920,7 +920,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         now + Duration::from_millis(30),
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
                 phase: PostFirePhase::Rebasing,
@@ -953,7 +953,7 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     let _detach_out = e.step(Input::DetachSub(sid), Instant::now());
     assert!(
         matches!(
-            e.profiles().get(pid).unwrap().state.burst_finish(),
+            e.profiles().get(pid).unwrap().state().burst_finish(),
             Some(BurstFinish::Reap)
         ),
         "reap_pending set on Active profile detach",
@@ -1087,7 +1087,7 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
         "stale BurstDeadline in Awaiting does not emit a probe",
     );
     // Phase still Awaiting.
-    let phase = match &e.profiles().get(pid).unwrap().state {
+    let phase = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!(),
     };
@@ -1177,11 +1177,11 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
         "v1 loss-of-fidelity: user edit during fire-tail does not fire its own Effect",
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
     // baseline reflects the post-edit tree.
-    let baseline = e.profiles().get(pid).unwrap().baseline.as_ref().unwrap();
+    let baseline = e.profiles().get(pid).unwrap().baseline().unwrap();
     match baseline {
         TreeSnapshot::Dir(arc) => {
             assert!(
@@ -1261,14 +1261,14 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
     // history records the Sub's Subtree key — used to gate the B1
     // suppress in the phantom burst below.
     let p = e.profiles().get(pid).unwrap();
-    assert!(matches!(p.state, ProfileState::Idle));
+    assert!(matches!(p.state(), ProfileState::Idle));
     let recorded_key = p.fired_subs.iter().next().expect("fire history recorded");
     assert!(
         matches!(recorded_key, DedupKey::Subtree { profile, .. } if *profile == pid),
         "fire history records the Subtree key for this Profile",
     );
     assert_eq!(
-        p.baseline.as_ref().unwrap().hash(),
+        p.baseline().unwrap().hash(),
         post_effect.dir_hash(),
         "rebase aligned baseline with the post-Effect tree",
     );
@@ -1286,7 +1286,7 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
     );
     // Burst returned to Idle (no Awaiting because count==0).
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
 }
@@ -1439,7 +1439,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         "B1 dedup suppresses PerFile phantom for non-idempotent format",
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
 }

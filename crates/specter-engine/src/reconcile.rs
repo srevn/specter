@@ -848,12 +848,15 @@ mod tests {
         // zero allocations, zero Watch ops, current unchanged.
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let snap_a = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        profiles.get_mut(pid).unwrap().current = Some(TreeSnapshot::Dir(Arc::clone(&snap_a)));
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .install_dir_current(Arc::clone(&snap_a));
         let response = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
         let prior_arc_count = Arc::strong_count(&snap_a);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+        let prior = match profiles.get(pid).and_then(|p| p.current()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
             _ => None,
         };
@@ -883,7 +886,7 @@ mod tests {
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let response = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+        let prior = match profiles.get(pid).and_then(|p| p.current()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
             _ => None,
         };
@@ -898,8 +901,8 @@ mod tests {
             &mut out,
         );
         let p = profiles.get(pid).unwrap();
-        assert!(p.current.is_some());
-        let current = p.current.as_ref().unwrap();
+        assert!(p.current().is_some());
+        let current = p.current().unwrap();
         let TreeSnapshot::Dir(arc) = current else {
             panic!("expected Dir snapshot");
         };
@@ -928,8 +931,10 @@ mod tests {
         // Prior current = root with a.rs as covered leaf; baseline matches
         // so the diff has no ops other than the delete.
         let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        profiles.get_mut(pid).unwrap().current =
-            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .install_dir_current(Arc::clone(&prior_current));
 
         // Pre-populate the dedup map. SubId::default() is fine — the
         // purge filter doesn't inspect the sub field. The `profile` field
@@ -961,7 +966,7 @@ mod tests {
         // Probe response: a.rs is gone.
         let response = dir_snap(200, vec![]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+        let prior = match profiles.get(pid).and_then(|p| p.current()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
             _ => None,
         };
@@ -999,8 +1004,10 @@ mod tests {
         tree.set_kind(a_rs_id, ResourceKind::File);
 
         let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        profiles.get_mut(pid).unwrap().current =
-            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .install_dir_current(Arc::clone(&prior_current));
 
         let live_key = DedupKey::PerFile {
             sub: SubId::default(),
@@ -1017,7 +1024,7 @@ mod tests {
         // forces graft to walk the level rather than equal-hash early-out.
         let response = dir_snap(200, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+        let prior = match profiles.get(pid).and_then(|p| p.current()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
             _ => None,
         };
@@ -1057,8 +1064,10 @@ mod tests {
         tree.set_kind(a_rs_id, ResourceKind::File);
 
         let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        profiles.get_mut(pid).unwrap().current =
-            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .install_dir_current(Arc::clone(&prior_current));
 
         // Subtree key references a *Profile*, not a Resource. SubId
         // and ProfileId values are arbitrary for this test.
@@ -1076,7 +1085,7 @@ mod tests {
         // the Subtree entry should survive.
         let response = dir_snap(200, vec![]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+        let prior = match profiles.get(pid).and_then(|p| p.current()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
             _ => None,
         };
@@ -1129,10 +1138,10 @@ mod tests {
         // `profile` field is the owning Profile's own id — mirrors what
         // `emit_effects_per_stable_file` writes in production.
         for &pid in &[pid_a, pid_b] {
-            profiles.get_mut(pid).unwrap().current = Some(TreeSnapshot::Dir(dir_snap(
-                100,
-                vec![("a.rs", leaf(EntryKind::File, 1))],
-            )));
+            profiles
+                .get_mut(pid)
+                .unwrap()
+                .install_dir_current(dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]));
             profiles
                 .get_mut(pid)
                 .unwrap()
@@ -1155,7 +1164,7 @@ mod tests {
 
         let response = dir_snap(200, vec![]);
 
-        let prior = match profiles.get(pid_a).and_then(|p| p.current.as_ref()) {
+        let prior = match profiles.get(pid_a).and_then(|p| p.current()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
             _ => None,
         };
@@ -1230,12 +1239,14 @@ mod tests {
         tree.set_kind(b_id, ResourceKind::Dir);
 
         let prior_current = dir_snap(100, vec![("a", dir_uncovered(2))]);
-        profiles.get_mut(pid).unwrap().current =
-            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .install_dir_current(Arc::clone(&prior_current));
 
         let response = dir_snap(200, vec![]);
 
-        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+        let prior = match profiles.get(pid).and_then(|p| p.current()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
             _ => None,
         };
@@ -1270,7 +1281,7 @@ mod tests {
         );
 
         let p = profiles.get(pid).unwrap();
-        let TreeSnapshot::Dir(current_arc) = p.current.as_ref().unwrap() else {
+        let TreeSnapshot::Dir(current_arc) = p.current().unwrap() else {
             panic!("expected Dir snapshot");
         };
         assert!(
@@ -1327,8 +1338,10 @@ mod tests {
 
         // Prior snapshot: root with covered Leaf `foo` (inode 42).
         let prior_current = dir_snap(100, vec![("foo", leaf(EntryKind::File, 42))]);
-        profiles.get_mut(pid).unwrap().current =
-            Some(TreeSnapshot::Dir(Arc::clone(&prior_current)));
+        profiles
+            .get_mut(pid)
+            .unwrap()
+            .install_dir_current(Arc::clone(&prior_current));
 
         // Build response: root has covered Dir `foo` at the SAME inode
         // (42), with one descendant File `nested.rs` under it. The
@@ -1357,7 +1370,7 @@ mod tests {
             "regression invariant: prior File + new Dir at the same inode",
         );
 
-        let prior = match profiles.get(pid).and_then(|p| p.current.as_ref()) {
+        let prior = match profiles.get(pid).and_then(|p| p.current()) {
             Some(TreeSnapshot::Dir(arc)) => Some(Arc::clone(arc)),
             _ => None,
         };

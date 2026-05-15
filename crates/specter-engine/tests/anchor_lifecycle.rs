@@ -163,7 +163,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         Instant::now(),
     );
     assert_eq!(
-        e.profiles().get(pid_q).unwrap().kind,
+        e.profiles().get(pid_q).unwrap().kind(),
         Some(ResourceKind::File),
     );
 
@@ -171,7 +171,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     let (_sid_p, pid_p, out_p) = attach_at(&mut e, "P", anchor, ClassSet::EMPTY, MAX_SETTLE);
     let p_corr = first_probe_corr(&out_p).expect("P's Seed probe at attach");
     assert_eq!(
-        e.profiles().get(pid_p).unwrap().kind,
+        e.profiles().get(pid_p).unwrap().kind(),
         Some(ResourceKind::File),
     );
     // Both Profiles claim the anchor → watch_demand = 2.
@@ -188,11 +188,11 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         Instant::now(),
     );
     let p = e.profiles().get(pid_p).expect("P alive");
-    assert!(p.kind.is_none(), "P.kind cleared by discard_anchor_state");
-    assert!(p.current.is_none());
-    assert!(p.baseline.is_none());
-    assert_eq!(p.anchor_claim, AnchorClaim::None);
-    assert!(matches!(p.state, ProfileState::Idle));
+    assert!(p.kind().is_none(), "P.kind cleared by discard_anchor_state");
+    assert!(p.current().is_none());
+    assert!(p.baseline().is_none());
+    assert_eq!(p.anchor_claim(), AnchorClaim::None);
+    assert!(matches!(p.state(), ProfileState::Idle));
     // Q's claim keeps the anchor alive.
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
@@ -264,7 +264,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     let (_sid_p, pid_p, out_p) = attach_at(&mut e, "P", anchor, ClassSet::EMPTY, MAX_SETTLE);
     let p_corr = first_probe_corr(&out_p).expect("P's Seed probe");
     assert_eq!(
-        e.profiles().get(pid_p).unwrap().kind,
+        e.profiles().get(pid_p).unwrap().kind(),
         Some(ResourceKind::Dir),
     );
 
@@ -276,7 +276,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         }),
         Instant::now(),
     );
-    assert!(e.profiles().get(pid_p).unwrap().kind.is_none());
+    assert!(e.profiles().get(pid_p).unwrap().kind().is_none());
 
     let recovery_out = e.step(
         Input::FsEvent {
@@ -343,7 +343,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         }),
         Instant::now(),
     );
-    assert!(e.profiles().get(pid_p).unwrap().kind.is_none());
+    assert!(e.profiles().get(pid_p).unwrap().kind().is_none());
 
     let recovery_out = e.step(
         Input::FsEvent {

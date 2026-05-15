@@ -99,7 +99,7 @@ fn complete_seed_burst(
         Instant::now(),
     );
     assert!(
-        matches!(e.profiles().get(pid).unwrap().state, ProfileState::Idle),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
         "Seed-Ok transitions Profile to Idle",
     );
 }
@@ -361,7 +361,7 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
     for pid in [pid_a, pid_b] {
         assert!(
             matches!(
-                e.profiles().get(pid).unwrap().state,
+                e.profiles().get(pid).unwrap().state(),
                 ProfileState::Active(_, _),
             ),
             "anchor MetadataChanged drives a burst on Profile {pid:?} regardless of mask",
@@ -407,7 +407,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Profile is Pending; current_prefix is /tmp.
-    let descent = match &e.profiles().get(pid).unwrap().state {
+    let descent = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Pending(d) => d.clone(),
         s => panic!("expected Pending, got {s:?}"),
     };
@@ -469,7 +469,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
 
     assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim,
+        e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::Held,
         "post-Seed: anchor_claim = Held",
     );
@@ -495,12 +495,12 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
 
     let p = e.profiles().get(pid).unwrap();
     assert_eq!(
-        p.anchor_claim,
+        p.anchor_claim(),
         AnchorClaim::None,
         "anchor_claim cleared by on_anchor_terminal_event",
     );
-    assert!(p.baseline.is_none());
-    assert!(p.current.is_none());
+    assert!(p.baseline().is_none());
+    assert!(p.current().is_none());
     assert_eq!(
         e.tree().get(anchor).unwrap().watch_demand(),
         0,
@@ -577,7 +577,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
     // No state mutation: Profile remains Idle; no probe queued, no
     // Effect.
     assert!(
-        matches!(e.profiles().get(pid).unwrap().state, ProfileState::Idle),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
         "drop happens before drive_burst — Profile stays Idle",
     );
     assert!(out.probe_ops.is_empty(), "no probe queued");
@@ -621,7 +621,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
     );
     assert!(
         matches!(
-            e.profiles().get(pid).unwrap().state,
+            e.profiles().get(pid).unwrap().state(),
             ProfileState::Active(_, _),
         ),
         "Modified on a CONTENT-class child drives a burst",
@@ -793,7 +793,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         ScanConfig::builder().recursive(true).build(),
     );
     assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim,
+        e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::Held,
     );
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
@@ -813,7 +813,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
     // Anchor's contribution is released; Profile back to Idle ready for
     // recovery via watch_root_parent.
     assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim,
+        e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::None,
         "Seed Vanished now releases anchor_claim (post-fix)",
     );
@@ -830,7 +830,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         out.watch_ops,
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     // watch_root_parent kept for recovery.
@@ -882,11 +882,11 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
     // invariant).
     let p = e.profiles().get(pid).expect("Profile alive");
     assert!(
-        matches!(p.state, ProfileState::Pending(_)),
+        matches!(p.state(), ProfileState::Pending(_)),
         "recovery transitions Profile → Pending",
     );
     assert_eq!(
-        p.anchor_claim,
+        p.anchor_claim(),
         AnchorClaim::None,
         "post-fix: anchor_claim = None during Pending — trichotomy holds",
     );
@@ -939,7 +939,7 @@ fn seed_failed_releases_anchor_claim() {
     );
 
     assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim,
+        e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::None,
         "Seed Failed releases anchor_claim (post-fix, symmetric with Seed Vanished)",
     );
@@ -1016,7 +1016,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
     // Detach mid-burst to set reap_pending.
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state.burst_finish(),
+        e.profiles().get(pid).unwrap().state().burst_finish(),
         Some(BurstFinish::Reap)
     ));
 
@@ -1077,7 +1077,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
     );
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state.burst_finish(),
+        e.profiles().get(pid).unwrap().state().burst_finish(),
         Some(BurstFinish::Reap)
     ));
 
@@ -1136,7 +1136,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
     );
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state.burst_finish(),
+        e.profiles().get(pid).unwrap().state().burst_finish(),
         Some(BurstFinish::Reap)
     ));
 
@@ -1152,7 +1152,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
         );
     }
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             specter_core::ActiveBurst::PreFire(specter_core::PreFireBurst {
                 phase: specter_core::PreFirePhase::Verifying,
@@ -1267,11 +1267,11 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
     // Detach P to set reap_pending. Q stays alive.
     let _ = e.step(Input::DetachSub(sid_p), Instant::now());
     assert!(matches!(
-        e.profiles().get(pid_p).unwrap().state.burst_finish(),
+        e.profiles().get(pid_p).unwrap().state().burst_finish(),
         Some(BurstFinish::Reap)
     ));
     assert!(!matches!(
-        e.profiles().get(pid_q).unwrap().state.burst_finish(),
+        e.profiles().get(pid_q).unwrap().state().burst_finish(),
         Some(BurstFinish::Reap)
     ));
 
@@ -1302,11 +1302,11 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
     assert!(e.profiles().get(pid_p).is_none(), "P reaped");
     let q = e.profiles().get(pid_q).expect("Q survives");
     assert_eq!(
-        q.anchor_claim,
+        q.anchor_claim(),
         AnchorClaim::None,
         "Q's anchor_claim cleared by terminal event",
     );
-    assert!(matches!(q.state, ProfileState::Idle));
+    assert!(matches!(q.state(), ProfileState::Idle));
 
     // Counter walked 2 → 1 → 0 cleanly. Anchor slot is reaped because
     // the surviving-child only kept it alive while P+Q were attached;
@@ -1368,7 +1368,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_dir() {
 
     // Pre-conditions: Profile is Idle, child has watch_demand >= 1.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     assert!(e.tree().get(child).is_some());
@@ -1454,7 +1454,7 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
     );
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state.burst_finish(),
+        e.profiles().get(pid).unwrap().state().burst_finish(),
         Some(BurstFinish::Reap)
     ));
 
@@ -1521,10 +1521,10 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
     // anchor_claim cleared to None, current taken by
     // release_descendant_claim, child reaped.
     let p = e.profiles().get(pid).expect("Profile survives anchor loss");
-    assert!(matches!(p.state, ProfileState::Idle));
-    assert_eq!(p.anchor_claim, AnchorClaim::None);
+    assert!(matches!(p.state(), ProfileState::Idle));
+    assert_eq!(p.anchor_claim(), AnchorClaim::None);
     assert!(
-        p.current.is_none(),
+        p.current().is_none(),
         "current taken by release_descendant_claim"
     );
     assert!(
@@ -1597,7 +1597,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         .cloned()
         .expect("Standard-Ok stable verdict fires one Effect");
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             specter_core::ActiveBurst::PostFire(specter_core::PostFireBurst {
                 phase: specter_core::PostFirePhase::Awaiting { .. },
@@ -1637,7 +1637,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     );
 
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     assert!(

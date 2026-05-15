@@ -132,7 +132,7 @@ impl Engine {
         );
 
         if let Some(p) = self.profiles.get_mut(pid) {
-            p.state = ProfileState::Idle;
+            p.transition_state(ProfileState::Idle);
         }
 
         sub_watch_then_try_reap(&mut self.tree, prefix, ContribKey::ProfileDescent(pid), out);

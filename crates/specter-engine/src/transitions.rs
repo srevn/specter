@@ -664,8 +664,10 @@ impl Engine {
             let new_timer = self
                 .timers
                 .schedule(new_deadline, profile_id, TimerKind::Settle);
-            if let Some(p) = self.profiles.get_mut(profile_id)
-                && let ProfileState::Active(ActiveBurst::PreFire(pre), _) = &mut p.state
+            if let Some(pre) = self
+                .profiles
+                .get_mut(profile_id)
+                .and_then(specter_core::Profile::pre_fire_burst_mut)
             {
                 pre.phase = PreFirePhase::Batching {
                     settle_timer: new_timer,
@@ -757,8 +759,10 @@ impl Engine {
 
         match phase_action {
             AwaitAction::Decrement => {
-                if let Some(p) = self.profiles.get_mut(profile_id)
-                    && let ProfileState::Active(ActiveBurst::PostFire(post), _) = &mut p.state
+                if let Some(post) = self
+                    .profiles
+                    .get_mut(profile_id)
+                    .and_then(specter_core::Profile::post_fire_burst_mut)
                     && let PostFirePhase::Awaiting {
                         ref mut outstanding,
                         ..
@@ -2025,8 +2029,10 @@ impl Engine {
         // response, which will dispatch with `forced = true`). Lifting
         // the write out makes "burst-deadline elapsed ⇒ forced fire on
         // next emission" the helper's first statement.
-        let needs_verify = if let Some(p) = self.profiles.get_mut(profile_id)
-            && let ProfileState::Active(ActiveBurst::PreFire(pre), _) = &mut p.state
+        let needs_verify = if let Some(pre) = self
+            .profiles
+            .get_mut(profile_id)
+            .and_then(specter_core::Profile::pre_fire_burst_mut)
         {
             pre.forced = true;
             matches!(

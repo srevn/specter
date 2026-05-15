@@ -145,7 +145,7 @@ fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId) {
         Instant::now(),
     );
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
 }
@@ -171,7 +171,7 @@ fn attach_sub_fresh_profile_emits_watch_suppress_probe() {
 fn attach_sub_caches_anchor_kind_for_classified_resource() {
     let (e, pid, _sid, _r, _now) = engine_with_attached_sub();
     assert_eq!(
-        e.profiles.get(pid).and_then(|p| p.kind),
+        e.profiles.get(pid).and_then(specter_core::Profile::kind),
         Some(ResourceKind::Dir),
         "resource-based attach reads the classified anchor's kind into Profile.kind",
     );
@@ -208,7 +208,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
     let pid = e.subs.get(sid).unwrap().profile;
 
     assert_eq!(
-        e.profiles.get(pid).and_then(|p| p.kind),
+        e.profiles.get(pid).and_then(specter_core::Profile::kind),
         None,
         "unprobed anchor → Profile.kind starts as None",
     );
@@ -228,7 +228,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
         now,
     );
     assert_eq!(
-        e.profiles.get(pid).and_then(|p| p.kind),
+        e.profiles.get(pid).and_then(specter_core::Profile::kind),
         Some(ResourceKind::Dir),
         "Seed-Ok fallback caches the anchor kind from the response shape",
     );
@@ -265,7 +265,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert_eq!(
-        e.profiles.get(pid).and_then(|p| p.kind),
+        e.profiles.get(pid).and_then(specter_core::Profile::kind),
         None,
         "unprobed anchor → Profile.kind starts as None",
     );
@@ -283,7 +283,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
         now,
     );
     assert_eq!(
-        e.profiles.get(pid).and_then(|p| p.kind),
+        e.profiles.get(pid).and_then(specter_core::Profile::kind),
         Some(ResourceKind::Dir),
         "SubtreeOk on a kind-None Profile classifies as Dir at dispatch_burst_outcome",
     );
@@ -325,7 +325,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert_eq!(
-        e.profiles.get(pid).and_then(|p| p.kind),
+        e.profiles.get(pid).and_then(specter_core::Profile::kind),
         None,
         "unprobed anchor → Profile.kind starts as None",
     );
@@ -343,7 +343,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
         now,
     );
     assert_eq!(
-        e.profiles.get(pid).and_then(|p| p.kind),
+        e.profiles.get(pid).and_then(specter_core::Profile::kind),
         Some(ResourceKind::File),
         "AnchorOk on a kind-None Profile classifies as File at dispatch_burst_outcome",
     );
@@ -389,7 +389,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     let pid = e.subs.get(sid).unwrap().profile;
     assert!(
         matches!(
-            e.profiles.get(pid).map(|p| &p.state),
+            e.profiles.get(pid).map(specter_core::Profile::state),
             Some(ProfileState::Pending(_)),
         ),
         "path-based attach against an absent leaf goes Pending",
@@ -467,7 +467,7 @@ fn dispatch_standard_ok_with_kind_mismatched_response_routes_through_finalize_an
         now,
     );
     assert_eq!(
-        e.profiles.get(pid).and_then(|p| p.kind),
+        e.profiles.get(pid).and_then(specter_core::Profile::kind),
         Some(ResourceKind::File),
     );
 
@@ -569,7 +569,7 @@ fn standard_burst_on_unknown_anchor_emits_subtree_probe() {
 fn attach_sub_existing_profile_bumps_refcount() {
     let (mut e, pid, _sid, r, now) = engine_with_attached_sub();
     let pre_state = matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Active(_, _)
     );
     assert!(pre_state, "first attach went Active");
@@ -622,8 +622,8 @@ fn engine_dispatch_through_shim_matches_v4_behaviour() {
         Instant::now(),
     );
     let p = e.profiles.get(pid).unwrap();
-    assert!(matches!(p.state, ProfileState::Idle));
-    assert!(p.current.is_some(), "Seed-Ok sets current via shim");
+    assert!(matches!(p.state(), ProfileState::Idle));
+    assert!(p.current().is_some(), "Seed-Ok sets current via shim");
     assert!(out.effects.is_empty(), "Seed bursts never fire Effects");
 }
 
@@ -644,9 +644,9 @@ fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
     );
 
     let p = e.profiles.get(pid).unwrap();
-    assert!(matches!(p.state, ProfileState::Idle));
-    assert!(p.baseline.is_some());
-    assert!(p.current.is_some());
+    assert!(matches!(p.state(), ProfileState::Idle));
+    assert!(p.baseline().is_some());
+    assert!(p.current().is_some());
     assert!(out.effects.is_empty(), "Seed bursts never fire Effects");
     // Anchor unsuppressed.
     let unsuppress = out
@@ -671,9 +671,9 @@ fn probe_response_seed_vanished_clears_baseline_and_diagnoses() {
         Instant::now(),
     );
     let p = e.profiles.get(pid).unwrap();
-    assert!(matches!(p.state, ProfileState::Idle));
-    assert!(p.baseline.is_none());
-    assert!(p.current.is_none());
+    assert!(matches!(p.state(), ProfileState::Idle));
+    assert!(p.baseline().is_none());
+    assert!(p.current().is_none());
     let has_diag = out.diagnostics.iter().any(|d| {
         matches!(
             d,
@@ -734,7 +734,7 @@ fn probe_response_correlation_mismatch_drops_with_diagnostic() {
     assert!(stale);
     // State unchanged: still Active(Seed Verifying).
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Active(_, _),
     ));
 }
@@ -812,7 +812,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         }),
         now + SETTLE + Duration::from_millis(1),
     );
-    let burst = match &e.profiles.get(pid).unwrap().state {
+    let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
         _ => panic!("expected Active(Awaiting) after firing"),
     };
@@ -892,7 +892,7 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
     // fire history. The phantom condition (`baseline.hash() ==
     // current.hash()`) is structurally satisfied; the fresh-Sub
     // condition (`fired_subs.is_empty()`) is by construction.
-    let baseline_hash = match e.profiles.get(pid).unwrap().baseline.as_ref() {
+    let baseline_hash = match e.profiles.get(pid).unwrap().baseline() {
         Some(TreeSnapshot::Dir(arc)) => arc.dir_hash(),
         _ => panic!("post-Seed baseline must be Some(Dir)"),
     };
@@ -1163,7 +1163,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     );
 
     let p = e.profiles.get(pid).expect("Profile alive");
-    match &p.current {
+    match p.current() {
         Some(TreeSnapshot::File(_)) => {} // navigation invariant preserved
         Some(TreeSnapshot::Dir(arc)) => panic!(
             "Profile.current corrupted to Dir(root_meta={:?}); expected File(leaf)",
@@ -1230,7 +1230,7 @@ fn standard_burst_force_fires_on_max_settle() {
         // Forced fire transitions to Awaiting (Effect in flight). The
         // post-fire rebase happens when the eventual EffectComplete
         // drives the Awaiting → Rebasing transition.
-        let phase = match &e.profiles.get(pid).unwrap().state {
+        let phase = match e.profiles.get(pid).unwrap().state() {
             ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
             _ => panic!("expected Active(Awaiting)"),
         };
@@ -1258,7 +1258,7 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
         },
         Instant::now(),
     );
-    let burst = match &e.profiles.get(pid).unwrap().state {
+    let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         _ => panic!(),
     };
@@ -1399,7 +1399,7 @@ fn fs_event_metadatachanged_at_anchor_bypasses_class_filter() {
     );
     assert!(
         matches!(
-            e.profiles.get(pid).unwrap().state,
+            e.profiles.get(pid).unwrap().state(),
             ProfileState::Active(_, _),
         ),
         "MetadataChanged at the anchor drives a burst even on EMPTY mask",
@@ -1454,7 +1454,7 @@ fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
     // No `MetadataChangedIgnored` lingers — the variant was deleted.
     // No state mutation: the filter `continue`s before drive_burst.
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
 }
@@ -1520,11 +1520,14 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     );
     // Profile remains Idle: dropped events do not extend dirty sets.
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     // Sanity: anchor's contribution is intact (we did NOT terminate).
-    assert_eq!(e.profiles.get(pid).unwrap().anchor_claim, AnchorClaim::Held,);
+    assert_eq!(
+        e.profiles.get(pid).unwrap().anchor_claim(),
+        AnchorClaim::Held,
+    );
     let _ = sid;
 }
 
@@ -1539,7 +1542,7 @@ fn fs_event_anchor_terminal_bypasses_class_filter() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     assert_eq!(
-        e.profiles.get(pid).unwrap().anchor_claim,
+        e.profiles.get(pid).unwrap().anchor_claim(),
         AnchorClaim::Held,
         "anchor_claim set to Held after attach_sub_inner",
     );
@@ -1560,13 +1563,13 @@ fn fs_event_anchor_terminal_bypasses_class_filter() {
 
     let p = e.profiles.get(pid).unwrap();
     assert_eq!(
-        p.anchor_claim,
+        p.anchor_claim(),
         AnchorClaim::None,
         "anchor_claim cleared by on_anchor_terminal_event",
     );
-    assert!(p.baseline.is_none());
-    assert!(p.current.is_none());
-    assert!(matches!(p.state, ProfileState::Idle));
+    assert!(p.baseline().is_none());
+    assert!(p.current().is_none());
+    assert!(matches!(p.state(), ProfileState::Idle));
 }
 
 #[test]
@@ -1643,7 +1646,7 @@ fn fs_event_removed_at_anchor_active_terminates() {
         now,
     );
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Active(_, _),
     ));
     // Now Removed at anchor → terminate.
@@ -1655,9 +1658,9 @@ fn fs_event_removed_at_anchor_active_terminates() {
         now,
     );
     let p = e.profiles.get(pid).unwrap();
-    assert!(matches!(p.state, ProfileState::Idle));
-    assert!(p.baseline.is_none());
-    assert!(p.current.is_none());
+    assert!(matches!(p.state(), ProfileState::Idle));
+    assert!(p.baseline().is_none());
+    assert!(p.current().is_none());
     // watch_demand on anchor → 0; one Unwatch op emitted.
     assert_eq!(e.tree.get(root).unwrap().watch_demand(), 0);
     let unwatches = out
@@ -1679,7 +1682,7 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     assert_eq!(e.tree.get(root).unwrap().watch_demand(), 1);
-    assert!(e.profiles.get(pid).unwrap().current.is_some());
+    assert!(e.profiles.get(pid).unwrap().current().is_some());
 
     let _ = e.step(
         Input::FsEvent {
@@ -1691,14 +1694,14 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
 
     // Profile state stays Idle (no Active transition).
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     // watch_demand released; baseline/current cleared.
     assert_eq!(e.tree.get(root).unwrap().watch_demand(), 0);
     let p = e.profiles.get(pid).unwrap();
-    assert!(p.baseline.is_none());
-    assert!(p.current.is_none());
+    assert!(p.baseline().is_none());
+    assert!(p.current().is_none());
 }
 
 // ---- TimerExpired dispatch ----
@@ -1727,7 +1730,7 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
     );
     let p = e.profiles.get(pid).unwrap();
     assert!(matches!(
-        p.state,
+        p.state(),
         ProfileState::Active(_, _) // Verifying
     ));
     let probes = out
@@ -1800,7 +1803,7 @@ fn effect_complete_ok_in_idle_diagnoses_outside_awaiting() {
     // No probe emitted — the Profile stays Idle.
     assert!(out.probe_ops.is_empty());
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
 }
@@ -1813,7 +1816,7 @@ fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
     // tracking it), so it diagnoses with EffectCompleteOutsideAwaiting.
     let (mut e, pid, sid, _root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
-    let pre_baseline = e.profiles.get(pid).unwrap().baseline.is_some();
+    let pre_baseline = e.profiles.get(pid).unwrap().baseline().is_some();
     let out = e.step(
         Input::EffectComplete {
             sub: sid,
@@ -1839,7 +1842,7 @@ fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
     assert!(out.effects.is_empty());
     assert!(out.probe_ops.is_empty());
     assert_eq!(
-        e.profiles.get(pid).unwrap().baseline.is_some(),
+        e.profiles.get(pid).unwrap().baseline().is_some(),
         pre_baseline,
         "baseline unchanged on Failed",
     );
@@ -2203,7 +2206,7 @@ fn watch_op_rejected_for_anchored_profile_emits_anchor_claim_purged() {
     );
     // Anchor claim cleared.
     assert_eq!(
-        e.profiles.get(pid).unwrap().anchor_claim,
+        e.profiles.get(pid).unwrap().anchor_claim(),
         AnchorClaim::None,
         "anchor_claim cleared by purge",
     );
@@ -2299,7 +2302,7 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
     let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Idle
     ));
 
@@ -2310,7 +2313,7 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
         Instant::now(),
     );
 
-    let burst = match &e.profiles.get(pid).unwrap().state {
+    let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
@@ -2348,7 +2351,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
         now,
     );
     // Now in Active(Standard) Batching.
-    let burst = match &e.profiles.get(pid).unwrap().state {
+    let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         s => panic!("expected Active(Standard) after FsEvent; got {s:?}"),
     };
@@ -2362,7 +2365,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
         now,
     );
 
-    let burst = match &e.profiles.get(pid).unwrap().state {
+    let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
@@ -2410,14 +2413,14 @@ fn sensor_overflow_pending_profile_is_skipped() {
         "fixture: profile is in Pending(_)",
     );
 
-    let pre_state = format!("{:?}", e.profiles.get(pid).unwrap().state);
+    let pre_state = format!("{:?}", e.profiles.get(pid).unwrap().state());
     let out = e.step(
         Input::SensorOverflow {
             scope: OverflowScope::Global,
         },
         Instant::now(),
     );
-    let post_state = format!("{:?}", e.profiles.get(pid).unwrap().state);
+    let post_state = format!("{:?}", e.profiles.get(pid).unwrap().state());
 
     assert_eq!(
         pre_state, post_state,
@@ -2484,11 +2487,11 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     complete_seed_burst(&mut e, pid_a);
     complete_seed_burst(&mut e, pid_b);
     assert!(matches!(
-        e.profiles.get(pid_a).unwrap().state,
+        e.profiles.get(pid_a).unwrap().state(),
         ProfileState::Idle
     ));
     assert!(matches!(
-        e.profiles.get(pid_b).unwrap().state,
+        e.profiles.get(pid_b).unwrap().state(),
         ProfileState::Idle
     ));
 
@@ -2502,13 +2505,13 @@ fn sensor_overflow_resource_scope_filters_profiles() {
 
     assert!(
         matches!(
-            &e.profiles.get(pid_a).unwrap().state,
+            e.profiles.get(pid_a).unwrap().state(),
             ProfileState::Active(ActiveBurst::PreFire(pre), _) if pre.intent == BurstIntent::Seed
         ),
         "Profile A (anchor at a) reseeded",
     );
     assert!(
-        matches!(&e.profiles.get(pid_b).unwrap().state, ProfileState::Idle),
+        matches!(e.profiles.get(pid_b).unwrap().state(), ProfileState::Idle),
         "Profile B (anchor at b, sibling of a) untouched",
     );
 }
@@ -2520,12 +2523,15 @@ fn seed_vanished_then_reap_releases_anchor_via_claim() {
     let (mut e, pid, sid, r, _now) = engine_with_attached_sub();
     // Anchor watch_demand is 1, anchor_claim is Held.
     assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
-    assert_eq!(e.profiles.get(pid).unwrap().anchor_claim, AnchorClaim::Held,);
+    assert_eq!(
+        e.profiles.get(pid).unwrap().anchor_claim(),
+        AnchorClaim::Held,
+    );
 
     // Detach the Sub mid-burst → reap_pending = true.
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state.burst_finish(),
+        e.profiles.get(pid).unwrap().state().burst_finish(),
         Some(BurstFinish::Reap)
     ));
 
@@ -2560,7 +2566,10 @@ fn anchor_terminal_event_clears_anchor_claim() {
     // reap must NOT double-release it (the claim is cleared to None).
     let (mut e, pid, _sid, r, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
-    assert_eq!(e.profiles.get(pid).unwrap().anchor_claim, AnchorClaim::Held,);
+    assert_eq!(
+        e.profiles.get(pid).unwrap().anchor_claim(),
+        AnchorClaim::Held,
+    );
 
     // Inject a Removed event at the anchor: the terminal event releases
     // the anchor's contribution and clears the claim.
@@ -2572,7 +2581,7 @@ fn anchor_terminal_event_clears_anchor_claim() {
         Instant::now(),
     );
     assert_eq!(
-        e.profiles.get(pid).unwrap().anchor_claim,
+        e.profiles.get(pid).unwrap().anchor_claim(),
         AnchorClaim::None,
         "anchor_claim cleared by terminal event",
     );
@@ -2591,7 +2600,7 @@ fn detach_sub_idle_profile_reaps_immediately() {
     complete_seed_burst(&mut e, pid);
     // Profile is now Idle.
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state,
+        e.profiles.get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     let out = e.step(Input::DetachSub(sid), Instant::now());
@@ -2617,7 +2626,7 @@ fn detach_sub_active_profile_marks_reap_pending() {
     // Profile is Active(Seed Verifying) — Seed-burst still in flight.
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     let p = e.profiles.get(pid).expect("profile alive until burst ends");
-    assert!(matches!(p.state.burst_finish(), Some(BurstFinish::Reap)));
+    assert!(matches!(p.state().burst_finish(), Some(BurstFinish::Reap)));
     assert!(
         e.subs.at(pid).is_empty(),
         "no Subs remain after detaching the sole Sub"
@@ -2644,7 +2653,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
     // Detach the Sub mid-burst.
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
-        e.profiles.get(pid).unwrap().state.burst_finish(),
+        e.profiles.get(pid).unwrap().state().burst_finish(),
         Some(BurstFinish::Reap)
     ));
 
@@ -3419,7 +3428,7 @@ fn drive_to_first_effect(
         now,
     );
     // Drain settle timer → Verifying.
-    let settle_timer = match &e.profiles.get(pid).unwrap().state {
+    let settle_timer = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
             PreFirePhase::Batching { settle_timer } => *settle_timer,
             _ => panic!("expected Batching"),
@@ -3449,7 +3458,7 @@ fn drive_to_first_effect(
         now + SETTLE,
     );
     // Drain settle timer → Verifying again.
-    let settle_timer2 = match &e.profiles.get(pid).unwrap().state {
+    let settle_timer2 = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
             PreFirePhase::Batching { settle_timer } => *settle_timer,
             _ => panic!("expected Batching"),
@@ -3901,7 +3910,7 @@ fn drive_to_standard_verifying(
         },
         now,
     );
-    let settle_timer = match &e.profiles.get(pid).unwrap().state {
+    let settle_timer = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
             PreFirePhase::Batching { settle_timer } => *settle_timer,
             _ => panic!("expected Standard Batching"),
@@ -3960,7 +3969,7 @@ fn drive_to_rebasing(
 fn dispatch_seed_vanished_clears_profile_kind() {
     let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
     assert_eq!(
-        e.profiles.get(pid).unwrap().kind,
+        e.profiles.get(pid).unwrap().kind(),
         Some(ResourceKind::Dir),
         "fresh attach caches anchor's classified kind",
     );
@@ -3976,7 +3985,7 @@ fn dispatch_seed_vanished_clears_profile_kind() {
         Instant::now(),
     );
     assert!(
-        e.profiles.get(pid).unwrap().kind.is_none(),
+        e.profiles.get(pid).unwrap().kind().is_none(),
         "Seed-Vanished must clear the cached anchor kind",
     );
 }
@@ -3996,7 +4005,7 @@ fn dispatch_seed_failed_clears_profile_kind() {
         Instant::now(),
     );
     assert!(
-        e.profiles.get(pid).unwrap().kind.is_none(),
+        e.profiles.get(pid).unwrap().kind().is_none(),
         "Seed-Failed must clear the cached anchor kind",
     );
 }
@@ -4006,7 +4015,7 @@ fn dispatch_standard_vanished_clears_profile_kind() {
     let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
     let correlation = drive_to_standard_verifying(&mut e, pid, root, now);
     assert_eq!(
-        e.profiles.get(pid).unwrap().kind,
+        e.profiles.get(pid).unwrap().kind(),
         Some(ResourceKind::Dir),
         "kind cached pre-dispatch",
     );
@@ -4019,7 +4028,7 @@ fn dispatch_standard_vanished_clears_profile_kind() {
         now + SETTLE,
     );
     assert!(
-        e.profiles.get(pid).unwrap().kind.is_none(),
+        e.profiles.get(pid).unwrap().kind().is_none(),
         "Standard-Vanished must clear the cached anchor kind",
     );
 }
@@ -4037,7 +4046,7 @@ fn dispatch_standard_failed_clears_profile_kind() {
         now + SETTLE,
     );
     assert!(
-        e.profiles.get(pid).unwrap().kind.is_none(),
+        e.profiles.get(pid).unwrap().kind().is_none(),
         "Standard-Failed must clear the cached anchor kind",
     );
 }
@@ -4047,7 +4056,7 @@ fn dispatch_rebase_vanished_clears_profile_kind() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
     let correlation = drive_to_rebasing(&mut e, pid, sid, root, now);
     assert_eq!(
-        e.profiles.get(pid).unwrap().kind,
+        e.profiles.get(pid).unwrap().kind(),
         Some(ResourceKind::Dir),
         "kind cached pre-rebase",
     );
@@ -4060,7 +4069,7 @@ fn dispatch_rebase_vanished_clears_profile_kind() {
         now + SETTLE * 4,
     );
     assert!(
-        e.profiles.get(pid).unwrap().kind.is_none(),
+        e.profiles.get(pid).unwrap().kind().is_none(),
         "Rebase-Vanished must clear the cached anchor kind",
     );
 }
@@ -4078,7 +4087,7 @@ fn dispatch_rebase_failed_clears_profile_kind() {
         now + SETTLE * 4,
     );
     assert!(
-        e.profiles.get(pid).unwrap().kind.is_none(),
+        e.profiles.get(pid).unwrap().kind().is_none(),
         "Rebase-Failed must clear the cached anchor kind",
     );
 }
@@ -4089,7 +4098,7 @@ fn finalize_anchor_lost_clears_profile_kind() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     assert_eq!(
-        e.profiles.get(pid).unwrap().kind,
+        e.profiles.get(pid).unwrap().kind(),
         Some(ResourceKind::Dir),
         "kind cached post-Seed-Ok",
     );
@@ -4101,7 +4110,7 @@ fn finalize_anchor_lost_clears_profile_kind() {
         Instant::now(),
     );
     assert!(
-        e.profiles.get(pid).unwrap().kind.is_none(),
+        e.profiles.get(pid).unwrap().kind().is_none(),
         "anchor terminal event must clear the cached anchor kind",
     );
 }
@@ -4126,7 +4135,7 @@ fn finalize_anchor_lost_was_active_pre_helper_ordering() {
     );
     assert!(
         matches!(
-            e.profiles.get(pid).unwrap().state,
+            e.profiles.get(pid).unwrap().state(),
             ProfileState::Active(_, _)
         ),
         "harness pre-condition: Profile is Active",
@@ -4137,13 +4146,13 @@ fn finalize_anchor_lost_was_active_pre_helper_ordering() {
 
     let p = e.profiles.get(pid).expect("Profile lives");
     assert!(
-        matches!(p.state, ProfileState::Idle),
+        matches!(p.state(), ProfileState::Idle),
         "was_active=true ⇒ finish_burst_to_idle ran ⇒ state is Idle; got {:?}",
-        p.state,
+        p.state(),
     );
-    assert!(p.kind.is_none(), "kind cleared by discard_anchor_state");
+    assert!(p.kind().is_none(), "kind cleared by discard_anchor_state");
     assert_eq!(
-        p.anchor_claim,
+        p.anchor_claim(),
         AnchorClaim::None,
         "anchor claim released by discard_anchor_state",
     );
@@ -4225,7 +4234,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         )),
         "Awaiting absorb must emit EventAbsorbedByFireTail",
     );
-    let burst = match &e.profiles.get(pid).unwrap().state {
+    let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
         _ => panic!("expected Active(Awaiting)"),
     };
@@ -4266,7 +4275,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         other => panic!("Rebasing on Dir-anchored Profile must emit Subtree probe; got {other:?}"),
     }
 
-    let burst = match &e.profiles.get(pid).unwrap().state {
+    let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
         _ => panic!("expected Active(Rebasing)"),
     };
@@ -4392,7 +4401,7 @@ fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
         p.last_settled_hash_at_loss = Some(0xdead_beef);
         p.baseline = Some(TreeSnapshot::Dir(dir_tree_snap(vec![])));
         p.current = Some(TreeSnapshot::Dir(dir_tree_snap(vec![])));
-        p.state = state;
+        p.transition_state(state);
     }
 
     let mut out = StepOutput::default();
@@ -4400,10 +4409,10 @@ fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
 
     let p = e.profiles.get(pid).expect("Profile lives");
     assert!(
-        p.last_settled_hash_at_loss.is_none(),
+        p.last_settled_hash_at_loss().is_none(),
         "witness cleared on rebase",
     );
-    assert!(p.baseline.is_some(), "baseline set to current");
+    assert!(p.baseline().is_some(), "baseline set to current");
 }
 
 #[test]
@@ -4424,7 +4433,7 @@ fn dispatch_seed_ok_no_drift_branch_clears_last_settled_hash_at_loss() {
         // Empty dedup map and empty fired_subs ⇒ no drift, no fire.
         p.baseline = None;
         p.current = None;
-        p.state = state;
+        p.transition_state(state);
     }
 
     let mut out = StepOutput::default();
@@ -4434,7 +4443,7 @@ fn dispatch_seed_ok_no_drift_branch_clears_last_settled_hash_at_loss() {
         e.profiles
             .get(pid)
             .unwrap()
-            .last_settled_hash_at_loss
+            .last_settled_hash_at_loss()
             .is_none(),
         "no-drift Seed-Ok cleared witness",
     );
@@ -4472,7 +4481,7 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
         p.last_settled_hash_at_loss = Some(0xdead_beef);
         p.baseline = None;
         p.current = None;
-        p.state = state;
+        p.transition_state(state);
     }
 
     let mut out = StepOutput::default();
@@ -4483,11 +4492,11 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
 
     let p = e.profiles.get(pid).unwrap();
     assert!(
-        p.last_settled_hash_at_loss.is_none(),
+        p.last_settled_hash_at_loss().is_none(),
         "drift Seed-Ok cleared witness eagerly",
     );
     assert!(
-        p.baseline.is_some(),
+        p.baseline().is_some(),
         "drift branch rebased baseline = current",
     );
 }
@@ -4507,11 +4516,11 @@ fn seed_drift_observed_returns_false_for_fresh_profile() {
     let p = e.profiles.get(pid).expect("Profile lives post-attach");
     assert!(p.fired_subs.is_empty(), "precondition: no fire history");
     assert!(
-        p.last_settled_hash_at_loss.is_none(),
+        p.last_settled_hash_at_loss().is_none(),
         "precondition: no witness"
     );
     assert!(
-        p.baseline.is_none(),
+        p.baseline().is_none(),
         "precondition: baseline cleared post-attach"
     );
 

@@ -199,7 +199,7 @@ mod tests {
     use specter_core::{
         ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DirMeta, DirSnapshot,
         FsIdentity, PreFireBurst, PreFirePhase, Profile, ProfileState, ResourceRole, ScanConfig,
-        TimerId, TreeSnapshot,
+        TimerId,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -323,7 +323,7 @@ mod tests {
         // `Profile.current` (set by `dispatch_standard_ok` before
         // `transition_to_draining`).
         let mid_resource = profiles.get(p_mid).unwrap().resource;
-        let stable_snapshot = TreeSnapshot::Dir(Arc::new(DirSnapshot::new(
+        let stable_snapshot = Arc::new(DirSnapshot::new(
             DirMeta {
                 mtime: UNIX_EPOCH,
                 fs_id: FsIdentity {
@@ -333,11 +333,11 @@ mod tests {
             },
             0,
             BTreeMap::<CompactString, ChildEntry>::new(),
-        )));
+        ));
         {
             let mid = profiles.get_mut(p_mid).unwrap();
-            mid.current = Some(stable_snapshot);
-            mid.state = ProfileState::Active(
+            mid.install_dir_current(stable_snapshot);
+            mid.transition_state(ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
                     burst_deadline: TimerId::default(),
                     phase: PreFirePhase::Draining,
@@ -350,7 +350,7 @@ mod tests {
                     last_event_time: None,
                 }),
                 BurstFinish::ReturnToIdle,
-            );
+            ));
             mid.dirty_descendants = 1;
         }
 

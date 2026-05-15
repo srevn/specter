@@ -297,7 +297,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
     {
         let p = e.profiles().get(dynamic_profile).expect("Profile alive");
         assert_eq!(
-            p.kind,
+            p.kind(),
             Some(ResourceKind::File),
             "anchor classified as File from enumeration-observed kind",
         );
@@ -349,12 +349,12 @@ fn full_lifecycle_attach_promote_seed_reap() {
     {
         let p = e.profiles().get(dynamic_profile).expect("Profile alive");
         assert!(
-            matches!(p.state, specter_core::ProfileState::Idle),
+            matches!(p.state(), specter_core::ProfileState::Idle),
             "Profile returns to Idle after Seed completes; got {:?}",
-            p.state,
+            p.state(),
         );
         assert!(
-            p.current.is_some(),
+            p.current().is_some(),
             "baseline integrated as Profile.current"
         );
     }
@@ -551,7 +551,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         specter_core::testkit::first_attached_sub(&attach_p_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
     ));
     let descent_p_corr =

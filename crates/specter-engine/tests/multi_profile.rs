@@ -352,7 +352,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         t2,
     );
     assert!(matches!(
-        e.profiles().get(pid_parent).unwrap().state,
+        e.profiles().get(pid_parent).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PreFire(PreFireBurst {
                 phase: PreFirePhase::Draining,
@@ -381,7 +381,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     );
     // Stable verdict transitions to Awaiting; no reconfirm yet.
     assert!(matches!(
-        e.profiles().get(pid_child).unwrap().state,
+        e.profiles().get(pid_child).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
                 phase: PostFirePhase::Awaiting { outstanding: 1, .. },
@@ -403,7 +403,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         .cloned()
         .expect("child fired one Effect at stable verdict");
     assert!(matches!(
-        e.profiles().get(pid_parent).unwrap().state,
+        e.profiles().get(pid_parent).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PreFire(PreFireBurst {
                 phase: PreFirePhase::Draining,
@@ -457,7 +457,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
 
     // Parent's state is now Probing again (the reconfirm).
     assert!(matches!(
-        e.profiles().get(pid_parent).unwrap().state,
+        e.profiles().get(pid_parent).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PreFire(PreFireBurst {
                 phase: PreFirePhase::Verifying,

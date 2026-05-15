@@ -121,7 +121,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
     let (sid, pid, attach_out) = attach_subtree_root(&mut e, "build", root, MAX_SETTLE);
     complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
     assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim,
+        e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::Held,
     );
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
@@ -143,7 +143,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
 
     // Anchor claim cleared; counter zeroed.
     assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim,
+        e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::None,
     );
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
@@ -188,11 +188,11 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
 
     // Pre-condition: both Profiles cache the anchor's kind.
     assert_eq!(
-        e.profiles().get(pid_p).unwrap().kind,
+        e.profiles().get(pid_p).unwrap().kind(),
         Some(ResourceKind::Dir),
     );
     assert_eq!(
-        e.profiles().get(pid_q).unwrap().kind,
+        e.profiles().get(pid_q).unwrap().kind(),
         Some(ResourceKind::Dir),
     );
 
@@ -211,21 +211,21 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
     );
 
     assert!(
-        e.profiles().get(pid_p).unwrap().kind.is_none(),
+        e.profiles().get(pid_p).unwrap().kind().is_none(),
         "P's kind cleared by WatchOpRejected anchor purge",
     );
     assert!(
-        e.profiles().get(pid_q).unwrap().kind.is_none(),
+        e.profiles().get(pid_q).unwrap().kind().is_none(),
         "Q's kind cleared by WatchOpRejected anchor purge",
     );
     // Sibling assertion that the existing claim-side discipline is
     // also intact — both anchor claims released, counter zeroed.
     assert_eq!(
-        e.profiles().get(pid_p).unwrap().anchor_claim,
+        e.profiles().get(pid_p).unwrap().anchor_claim(),
         AnchorClaim::None,
     );
     assert_eq!(
-        e.profiles().get(pid_q).unwrap().anchor_claim,
+        e.profiles().get(pid_q).unwrap().anchor_claim(),
         AnchorClaim::None,
     );
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
@@ -261,11 +261,11 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
 
     // Both claims cleared.
     assert_eq!(
-        e.profiles().get(pid_p).unwrap().anchor_claim,
+        e.profiles().get(pid_p).unwrap().anchor_claim(),
         AnchorClaim::None,
     );
     assert_eq!(
-        e.profiles().get(pid_q).unwrap().anchor_claim,
+        e.profiles().get(pid_q).unwrap().anchor_claim(),
         AnchorClaim::None,
     );
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
@@ -406,7 +406,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     let pid = e.subs().get(sid).unwrap().profile;
     let initial_corr = first_probe_corr(&attach_out).expect("descent probe");
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
     ));
 
@@ -427,7 +427,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
 
     // Descent vacated.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     // Cancel + ProfileClaimPurged{DescentPrefix} surface.
@@ -707,7 +707,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         specter_core::testkit::first_attached_sub(&attach_p_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_p).unwrap().profile;
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
     ));
     assert_eq!(e.tree().get(a).unwrap().watch_demand(), 2);
@@ -725,7 +725,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         0
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     match &e.promoters().get(qid).unwrap().state {

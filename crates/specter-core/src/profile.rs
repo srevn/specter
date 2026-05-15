@@ -2757,4 +2757,128 @@ mod tests {
         assert!(p.current().is_none(), "take leaves None");
         assert!(p.take_current().is_none(), "second take is idempotent");
     }
+
+    /// Guarded random walk over the public state-machine mutators,
+    /// asserting after every op: `baseline`/`current` share a
+    /// `TreeSnapshot` variant when both set; `kind` agrees with
+    /// `current`'s variant; a present `baseline` implies no survival
+    /// witness. Guards read the live accessors so a step never trips a
+    /// precondition instead of the invariant under test. Deterministic
+    /// xorshift64 PRNG, seed pinned in the fn name; 16 fresh Profiles so
+    /// the one-shot `materialize_anchor` is exercised.
+    #[test]
+    fn cross_field_invariants_hold_under_random_api_walk_seed_0x5eed_f00d() {
+        struct XorShift64(u64);
+        impl XorShift64 {
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn below(&mut self, n: u64) -> u64 {
+                self.next_u64() % n
+            }
+        }
+
+        fn is_dir(s: &TreeSnapshot) -> bool {
+            matches!(s, TreeSnapshot::Dir(_))
+        }
+
+        fn assert_invariants(p: &Profile, op: &str) {
+            if let (Some(b), Some(c)) = (p.baseline(), p.current()) {
+                assert_eq!(
+                    is_dir(b),
+                    is_dir(c),
+                    "inv1 (baseline/current share a variant) violated after {op}",
+                );
+            }
+            if let (Some(k), Some(c)) = (p.kind(), p.current()) {
+                assert_eq!(
+                    matches!(k, ResourceKind::Dir),
+                    is_dir(c),
+                    "inv2 (kind matches current variant) violated after {op}",
+                );
+            }
+            if p.baseline().is_some() {
+                assert!(
+                    p.last_settled_hash_at_loss().is_none(),
+                    "inv3 (baseline ⇒ no survival witness) violated after {op}",
+                );
+            }
+        }
+
+        let mut master = XorShift64(0x5EED_F00D_D1CE_C0DE);
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+
+        for _ in 0..16 {
+            let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+            let mut rng = XorShift64(master.next_u64() | 1);
+            assert_invariants(&p, "construction");
+
+            for _ in 0..512 {
+                match rng.below(9) {
+                    0 => {
+                        let kind_ok = matches!(p.kind(), None | Some(ResourceKind::Dir));
+                        let base_ok = p
+                            .baseline()
+                            .is_none_or(|b| matches!(b, TreeSnapshot::Dir(_)));
+                        if kind_ok && base_ok {
+                            p.install_dir_current(empty_dir_snapshot());
+                            assert_invariants(&p, "install_dir_current");
+                        }
+                    }
+                    1 => {
+                        let kind_ok = matches!(p.kind(), None | Some(ResourceKind::File));
+                        let base_ok = p
+                            .baseline()
+                            .is_none_or(|b| matches!(b, TreeSnapshot::File(_)));
+                        if kind_ok && base_ok {
+                            p.install_file_current(empty_leaf_entry());
+                            assert_invariants(&p, "install_file_current");
+                        }
+                    }
+                    2 => {
+                        p.clear_anchor_classification();
+                        assert_invariants(&p, "clear_anchor_classification");
+                    }
+                    3 => {
+                        let pending = matches!(p.state(), ProfileState::Pending(_));
+                        if pending && p.anchor_claim() == AnchorClaim::None && p.kind().is_none() {
+                            let k = if rng.below(2) == 0 {
+                                ResourceKind::Dir
+                            } else {
+                                ResourceKind::File
+                            };
+                            p.materialize_anchor(k);
+                            assert_invariants(&p, "materialize_anchor");
+                        }
+                    }
+                    4 => {
+                        p.rebase_baseline();
+                        assert_invariants(&p, "rebase_baseline");
+                    }
+                    5 => {
+                        p.transition_state(ProfileState::Idle);
+                        assert_invariants(&p, "transition_state(Idle)");
+                    }
+                    6 => {
+                        p.transition_state(pending(r));
+                        assert_invariants(&p, "transition_state(Pending)");
+                    }
+                    7 => {
+                        p.transition_state(active_prefire(r));
+                        assert_invariants(&p, "transition_state(PreFire)");
+                    }
+                    _ => {
+                        p.transition_state(active_postfire());
+                        assert_invariants(&p, "transition_state(PostFire)");
+                    }
+                }
+            }
+        }
+    }
 }

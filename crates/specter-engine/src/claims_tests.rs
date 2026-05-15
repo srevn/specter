@@ -122,20 +122,20 @@ fn discard_anchor_state_clears_kind_baseline_current_anchor_claim() {
     // Pre-condition.
     {
         let p = e.profiles().get(pid).expect("Profile lives");
-        assert_eq!(p.kind, Some(ResourceKind::Dir));
-        assert!(p.baseline.is_some());
-        assert!(p.current.is_some());
-        assert_eq!(p.anchor_claim, AnchorClaim::Held);
+        assert_eq!(p.kind(), Some(ResourceKind::Dir));
+        assert!(p.baseline().is_some());
+        assert!(p.current().is_some());
+        assert_eq!(p.anchor_claim(), AnchorClaim::Held);
     }
 
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
 
     let p = e.profiles().get(pid).expect("Profile lives");
-    assert!(p.kind.is_none(), "kind cleared");
-    assert!(p.baseline.is_none(), "baseline cleared");
-    assert!(p.current.is_none(), "current taken by descendant release");
-    assert_eq!(p.anchor_claim, AnchorClaim::None, "anchor claim released");
+    assert!(p.kind().is_none(), "kind cleared");
+    assert!(p.baseline().is_none(), "baseline cleared");
+    assert!(p.current().is_none(), "current taken by descendant release");
+    assert_eq!(p.anchor_claim(), AnchorClaim::None, "anchor claim released");
 }
 
 #[test]
@@ -170,13 +170,13 @@ fn discard_anchor_state_captures_last_settled_hash_at_loss() {
     let pre_loss_hash = e
         .profiles()
         .get(pid)
-        .and_then(|p| p.baseline.as_ref().map(specter_core::TreeSnapshot::hash))
+        .and_then(|p| p.baseline().map(specter_core::TreeSnapshot::hash))
         .expect("fixture must produce baseline");
     assert!(
         e.profiles()
             .get(pid)
             .unwrap()
-            .last_settled_hash_at_loss
+            .last_settled_hash_at_loss()
             .is_none(),
         "active mode: witness must be None pre-loss",
     );
@@ -185,9 +185,9 @@ fn discard_anchor_state_captures_last_settled_hash_at_loss() {
     e.discard_anchor_state(pid, &mut out);
 
     let p = e.profiles().get(pid).unwrap();
-    assert!(p.baseline.is_none(), "discard cleared baseline");
+    assert!(p.baseline().is_none(), "discard cleared baseline");
     assert_eq!(
-        p.last_settled_hash_at_loss,
+        p.last_settled_hash_at_loss(),
         Some(pre_loss_hash),
         "witness captured pre-loss baseline hash",
     );
@@ -221,7 +221,7 @@ fn discard_anchor_state_no_witness_when_baseline_already_none() {
 
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
-    let witness_after_first = e.profiles().get(pid).unwrap().last_settled_hash_at_loss;
+    let witness_after_first = e.profiles().get(pid).unwrap().last_settled_hash_at_loss();
     assert!(
         witness_after_first.is_some(),
         "first discard captures witness",
@@ -231,7 +231,7 @@ fn discard_anchor_state_no_witness_when_baseline_already_none() {
     e.discard_anchor_state(pid, &mut out2);
 
     assert_eq!(
-        e.profiles().get(pid).unwrap().last_settled_hash_at_loss,
+        e.profiles().get(pid).unwrap().last_settled_hash_at_loss(),
         witness_after_first,
         "second discard with baseline = None preserves prior witness",
     );
@@ -246,10 +246,10 @@ fn discard_anchor_state_idempotent() {
     let snap_after_first = {
         let p = e.profiles().get(pid).expect("Profile lives");
         (
-            p.kind,
-            p.baseline.is_some(),
-            p.current.is_some(),
-            p.anchor_claim,
+            p.kind(),
+            p.baseline().is_some(),
+            p.current().is_some(),
+            p.anchor_claim(),
         )
     };
 
@@ -259,10 +259,10 @@ fn discard_anchor_state_idempotent() {
     let snap_after_second = {
         let p = e.profiles().get(pid).expect("Profile lives");
         (
-            p.kind,
-            p.baseline.is_some(),
-            p.current.is_some(),
-            p.anchor_claim,
+            p.kind(),
+            p.baseline().is_some(),
+            p.current().is_some(),
+            p.anchor_claim(),
         )
     };
 
@@ -312,8 +312,8 @@ fn discard_anchor_state_safe_after_vacate() {
     );
     // Profile state still cleared correctly.
     let p = e.profiles().get(pid).expect("Profile lives");
-    assert_eq!(p.anchor_claim, AnchorClaim::None);
-    assert!(p.kind.is_none());
+    assert_eq!(p.anchor_claim(), AnchorClaim::None);
+    assert!(p.kind().is_none());
 }
 
 #[test]
@@ -573,11 +573,48 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
     // recovery channel — but the anchor is a root in this fixture, so
     // `watch_root_parent` is None throughout).
     let p = e.profiles().get(pid).expect("Profile lives");
-    assert_eq!(p.anchor_claim, AnchorClaim::None);
-    assert!(p.kind.is_none());
-    assert!(p.baseline.is_none());
-    assert!(p.current.is_none());
+    assert_eq!(p.anchor_claim(), AnchorClaim::None);
+    assert!(p.kind().is_none());
+    assert!(p.baseline().is_none());
+    assert!(p.current().is_none());
 
     // Profile is back to Idle (finish_burst_to_idle ran).
-    assert!(matches!(p.state, specter_core::ProfileState::Idle,));
+    assert!(matches!(p.state(), specter_core::ProfileState::Idle,));
+}
+
+/// `release_anchor_claim` flips a materialised `Held` claim to `None`
+/// and is idempotent — a second call is a no-op on both the claim and
+/// the Tree (the early-return guard on `anchor_claim`), so it emits no
+/// further watch op. Isolates the helper that `discard_anchor_state`
+/// composes; pins the materialise ↔ release symmetry directly.
+#[test]
+fn release_anchor_claim_is_symmetric_and_idempotent() {
+    let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim(),
+        AnchorClaim::Held,
+        "fixture materialised the anchor → claim Held",
+    );
+
+    let mut out = StepOutput::default();
+    e.release_anchor_claim(pid, &mut out);
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim(),
+        AnchorClaim::None,
+        "release flips Held → None (symmetric with materialise)",
+    );
+
+    let mut out2 = StepOutput::default();
+    e.release_anchor_claim(pid, &mut out2);
+    assert_eq!(
+        e.profiles().get(pid).unwrap().anchor_claim(),
+        AnchorClaim::None,
+        "second release is idempotent — stays None",
+    );
+    assert!(
+        out2.watch_ops.is_empty(),
+        "idempotent release emits no further Tree watch op: {:?}",
+        out2.watch_ops,
+    );
 }

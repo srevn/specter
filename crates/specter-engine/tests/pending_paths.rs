@@ -153,7 +153,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
 
     // Profile is now in Active(Seed Probing) — the Seed burst was
     // started at materialization.
-    let burst_intent = match &e.profiles().get(pid).unwrap().state {
+    let burst_intent = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.intent,
         _ => panic!("expected Active"),
     };
@@ -172,8 +172,8 @@ fn attach_sub_path_pending_then_anchor_appears() {
 
     // Profile should now be Idle with baseline established.
     let p = e.profiles().get(pid).unwrap();
-    assert!(matches!(p.state, ProfileState::Idle));
-    assert!(p.baseline.is_some());
+    assert!(matches!(p.state(), ProfileState::Idle));
+    assert!(p.baseline().is_some());
 }
 
 #[test]
@@ -218,7 +218,7 @@ fn pending_path_failed_probe_retains_state() {
     // Profile still pending (descent state lives on
     // `ProfileState::Pending`, not on a separate SecondaryMap).
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
     ));
 }
@@ -319,7 +319,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         now,
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     assert!(e.profiles().get(pid).unwrap().watch_root_parent == Some(root_dir));
@@ -334,8 +334,8 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     );
     // Profile is Idle with current=None now.
     let p = e.profiles().get(pid).unwrap();
-    assert!(matches!(p.state, ProfileState::Idle));
-    assert!(p.current.is_none());
+    assert!(matches!(p.state(), ProfileState::Idle));
+    assert!(p.current().is_none());
 
     // StructureChanged at / triggers recovery: Profile re-enters pending
     // descent with prefix=/, remaining=[src].
@@ -385,7 +385,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     // Profile is Pending with an in-flight descent probe.
     let initial_corr = first_probe_corr(&attach_out).expect("descent probe at attach");
     let is_pending = matches!(
-        &e.profiles().get(pid).expect("Profile attached").state,
+        e.profiles().get(pid).expect("Profile attached").state(),
         ProfileState::Pending(_)
     );
     assert!(is_pending, "Profile is in Pending state");
@@ -447,7 +447,7 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
 
     let p = e.profiles().get(pid).expect("Profile attached");
     let anchor = p.resource;
-    let prefix = match &p.state {
+    let prefix = match p.state() {
         ProfileState::Pending(d) => d.current_prefix(),
         s => panic!("expected Pending, got {s:?}"),
     };
@@ -484,7 +484,7 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
 
     // Profile remains Pending (no covering-profile fan-out touched it).
     let still_pending = matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
     );
     assert!(
@@ -570,7 +570,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     );
     assert!(
         matches!(
-            e.profiles().get(pid_a).unwrap().state,
+            e.profiles().get(pid_a).unwrap().state(),
             ProfileState::Pending(_),
         ),
         "A still Pending after no-progress response",
@@ -615,8 +615,8 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         now,
     );
     let p_b = e.profiles().get(pid_b).unwrap();
-    assert!(matches!(p_b.state, ProfileState::Idle));
-    assert!(p_b.current.is_none(), "B's anchor is gone");
+    assert!(matches!(p_b.state(), ProfileState::Idle));
+    assert!(p_b.current().is_none(), "B's anchor is gone");
     assert_eq!(p_b.watch_root_parent, Some(root_dir));
 
     // Profile C: anchor at /elsewhere; Seed → Idle. Unrelated to /root.
@@ -645,7 +645,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         now,
     );
     assert!(matches!(
-        e.profiles().get(pid_c).unwrap().state,
+        e.profiles().get(pid_c).unwrap().state(),
         ProfileState::Idle,
     ));
 
@@ -671,7 +671,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     assert_eq!(a_probes, 1, "A's descent advance emits one probe");
     assert!(
         matches!(
-            e.profiles().get(pid_a).unwrap().state,
+            e.profiles().get(pid_a).unwrap().state(),
             ProfileState::Pending(_),
         ),
         "A remains Pending",
@@ -686,7 +686,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     assert_eq!(b_probes, 1, "B's recovery emits one descent probe");
     assert!(
         matches!(
-            e.profiles().get(pid_b).unwrap().state,
+            e.profiles().get(pid_b).unwrap().state(),
             ProfileState::Pending(_),
         ),
         "B transitioned Idle → Pending",
@@ -700,7 +700,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         .count();
     assert_eq!(c_probes, 0, "C is unrelated to /root; no probe");
     assert!(matches!(
-        e.profiles().get(pid_c).unwrap().state,
+        e.profiles().get(pid_c).unwrap().state(),
         ProfileState::Idle,
     ));
 }

@@ -378,7 +378,7 @@ fn descent_anchor_kind_set_from_entry() {
 fn descent_materialization_caches_profile_kind() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     assert_eq!(
-        e.profiles().get(pid).and_then(|p| p.kind),
+        e.profiles().get(pid).and_then(specter_core::Profile::kind),
         None,
         "Pending Profile starts with kind = None (anchor not yet observed)",
     );
@@ -401,7 +401,7 @@ fn descent_materialization_caches_profile_kind() {
     );
 
     assert_eq!(
-        e.profiles().get(pid).and_then(|p| p.kind),
+        e.profiles().get(pid).and_then(specter_core::Profile::kind),
         Some(ResourceKind::File),
         "Profile.kind cached at descent materialisation matches the entry kind",
     );
@@ -620,7 +620,7 @@ fn descent_materialization_sets_anchor_claim_held() {
         Instant::now(),
     );
     assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim,
+        e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::Held,
         "anchor_claim set to Held on descent materialization",
     );
@@ -641,7 +641,7 @@ fn reap_pending_profile_releases_only_descent_prefix() {
     assert_eq!(e.tree().get(foo).unwrap().watch_demand(), 1);
     assert_eq!(e.tree().get(bar).unwrap().watch_demand(), 0);
     assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim,
+        e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::None,
     );
 
@@ -684,7 +684,7 @@ fn profile_state_default_is_idle() {
         NO_EVENTS,
         None,
     );
-    assert!(matches!(p.state, ProfileState::Idle));
+    assert!(matches!(p.state(), ProfileState::Idle));
 }
 
 /// `Engine::descent_state` returns `None` for an Idle Profile.
@@ -747,7 +747,7 @@ fn descent_state_helper_returns_none_for_active() {
     let pid = e.subs().get(sid).unwrap().profile;
     // Materialized Profile starts a Seed burst — state is Active.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         specter_core::ProfileState::Active(_, _)
     ));
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
@@ -789,7 +789,7 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     // Initially Pending.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_)
     ));
     let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
@@ -806,7 +806,7 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
     // After anchor materialization: Pending → Idle, then start_seed_burst
     // transitions Idle → Active(Seed). The post-step state is Active.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(_, _)
     ));
     // descent_state agrees: no descent.
@@ -849,7 +849,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim,
+        e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::Held,
     );
     // Drain Seed via Vanished so the Profile lands Idle with the
@@ -934,7 +934,7 @@ fn on_probe_response_routes_descent_via_state_match() {
         "descent route ran"
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         specter_core::ProfileState::Active(_, _)
     ));
 }
@@ -946,7 +946,7 @@ fn on_watch_op_rejected_clears_pending_state() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     let foo = lookup_foo(&e);
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_)
     ));
 
@@ -966,7 +966,7 @@ fn on_watch_op_rejected_clears_pending_state() {
 
     // Purge transitions Pending → Idle; descent_state agrees.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
@@ -1002,7 +1002,7 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
         "descent probe in flight after attach",
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
     ));
 
@@ -1027,7 +1027,7 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
     );
     // Profile transitioned via `release_descent_prefix_claim`.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     // Exactly one Cancel for the Profile (idempotency check).
@@ -1103,7 +1103,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     // dispatch_seed_vanished routes to finalize_anchor_lost: anchor
     // contribution released, baseline/current cleared, Profile lands Idle.
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
     assert!(
@@ -1143,7 +1143,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         "channel re-opened by enter_pending_descent",
     );
     assert!(matches!(
-        e.profiles().get(pid).unwrap().state,
+        e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
     ));
     // The descent probe was emitted at foo (the parent / new prefix).

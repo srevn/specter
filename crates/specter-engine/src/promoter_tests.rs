@@ -1583,7 +1583,7 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
     // anchor_claim cleared (finalize_anchor_lost path).
     assert!(
         matches!(
-            e.profiles.get(profile_id).unwrap().anchor_claim,
+            e.profiles.get(profile_id).unwrap().anchor_claim(),
             AnchorClaim::None,
         ),
         "anchor_claim cleared by finalize_anchor_lost",
@@ -1650,7 +1650,7 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
     );
     assert!(
         matches!(
-            e.profiles.get(profile_id).unwrap().anchor_claim,
+            e.profiles.get(profile_id).unwrap().anchor_claim(),
             AnchorClaim::None,
         ),
         "anchor_claim cleared",
