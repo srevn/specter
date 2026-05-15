@@ -18,6 +18,7 @@ mod input;
 mod op;
 mod output;
 mod pattern;
+mod probe;
 mod profile;
 mod promoter;
 mod resource;
@@ -42,6 +43,7 @@ pub use op::{
 };
 pub use output::{SortedEffects, StepOutput, StepOutputParts};
 pub use pattern::{PatternComponent, PatternError, PatternSpec};
+pub use probe::ProbeSlot;
 pub use profile::{
     ActiveBurst, AnchorClaim, BurstFinish, BurstIntent, DescentRemaining, DescentState,
     DetachLifecycle, FiredKey, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, Profile,

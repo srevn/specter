@@ -13,6 +13,10 @@ lto           = true
 strip         = true
 codegen-units = 1
 
+[profile.dev]
+incremental = false
+debug       = false
+
 [workspace.dependencies]
 # core
 slotmap         = "1"
