@@ -200,6 +200,31 @@ pub fn compute_config_hash(scan: &ScanConfig, max_settle: Duration, events: Clas
     h.finish()
 }
 
+/// The Profile partition key's config half, reified: the inputs whose
+/// canonical hash decides which Profile a Sub joins. Subs whose
+/// identities hash equal share one Profile, one snapshot, one burst
+/// lifecycle.
+///
+/// Deliberately neither `Hash` nor `Eq`/`Ord`: [`Self::config_hash`] is
+/// the sole identity operation. A structural derive would be a second
+/// identity route that could diverge from the canonical hash the
+/// partition actually keys on.
+#[derive(Clone, Debug)]
+pub struct ProfileIdentity {
+    pub config: ScanConfig,
+    pub max_settle: Duration,
+    pub events: ClassSet,
+}
+
+impl ProfileIdentity {
+    /// Canonical hash of this identity — the single public hashing
+    /// route for Profile partitioning.
+    #[must_use]
+    pub fn config_hash(&self) -> u64 {
+        compute_config_hash(&self.config, self.max_settle, self.events)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ClassSet, ConfigError, GlobPattern, ScanConfig, compute_config_hash};

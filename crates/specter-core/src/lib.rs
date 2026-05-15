@@ -52,7 +52,7 @@ pub use promoter::{
 };
 pub use resource::{ContribKey, Resource, ResourceKind, ResourceRole};
 pub use scan_config::{
-    ConfigError, GlobPattern, ScanConfig, ScanConfigBuilder, compute_config_hash,
+    ConfigError, GlobPattern, ProfileIdentity, ScanConfig, ScanConfigBuilder, compute_config_hash,
 };
 pub use snapshot::EntryKind;
 pub use snapshot::tree::{
