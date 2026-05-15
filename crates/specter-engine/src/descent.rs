@@ -256,7 +256,7 @@ impl crate::Engine {
         debug_assert!(
             self.profiles
                 .get(profile_id)
-                .is_some_and(|p| matches!(p.state, ProfileState::Idle))
+                .is_some_and(|p| matches!(p.state(), ProfileState::Idle))
                 && self.probe_channel.correlation_for(owner).is_none(),
             "enter_pending_descent: Profile must be Idle with closed probe channel; \
              caller must invoke cancel_owner_probe (or take the response-dispatch path) \

@@ -52,7 +52,7 @@ impl Engine {
         let Some(p) = self.profiles.get(pid) else {
             return;
         };
-        let AnchorClaim::Held = p.anchor_claim else {
+        let AnchorClaim::Held = p.anchor_claim() else {
             return;
         };
         let resource = p.resource;

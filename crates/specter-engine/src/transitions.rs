@@ -308,7 +308,7 @@ impl Engine {
                 // open without a matching phase write — never reached
                 // in production.
                 let Some((intent, forced)) = self.profiles.get(profile_id).and_then(|p| {
-                    if let ProfileState::Active(ActiveBurst::PreFire(pre), _) = &p.state {
+                    if let ProfileState::Active(ActiveBurst::PreFire(pre), _) = p.state() {
                         Some((pre.intent, pre.forced))
                     } else {
                         None
@@ -489,11 +489,7 @@ impl Engine {
                 // routed through `finalize_anchor_lost` first); the
                 // `debug_assert!` is defense-in-depth against a future
                 // caller bypassing that boundary.
-                let prior = match self
-                    .profiles
-                    .get(profile_id)
-                    .and_then(|p| p.current.as_ref())
-                {
+                let prior = match self.profiles.get(profile_id).and_then(|p| p.current()) {
                     Some(TreeSnapshot::Dir(prior_arc)) => Some(Arc::clone(prior_arc)),
                     None => None,
                     Some(TreeSnapshot::File(_)) => {
@@ -549,7 +545,10 @@ impl Engine {
         snapshot: &TreeSnapshot,
         out: &mut StepOutput,
     ) -> bool {
-        let prior = self.profiles.get(profile_id).and_then(|p| p.kind);
+        let prior = self
+            .profiles
+            .get(profile_id)
+            .and_then(specter_core::Profile::kind);
         let response_kind = match snapshot {
             TreeSnapshot::Dir(_) => ResourceKind::Dir,
             TreeSnapshot::File(_) => ResourceKind::File,
@@ -642,7 +641,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let ProfileState::Active(ActiveBurst::PreFire(pre), _) = &p.state else {
+        let ProfileState::Active(ActiveBurst::PreFire(pre), _) = p.state() else {
             return;
         };
         // is_timer_referenced upstream guarantees Batching, but the
@@ -735,7 +734,11 @@ impl Engine {
         // between the prior `outstanding == N` step and this completion
         // mutates the directive in place via `mark_active_for_reap`,
         // and the match arm below sees the post-flip value.
-        let phase_action = match self.profiles.get(profile_id).map(|p| &p.state) {
+        let phase_action = match self
+            .profiles
+            .get(profile_id)
+            .map(specter_core::Profile::state)
+        {
             Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => match &post.phase {
                 PostFirePhase::Awaiting { outstanding, .. } => {
                     if *outstanding <= 1 {
@@ -925,13 +928,13 @@ impl Engine {
         let mut parent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         let mut descent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         for (pid, p) in self.profiles.iter() {
-            if matches!(p.anchor_claim, AnchorClaim::Held) && p.resource == resource {
+            if matches!(p.anchor_claim(), AnchorClaim::Held) && p.resource == resource {
                 anchor_claimers.push(pid);
             }
             if p.watch_root_parent == Some(resource) {
                 parent_claimers.push(pid);
             }
-            if let ProfileState::Pending(d) = &p.state
+            if let ProfileState::Pending(d) = p.state()
                 && d.current_prefix() == resource
             {
                 descent_claimers.push(pid);
@@ -1128,7 +1131,7 @@ impl Engine {
             let Some(p) = self.profiles.get(pid) else {
                 continue;
             };
-            match &p.state {
+            match p.state() {
                 ProfileState::Idle => {
                     self.start_seed_burst(pid, now, out);
                 }
@@ -1305,9 +1308,9 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        match &p.state {
+        match p.state() {
             ProfileState::Idle => {
-                if p.current.is_some() {
+                if p.current().is_some() {
                     self.start_standard_burst(profile_id, event_resource, now, out);
                 } else {
                     self.start_seed_burst(profile_id, now, out);
@@ -1445,7 +1448,7 @@ impl Engine {
         let marked = self
             .profiles
             .get_mut(profile_id)
-            .is_some_and(|p| p.state.mark_active_for_reap());
+            .is_some_and(specter_core::Profile::mark_active_for_reap);
         if marked {
             self.finish_burst_to_idle(profile_id, out);
         } else if self.profiles.get(profile_id).is_some() {
@@ -1493,7 +1496,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        if matches!(p.state, ProfileState::Pending(_)) {
+        if matches!(p.state(), ProfileState::Pending(_)) {
             return;
         }
         // Capture `was_active` BEFORE discard_anchor_state. The helper
@@ -1501,7 +1504,7 @@ impl Engine {
         // does), so the read is order-insensitive in v1; pinning it
         // before the helper guards against any future helper change
         // that touches state.
-        let was_active = matches!(p.state, ProfileState::Active(_, _));
+        let was_active = matches!(p.state(), ProfileState::Active(_, _));
 
         // Idempotent: emits Cancel iff the probe channel is open
         // (Active+Verifying ⇒ channel open). For Active+Batching /
@@ -1561,7 +1564,7 @@ impl Engine {
         // single-threaded step, but matches the prior `unwrap_or(anchor)`
         // semantics one-for-one.
         let target = match self.profiles.get(profile_id) {
-            Some(p) => match &p.state {
+            Some(p) => match p.state() {
                 ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.probe_target,
                 _ => p.resource,
             },
@@ -1689,14 +1692,14 @@ impl Engine {
         if p.fired_subs.is_empty() {
             return false;
         }
-        let Some(current) = p.current.as_ref() else {
+        let Some(current) = p.current() else {
             return false;
         };
         let curr = current.hash();
-        if let Some(witness) = p.last_settled_hash_at_loss {
+        if let Some(witness) = p.last_settled_hash_at_loss() {
             return witness != curr;
         }
-        match p.baseline.as_ref() {
+        match p.baseline() {
             Some(b) => b.hash() != curr,
             None => false,
         }
@@ -1776,7 +1779,7 @@ impl Engine {
         // defensive non-Active routes (production never reaches them).
         let (target, prior_target_hash, dirty_zero) = match self.profiles.get(profile_id) {
             Some(p) => {
-                let target = match &p.state {
+                let target = match p.state() {
                     ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.probe_target,
                     _ => p.resource,
                 };
@@ -1999,7 +2002,7 @@ impl Engine {
         // defensive arm.
         self.profiles
             .get(profile_id)
-            .and_then(|p| match &p.state {
+            .and_then(|p| match p.state() {
                 ProfileState::Active(ActiveBurst::PostFire(post), _) => Some(post.intent),
                 ProfileState::Active(ActiveBurst::PreFire(pre), _) => Some(pre.intent),
                 _ => None,
@@ -2069,7 +2072,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let ProfileState::Active(ActiveBurst::PostFire(post), finish) = &p.state else {
+        let ProfileState::Active(ActiveBurst::PostFire(post), finish) = p.state() else {
             return;
         };
         let PostFirePhase::Awaiting { outstanding, .. } = &post.phase else {
@@ -2129,12 +2132,12 @@ impl Engine {
         // remaining Subs (none, by construction of the directive's
         // writers) would fire against a Sub registry that no longer
         // holds them — suppress emission entirely.
-        if matches!(p.state.burst_finish(), Some(BurstFinish::Reap)) {
+        if matches!(p.state().burst_finish(), Some(BurstFinish::Reap)) {
             return EmitOutcome::default();
         }
         let resource = p.resource;
-        let baseline_snap = p.baseline.clone();
-        let current_snap = p.current.clone();
+        let baseline_snap = p.baseline().cloned();
+        let current_snap = p.current().cloned();
         let pattern = p.config.pattern.clone();
         // Read the cached anchor classification. `None` falls back to
         // `Dir` — the actuator's `compute_cwd` then anchors at the path
@@ -2144,7 +2147,7 @@ impl Engine {
         // resource-based attach whose Seed probe hasn't returned —
         // `dispatch_seed_ok`'s fallback writes the field on the next
         // Seed-Ok.
-        let anchor_kind = p.kind.unwrap_or(ResourceKind::Dir);
+        let anchor_kind = p.kind().unwrap_or(ResourceKind::Dir);
         // Substitution-side projection of `ScanConfig.exclude`. The
         // resolver iterates source strings; the sensor consults compiled
         // matchers. The projection is sorted at `Profile::new`.
@@ -2450,7 +2453,7 @@ impl Engine {
                 let Some(p) = self.profiles.get(pid) else {
                     continue;
                 };
-                if matches!(p.state, ProfileState::Pending(_)) {
+                if matches!(p.state(), ProfileState::Pending(_)) {
                     continue;
                 }
                 if crate::coverage::covers(p, resource, &self.tree) && !out.contains(&pid) {
@@ -2493,12 +2496,12 @@ impl Engine {
             recoveries: SmallVec::new(),
         };
         for (pid, p) in self.profiles.iter() {
-            match &p.state {
+            match p.state() {
                 ProfileState::Pending(d) if d.current_prefix() == resource => {
                     out.descents.push(ProbeOwner::Profile(pid));
                 }
                 ProfileState::Idle
-                    if p.watch_root_parent == Some(resource) && p.current.is_none() =>
+                    if p.watch_root_parent == Some(resource) && p.current().is_none() =>
                 {
                     out.recoveries.push(pid);
                 }

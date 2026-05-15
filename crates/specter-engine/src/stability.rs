@@ -73,7 +73,7 @@ pub(crate) fn propagate(
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let new_value = clamped as u32;
         p.dirty_descendants = new_value;
-        if prev > 0 && new_value == 0 && p.state.is_draining() {
+        if prev > 0 && new_value == 0 && p.state().is_draining() {
             hit_zero.push(parent);
         }
         current = parent;

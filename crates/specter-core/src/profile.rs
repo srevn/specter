@@ -1019,6 +1019,14 @@ pub enum AnchorClaim {
     Held,
 }
 
+/// One stability state machine per `(Resource, ScanConfig)`.
+///
+/// The six state-machine fields (`state`, `anchor_claim`, `kind`,
+/// `baseline`, `current`, `last_settled_hash_at_loss`) are
+/// module-private — their cross-field invariants are enforced by the
+/// setter/accessor API below, which is the only cross-crate write
+/// surface (`specter-engine` cannot assign them directly). The
+/// remaining fields stay `pub` for engine read/write.
 #[derive(Debug)]
 pub struct Profile {
     pub resource: ResourceId,
@@ -1098,10 +1106,19 @@ pub struct Profile {
     /// future write site that mutates `current` and `kind` independently
     /// must preserve the agreement; `Engine::discard_anchor_state`
     /// clears both atomically inside one `Engine::step`.
-    pub kind: Option<ResourceKind>,
-    pub state: ProfileState,
-    pub baseline: Option<TreeSnapshot>,
-    pub current: Option<TreeSnapshot>,
+    kind: Option<ResourceKind>,
+    /// Sole post-construction writer: [`Self::transition_state`]; read
+    /// via [`Self::state`].
+    state: ProfileState,
+    /// Written via [`Self::rebase_baseline`] (set) and
+    /// [`Self::clear_anchor_classification`] (clear); read via
+    /// [`Self::baseline`].
+    baseline: Option<TreeSnapshot>,
+    /// Written via [`Self::install_dir_current`] /
+    /// [`Self::install_file_current`] (set) and [`Self::take_current`] /
+    /// [`Self::clear_anchor_classification`] (clear); read via
+    /// [`Self::current`].
+    current: Option<TreeSnapshot>,
     /// Cached nearest covering ancestor Profile — the parent edge
     /// `propagate` walks at burst-start (`+1`) and burst-end (`-1`).
     /// `None` for root Profiles whose ancestor chain holds no
@@ -1151,7 +1168,7 @@ pub struct Profile {
     /// contribution intact) and a heuristic like
     /// `tree.get(anchor).is_watched()` overcounts in multi-Profile
     /// sharing (would steal another Profile's contribution).
-    pub anchor_claim: AnchorClaim,
+    anchor_claim: AnchorClaim,
     /// Set of `DedupKey`s for which this Profile has emitted at least one
     /// Effect that has not been cleared by a `Failed` outcome,
     /// `detach_sub`, or covered-leaf reap. Pure existence — no value
@@ -1183,7 +1200,7 @@ pub struct Profile {
     /// Active-mode drift detection consults `baseline` directly; the
     /// witness substitutes for `baseline.hash()` once `baseline` is
     /// cleared.
-    pub last_settled_hash_at_loss: Option<u128>,
+    last_settled_hash_at_loss: Option<u128>,
     /// User-declared event-class mask for this Profile. Every Sub on a
     /// Profile shares the same `events` by construction (mask folds into
     /// `config_hash`), so this field is the Sub's mask — the "union"

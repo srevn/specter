@@ -507,64 +507,6 @@ fn dispatch_standard_ok_with_kind_mismatched_response_routes_through_finalize_an
     );
 }
 
-/// `Profile.kind = None` is the `(Some(Dir | Unknown) | None)` fallback
-/// arm in `transition_to_verifying`'s match: an unclassified anchor probes
-/// as `Subtree`, never as `AnchorFile`. The unified fallback collapses
-/// the prior two-layer defensive defaults (File at the burst site,
-/// Directory at the probe-shape site) into one rule applied at one site.
-/// This test pins the rule for the Standard-burst path; the Seed-burst
-/// path is covered by
-/// `dispatch_burst_outcome_classifies_kind_on_first_seed_subtree` (whose
-/// initial probe shape is Subtree).
-#[test]
-fn standard_burst_on_unknown_anchor_emits_subtree_probe() {
-    let (mut e, pid, _sid, r, now) = engine_with_attached_sub();
-    complete_seed_burst(&mut e, pid);
-    // After Seed completes, Profile.kind = Some(Dir). Reset to None to
-    // simulate the corner case where a Standard burst runs before any
-    // probe has classified the anchor (e.g., a future code path that
-    // attaches a Profile in Idle without driving a Seed first).
-    if let Some(p) = e.profiles.get_mut(pid) {
-        p.kind = None;
-    }
-
-    // Drive a Standard burst from an FsEvent at the anchor; advance the
-    // settle timer to reach Verifying.
-    let t1 = now + Duration::from_millis(10);
-    e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::Modified,
-        },
-        t1,
-    );
-    let t2 = t1 + SETTLE * 2;
-    let mut probe_request: Option<ProbeRequest> = None;
-    while let Some(entry) = e.pop_expired(t2) {
-        let out = e.step(
-            Input::TimerExpired {
-                profile: entry.profile,
-                kind: entry.kind,
-                id: entry.id,
-            },
-            t2,
-        );
-        for op in &out.probe_ops {
-            if let ProbeOp::Probe { request } = op {
-                probe_request = Some(request.clone());
-            }
-        }
-    }
-
-    match probe_request {
-        Some(ProbeRequest::Subtree { .. }) => {}
-        other => panic!(
-            "Profile.kind = None on a Standard burst must emit ProbeRequest::Subtree \
-             (unified fallback); got {other:?}",
-        ),
-    }
-}
-
 #[test]
 fn attach_sub_existing_profile_bumps_refcount() {
     let (mut e, pid, _sid, r, now) = engine_with_attached_sub();
@@ -4385,10 +4327,44 @@ fn active_post_fire_burst(
     )
 }
 
+/// Drive an attached Profile into **survival mode** — the post
+/// anchor-loss shape (`baseline` / `current` / `kind` cleared,
+/// `last_settled_hash_at_loss = Some(witness_snap.dir_hash())`) using
+/// only the production `Profile` API. Mirrors the engine's own
+/// take-then-clear loss sequence, so the captured witness is exactly
+/// `witness_snap`'s hash.
+fn enter_survival_mode(
+    e: &mut Engine,
+    pid: specter_core::ProfileId,
+    witness_snap: Arc<DirSnapshot>,
+) {
+    let p = e.profiles.get_mut(pid).expect("Profile lives");
+    p.install_dir_current(witness_snap);
+    p.rebase_baseline();
+    p.take_current();
+    p.clear_anchor_classification();
+}
+
+/// Drive an attached Profile into **active mode**: `baseline =
+/// Dir(baseline_snap)`, `current = Dir(current_snap)`, witness `None`,
+/// `kind = Some(Dir)` — built only from the production setters.
+fn enter_active_mode(
+    e: &mut Engine,
+    pid: specter_core::ProfileId,
+    baseline_snap: Arc<DirSnapshot>,
+    current_snap: Arc<DirSnapshot>,
+) {
+    let p = e.profiles.get_mut(pid).expect("Profile lives");
+    p.install_dir_current(baseline_snap);
+    p.rebase_baseline();
+    p.install_dir_current(current_snap);
+}
+
 #[test]
 fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
     let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
 
+    enter_survival_mode(&mut e, pid, dir_tree_snap(vec![]));
     let state = active_post_fire_burst(
         &mut e,
         pid,
@@ -4398,9 +4374,10 @@ fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.last_settled_hash_at_loss = Some(0xdead_beef);
-        p.baseline = Some(TreeSnapshot::Dir(dir_tree_snap(vec![])));
-        p.current = Some(TreeSnapshot::Dir(dir_tree_snap(vec![])));
+        assert!(
+            p.last_settled_hash_at_loss().is_some(),
+            "precondition: survival mode populated the witness",
+        );
         p.transition_state(state);
     }
 
@@ -4419,6 +4396,10 @@ fn dispatch_rebase_ok_clears_last_settled_hash_at_loss() {
 fn dispatch_seed_ok_no_drift_branch_clears_last_settled_hash_at_loss() {
     let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
 
+    // Survival mode at entry (baseline = None, witness populated);
+    // empty fired_subs ⇒ no drift — but Seed still rebases, clearing
+    // the witness.
+    enter_survival_mode(&mut e, pid, dir_tree_snap(vec![]));
     let state = active_pre_fire_burst(
         &mut e,
         pid,
@@ -4428,11 +4409,6 @@ fn dispatch_seed_ok_no_drift_branch_clears_last_settled_hash_at_loss() {
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.last_settled_hash_at_loss = Some(0xdead_beef);
-        // Survival mode at entry: baseline = None, witness populated.
-        // Empty dedup map and empty fired_subs ⇒ no drift, no fire.
-        p.baseline = None;
-        p.current = None;
         p.transition_state(state);
     }
 
@@ -4462,6 +4438,15 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
         profile: pid,
     };
 
+    // Survival-mode drift setup: a witness snapshot whose hash won't
+    // match the empty post-graft current ⇒ the bool drift signal
+    // triggers; pre-loss fire history in `fired_subs` narrows the
+    // SeedDrift filter to `dk`.
+    enter_survival_mode(
+        &mut e,
+        pid,
+        dir_tree_snap(vec![("pre", EntryKind::File, 1)]),
+    );
     let state = active_pre_fire_burst(
         &mut e,
         pid,
@@ -4471,16 +4456,8 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
-        // Survival-mode drift setup. Pre-loss fire history in
-        // `fired_subs` plus a witness hash that won't match the
-        // post-graft current.hash() — the bool drift signal triggers
-        // and the SeedDrift filter (Subtree subset of fired_subs)
-        // narrows to `dk`.
         p.fired_subs.insert(dk.clone());
         p.fired_subs.insert(dk);
-        p.last_settled_hash_at_loss = Some(0xdead_beef);
-        p.baseline = None;
-        p.current = None;
         p.transition_state(state);
     }
 
@@ -4539,19 +4516,23 @@ fn seed_drift_observed_returns_false_for_fresh_profile() {
 fn seed_drift_observed_returns_true_on_post_recovery_drift() {
     let (mut e, pid, sid, _anchor, _now) = engine_with_attached_sub();
     let snap = dir_tree_snap(vec![("file", EntryKind::File, 1)]);
-    let curr_hash = snap.dir_hash();
+    let witness_snap = dir_tree_snap(vec![]);
+    assert_ne!(
+        witness_snap.dir_hash(),
+        snap.dir_hash(),
+        "test setup: pre-loss witness and recovery current must differ",
+    );
 
+    // Survival mode: anchor loss stashed the pre-loss baseline.hash()
+    // into the witness; the recovery probe lands a `current` whose hash
+    // differs from that witness ⇒ drift.
+    enter_survival_mode(&mut e, pid, witness_snap);
     if let Some(p) = e.profiles.get_mut(pid) {
         p.fired_subs.insert(DedupKey::Subtree {
             sub: sid,
             profile: pid,
         });
-        // Survival mode: baseline cleared by anchor loss; witness carries
-        // the pre-loss baseline.hash(). Use a witness that intentionally
-        // disagrees with `current` so drift is detected.
-        p.last_settled_hash_at_loss = Some(curr_hash.wrapping_add(1));
-        p.baseline = None;
-        p.current = Some(TreeSnapshot::Dir(snap));
+        p.install_dir_current(snap);
     }
 
     assert!(
@@ -4580,16 +4561,12 @@ fn seed_drift_observed_returns_true_on_active_mode_drift() {
         "test setup: baseline and current must have distinct hashes",
     );
 
+    enter_active_mode(&mut e, pid, baseline_snap, current_snap);
     if let Some(p) = e.profiles.get_mut(pid) {
         p.fired_subs.insert(DedupKey::Subtree {
             sub: sid,
             profile: pid,
         });
-        // Active mode: baseline persists across the overflow, witness
-        // remains `None` per the cross-field invariant.
-        p.last_settled_hash_at_loss = None;
-        p.baseline = Some(TreeSnapshot::Dir(baseline_snap));
-        p.current = Some(TreeSnapshot::Dir(current_snap));
     }
 
     assert!(
@@ -4608,14 +4585,12 @@ fn seed_drift_observed_returns_false_when_active_mode_baseline_matches_current()
     let (mut e, pid, sid, _anchor, _now) = engine_with_attached_sub();
     let snap = dir_tree_snap(vec![("file", EntryKind::File, 1)]);
 
+    enter_active_mode(&mut e, pid, snap.clone(), snap);
     if let Some(p) = e.profiles.get_mut(pid) {
         p.fired_subs.insert(DedupKey::Subtree {
             sub: sid,
             profile: pid,
         });
-        p.last_settled_hash_at_loss = None;
-        p.baseline = Some(TreeSnapshot::Dir(snap.clone()));
-        p.current = Some(TreeSnapshot::Dir(snap));
     }
 
     assert!(

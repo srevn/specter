@@ -117,7 +117,7 @@ impl Engine {
     #[must_use]
     pub(crate) fn descent_state(&self, owner: ProbeOwner) -> Option<&DescentState> {
         match owner {
-            ProbeOwner::Profile(pid) => self.profiles.get(pid)?.state.descent_state(),
+            ProbeOwner::Profile(pid) => self.profiles.get(pid)?.state().descent_state(),
             ProbeOwner::Promoter(pid) => self.promoters.get(pid)?.state.descent_state(),
         }
     }
@@ -125,7 +125,7 @@ impl Engine {
     /// Mutable counterpart to [`Engine::descent_state`].
     pub(crate) fn descent_state_mut(&mut self, owner: ProbeOwner) -> Option<&mut DescentState> {
         match owner {
-            ProbeOwner::Profile(pid) => self.profiles.get_mut(pid)?.state.descent_state_mut(),
+            ProbeOwner::Profile(pid) => self.profiles.get_mut(pid)?.descent_state_mut(),
             ProbeOwner::Promoter(pid) => self.promoters.get_mut(pid)?.state.descent_state_mut(),
         }
     }
@@ -467,7 +467,7 @@ impl Engine {
         let cleared = self
             .profiles
             .get_mut(profile_id)
-            .is_some_and(|p| p.state.clear_active_reap());
+            .is_some_and(specter_core::Profile::clear_active_reap);
         debug_assert!(
             cleared,
             "revive_zombie: ZombieRevival origin must clear an active Reap directive \
@@ -597,7 +597,10 @@ impl Engine {
         cfg_hash: u64,
     ) -> (ProfileId, ProfileOrigin) {
         if let Some(pid) = self.profiles.find(anchor, cfg_hash) {
-            let zombie = self.profiles.get(pid).and_then(|p| p.state.burst_finish())
+            let zombie = self
+                .profiles
+                .get(pid)
+                .and_then(|p| p.state().burst_finish())
                 == Some(BurstFinish::Reap);
             let origin = if zombie {
                 ProfileOrigin::ZombieRevival
@@ -845,7 +848,7 @@ impl Engine {
         let lifecycle = self
             .profiles
             .get(profile_id)
-            .map(|p| p.state.detach_lifecycle());
+            .map(|p| p.state().detach_lifecycle());
         match lifecycle {
             Some(DetachLifecycle::ReapNow) => {
                 self.reap_profile(profile_id, ReapTrigger::Immediate, out);
@@ -859,7 +862,7 @@ impl Engine {
                 let marked = self
                     .profiles
                     .get_mut(profile_id)
-                    .is_some_and(|p| p.state.mark_active_for_reap());
+                    .is_some_and(specter_core::Profile::mark_active_for_reap);
                 debug_assert!(
                     marked,
                     "detach_sub_inner: DetachLifecycle::DeferToBurstEnd requires \
@@ -1013,7 +1016,7 @@ impl Engine {
         // atomically in `dispatch_descent_ok`'s anchor branch.
         debug_assert!(
             !matches!(
-                (&p.state, p.anchor_claim),
+                (p.state(), p.anchor_claim()),
                 (ProfileState::Pending(_), AnchorClaim::Held),
             ),
             "reap_profile: Pending + AnchorClaim::Held must be mutually exclusive",
@@ -1237,7 +1240,7 @@ pub(crate) fn is_timer_referenced(
 ) -> bool {
     profiles
         .get(profile)
-        .and_then(|p| p.state.timer_token(kind))
+        .and_then(|p| p.state().timer_token(kind))
         .is_some_and(|live| live == id)
 }
 

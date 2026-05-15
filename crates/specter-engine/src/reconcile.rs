@@ -519,7 +519,7 @@ pub(crate) fn current_target_hash(
     target: ResourceId,
     tree: &Tree,
 ) -> Option<u128> {
-    match profile.current.as_ref()? {
+    match profile.current()? {
         TreeSnapshot::Dir(root) => {
             subtree_at_dir(root, profile.resource, target, tree).map(|s| s.dir_hash())
         }

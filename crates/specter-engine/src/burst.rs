@@ -97,13 +97,13 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return false;
         };
-        if matches!(&p.state, ProfileState::Active(ActiveBurst::PreFire(_), _)) {
+        if matches!(p.state(), ProfileState::Active(ActiveBurst::PreFire(_), _)) {
             return true;
         }
         out.diagnostics.push(Diagnostic::InvalidBurstTransition {
             profile: profile_id,
             helper,
-            observed: p.state.discriminant(),
+            observed: p.state().discriminant(),
         });
         false
     }
@@ -128,13 +128,13 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return false;
         };
-        if matches!(&p.state, ProfileState::Active(ActiveBurst::PostFire(_), _)) {
+        if matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _)) {
             return true;
         }
         out.diagnostics.push(Diagnostic::InvalidBurstTransition {
             profile: profile_id,
             helper,
-            observed: p.state.discriminant(),
+            observed: p.state().discriminant(),
         });
         false
     }
@@ -159,13 +159,13 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return false;
         };
-        if matches!(&p.state, ProfileState::Idle) {
+        if matches!(p.state(), ProfileState::Idle) {
             return true;
         }
         out.diagnostics.push(Diagnostic::InvalidBurstTransition {
             profile: profile_id,
             helper,
-            observed: p.state.discriminant(),
+            observed: p.state().discriminant(),
         });
         false
     }
@@ -396,7 +396,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let ProfileState::Active(ActiveBurst::PreFire(pre), _) = &p.state else {
+        let ProfileState::Active(ActiveBurst::PreFire(pre), _) = p.state() else {
             return;
         };
         let settle = p.settle;
@@ -441,7 +441,7 @@ impl Engine {
             && self
                 .profiles
                 .get(profile_id)
-                .is_some_and(|p| match &p.state {
+                .is_some_and(|p| match p.state() {
                     ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
                         !pre.suppressed_resources.contains(&event_resource)
                     }
@@ -587,7 +587,7 @@ impl Engine {
         // breaks ancestry; the helper still returns a usable
         // `ResourceId` (folded back to anchor), so the burst proceeds.
         let target = match self.profiles.get(profile_id) {
-            Some(p) => match &p.state {
+            Some(p) => match p.state() {
                 ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
                     pre_fire_target(p, pre, &self.tree, profile_id, out)
                 }
@@ -1055,7 +1055,7 @@ impl Engine {
         };
         let owner = ProbeOwner::Profile(profile_id);
         let target_path = self.tree.path_of(target).unwrap_or_default();
-        match p.kind {
+        match p.kind() {
             Some(ResourceKind::File) => {
                 Self::emit_anchor_probe(owner, correlation, target_path, out);
             }
@@ -1067,8 +1067,7 @@ impl Engine {
             // dispatch_*_vanished paths to recover via descent.
             Some(ResourceKind::Dir | ResourceKind::Unknown) | None => {
                 let baseline_subtree = p
-                    .current
-                    .as_ref()
+                    .current()
                     .and_then(|s| s.subtree_at(p.resource, target, &self.tree));
                 let force_walk_paths = build_force_walk(force_walk_resources, target, &self.tree);
                 Self::emit_subtree_probe(
@@ -1323,7 +1322,7 @@ pub(crate) fn pre_fire_target(
     profile: ProfileId,
     out: &mut StepOutput,
 ) -> ResourceId {
-    match (p.kind, pre.intent) {
+    match (p.kind(), pre.intent) {
         (Some(ResourceKind::File), _) | (_, BurstIntent::Seed) => p.resource,
         _ => lca_target(p.resource, &pre.dirty_resources, tree, profile, out),
     }
