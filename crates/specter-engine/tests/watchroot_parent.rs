@@ -18,7 +18,7 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ClassSet, DirMeta, DirSnapshot, EffectScope, FsIdentity, Input, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeResponse, ResourceKind, ResourceRole, ScanConfig,
-    SubAttachRequest, WatchOp,
+    SubAttachAnchor, SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -64,9 +64,9 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         .expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        src,
+        SubAttachAnchor::Resource(src),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -103,9 +103,9 @@ fn root_anchor_has_no_watch_root_parent() {
     let mut e = Engine::new();
     let src = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(src, ResourceKind::Dir);
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        src,
+        SubAttachAnchor::Resource(src),
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
@@ -132,9 +132,9 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let now = Instant::now();
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        src,
+        SubAttachAnchor::Resource(src),
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
@@ -204,9 +204,9 @@ fn multiple_profiles_share_one_watch_root_parent() {
 
     let now = Instant::now();
     let _ = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
-            src_a,
+            SubAttachAnchor::Resource(src_a),
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
@@ -218,9 +218,9 @@ fn multiple_profiles_share_one_watch_root_parent() {
         now,
     );
     let _ = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "B".into(),
-            src_b,
+            SubAttachAnchor::Resource(src_b),
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
@@ -255,9 +255,9 @@ fn watch_root_parent_role_stays_user_when_already_user() {
     let now = Instant::now();
     // Sub at /root.
     let _ = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "outer".into(),
-            root,
+            SubAttachAnchor::Resource(root),
             ScanConfig::builder().recursive(false).build(),
             MAX_SETTLE,
             SETTLE,
@@ -275,9 +275,9 @@ fn watch_root_parent_role_stays_user_when_already_user() {
 
     // Sub at /root/src — /root becomes its watch_root_parent.
     let _ = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "inner".into(),
-            src,
+            SubAttachAnchor::Resource(src),
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,

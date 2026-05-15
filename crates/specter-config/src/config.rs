@@ -7,7 +7,7 @@ use crate::template;
 use compact_str::CompactString;
 use specter_core::{
     self as core, ActionProgram, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    PatternSpec, PromoterAttachRequest, ScanConfig, SubAttachRequest,
+    PatternSpec, PromoterAttachRequest, ScanConfig, SubAttachAnchor, SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -176,9 +176,9 @@ pub struct SubSpec {
 impl SubSpec {
     #[must_use]
     pub fn to_attach_request(&self) -> SubAttachRequest {
-        SubAttachRequest::for_path(
+        SubAttachRequest::for_anchor(
             self.name.to_string(),
-            self.path.clone(),
+            SubAttachAnchor::Path(self.path.clone()),
             self.scan.clone(),
             self.max_settle,
             self.settle,
@@ -1366,7 +1366,7 @@ fn parse_events_field(
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, LogDestination, LogLevel, SubSpec};
+    use super::{Config, LogDestination, LogLevel, SubAttachAnchor, SubSpec};
     use crate::error::{ConfigError, IssueKind};
     use specter_core::program::SpawnBody;
     use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
@@ -1832,14 +1832,16 @@ mod tests {
     }
 
     #[test]
-    fn to_attach_request_uses_for_path_with_canonicalized_path() {
+    fn to_attach_request_uses_path_anchor_with_canonicalized_path() {
         let cfg = Config::from_str(&minimal_toml("")).unwrap();
         let req = cfg.watches[0].to_attach_request();
         assert_eq!(req.name, "build");
-        assert!(req.path.is_some());
+        assert!(matches!(req.anchor, SubAttachAnchor::Path(_)));
+        let SubAttachAnchor::Path(p) = &req.anchor else {
+            panic!("expected Path anchor")
+        };
         assert_eq!(
-            req.path.as_ref().unwrap(),
-            &cfg.watches[0].path,
+            p, &cfg.watches[0].path,
             "request carries the same path stored in SubSpec"
         );
         assert_eq!(

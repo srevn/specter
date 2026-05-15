@@ -28,8 +28,8 @@
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ClassSet, Diagnostic, EffectScope, Input, PatternSpec, PromoterAttachRequest,
-    PromoterRegistryDiff, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest,
-    SubRegistryDiff, WatchRegistryDiff,
+    PromoterRegistryDiff, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
+    SubAttachRequest, SubRegistryDiff, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::sync::Arc;
@@ -47,9 +47,9 @@ fn empty_program() -> Arc<ActionProgram> {
 fn sub_req_at_root(name: &str, e: &mut Engine) -> SubAttachRequest {
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
-    SubAttachRequest::for_resource(
+    SubAttachRequest::for_anchor(
         name.to_owned(),
-        r,
+        SubAttachAnchor::Resource(r),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,

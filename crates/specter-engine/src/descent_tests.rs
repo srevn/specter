@@ -20,7 +20,7 @@ use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry, ProbeOp, ProbeOutcome,
     ProbeOwner, ProbeRequest, ProbeResponse, ReapTrigger, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, SubAttachRequest,
+    ScanConfig, SubAttachAnchor, SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -87,9 +87,9 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
         .expect("non-empty fixture");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "guard".into(),
-        PathBuf::from("/foo/bar"),
+        SubAttachAnchor::Path(PathBuf::from("/foo/bar")),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -166,9 +166,9 @@ fn descent_two_levels_advances_progressively() {
         .expect("non-empty fixture");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "guard".into(),
-        PathBuf::from("/foo/bar/baz"),
+        SubAttachAnchor::Path(PathBuf::from("/foo/bar/baz")),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -416,9 +416,9 @@ fn descent_materialization_caches_profile_kind() {
 fn absolute_attach_bootstraps_fs_root_segment() {
     let mut e = Engine::new();
 
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "build".into(),
-        PathBuf::from("/tmp"),
+        SubAttachAnchor::Path(PathBuf::from("/tmp")),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -487,9 +487,9 @@ fn absolute_attach_bootstraps_fs_root_segment() {
 #[test]
 fn second_absolute_attach_reuses_fs_root() {
     let mut e = Engine::new();
-    let req1 = SubAttachRequest::for_path(
+    let req1 = SubAttachRequest::for_anchor(
         "a".into(),
-        PathBuf::from("/foo"),
+        SubAttachAnchor::Path(PathBuf::from("/foo")),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -498,9 +498,9 @@ fn second_absolute_attach_reuses_fs_root() {
         NO_EVENTS,
         false,
     );
-    let req2 = SubAttachRequest::for_path(
+    let req2 = SubAttachRequest::for_anchor(
         "b".into(),
-        PathBuf::from("/bar"),
+        SubAttachAnchor::Path(PathBuf::from("/bar")),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -526,9 +526,9 @@ fn second_absolute_attach_reuses_fs_root() {
 #[test]
 fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
     let mut e = Engine::new();
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "log".into(),
-        PathBuf::from("/var/log/myapp"),
+        SubAttachAnchor::Path(PathBuf::from("/var/log/myapp")),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -573,9 +573,9 @@ fn descent_probe_uses_descent_variant() {
         .recursive(true)
         .pattern(specter_core::GlobPattern::compile("*.c").unwrap())
         .build();
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "g".into(),
-        PathBuf::from("/foo/bar"),
+        SubAttachAnchor::Path(PathBuf::from("/foo/bar")),
         user_cfg,
         MAX_SETTLE,
         SETTLE,
@@ -694,9 +694,9 @@ fn descent_state_helper_returns_none_for_idle() {
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure_root("foo", ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "g".into(),
-        foo,
+        SubAttachAnchor::Resource(foo),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -731,9 +731,9 @@ fn descent_state_helper_returns_none_for_active() {
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure_root("foo", ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "g".into(),
-        foo,
+        SubAttachAnchor::Resource(foo),
         cfg(),
         MAX_SETTLE,
         SETTLE,
@@ -834,9 +834,9 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure_root("foo", ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "g".into(),
-        foo,
+        SubAttachAnchor::Resource(foo),
         cfg(),
         MAX_SETTLE,
         SETTLE,

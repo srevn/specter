@@ -34,7 +34,8 @@ use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, PatternSpec,
     ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, PromoterAttachRequest, PromoterId,
-    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachRequest, SubId,
+    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
+    SubAttachRequest, SubId,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1547,8 +1548,7 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
     let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile;
     let static_req = SubAttachRequest {
         name: String::from("static-foo"),
-        resource: anchor,
-        path: None,
+        anchor: SubAttachAnchor::Resource(anchor),
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -1620,8 +1620,7 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let req = SubAttachRequest {
         name: String::from("static"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -1667,8 +1666,7 @@ fn anchor_terminal_predicate_static_sub_makes_mixed() {
     let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile;
     let req = SubAttachRequest {
         name: String::from("static"),
-        resource: anchor,
-        path: None,
+        anchor: SubAttachAnchor::Resource(anchor),
         config: cfg(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,

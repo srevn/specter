@@ -27,7 +27,8 @@ use specter_core::{
     ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta,
     DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry, ProbeCorrelation,
     ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
+    SubAttachRequest, SubId,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -108,9 +109,9 @@ fn attach_at(
     events: ClassSet,
     max_settle: Duration,
 ) -> (SubId, ProfileId, StepOutput) {
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         name.into(),
-        anchor,
+        SubAttachAnchor::Resource(anchor),
         ScanConfig::builder().recursive(true).build(),
         max_settle,
         SETTLE,

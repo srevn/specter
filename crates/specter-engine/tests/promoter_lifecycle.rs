@@ -38,7 +38,7 @@ use specter_core::{
     EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, PromoterAttachRequest,
     PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    SubAttachRequest, WatchOp, WatchRegistryDiff,
+    SubAttachAnchor, SubAttachRequest, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -287,9 +287,9 @@ fn full_lifecycle_attach_promote_seed_reap() {
     //
     // The forward-pass FINAL branch pre-ensured the `foo.log` slot
     // (via `tree.lookup -> tree.ensure_child(.., User)`) and stamped its
-    // kind from the enumeration's `EntryKind::File`. Then
-    // `for_resource_dynamic` routes `attach_sub_inner` through the
-    // resource-anchored branch (`req.path.is_none()`), so the new
+    // kind from the enumeration's `EntryKind::File`. Then the dynamic
+    // Sub's `SubAttachAnchor::Resource` anchor routes `attach_sub_inner`
+    // through the resource-anchored branch, so the new
     // Profile lands in `Active(Seed)` directly — no Pending descent.
     // Profile.kind = File (read from the freshly-stamped slot in
     // attach_sub_inner) and the Seed burst mints an `AnchorFile`
@@ -412,9 +412,9 @@ fn static_attach_emits_sub_attached_with_no_source_promoter() {
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
-    let req = specter_core::SubAttachRequest::for_resource(
+    let req = specter_core::SubAttachRequest::for_anchor(
         "build".into(),
-        r,
+        SubAttachAnchor::Resource(r),
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
@@ -535,9 +535,9 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     // starts in `Pending(/a/b, ["c"])`, bumping /a/b's STRUCTURE
     // contribution to 2. A descent probe targets /a/b under the
     // Profile owner — distinct from the Promoter's enumeration probe.
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        PathBuf::from("/a/b/c"),
+        SubAttachAnchor::Path(PathBuf::from("/a/b/c")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,

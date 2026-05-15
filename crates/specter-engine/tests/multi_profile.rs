@@ -24,7 +24,7 @@ use specter_core::{
     DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry, PostFireBurst,
     PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
     ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachRequest, WatchOp,
+    SubAttachAnchor, SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -89,9 +89,9 @@ fn two_profiles_one_resource_share_watch_demand() {
     let cfg_a = ScanConfig::builder().recursive(true).build();
     let cfg_b = ScanConfig::builder().recursive(false).build();
 
-    let req_a = SubAttachRequest::for_resource(
+    let req_a = SubAttachRequest::for_anchor(
         "build".into(),
-        r,
+        SubAttachAnchor::Resource(r),
         cfg_a,
         MAX_SETTLE,
         SETTLE,
@@ -108,9 +108,9 @@ fn two_profiles_one_resource_share_watch_demand() {
         .count();
     assert_eq!(watch_count_a, 1, "0→1 edge emits one Watch");
 
-    let req_b = SubAttachRequest::for_resource(
+    let req_b = SubAttachRequest::for_anchor(
         "lint".into(),
-        r,
+        SubAttachAnchor::Resource(r),
         cfg_b,
         MAX_SETTLE,
         SETTLE,
@@ -148,9 +148,9 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
     let out_p = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "parent".into(),
-            src,
+            SubAttachAnchor::Resource(src),
             cfg.clone(),
             MAX_SETTLE,
             SETTLE,
@@ -176,9 +176,9 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
     );
 
     let out_c = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "child".into(),
-            foo,
+            SubAttachAnchor::Resource(foo),
             cfg,
             MAX_SETTLE,
             SETTLE,
@@ -249,9 +249,9 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
     let out_p = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "parent".into(),
-            src,
+            SubAttachAnchor::Resource(src),
             cfg.clone(),
             MAX_SETTLE,
             SETTLE,
@@ -275,9 +275,9 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     );
 
     let out_c = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "child".into(),
-            foo,
+            SubAttachAnchor::Resource(foo),
             cfg,
             MAX_SETTLE,
             SETTLE,
@@ -482,9 +482,9 @@ fn co_located_profiles_share_suppress_count() {
     let now = Instant::now();
 
     let attach_out = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "a".into(),
-            r,
+            SubAttachAnchor::Resource(r),
             cfg_a,
             MAX_SETTLE,
             SETTLE,
@@ -500,9 +500,9 @@ fn co_located_profiles_share_suppress_count() {
     let pid_a = e.subs().get(sid_a).unwrap().profile;
 
     let attach_out = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "b".into(),
-            r,
+            SubAttachAnchor::Resource(r),
             cfg_b,
             MAX_SETTLE,
             SETTLE,

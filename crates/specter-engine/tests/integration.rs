@@ -30,7 +30,7 @@ use specter_core::{
     DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity, Input,
     LeafEntry, Placeholder, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
     Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachRequest, Tree, WatchOp,
+    SubAttachAnchor, SubAttachRequest, Tree, WatchOp,
 };
 use specter_engine::{Engine, covers, nearest_covering_ancestor};
 use std::collections::BTreeMap;
@@ -287,8 +287,7 @@ fn golden_path_full_lifecycle() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "build".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -394,8 +393,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
     e.tree_mut().set_kind(r, ResourceKind::File);
     let req = SubAttachRequest {
         name: "fmt".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -434,8 +432,7 @@ fn pending_event_race_late_probe_response_discarded() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "build".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -484,8 +481,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
     let r = e_anchor(&mut e, "src");
     let req = SubAttachRequest {
         name: "build".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -530,8 +526,7 @@ fn force_fire_emits_effect_with_forced_true() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "build".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -599,8 +594,7 @@ fn step_output_is_sorted() {
     let r = e_anchor(&mut e, "root");
     let req = SubAttachRequest {
         name: "build".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: cfg_recursive(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,

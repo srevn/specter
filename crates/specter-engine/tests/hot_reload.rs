@@ -19,7 +19,7 @@ use specter_core::{
     ActionProgram, BurstFinish, ChildEntry, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta,
     DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry,
     ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ResourceKind, ResourceRole, ScanConfig,
-    SubAttachRequest, SubRegistryDiff, WatchOp, WatchRegistryDiff,
+    SubAttachAnchor, SubAttachRequest, SubRegistryDiff, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -77,9 +77,9 @@ fn config_diff_add_sub_to_existing_profile() {
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
     let attach = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
-            r,
+            SubAttachAnchor::Resource(r),
             cfg.clone(),
             MAX_SETTLE,
             SETTLE,
@@ -96,9 +96,9 @@ fn config_diff_add_sub_to_existing_profile() {
 
     // ConfigDiff with one added Sub at the same anchor + same cfg.
     let mut diff = SubRegistryDiff::default();
-    diff.added.push(SubAttachRequest::for_resource(
+    diff.added.push(SubAttachRequest::for_anchor(
         "B".into(),
-        r,
+        SubAttachAnchor::Resource(r),
         cfg,
         MAX_SETTLE,
         SETTLE,
@@ -139,9 +139,9 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "A".into(),
-        r,
+        SubAttachAnchor::Resource(r),
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
@@ -208,9 +208,9 @@ fn config_diff_mid_burst_remove_defers_reap() {
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let attach_out = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
-            r,
+            SubAttachAnchor::Resource(r),
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
@@ -315,9 +315,9 @@ fn config_diff_mid_burst_modify_revives_profile() {
     let now = Instant::now();
     let cfg = ScanConfig::builder().build();
     let attach_out = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
-            r,
+            SubAttachAnchor::Resource(r),
             cfg.clone(),
             MAX_SETTLE,
             SETTLE,
@@ -365,9 +365,9 @@ fn config_diff_mid_burst_modify_revives_profile() {
     let mut diff = SubRegistryDiff::default();
     diff.modified.push((
         sid_a,
-        SubAttachRequest::for_resource(
+        SubAttachRequest::for_anchor(
             "B".into(),
-            r,
+            SubAttachAnchor::Resource(r),
             cfg,
             MAX_SETTLE,
             SETTLE,
@@ -427,9 +427,9 @@ fn effect_complete_after_detach_drops_silently() {
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let attach_out = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
-            r,
+            SubAttachAnchor::Resource(r),
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
@@ -511,9 +511,9 @@ fn config_diff_modified_remove_then_add() {
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let attach_out = e.step(
-        Input::AttachSub(SubAttachRequest::for_resource(
+        Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
-            r,
+            SubAttachAnchor::Resource(r),
             ScanConfig::builder().recursive(true).build(),
             MAX_SETTLE,
             SETTLE,
@@ -549,9 +549,9 @@ fn config_diff_modified_remove_then_add() {
     let mut diff = SubRegistryDiff::default();
     diff.modified.push((
         sid_a,
-        SubAttachRequest::for_path(
+        SubAttachRequest::for_anchor(
             "A-renamed".into(),
-            PathBuf::from("/src"),
+            SubAttachAnchor::Path(PathBuf::from("/src")),
             ScanConfig::builder().recursive(false).build(),
             MAX_SETTLE,
             SETTLE,

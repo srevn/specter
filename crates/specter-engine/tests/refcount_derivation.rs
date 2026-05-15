@@ -11,7 +11,7 @@
 use specter_core::testkit::{first_attached_sub, single_exec_program};
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, Input, ResourceRole, ScanConfig,
-    SubAttachRequest, SubId,
+    SubAttachAnchor, SubAttachRequest, SubId,
 };
 use specter_engine::Engine;
 use std::sync::Arc;
@@ -37,9 +37,9 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
 
     let attach = |e: &mut Engine, name: &str| -> SubId {
         let out = e.step(
-            Input::AttachSub(SubAttachRequest::for_resource(
+            Input::AttachSub(SubAttachRequest::for_anchor(
                 name.into(),
-                r,
+                SubAttachAnchor::Resource(r),
                 cfg.clone(),
                 MAX_SETTLE,
                 SETTLE,

@@ -36,7 +36,8 @@ use specter_core::{
     Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent,
     FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, TimerKind, TreeSnapshot,
+    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, TimerKind,
+    TreeSnapshot,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -97,9 +98,9 @@ fn pid_of(e: &Engine, sid: SubId) -> ProfileId {
 
 /// Subtree-root attach request returning a recursive Sub with `/bin/true`.
 fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
-    SubAttachRequest::for_resource(
+    SubAttachRequest::for_anchor(
         name.into(),
-        r,
+        SubAttachAnchor::Resource(r),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -113,9 +114,9 @@ fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
 /// Same as `subtree_request` but with `CONTENT` in the events mask so
 /// descendant `Modified` events pass the class filter.
 fn subtree_request_with_content(name: &str, r: ResourceId) -> SubAttachRequest {
-    SubAttachRequest::for_resource(
+    SubAttachRequest::for_anchor(
         name.into(),
-        r,
+        SubAttachAnchor::Resource(r),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -837,9 +838,9 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
     let now = Instant::now();
 
     // Per-stable-file requires CONTENT in the events mask.
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "fmt".into(),
-        r,
+        SubAttachAnchor::Resource(r),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -1344,9 +1345,9 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
 
     // PerStableFile Sub on the anchor; CONTENT events so per-leaf FDs
     // are issued. Seed baseline empty.
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "fmt".into(),
-        r,
+        SubAttachAnchor::Resource(r),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,

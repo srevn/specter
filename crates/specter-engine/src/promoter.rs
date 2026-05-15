@@ -48,8 +48,8 @@ use compact_str::CompactString;
 use specter_core::{
     ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
     PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, Promoter, PromoterAttachRequest,
-    PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole, StepOutput, SubAttachRequest,
-    SubId, Tree,
+    PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole, StepOutput, SubAttachAnchor,
+    SubAttachRequest, SubId, Tree,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -959,15 +959,14 @@ impl Engine {
     /// `step` invocation.
     ///
     /// **Resource-anchored attach.** `anchor_resource` is the live
-    /// Tree slot id for the matched entry — the forward-pass call site
-    /// either looked it up or freshly ensured it (with
-    /// [`specter_core::ResourceRole::User`]) before invoking
-    /// `try_promote`. The request is built via
-    /// [`SubAttachRequest::for_resource_dynamic`], which routes
-    /// `attach_sub_inner` through its resource-anchored branch
-    /// (`req.path.is_none()`); the path-decomposition failure mode is
-    /// structurally unreachable, hence the `debug_assert_ne!` rather
-    /// than a soft early-return.
+    /// Tree slot the forward-pass call site looked up or freshly
+    /// `ensure_child`'d as [`specter_core::ResourceRole::User`] before
+    /// invoking `try_promote`. The request is built via
+    /// [`SubAttachRequest::for_anchor_dynamic`] with a
+    /// [`SubAttachAnchor::Resource`]; the engine's Resource-arm
+    /// liveness check passes on a slot this freshly minted, so
+    /// `attach_sub_inner` cannot return `None` — the `.expect` records
+    /// that invariant rather than masking a soft early-return.
     ///
     /// **`promote_path` is diagnostic-only.** The caller's
     /// `target_path.join(name_str)` flows through as an owned
@@ -1016,13 +1015,13 @@ impl Engine {
 
         let synthesized = format!("{promoter_name}@{}", promote_path.display());
 
-        // Build the request via the resource-anchored constructor —
-        // `attach_sub_inner` reads `req.resource` directly when
-        // `req.path.is_none()` and bypasses `decompose_attach_path`
-        // entirely. No `PathBuf` clone on the request side.
-        let req = SubAttachRequest::for_resource_dynamic(
+        // Resource-anchored: `anchor_resource` is the slot the
+        // forward-pass just looked up or `ensure_child`'d as `User`, so
+        // the engine's Resource-arm liveness check passes and
+        // `attach_sub_inner` cannot return `None` here.
+        let req = SubAttachRequest::for_anchor_dynamic(
             synthesized,
-            anchor_resource,
+            SubAttachAnchor::Resource(anchor_resource),
             config,
             max_settle,
             settle,
@@ -1034,8 +1033,8 @@ impl Engine {
         );
 
         let sub_id = self.attach_sub_inner(req, now, out).expect(
-            "for_resource_dynamic bypasses path validation; attach_sub_inner cannot fail \
-             on the resource-anchored path",
+            "promoter forward-pass anchored at a freshly ensured live User slot; \
+             the engine's Resource-arm liveness check cannot trip",
         );
 
         // Dedup map. `anchor_resource: Copy` — no consumption

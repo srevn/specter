@@ -27,8 +27,8 @@ use specter_core::{
     OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
     PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileState,
     PromoterAttachRequest, PromoterId, PromoterRegistryDiff, PromoterState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, TimerKind,
-    TreeSnapshot, WatchOp, WatchRegistryDiff,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    TimerKind, TreeSnapshot, WatchOp, WatchRegistryDiff,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -70,8 +70,7 @@ fn engine_with_attached_sub() -> (
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("test-sub"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -192,8 +191,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("test-sub"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -249,8 +247,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
     // collapses Unknown to None, so Profile.kind starts as None.
     let req = SubAttachRequest {
         name: String::from("test-sub"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -309,8 +306,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
     // it ever does (defense-in-depth + symmetry with the SubtreeOk arm).
     let req = SubAttachRequest {
         name: String::from("test-sub"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -372,9 +368,9 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
         .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User)
         .expect("non-empty fixture");
     e.tree.set_kind(foo, ResourceKind::Dir);
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "guard".into(),
-        std::path::PathBuf::from("/foo/bar"),
+        SubAttachAnchor::Path(std::path::PathBuf::from("/foo/bar")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -437,8 +433,7 @@ fn dispatch_standard_ok_with_kind_mismatched_response_routes_through_finalize_an
     e.tree.set_kind(r, ResourceKind::File);
     let req = SubAttachRequest {
         name: String::from("test-sub"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -520,8 +515,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
     // Second attach with the same config_hash.
     let req = SubAttachRequest {
         name: String::from("second"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -918,8 +912,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "build".into(),
-        resource: file_anchor,
-        path: None,
+        anchor: SubAttachAnchor::Resource(file_anchor),
         config: ScanConfig::builder().recursive(false).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -1013,8 +1006,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("build"),
-        resource: file_anchor,
-        path: None,
+        anchor: SubAttachAnchor::Resource(file_anchor),
         config: ScanConfig::builder().recursive(false).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -1414,8 +1406,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("test-sub"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -1800,8 +1791,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("fmt"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -1914,8 +1904,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
     e.tree.set_kind(r, ResourceKind::File);
     let req = SubAttachRequest {
         name: String::from("file-sub"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -2026,9 +2015,9 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User)
         .expect("non-empty fixture");
     e.tree.set_kind(foo, ResourceKind::Dir);
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "guard".into(),
-        std::path::PathBuf::from("/foo/bar"),
+        SubAttachAnchor::Path(std::path::PathBuf::from("/foo/bar")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -2164,9 +2153,9 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User)
         .expect("non-empty fixture");
     e.tree.set_kind(foo, ResourceKind::Dir);
-    let req_a = SubAttachRequest::for_path(
+    let req_a = SubAttachRequest::for_anchor(
         "a".into(),
-        std::path::PathBuf::from("/foo/sib_a"),
+        SubAttachAnchor::Path(std::path::PathBuf::from("/foo/sib_a")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -2175,9 +2164,9 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         NO_EVENTS,
         false,
     );
-    let req_b = SubAttachRequest::for_path(
+    let req_b = SubAttachRequest::for_anchor(
         "b".into(),
-        std::path::PathBuf::from("/foo/sib_b"),
+        SubAttachAnchor::Path(std::path::PathBuf::from("/foo/sib_b")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -2334,9 +2323,9 @@ fn sensor_overflow_pending_profile_is_skipped() {
     // Overflow is a no-op for the Profile state but still emits the
     // diagnostic.
     let mut e = Engine::new();
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "guard".into(),
-        std::path::PathBuf::from("/missing/anchor"),
+        SubAttachAnchor::Path(std::path::PathBuf::from("/missing/anchor")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -2402,8 +2391,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     let now = Instant::now();
     let req_a = SubAttachRequest {
         name: "sub-a".into(),
-        resource: a,
-        path: None,
+        anchor: SubAttachAnchor::Resource(a),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -2415,7 +2403,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     };
     let req_b = SubAttachRequest {
         name: "sub-b".into(),
-        resource: b,
+        anchor: SubAttachAnchor::Resource(b),
         ..req_a.clone()
     };
     let attach_out = e.step(Input::AttachSub(req_a), now);
@@ -2641,8 +2629,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
     let attach_out = e.step(
         Input::AttachSub(SubAttachRequest {
             name: "fast".into(),
-            resource: r,
-            path: None,
+            anchor: SubAttachAnchor::Resource(r),
             config: cfg.clone(),
             max_settle: MAX_SETTLE,
             settle: Duration::from_millis(50),
@@ -2660,8 +2647,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
     let _ = e.step(
         Input::AttachSub(SubAttachRequest {
             name: "slow".into(),
-            resource: r,
-            path: None,
+            anchor: SubAttachAnchor::Resource(r),
             config: cfg,
             max_settle: MAX_SETTLE,
             settle: Duration::from_millis(200),
@@ -2697,8 +2683,7 @@ fn config_diff_added_only_attaches_subs() {
 
     let req = SubAttachRequest {
         name: "added".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -2740,9 +2725,9 @@ fn config_diff_removed_then_added_atomic() {
     complete_seed_burst(&mut e, pid_a);
 
     // Path-based add — the engine re-materializes if needed.
-    let req_b = SubAttachRequest::for_path(
+    let req_b = SubAttachRequest::for_anchor(
         "B".into(),
-        std::path::PathBuf::from("/anchor"),
+        SubAttachAnchor::Path(std::path::PathBuf::from("/anchor")),
         ScanConfig::builder().build(), // different config_hash (non-recursive)
         MAX_SETTLE,
         SETTLE,
@@ -2951,8 +2936,7 @@ fn config_diff_applies_both_halves_in_one_step() {
 
     let sub_req = SubAttachRequest {
         name: "static_a".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -3089,8 +3073,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "fmt".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -3234,8 +3217,7 @@ fn per_stable_file_skips_dir_entries() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "fmt".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -3492,8 +3474,7 @@ fn per_file_effect_target_matches_dedup_key_resource() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "fmt".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -3667,8 +3648,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("fmt"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -3756,8 +3736,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     e.tree.set_kind(r, ResourceKind::Dir);
     let req = SubAttachRequest {
         name: String::from("formatter"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -3779,8 +3758,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     // the existing Profile; the flag stays true.
     let req2 = SubAttachRequest {
         name: String::from("formatter-2"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -3810,8 +3788,7 @@ fn structure_only_profile_has_per_file_fds_false() {
     e.tree.set_kind(r, ResourceKind::Dir);
     let req = SubAttachRequest {
         name: String::from("ls-only"),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -4123,8 +4100,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: String::from("test-sub"),
-        resource: root,
-        path: None,
+        anchor: SubAttachAnchor::Resource(root),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -4762,8 +4738,7 @@ mod props {
         let now = Instant::now();
         let req = SubAttachRequest {
             name: String::from("test"),
-            resource: r,
-            path: None,
+            anchor: SubAttachAnchor::Resource(r),
             config: ScanConfig::builder().recursive(true).build(),
             max_settle: MAX_SETTLE,
             settle: SETTLE,

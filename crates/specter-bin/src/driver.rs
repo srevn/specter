@@ -870,6 +870,12 @@ pub fn log_diagnostic(d: &Diagnostic) {
                 "attach path invalid; request dropped",
             );
         }
+        Diagnostic::AttachResourceStale { resource } => {
+            tracing::warn!(
+                ?resource,
+                "attach resource stale (no live Tree slot); request dropped",
+            );
+        }
         Diagnostic::SpliceCrossedUncovered {
             profile,
             target,

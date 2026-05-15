@@ -25,21 +25,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Where a Sub anchors.
+///
+/// `Resource` names a slot the caller has already materialised; the
+/// engine trusts it after an O(1) liveness check. `Path` names an
+/// absolute path the engine resolves at attach time — immediate when
+/// every component already exists, otherwise pending descent until the
+/// anchor materialises and a Seed burst establishes the baseline.
+#[derive(Clone, Debug)]
+pub enum SubAttachAnchor {
+    Resource(ResourceId),
+    Path(PathBuf),
+}
+
 /// Public-API request to attach a Sub.
 ///
 /// Carries everything `Engine::attach_sub` needs to either reuse an
-/// existing Profile (matching `(resource, config_hash)`) or create a fresh
-/// one. Two ways to identify the anchor:
-///
-/// - `resource: ResourceId` for paths the engine has already materialized
-///   (P4 path; bin/test code that walks the Tree first).
-/// - `path: Some(PathBuf)` for absolute paths the engine should
-///   materialize itself (pending-path support).
-///   When `path` is `Some`, the engine ignores `resource` and walks the
-///   path components via `Tree::ensure_path`. If any non-leaf component is
-///   a fresh `DescentScaffold`, the Profile is registered as pending; once
-///   the anchor materializes, a Seed burst (`PreFireBurst { intent:
-///   Seed, ... }`) establishes the baseline.
+/// existing Profile (matching `(anchor, config_hash)`) or create a fresh
+/// one. The [`SubAttachAnchor`] sum makes the resource-vs-path choice
+/// exclusive by construction — a request names exactly one, and the
+/// engine dispatches on it with an exhaustive `match`.
 ///
 /// `name` is `String` so callers don't need a `compact_str` dependency at
 /// this seam — `Sub::new` converts via `Into<CompactString>` internally.
@@ -57,8 +62,7 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct SubAttachRequest {
     pub name: String,
-    pub resource: ResourceId,
-    pub path: Option<PathBuf>,
+    pub anchor: SubAttachAnchor,
     pub config: ScanConfig,
     pub max_settle: Duration,
     pub settle: Duration,
@@ -87,17 +91,14 @@ pub struct SubAttachRequest {
 }
 
 impl SubAttachRequest {
-    /// Build a request anchored at a pre-materialized `ResourceId`. The
-    /// engine looks up the Resource by id; the request does not carry a
-    /// path string.
-    ///
-    /// `source_promoter` defaults to `None` — static attach. Use
-    /// [`Self::for_dynamic`] when a Promoter is the source.
+    /// Build a static (operator-declared) attach request.
+    /// `source_promoter` is `None`; use [`Self::for_anchor_dynamic`]
+    /// when a Promoter is the source.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
-    pub const fn for_resource(
+    pub const fn for_anchor(
         name: String,
-        resource: ResourceId,
+        anchor: SubAttachAnchor,
         config: ScanConfig,
         max_settle: Duration,
         settle: Duration,
@@ -108,8 +109,7 @@ impl SubAttachRequest {
     ) -> Self {
         Self {
             name,
-            resource,
-            path: None,
+            anchor,
             config,
             max_settle,
             settle,
@@ -121,19 +121,17 @@ impl SubAttachRequest {
         }
     }
 
-    /// Build a request anchored at an absolute path. The engine walks the
-    /// path via `Tree::ensure_path` at attach time and decides between
-    /// immediate Seed and pending descent based on which segments already
-    /// exist. `resource` defaults to `ResourceId::default()`; the engine
-    /// treats that as the "use the path" signal.
-    ///
-    /// `source_promoter` defaults to `None` — static attach. Use
-    /// [`Self::for_dynamic`] when a Promoter is the source.
+    /// Promoter-synthesised counterpart to [`Self::for_anchor`].
+    /// `source` is non-optional — a dynamic Sub always has an
+    /// originating promoter. Delegates to [`Self::for_anchor`] and
+    /// stamps `source_promoter`; the engine reads the stamp at recovery
+    /// time (`on_anchor_terminal_event`) to distinguish all-dynamic
+    /// Profiles (wholesale teardown) from mixed/static ones.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
-    pub fn for_path(
+    pub const fn for_anchor_dynamic(
         name: String,
-        path: PathBuf,
+        anchor: SubAttachAnchor,
         config: ScanConfig,
         max_settle: Duration,
         settle: Duration,
@@ -141,72 +139,12 @@ impl SubAttachRequest {
         scope: EffectScope,
         events: ClassSet,
         log_output: bool,
+        source: PromoterId,
     ) -> Self {
-        Self {
-            name,
-            resource: ResourceId::default(),
-            path: Some(path),
-            config,
-            max_settle,
-            settle,
-            program,
-            scope,
-            events,
-            log_output,
-            source_promoter: None,
-        }
-    }
-
-    /// Build a request for a dynamic Sub spawned by a Promoter. Wraps
-    /// [`Self::for_path`] and stamps `source_promoter`. The engine uses the
-    /// stamp at recovery time (`on_anchor_terminal_event`) to distinguish
-    /// all-dynamic Profiles (wholesale teardown) from mixed/static
-    /// Profiles (preserve recovery).
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn for_dynamic(
-        name: String,
-        path: PathBuf,
-        config: ScanConfig,
-        max_settle: Duration,
-        settle: Duration,
-        program: Arc<ActionProgram>,
-        scope: EffectScope,
-        events: ClassSet,
-        log_output: bool,
-        source_promoter: PromoterId,
-    ) -> Self {
-        let mut req = Self::for_path(
-            name, path, config, max_settle, settle, program, scope, events, log_output,
+        let mut req = Self::for_anchor(
+            name, anchor, config, max_settle, settle, program, scope, events, log_output,
         );
-        req.source_promoter = Some(source_promoter);
-        req
-    }
-
-    /// Build a request for a dynamic Sub spawned by a Promoter, anchored
-    /// at a pre-materialized [`ResourceId`]. Resource-anchored counterpart
-    /// to [`Self::for_dynamic`]: the typical promoter forward-pass already
-    /// holds the proxy's target slot and matched child name in hand, so
-    /// the engine reads `req.resource` directly without re-decomposing a
-    /// path string. `path` stays `None`; `source_promoter` is stamped.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub const fn for_resource_dynamic(
-        name: String,
-        resource: ResourceId,
-        config: ScanConfig,
-        max_settle: Duration,
-        settle: Duration,
-        program: Arc<ActionProgram>,
-        scope: EffectScope,
-        events: ClassSet,
-        log_output: bool,
-        source_promoter: PromoterId,
-    ) -> Self {
-        let mut req = Self::for_resource(
-            name, resource, config, max_settle, settle, program, scope, events, log_output,
-        );
-        req.source_promoter = Some(source_promoter);
+        req.source_promoter = Some(source);
         req
     }
 }

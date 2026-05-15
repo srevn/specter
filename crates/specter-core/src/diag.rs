@@ -339,6 +339,12 @@ pub enum Diagnostic {
     /// multi-path attach batches (hot reload `ConfigDiff::added`) can
     /// identify which entry failed without re-scanning the config.
     AttachPathInvalid { path: PathBuf, hint: &'static str },
+    /// A resource-anchored attach request named a [`ResourceId`] with no
+    /// live Tree slot (reaped, never-existed, or a default sentinel).
+    /// The engine drops the attach and surfaces the offending id rather
+    /// than trusting the stale claim and panicking downstream — the
+    /// resource-arm counterpart to [`Self::AttachPathInvalid`].
+    AttachResourceStale { resource: ResourceId },
     /// A probe response's snapshot shape (`File` from `AnchorOk(_)` vs
     /// `Dir` from `SubtreeOk(_)`) disagrees with the Profile's cached
     /// [`crate::Profile::kind`].

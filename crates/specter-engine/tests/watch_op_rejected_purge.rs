@@ -14,7 +14,7 @@ use specter_core::{
     DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity,
     Input, LeafEntry, PatternSpec, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
     ProbeResponse, ProfileId, ProfileState, PromoterAttachRequest, PromoterClaimKind,
-    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
     SubAttachRequest, SubId, WatchFailure, WatchOp,
 };
 use specter_engine::Engine;
@@ -91,9 +91,9 @@ fn attach_subtree_root(
     resource: ResourceId,
     max_settle: Duration,
 ) -> (SubId, ProfileId, StepOutput) {
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         name.to_string(),
-        resource,
+        SubAttachAnchor::Resource(resource),
         ScanConfig::builder().recursive(true).build(),
         max_settle,
         SETTLE,
@@ -390,9 +390,9 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         .expect("non-empty fixture");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        PathBuf::from("/foo/bar"),
+        SubAttachAnchor::Path(PathBuf::from("/foo/bar")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -691,9 +691,9 @@ fn watch_op_rejected_purges_co_claimed_resource() {
     // Attach a Profile at /a/foo. /a exists; /a/foo does not. The
     // Profile starts in Pending(/a, ["foo"]) and bumps /a's STRUCTURE
     // contribution to 2.
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        PathBuf::from("/a/foo"),
+        SubAttachAnchor::Path(PathBuf::from("/a/foo")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,

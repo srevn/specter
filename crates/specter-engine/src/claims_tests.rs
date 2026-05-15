@@ -23,7 +23,7 @@ use specter_core::{
     ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DedupKey, DirChild,
     DirMeta, DirSnapshot, EffectScope, EntryKind, FsIdentity, Input, LeafEntry, ProbeCorrelation,
     ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachRequest, SubId, WatchOp,
+    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -86,9 +86,9 @@ fn engine_with_materialised_profile(
         .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        anchor,
+        SubAttachAnchor::Resource(anchor),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -374,9 +374,9 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
     let anchor = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        anchor,
+        SubAttachAnchor::Resource(anchor),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -463,9 +463,9 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
     let anchor = e.tree_mut().ensure_root("a", ResourceRole::User);
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        anchor,
+        SubAttachAnchor::Resource(anchor),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,

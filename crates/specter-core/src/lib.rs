@@ -59,7 +59,9 @@ pub use snapshot::tree::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot,
     diff_dir_pair, diff_tree, splice, subtree_at_dir,
 };
-pub use sub::{ClassSet, EffectScope, Sub, SubAttachRequest, SubRegistry, SubRegistryDiff};
+pub use sub::{
+    ClassSet, EffectScope, Sub, SubAttachAnchor, SubAttachRequest, SubRegistry, SubRegistryDiff,
+};
 pub use time::{Clock, SystemClock};
 pub use tree::{AttachPathError, FS_ROOT_SEGMENT, StaleIdError, Tree, TreePath};
 

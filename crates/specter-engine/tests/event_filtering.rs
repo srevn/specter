@@ -27,8 +27,8 @@ use specter_core::{
     ActionProgram, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, ChildEntry, ClassSet, DedupKey,
     Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input,
     LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
-    WatchOp,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
+    SubAttachRequest, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -114,9 +114,9 @@ fn attach_sub_with_events(
     events: ClassSet,
     config: ScanConfig,
 ) -> (specter_core::SubId, ProfileId, StepOutput) {
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         name.to_string(),
-        resource,
+        SubAttachAnchor::Resource(resource),
         config,
         MAX_SETTLE,
         SETTLE,
@@ -391,9 +391,9 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
         .expect("non-empty fixture");
     e.tree_mut().set_kind(tmp, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        PathBuf::from("/tmp/build/leaf"),
+        SubAttachAnchor::Path(PathBuf::from("/tmp/build/leaf")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -1211,9 +1211,9 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
 
     // Two Subs at the same anchor with different config_hash —
     // different max_settle yields a fresh Profile.
-    let attach_p = SubAttachRequest::for_resource(
+    let attach_p = SubAttachRequest::for_anchor(
         "P".into(),
-        root,
+        SubAttachAnchor::Resource(root),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -1222,9 +1222,9 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         ClassSet::CONTENT,
         false,
     );
-    let attach_q = SubAttachRequest::for_resource(
+    let attach_q = SubAttachRequest::for_anchor(
         "Q".into(),
-        root,
+        SubAttachAnchor::Resource(root),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE + Duration::from_secs(1),
         SETTLE,
@@ -1670,9 +1670,9 @@ fn release_descendant_claim_multi_profile_preserves_others() {
 
     // Two Profiles at the same anchor with different config_hash
     // (different max_settle ⇒ different Profile).
-    let attach_p = SubAttachRequest::for_resource(
+    let attach_p = SubAttachRequest::for_anchor(
         "P".into(),
-        root,
+        SubAttachAnchor::Resource(root),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -1681,9 +1681,9 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         ClassSet::CONTENT,
         false,
     );
-    let attach_q = SubAttachRequest::for_resource(
+    let attach_q = SubAttachRequest::for_anchor(
         "Q".into(),
-        root,
+        SubAttachAnchor::Resource(root),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE + Duration::from_secs(1),
         SETTLE,
@@ -1801,9 +1801,9 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
-    let attach_p = SubAttachRequest::for_resource(
+    let attach_p = SubAttachRequest::for_anchor(
         "P".into(),
-        root,
+        SubAttachAnchor::Resource(root),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -1812,9 +1812,9 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         ClassSet::CONTENT,
         false,
     );
-    let attach_q = SubAttachRequest::for_resource(
+    let attach_q = SubAttachRequest::for_anchor(
         "Q".into(),
-        root,
+        SubAttachAnchor::Resource(root),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE + Duration::from_secs(1),
         SETTLE,

@@ -27,7 +27,7 @@ use specter_core::{
     ProfileState, ReapTrigger, TimerKind,
 };
 // Registries.
-use specter_core::{PromoterRegistry, Sub, SubAttachRequest, SubRegistry};
+use specter_core::{PromoterRegistry, Sub, SubAttachAnchor, SubAttachRequest, SubRegistry};
 // Per-Resource bookkeeping.
 use specter_core::{ClassSet, ContribKey};
 // Probe + effect correlation.
@@ -187,12 +187,12 @@ impl Engine {
         out
     }
 
-    /// Attach a Sub to an existing Resource (`req.resource`) or to a
-    /// path that the engine materialises (`req.path`). Reuses an
-    /// existing Profile when `(resource, config_hash)` matches;
-    /// otherwise creates a fresh Profile, emits `WatchOp::Watch` on its
-    /// anchor, and starts a Seed burst (`PreFireBurst { intent: Seed,
-    /// phase: Verifying }`) to establish the initial baseline.
+    /// Attach a Sub at its [`SubAttachAnchor`] — a caller-supplied
+    /// `Resource` slot or a `Path` the engine materialises. Reuses an
+    /// existing Profile when `(anchor, config_hash)` matches; otherwise
+    /// creates a fresh Profile, emits `WatchOp::Watch` on its anchor,
+    /// and starts a Seed burst (`PreFireBurst { intent: Seed, phase:
+    /// Verifying }`) to establish the initial baseline.
     ///
     /// Three-phase pipeline; sole public entry is
     /// [`Input::AttachSub`] via [`Self::step`]. The inner is
@@ -208,17 +208,17 @@ impl Engine {
     /// runs. The in-flight burst continues to completion under the
     /// new Sub set.
     ///
-    /// On path rejection, returns `None` and emits a
-    /// [`Diagnostic::AttachPathInvalid`]; the
-    /// resource-based path cannot fail and always returns `Some`.
-    /// External callers consume the [`Diagnostic::SubAttached`] /
-    /// [`Diagnostic::AttachPathInvalid`] stream to reconcile their
-    /// `name → SubId` index.
+    /// Total: an unresolvable anchor returns `None` with a typed
+    /// diagnostic — [`Diagnostic::AttachPathInvalid`] for a malformed
+    /// `Path`, [`Diagnostic::AttachResourceStale`] for a `Resource`
+    /// with no live slot. External callers reconcile their `name →
+    /// SubId` index from the [`Diagnostic::SubAttached`] /
+    /// `AttachPathInvalid` / `AttachResourceStale` stream.
     ///
-    /// # Production invariants (path-based attach)
+    /// # Production invariants (`Path` anchor)
     ///
-    /// 1. **Absolute paths only.** `req.path` must be absolute and
-    ///    UTF-8. [`Tree::parse_attach_path`] is the canonical gate; it
+    /// 1. **Absolute paths only.** A [`SubAttachAnchor::Path`] must be
+    ///    absolute and UTF-8. [`Tree::parse_attach_path`] is the canonical gate; it
     ///    rejects non-absolute paths, non-UTF-8 segments, `.` / `..`
     ///    components, Windows path prefixes, and empty segments. The
     ///    bin layer's `canonicalize_lenient` already enforces absolute
@@ -240,20 +240,15 @@ impl Engine {
     ///    Sensor's `WatchOp::Watch { path }` always carries an absolute
     ///    path for any Profile registered through this pipeline.
     ///
-    /// # Panics
-    /// Panics if `req.resource` is stale (no live Tree slot) on the
-    /// resource-based attach path. The Engine must construct the
-    /// Resource before attaching a Sub to it.
-    ///
     /// # Pipeline (three phases)
     ///
-    /// 1. **Identity resolution.** `resolve_attach_anchor` parses the
-    ///    request's `path` (or trusts `resource`), materialises the
-    ///    Tree, and yields a typed [`AnchorResolution`] indicating
-    ///    whether the anchor is materialised (`Immediate`) or
-    ///    scaffolded (`Pending`). `find_or_create_profile` then
-    ///    classifies the `(anchor, config_hash)` lookup into a
-    ///    [`ProfileOrigin`] trichotomy.
+    /// 1. **Identity resolution.** `resolve_attach_anchor` resolves the
+    ///    request's `anchor` — parsing and materialising a `Path`, or
+    ///    liveness-checking a `Resource` — and yields a typed
+    ///    [`AnchorResolution`] indicating whether the anchor is
+    ///    materialised (`Immediate`) or scaffolded (`Pending`).
+    ///    `find_or_create_profile` then classifies the `(anchor,
+    ///    config_hash)` lookup into a [`ProfileOrigin`] trichotomy.
     /// 2. **Sub registration.** `register_sub` consumes the request to
     ///    mint the [`Sub`] and emit [`Diagnostic::SubAttached`] — the
     ///    single point at which a SubId enters the registry.
@@ -337,17 +332,17 @@ impl Engine {
     /// materialised on disk) or `Pending` (anchor is a scaffold; the
     /// engine must descend before the burst can start).
     ///
-    /// Path-based attach (`req.path` set) routes through
+    /// A [`SubAttachAnchor::Path`] routes through
     /// [`Tree::parse_attach_path`] (which rejects non-absolute,
     /// non-UTF-8, `.` / `..`, Windows-prefix, and empty-segment paths)
-    /// and then [`Self::materialize_path_or_pending`]. On parse
-    /// rejection, emits a [`Diagnostic::AttachPathInvalid`] and
-    /// returns `None`.
+    /// and then [`Self::materialize_path_or_pending`]; a malformed path
+    /// emits [`Diagnostic::AttachPathInvalid`] and returns `None`.
     ///
-    /// Resource-based attach (`req.path` `None`) trusts the caller's
-    /// `req.resource` — the [`AnchorResolution::Immediate`] variant
-    /// applies unconditionally because the caller has already
-    /// guaranteed a live Tree slot.
+    /// A [`SubAttachAnchor::Resource`] re-gates the caller's claimed
+    /// slot with an O(1) liveness check: a stale id emits
+    /// [`Diagnostic::AttachResourceStale`] and returns `None`,
+    /// otherwise it resolves [`AnchorResolution::Immediate`] (a
+    /// `Resource` anchor never descends).
     ///
     /// Promotes a `DescentScaffold` anchor to `User` on the
     /// `Immediate` path (the scaffold may have been left over from an
@@ -362,8 +357,8 @@ impl Engine {
         req: &SubAttachRequest,
         out: &mut StepOutput,
     ) -> Option<AnchorResolution> {
-        let resolved = match req.path.as_ref() {
-            Some(path) => {
+        let resolved = match &req.anchor {
+            SubAttachAnchor::Path(path) => {
                 let parsed = match Tree::parse_attach_path(path) {
                     Ok(p) => p,
                     Err(err) => {
@@ -389,9 +384,20 @@ impl Engine {
                     },
                 }
             }
-            None => AnchorResolution::Immediate {
-                anchor: req.resource,
-            },
+            SubAttachAnchor::Resource(r) => {
+                // The caller claims `r` is already live. Re-gate it at
+                // the boundary — the request crossed a channel and
+                // cannot hold a Tree borrow, so liveness is verified
+                // here, symmetric with the Path arm's `parse_attach_path`
+                // re-check. A stale slot is dropped gracefully rather
+                // than panicking downstream.
+                if self.tree.get(*r).is_none() {
+                    out.diagnostics
+                        .push(Diagnostic::AttachResourceStale { resource: *r });
+                    return None;
+                }
+                AnchorResolution::Immediate { anchor: *r }
+            }
         };
 
         // Promote a `DescentScaffold` anchor to `User` on the
@@ -1275,9 +1281,9 @@ enum ProfileOrigin {
 /// awaiting materialisation. The split drives Phase 3's
 /// `bootstrap_immediate` vs `bootstrap_pending` dispatch.
 ///
-/// The `Immediate` arm subsumes both path-based attach
-/// (fully-materialised path) and resource-based attach (caller
-/// supplies the live `ResourceId` directly via `req.resource`).
+/// The `Immediate` arm subsumes both a fully-materialised
+/// [`SubAttachAnchor::Path`] and a liveness-checked
+/// [`SubAttachAnchor::Resource`]; only `Path` can resolve `Pending`.
 enum AnchorResolution {
     /// The anchor is a live, materialised Tree slot.
     /// `bootstrap_immediate` will install the anchor watch contribution
@@ -1637,9 +1643,9 @@ mod tests {
     fn attach_path_invalid_carries_offending_path() {
         let mut e = Engine::new();
         let bad = std::path::PathBuf::from("./relative/with/dot");
-        let req = SubAttachRequest::for_path(
+        let req = SubAttachRequest::for_anchor(
             "bad".to_string(),
-            bad.clone(),
+            SubAttachAnchor::Path(bad.clone()),
             ScanConfig::builder().recursive(false).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
@@ -1671,9 +1677,9 @@ mod tests {
         let pre_profile_count = e.profiles.len();
 
         let bad = std::path::PathBuf::from("relative/path");
-        let req = SubAttachRequest::for_path(
+        let req = SubAttachRequest::for_anchor(
             "rel".to_string(),
-            bad.clone(),
+            SubAttachAnchor::Path(bad.clone()),
             ScanConfig::builder().recursive(false).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
@@ -1718,9 +1724,9 @@ mod tests {
         let pre_tree_len = e.tree.len();
         let pre_profile_count = e.profiles.len();
 
-        let req = SubAttachRequest::for_path(
+        let req = SubAttachRequest::for_anchor(
             "bad".to_string(),
-            path.clone(),
+            SubAttachAnchor::Path(path.clone()),
             ScanConfig::builder().recursive(false).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
@@ -1744,6 +1750,59 @@ mod tests {
             specter_core::Diagnostic::AttachPathInvalid { path: p, hint }
                 if p == &path && hint.contains("non-UTF-8"),
         )));
+    }
+
+    /// A `Resource` anchor naming a dead slot is re-gated at the
+    /// boundary — graceful `AttachResourceStale` + `None`, no panic,
+    /// zero engine-state mutation. Symmetric with the `Path`-arm
+    /// total-rejection tests above.
+    #[test]
+    fn attach_with_stale_resource_emits_diagnostic_and_no_state() {
+        let mut e = Engine::new();
+        let pre_tree_len = e.tree.len();
+        let pre_profile_count = e.profiles.len();
+
+        // `slotmap::new_key_type!` never mints the default key, so
+        // `ResourceId::default()` is permanently stale.
+        let stale = ResourceId::default();
+        let req = SubAttachRequest::for_anchor(
+            "stale".to_string(),
+            SubAttachAnchor::Resource(stale),
+            ScanConfig::builder().recursive(false).build(),
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+            specter_core::testkit::single_exec_program(std::iter::empty()),
+            specter_core::EffectScope::SubtreeRoot,
+            specter_core::ClassSet::default(),
+            false,
+        );
+        let out = e.step(Input::AttachSub(req), Instant::now());
+        let sid = specter_core::testkit::first_attached_sub(&out);
+
+        assert!(sid.is_none(), "rejected attach mints no SubId");
+        assert_eq!(e.tree.len(), pre_tree_len, "no Tree slots created");
+        assert_eq!(e.profiles.len(), pre_profile_count, "no Profile attached");
+        assert!(e.subs.is_empty(), "no Sub recorded in registry");
+        assert!(out.watch_ops.is_empty(), "no watch ops emitted");
+        assert!(out.probe_ops.is_empty(), "no probe ops emitted");
+        assert!(out.effects.is_empty(), "no effects emitted");
+
+        let stale_count = out
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d,
+                    specter_core::Diagnostic::AttachResourceStale { resource }
+                        if *resource == stale,
+                )
+            })
+            .count();
+        assert_eq!(
+            stale_count, 1,
+            "exactly one AttachResourceStale carrying the offending id; got {:?}",
+            out.diagnostics,
+        );
     }
 
     #[test]
@@ -1817,9 +1876,9 @@ mod tests {
     // ===== Zombie revival =====
 
     fn revival_attach_req(anchor: ResourceId, name: &str, settle: Duration) -> SubAttachRequest {
-        SubAttachRequest::for_resource(
+        SubAttachRequest::for_anchor(
             name.into(),
-            anchor,
+            SubAttachAnchor::Resource(anchor),
             ScanConfig::builder().build(),
             Duration::from_secs(6),
             settle,
@@ -2038,9 +2097,9 @@ mod tests {
         e.tree.set_kind(parent, ResourceKind::Dir);
         e.tree.set_kind(anchor, ResourceKind::Dir);
 
-        let req = SubAttachRequest::for_resource(
+        let req = SubAttachRequest::for_anchor(
             "permtest".into(),
-            anchor,
+            SubAttachAnchor::Resource(anchor),
             ScanConfig::builder().build(),
             Duration::from_secs(6),
             Duration::from_millis(50),

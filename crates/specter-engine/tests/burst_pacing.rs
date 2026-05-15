@@ -21,7 +21,7 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope,
     FsEvent, FsIdentity, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachRequest,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -84,8 +84,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "build".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,
@@ -192,8 +191,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
     let now = Instant::now();
     let req = SubAttachRequest {
         name: "build".into(),
-        resource: r,
-        path: None,
+        anchor: SubAttachAnchor::Resource(r),
         config: ScanConfig::builder().recursive(true).build(),
         max_settle: MAX_SETTLE,
         settle: SETTLE,

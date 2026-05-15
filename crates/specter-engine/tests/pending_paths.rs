@@ -19,7 +19,7 @@ use specter_core::{
     ActionProgram, ActiveBurst, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry, ProbeCorrelation, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubAttachRequest,
+    StepOutput, SubAttachAnchor, SubAttachRequest,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -89,9 +89,9 @@ fn attach_sub_path_pending_then_anchor_appears() {
         .expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        PathBuf::from("/var/log/myapp"),
+        SubAttachAnchor::Path(PathBuf::from("/var/log/myapp")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -185,9 +185,9 @@ fn pending_path_failed_probe_retains_state() {
         .expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        PathBuf::from("/var/missing"),
+        SubAttachAnchor::Path(PathBuf::from("/var/missing")),
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
@@ -235,9 +235,9 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         .expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        PathBuf::from("/var/missing"),
+        SubAttachAnchor::Path(PathBuf::from("/var/missing")),
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
@@ -293,9 +293,9 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         .expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_resource(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        src,
+        SubAttachAnchor::Resource(src),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -366,9 +366,9 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
         .expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        PathBuf::from("/var/log/myapp"),
+        SubAttachAnchor::Path(PathBuf::from("/var/log/myapp")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -429,9 +429,9 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     // Absolute path against an empty Tree: bootstrap creates `/`, anchor
     // `/foo` is scaffolded under `/`. Profile lands Pending with
     // current_prefix = `/`, anchor = /foo (different slots).
-    let req = SubAttachRequest::for_path(
+    let req = SubAttachRequest::for_anchor(
         "watch".into(),
-        PathBuf::from("/foo"),
+        SubAttachAnchor::Path(PathBuf::from("/foo")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -543,9 +543,9 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     // exist). Drain its initial descent probe with a no-progress
     // response so its `pending_probe` slot is empty before the test
     // event — `on_descent_event` short-circuits on a busy slot.
-    let req_a = SubAttachRequest::for_path(
+    let req_a = SubAttachRequest::for_anchor(
         "watch-a".into(),
-        PathBuf::from("/root/foo"),
+        SubAttachAnchor::Path(PathBuf::from("/root/foo")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -578,9 +578,9 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
 
     // Profile B: anchor at /root/bar; drive Seed → Idle, then Removed
     // at /root/bar → Idle with current=None and watch_root_parent=/root.
-    let req_b = SubAttachRequest::for_resource(
+    let req_b = SubAttachRequest::for_anchor(
         "watch-b".into(),
-        bar,
+        SubAttachAnchor::Resource(bar),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -620,9 +620,9 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     assert_eq!(p_b.watch_root_parent, Some(root_dir));
 
     // Profile C: anchor at /elsewhere; Seed → Idle. Unrelated to /root.
-    let req_c = SubAttachRequest::for_resource(
+    let req_c = SubAttachRequest::for_anchor(
         "watch-c".into(),
-        elsewhere,
+        SubAttachAnchor::Resource(elsewhere),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
