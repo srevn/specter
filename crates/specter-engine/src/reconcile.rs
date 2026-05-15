@@ -602,6 +602,7 @@ mod tests {
                 MAX_SETTLE,
                 SETTLE,
                 events,
+                None,
             ),
         );
         // The covered descendants reconciler reads `has_per_file_fds`
@@ -1116,6 +1117,7 @@ mod tests {
                 Duration::from_secs(12),
                 Duration::from_millis(50),
                 ClassSet::CONTENT,
+                None,
             ),
         );
         let a_rs_id = tree

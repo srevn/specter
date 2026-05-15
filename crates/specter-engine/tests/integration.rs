@@ -83,11 +83,12 @@ fn covers_drives_nearest_covering_ancestor() {
                 MAX_SETTLE,
                 SETTLE,
                 NO_EVENTS,
+                None,
             ),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
 
         assert!(!covers(profiles.get(p_root).unwrap(), b, &tree));
@@ -110,11 +111,11 @@ fn covers_drives_nearest_covering_ancestor() {
         }
         let p_root = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
 
         assert!(covers(profiles.get(p_root).unwrap(), b, &tree));
@@ -155,6 +156,7 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
             MAX_SETTLE,
             SETTLE,
             NO_EVENTS,
+            None,
         ),
     );
     let profile = profiles.get(p).unwrap();

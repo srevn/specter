@@ -1222,6 +1222,12 @@ impl Profile {
     /// `exclude_strings` is projected once here from `config.exclude` —
     /// the [`ScanConfig`] builder has already sorted the vector by source,
     /// so the projection is canonical without re-sorting.
+    ///
+    /// `kind` is the anchor's classified shape at construction: `None`
+    /// for a `DescentScaffold` or freshly-`ensure`d-but-unprobed slot
+    /// (descent materialisation classifies it via
+    /// [`Self::materialize_anchor`]; the first Seed-Ok via
+    /// [`Self::install_dir_current`] / [`Self::install_file_current`]).
     #[must_use]
     pub fn new(
         resource: ResourceId,
@@ -1229,6 +1235,7 @@ impl Profile {
         max_settle: Duration,
         settle: Duration,
         events: ClassSet,
+        kind: Option<ResourceKind>,
     ) -> Self {
         let config_hash = compute_config_hash(&config, max_settle, events);
         let has_per_file_fds = events.intersects(ClassSet::CONTENT | ClassSet::METADATA);
@@ -1242,7 +1249,7 @@ impl Profile {
             config,
             exclude_strings,
             config_hash,
-            kind: None,
+            kind,
             state: ProfileState::Idle,
             baseline: None,
             current: None,
@@ -1355,6 +1362,163 @@ impl Profile {
         if let Some(b) = self.baseline.as_ref() {
             self.last_settled_hash_at_loss = Some(b.hash());
         }
+    }
+
+    /// Atomically clear the anchor classification triple
+    /// `(kind, baseline, current)`. Captures the survival witness from
+    /// `baseline` *first*, so the cross-field invariant
+    /// `baseline.is_some() ⇒ last_settled_hash_at_loss.is_none()` holds
+    /// at every step boundary. `current` is already `None` at every
+    /// production caller (`discard_anchor_state` runs
+    /// [`Self::take_current`] first); the write here backstops a future
+    /// caller that skips the take. The witness is *not* cleared — it is
+    /// consumed later by [`Self::rebase_baseline`]. Inverse of
+    /// [`Self::materialize_anchor`].
+    pub fn clear_anchor_classification(&mut self) {
+        self.capture_witness_at_loss();
+        self.baseline = None;
+        self.current = None;
+        self.kind = None;
+    }
+
+    /// Atomically install a descent-materialised anchor: transition
+    /// `Pending → Idle`, install the claim, pin the discovered kind. Sole
+    /// caller `Engine::materialize_profile_anchor`, which launches the
+    /// Seed burst on the next statement — the `Idle` written here is a
+    /// structural intermediate, never observed. Inverse of
+    /// [`Self::clear_anchor_classification`].
+    ///
+    /// Debug-asserts the fresh-materialisation preconditions
+    /// (`state == Pending`, no claim, unprobed kind); release builds
+    /// compile the asserts out and still write the triple atomically (a
+    /// breach is the same shape as an `install_*_current` kind mismatch).
+    pub fn materialize_anchor(&mut self, kind: ResourceKind) {
+        debug_assert!(
+            matches!(self.state, ProfileState::Pending(_)),
+            "materialize_anchor: state must be Pending (was {:?})",
+            self.state.discriminant(),
+        );
+        debug_assert!(
+            matches!(self.anchor_claim, AnchorClaim::None),
+            "materialize_anchor: anchor_claim must be None",
+        );
+        debug_assert!(
+            self.kind.is_none(),
+            "materialize_anchor: kind must be unprobed",
+        );
+        self.state = ProfileState::Idle;
+        self.anchor_claim = AnchorClaim::Held;
+        self.kind = Some(kind);
+    }
+
+    /// Sole legitimate post-construction writer of `state`. Returns the
+    /// prior state via `mem::replace` so the typed-move callers
+    /// (`transition_to_awaiting`, `finish_burst_to_idle`) can consume the
+    /// prior burst by value for [`PreFireBurst::into_post_fire`] without
+    /// holding a `&mut state` borrow across the move. Shape-agnostic:
+    /// transition preconditions are owned by the engine boundary
+    /// (`require_idle` / `require_active_pre_fire`), not duplicated here.
+    /// Not `#[must_use]` — whole-value-replace callers discard the return;
+    /// only the typed-move callers bind it.
+    pub const fn transition_state(&mut self, new: ProfileState) -> ProfileState {
+        std::mem::replace(&mut self.state, new)
+    }
+
+    /// Install the anchor claim. Idempotent against `Held`. Production
+    /// caller: `Engine::bootstrap_immediate`. (The descent-materialised
+    /// claim rides [`Self::materialize_anchor`]'s bundled write instead.)
+    pub const fn install_anchor_claim_held(&mut self) {
+        self.anchor_claim = AnchorClaim::Held;
+    }
+
+    /// Release the anchor claim. Idempotent against `None`. Production
+    /// caller: `Engine::release_anchor_claim`, which wraps this with the
+    /// Tree-side `sub_watch`.
+    pub const fn release_anchor_claim_now(&mut self) {
+        self.anchor_claim = AnchorClaim::None;
+    }
+
+    /// Borrow the pre-fire burst payload iff
+    /// `state == Active(PreFire(_), _)` — a read of the state's
+    /// structural shape, *not* a variant transition (the variant-level
+    /// move still routes through [`Self::transition_state`]).
+    pub const fn pre_fire_burst_mut(&mut self) -> Option<&mut PreFireBurst> {
+        match &mut self.state {
+            ProfileState::Active(ActiveBurst::PreFire(pre), _) => Some(pre),
+            _ => None,
+        }
+    }
+
+    /// Symmetric with [`Self::pre_fire_burst_mut`] for the post-fire payload.
+    pub const fn post_fire_burst_mut(&mut self) -> Option<&mut PostFireBurst> {
+        match &mut self.state {
+            ProfileState::Active(ActiveBurst::PostFire(post), _) => Some(post),
+            _ => None,
+        }
+    }
+
+    /// Borrow the state machine. The universal read path — every `&self`
+    /// [`ProfileState`] projection (`discriminant`, `burst_finish`,
+    /// `detach_lifecycle`, `timer_token`, `is_draining`, `descent_state`)
+    /// routes through this.
+    #[must_use]
+    pub const fn state(&self) -> &ProfileState {
+        &self.state
+    }
+
+    #[must_use]
+    pub const fn anchor_claim(&self) -> AnchorClaim {
+        self.anchor_claim
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> Option<ResourceKind> {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn baseline(&self) -> Option<&TreeSnapshot> {
+        self.baseline.as_ref()
+    }
+
+    #[must_use]
+    pub const fn current(&self) -> Option<&TreeSnapshot> {
+        self.current.as_ref()
+    }
+
+    #[must_use]
+    pub const fn last_settled_hash_at_loss(&self) -> Option<u128> {
+        self.last_settled_hash_at_loss
+    }
+
+    /// Mutable descent payload — thin delegator to
+    /// [`ProfileState::descent_state_mut`].
+    pub const fn descent_state_mut(&mut self) -> Option<&mut DescentState> {
+        self.state.descent_state_mut()
+    }
+
+    /// Flip an Active burst's directive to `Reap`. `true` iff the flip
+    /// landed (Active). Delegates to [`ProfileState::mark_active_for_reap`].
+    #[must_use]
+    pub const fn mark_active_for_reap(&mut self) -> bool {
+        self.state.mark_active_for_reap()
+    }
+
+    /// Revive a zombie burst (`Reap → ReturnToIdle`). `true` iff a zombie
+    /// was revived. Delegates to [`ProfileState::clear_active_reap`].
+    #[must_use]
+    pub const fn clear_active_reap(&mut self) -> bool {
+        self.state.clear_active_reap()
+    }
+
+    /// Take `current`, leaving `None` — the descendant-claim-release
+    /// primitive. Sole caller `Engine::release_descendant_claim`;
+    /// idempotent (a second call finds `None`). Not subsumed by
+    /// [`Self::clear_anchor_classification`]: it runs first and is also
+    /// called standalone from the `dispatch_*_vanished/failed` +
+    /// `reap_profile` sites.
+    pub const fn take_current(&mut self) -> Option<TreeSnapshot> {
+        self.current.take()
     }
 }
 
@@ -1496,7 +1660,7 @@ mod tests {
     fn new_profile_starts_idle_with_zero_refcounts() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(matches!(p.state, ProfileState::Idle));
         assert!(p.baseline.is_none());
         assert!(p.current.is_none());
@@ -1513,7 +1677,7 @@ mod tests {
     fn new_profile_initialises_fired_subs_empty() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(p.fired_subs.is_empty());
     }
 
@@ -1524,7 +1688,7 @@ mod tests {
     fn new_profile_initialises_has_per_file_fds_false_for_empty_events() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(!p.has_per_file_fds);
         assert_eq!(p.events_union, ClassSet::EMPTY);
     }
@@ -1535,7 +1699,7 @@ mod tests {
     fn new_profile_has_per_file_fds_when_content_in_events() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
         assert!(p.has_per_file_fds);
         assert_eq!(p.events_union, ClassSet::CONTENT);
     }
@@ -1546,7 +1710,7 @@ mod tests {
     fn new_profile_has_per_file_fds_when_metadata_in_events() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA, None);
         assert!(p.has_per_file_fds);
     }
 
@@ -1556,7 +1720,7 @@ mod tests {
     fn new_profile_has_per_file_fds_false_for_structure_only() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE, None);
         assert!(!p.has_per_file_fds);
     }
 
@@ -1566,7 +1730,7 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let c = cfg();
         let expected = compute_config_hash(&c, MAX_SETTLE, NO_EVENTS);
-        let p = Profile::new(r, c, MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(r, c, MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert_eq!(p.config_hash, expected);
     }
 
@@ -1576,8 +1740,8 @@ mod tests {
     fn config_hash_partitions_by_events() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p_content = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT);
-        let p_meta = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA);
+        let p_content = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
+        let p_meta = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA, None);
         assert_ne!(p_content.config_hash, p_meta.config_hash);
     }
 
@@ -1586,7 +1750,7 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         let h = p.config_hash;
         let pid = profiles.attach(&mut tree, p);
 
@@ -1601,7 +1765,7 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let _pid = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
 
         assert!(
@@ -1615,7 +1779,7 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         let h = p.config_hash;
         let pid = profiles.attach(&mut tree, p);
 
@@ -1632,7 +1796,7 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let pid = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
 
         profiles.detach(&mut tree, pid);
@@ -1648,12 +1812,12 @@ mod tests {
 
         let pid_a = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), Duration::from_secs(6), SETTLE, NO_EVENTS),
+            Profile::new(r, cfg(), Duration::from_secs(6), SETTLE, NO_EVENTS, None),
         );
         // Different max_settle ⇒ different config_hash ⇒ distinct Profile.
         let pid_b = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), Duration::from_secs(12), SETTLE, NO_EVENTS),
+            Profile::new(r, cfg(), Duration::from_secs(12), SETTLE, NO_EVENTS, None),
         );
 
         let mut got: Vec<_> = profiles.at(r).collect();
@@ -1672,11 +1836,11 @@ mod tests {
 
         let p1 = profiles.attach(
             &mut tree,
-            Profile::new(r1, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(r1, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         let p2 = profiles.attach(
             &mut tree,
-            Profile::new(r2, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(r2, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         assert_ne!(p1, p2);
         assert_eq!(profiles.len(), 2);
@@ -1694,12 +1858,12 @@ mod tests {
         let r = tree.ensure_root("x", ResourceRole::User);
         let _pid = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         // Caller failed to `find` first; second attach hits debug_assert.
         let _pid2 = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
     }
 
@@ -1737,7 +1901,7 @@ mod tests {
     fn rebase_baseline_clones_current_into_baseline() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
         assert!(p.baseline.is_none());
 
@@ -1755,7 +1919,7 @@ mod tests {
     fn rebase_baseline_clears_witness() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
         p.last_settled_hash_at_loss = Some(0xdead_beef);
 
@@ -1771,7 +1935,7 @@ mod tests {
     fn capture_witness_at_loss_sets_witness_from_baseline_dir_hash() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         let snap = TreeSnapshot::Dir(empty_dir_snapshot());
         let expected = snap.hash();
         p.baseline = Some(snap);
@@ -1785,7 +1949,7 @@ mod tests {
     fn capture_witness_at_loss_sets_witness_from_baseline_leaf_hash() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("file", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         let snap = TreeSnapshot::File(empty_leaf_entry());
         let expected = snap.hash();
         p.baseline = Some(snap);
@@ -1803,7 +1967,7 @@ mod tests {
     fn install_dir_current_sets_kind_and_current_atomically() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(p.kind.is_none(), "fresh Profile has unprobed kind");
         assert!(p.current.is_none());
 
@@ -1821,7 +1985,7 @@ mod tests {
     fn install_file_current_sets_kind_and_current_atomically() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("file", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         p.install_file_current(empty_leaf_entry());
 
@@ -1835,7 +1999,7 @@ mod tests {
     fn install_dir_current_idempotent_on_dir_kind() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_dir_current(empty_dir_snapshot());
 
         // Second install with a fresh snapshot.
@@ -1857,7 +2021,7 @@ mod tests {
     fn install_dir_current_panics_on_file_kinded_profile_in_debug() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_file_current(empty_leaf_entry());
         // Boundary-bypass: a future caller skips
         // `kind_agrees_or_finalize`; the setter's debug_assert fires.
@@ -1873,7 +2037,7 @@ mod tests {
     fn install_file_current_panics_on_dir_kinded_profile_in_debug() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_dir_current(empty_dir_snapshot());
         p.install_file_current(empty_leaf_entry());
     }
@@ -1882,7 +2046,7 @@ mod tests {
     fn capture_witness_at_loss_no_op_when_baseline_none() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         // Pre-populate witness; helper must not overwrite with None.
         p.last_settled_hash_at_loss = Some(0x00c0_ffee);
 
@@ -1912,7 +2076,7 @@ mod tests {
             .exclude(glob("m"))
             .build();
 
-        let p = Profile::new(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         let actual: Vec<&str> = p
             .exclude_strings
@@ -1929,7 +2093,7 @@ mod tests {
     fn profile_new_exclude_strings_empty_for_no_excludes() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(p.exclude_strings.is_empty());
     }
 
@@ -1946,7 +2110,7 @@ mod tests {
             .exclude(glob("*.bak"))
             .build();
 
-        let p = Profile::new(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS);
+        let p = Profile::new(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         let initial = Arc::strong_count(&p.exclude_strings);
         let sibling_a = Arc::clone(&p.exclude_strings);
@@ -2279,5 +2443,321 @@ mod tests {
         // Mutator returns None on non-Pending states.
         let mut idle = ProfileState::Idle;
         assert!(idle.descent_state_mut().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // State-machine setter / accessor API (clear_anchor_classification,
+    // materialize_anchor, transition_state, anchor_claim setters,
+    // burst projections, read accessors, delegators, take_current)
+    // -----------------------------------------------------------------------
+
+    use super::AnchorClaim;
+    use crate::resource::ResourceKind;
+
+    fn pending(r: ResourceId) -> ProfileState {
+        ProfileState::Pending(DescentState::new(
+            r,
+            DescentRemaining::from_vec(vec![CompactString::from("seg")]).expect("non-empty"),
+        ))
+    }
+
+    fn active_prefire(r: ResourceId) -> ProfileState {
+        ProfileState::Active(
+            ActiveBurst::PreFire(batching_burst(tid(1), tid(2), r)),
+            BurstFinish::ReturnToIdle,
+        )
+    }
+
+    fn active_postfire() -> ProfileState {
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                intent: BurstIntent::Standard,
+                phase: PostFirePhase::Rebasing,
+                force_walk_resources: BTreeSet::new(),
+            }),
+            BurstFinish::ReturnToIdle,
+        )
+    }
+
+    #[test]
+    fn profile_new_threads_kind_param() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let classified = Profile::new(
+            r,
+            cfg(),
+            MAX_SETTLE,
+            SETTLE,
+            NO_EVENTS,
+            Some(ResourceKind::Dir),
+        );
+        assert_eq!(classified.kind(), Some(ResourceKind::Dir));
+        let unprobed = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert_eq!(unprobed.kind(), None);
+    }
+
+    #[test]
+    fn read_accessors_mirror_fields() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+
+        assert!(matches!(p.state(), ProfileState::Idle));
+        assert_eq!(p.anchor_claim(), AnchorClaim::None);
+        assert_eq!(p.kind(), None);
+        assert!(p.baseline().is_none());
+        assert!(p.current().is_none());
+        assert_eq!(p.last_settled_hash_at_loss(), None);
+
+        let snap = TreeSnapshot::Dir(empty_dir_snapshot());
+        let h = snap.hash();
+        p.baseline = Some(snap.clone());
+        p.current = Some(snap);
+        p.kind = Some(ResourceKind::Dir);
+        p.anchor_claim = AnchorClaim::Held;
+        p.last_settled_hash_at_loss = Some(h);
+
+        assert_eq!(p.anchor_claim(), AnchorClaim::Held);
+        assert_eq!(p.kind(), Some(ResourceKind::Dir));
+        assert!(matches!(p.baseline(), Some(TreeSnapshot::Dir(_))));
+        assert!(matches!(p.current(), Some(TreeSnapshot::Dir(_))));
+        assert_eq!(p.last_settled_hash_at_loss(), Some(h));
+    }
+
+    #[test]
+    fn transition_state_replaces_and_returns_prior() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+
+        let prior = p.transition_state(pending(r));
+        assert!(matches!(prior, ProfileState::Idle));
+        assert!(matches!(p.state(), ProfileState::Pending(_)));
+
+        let prior = p.transition_state(ProfileState::Idle);
+        assert!(matches!(prior, ProfileState::Pending(_)));
+        assert!(matches!(p.state(), ProfileState::Idle));
+    }
+
+    #[test]
+    fn clear_anchor_classification_clears_triple_and_captures_witness() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let snap = TreeSnapshot::Dir(empty_dir_snapshot());
+        let expected = snap.hash();
+        p.kind = Some(ResourceKind::Dir);
+        p.baseline = Some(snap.clone());
+        p.current = Some(snap);
+
+        p.clear_anchor_classification();
+
+        assert_eq!(p.kind(), None);
+        assert!(p.baseline().is_none());
+        assert!(p.current().is_none());
+        assert_eq!(
+            p.last_settled_hash_at_loss(),
+            Some(expected),
+            "witness captured from baseline before the clear",
+        );
+    }
+
+    #[test]
+    fn clear_anchor_classification_preserves_prior_witness_when_baseline_none() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        // Already-lost shape: no baseline, witness already held.
+        p.last_settled_hash_at_loss = Some(0x00c0_ffee);
+        p.kind = Some(ResourceKind::Dir);
+
+        p.clear_anchor_classification();
+
+        assert_eq!(
+            p.last_settled_hash_at_loss(),
+            Some(0x00c0_ffee),
+            "capture is a no-op against None baseline — prior witness survives",
+        );
+        assert_eq!(p.kind(), None);
+    }
+
+    #[test]
+    fn materialize_anchor_installs_triple_from_pending() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.state = pending(r);
+
+        p.materialize_anchor(ResourceKind::Dir);
+
+        assert!(matches!(p.state(), ProfileState::Idle));
+        assert_eq!(p.anchor_claim(), AnchorClaim::Held);
+        assert_eq!(p.kind(), Some(ResourceKind::Dir));
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "state must be Pending")]
+    fn materialize_anchor_panics_when_not_pending() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        // Fresh Profile is Idle, not Pending — precondition breach.
+        p.materialize_anchor(ResourceKind::Dir);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "anchor_claim must be None")]
+    fn materialize_anchor_panics_when_claim_held() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.state = pending(r);
+        p.anchor_claim = AnchorClaim::Held;
+        p.materialize_anchor(ResourceKind::Dir);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "kind must be unprobed")]
+    fn materialize_anchor_panics_when_kind_probed() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.state = pending(r);
+        p.kind = Some(ResourceKind::Dir);
+        p.materialize_anchor(ResourceKind::Dir);
+    }
+
+    #[test]
+    fn anchor_claim_setters_are_idempotent() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+
+        p.install_anchor_claim_held();
+        assert_eq!(p.anchor_claim(), AnchorClaim::Held);
+        p.install_anchor_claim_held();
+        assert_eq!(
+            p.anchor_claim(),
+            AnchorClaim::Held,
+            "idempotent against Held"
+        );
+
+        p.release_anchor_claim_now();
+        assert_eq!(p.anchor_claim(), AnchorClaim::None);
+        p.release_anchor_claim_now();
+        assert_eq!(
+            p.anchor_claim(),
+            AnchorClaim::None,
+            "idempotent against None"
+        );
+    }
+
+    #[test]
+    fn pre_fire_burst_mut_some_only_on_prefire_and_mutation_persists() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+
+        assert!(p.pre_fire_burst_mut().is_none(), "Idle has no pre-fire");
+        p.state = pending(r);
+        assert!(p.pre_fire_burst_mut().is_none(), "Pending has no pre-fire");
+        p.state = active_postfire();
+        assert!(p.pre_fire_burst_mut().is_none(), "PostFire has no pre-fire");
+
+        p.state = active_prefire(r);
+        let pre = p.pre_fire_burst_mut().expect("PreFire carries the payload");
+        pre.forced = true;
+        assert!(
+            p.pre_fire_burst_mut().expect("still PreFire").forced,
+            "mutation through the projection persists",
+        );
+    }
+
+    #[test]
+    fn post_fire_burst_mut_some_only_on_postfire_and_mutation_persists() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+
+        assert!(p.post_fire_burst_mut().is_none(), "Idle has no post-fire");
+        p.state = active_prefire(r);
+        assert!(
+            p.post_fire_burst_mut().is_none(),
+            "PreFire has no post-fire"
+        );
+
+        p.state = active_postfire();
+        let post = p
+            .post_fire_burst_mut()
+            .expect("PostFire carries the payload");
+        post.force_walk_resources.insert(r);
+        assert!(
+            p.post_fire_burst_mut()
+                .expect("still PostFire")
+                .force_walk_resources
+                .contains(&r),
+            "mutation through the projection persists",
+        );
+    }
+
+    #[test]
+    fn delegators_route_to_profile_state() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+
+        // descent_state_mut: Some only on Pending; advancing persists.
+        assert!(p.descent_state_mut().is_none());
+        p.state = ProfileState::Pending(DescentState::new(
+            r,
+            DescentRemaining::from_vec(vec![CompactString::from("a"), CompactString::from("b")])
+                .expect("non-empty"),
+        ));
+        p.descent_state_mut()
+            .expect("Pending carries descent")
+            .remaining_components_mut()
+            .advance();
+        assert_eq!(
+            p.descent_state_mut()
+                .expect("still Pending")
+                .remaining_components()
+                .as_slice(),
+            &[CompactString::from("b")],
+        );
+
+        // mark/clear_active_for_reap delegate the bool semantics.
+        let mut q = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert!(!q.mark_active_for_reap(), "Idle cannot be marked");
+        assert!(!q.clear_active_reap(), "Idle has nothing to clear");
+        q.state = active_prefire(r);
+        assert!(q.mark_active_for_reap(), "Active flips to Reap");
+        assert!(q.mark_active_for_reap(), "already-Reap is idempotent true");
+        assert!(q.clear_active_reap(), "zombie revived");
+        assert!(!q.clear_active_reap(), "nothing left to clear");
+    }
+
+    #[test]
+    fn take_current_takes_and_is_idempotent() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.current = Some(TreeSnapshot::Dir(empty_dir_snapshot()));
+
+        let taken = p.take_current();
+        assert!(matches!(taken, Some(TreeSnapshot::Dir(_))));
+        assert!(p.current().is_none(), "take leaves None");
+        assert!(p.take_current().is_none(), "second take is idempotent");
     }
 }

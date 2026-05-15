@@ -1387,6 +1387,7 @@ mod tests {
                 MAX_SETTLE,
                 SETTLE,
                 NO_EVENTS,
+                None,
             ),
         );
         (e, pid)
@@ -1903,6 +1904,7 @@ mod tests {
                 MAX_SETTLE,
                 SETTLE,
                 NO_EVENTS,
+                None,
             ),
         );
         (e, pid, root, a, b)
@@ -2229,6 +2231,7 @@ mod tests {
                 MAX_SETTLE,
                 SETTLE,
                 NO_EVENTS,
+                None,
             ),
         );
         if let Some(p) = e.profiles.get_mut(pid) {
@@ -2284,6 +2287,7 @@ mod tests {
                 MAX_SETTLE,
                 SETTLE,
                 NO_EVENTS,
+                None,
             ),
         );
 

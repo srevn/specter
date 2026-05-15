@@ -381,6 +381,7 @@ mod tests {
                 MAX_SETTLE,
                 SETTLE,
                 ClassSet::EMPTY,
+                None,
             ),
         );
         (e, ProbeOwner::Profile(pid))
@@ -505,11 +506,11 @@ mod tests {
         let cfg = ScanConfig::builder().build();
         let pid1 = e.profiles.attach(
             &mut e.tree,
-            Profile::new(r1, cfg.clone(), MAX_SETTLE, SETTLE, ClassSet::EMPTY),
+            Profile::new(r1, cfg.clone(), MAX_SETTLE, SETTLE, ClassSet::EMPTY, None),
         );
         let pid2 = e.profiles.attach(
             &mut e.tree,
-            Profile::new(r2, cfg, MAX_SETTLE, SETTLE, ClassSet::EMPTY),
+            Profile::new(r2, cfg, MAX_SETTLE, SETTLE, ClassSet::EMPTY, None),
         );
         let owner1 = ProbeOwner::Profile(pid1);
         let owner2 = ProbeOwner::Profile(pid2);

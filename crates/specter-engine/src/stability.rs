@@ -238,15 +238,15 @@ mod tests {
         }
         let p_root = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         let p_mid = profiles.attach(
             &mut tree,
-            Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         let p_leaf = profiles.attach(
             &mut tree,
-            Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         (tree, profiles, p_root, p_mid, p_leaf)
     }
@@ -455,11 +455,11 @@ mod tests {
         }
         let _p_root = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         let p_leaf = profiles.attach(
             &mut tree,
-            Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
 
         // Initial parent edge: p_leaf → p_root (no mid yet).
@@ -469,7 +469,7 @@ mod tests {
         // rewrites its edge to the closer ancestor.
         let p_mid = profiles.attach(
             &mut tree,
-            Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS),
+            Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         recompute_parent_edges(&tree, &mut profiles, [p_leaf]);
 

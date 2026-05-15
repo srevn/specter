@@ -588,15 +588,12 @@ impl Engine {
     /// dispatch on the typed origin rather than re-deriving zombie
     /// state from `reap_pending`.
     ///
-    /// **Fresh-Profile bookkeeping that lives here.** Caches the
-    /// anchor's classified kind on the new Profile. `None` for a
-    /// `DescentScaffold` anchor (Pending path; descent's
-    /// materialisation branch writes the field) or a freshly
-    /// `ensure`'d-but-unprobed slot (the first Seed-Ok fallback in
-    /// `dispatch_seed_ok` writes the field). Existing Profiles already
-    /// carry the field from their own first-classify moment;
-    /// refreshing here would either no-op or trample the canonical
-    /// first observation.
+    /// **Fresh-Profile bookkeeping that lives here.** The anchor's
+    /// classified kind is read from the Tree slot and threaded through
+    /// [`Profile::new`]: `None` for a `DescentScaffold` anchor (descent
+    /// materialisation classifies it) or a freshly-`ensure`d-but-unprobed
+    /// slot (first Seed-Ok classifies it). Existing Profiles already
+    /// carry the field from their own first-classify moment.
     fn find_or_create_profile(
         &mut self,
         anchor: ResourceId,
@@ -613,22 +610,21 @@ impl Engine {
             };
             return (pid, origin);
         }
+        // Read the anchor's classified kind before construction:
+        // `profiles.attach` only registers Profile-side indices on the
+        // anchor slot, never its `kind`, so the slot's classification is
+        // identical before and after. Threading it through the
+        // constructor removes the post-attach re-borrow + `expect`.
+        let anchor_kind = self.tree.get(anchor).and_then(specter_core::Resource::kind);
         let p = Profile::new(
             anchor,
             req.config.clone(),
             req.max_settle,
             req.settle,
             req.events,
+            anchor_kind,
         );
         let pid = self.profiles.attach(&mut self.tree, p);
-        let anchor_kind = self.tree.get(anchor).and_then(specter_core::Resource::kind);
-        // `profiles.attach` just minted the slot — it's live by
-        // construction. Use `expect` to surface a structural-invariant
-        // breach rather than silently dropping the kind write.
-        self.profiles
-            .get_mut(pid)
-            .expect("find_or_create_profile: just-attached Profile must be live")
-            .kind = anchor_kind;
         (pid, ProfileOrigin::Fresh)
     }
 
@@ -1557,6 +1553,7 @@ mod tests {
                 Duration::from_secs(6),
                 Duration::from_millis(50),
                 specter_core::ClassSet::EMPTY,
+                None,
             ),
         );
         let pid2 = e.profiles.attach(
@@ -1567,6 +1564,7 @@ mod tests {
                 Duration::from_secs(6),
                 Duration::from_millis(50),
                 specter_core::ClassSet::EMPTY,
+                None,
             ),
         );
         let pid3 = e.profiles.attach(
@@ -1577,6 +1575,7 @@ mod tests {
                 Duration::from_secs(6),
                 Duration::from_millis(50),
                 specter_core::ClassSet::EMPTY,
+                None,
             ),
         );
 
@@ -1788,6 +1787,7 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_millis(50),
             specter_core::ClassSet::EMPTY,
+            None,
         );
         let pid = e.profiles.attach(&mut e.tree, profile);
 

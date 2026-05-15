@@ -682,6 +682,7 @@ fn profile_state_default_is_idle() {
         MAX_SETTLE,
         SETTLE,
         NO_EVENTS,
+        None,
     );
     assert!(matches!(p.state, ProfileState::Idle));
 }
