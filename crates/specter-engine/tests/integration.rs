@@ -249,7 +249,7 @@ fn drive_standard_burst_to_stable(
                 }),
                 t,
             );
-            if !out.effects.is_empty() {
+            if !out.effects().is_empty() {
                 return out;
             }
         }
@@ -319,7 +319,7 @@ fn golden_path_full_lifecycle() {
     );
     let seed_correlation =
         first_probe_correlation(&attach_out).expect("Seed Probe fires immediately");
-    assert!(attach_out.effects.is_empty());
+    assert!(attach_out.effects().is_empty());
 
     // Seed Ok → baseline = current = empty snapshot; → Idle; Unsuppress.
     let snap_seed = dir_snap(vec![]);
@@ -331,7 +331,7 @@ fn golden_path_full_lifecycle() {
         }),
         now + Duration::from_millis(1),
     );
-    assert!(seed_resp.effects.is_empty(), "Seed never emits Effects");
+    assert!(seed_resp.effects().is_empty(), "Seed never emits Effects");
     assert!(
         seed_resp
             .watch_ops
@@ -354,15 +354,15 @@ fn golden_path_full_lifecycle() {
             .iter()
             .any(|op| matches!(op, WatchOp::Suppress { .. }))
     );
-    assert!(fs_out.effects.is_empty());
+    assert!(fs_out.effects().is_empty());
 
     // Drive the Standard burst to a stable verdict (probing against the
     // empty snapshot; the burst stabilizes when current matches the
     // response). The walker advances time and injects probe responses.
     let pid = pid_of(&e, sid);
     let stable_out = drive_standard_burst_to_stable(&mut e, pid, snap_seed.clone(), t1);
-    assert_eq!(stable_out.effects.len(), 1);
-    assert!(!stable_out.effects[0].forced);
+    assert_eq!(stable_out.effects().len(), 1);
+    assert!(!stable_out.effects()[0].forced);
 
     // EffectComplete::Ok drives the burst out of Awaiting and into
     // Rebasing — a fresh probe is emitted at the anchor to capture the
@@ -370,7 +370,7 @@ fn golden_path_full_lifecycle() {
     let post_effect = e.step(
         Input::EffectComplete {
             sub: sid,
-            key: stable_out.effects[0].key(),
+            key: stable_out.effects()[0].key(),
             result: EffectOutcome::Ok,
         },
         t1 + SETTLE * 16,
@@ -596,9 +596,9 @@ fn force_fire_emits_effect_with_forced_true() {
             }),
             deadline_t,
         );
-        assert_eq!(out.effects.len(), 1);
+        assert_eq!(out.effects().len(), 1);
         assert!(
-            out.effects[0].forced,
+            out.effects()[0].forced,
             "force-fired Effect carries forced=true"
         );
     } else {

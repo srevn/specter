@@ -1,26 +1,96 @@
 //! `StepOutput` and its determinism contract.
 //!
-//! The sort guarantee is owned by the type itself: every consumer that
-//! returns `StepOutput` calls [`StepOutput::sort_for_emission`] before
-//! handing it back, so callers always see sorted slices. `SmallVec`
-//! tracks inline-slot validity via `MaybeUninit` — uninitialized slots
-//! are unreachable rather than depending on a `Default` sentinel.
+//! `effects` is sealed: the field is private, wrapped in
+//! [`SortedEffects`] whose mutators are module-private. Callers append
+//! via [`StepOutput::push_effect`] and read via [`StepOutput::effects`]
+//! / [`StepOutput::into_parts`], so observing effects in any order
+//! other than the emission sort is unrepresentable. The one residual:
+//! every `StepOutput`-returning entry point must call
+//! [`StepOutput::sort_for_emission`] before returning the value.
 
 use crate::diag::Diagnostic;
 use crate::effect::Effect;
 use crate::op::{ProbeOp, WatchOp};
 use smallvec::SmallVec;
 
+/// The `effects` stream in emission order.
+///
+/// Append-only from outside the module ([`StepOutput::push_effect`]);
+/// the order-establishing `reseal` and the unsorted `push_unsorted` are
+/// module-private, so the only public view ([`std::ops::Deref`] to
+/// `&[Effect]`) is always the sorted one.
+#[derive(Clone, Debug, Default)]
+pub struct SortedEffects(SmallVec<[Effect; 2]>);
+
+impl SortedEffects {
+    /// Append without re-establishing order. The companion
+    /// [`Self::reseal`] restores the invariant before the value escapes.
+    fn push_unsorted(&mut self, e: Effect) {
+        self.0.push(e);
+    }
+
+    /// Restore the emission order ([`Effect::sort_key`]).
+    fn reseal(&mut self) {
+        self.0.sort_by_key(Effect::sort_key);
+    }
+}
+
+impl std::ops::Deref for SortedEffects {
+    type Target = [Effect];
+    fn deref(&self) -> &[Effect] {
+        &self.0
+    }
+}
+
+/// The four owned streams yielded by [`StepOutput::into_parts`], in
+/// dispatch order: watch ops, probe ops, effects (emission-sorted),
+/// diagnostics.
+pub type StepOutputParts = (
+    SmallVec<[WatchOp; 2]>,
+    SmallVec<[ProbeOp; 4]>,
+    SmallVec<[Effect; 2]>,
+    SmallVec<[Diagnostic; 2]>,
+);
+
 #[derive(Debug, Default, Clone)]
 pub struct StepOutput {
     pub watch_ops: SmallVec<[WatchOp; 2]>,
     pub probe_ops: SmallVec<[ProbeOp; 4]>,
-    pub effects: SmallVec<[Effect; 2]>,
+    effects: SortedEffects,
     pub diagnostics: SmallVec<[Diagnostic; 2]>,
 }
 
 impl StepOutput {
-    /// Sort the three slices to the engine's determinism contract:
+    /// Append an [`Effect`] in unsorted (insertion) order.
+    /// [`Self::sort_for_emission`] re-establishes the contract before
+    /// the value is handed downstream.
+    pub fn push_effect(&mut self, e: Effect) {
+        self.effects.push_unsorted(e);
+    }
+
+    /// The emitted effects, always in sort order.
+    #[must_use]
+    pub const fn effects(&self) -> &SortedEffects {
+        &self.effects
+    }
+
+    /// Consume into the four owned streams, effects in emission order.
+    ///
+    /// Terminal-consumer drain: `self` is owned, so this is only
+    /// reachable on a fully built, already-resealed value (every
+    /// `StepOutput`-returning entry point reseals before returning).
+    /// Zero-copy — every stream moves out.
+    #[must_use]
+    pub fn into_parts(self) -> StepOutputParts {
+        (
+            self.watch_ops,
+            self.probe_ops,
+            self.effects.0,
+            self.diagnostics,
+        )
+    }
+
+    /// Sort the streams to the engine's determinism contract:
     /// `watch_ops` by [`WatchOp::resource`]; `probe_ops` by
     /// [`ProbeOp::owner`]; `effects` by [`Effect::sort_key`].
     /// `diagnostics` follow insertion order — they are not part of the
@@ -31,7 +101,7 @@ impl StepOutput {
     pub fn sort_for_emission(&mut self) {
         self.watch_ops.sort_by_key(WatchOp::resource);
         self.probe_ops.sort_by_key(ProbeOp::owner);
-        self.effects.sort_by_key(Effect::sort_key);
+        self.effects.reseal();
     }
 }
 
@@ -173,14 +243,14 @@ mod tests {
         let r_hi = rid(9);
         // Push out of order: (sub_b, hi), (sub_a, hi), (sub_a, lo).
         let mut out = StepOutput::default();
-        out.effects.push(effect(
+        out.push_effect(effect(
             DedupKey::Subtree {
                 sub: sub_b,
                 profile: prof,
             },
             r_hi,
         ));
-        out.effects.push(effect(
+        out.push_effect(effect(
             DedupKey::PerFile {
                 sub: sub_a,
                 profile: prof,
@@ -188,7 +258,7 @@ mod tests {
             },
             r_hi,
         ));
-        out.effects.push(effect(
+        out.push_effect(effect(
             DedupKey::PerFile {
                 sub: sub_a,
                 profile: prof,
@@ -199,7 +269,7 @@ mod tests {
 
         out.sort_for_emission();
 
-        let keys: Vec<(SubId, ResourceId)> = out.effects.iter().map(Effect::sort_key).collect();
+        let keys: Vec<(SubId, ResourceId)> = out.effects().iter().map(Effect::sort_key).collect();
         assert_eq!(keys, vec![(sub_a, r_lo), (sub_a, r_hi), (sub_b, r_hi)]);
     }
 }

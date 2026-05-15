@@ -29,7 +29,7 @@ impl MockSensor {
     pub fn observe(&mut self, out: &StepOutput) {
         self.watch_ops.extend(out.watch_ops.iter().cloned());
         self.probe_ops.extend(out.probe_ops.iter().cloned());
-        self.effects.extend(out.effects.iter().cloned());
+        self.effects.extend(out.effects().iter().cloned());
         self.diagnostics.extend(out.diagnostics.iter().cloned());
     }
 

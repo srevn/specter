@@ -237,7 +237,7 @@ fn drive_to_awaiting(
             );
             // Done when an Effect fires OR the burst returned to Idle.
             let is_idle = matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle);
-            if !out.effects.is_empty() || is_idle {
+            if !out.effects().is_empty() || is_idle {
                 return out;
             }
             last_out = out;
@@ -272,11 +272,11 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         now + Duration::from_millis(10),
     );
     assert_eq!(
-        stable_out.effects.len(),
+        stable_out.effects().len(),
         1,
         "one Effect emitted at stable verdict"
     );
-    let effect_key = stable_out.effects[0].key();
+    let effect_key = stable_out.effects()[0].key();
     let phase = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!("expected Active(Awaiting)"),
@@ -321,7 +321,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     // hash dedup suppresses the Effect (current == fired_subs).
     let later_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(40));
     assert!(
-        later_out.effects.is_empty(),
+        later_out.effects().is_empty(),
         "hash dedup suppresses idempotent re-fire — fire-cycle terminated cleanly",
     );
     // Burst returned to Idle directly (no Awaiting because count==0).
@@ -436,7 +436,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         snap.clone(),
         now + Duration::from_millis(10),
     );
-    let effect_key = stable_out.effects[0].key();
+    let effect_key = stable_out.effects()[0].key();
 
     // EffectComplete::Ok → Rebasing.
     e.step(
@@ -563,7 +563,7 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
-    let effect_key = stable_out.effects[0].key();
+    let effect_key = stable_out.effects()[0].key();
 
     // Force gate-deadline.
     let gate_t = now + Duration::from_millis(10) + MAX_SETTLE * 8;
@@ -629,7 +629,7 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
     let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
-    let effect_key = stable_out.effects[0].key();
+    let effect_key = stable_out.effects()[0].key();
 
     // Anchor terminal event → finalize_anchor_lost → finish_burst_to_idle.
     let lost_out = e.step(
@@ -685,7 +685,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
-    let effect_key = stable_out.effects[0].key();
+    let effect_key = stable_out.effects()[0].key();
 
     // EffectComplete::Ok → Rebasing.
     e.step(
@@ -750,7 +750,7 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
         now + Duration::from_millis(1),
     );
     assert!(
-        resp_out.effects.is_empty(),
+        resp_out.effects().is_empty(),
         "fresh Seed never fires Effects"
     );
     assert!(matches!(
@@ -783,7 +783,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
         snap.clone(),
         now + Duration::from_millis(10),
     );
-    let effect_key = stable_out.effects[0].key();
+    let effect_key = stable_out.effects()[0].key();
     let rebase_out = e.step(
         Input::EffectComplete {
             sub: sid,
@@ -815,7 +815,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
     let later = now + Duration::from_millis(40);
     let second_out = drive_to_awaiting(&mut e, pid, r, snap, later);
     assert!(
-        second_out.effects.is_empty(),
+        second_out.effects().is_empty(),
         "hash dedup suppresses the second fire — count == 0",
     );
     // Profile finished directly to Idle; no Awaiting.
@@ -875,7 +875,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         now + Duration::from_millis(10),
     );
     assert_eq!(
-        stable_out.effects.len(),
+        stable_out.effects().len(),
         2,
         "two PerStableFile Effects emitted",
     );
@@ -887,8 +887,8 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         phase,
         PostFirePhase::Awaiting { outstanding: 2, .. }
     ));
-    let key_a = stable_out.effects[0].key();
-    let key_b = stable_out.effects[1].key();
+    let key_a = stable_out.effects()[0].key();
+    let key_b = stable_out.effects()[1].key();
 
     // First completion: Ok → outstanding=1.
     e.step(
@@ -948,7 +948,7 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     let snap = dir_snap(vec![]);
     let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
     let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
-    let effect_key = stable_out.effects[0].key();
+    let effect_key = stable_out.effects()[0].key();
 
     // Detach the only Sub. Profile is Active(Awaiting) → reap_pending=true.
     let _detach_out = e.step(Input::DetachSub(sid), Instant::now());
@@ -1134,7 +1134,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
         snap_initial.clone(),
         now + Duration::from_millis(10),
     );
-    let effect_key = stable_out.effects[0].key();
+    let effect_key = stable_out.effects()[0].key();
 
     // User edits the child (concurrent with the in-flight Effect).
     e.step(
@@ -1174,7 +1174,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     );
     // No second Effect — the user's edit folded into baseline silently.
     assert!(
-        final_out.effects.is_empty(),
+        final_out.effects().is_empty(),
         "v1 loss-of-fidelity: user edit during fire-tail does not fire its own Effect",
     );
     assert!(matches!(
@@ -1231,8 +1231,8 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
         pre_emit.clone(),
         now + Duration::from_millis(10),
     );
-    assert_eq!(stable_out.effects.len(), 1, "burst 1 fires one Effect");
-    let effect_key = stable_out.effects[0].key();
+    assert_eq!(stable_out.effects().len(), 1, "burst 1 fires one Effect");
+    let effect_key = stable_out.effects()[0].key();
 
     // EffectComplete::Ok → Rebasing → rebase probe in flight.
     let rebase_out = e.step(
@@ -1282,7 +1282,7 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
     let phantom_out =
         drive_to_awaiting(&mut e, pid, r, post_effect, now + Duration::from_millis(40));
     assert!(
-        phantom_out.effects.is_empty(),
+        phantom_out.effects().is_empty(),
         "B1 dedup suppresses post-rebase phantom for non-idempotent command",
     );
     // Burst returned to Idle (no Awaiting because count==0).
@@ -1380,8 +1380,12 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         pre_emit.clone(),
         now + Duration::from_millis(10),
     );
-    assert_eq!(stable_out.effects.len(), 1, "one PerFile Effect for foo.rs");
-    let effect_key = stable_out.effects[0].key();
+    assert_eq!(
+        stable_out.effects().len(),
+        1,
+        "one PerFile Effect for foo.rs"
+    );
+    let effect_key = stable_out.effects()[0].key();
     let foo_resource = match &effect_key {
         DedupKey::PerFile { resource, .. } => *resource,
         DedupKey::Subtree { .. } => panic!("expected PerFile key"),
@@ -1436,7 +1440,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     let phantom_out =
         drive_to_awaiting(&mut e, pid, r, post_effect, now + Duration::from_millis(40));
     assert!(
-        phantom_out.effects.is_empty(),
+        phantom_out.effects().is_empty(),
         "B1 dedup suppresses PerFile phantom for non-idempotent format",
     );
     assert!(matches!(

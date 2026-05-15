@@ -1343,7 +1343,7 @@ mod tests {
         assert!(has_diag);
         assert!(out.watch_ops.is_empty());
         assert!(out.probe_ops.is_empty());
-        assert!(out.effects.is_empty());
+        assert!(out.effects().is_empty());
     }
 
     #[test]
@@ -1418,7 +1418,7 @@ mod tests {
         );
         assert!(out.watch_ops.is_empty());
         assert!(out.probe_ops.is_empty());
-        assert!(out.effects.is_empty());
+        assert!(out.effects().is_empty());
         let has_diag = out.diagnostics.iter().any(|d| {
             matches!(
                 d,
@@ -1440,7 +1440,7 @@ mod tests {
         );
         assert!(out.watch_ops.is_empty());
         assert!(out.probe_ops.is_empty());
-        assert!(out.effects.is_empty());
+        assert!(out.effects().is_empty());
         assert!(out.diagnostics.is_empty());
     }
 
@@ -1693,7 +1693,7 @@ mod tests {
         assert!(e.subs.is_empty(), "no Sub recorded in registry");
         assert!(out.watch_ops.is_empty(), "no watch ops emitted");
         assert!(out.probe_ops.is_empty(), "no probe ops emitted");
-        assert!(out.effects.is_empty(), "no effects emitted");
+        assert!(out.effects().is_empty(), "no effects emitted");
         assert!(out.diagnostics.iter().any(|d| matches!(
             d,
             specter_core::Diagnostic::AttachPathInvalid { path, hint }
@@ -1740,7 +1740,7 @@ mod tests {
         assert!(e.subs.is_empty(), "no Sub recorded in registry");
         assert!(out.watch_ops.is_empty(), "no watch ops emitted");
         assert!(out.probe_ops.is_empty(), "no probe ops emitted");
-        assert!(out.effects.is_empty(), "no effects emitted");
+        assert!(out.effects().is_empty(), "no effects emitted");
         assert!(out.diagnostics.iter().any(|d| matches!(
             d,
             specter_core::Diagnostic::AttachPathInvalid { path: p, hint }
@@ -1781,7 +1781,7 @@ mod tests {
         assert!(e.subs.is_empty(), "no Sub recorded in registry");
         assert!(out.watch_ops.is_empty(), "no watch ops emitted");
         assert!(out.probe_ops.is_empty(), "no probe ops emitted");
-        assert!(out.effects.is_empty(), "no effects emitted");
+        assert!(out.effects().is_empty(), "no effects emitted");
 
         let stale_count = out
             .diagnostics

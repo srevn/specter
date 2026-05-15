@@ -630,7 +630,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
         "drop happens before drive_burst — Profile stays Idle",
     );
     assert!(out.probe_ops.is_empty(), "no probe queued");
-    assert!(out.effects.is_empty(), "no effects emitted");
+    assert!(out.effects().is_empty(), "no effects emitted");
 }
 
 #[test]
@@ -1641,7 +1641,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         t2,
     );
     let effect = stable_out
-        .effects
+        .effects()
         .first()
         .cloned()
         .expect("Standard-Ok stable verdict fires one Effect");

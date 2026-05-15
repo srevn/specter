@@ -342,7 +342,7 @@ fn discard_anchor_state_no_op_on_already_lost_profile() {
         "no diagnostics; got {:?}",
         out.diagnostics,
     );
-    assert!(out.effects.is_empty());
+    assert!(out.effects().is_empty());
 }
 
 #[test]

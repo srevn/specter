@@ -294,7 +294,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         }),
         t2,
     );
-    assert!(out.effects.is_empty(), "reap_pending suppresses Effect");
+    assert!(out.effects().is_empty(), "reap_pending suppresses Effect");
     assert!(
         e.profiles().get(pid).is_none(),
         "Profile reaped at burst end"

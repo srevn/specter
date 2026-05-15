@@ -398,7 +398,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         "parent does NOT reconfirm at child stable — child's Effect still in flight",
     );
     let child_effect = stable_out
-        .effects
+        .effects()
         .first()
         .cloned()
         .expect("child fired one Effect at stable verdict");

@@ -723,27 +723,33 @@ impl EngineDriver {
     /// `Prober::submit`, `WakeHandle::wake`, `tracing::*`) — none
     /// requires `&mut self`.
     fn forward(&self, out: StepOutput) {
-        for op in out.watch_ops {
+        // Terminal-consumer drain: `out` is already resealed (every
+        // `StepOutput`-returning entry point sorts before returning), so
+        // a single by-value destructure preserves the sort and the
+        // dispatch order below without one clone per Effect.
+        let (watch_ops, probe_ops, effects, diagnostics) = out.into_parts();
+
+        for op in watch_ops {
             match self.sides.watch_ops_tx.send(op) {
                 Ok(()) => self.wake_handle.wake(),
                 Err(_) => tracing::warn!("watch_ops channel disconnected; dropping op"),
             }
         }
 
-        for op in out.probe_ops {
+        for op in probe_ops {
             match op {
                 ProbeOp::Probe { request } => self.prober.submit(request),
                 ProbeOp::Cancel { owner } => self.prober.cancel(owner),
             }
         }
 
-        for eff in out.effects {
+        for eff in effects {
             if self.sides.effects_tx.send(eff).is_err() {
                 tracing::warn!("effects channel disconnected; dropping effect");
             }
         }
 
-        for diag in out.diagnostics {
+        for diag in diagnostics {
             log_diagnostic(&diag);
         }
     }

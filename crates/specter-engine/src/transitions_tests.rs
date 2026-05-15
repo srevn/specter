@@ -584,7 +584,7 @@ fn engine_dispatch_through_shim_matches_v4_behaviour() {
     let p = e.profiles.get(pid).unwrap();
     assert!(matches!(p.state(), ProfileState::Idle));
     assert!(p.current().is_some(), "Seed-Ok sets current via shim");
-    assert!(out.effects.is_empty(), "Seed bursts never fire Effects");
+    assert!(out.effects().is_empty(), "Seed bursts never fire Effects");
 }
 
 #[test]
@@ -607,7 +607,7 @@ fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
     assert!(matches!(p.state(), ProfileState::Idle));
     assert!(p.baseline().is_some());
     assert!(p.current().is_some());
-    assert!(out.effects.is_empty(), "Seed bursts never fire Effects");
+    assert!(out.effects().is_empty(), "Seed bursts never fire Effects");
     // Anchor unsuppressed.
     let unsuppress = out
         .watch_ops
@@ -782,8 +782,12 @@ fn standard_burst_stable_emits_effect_and_awaits() {
         "stable verdict transitions to Awaiting with one outstanding Effect; got {:?}",
         burst.phase,
     );
-    assert_eq!(out.effects.len(), 1, "one Effect emitted at stable verdict");
-    let eff = &out.effects[0];
+    assert_eq!(
+        out.effects().len(),
+        1,
+        "one Effect emitted at stable verdict"
+    );
+    let eff = &out.effects()[0];
     assert!(!eff.forced);
     // Engine carries the lowered ActionProgram; the actuator resolves
     // argv at spawn time. Assert on the template's literal-only first arg
@@ -903,7 +907,7 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
     );
 
     assert_eq!(
-        out.effects.len(),
+        out.effects().len(),
         1,
         "fresh Sub must fire on first stable verdict, even on a phantom \
          (`baseline.hash() == current.hash()`); `fired_subs.contains` \
@@ -997,8 +1001,8 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         }),
         t2,
     );
-    assert_eq!(out.effects.len(), 1);
-    let eff = &out.effects[0];
+    assert_eq!(out.effects().len(), 1);
+    let eff = &out.effects()[0];
     // File-kind anchor: actuator's `compute_cwd` returns parent dir.
     // The engine's job here is to pin (anchor_path, anchor_kind) so the
     // actuator's compute_cwd reaches "parentdir". The original cwd
@@ -1140,7 +1144,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
 
     // (3) Stable verdict (same leaf hash) + dirty=0 ⇒ exactly one Effect fires.
     assert_eq!(
-        out.effects.len(),
+        out.effects().len(),
         1,
         "stable verdict + dirty=0 ⇒ exactly one Effect fires",
     );
@@ -1204,9 +1208,9 @@ fn standard_burst_force_fires_on_max_settle() {
             matches!(phase, PostFirePhase::Awaiting { outstanding: 1, .. }),
             "force-fired stable verdict transitions to Awaiting; got {phase:?}",
         );
-        assert_eq!(out.effects.len(), 1);
+        assert_eq!(out.effects().len(), 1);
         assert!(
-            out.effects[0].forced,
+            out.effects()[0].forced,
             "force-fired Effect must carry forced=true",
         );
     }
@@ -1808,7 +1812,7 @@ fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
         )
     });
     assert!(has_diag, "Failed in Idle diagnoses as late completion");
-    assert!(out.effects.is_empty());
+    assert!(out.effects().is_empty());
     assert!(out.probe_ops.is_empty());
     assert_eq!(
         e.profiles.get(pid).unwrap().baseline().is_some(),
@@ -1888,14 +1892,14 @@ fn effect_emission_carries_diff_when_needs_diff() {
             }),
             t,
         );
-        if !out.effects.is_empty() {
+        if !out.effects().is_empty() {
             effect_out = Some(out);
             break;
         }
     }
     let out = effect_out.expect("burst stabilized and emitted an Effect");
-    assert_eq!(out.effects.len(), 1);
-    let effect = &out.effects[0];
+    assert_eq!(out.effects().len(), 1);
+    let effect = &out.effects()[0];
     assert!(
         effect.diff().is_some(),
         "needs_diff Effect carries the Diff"
@@ -2667,7 +2671,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
         }),
         t2,
     );
-    assert!(out.effects.is_empty(), "reap_pending suppresses Effect");
+    assert!(out.effects().is_empty(), "reap_pending suppresses Effect");
     assert!(e.profiles.get(pid).is_none(), "Profile reaped at burst end");
 }
 
@@ -3245,7 +3249,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     );
     // Stable; baseline is empty, current has 2 files → diff.created has 2.
     let per_file_effects: Vec<&specter_core::Effect> = out
-        .effects
+        .effects()
         .iter()
         .filter(|e| matches!(&e.key(), DedupKey::PerFile { sub, .. } if *sub == sid))
         .collect();
@@ -3394,7 +3398,7 @@ fn per_stable_file_skips_dir_entries() {
     );
 
     let per_file_effects: Vec<&specter_core::Effect> = out
-        .effects
+        .effects()
         .iter()
         .filter(|e| matches!(&e.key(), DedupKey::PerFile { sub, .. } if *sub == sid))
         .collect();
@@ -3501,7 +3505,7 @@ fn records_fired_subs_after_subtree_effect() {
     let out = drive_to_first_effect(&mut e, pid, root, now);
 
     // First Effect fires (no prior emission).
-    assert_eq!(out.effects.len(), 1, "first Standard-Ok fires Effect");
+    assert_eq!(out.effects().len(), 1, "first Standard-Ok fires Effect");
     // fired_subs now has one entry for the SubtreeRoot key.
     let p = e.profiles.get(pid).unwrap();
     assert_eq!(p.fired_subs.len(), 1);
@@ -3526,13 +3530,13 @@ fn subtree_effect_target_is_anchor_at_emission() {
     let now = Instant::now();
     let out = drive_to_first_effect(&mut e, pid, root, now);
 
-    assert_eq!(out.effects.len(), 1, "Subtree-Ok fires one Effect");
+    assert_eq!(out.effects().len(), 1, "Subtree-Ok fires one Effect");
     assert!(
-        matches!(&out.effects[0].key(), DedupKey::Subtree { profile, .. } if *profile == pid),
+        matches!(&out.effects()[0].key(), DedupKey::Subtree { profile, .. } if *profile == pid),
         "Effect is keyed Subtree at the burst's Profile",
     );
     assert_eq!(
-        out.effects[0].sort_key().1,
+        out.effects()[0].sort_key().1,
         root,
         "Subtree.target is the Profile anchor at emission time",
     );
@@ -3592,7 +3596,10 @@ fn recovery_seed_no_prior_emit_does_not_fire() {
         }),
         Instant::now(),
     );
-    assert!(out.effects.is_empty(), "fresh-Profile Seed fires no Effect");
+    assert!(
+        out.effects().is_empty(),
+        "fresh-Profile Seed fires no Effect"
+    );
 }
 
 /// Standard burst with a per-stable-file Sub: drift filter is `None`,
@@ -3671,14 +3678,14 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
             }),
             t,
         );
-        if !out.effects.is_empty() {
+        if !out.effects().is_empty() {
             effect_out = Some(out);
             break;
         }
     }
     let out = effect_out.expect("Standard burst stabilised and emitted");
     assert_eq!(
-        out.effects.len(),
+        out.effects().len(),
         1,
         "Standard burst with PerFile Sub fires one Effect for the new file",
     );
@@ -3836,12 +3843,12 @@ fn drive_to_rebasing(
 ) -> specter_core::ProbeCorrelation {
     let stable_out = drive_to_first_effect(e, pid, root, now);
     assert_eq!(
-        stable_out.effects.len(),
+        stable_out.effects().len(),
         1,
         "Standard stable verdict fires one Effect; got {:?}",
-        stable_out.effects,
+        stable_out.effects(),
     );
-    let key = stable_out.effects[0].key();
+    let key = stable_out.effects()[0].key();
     let rebase_out = e.step(
         Input::EffectComplete {
             sub: sid,
@@ -4095,8 +4102,8 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
     let pid = e.subs.get(sid).unwrap().profile;
 
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
-    assert_eq!(stable_out.effects.len(), 1, "stable verdict fires Effect");
-    let key = stable_out.effects[0].key();
+    assert_eq!(stable_out.effects().len(), 1, "stable verdict fires Effect");
+    let key = stable_out.effects()[0].key();
 
     // Look up the descendant the standard burst's reconcile created.
     // `drive_to_first_effect` ships `[("a.rs", File, 1)]` as the
@@ -4194,7 +4201,7 @@ fn rebasing_without_absorbed_events_ships_empty_force_walk() {
     let (mut e, pid, sid, root, _now0) = engine_with_attached_sub();
     let now = Instant::now();
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
-    let key = stable_out.effects[0].key();
+    let key = stable_out.effects()[0].key();
 
     // No FsEvent during Awaiting — drive directly to EffectComplete.
     let rebase_out = e.step(
@@ -4421,7 +4428,7 @@ fn dispatch_seed_ok_drift_branch_clears_last_settled_hash_at_loss_eagerly() {
     e.dispatch_seed_ok(pid, TreeSnapshot::Dir(dir_tree_snap(vec![])), now, &mut out);
 
     // Drift branch must have fired one Effect.
-    assert_eq!(out.effects.len(), 1, "drift branch emitted one Effect");
+    assert_eq!(out.effects().len(), 1, "drift branch emitted one Effect");
 
     let p = e.profiles.get(pid).unwrap();
     assert!(
@@ -4691,18 +4698,13 @@ mod props {
     }
 
     fn extend_step_output(dst: &mut StepOutput, src: StepOutput) {
-        for op in src.watch_ops {
-            dst.watch_ops.push(op);
+        let (watch_ops, probe_ops, effects, diagnostics) = src.into_parts();
+        dst.watch_ops.extend(watch_ops);
+        dst.probe_ops.extend(probe_ops);
+        for ef in effects {
+            dst.push_effect(ef);
         }
-        for op in src.probe_ops {
-            dst.probe_ops.push(op);
-        }
-        for ef in src.effects {
-            dst.effects.push(ef);
-        }
-        for d in src.diagnostics {
-            dst.diagnostics.push(d);
-        }
+        dst.diagnostics.extend(diagnostics);
     }
 
     fn fresh_engine_with_sub() -> (
@@ -4879,7 +4881,7 @@ mod props {
                 }),
                 now,
             );
-            prop_assert!(out.effects.is_empty(), "Seed bursts never emit Effects");
+            prop_assert!(out.effects().is_empty(), "Seed bursts never emit Effects");
         }
 
         /// `prop_dirty_descendants_clamps_at_zero` — I4 on a single-Profile

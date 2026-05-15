@@ -159,9 +159,9 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         }),
         resp_t,
     );
-    assert_eq!(stable_out.effects.len(), 1, "stable verdict fires Effect");
+    assert_eq!(stable_out.effects().len(), 1, "stable verdict fires Effect");
     assert!(
-        !stable_out.effects[0].forced,
+        !stable_out.effects()[0].forced,
         "post-fix burst converges before burst_deadline; \
          `forced = true` would mean the regression is back",
     );

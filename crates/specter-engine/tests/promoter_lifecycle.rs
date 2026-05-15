@@ -344,9 +344,9 @@ fn full_lifecycle_attach_promote_seed_reap() {
         now,
     );
     assert!(
-        baseline_out.effects.is_empty(),
+        baseline_out.effects().is_empty(),
         "fresh Seed verdict establishes baseline without firing; got effects={:?}",
-        baseline_out.effects,
+        baseline_out.effects(),
     );
     {
         let p = e.profiles().get(dynamic_profile).expect("Profile alive");

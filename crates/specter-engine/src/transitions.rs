@@ -2116,7 +2116,7 @@ impl Engine {
     /// holds the Subs.
     ///
     /// Returns an [`EmitOutcome`] whose `count` is the number of Effects
-    /// pushed onto `out.effects`. Callers consume this to decide whether
+    /// appended to `out`. Callers consume this to decide whether
     /// to enter the `Awaiting` phase (`count > 0`) or short-circuit to
     /// `finish_burst_to_idle` (dedup-hash suppressed everything, no Subs
     /// matched, or the burst is flagged [`BurstFinish::Reap`]).
@@ -2190,7 +2190,7 @@ impl Engine {
         let effect_forced = mode.effect_forced();
 
         // Snapshot the Sub IDs to avoid holding `&self.subs` across the
-        // loop body's `out.effects.push`.
+        // loop body's `out.push_effect`.
         let sub_ids: Vec<SubId> = self.subs.at(profile_id).to_vec();
         let mut count: u32 = 0;
         for sub_id in sub_ids {
@@ -2245,7 +2245,7 @@ impl Engine {
                     let Some(sub) = self.subs.get(sub_id) else {
                         continue;
                     };
-                    out.effects.push(Effect::subtree(
+                    out.push_effect(Effect::subtree(
                         EffectCommon {
                             sub: sub_id,
                             profile: profile_id,
@@ -2314,7 +2314,7 @@ impl Engine {
     /// covered entries), a fresh Resource is created with no `watch_demand`
     /// contribution.
     ///
-    /// Returns the number of Effects pushed to `out.effects`. The caller
+    /// Returns the number of Effects appended to `out`. The caller
     /// (`emit_effects`) sums this into the [`EmitOutcome.count`] it returns.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -2394,7 +2394,7 @@ impl Engine {
                 continue;
             };
             let log_output = sub.log_output;
-            out.effects.push(Effect::per_file(
+            out.push_effect(Effect::per_file(
                 EffectCommon {
                     sub: sub_id,
                     profile: profile_id,
@@ -2528,7 +2528,7 @@ struct EventCarriers {
 }
 
 /// Outcome of an [`Engine::emit_effects`] call. `count` is the number of
-/// `out.effects.push(...)` invocations that survived dedup-hash
+/// `out.push_effect(...)` invocations that survived dedup-hash
 /// suppression and Sub-scope routing — i.e., Effects that the Actuator
 /// will actually run.
 ///
