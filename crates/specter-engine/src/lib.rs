@@ -10,7 +10,7 @@ mod coverage;
 mod descent;
 mod engine;
 mod path;
-mod probe_channel;
+mod probe;
 mod promoter;
 mod promoter_claims;
 mod reconcile;

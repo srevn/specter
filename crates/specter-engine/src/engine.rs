@@ -34,7 +34,7 @@ use specter_core::{
 // Per-Resource bookkeeping.
 use specter_core::{ClassSet, ContribKey};
 // Probe + effect correlation.
-use specter_core::{CorrelationId, ProbeOwner};
+use specter_core::{CorrelationId, ProbeCorrelation, ProbeOwner};
 // Engine step I/O.
 use specter_core::{Diagnostic, Input, StepOutput};
 use std::time::{Duration, Instant};
@@ -74,17 +74,29 @@ pub struct Engine {
     pub(crate) timers: TimerHeap,
     /// The engine-wide [`ProbeCorrelation`] monotone floor — the one
     /// irreducible engine-resident probe datum now that every
-    /// probe-bearing fact homes on its owner's state slot. See
-    /// [`crate::probe_channel::ProbeChannel`] for the mint API and the
-    /// state-derived projection surface beside it.
-    pub(crate) probe_channel: crate::probe_channel::ProbeChannel,
+    /// probe-bearing fact homes on its owner's state slot. Driven
+    /// solely by [`Engine::mint_probe_correlation`]; see
+    /// [`crate::probe`] for the mint contract and the state-derived
+    /// projection surface beside it. Phantom-typed distinct from
+    /// `effect_correlations`: the two id spaces stay structurally
+    /// separate at the type level.
+    pub(crate) correlations: MonotonicCounter<ProbeCorrelation>,
     /// Monotonic counter for [`CorrelationId`] minting. Bumped at
     /// every `Effect` push in `transitions.rs::emit_effects` so the
     /// actuator-side coalescer can correlate completions back to the
     /// originating Effect across the Latest dedup. Phantom-typed
-    /// distinct from the channel's probe-side counter: the two id
-    /// spaces stay structurally separate at the type level.
+    /// distinct from the probe-side counter: the two id spaces stay
+    /// structurally separate at the type level.
     pub(crate) effect_correlations: MonotonicCounter<CorrelationId>,
+    /// Debug-only consume-once tripwire — the cross-step witness that
+    /// no [`ProbeCorrelation`] reaches a `dispatch_*` arm twice. The
+    /// structural laws (core slot arm-once, [`Engine::take_owner_probe`]
+    /// disarm-once) make the violation unconstructable; this records
+    /// the per-owner high-water dispatched correlation so a property
+    /// test or fuzzer surfaces a regression as a panic. Absent in
+    /// release: zero cost, zero footprint.
+    #[cfg(debug_assertions)]
+    pub(crate) dispatch_ledger: crate::probe::DispatchLedger,
     /// Reusable scratch buffer for parent-edge recomputation. The
     /// `collect_in_subtree` / `collect_pointing_at` producers in
     /// [`crate::stability`] fill this from an immutable
@@ -1530,11 +1542,11 @@ mod tests {
     }
 
     #[test]
-    fn probe_channel_open_is_monotonic_per_owner() {
-        // Successive probe correlations are globally monotone: each
-        // `mint_probe_correlation` advances the engine-wide counter,
-        // yielding strictly-increasing distinct ids in one id space
-        // (no per-owner channel state — slots hold their own).
+    fn mint_probe_correlation_is_monotone() {
+        // Successive `mint_probe_correlation` calls yield strictly
+        // increasing, globally-unique correlations drawn off the one
+        // engine-wide monotone floor — distinct ids in a single id
+        // space (owners' slots hold their own correlation).
         let mut e = Engine::new();
         let a = e.mint_probe_correlation();
         let b = e.mint_probe_correlation();
@@ -1555,7 +1567,7 @@ mod tests {
     #[should_panic(expected = "MonotonicCounter")]
     fn mint_probe_correlation_panics_on_counter_saturation() {
         let mut e = Engine::new();
-        e.probe_channel.prime_counter(u64::MAX);
+        e.correlations.prime(u64::MAX);
         let _ = e.mint_probe_correlation();
     }
 
@@ -1567,7 +1579,7 @@ mod tests {
         assert!(e.subs.is_empty());
         assert!(e.timers.is_empty());
         assert!(e.next_deadline().is_none());
-        assert_eq!(e.probe_channel.counter_peek(), 0);
+        assert_eq!(e.correlations.peek(), 0);
         assert_eq!(e.effect_correlations.peek(), 0);
     }
 

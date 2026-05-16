@@ -1018,8 +1018,8 @@ fn descent_remaining_from_empty_vec_is_none() {
 // Probe-channel discipline (post-refactor invariants)
 //
 // I5 ("at most one outstanding probe per Profile") is enforced
-// structurally by the engine's `ProbeChannel` (single map entry per
-// owner; `open()` panics unconditionally on double-open). The tests
+// structurally by the owner state's single `ProbeSlot` (one owner ⇒
+// one state variant ⇒ one slot). The tests
 // below pin the surrounding behaviour: clear-on-cancel,
 // recovery-overlap accounting, and the cancel-first contract on
 // `release_descent_prefix_claim`.

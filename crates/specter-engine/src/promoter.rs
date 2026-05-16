@@ -47,7 +47,7 @@
 use crate::Engine;
 use crate::descent::{MaterializeResult, kind_from_entry};
 use crate::path::empty_path;
-use crate::probe_channel::ProbeRoute;
+use crate::probe::ProbeRoute;
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
@@ -557,6 +557,8 @@ impl Engine {
             "consume-once: promoter slot disarm must yield the gated \
              correlation (promoter = {promoter_id:?})",
         );
+        #[cfg(debug_assertions)]
+        self.dispatch_ledger.record(owner, received);
 
         match route {
             Some(ProbeRoute::Descent) => match response.outcome {

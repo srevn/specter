@@ -19,7 +19,7 @@
 use crate::Engine;
 use crate::engine::is_timer_referenced;
 use crate::path::empty_path;
-use crate::probe_channel::ProbeRoute;
+use crate::probe::ProbeRoute;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use compact_str::CompactString;
 use smallvec::SmallVec;
@@ -282,7 +282,7 @@ impl Engine {
     /// old channel close-on-response.
     ///
     /// **Routing.** [`Engine::probe_route`] reads the routing class off
-    /// state pre-disarm ([`crate::probe_channel::ProbeRoute`] is
+    /// state pre-disarm ([`crate::probe::ProbeRoute`] is
     /// [`Copy`]; disarm leaves the carrier variant intact). `None` is
     /// dead-by-construction for a Profile owner that passed the
     /// staleness gate (the matched correlation lives on exactly one
@@ -318,6 +318,8 @@ impl Engine {
             "consume-once: state-slot disarm must yield the gated correlation \
              (profile = {profile_id:?})",
         );
+        #[cfg(debug_assertions)]
+        self.dispatch_ledger.record(owner, received);
 
         match route {
             Some(ProbeRoute::Verifying { intent, forced }) => {
@@ -2581,9 +2583,9 @@ enum AwaitAction {
 /// Per-Promoter dispatch projection used by [`Engine::on_sensor_overflow`].
 /// Computed under a short `&self.promoters` borrow, then dispatched
 /// under `&mut self` — splitting the borrow lifetimes is the only way
-/// to thread the post-state-read calls (`probe_channel.open`,
-/// `dispatch_next_enumeration`) through Rust's borrow rules without
-/// re-querying the registry per access.
+/// to thread the post-state-read calls (`mint_probe_correlation` then
+/// the slot arm, `dispatch_next_enumeration`) through Rust's borrow
+/// rules without re-querying the registry per access.
 ///
 /// Variants:
 /// - `DescentProbe(prefix)`: `PrefixPending` Promoter with no

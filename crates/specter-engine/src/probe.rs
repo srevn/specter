@@ -7,12 +7,13 @@
 //! counter — plus the thin state-derived surface the response path
 //! reads through:
 //!
-//! 1. **Correlation monotonicity for the probe id space.**
-//!    [`ProbeChannel`] is the sole probe-correlation mint site;
-//!    [`Engine::mint_probe_correlation`] is its only driver. The
-//!    phantom-typed [`MonotonicCounter`] makes cross-space misuse
-//!    (minting a [`specter_core::CorrelationId`] from here, or vice
-//!    versa) a compile error, and saturation an unconditional panic.
+//! 1. **Correlation monotonicity for the probe id space.** The
+//!    engine-wide mint floor is the bare `Engine.correlations`
+//!    [`MonotonicCounter`] field, driven solely by
+//!    [`Engine::mint_probe_correlation`]. The phantom-typed counter
+//!    makes cross-space misuse (minting a
+//!    [`specter_core::CorrelationId`] from it, or vice versa) a compile
+//!    error, and saturation an unconditional panic.
 //! 2. **State-derived projections.** [`Engine::pending_probe_for`] (the
 //!    staleness identity), [`Engine::probe_route`] (the routing class),
 //!    and [`Engine::take_owner_probe`] (the single consume) read or
@@ -26,9 +27,14 @@
 //!    are the sole [`ProbeOp::Probe`] construction sites — stateless
 //!    typed constructors that live here because they belong to "probe
 //!    wiring" even though they touch no engine state.
+//! 4. **Consume-once tripwire.** [`DispatchLedger`] (debug builds only)
+//!    records the high-water correlation dispatched per owner. The
+//!    structural laws (arm-once on the core slot, disarm-once via
+//!    [`Engine::take_owner_probe`]) make a double-dispatch
+//!    unconstructable; the ledger is the cross-step runtime witness
+//!    that pins it under fuzzing and property tests.
 
 use crate::Engine;
-use crate::counter::MonotonicCounter;
 use specter_core::{
     ActiveBurst, BurstIntent, DirSnapshot, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOp,
     ProbeOwner, ProbeRequest, Profile, ProfileState, PromoterState, ResourceId, ScanConfig,
@@ -37,25 +43,6 @@ use specter_core::{
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
-
-/// The engine-wide probe-correlation floor.
-///
-/// Every probe-bearing fact lives on its owner's state slot; the one
-/// irreducible engine-resident probe datum is this monotone counter —
-/// the single id space all probe correlations are minted from, so a
-/// slot-held correlation is globally unique against every other.
-///
-/// **Construction.** Initialised via `Default` at [`Engine::new`]; the
-/// counter starts at zero.
-///
-/// **Invariant.** The counter advances monotonically; saturation
-/// panics unconditionally via [`MonotonicCounter::next`]
-/// (release-runnable) — silent wrap would duplicate ids and corrupt
-/// stale-response detection.
-#[derive(Debug, Default)]
-pub(crate) struct ProbeChannel {
-    counter: MonotonicCounter<ProbeCorrelation>,
-}
 
 /// State-derived routing class for a probe response — what the
 /// dispatcher needs that the response wire does not supply.
@@ -92,31 +79,41 @@ pub(crate) enum ProbeRoute {
     Enumerating { target: ResourceId },
 }
 
-impl ProbeChannel {
-    /// Mint a fresh [`ProbeCorrelation`] off the monotone floor. The
-    /// sole probe-correlation mint primitive: every state-resident slot
-    /// arms through here (via [`Engine::mint_probe_correlation`]) so
-    /// slot-held correlations stay globally unique — one id space.
-    ///
-    /// **Counter saturation.** Inherited from
-    /// [`MonotonicCounter::next`]: unconditional panic at [`u64::MAX`].
-    #[must_use]
-    pub(crate) fn mint(&mut self) -> ProbeCorrelation {
-        self.counter.next()
-    }
+/// Debug-only consume-once tripwire.
+///
+/// The structural laws make a double-dispatch unconstructable: the
+/// core slot's `arm` asserts arm-once, and [`Engine::take_owner_probe`]
+/// disarms exactly once before any dispatch. This ledger is the
+/// *cross-step runtime witness* of that property — a
+/// [`specter_core::ProbeSlot`] is a single-step value and cannot carry
+/// per-owner history, so the engine owns the dispatch-once half of the
+/// proof. Correlations are minted off one monotone floor, so a
+/// correctly-consumed sequence dispatches strictly increasing
+/// correlations per owner; re-dispatching an already-consumed
+/// correlation is necessarily not above the per-owner high-water mark
+/// and trips the assert. Debug-only: zero cost, zero footprint in
+/// release.
+#[cfg(debug_assertions)]
+#[derive(Debug, Default)]
+pub(crate) struct DispatchLedger {
+    high_water: std::collections::BTreeMap<ProbeOwner, ProbeCorrelation>,
+}
 
-    /// Test-only counter prime. Saturation tests jump to `u64::MAX`
-    /// without consuming the counter via repeated mints.
-    #[cfg(test)]
-    pub(crate) fn prime_counter(&mut self, value: u64) {
-        self.counter.prime(value);
-    }
-
-    /// Test-only counter peek for "fresh engine starts at zero"
-    /// fixtures.
-    #[cfg(test)]
-    pub(crate) fn counter_peek(&self) -> u64 {
-        self.counter.peek()
+#[cfg(debug_assertions)]
+impl DispatchLedger {
+    /// Record that `correlation` was routed into a `dispatch_*` arm for
+    /// `owner`, asserting it is strictly greater than every correlation
+    /// previously dispatched for that owner. Sole callers: the two
+    /// response handlers, immediately after the slot is disarmed and
+    /// before the outcome is dispatched.
+    pub(crate) fn record(&mut self, owner: ProbeOwner, correlation: ProbeCorrelation) {
+        let prior = self.high_water.insert(owner, correlation);
+        debug_assert!(
+            prior.is_none_or(|p| correlation > p),
+            "consume-once tripwire: correlation {correlation:?} dispatched for \
+             {owner:?} is not strictly greater than the prior dispatched \
+             {prior:?} — a probe correlation reached a dispatch arm more than once",
+        );
     }
 }
 
@@ -188,11 +185,13 @@ impl Engine {
     }
 
     /// Mint a fresh [`ProbeCorrelation`] off the engine-wide monotone
-    /// floor — the sole mint driver for every state-resident probe
-    /// slot. One id space, so slot-held correlations never collide.
+    /// floor (`self.correlations`) — the sole mint driver for every
+    /// state-resident probe slot. One id space, so slot-held
+    /// correlations never collide; saturation panics unconditionally
+    /// via [`crate::counter::MonotonicCounter::next`].
     #[must_use]
     pub(crate) fn mint_probe_correlation(&mut self) -> ProbeCorrelation {
-        self.probe_channel.mint()
+        self.correlations.next()
     }
 
     /// Consume the owner's in-flight probe and return its correlation

@@ -498,7 +498,7 @@ fn proxy_event_enqueues_and_dispatches() {
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
-        "channel closed after empty enumeration",
+        "probe slot disarmed after empty enumeration",
     );
     assert!(
         pending_enumerations(&e, pid).is_empty(),
@@ -691,7 +691,7 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
-        "channel closed after empty response",
+        "probe slot disarmed after empty response",
     );
     assert!(
         matches!(
@@ -717,7 +717,7 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
     assert!(probe_for_pid, "fresh descent probe minted for Promoter");
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
-        "probe channel re-opened",
+        "probe slot re-armed",
     );
     // No EventNoConsumer diagnostic — the §A bug surface.
     assert!(
@@ -853,7 +853,7 @@ fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
-        "channel closed after Failed",
+        "probe slot disarmed after Failed",
     );
     assert!(
         matches!(
@@ -881,7 +881,7 @@ fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
-        "probe channel re-opened",
+        "probe slot re-armed",
     );
 }
 
@@ -922,7 +922,7 @@ fn register_proxy_is_idempotent_on_re_registration() {
     );
 }
 
-// ---- promoter enumeration channel lifecycle ----
+// ---- promoter enumeration slot lifecycle ----
 
 #[test]
 fn dispatch_next_enumeration_records_pending_target() {
@@ -999,7 +999,7 @@ fn pending_enumeration_target_clears_on_response() {
 }
 
 #[test]
-fn cancel_owner_probe_clears_promoter_enumeration_channel() {
+fn cancel_owner_probe_clears_promoter_enumeration_slot() {
     // `cancel_owner_probe` is the canonical disarm-on-cancel path. For
     // a Promoter owner with an armed enumeration slot it disarms the
     // slot and emits a Cancel op.
@@ -1044,7 +1044,7 @@ fn cancel_owner_probe_clears_promoter_enumeration_channel() {
             op,
             ProbeOp::Cancel { owner: ProbeOwner::Promoter(p) } if *p == pid,
         )),
-        "Cancel op emitted for the open channel",
+        "Cancel op emitted for the armed probe slot",
     );
 }
 

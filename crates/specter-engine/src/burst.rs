@@ -46,7 +46,7 @@
 //!   anchor unconditionally and bypass this helper.
 //! - [`Engine::emit_probe_at`] — Engine method that dispatches on
 //!   `Profile.kind` and constructs the probe via the typed helpers in
-//!   `probe_channel` (`emit_anchor_probe` / `emit_subtree_probe`). The
+//!   `probe` (`emit_anchor_probe` / `emit_subtree_probe`). The
 //!   single site that maps a `(profile_id, target)` pair to a
 //!   `ProbeOp::Probe` op. Unclassified anchors take the Subtree arm —
 //!   the walker returns `Vanished` on kind mismatch and the engine

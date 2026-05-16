@@ -726,8 +726,8 @@ fn probe_response_for_idle_profile_drops_with_diagnostic() {
 // once probe correlation lives on a state-resident `ProbeSlot` — a
 // slot can only be armed via its owning phase's typed transition, so
 // the (state, phase)-mismatch arm cannot be reached without forging an
-// invalid state. Structural property tests live in `probe_channel.rs`'s
-// `#[cfg(test)] mod tests`.
+// invalid state. Structural property tests for `ProbeSlot` live in
+// `specter-core`'s `probe.rs` `#[cfg(test)] mod tests`.
 
 // ---- Standard burst dispatch ----
 
