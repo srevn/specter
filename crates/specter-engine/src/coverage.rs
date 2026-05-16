@@ -29,8 +29,8 @@ use std::path::PathBuf;
 ///
 /// Returns `false` if `target` is not on the descendant chain of
 /// `profile.resource` (sibling, ancestor, or unrelated subtree), or if
-/// any segment along the chain fails to resolve through the `Tree`'s
-/// interner.
+/// any node along the chain is stale (its `ResourceId` no longer names
+/// a live slot).
 #[must_use]
 pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
     let anchor = profile.resource;

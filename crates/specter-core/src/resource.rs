@@ -1,9 +1,13 @@
 //! `Resource` and friends.
 //!
-//! `Resource` lives inside `Tree`'s `SlotMap`. The structurally load-bearing
-//! fields (`parent`, `segment`, `children`, `profiles`) are `pub(crate)` —
-//! mutating them outside the routes that maintain the corresponding indices
-//! corrupts the Tree. Read access is via the accessor methods.
+//! `Resource` lives inside `Tree`'s `SlotMap`. The structurally
+//! load-bearing fields (`parent`, `segment`, `children`, `profiles`)
+//! are `pub(crate)` — mutating them outside the routes that maintain
+//! the corresponding indices corrupts the Tree. Cross-crate read
+//! access is via the accessor methods (`parent()`, `children()`,
+//! `profiles()`); a slot's own segment string is read through
+//! [`crate::Tree::name`] (no standalone `segment()` accessor — the
+//! key type is a Tree-internal detail).
 //!
 //! `kind` is `pub(crate)` — three external read sites historically
 //! disagreed on what `Unknown` means (pattern bypass vs File-shape vs
@@ -32,11 +36,11 @@
 
 use crate::ids::{ProfileId, PromoterId, ResourceId};
 use crate::sub::ClassSet;
+use compact_str::CompactString;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use string_interner::symbol::SymbolU32;
 
 /// Identity of a single contributor to a Resource's contributions map.
 ///
@@ -91,7 +95,18 @@ pub enum ContribKey {
 #[derive(Debug)]
 pub struct Resource {
     pub(crate) parent: Option<ResourceId>,
-    pub(crate) segment: SymbolU32,
+    /// This slot's own path segment — the second half of the
+    /// `(parent, segment)` identity. Owned outright (`CompactString`,
+    /// inline and allocation-free for the typical ≤24-byte path
+    /// component) and **write-once**: set in `Resource::new`, never
+    /// reparented (a rename mints a fresh slot under a new
+    /// `ResourceId`; the chain is append-only). The parent's
+    /// `children` map holds an equal key — the duplication is the
+    /// intrusive-tree trade-off that buys O(1) self-naming
+    /// ([`crate::Tree::name`]) without a reverse parent-map scan, and
+    /// it is bounded by the live-slot count: the segment dies with
+    /// the slot, so there is no second arena to keep in lockstep.
+    pub(crate) segment: CompactString,
     /// Path from the root chain down to this slot, materialised once at
     /// construction. **Function-of-data, by construction**: the
     /// equality `path == join(root..=self segments)` holds because
@@ -106,7 +121,12 @@ pub struct Resource {
     /// allocation ships read-only across the engine→sensor actor
     /// boundary.
     pub(crate) path: Arc<Path>,
-    pub(crate) children: BTreeMap<SymbolU32, ResourceId>,
+    /// Direct children keyed by segment string. Each key equals the
+    /// child's own `segment`. `BTreeMap` ⇒ iteration is lexicographic
+    /// by segment — deterministic and local to this directory, with
+    /// no dependency on global Tree attach history
+    /// ([`crate::Tree::children_ids`]).
+    pub(crate) children: BTreeMap<CompactString, ResourceId>,
     pub(crate) profiles: SmallVec<[(u64, ProfileId); 1]>,
     /// Promoter back-ref. Maintained in lockstep with
     /// `Promoter.proxies` by the engine's promoter-side helpers
@@ -224,7 +244,7 @@ pub enum ResourceRole {
 impl Resource {
     pub(crate) fn new(
         parent: Option<ResourceId>,
-        segment: SymbolU32,
+        segment: CompactString,
         role: ResourceRole,
         path: Arc<Path>,
     ) -> Self {
@@ -324,11 +344,6 @@ impl Resource {
         self.parent
     }
 
-    #[must_use]
-    pub const fn segment(&self) -> SymbolU32 {
-        self.segment
-    }
-
     /// Materialised path from the root chain to this slot. `Arc::clone`
     /// at the call site is a refcount bump — the join was paid once at
     /// construction. See the field rustdoc for the by-construction
@@ -339,7 +354,7 @@ impl Resource {
     }
 
     #[must_use]
-    pub const fn children(&self) -> &BTreeMap<SymbolU32, ResourceId> {
+    pub const fn children(&self) -> &BTreeMap<CompactString, ResourceId> {
         &self.children
     }
 
@@ -495,11 +510,10 @@ impl Resource {
 mod tests {
     use super::{ClassSet, ContribKey, Resource, ResourceKind, ResourceRole};
     use crate::ids::{ProfileId, ResourceId};
-    use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
+    use compact_str::CompactString;
 
-    fn dummy_segment() -> SymbolU32 {
-        let mut interner = StringInterner::<StringBackend<SymbolU32>>::new();
-        interner.get_or_intern("seg")
+    fn dummy_segment() -> CompactString {
+        CompactString::const_new("seg")
     }
 
     fn dummy_path() -> std::sync::Arc<std::path::Path> {

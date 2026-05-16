@@ -52,7 +52,7 @@ use tracing_subscriber::{
 /// [`ObservabilityGuard`] separately so `Drop` order doesn't truncate
 /// trailing log events.
 ///
-/// Cheap to construct via [`ObservabilityHandle::noop`] for tests that
+/// Cheap to construct via `ObservabilityHandle::noop` for tests that
 /// don't exercise the SIGHUP API.
 pub struct ObservabilityHandle {
     /// Reload handle for the level filter. `None` for noop handles

@@ -1025,7 +1025,7 @@ impl DescentRemaining {
 
     /// True iff only the head remains (`len() == 1`). The descent
     /// dispatcher's terminal arm consumes the head via anchor
-    /// materialization on this edge and never calls [`advance`].
+    /// materialization on this edge and never calls [`Self::advance`].
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
         self.inner.len() == 1
@@ -1150,7 +1150,7 @@ pub enum AnchorClaim {
 }
 
 /// Identity of a past Effect emission *within one Profile's fire
-/// history* ([`Profile::fired_subs`]).
+/// history* (`Profile::fired_subs`).
 ///
 /// Profile-free by construction: the owning `Profile` is the
 /// `BTreeSet`'s container, so a `profile` discriminator would be
@@ -1522,12 +1522,12 @@ struct TreeContributions {
 /// module-private substructure exposing a typed accessor/transition
 /// API — the cross-crate write surface is `Profile`'s `pub fn`s, never
 /// a field assignment. Each substructure owns its own invariant:
-/// [`ProfileConfig`] (frozen identity ⇒ derived caches),
-/// [`AnchorClassification`] (snapshot-shape ⊕ baseline/witness
-/// exclusion), [`ProfileStateMachine`] (`state` + the I4-floored
-/// dirty-descendant counter), [`TreeContributions`] (deferred Tree
-/// releases — drift = refcount leak), [`ProfileTopology`] (soft parent
-/// cache — drift = perf only), [`FiredSubsHistory`] (the fire-history
+/// `ProfileConfig` (frozen identity ⇒ derived caches),
+/// `AnchorClassification` (snapshot-shape ⊕ baseline/witness
+/// exclusion), `ProfileStateMachine` (`state` + the I4-floored
+/// dirty-descendant counter), `TreeContributions` (deferred Tree
+/// releases — drift = refcount leak), `ProfileTopology` (soft parent
+/// cache — drift = perf only), `FiredSubsHistory` (the fire-history
 /// key set).
 #[derive(Debug)]
 pub struct Profile {
@@ -1596,7 +1596,7 @@ impl Profile {
     ///
     /// `identity` ([`ProfileIdentity`] = `{config, max_settle,
     /// events}`) is the Profile partition key's config half, taken by
-    /// value: [`ProfileConfig::new`] folds it once into the lifetime-
+    /// value: `ProfileConfig::new` folds it once into the lifetime-
     /// stable `config_hash` plus the `exclude_strings` /
     /// `has_per_file_fds` projections. There is no path to a Profile
     /// with an unset or stale hash. The sole production caller
@@ -1611,7 +1611,7 @@ impl Profile {
     /// breach here means a caller bypassed config validation.
     ///
     /// `kind` is the anchor's classified shape at construction,
-    /// projected into the [`AnchorClassification`] sum: `None` ⇒
+    /// projected into the `AnchorClassification` sum: `None` ⇒
     /// `Unclassified` (a `DescentScaffold` or freshly-`ensure`d slot;
     /// descent materialisation classifies it via
     /// [`Self::materialize_anchor`], the first Seed-Ok via
@@ -1863,7 +1863,7 @@ impl Profile {
     ///
     /// The snapshot-shape (`kind ⇔ current` variant) and
     /// baseline/witness-exclusion invariants are *structural* — no
-    /// representable [`AnchorClassification`] violates them, so there
+    /// representable `AnchorClassification` violates them, so there
     /// is nothing to check there. What remains is the pair of
     /// one-directional cross-axis invariants the type system does not
     /// cover, asserted here so a future coordinator that leaves a

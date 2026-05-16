@@ -1208,10 +1208,10 @@ impl Engine {
     /// `cancel_owner_probe` and `detach_sub_inner`'s defensive
     /// idempotence on stale ids.
     ///
-    /// Time-independent like [`Self::detach_sub`]: the helper drives
-    /// only refcount and registry teardown; bursts running on Profiles
-    /// cascaded by promoter reap continue under their existing
-    /// schedule.
+    /// Time-independent like `detach_sub_inner`: the helper
+    /// drives only refcount and registry teardown; bursts running on
+    /// Profiles cascaded by promoter reap continue under their
+    /// existing schedule.
     pub fn reap_promoter(&mut self, pid: PromoterId) -> StepOutput {
         let mut out = StepOutput::default();
         self.reap_promoter_inner(pid, &mut out);

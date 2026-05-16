@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// One CFG node — a spawn body plus the two edges the dispatcher reads
 /// on outcome.
 ///
-/// Builder-only: [`Self::new`] is `pub(super)`, so a `ProgramOp` is
+/// Builder-only: `Self::new` is `pub(super)`, so a `ProgramOp` is
 /// minted solely by [`super::ProgramBuilder::build`]. A bare op
 /// outside a built [`super::ActionProgram`] is inert — nothing
 /// consumes one — so exposing a public constructor would be a

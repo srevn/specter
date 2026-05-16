@@ -7,8 +7,8 @@
 //! - Snapshots are tree-shaped. Each `DirSnapshot` owns one directory's
 //!   `lstat` triple ([`DirMeta`]), the `ScanConfig` hash they were captured
 //!   under (`captured_with`), and a `BTreeMap<CompactString, ChildEntry>`
-//!   of direct children (string-keyed, not interner-relative — keeps the
-//!   hash cross-process stable).
+//!   of direct children (string-keyed — keeps the hash cross-process
+//!   stable).
 //! - Children are either [`LeafEntry`] (file/symlink/other; no recursion)
 //!   or [`DirChild`] (directory; a sum type with two variants —
 //!   `Covered(Arc<DirSnapshot>)` and `Uncovered(FsIdentity)`).
@@ -567,7 +567,7 @@ impl DirSnapshot {
     ///
     /// Three call sites consume the covered-dir slot: the walker's
     /// recursive baseline lookup, [`subtree_at_dir`]'s descent step,
-    /// and [`splice_dir`]'s prior-child resolution. Each needs
+    /// and `splice_dir`'s prior-child resolution. Each needs
     /// "`Dir` entry that is `Covered`" → `Arc<DirSnapshot>` as a single
     /// named operation; this primitive collapses the `entries.get(name)`
     /// + variant match into one call.
@@ -862,7 +862,7 @@ pub enum SpliceResult {
 ///
 /// `anchor` is the Profile's anchor `ResourceId` — the engine-side
 /// identity the caller knows `prior` is rooted at. It drives
-/// [`ancestor_chain`]'s walk and isn't compared against any snapshot
+/// `ancestor_chain`'s walk and isn't compared against any snapshot
 /// field; the wire payload is path-and-content only.
 ///
 /// **File-anchored Profiles never call this helper.** Their

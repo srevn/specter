@@ -12,7 +12,6 @@ deny = [
   { name = "polling" },
   { name = "smol" },
   { name = "futures-util" },
-  { name = "hashbrown", wrappers = ["string-interner"] },
   { name = "libc", wrappers = [
     "specter-sensor",
     "specter-actuator",

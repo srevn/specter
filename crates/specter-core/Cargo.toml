@@ -10,12 +10,11 @@ default = []
 testkit = []
 
 [dependencies]
-slotmap.workspace         = true
-globset.workspace         = true
-compact_str.workspace     = true
-smallvec.workspace        = true
-string-interner.workspace = true
-siphasher.workspace       = true
+slotmap.workspace     = true
+globset.workspace     = true
+compact_str.workspace = true
+smallvec.workspace    = true
+siphasher.workspace   = true
 
 [dev-dependencies]
 proptest.workspace = true

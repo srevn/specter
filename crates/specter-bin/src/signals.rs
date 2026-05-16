@@ -20,8 +20,9 @@
 //! - **SIGINT / SIGTERM (second within `HARD_EXIT_WINDOW`)** →
 //!   pre-empt the actuator's 5s SIGTERM grace via
 //!   `hard_shutdown_actuator_tx`, briefly yield so phase 3 (SIGKILL
-//!   stragglers) lands before the parent dies, then call [`exit_hard`]
-//!   (default: `std::process::exit(130)`). Without the pre-empt,
+//!   stragglers) lands before the parent dies, then call the
+//!   injectable `exit_fn` (default: `std::process::exit(130)`). Without
+//!   the pre-empt,
 //!   stubborn children that ignored phase 1's SIGTERM survive as orphans
 //!   reparented to PID 1. The injectable `exit_fn` parameter lets tests
 //!   assert escalation without killing the test runner.

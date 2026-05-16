@@ -1,13 +1,20 @@
 //! `Tree` — Resource container and slot semantics.
 //!
-//! The Tree owns one `StringInterner` for segments, a `SlotMap` of
-//! `Resource`s (`ResourceId`s are generational), and a flat `roots: Vec`.
-//! Identity model: `(parent, segment)` is the slot. Same `(parent, segment)`
-//! always returns the same `ResourceId`. Recreation at a vacated-but-anchored
-//! slot reuses the id. Reaped slots produce fresh ids on the next
-//! `ensure_root` / `ensure_child`.
+//! `Tree` is a **single-arena** structure: a generational `SlotMap` of
+//! `Resource`s plus a flat `roots: Vec`. Each `Resource` owns its
+//! `segment` string outright, so there is no second store to keep in
+//! lockstep with the slotmap — a slot's identity and its name live and
+//! die together, and the only growth class is bounded by the live-slot
+//! count.
 //!
-//! Public API takes `&str` segments; the interner is internal.
+//! Identity model: `(parent, segment)` is the slot. The same
+//! `(parent, segment)` always returns the same `ResourceId`. Recreation
+//! at a vacated-but-anchored slot reuses the id; a reaped slot mints a
+//! fresh id on the next `ensure_root` / `ensure_child`.
+//!
+//! The public API is `&str`-keyed; segment lookups are
+//! allocation-free (`CompactString: Borrow<str>`), and a segment string
+//! is materialised only when a slot is actually created.
 
 use crate::ids::ResourceId;
 use crate::op::WatchOp;
@@ -17,7 +24,6 @@ use compact_str::CompactString;
 use slotmap::SlotMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32};
 
 /// Synthetic segment representing the filesystem root `/`.
 ///
@@ -134,7 +140,6 @@ impl TreePath {
 pub struct Tree {
     nodes: SlotMap<ResourceId, Resource>,
     roots: Vec<ResourceId>,
-    interner: StringInterner<StringBackend<SymbolU32>>,
 }
 
 impl Tree {
@@ -326,12 +331,18 @@ impl Tree {
     /// `role` applies only on creation. Infallible — a root has no
     /// parent to be stale against.
     pub fn ensure_root(&mut self, segment: &str, role: ResourceRole) -> ResourceId {
-        let sym = self.interner.get_or_intern(segment);
-        if let Some(id) = self.find_root(sym) {
+        if let Some(id) = self.find_root(segment) {
             return id;
         }
+        // Slot creation is the only place the segment string is
+        // materialised; the idempotent hit above keys on `&str`.
         let path = Self::build_root_path(segment);
-        let id = self.nodes.insert(Resource::new(None, sym, role, path));
+        let id = self.nodes.insert(Resource::new(
+            None,
+            CompactString::from(segment),
+            role,
+            path,
+        ));
         self.roots.push(id);
         id
     }
@@ -343,8 +354,10 @@ impl Tree {
     ///
     /// Production callers `.expect()` the `Result` with a panic
     /// message pinning whichever structural invariant keeps `parent`
-    /// alive. The staleness check runs before `get_or_intern`, so a
-    /// faulted call cannot grow the interner.
+    /// alive. The stale-parent check and the idempotent existing-child
+    /// hit both run before any segment string is materialised, so a
+    /// faulted or idempotent call neither allocates nor mutates the
+    /// Tree.
     pub fn ensure_child(
         &mut self,
         parent: ResourceId,
@@ -354,36 +367,47 @@ impl Tree {
         if self.nodes.get(parent).is_none() {
             return Err(StaleIdError::StaleParent(parent));
         }
-        let sym = self.interner.get_or_intern(segment);
-        if let Some(child_id) = self.nodes[parent].children.get(&sym).copied() {
+        if let Some(child_id) = self.nodes[parent].children.get(segment).copied() {
             return Ok(child_id);
         }
-        // After the existing-child early-return: an idempotent
-        // `ensure_child` does zero path work.
+        // Slot creation — the only place the segment string is
+        // materialised. Two owned copies are structurally required:
+        // the slot owns its `segment`, and the parent's `children`
+        // map owns the key. The key cannot borrow the child's field
+        // (self-referential), so the duplication is intentional; for
+        // typical ≤24-byte segments both are inline, allocation-free.
+        let key = CompactString::from(segment);
         let path = self.build_child_path(parent, segment);
         let id = self
             .nodes
-            .insert(Resource::new(Some(parent), sym, role, path));
-        self.nodes[parent].children.insert(sym, id);
+            .insert(Resource::new(Some(parent), key.clone(), role, path));
+        self.nodes[parent].children.insert(key, id);
         Ok(id)
     }
 
-    /// Look up a Resource at `(parent, segment)`. Returns `None` if the
-    /// segment was never interned or the slot was reaped.
+    /// Look up a Resource at `(parent, segment)`. Returns `None` when
+    /// no slot exists there — never created, or created and since
+    /// reaped. The lookup is allocation-free: `segment: &str` keys the
+    /// `BTreeMap<CompactString, _>` directly via `CompactString:
+    /// Borrow<str>`.
     #[must_use]
     pub fn lookup(&self, parent: Option<ResourceId>, segment: &str) -> Option<ResourceId> {
-        let sym = self.interner.get(segment)?;
         match parent {
-            Some(p) => self.nodes.get(p)?.children.get(&sym).copied(),
-            None => self.find_root(sym),
+            Some(p) => self.nodes.get(p)?.children.get(segment).copied(),
+            None => self.find_root(segment),
         }
     }
 
-    fn find_root(&self, sym: SymbolU32) -> Option<ResourceId> {
-        self.roots
-            .iter()
-            .copied()
-            .find(|&r| self.nodes.get(r).is_some_and(|n| n.segment == sym))
+    /// Linear scan of `roots` comparing the stored segment string.
+    /// `roots` holds one element in production (the synthetic FS
+    /// root); the scan is `&str`-vs-`&str` (`CompactString::as_str`),
+    /// impl-independent and allocation-free.
+    fn find_root(&self, segment: &str) -> Option<ResourceId> {
+        self.roots.iter().copied().find(|&r| {
+            self.nodes
+                .get(r)
+                .is_some_and(|n| n.segment.as_str() == segment)
+        })
     }
 
     /// Finalise the slot's kernel-watch and sensor-suppress protocols,
@@ -517,28 +541,37 @@ impl Tree {
             // still owes a burst-suppress closing op.
             self.vacate(current, out);
 
-            let node = &self.nodes[current];
-            let parent = node.parent;
-            let segment = node.segment;
+            // Take ownership of the slot out of the slotmap. `parent`
+            // and `segment` are then read off the owned `Resource`
+            // with no clone — the segment string dies *with* the slot,
+            // which is exactly why the unbounded-store class is gone
+            // by construction. `.expect` pins the loop invariant: a
+            // panic here would mean a non-live `current` reached the
+            // body, which the gate above and the cascade re-test below
+            // structurally forbid.
+            let removed = self
+                .nodes
+                .remove(current)
+                .expect("try_reap loop invariant: `current` names a live slot");
 
-            // Unlink from parent's `children` map or `roots` vector
-            // before removing the slot itself. Both operations are
-            // cheap (BTreeMap by-key remove / Vec retain).
-            match parent {
+            // Unlink the removed slot from its parent's `children` map
+            // (by segment key — allocation-free via `Borrow<str>`) or
+            // from the `roots` vector. Reading the key off the owned
+            // `removed` keeps it clear of the `&mut self.nodes` borrow.
+            match removed.parent {
                 Some(p) => {
                     if let Some(parent_node) = self.nodes.get_mut(p) {
-                        parent_node.children.remove(&segment);
+                        parent_node.children.remove(removed.segment.as_str());
                     }
                 }
                 None => {
                     self.roots.retain(|x| *x != current);
                 }
             }
-            self.nodes.remove(current);
 
             // Advance to the parent and re-test. Stop on roots or when
             // the parent still carries an anchor.
-            let Some(parent_id) = parent else {
+            let Some(parent_id) = removed.parent else {
                 return true;
             };
             let Some(parent_node) = self.nodes.get(parent_id) else {
@@ -562,10 +595,14 @@ impl Tree {
         std::iter::successors(self.parent(id), move |&p| self.parent(p))
     }
 
-    /// Iterator over direct children of `id`. Order is the `BTreeMap`
-    /// iteration order over `SymbolU32` (interner-insertion-derived) —
-    /// deterministic within one Tree but not lex by segment string. Sites
-    /// that need lex order resolve segment strings at the emission point.
+    /// Iterator over direct children of `id`. Order is the
+    /// `BTreeMap`'s iteration order over the child segment strings —
+    /// **lexicographic by segment**: deterministic and local to this
+    /// directory, with no dependency on global Tree attach history.
+    /// Consumers that need a different order sort at the point of use;
+    /// every current consumer is an exhaustive traversal or a
+    /// set-membership filter, so the order is correctness-irrelevant
+    /// to them.
     pub fn children_ids(&self, id: ResourceId) -> impl Iterator<Item = ResourceId> + '_ {
         self.nodes
             .get(id)
@@ -573,16 +610,20 @@ impl Tree {
             .flat_map(|n| n.children.values().copied())
     }
 
-    /// Resolved name (segment string) of `id`, if the slot exists.
+    /// Segment string of `id`, if the slot exists.
+    ///
+    /// The returned `&str` borrows the slot's owned `segment`, so it
+    /// is invalidated by any `&mut self` Tree mutation or a reap of
+    /// `id` — the borrow checker enforces this, so a name-then-mutate
+    /// misuse is a compile error rather than a runtime hazard.
     #[must_use]
     pub fn name(&self, id: ResourceId) -> Option<&str> {
-        let sym = self.nodes.get(id)?.segment;
-        self.interner.resolve(sym)
+        Some(self.nodes.get(id)?.segment.as_str())
     }
 
     /// The slot's materialised path (`Arc::clone` of the field set at
     /// construction). O(1): a slotmap get plus a refcount bump — no
-    /// parent walk, no interner resolves, no allocation.
+    /// parent walk, no allocation.
     ///
     /// Stays honestly `Option`: `None` iff `id` is stale. The Resource
     /// owns its path, so a stale id has no Resource and therefore no
@@ -696,18 +737,6 @@ mod tests {
         assert_eq!(err, Err(StaleIdError::StaleParent(null)));
     }
 
-    /// Stale-parent check must precede `get_or_intern` so a fuzz
-    /// stream of novel segments at dead parents can't grow the interner.
-    #[test]
-    fn ensure_child_does_not_intern_segment_on_stale_parent() {
-        let mut tree = Tree::new();
-        let parent = tree.ensure_root("/p", ResourceRole::User);
-        assert!(tree.try_reap(parent, &mut StepOutput::default()));
-        let interner_before = tree.interner.len();
-        let _ = tree.ensure_child(parent, "never_interned_segment", ResourceRole::User);
-        assert_eq!(tree.interner.len(), interner_before);
-    }
-
     #[test]
     fn ensure_child_returns_existing_slot_after_vacate() {
         let mut tree = Tree::new();
@@ -817,6 +846,52 @@ mod tests {
             }
             let actual = tree.path_of(id);
             prop_assert_eq!(actual.as_deref(), Some(expected.as_path()));
+        }
+
+        /// F-CRIT-1 forward regression guard. Populate N
+        /// distinct-segment children under a parent kept alive by a
+        /// contribution (so the reap cascade cannot take the parent
+        /// out from under the assertion), then reap each child. Every
+        /// child slot and every children-map entry must return to the
+        /// pre-population baseline. Together with the structural
+        /// guarantee — the Tree holds no second segment store, a
+        /// compile-time fact — this pins the unbounded-growth class
+        /// shut: segment strings die with their slots by construction,
+        /// with no reclaim API required.
+        #[test]
+        fn prop_reap_releases_segment(
+            raw in proptest::collection::vec(any_segment(), 1..16),
+        ) {
+            // `ensure_child` is idempotent on segment; dedup so the
+            // population count is exactly the distinct-segment count.
+            let mut segs: Vec<String> = raw;
+            segs.sort();
+            segs.dedup();
+
+            let mut tree = Tree::new();
+            let parent = tree.ensure_root("anchor-root", ResourceRole::User);
+            tree.get_mut(parent).unwrap().insert_contribution(
+                crate::resource::ContribKey::ProfileAnchor(crate::ids::ProfileId::default()),
+                crate::sub::ClassSet::STRUCTURE,
+            );
+            let base_len = tree.len(); // parent only
+
+            for seg in &segs {
+                tree.ensure_child(parent, seg, ResourceRole::User)
+                    .expect("parent is anchored, never stale");
+            }
+            prop_assert_eq!(tree.len(), base_len + segs.len());
+            prop_assert_eq!(tree.get(parent).unwrap().children().len(), segs.len());
+
+            for seg in &segs {
+                let id = tree.lookup(Some(parent), seg).expect("just created");
+                prop_assert!(tree.try_reap(id, &mut discard()));
+            }
+
+            // Every child slot released; the parent retained only by
+            // its contribution; the children map fully drained.
+            prop_assert_eq!(tree.len(), base_len);
+            prop_assert!(tree.get(parent).unwrap().children().is_empty());
         }
     }
 

@@ -55,7 +55,7 @@
 //! knowledge. Composite types encode through a single named function
 //! sited beside the type, composed only of seam primitives:
 //! [`put_systemtime_into`] here (a `std` type), and
-//! [`crate::fs_id::encode_into`] beside `FsIdentity`. Callers fold
+//! `crate::fs_id::encode_into` beside `FsIdentity`. Callers fold
 //! everything explicitly — there is no blanket `Hash` shortcut, which
 //! is what makes a native-endian width unconstructable.
 
@@ -71,7 +71,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// (128-bit). The inner hasher is private and is only ever driven by
 /// `write(&[u8])`, so a width-specialised or native-endian path is
 /// *unconstructable*. Build one via [`hasher`] / [`hasher_128`];
-/// finalise via [`StableHasher::finish_u64`] / [`finish_u128`].
+/// finalise via [`StableHasher::finish_u64`] / [`StableHasher::finish_u128`].
 ///
 /// Every `put_*` writes the value's explicit little-endian byte image.
 /// On a little-endian target this is byte-identical to the historical

@@ -47,20 +47,20 @@ use std::hash::Hasher;
 /// Kernel-side observable identity of an inode at `stat` time.
 ///
 /// Construct via [`FsIdentity::from_metadata`] (production — both halves
-/// from one `&Metadata`) or [`FsIdentity::synthetic`] (test-only). See
+/// from one `&Metadata`) or `FsIdentity::synthetic` (test-only). See
 /// the module-level docs for the semantics and atomicity invariant.
 ///
 /// ## Digest encoding
 ///
 /// Snapshot digests fold `FsIdentity` **exclusively** through
-/// [`encode_into`] — `inode` then `device`, each as a little-endian
+/// `encode_into` — `inode` then `device`, each as a little-endian
 /// `u64`, in declaration order, with no discriminator or length prefix.
 /// That order is byte-identical to the historical `inode` then `device`
 /// `u64` fold; the `encode_into_matches_inode_then_device` regression
 /// pins the equivalence and the snapshot goldens (`compute_leaf_hash` /
 /// `compute_dir_hash`) pin it end-to-end, so a future field reorder
 /// fires at `cargo nextest` time. `FsIdentity` deliberately has **no**
-/// `Hash` impl: the only route to a digest is [`encode_into`], mirroring
+/// `Hash` impl: the only route to a digest is `encode_into`, mirroring
 /// the [`StableHasher`] "own the bytes" discipline — a blanket-`Hash`
 /// digest path is unconstructable.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
