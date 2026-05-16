@@ -152,11 +152,12 @@ fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId) {
 
 #[test]
 fn attach_sub_fresh_profile_emits_watch_suppress_probe() {
-    let (e, _pid, _sid, r, _now) = engine_with_attached_sub();
+    let (mut e, _pid, _sid, r, _now) = engine_with_attached_sub();
     // After attach: anchor watch_demand=1, suppress_count=1, Profile is
     // Active(Seed Verifying).
     assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
     assert_eq!(e.tree.get(r).unwrap().suppress_count(), 1);
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `Profile.kind` is the cached witness of the anchor's classification:
@@ -167,12 +168,13 @@ fn attach_sub_fresh_profile_emits_watch_suppress_probe() {
 /// `attach_sub_inner` post-`Profile::new` write.
 #[test]
 fn attach_sub_caches_anchor_kind_for_classified_resource() {
-    let (e, pid, _sid, _r, _now) = engine_with_attached_sub();
+    let (mut e, pid, _sid, _r, _now) = engine_with_attached_sub();
     assert_eq!(
         e.profiles.get(pid).and_then(specter_core::Profile::kind),
         Some(ResourceKind::Dir),
         "resource-based attach reads the classified anchor's kind into Profile.kind",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Resource-based attach against an `Unknown` slot leaves `Profile.kind
@@ -552,6 +554,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
     // them.
     assert!(out.watch_ops.is_empty());
     assert!(out.probe_ops.is_empty());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---- ProbeResponse dispatch ----
@@ -692,6 +695,7 @@ fn probe_response_correlation_mismatch_drops_with_diagnostic() {
         e.profiles.get(pid).unwrap().state(),
         ProfileState::Active(_, _),
     ));
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -1334,6 +1338,7 @@ fn stale_probe_response_emits_exactly_one_diagnostic() {
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
         "live channel untouched by stale response",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Anchor events bypass the class filter unconditionally.
@@ -1703,6 +1708,7 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
         .filter(|op| matches!(op, ProbeOp::Probe { .. }))
         .count();
     assert_eq!(probes, 1);
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -1962,6 +1968,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
         matches!(probe_request, Some(ProbeRequest::AnchorFile { .. })),
         "File-anchored Profile's seed burst must emit ProbeRequest::AnchorFile",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---- on_watch_op_rejected ----
@@ -2302,6 +2309,7 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
         )),
         "Diagnostic::SensorOverflow{{Global}} emitted exactly once per overflow input",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -2354,6 +2362,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
             scope: OverflowScope::Global
         }
     )),);
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -2406,6 +2415,7 @@ fn sensor_overflow_pending_profile_is_skipped() {
             .any(|d| matches!(d, Diagnostic::SensorOverflow { .. })),
         "diagnostic still emitted regardless of per-Profile dispatch",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -2490,6 +2500,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
         matches!(e.profiles.get(pid_b).unwrap().state(), ProfileState::Idle),
         "Profile B (anchor at b, sibling of a) untouched",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---- P11.0: anchor_claim drives reap correctness ----
@@ -2607,6 +2618,7 @@ fn detach_sub_active_profile_marks_reap_pending() {
         e.subs.at(pid).is_empty(),
         "no Subs remain after detaching the sole Sub"
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -2725,6 +2737,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
         e.profiles.get(pid).unwrap().settle,
         Duration::from_millis(200)
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---- on_config_diff ----
@@ -2772,6 +2785,7 @@ fn config_diff_added_only_attaches_subs() {
             .any(|op| matches!(op, ProbeOp::Probe { .. }))
     );
     assert_eq!(e.subs().len(), 1);
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -2810,6 +2824,7 @@ fn config_diff_removed_then_added_atomic() {
     assert_eq!(e.subs().len(), 1);
     // Single sorted StepOutput; multiple watch_ops merged.
     assert!(!out.watch_ops.is_empty());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---- on_config_diff: promoter half ----
@@ -2867,6 +2882,7 @@ fn config_diff_promoter_added_attaches_promoter() {
         "PromoterAttached diagnostic emitted; got {:?}",
         out.diagnostics,
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `promoters.removed` runs `reap_promoter_inner` for each id.
@@ -2975,6 +2991,7 @@ fn config_diff_promoter_modified_reaps_and_attaches() {
         "PromoterAttached emitted after reap; got {:?}",
         out.diagnostics,
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Sub side runs before Promoter side. Confirms ordering by combining
@@ -3040,6 +3057,7 @@ fn config_diff_applies_both_halves_in_one_step() {
         "PromoterAttached emitted; got {:?}",
         out.diagnostics,
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Stale `PromoterId` in `removed` is a silent no-op (mirrors
@@ -3123,6 +3141,7 @@ fn config_diff_promoter_modify_during_prefix_pending() {
             .any(|op| matches!(op, ProbeOp::Cancel { .. })),
         "PrefixPending reap must Cancel the in-flight descent probe",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---- emit_effects PerStableFile ----
@@ -3559,6 +3578,7 @@ fn clears_fired_subs_on_effect_complete_failed() {
         e.profiles.get(pid).unwrap().fired_is_empty(),
         "Failed Effect clears the suppression entry",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -3738,6 +3758,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     // Profile's events mask is invariant.
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles.get(pid).unwrap().has_per_file_fds());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -3768,6 +3789,7 @@ fn structure_only_profile_has_per_file_fds_false() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert!(!e.profiles.get(pid).unwrap().has_per_file_fds());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---------- Anchor-loss kind-cache invalidation ----------
@@ -4173,6 +4195,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         "transition_to_rebasing clears force_walk_resources after \
          consuming them",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Idempotent fire-tail: no FsEvent absorbs during Awaiting →
@@ -4217,6 +4240,7 @@ fn rebasing_without_absorbed_events_ships_empty_force_walk() {
         }
         other => panic!("expected Subtree probe; got {other:?}"),
     }
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---------- rebase_baseline witness clears at every site ----------
@@ -4310,6 +4334,9 @@ fn enter_active_mode(
 #[test]
 fn dispatch_rebase_ok_consumes_survival_witness() {
     let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+    // Drain the attach-time Seed-Verifying probe before the manual
+    // `transition_state` clobber below drops that armed state.
+    let _ = e.cancel_all_in_flight_probes();
 
     let witness_snap = dir_tree_snap(vec![]);
     let witness_hash = witness_snap.dir_hash();
@@ -4362,6 +4389,9 @@ fn dispatch_rebase_ok_consumes_survival_witness() {
 #[test]
 fn dispatch_seed_ok_no_drift_branch_consumes_survival_witness() {
     let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+    // Drain the attach-time Seed-Verifying probe before the manual
+    // `transition_state` clobber below drops that armed state.
+    let _ = e.cancel_all_in_flight_probes();
 
     // Survival mode at entry (no live baseline, witness populated);
     // empty fired_subs ⇒ no drift — but Seed still rebases, consuming
@@ -4410,6 +4440,9 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
     // transition_to_awaiting) keeps the baseline ⊕ witness exclusivity
     // holding at every step boundary, not just at later consume sites.
     let (mut e, pid, sid, anchor, now) = engine_with_attached_sub();
+    // Drain the attach-time Seed-Verifying probe before the manual
+    // `transition_state` clobber below drops that armed state.
+    let _ = e.cancel_all_in_flight_probes();
 
     let dk = FiredKey::Subtree(sid);
 
@@ -4470,7 +4503,7 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
 /// load-bearing guard for the fresh-attach case.
 #[test]
 fn seed_drift_observed_returns_false_for_fresh_profile() {
-    let (e, pid, _sid, _anchor, _now) = engine_with_attached_sub();
+    let (mut e, pid, _sid, _anchor, _now) = engine_with_attached_sub();
     let p = e.profiles.get(pid).expect("Profile lives post-attach");
     assert!(p.fired_is_empty(), "precondition: no fire history");
     assert!(
@@ -4486,6 +4519,7 @@ fn seed_drift_observed_returns_false_for_fresh_profile() {
         !e.seed_drift_observed(pid),
         "fresh Profile (no fire history, no settled state) reports no drift",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Survival-mode drift: anchor loss collapsed the anchor to
@@ -4517,6 +4551,7 @@ fn seed_drift_observed_returns_true_on_post_recovery_drift() {
         e.seed_drift_observed(pid),
         "survival mode: witness != current.hash() ⇒ drift detected",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Active-mode drift: `baseline().is_some()` (no anchor loss has
@@ -4549,6 +4584,7 @@ fn seed_drift_observed_returns_true_on_active_mode_drift() {
         "active-mode (overflow) drift: baseline.hash() != current.hash() ⇒ \
          drift detected ⇒ conservative re-fire",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Active-mode no-drift: `baseline.hash() == current.hash()` —
@@ -4570,6 +4606,7 @@ fn seed_drift_observed_returns_false_when_active_mode_baseline_matches_current()
         "active mode, baseline.hash() == current.hash() ⇒ no drift \
          (overflow without disk change)",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---------- Property tests ----------
@@ -4790,6 +4827,7 @@ mod props {
                 sorted_p.sort();
                 prop_assert_eq!(probe_keys, sorted_p);
             }
+            let _ = e.cancel_all_in_flight_probes();
         }
 
         /// I5: at most one outstanding ProbeRequest per Profile. Track
@@ -4860,6 +4898,7 @@ mod props {
                     "I5 channel-discipline: probe channel carries at most one outstanding probe per Profile",
                 );
             }
+            let _ = e.cancel_all_in_flight_probes();
         }
 
         /// `prop_seed_burst_emits_no_effects`: from a fresh attach, the
@@ -4912,6 +4951,7 @@ mod props {
                     prop_assert_eq!(p.dirty_descendants(), 0);
                 }
             }
+            let _ = e.cancel_all_in_flight_probes();
         }
 
         /// `prop_step_is_total` — for any input sequence on a fresh engine,
@@ -4927,6 +4967,7 @@ mod props {
                 let _ = run_action(&mut e, sid, r, action, &mut t, &mut last_correlation);
             }
             prop_assert!(true);
+            let _ = e.cancel_all_in_flight_probes();
         }
     }
 

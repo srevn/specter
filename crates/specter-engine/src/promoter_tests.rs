@@ -196,6 +196,7 @@ fn attach_immediate_active_at_existing_prefix() {
         last_probe_path(&out).as_deref(),
         e.tree().path_of(var_log).as_deref()
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -236,6 +237,7 @@ fn attach_pending_when_literal_prefix_missing() {
         e.tree().path_of(fs_root).as_deref()
     );
     assert!(e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -284,6 +286,7 @@ fn descent_advances_one_segment_on_partial_response() {
         ResourceRole::User,
         "[S-8] proxy slot is User-roled",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -346,6 +349,7 @@ fn enumeration_ok_promotes_final_match() {
         )),
         "PromotionKindObserved diagnostic emitted",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -410,6 +414,7 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
             || !proxies.contains_key(&e.tree().lookup(Some(srv), "noisy.cfg").unwrap()),
         "Leaf children are not registered as sub-proxies at non-final position",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -466,6 +471,7 @@ fn try_promote_is_idempotent_on_repeated_match() {
         1,
         "dedup gate prevents re-promotion of the same path",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -516,6 +522,7 @@ fn proxy_event_enqueues_and_dispatches() {
         e.tree().path_of(var_log).as_deref(),
         "probe target = the proxy that received the event",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -641,6 +648,7 @@ fn descent_vanished_rewinds_to_parent() {
         0,
         "vanished prefix had its watch_demand zeroed (vacate)",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---- §A regression: PrefixPending events at the prefix re-trigger descent.
@@ -721,6 +729,7 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
         "Promoter PrefixPending consumed the event (no EventNoConsumer): {:?}",
         out.diagnostics,
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// I5 guard: while a descent probe is in flight, an FsEvent at the
@@ -760,6 +769,7 @@ fn prefix_pending_event_during_in_flight_probe_drops() {
         descent_probes, 0,
         "I5: no second probe minted while one is in flight",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Terminal events at the prefix (Removed / Renamed / Revoked) must
@@ -814,6 +824,7 @@ fn prefix_pending_terminal_event_at_prefix_emits_fresh_descent_probe() {
             .any(|d| matches!(d, Diagnostic::EventNoConsumer { .. })),
         "terminal event consumed by descent dispatch (no EventNoConsumer)",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Failed descent + event-driven retry: after a `Failed { errno }`
@@ -877,6 +888,7 @@ fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
         "probe slot re-armed",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -914,6 +926,7 @@ fn register_proxy_is_idempotent_on_re_registration() {
         &[pid],
         "back-ref unchanged (single entry) on re-registration",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -1012,6 +1025,7 @@ fn dispatch_next_enumeration_records_pending_target() {
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
         "probe correlation in flight alongside the enumeration slot tag",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -1447,6 +1461,7 @@ fn reap_promoter_drains_dynamic_subs() {
         e.subs().get(sub_id).is_none(),
         "dynamic Sub detached from registry",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -1781,4 +1796,5 @@ fn anchor_terminal_predicate_static_sub_makes_mixed() {
     });
     assert!(!all_dynamic, "mixed Profile must not be all_dynamic");
     let _ = pid; // pid only needed to anchor the Promoter alive
+    let _ = e.cancel_all_in_flight_probes();
 }

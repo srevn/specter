@@ -184,7 +184,7 @@ impl PromoterState {
     #[must_use]
     pub const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
         match self {
-            Self::PrefixPending(d) => d.probe.correlation(),
+            Self::PrefixPending(d) => d.probe_correlation(),
             Self::Active { enumerating, .. } => enumerating.correlation(),
         }
     }
@@ -198,7 +198,7 @@ impl PromoterState {
     /// [`crate::ProfileState::take_probe`].
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
         match self {
-            Self::PrefixPending(d) => d.probe.disarm(),
+            Self::PrefixPending(d) => d.disarm_probe(),
             Self::Active { enumerating, .. } => enumerating.disarm(),
         }
     }

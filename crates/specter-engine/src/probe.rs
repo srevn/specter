@@ -227,6 +227,62 @@ impl Engine {
         }
     }
 
+    /// Abandon **every** in-flight probe across all Profiles and
+    /// Promoters, emitting one [`ProbeOp::Cancel`] per owner that had
+    /// one outstanding. Returns the sealed [`StepOutput`] the caller
+    /// forwards to the prober.
+    ///
+    /// This is the **graceful-shutdown probe drain**. The linear
+    /// [`specter_core::ProbeSlot`] `Drop` tripwire fires if the
+    /// `Engine` is dropped with a probe still armed, and a normal
+    /// shutdown routinely coincides with one in flight (every
+    /// settle / verify / rebase / descent window). The driver calls
+    /// this once when a tick resolves to shutdown, before the engine
+    /// is torn down; every consume routes through
+    /// [`Self::cancel_owner_probe`] — the same disarm-then-`Cancel`
+    /// choke every internal abandon site uses — so the slot is
+    /// consumed (not forgotten, not leaked) and a graceful exit is
+    /// silent. The guard stays fully effective: a genuine mid-`step`
+    /// orphan still panics during that step, long before any shutdown
+    /// drain runs.
+    ///
+    /// Tests that freeze a Profile / Promoter mid-flight reuse this
+    /// for the *same* teardown before dropping a local `Engine`, so a
+    /// test models the real shutdown path, not a test-only fiction.
+    /// `pub` because the driver crate and the engine's external
+    /// `tests/` crate are both out-of-crate callers.
+    ///
+    /// Snapshot-then-consume: the `probe_correlation` projection
+    /// borrows `&self`, the disarm needs `&mut self`, so they can't
+    /// overlap; one owner is one state variant holding one slot, so
+    /// every armed slot is enumerated exactly once. Output is
+    /// [`StepOutput::sort_for_emission`]-sealed like every other
+    /// `StepOutput`-returning entry point — `forward` assumes a
+    /// resealed value.
+    #[must_use]
+    pub fn cancel_all_in_flight_probes(&mut self) -> StepOutput {
+        let mut out = StepOutput::default();
+        let owners: Vec<ProbeOwner> = self
+            .profiles
+            .iter()
+            .filter_map(|(pid, p)| {
+                p.state()
+                    .probe_correlation()
+                    .map(|_| ProbeOwner::Profile(pid))
+            })
+            .chain(self.promoters.iter().filter_map(|(qid, q)| {
+                q.state
+                    .probe_correlation()
+                    .map(|_| ProbeOwner::Promoter(qid))
+            }))
+            .collect();
+        for owner in owners {
+            self.cancel_owner_probe(owner, &mut out);
+        }
+        out.sort_for_emission();
+        out
+    }
+
     /// Emit [`ProbeRequest::AnchorFile`]. Walker runs a single `lstat`
     /// and returns `ProbeOutcome::AnchorOk` / `Vanished` / `Failed`.
     ///

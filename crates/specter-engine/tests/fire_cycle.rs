@@ -545,6 +545,7 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
         rebase_emitted,
         "rebase probe emitted on gate-deadline force-transition"
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -610,6 +611,7 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
             BurstFinish::ReturnToIdle
         ),
     ));
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -920,6 +922,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         first_probe_correlation(&rebase_out).is_some(),
         "rebase probe emitted"
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]

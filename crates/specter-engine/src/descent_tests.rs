@@ -153,6 +153,7 @@ fn descent_one_level_advances_on_created_entry() {
         vec![ProbeOwner::Profile(pid)],
         "Seed burst probe emitted at anchor"
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -232,6 +233,7 @@ fn descent_two_levels_advances_progressively() {
 
     // Anchor materialized.
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -301,6 +303,7 @@ fn descent_event_at_prefix_emits_fresh_probe() {
         .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)));
     assert!(probe_for_pid, "descent probe emitted on prefix event");
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -325,6 +328,7 @@ fn descent_event_during_in_flight_probe_drops() {
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)))
         .count();
     assert_eq!(descent_probes, 0);
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -380,6 +384,7 @@ fn descent_anchor_kind_set_from_entry() {
     let res = e.tree().get(bar).unwrap();
     assert_eq!(res.kind(), Some(ResourceKind::Dir));
     assert!(matches!(res.role, ResourceRole::User));
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Companion to `descent_anchor_kind_set_from_entry`: descent
@@ -419,6 +424,7 @@ fn descent_materialization_caches_profile_kind() {
         Some(ResourceKind::File),
         "Profile.kind cached at descent materialisation matches the entry kind",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ===== absolute-path bootstrap & minimal descent probe =====
@@ -499,6 +505,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
         _ => None,
     });
     assert_eq!(probe_path, Some(Path::new("/")));
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Two absolute attaches share the FS-root via the bootstrap's
@@ -539,6 +546,7 @@ fn second_absolute_attach_reuses_fs_root() {
     assert!(e.tree().lookup(Some(root), "bar").is_some());
     // FS-root carries one contribution from each pending descent.
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 2);
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Deep absolute paths walk one segment at a time: the descent's
@@ -576,6 +584,7 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
             CompactString::from("myapp"),
         ],
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Descent probes ride a dedicated `ProbeRequest::Descent` variant —
@@ -624,6 +633,7 @@ fn descent_probe_uses_descent_variant() {
          the typed variant is the structural guarantee that user filters \
          can't mask the next path segment",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Materialization at descent's anchor branch sets
@@ -648,6 +658,7 @@ fn descent_materialization_sets_anchor_claim_held() {
         AnchorClaim::Held,
         "anchor_claim set to Held on descent materialization",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Pending Profile reaped before descent advances:
@@ -777,13 +788,14 @@ fn descent_state_helper_returns_none_for_active() {
         specter_core::ProfileState::Active(_, _)
     ));
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `Engine::descent_state` returns `Some(d)` for a Pending Profile,
 /// and the inner state matches what was registered.
 #[test]
 fn descent_state_helper_returns_some_for_pending() {
-    let (e, _sid, pid) = setup_pending_one_level();
+    let (mut e, _sid, pid) = setup_pending_one_level();
     let descent = e
         .descent_state(ProbeOwner::Profile(pid))
         .expect("Pending state populated");
@@ -796,6 +808,7 @@ fn descent_state_helper_returns_some_for_pending() {
         vec![CompactString::from("bar")],
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `Engine::descent_state` returns `None` for an unknown `ProfileId`.
@@ -841,6 +854,7 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
     ));
     // descent_state agrees: no descent.
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `reap_profile`'s trichotomy `debug_assert!` is reachable from the
@@ -967,6 +981,7 @@ fn on_probe_response_routes_descent_via_state_match() {
         e.profiles().get(pid).unwrap().state(),
         specter_core::ProfileState::Active(_, _)
     ));
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `on_watch_op_rejected` purge transitions Pending → Idle.
@@ -1191,6 +1206,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     );
     // ClassSet::STRUCTURE is correct for the descent contribution.
     let _ = ClassSet::STRUCTURE;
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Cancel-first contract on `release_descent_prefix_claim`: invoking the

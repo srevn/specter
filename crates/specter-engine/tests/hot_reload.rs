@@ -122,6 +122,7 @@ fn config_diff_add_sub_to_existing_profile() {
         .count();
     assert_eq!(new_watches, 0, "no fresh Watch on existing Profile");
     assert_eq!(new_probes, 0, "no fresh Probe on existing Profile");
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -568,4 +569,5 @@ fn config_diff_modified_remove_then_add() {
     // minted by attach_sub_inner.
     assert!(e.subs().get(sid_a).is_none(), "old Sub removed");
     assert_eq!(e.subs().len(), 1, "exactly one Sub remains");
+    let _ = e.cancel_all_in_flight_probes();
 }

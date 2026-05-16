@@ -1947,6 +1947,7 @@ mod tests {
             )),
             "ReapPendingCancelled emitted on revival",
         );
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     #[test]
@@ -2131,7 +2132,7 @@ mod tests {
             releases[idx](&mut e, pid, &mut out);
         }
 
-        QuartetFinalState {
+        let final_state = QuartetFinalState {
             anchor_claim: e
                 .profiles
                 .get(pid)
@@ -2149,7 +2150,11 @@ mod tests {
                 .tree
                 .get(parent)
                 .map_or(0, specter_core::Resource::watch_demand),
-        }
+        };
+        // The attach-time Seed-Verifying probe is still armed; the
+        // release quartet never consumes it. Drain before `e` drops.
+        let _ = e.cancel_all_in_flight_probes();
+        final_state
     }
 
     /// Enumerate every permutation of `[0, 1, 2, 3]` via Heap's

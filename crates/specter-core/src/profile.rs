@@ -764,7 +764,7 @@ impl ProfileState {
                 PostFirePhase::Rebasing(slot) => slot.correlation(),
                 PostFirePhase::Awaiting { .. } => None,
             },
-            Self::Pending(d) => d.probe.correlation(),
+            Self::Pending(d) => d.probe_correlation(),
             Self::Idle => None,
         }
     }
@@ -788,7 +788,7 @@ impl ProfileState {
                 PostFirePhase::Rebasing(slot) => slot.disarm(),
                 PostFirePhase::Awaiting { .. } => None,
             },
-            Self::Pending(d) => d.probe.disarm(),
+            Self::Pending(d) => d.disarm_probe(),
             Self::Idle => None,
         }
     }
@@ -833,21 +833,25 @@ pub enum ProfileStateDiscriminant {
 /// awaiting the next structural event with nothing out. One descent
 /// holds exactly one slot, so two simultaneous descent probes are
 /// unconstructable.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DescentState {
     /// Deepest existing ancestor currently Watched. The Profile
-    /// contributes `+1` to this Resource's `watch_demand`.
-    pub(crate) current_prefix: ResourceId,
+    /// contributes `+1` to this Resource's `watch_demand`. Module-private:
+    /// read via [`Self::current_prefix`], moved via [`Self::advance_to`].
+    current_prefix: ResourceId,
     /// Path components from `current_prefix` (exclusive) down to the
     /// anchor (inclusive). Non-empty by type construction;
-    /// single-component segments (no `/`).
-    pub(crate) remaining_components: DescentRemaining,
-    /// The descent probe slot. Armed while a probe is in flight at
-    /// `current_prefix` (carrying the correlation the response must
-    /// echo); empty while descent awaits the next structural event.
-    /// Armed at every fresh-descent / advance / rewind mint; disarmed
-    /// once when the response is consumed or the descent is cancelled.
-    pub(crate) probe: ProbeSlot,
+    /// single-component segments (no `/`). Module-private: reached via
+    /// [`Self::remaining_components`] / [`Self::remaining_components_mut`].
+    remaining_components: DescentRemaining,
+    /// The descent probe slot — a linear [`ProbeSlot`]. Armed while a
+    /// probe is in flight at `current_prefix` (carrying the correlation
+    /// the response must echo); empty while descent awaits the next
+    /// structural event. Module-private: the linear protocol is the
+    /// only access path — [`Self::arm_probe`] (mint),
+    /// [`Self::probe_correlation`] (read), [`Self::disarm_probe`]
+    /// (consume). It cannot be cloned, so it is consumed where it lives.
+    probe: ProbeSlot,
 }
 
 impl DescentState {
@@ -921,16 +925,40 @@ impl DescentState {
     }
 
     /// Arm the descent's single probe slot with a freshly-minted
-    /// correlation. The mint-side typed mutator the engine calls when
-    /// re-probing in place (forward advance, rewind, event re-trigger);
-    /// the fresh-descent entry instead constructs the slot armed via
-    /// [`Self::new`]. Asserts the slot was empty (the response handler
-    /// or cancel path disarmed it first) — a double-arm would orphan
-    /// the prior correlation. The consume direction is deliberately
-    /// *not* exposed here: it routes through the owning state's single
-    /// `take_probe` so consume-once stays one law.
+    /// correlation — the **mint** edge of the descent's linear-probe
+    /// protocol. The engine calls this when re-probing in place
+    /// (forward advance, rewind, event re-trigger); fresh-descent entry
+    /// instead constructs the slot armed via [`Self::new`]. Asserts the
+    /// slot was empty (the response handler or cancel path disarmed it
+    /// first) — a double-arm would orphan the prior correlation.
     pub fn arm_probe(&mut self, correlation: ProbeCorrelation) {
         self.probe.arm(correlation, ());
+    }
+
+    /// Identity of the descent's in-flight probe, or `None` if idle —
+    /// the **read** edge of the linear-probe protocol.
+    /// [`crate::ProfileState::probe_correlation`] /
+    /// [`crate::PromoterState::probe_correlation`] delegate here for
+    /// their descent carrier rather than reaching the private slot.
+    #[must_use]
+    pub(crate) const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
+        self.probe.correlation()
+    }
+
+    /// Consume the descent's probe: disarm the slot and return the
+    /// prior correlation (`None` if already idle) — the **consume**
+    /// edge of the linear-probe protocol, dual of [`Self::arm_probe`].
+    ///
+    /// Crate-internal by design. The engine-facing "single consume per
+    /// owner" law remains the `pub`
+    /// [`crate::ProfileState::take_probe`] /
+    /// [`crate::PromoterState::take_probe`]; both delegate their
+    /// descent arm here, so the consume routes through the typed
+    /// protocol instead of a raw field and `probe` stays
+    /// module-private. Routing-once is unaffected — the engine still
+    /// sees exactly one consume entry point per owner.
+    pub(crate) const fn disarm_probe(&mut self) -> Option<ProbeCorrelation> {
+        self.probe.disarm()
     }
 }
 
@@ -971,7 +999,7 @@ impl DescentState {
 ///
 /// [`advance`]: Self::advance
 /// [`prepend`]: Self::prepend
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct DescentRemaining {
     /// Reversed: `inner.last()` is the logical head. Never empty.
     inner: Vec<CompactString>,
@@ -3645,11 +3673,12 @@ mod tests {
         );
 
         // take_probe delegates to ProfileState::take_probe: arming the
-        // Pending descent slot then taking it idles the machine state.
+        // Pending descent slot through the typed mint edge, then taking
+        // it idles the machine state (the take is the linear consume,
+        // so the slot is never dropped armed).
         p.descent_state_mut()
             .expect("still Pending")
-            .probe
-            .arm(ProbeCorrelation::from(7), ());
+            .arm_probe(ProbeCorrelation::from(7));
         assert_eq!(p.take_probe(), Some(ProbeCorrelation::from(7)));
         assert_eq!(p.take_probe(), None, "delegate idled the slot");
 

@@ -1550,6 +1550,7 @@ mod tests {
 
         // Heap: only burst_deadline (Seed has no settle_timer).
         assert_eq!(e.timers.len(), 1);
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     #[test]
@@ -1614,6 +1615,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(probe_correlation, Some(correlation));
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     /// The lift's central invariant: a Verifying burst's probe
@@ -1651,6 +1653,7 @@ mod tests {
             Some(projected),
             "the Verifying slot carries the in-flight correlation",
         );
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     #[test]
@@ -1727,6 +1730,10 @@ mod tests {
         e.start_standard_burst(pid, resource, now, &mut out);
         e.transition_to_verifying(pid, &mut out);
         out.probe_ops.clear();
+        // Production reaches `unstable_response_drives_batching` only
+        // from `on_probe_response`, which has already disarmed the
+        // Verifying slot via `take_owner_probe`. Mirror that consume.
+        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
 
         e.unstable_response_drives_batching(pid, now, &mut out);
 
@@ -1858,6 +1865,7 @@ mod tests {
             "after quiet ≥ settle, on_settle_expired transitions to Verifying; \
              got {final_phase:?}",
         );
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     #[test]
@@ -1866,6 +1874,10 @@ mod tests {
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, Instant::now(), &mut out);
         out.watch_ops.clear();
+        // Production reaches `finish_burst_to_idle` from a probe-response
+        // / effect-complete path that has already disarmed the in-flight
+        // slot via `take_owner_probe`. Mirror that consume.
+        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
 
         e.finish_burst_to_idle(pid, &mut out);
 
@@ -1917,6 +1929,10 @@ mod tests {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, Instant::now(), &mut out);
+        // Production reaches `transition_to_draining` only from
+        // `on_probe_response`, which has already disarmed the Verifying
+        // slot via `take_owner_probe`. Mirror that consume here.
+        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
 
         e.transition_to_draining(pid, &mut out);
 
@@ -2009,6 +2025,7 @@ mod tests {
              observed=ActivePreFire; got {:?}",
             out.diagnostics,
         );
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     #[test]
@@ -2507,6 +2524,7 @@ mod tests {
             "Standard burst on a File-anchored Profile must emit ProbeRequest::AnchorFile \
              at the anchor's path",
         );
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     #[test]
@@ -2566,6 +2584,7 @@ mod tests {
                  got {other:?}",
             ),
         }
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     #[test]
@@ -2591,6 +2610,7 @@ mod tests {
         // For a single dirty event at `a` under root, LCA promotes to `a`
         // (`a` is itself a Dir).
         assert_eq!(burst.probe_target, a);
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     // ---------------------------------------------------------------------------
@@ -2753,6 +2773,7 @@ mod tests {
         );
         assert_eq!(e.tree.get(a).unwrap().suppress_count(), 0);
         assert_eq!(e.tree.get(b).unwrap().suppress_count(), 0);
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     #[test]
@@ -2772,7 +2793,10 @@ mod tests {
         // Unstable response shrinks the burst back to Batching without
         // emitting Cancel — the verify just responded, so no in-flight
         // probe to revoke. (`unstable_response_drives_batching` does not
-        // call `cancel_owner_probe`.)
+        // call `cancel_owner_probe`.) Production reaches it from
+        // `on_probe_response`, which has already disarmed the Verifying
+        // slot via `take_owner_probe`; mirror that consume.
+        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
         e.unstable_response_drives_batching(pid, now + Duration::from_millis(2), &mut out);
         out.watch_ops.clear();
 
@@ -2851,6 +2875,7 @@ mod tests {
             unsuppress_resources, sorted,
             "drain emits Unsuppress ops in ResourceId-ascending order",
         );
+        let _ = e.cancel_all_in_flight_probes();
     }
 
     #[test]
@@ -2869,6 +2894,10 @@ mod tests {
         // suppressed_resources is now empty; any abnormal end shouldn't
         // re-emit Unsuppress for `a`.
         out.watch_ops.clear();
+        // Production reaches `finish_burst_to_idle` from a path that has
+        // already disarmed the in-flight slot via `take_owner_probe`.
+        // Mirror that consume.
+        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
 
         e.finish_burst_to_idle(pid, &mut out);
 

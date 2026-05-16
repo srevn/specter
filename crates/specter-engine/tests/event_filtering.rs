@@ -289,6 +289,7 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
         ClassSet::CONTENT | ClassSet::METADATA,
         "anchor's per-Resource union ORs both Profiles' contributions",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -344,6 +345,7 @@ fn it_ef_2b_profile_events_invariant_across_sub_attach_detach() {
 
     // The surviving Sub still belongs to that same Profile.
     assert_eq!(e.subs().get(sid_b).unwrap().profile, pid_a);
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -452,12 +454,14 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
-    // Profile is Pending; current_prefix is /tmp.
-    let descent = match e.profiles().get(pid).unwrap().state() {
-        ProfileState::Pending(d) => d.clone(),
+    // Profile is Pending; current_prefix is /tmp. Extract the `Copy`
+    // ResourceId directly — the descent's probe slot is linear and
+    // must not be cloned (nor borrowed-cloned to a no-op).
+    let current_prefix = match e.profiles().get(pid).unwrap().state() {
+        ProfileState::Pending(d) => d.current_prefix(),
         s => panic!("expected Pending, got {s:?}"),
     };
-    assert_eq!(descent.current_prefix(), tmp);
+    assert_eq!(current_prefix, tmp);
 
     // /tmp's events_union is STRUCTURE — NOT the Sub's CONTENT mask. The
     // Sub's mask only contributes to its own anchor's union; the prefix
@@ -470,6 +474,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
     // Profile's events_union still records the user's mask (drives mask
     // on the eventual anchor materialization).
     assert_eq!(e.profiles().get(pid).unwrap().events(), ClassSet::CONTENT,);
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -762,6 +767,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
         2,
         "watch_demand bumped 1→2 on second attach (union changes drive Watch even off the 0↔1 edge)",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -802,6 +808,7 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
         profile: pid_b,
     };
     assert_ne!(dk_a, dk_b, "DedupKey::Subtree partitions by (sub, profile)");
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1822,6 +1829,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         ClassSet::CONTENT,
         "Q's contribution intact",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -1965,4 +1973,5 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     );
     // Q is alive — its descendant claim on subdir is intact.
     assert!(e.profiles().get(pid_q).is_some(), "Q survives P's graft");
+    let _ = e.cancel_all_in_flight_probes();
 }

@@ -122,6 +122,7 @@ fn two_profiles_one_resource_share_watch_demand() {
     assert_eq!(watch_count_b, 0, "1→2 edge emits no Watch");
 
     assert_eq!(e.tree().get(r).unwrap().watch_demand(), 2);
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -460,6 +461,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             BurstFinish::ReturnToIdle
         ),
     ));
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]

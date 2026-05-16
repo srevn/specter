@@ -88,6 +88,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         Some(root),
         "Profile caches its watch_root_parent",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -112,6 +113,7 @@ fn root_anchor_has_no_watch_root_parent() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     assert!(e.profiles().get(pid).unwrap().watch_root_parent().is_none());
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -230,6 +232,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
         2,
         "both Profiles contribute to /root's watch_demand",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -290,4 +293,5 @@ fn watch_root_parent_role_stays_user_when_already_user() {
     ));
     // watch_demand has both contributions (root's own + inner's parent).
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 2);
+    let _ = e.cancel_all_in_flight_probes();
 }

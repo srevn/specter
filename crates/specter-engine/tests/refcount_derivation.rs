@@ -106,4 +106,5 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
             "post-detach count is the registry-derived live count",
         );
     }
+    let _ = e.cancel_all_in_flight_probes();
 }

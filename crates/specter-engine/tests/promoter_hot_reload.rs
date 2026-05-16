@@ -129,6 +129,7 @@ fn mixed_add_diff_emits_both_lifecycle_diagnostics() {
         "PromoterAttached emitted for `logs`; got {:?}",
         out.diagnostics,
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `subs.modified` + `promoters.modified` together: each modify is
@@ -234,6 +235,7 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
         .find_by_name("logs")
         .expect("logs re-registered");
     assert_ne!(new_pid, old_pid, "Promoter modify mints a fresh id");
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `subs.removed` + `promoters.removed` together: the diff's
@@ -289,6 +291,7 @@ fn mixed_remove_diff_emits_promoter_reaped_only() {
         !saw_any_attach,
         "no attach diagnostics on a remove-only diff"
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Static→dynamic migration via path edit: same name, but the path
@@ -333,6 +336,7 @@ fn static_to_dynamic_migration_diff_swaps_via_diagnostic_stream() {
         "PromoterAttached emitted with the migrated name; got {:?}",
         out.diagnostics,
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Reverse direction: dynamic→static migration. The diff emits
@@ -395,4 +399,5 @@ fn dynamic_to_static_migration_diff_swaps_via_diagnostic_stream() {
         "static SubAttached emitted; got {:?}",
         out.diagnostics,
     );
+    let _ = e.cancel_all_in_flight_probes();
 }

@@ -269,6 +269,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)))
         .count();
     assert_eq!(probes, 1, "FsEvent at prefix triggers fresh descent probe");
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -348,6 +349,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         recovery_probe,
         "recovery emits descent probe at watch_root_parent",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // Detach Pending Profile with in-flight descent probe
@@ -507,6 +509,7 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         "anchor terminal event on Pending Profile lands in EventOnUnwatchedResource diagnostic; got {:?}",
         out.diagnostics,
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // Behavioral parity: a single FsEvent at one Resource fans out to a
@@ -697,4 +700,5 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         e.profiles().get(pid_c).unwrap().state(),
         ProfileState::Idle,
     ));
+    let _ = e.cancel_all_in_flight_probes();
 }

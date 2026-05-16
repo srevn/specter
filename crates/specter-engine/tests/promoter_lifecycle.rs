@@ -437,6 +437,7 @@ fn static_attach_emits_sub_attached_with_no_source_promoter() {
         "exactly one SubAttached per attach; got diagnostics={:?}",
         out.diagnostics,
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -619,6 +620,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
             panic!("Promoter state should remain Active, got {s:?}")
         }
     }
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -844,6 +846,7 @@ fn sensor_overflow_reseeds_active_promoter() {
         )
     });
     assert!(probe_at_var_log, "probe targets /var/log");
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `PrefixPending` Promoter with no in-flight probe: an
@@ -923,6 +926,7 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
         )
     });
     assert!(probe_at_a, "descent probe targets /a");
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// `PrefixPending` Promoter with in-flight descent probe: the
@@ -986,6 +990,7 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
         Some(in_flight_corr),
         "in-flight correlation preserved",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// Regression for the dynamic-Sub burst-clock divergence: `try_promote`
@@ -1068,4 +1073,5 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
         "dynamic Sub's BurstDeadline must derive from the step's `now`, \
          not from the system clock",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }

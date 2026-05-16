@@ -212,6 +212,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         matches!(p_probe, ProbeRequest::Subtree { .. }),
         "post-fix: kind=None routes recovery through Subtree probe; got {p_probe:?}",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -287,6 +288,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         matches!(p_probe, ProbeRequest::Subtree { .. }),
         "Dir→File direction emits Subtree both pre-fix and post-fix",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
@@ -351,4 +353,5 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         .expect("P emits a recovery Seed probe");
     assert!(matches!(p_probe, ProbeRequest::Subtree { .. }));
     let _ = count_probes(&recovery_out);
+    let _ = e.cancel_all_in_flight_probes();
 }

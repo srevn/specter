@@ -52,7 +52,7 @@ use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
     ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
-    PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
+    PatternSpec, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
     PromoterAttachRequest, PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole,
     StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Tree,
 };
@@ -142,13 +142,28 @@ impl Engine {
         // pending descent mints its correlation *here* so the slot is
         // constructed already armed — there is no window where the
         // PrefixPending phase exists without its probe correlation.
-        let (initial_state, pending_descent) = match &materialize {
-            MaterializeResult::Materialized(_) => (
+        // `materialize` is consumed exactly once: `remaining` moves
+        // straight into the linear descent slot (no clone), and the
+        // post-insert step is carried as a structural token rather
+        // than re-derived from a surviving `materialize` — the
+        // `Pending ⇒ correlation` pairing is type-enforced, not an
+        // `expect`.
+        enum PostInsert {
+            EnterActive {
+                proxy_resource: ResourceId,
+            },
+            PendingDescent {
+                prefix: ResourceId,
+                correlation: ProbeCorrelation,
+            },
+        }
+        let (initial_state, post_insert) = match materialize {
+            MaterializeResult::Materialized(proxy_resource) => (
                 PromoterState::Active {
                     proxies: BTreeMap::new(),
                     enumerating: ProbeSlot::empty(),
                 },
-                None,
+                PostInsert::EnterActive { proxy_resource },
             ),
             MaterializeResult::Pending {
                 prefix, remaining, ..
@@ -156,11 +171,14 @@ impl Engine {
                 let correlation = self.mint_probe_correlation();
                 (
                     PromoterState::PrefixPending(DescentState::new(
-                        *prefix,
-                        remaining.clone(),
+                        prefix,
+                        remaining,
                         ProbeSlot::armed(correlation, ()),
                     )),
-                    Some((*prefix, correlation)),
+                    PostInsert::PendingDescent {
+                        prefix,
+                        correlation,
+                    },
                 )
             }
         };
@@ -194,9 +212,9 @@ impl Engine {
             name: CompactString::from(req.name.as_str()),
         });
 
-        // 8. Branch on materialise outcome to set up watches/probes.
-        match materialize {
-            MaterializeResult::Materialized(prefix_resource) => {
+        // 8. Branch on the post-insert token to set up watches/probes.
+        match post_insert {
+            PostInsert::EnterActive { proxy_resource } => {
                 // Single helper: enter_active demotes the slot's role
                 // (DescentScaffold → User) where applicable, registers
                 // the first proxy, and dispatches the initial
@@ -205,15 +223,16 @@ impl Engine {
                 self.enter_active(
                     promoter_id,
                     /* prior_prefix_to_release */ None,
-                    /* new_proxy_resource */ prefix_resource,
+                    /* new_proxy_resource */ proxy_resource,
                     /* pattern_component_index */ lpl,
                     now,
                     out,
                 );
             }
-            MaterializeResult::Pending { .. } => {
-                let (prefix, correlation) =
-                    pending_descent.expect("Pending materialise ⇒ correlation minted at step 5");
+            PostInsert::PendingDescent {
+                prefix,
+                correlation,
+            } => {
                 // PrefixPending: install the
                 // [`ContribKey::PromoterPrefix`] STRUCTURE
                 // contribution, then emit the descent probe carrying

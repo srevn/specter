@@ -93,7 +93,13 @@ pub enum ExitReason {
 /// matches on this; explicit enum is friendlier than a bool.
 #[derive(Debug, Eq, PartialEq)]
 pub enum TickOutcome {
+    /// Inputs drained; loop again.
     Continue,
+    /// Operator signal or sensor disconnect. The tick has already run
+    /// the cancel-first probe drain ([`EngineDriver::begin_shutdown`]),
+    /// so the engine holds no armed probe: tearing the driver down
+    /// (the bin's `drop(driver)`) will not trip the linear `ProbeSlot`
+    /// Drop guard.
     Shutdown,
 }
 
@@ -259,8 +265,32 @@ impl EngineDriver {
         }
     }
 
+    /// Cancel-first shutdown teardown, run once when [`Self::tick`]
+    /// resolves to shutdown (operator signal or sensor disconnect).
+    ///
+    /// The linear `ProbeSlot` Drop tripwire panics if the `Engine` is
+    /// dropped (the bin's `drop(driver)`) with a probe still armed,
+    /// and a graceful shutdown routinely coincides with one in flight
+    /// (settle / verify / rebase / descent). Disarm every owner's slot
+    /// and forward the resulting `Cancel`s to the prober — the same
+    /// disarm-then-`Cancel` discipline the engine applies to its
+    /// internal abandon sites, now at the process boundary. After this
+    /// returns the engine holds no armed probe, so dropping it is
+    /// silent and [`TickOutcome::Shutdown`] means "drained, safe to
+    /// tear down".
+    fn begin_shutdown(&mut self) -> TickOutcome {
+        let out = self.engine.cancel_all_in_flight_probes();
+        self.forward(out);
+        TickOutcome::Shutdown
+    }
+
     /// One pass through the drain order. Public for unit tests
     /// (sibling tests drive a single tick with mock channels).
+    ///
+    /// When the pass resolves to shutdown (operator signal or sensor
+    /// disconnect) it runs [`Self::begin_shutdown`] before returning
+    /// [`TickOutcome::Shutdown`], so the engine is probe-drained
+    /// whether the daemon ([`Self::run`]) or a test drove the tick.
     pub fn tick(&mut self) -> TickOutcome {
         let now = Instant::now();
 
@@ -273,7 +303,7 @@ impl EngineDriver {
                 }
                 Err(crossbeam::channel::TryRecvError::Empty) => break,
                 Err(crossbeam::channel::TryRecvError::Disconnected) => {
-                    return TickOutcome::Shutdown;
+                    return self.begin_shutdown();
                 }
             }
         }
@@ -333,22 +363,30 @@ impl EngineDriver {
                 d.saturating_duration_since(Instant::now())
             });
 
-        let mut sel = Select::new();
-        let _i_sensor = sel.recv(&self.sides.sensor_in_rx);
-        let _i_effect = sel.recv(&self.sides.effect_in_rx);
-        let _i_reload = sel.recv(&self.sides.reload_signal_rx);
-        // Wakes the driver from a long block when a config-event pulse
-        // arrives. The actual pulse handling lives in the per-tick
-        // drain above; this arm is purely for unblocking. The sender
-        // side must remain alive across the block — a Disconnected
-        // rx here would crossbeam-report as immediately-ready and
-        // busy-loop the driver.
-        let _i_config = sel.recv(&self.sides.config_event_rx);
-        let i_shutdown = sel.recv(&self.sides.shutdown_engine_rx);
+        // Scope the `Select`: it borrows `&self.sides.*`, while the
+        // shutdown drain below needs `&mut self`. Resolving to a
+        // `bool` inside the block drops `sel` (and its borrows) before
+        // `begin_shutdown` takes the mutable borrow.
+        let shutting_down = {
+            let mut sel = Select::new();
+            let _i_sensor = sel.recv(&self.sides.sensor_in_rx);
+            let _i_effect = sel.recv(&self.sides.effect_in_rx);
+            let _i_reload = sel.recv(&self.sides.reload_signal_rx);
+            // Wakes the driver from a long block when a config-event
+            // pulse arrives. The actual pulse handling lives in the
+            // per-tick drain above; this arm is purely for unblocking.
+            // The sender side must remain alive across the block — a
+            // Disconnected rx here would crossbeam-report as
+            // immediately-ready and busy-loop the driver.
+            let _i_config = sel.recv(&self.sides.config_event_rx);
+            let i_shutdown = sel.recv(&self.sides.shutdown_engine_rx);
+            matches!(sel.ready_timeout(timeout), Ok(idx) if idx == i_shutdown)
+        };
 
-        match sel.ready_timeout(timeout) {
-            Ok(idx) if idx == i_shutdown => TickOutcome::Shutdown,
-            Ok(_) | Err(crossbeam::channel::ReadyTimeoutError) => TickOutcome::Continue,
+        if shutting_down {
+            self.begin_shutdown()
+        } else {
+            TickOutcome::Continue
         }
     }
 
@@ -1202,6 +1240,12 @@ mod tests {
         // The Seed burst emitted a probe → forwarded to prober.submit.
         let submitted = rig.prober.take_submitted();
         assert_eq!(submitted.len(), 1);
+
+        // The attach left a Seed-Verifying probe armed. Production
+        // always loops to a shutdown tick, which drains it via
+        // `begin_shutdown`; model that here before the rig drops.
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     }
 
     #[test]
@@ -1558,6 +1602,12 @@ mod tests {
         let sid = *rig.driver.loader.ids.get("build").expect("name present");
         assert_ne!(sid, SubId::default());
         assert!(rig.driver.loader.promoter_ids.is_empty());
+
+        // The attach left a Seed-Verifying probe armed. Production
+        // always loops to a shutdown tick, which drains it via
+        // `begin_shutdown`; model that here before the rig drops.
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     }
 
     /// `run_initial_attach` extension: a config with a dynamic
@@ -1583,6 +1633,12 @@ mod tests {
             .get("logs")
             .expect("promoter name present");
         assert_ne!(pid, specter_core::PromoterId::default());
+
+        // The promoter attach left a descent probe armed. Production
+        // always loops to a shutdown tick, which drains it via
+        // `begin_shutdown`; model that here before the rig drops.
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     }
 
     /// Mixed static + dynamic config: the initial-attach loop walks
@@ -1619,6 +1675,12 @@ mod tests {
 
         assert!(rig.driver.loader.ids.contains_key("build"));
         assert!(rig.driver.loader.promoter_ids.contains_key("logs"));
+
+        // The attaches left probes armed (static Seed-Verifying +
+        // dynamic descent). Production always loops to a shutdown tick,
+        // which drains them via `begin_shutdown`; model that here.
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     }
 
     /// Disabled entries on either side are skipped: the config carries
@@ -1681,6 +1743,12 @@ mod tests {
             1,
             "only the enabled dynamic lives in promoter_ids"
         );
+
+        // The enabled attaches left probes armed. Production always
+        // loops to a shutdown tick, which drains them via
+        // `begin_shutdown`; model that here before the rig drops.
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     }
 
     /// Reload that adds a fresh dynamic [[watch]] populates
@@ -2396,6 +2464,12 @@ actions   = [{{ exec = ["true"] }}]
             ids_snapshot, ids_after,
             "silent-drop does not perturb attached Sub ids",
         );
+
+        // The initial attach left a Seed-Verifying probe armed.
+        // Production always loops to a shutdown tick, which drains it
+        // via `begin_shutdown`; model that here before the rig drops.
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     }
 
     /// Settle expiry whose lstat detects drift (file was edited)
@@ -2475,6 +2549,13 @@ actions   = [{{ exec = ["true"] }}]
             "v2's added watch 'b' attached during reload",
         );
         assert_eq!(rig.driver.loader.current_config.watches.len(), 2);
+
+        // The initial attach and the drift-driven reload left
+        // Seed-Verifying probes armed. Production always loops to a
+        // shutdown tick, which drains them via `begin_shutdown`; model
+        // that here before the rig drops.
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     }
 
     /// Lstat error (file missing, EACCES on parent, etc.) routes
@@ -2579,5 +2660,12 @@ actions   = [{{ exec = ["true"] }}]
             rig.driver.loader.config_meta, v1_meta,
             "post-reload meta must differ from the pre-edit identity",
         );
+
+        // The initial attach and the drift-driven reload left
+        // Seed-Verifying probes armed. Production always loops to a
+        // shutdown tick, which drains them via `begin_shutdown`; model
+        // that here before the rig drops.
+        rig.shutdown_tx.try_send(()).expect("shutdown send");
+        assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     }
 }
