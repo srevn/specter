@@ -787,6 +787,13 @@ pub fn subtree_at_dir(
 /// anchor down to one of its descendants — [`subtree_at_dir`] consumes
 /// it as the descent guide for snapshot navigation; [`splice`] consumes
 /// it to know which intermediate `DirSnapshot`s need rebuilding.
+///
+/// Termination relies on the [`Tree`] acyclicity invariant: each
+/// `tree.parent` step strictly ascends, so the walk reaches `anchor`
+/// or bottoms out at a root (`None`) in at most `depth(target)` steps.
+/// The loop is intentionally not depth-bounded here — the bound is a
+/// property of [`Tree`] construction, not a guard this hot path
+/// re-checks.
 fn ancestor_chain(
     target: ResourceId,
     anchor: ResourceId,
@@ -1044,19 +1051,28 @@ fn splice_dir(
 /// [`Diff`] over two parallel [`DirSnapshot`] trees rooted at the
 /// same anchor / target.
 ///
-/// Walks in lock-step, pruning equal-`dir_hash` subtrees. Output ordering
-/// is lex-by-segment within each list — depth-first lex traversal happens
-/// to coincide with flat lex sort of `parent/child` segments.
+/// Walks in lock-step, pruning equal-`dir_hash` subtrees. Each output
+/// list is in **stable depth-first pre-order**: `BTreeMap` iteration
+/// (lexicographic within a directory) then fixed recursion, so a
+/// directory entry is immediately followed by its whole subtree,
+/// before the directory's lexical siblings. Deterministic and
+/// replay-stable (`Diff: PartialEq`) but **not** a flat lexicographic
+/// sort of `parent/child` paths: the two diverge whenever a sibling
+/// sorts between a directory and its children (`d.txt` between `d` and
+/// `d/file`, since `/` = 0x2F sorts after `.` = 0x2E). `renamed` is in
+/// baseline-side traversal order, not sorted by `from` (see
+/// `pair_renames`).
 ///
 /// Cross-level rename detection: the per-level walk collects deltas
-/// keyed by `(device, inode)`; a post-pass pairs `Created` and `Deleted`
-/// across the entire walk into `Renamed`.
+/// keyed by `fs_id`; a `pair_renames` post-pass then pairs `Created`
+/// and `Deleted` across the whole walk into `Renamed`.
 ///
-/// Sole hot-path consumer is `specter_engine::reconcile::graft`, which
-/// holds a typed Dir prior + Dir response by construction. The
-/// [`TreeSnapshot`]-keyed entry point [`diff_tree`] is retained for
-/// test fixtures that diff over both anchor shapes; production paths
-/// call this helper directly to avoid the wrapper-Arc clone.
+/// This is the typed Dir/Dir surface — its production consumer is
+/// `specter_engine::reconcile::graft` (Dir prior + Dir response by
+/// construction: no variant dispatch, no wrapper-`Arc` clone). The
+/// [`TreeSnapshot`]-keyed [`diff_tree`] is the other production
+/// surface (anchor-shape dispatch, consumed by the engine's
+/// `emit_effects`); both are real paths, not test-only.
 #[must_use]
 pub fn diff_dir_pair(baseline: &DirSnapshot, current: &DirSnapshot) -> Diff {
     let mut out = Diff::default();
@@ -1079,11 +1095,15 @@ pub fn diff_dir_pair(baseline: &DirSnapshot, current: &DirSnapshot) -> Diff {
 
 /// [`Diff`] over two parallel [`TreeSnapshot`] trees.
 ///
-/// Test-facing entry point: dispatches on the anchor's shape to either
-/// [`diff_dir_pair`] (Dir/Dir) or the private File/File walker. Engine
-/// callers go through [`diff_dir_pair`] / [`diff_file_pair`] (via
-/// `dispatch_*_ok`'s inline path) so they avoid the variant dispatch
-/// and the type-shape contract is encoded at the call site.
+/// Anchor-shape-dispatching surface: matches the [`TreeSnapshot`]
+/// variant pair to [`diff_dir_pair`] (Dir/Dir) or the private
+/// File/File walker. The production consumer is the engine's
+/// `emit_effects` (diffs owned `baseline()` / `current()`
+/// [`TreeSnapshot`]s on the driver thread); test fixtures also use it
+/// to diff over both anchor shapes. The typed Dir/Dir hot path
+/// (`specter_engine::reconcile::graft`) calls [`diff_dir_pair`]
+/// directly to skip the variant match. Per-list ordering is
+/// [`diff_dir_pair`]'s — stable depth-first pre-order.
 #[must_use]
 pub fn diff_tree(baseline: &TreeSnapshot, current: &TreeSnapshot) -> Diff {
     match (baseline, current) {
@@ -1234,18 +1254,39 @@ fn diff_same_name(
                     }
                     (DirChild::Covered(_), DirChild::Uncovered(_))
                     | (DirChild::Uncovered(_), DirChild::Covered(_)) => {
-                        // Same-fs_id coverage flip. Walker's Uncovered gates
-                        // (`!recursive`, `max_depth`, cross-fs) are either
-                        // `config_hash`-frozen for a Profile or change
-                        // `fs_id` (mount-boundary lstat resolves to distinct
-                        // inode/device pairs), so the outer
-                        // `p.fs_id() == n.fs_id()` guard would have failed.
-                        // Reaching this arm would silently drop a coverage
-                        // delta and leak Tree watches; surface as a panic.
-                        unreachable!(
-                            "diff_same_name: same-fs_id (Covered, Uncovered) is impossible \
-                             — Uncovered gates are config-frozen or change fs_id",
+                        // Same-fs_id coverage flip: v1-unreachable. The
+                        // walker's Uncovered gates (`!recursive`,
+                        // `max_depth`, cross-fs) are `config_hash`-frozen
+                        // per Profile or change `fs_id`, so the outer
+                        // `p.fs_id() == n.fs_id()` guard would already have
+                        // failed (reachability argument unchanged).
+                        //
+                        // Degrade, don't abort: a panic here stalls the
+                        // single-threaded engine driver for a compounding
+                        // routing breach. Release stages the slot ineligible
+                        // (Deleted + Created, never a Rename) and recurses
+                        // both sides, surfacing the dropped coverage delta
+                        // rather than silently leaking Tree watches.
+                        debug_assert!(
+                            false,
+                            "diff_same_name: same-fs_id (Covered, Uncovered) is \
+                             v1-unreachable — Uncovered gates are config-frozen \
+                             or change fs_id",
                         );
+                        staged_deleted.push(StagedEntry {
+                            rel: rel.clone(),
+                            kind: EntryKind::Dir,
+                            fs_id: p.fs_id(),
+                            pair_eligible: false,
+                        });
+                        staged_created.push(StagedEntry {
+                            rel: rel.clone(),
+                            kind: EntryKind::Dir,
+                            fs_id: n.fs_id(),
+                            pair_eligible: false,
+                        });
+                        stage_descendants_deleted(&rel, pc, staged_deleted);
+                        stage_descendants_created(&rel, nc, staged_created);
                     }
                 }
             } else {
@@ -1369,7 +1410,7 @@ fn stage_created(
 // `all_created` / `all_deleted` are the snapshot ↔ empty transformations.
 // They exist as named methods (rather than `diff_tree(empty, snap)` calls)
 // to avoid allocating an empty `DirSnapshot` per invocation; both reuse
-// the same depth-first lex staging recursion as `diff_tree`.
+// the same depth-first pre-order staging recursion as `diff_tree`.
 //
 // **Asymmetry vs `modified` / `renamed`.** The four `Diff` categories do
 // not have symmetric single-snapshot reductions:
@@ -1390,8 +1431,8 @@ fn stage_created(
 
 impl Diff {
     /// Construct a [`Diff`] where every entry of `snap` (recursively, into
-    /// covered subtrees) appears as a `Created` entry, in depth-first lex
-    /// order.
+    /// covered subtrees) appears as a `Created` entry, in stable
+    /// depth-first pre-order (the same order [`diff_dir_pair`] emits).
     ///
     /// Equivalent to `diff_tree(empty_dirsnapshot, snap)` without the empty
     /// `DirSnapshot` allocation. Sole intended caller is
@@ -1421,8 +1462,8 @@ impl Diff {
     }
 
     /// Symmetric counterpart of [`Diff::all_created`]: every entry of `snap`
-    /// appears as a `Deleted` entry, in depth-first lex order. Used by
-    /// `specter_engine::Engine::release_descendant_claim` for
+    /// appears as a `Deleted` entry, in stable depth-first pre-order. Used
+    /// by `specter_engine::Engine::release_descendant_claim` for
     /// whole-snapshot teardown.
     ///
     /// See [`Diff::all_created`] for the modified/renamed asymmetry
@@ -1464,9 +1505,9 @@ impl Diff {
 /// not renames; they fall through to Created+Deleted.
 ///
 /// Output order: unpaired Created/Deleted are emitted in collection order
-/// (depth-first lex on each side); Renamed entries are emitted in
-/// `staged_deleted`'s iteration order (also depth-first lex on the
-/// baseline side).
+/// (depth-first pre-order on each side); Renamed entries are emitted in
+/// `staged_deleted`'s iteration order — the baseline-side depth-first
+/// pre-order, not sorted by `from`.
 ///
 /// The BTreeMap is keyed lookup-only (never iterated), so the canonical
 /// `FsIdentity` ord (inode-first by declaration order) supersedes the

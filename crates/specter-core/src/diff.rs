@@ -5,11 +5,15 @@
 //! — it walks two parallel `Snapshot` trees lock-step and emits this flat
 //! shape.
 //!
-//! Output ordering: each list is sorted independently by lex segment
-//! (depth-first lex traversal happens to coincide with flat lex over
-//! `parent/child`), with `renamed` ordered by `from`. `modified` carries
-//! the *current* entry's `EntryRef` payload (downstream consumers read the
-//! new state).
+//! Output ordering: each list is in stable depth-first pre-order —
+//! `BTreeMap` iteration (lexicographic within a directory) plus fixed
+//! recursion, so a directory entry is immediately followed by its whole
+//! subtree, before the directory's lexical siblings. Deterministic and
+//! replay-stable (`Diff: PartialEq`) but **not** a flat lexicographic
+//! sort of `parent/child` paths. `renamed` follows the baseline-side
+//! (deleted) traversal order, not a sort by `from`. `modified` carries
+//! the *current* entry's `EntryRef` payload (downstream consumers read
+//! the new state).
 //!
 //! Hardlinks (same inode at multiple segments) collide in the
 //! `fs_id` rename map; later entry wins. Documented v1 limitation; the
@@ -22,7 +26,8 @@ use smallvec::SmallVec;
 
 /// Classification of entry-level differences between two snapshots.
 ///
-/// Each list is independently sorted; see module docs.
+/// Each list is in stable depth-first pre-order (not a flat-lex sort);
+/// see module docs.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Diff {
     pub created: SmallVec<[EntryRef; 4]>,

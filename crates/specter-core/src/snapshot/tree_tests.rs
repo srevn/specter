@@ -1,6 +1,6 @@
 use super::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot, diff_tree,
-    splice,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot,
+    diff_dir_pair, diff_tree, splice,
 };
 use crate::diag::SpliceFailureCause;
 use crate::diff::{Diff, EntryRef, Rename};
@@ -1582,6 +1582,63 @@ fn diff_tree_dir_replace_at_different_inode_emits_descendants() {
     assert!(d.renamed.is_empty());
 }
 
+/// Same-name `"dir"` whose coverage flips Covered→Uncovered at the
+/// **same** `fs_id`. The matching `fs_id` makes `diff_same_name` reach
+/// the inner `(Covered, Uncovered)` arm; the Covered side carries one
+/// child so the outer `dir_hash` differs (Covered-non-empty vs
+/// Uncovered) and the walk descends into `"dir"` instead of
+/// short-circuiting at the root. Constructor-level only — the walker's
+/// config-frozen / fs_id-changing gates make this state v1-unreachable
+/// on a real probe.
+fn coverage_flip_same_fs_id_pair() -> (TreeSnapshot, TreeSnapshot) {
+    let inner = make_dir(
+        meta(1, 500, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("k"),
+            ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 77, 0)),
+        )]),
+    );
+    let a = TreeSnapshot::Dir(make_dir(
+        meta(1, 1, 0),
+        0,
+        BTreeMap::from_iter([(name("dir"), dir(500, 0, Some(inner)))]),
+    ));
+    let b = TreeSnapshot::Dir(make_dir(
+        meta(2, 1, 0),
+        0,
+        BTreeMap::from_iter([(name("dir"), dir(500, 0, None))]),
+    ));
+    (a, b)
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "same-fs_id (Covered, Uncovered) is v1-unreachable")]
+fn diff_same_name_coverage_flip_trips_debug_assert() {
+    let (a, b) = coverage_flip_same_fs_id_pair();
+    let _ = diff_tree(&a, &b);
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn diff_same_name_coverage_flip_degrades_to_delete_create_in_release() {
+    let (a, b) = coverage_flip_same_fs_id_pair();
+    let d = diff_tree(&a, &b);
+    let deleted: Vec<_> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
+    let created: Vec<_> = d.created.iter().map(|e| e.segment.as_str()).collect();
+    // Conservative over-approximation: the flipped slot plus the
+    // Covered side's observed descendants surface as Deleted; the
+    // Uncovered side contributes only the slot (no descendants were
+    // observed). Never collapses to a Rename, never aborts.
+    assert_eq!(deleted, vec!["dir", "dir/k"]);
+    assert_eq!(created, vec!["dir"]);
+    assert!(
+        d.renamed.is_empty(),
+        "coverage flip must not collapse to a Rename",
+    );
+}
+
 #[test]
 fn diff_tree_rename_into_kind_change_slot() {
     // Combined scenario: /old changes kind File→Dir AND a file at
@@ -1740,6 +1797,61 @@ fn diff_tree_created_lists_in_lex_order() {
 }
 
 #[test]
+fn diff_dir_pair_created_is_depth_first_preorder_not_flat_lex() {
+    // Contract pin (audit Test-gap #1): `created` is stable
+    // depth-first pre-order — a directory entry, then its whole
+    // subtree, then the directory's lexical siblings — NOT a flat
+    // lexicographic sort of `parent/child` paths.
+    //
+    // `{"d": Dir{"file"}, "d.txt": Leaf}` is the minimal divergent
+    // fixture: depth-first pre-order yields ["d", "d/file", "d.txt"],
+    // while a flat-lex sort would place "d.txt" before "d/file" (the
+    // separator '/' = 0x2F sorts after '.' = 0x2E). Equality with the
+    // sorted order would mean the implementation silently switched to
+    // a sort, breaking the replay-stable ordering contract.
+    let inner = make_dir(
+        meta(1, 2, 0),
+        0,
+        BTreeMap::from_iter([(
+            name("file"),
+            ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 9, 0)),
+        )]),
+    );
+    let baseline = make_dir(meta(1, 1, 0), 0, BTreeMap::new());
+    let current = make_dir(
+        meta(2, 1, 0),
+        0,
+        BTreeMap::from_iter([
+            (name("d"), dir(2, 0, Some(inner))),
+            (
+                name("d.txt"),
+                ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 10, 0)),
+            ),
+        ]),
+    );
+
+    let d = diff_dir_pair(&baseline, &current);
+    let created: Vec<&str> = d.created.iter().map(|e| e.segment.as_str()).collect();
+    assert_eq!(
+        created,
+        vec!["d", "d/file", "d.txt"],
+        "created must be stable depth-first pre-order",
+    );
+
+    let mut flat_lex = created.clone();
+    flat_lex.sort_unstable();
+    assert_eq!(
+        flat_lex,
+        vec!["d", "d.txt", "d/file"],
+        "fixture sanity: flat-lex order genuinely diverges from pre-order",
+    );
+    assert_ne!(
+        created, flat_lex,
+        "ordering is depth-first pre-order by contract, not a flat-lex sort",
+    );
+}
+
+#[test]
 fn diff_tree_file_to_file_modified() {
     let a = TreeSnapshot::File(leaf(EntryKind::File, 10, 1, 7, 0));
     let b = TreeSnapshot::File(leaf(EntryKind::File, 10, 2, 7, 0)); // mtime bumped
@@ -1888,8 +2000,11 @@ fn diff_all_created_uncovered_dir_emits_dir_only_no_descendants() {
 #[test]
 fn diff_all_created_covered_dir_emits_recursive_entries_depth_first_lex() {
     // Structure: root/{a (Dir, covered)/{b.rs}, c.rs}.
-    // Expected depth-first lex order in `created`:
-    //   "a", "a/b.rs", "c.rs".
+    // Expected depth-first pre-order in `created`:
+    //   "a", "a/b.rs", "c.rs"
+    // (coincides with flat lex for this fixture; the divergent case
+    // is pinned by
+    // `diff_dir_pair_created_is_depth_first_preorder_not_flat_lex`).
     let mut inner = BTreeMap::new();
     inner.insert(
         name("b.rs"),

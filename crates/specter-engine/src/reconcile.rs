@@ -286,14 +286,15 @@ pub(crate) fn apply_diff_to_tree(
 
     // Phase 2 — creates + renamed.to, forward iteration.
     //
-    // `diff.created` is in depth-first lex order (parents before
-    // descendants). `diff.renamed.to` is in `from`-sorted order, which
-    // is not necessarily descendant-aware, but `ensure_descendant`
-    // walks each component via `ensure_child` (idempotent on existing
-    // slots), so any out-of-order entry only triggers extra slot
-    // materialisation up front — the eventual `add_watch` for each
-    // explicit entry still lands correctly because contributions are
-    // per-`(slot, key)` and disjoint between unrelated slots.
+    // `diff.created` is in depth-first pre-order, so parents precede
+    // their descendants. `diff.renamed.to` follows the baseline-side
+    // (`from`) traversal order (not a sort), which is likewise not
+    // necessarily descendant-aware, but `ensure_descendant` walks each
+    // component via `ensure_child` (idempotent on existing slots), so
+    // any out-of-order entry only triggers extra slot materialisation
+    // up front — the eventual `add_watch` for each explicit entry
+    // still lands correctly because contributions are per-`(slot,
+    // key)` and disjoint between unrelated slots.
     let phase_2 = diff
         .created
         .iter()
