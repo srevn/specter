@@ -59,8 +59,12 @@ pub enum IssueKind {
     InvalidName,
     /// `path` of a dynamic `[[watch]]` failed `PatternSpec::parse` —
     /// any of `**`, `.`/`..`, empty segment, non-absolute, Windows
-    /// prefix, or a malformed glob segment. Detail carries the rendered
-    /// [`specter_core::PatternError`] message.
+    /// prefix, or a malformed glob segment. A pure-literal `path`
+    /// ([`specter_core::PatternError::NotDynamic`]) reaches the parser
+    /// only via dispatcher bypass — production gates on
+    /// `PatternSpec::is_dynamic` upstream, making this the structural
+    /// dual of [`Self::PathContainsGlobChars`]. Detail carries the
+    /// rendered [`specter_core::PatternError`] message.
     InvalidPattern,
     /// Defense-in-depth: `validate_static_watch` was reached with a
     /// path containing one of the four glob discriminator characters

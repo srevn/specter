@@ -4,7 +4,7 @@
 //! decomposed `Vec<PatternComponent>` and the `literal_prefix_len` —
 //! the number of leading consecutive `Literal` segments (root included).
 //! These two derived fields are a deterministic function of `source`, so
-//! equality and ordering route through `source` alone.
+//! equality routes through `source` alone.
 //!
 //! The parser screens a few invariants beyond glob compilation:
 //! - **Absolute only.** Patterns must begin with `/`.
@@ -24,7 +24,7 @@ use std::fmt;
 /// Decomposed glob path pattern. `components.len() >= 2` post-parse — a
 /// synthetic `Literal("/")` at index 0 plus at least one segment.
 ///
-/// Equality and ordering are over `source` only; the `components` and
+/// Equality is over `source` only; the `components` and
 /// `literal_prefix_len` fields are deterministic functions of `source`
 /// (the parser is pure), so two `PatternSpec`s with equal `source`
 /// strings have byte-equal decompositions.
@@ -65,6 +65,13 @@ pub enum PatternError {
     EmptySegment,
     /// Windows-style prefix detected (`:` inside a segment).
     WindowsPrefix,
+    /// Source is pure-literal — none of the `*`, `?`, `[`, `{`
+    /// discriminators — so it is a static anchor, not a dynamic
+    /// pattern. Callers route the static/dynamic split on
+    /// [`PatternSpec::is_dynamic`] upstream, so this is a
+    /// defense-in-depth signal for direct callers that bypass that
+    /// dispatch; production never reaches it.
+    NotDynamic,
 }
 
 impl fmt::Display for PatternError {
@@ -83,11 +90,28 @@ impl fmt::Display for PatternError {
                 f.write_str("empty path segment (consecutive `/` or trailing `/`)")
             }
             Self::WindowsPrefix => f.write_str("Windows-style prefix (`:`) is not allowed"),
+            Self::NotDynamic => f.write_str(
+                "pattern is pure-literal (no `*`, `?`, `[`, `{`); not a dynamic watch pattern",
+            ),
         }
     }
 }
 
 impl std::error::Error for PatternError {}
+
+/// `GlobPattern::compile` fails with [`ConfigError`]; a malformed glob
+/// segment inside a dynamic pattern surfaces as
+/// [`PatternError::InvalidGlob`]. Naming the conversion keeps the
+/// cross-error coupling explicit and exhaustiveness-checked — a future
+/// `ConfigError` variant forces a new arm here, where an inline
+/// single-arm `match` would have silently compiled through.
+impl From<ConfigError> for PatternError {
+    fn from(e: ConfigError) -> Self {
+        match e {
+            ConfigError::InvalidGlob { source, message } => Self::InvalidGlob { source, message },
+        }
+    }
+}
 
 impl PatternSpec {
     #[must_use]
@@ -101,9 +125,11 @@ impl PatternSpec {
     }
 
     /// Count of leading consecutive `Literal` components, root included.
-    /// Always `>= 1` (the synthetic root `/` is `Literal`) and `<` the
-    /// total component count when the spec is dynamic (`is_dynamic` was
-    /// the parse precondition).
+    /// Always `>= 1` (the synthetic root `/` is `Literal`) and strictly
+    /// `<` the total component count: [`Self::parse`] rejects
+    /// pure-literal sources with [`PatternError::NotDynamic`], so every
+    /// constructed `PatternSpec` has at least one non-`Literal`
+    /// component.
     #[must_use]
     pub const fn literal_prefix_len(&self) -> usize {
         self.literal_prefix_len
@@ -132,11 +158,14 @@ impl PatternSpec {
 
     /// Parse `source` into a structurally-classified `PatternSpec`.
     ///
-    /// **Pre-condition.** Caller must screen `source` via
-    /// [`Self::is_dynamic`] returning `true` before invoking this. A pure-
-    /// literal `source` reaches the `debug_assert!` at the end of the
-    /// body and panics in dev. Production callers (the validator's
-    /// dispatch in `specter-config`) always pre-screen.
+    /// A pure-literal `source` (none of the `*`, `?`, `[`, `{`
+    /// discriminators) is rejected with [`PatternError::NotDynamic`] —
+    /// release-true, never a panic. Callers route the static/dynamic
+    /// split on [`Self::is_dynamic`] upstream, so `NotDynamic` is a
+    /// defense-in-depth signal for direct callers that bypass that
+    /// dispatch. On `Ok`, the invariant `literal_prefix_len <
+    /// components.len()` is discharged by the parser itself, not by a
+    /// release-stripped convention.
     pub fn parse(source: &str) -> Result<Self, PatternError> {
         if source.is_empty() {
             return Err(PatternError::EmptyPattern);
@@ -166,12 +195,7 @@ impl PatternSpec {
             // set; reusing it here keeps the discriminator definition
             // single-source.
             if Self::is_dynamic(part) {
-                let g = GlobPattern::compile(part).map_err(|e| match e {
-                    ConfigError::InvalidGlob { source, message } => {
-                        PatternError::InvalidGlob { source, message }
-                    }
-                })?;
-                components.push(PatternComponent::Glob(g));
+                components.push(PatternComponent::Glob(GlobPattern::compile(part)?));
             } else {
                 components.push(PatternComponent::Literal(CompactString::from(part)));
             }
@@ -182,11 +206,14 @@ impl PatternSpec {
             .take_while(|c| matches!(c, PatternComponent::Literal(_)))
             .count();
 
-        debug_assert!(
-            literal_prefix_len < components.len(),
-            "PatternSpec::parse: pure-literal pattern accepted (caller must \
-             screen via is_dynamic before calling parse)",
-        );
+        // Pure-literal source ⇒ every component a `Literal` ⇒ the
+        // leading run spans the whole vec. Rejecting here upholds the
+        // `literal_prefix_len < components.len()` invariant callers
+        // rely on; `>=` faithfully negates that strict bound (`>` is
+        // structurally unreachable — `take_while().count() <= len`).
+        if literal_prefix_len >= components.len() {
+            return Err(PatternError::NotDynamic);
+        }
 
         Ok(Self {
             source: CompactString::from(source),
@@ -381,14 +408,17 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// Pre-condition contract: caller must pre-screen with `is_dynamic`.
-    /// A pure-literal source reaches the parse-end debug_assert and panics
-    /// in dev.
-    #[cfg(debug_assertions)]
+    /// Post-condition contract: a pure-literal source (no glob
+    /// discriminator) is rejected with [`PatternError::NotDynamic`] —
+    /// release-true, never a panic. The `literal_prefix_len <
+    /// components.len()` invariant is discharged by the parser, not a
+    /// release-stripped `debug_assert!`.
     #[test]
-    #[should_panic(expected = "pure-literal pattern accepted")]
-    fn parse_debug_asserts_on_pure_literal_source() {
-        let _ = PatternSpec::parse("/var/log/myapp");
+    fn parse_returns_not_dynamic_err() {
+        assert_eq!(
+            PatternSpec::parse("/var/log/myapp"),
+            Err(PatternError::NotDynamic),
+        );
     }
 
     /// `Display` produces human-readable, operator-friendly messages.
@@ -404,6 +434,7 @@ mod tests {
             (PatternError::NonCanonical, "`.` and `..`"),
             (PatternError::EmptySegment, "empty path segment"),
             (PatternError::WindowsPrefix, "Windows"),
+            (PatternError::NotDynamic, "pure-literal"),
         ] {
             let s = err.to_string();
             assert!(
