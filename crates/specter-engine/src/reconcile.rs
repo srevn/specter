@@ -65,7 +65,7 @@ use crate::coverage::covers;
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use smallvec::SmallVec;
 use specter_core::{
-    ContribKey, Diagnostic, Diff, DirSnapshot, EntryKind, FiredKey, Profile, ProfileId, ProfileMap,
+    ContribKey, Diagnostic, Diff, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
     ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot,
     diff_dir_pair, splice, subtree_at_dir,
 };
@@ -168,7 +168,7 @@ pub(crate) fn lookup_descendant(
 ///
 /// - **Dir**: covered Dirs always carry the contribution.
 /// - **Leaf** (File / Symlink / Other): covered Leaves carry the
-///   contribution iff `profile.has_per_file_fds` is true.
+///   contribution iff `profile.has_per_file_fds()` is true.
 ///
 /// Mirrors the gating used by [`apply_diff_to_tree`]'s Phase 2 `add_watch`
 /// site, so a contribution installed during a prior probe response is
@@ -177,7 +177,7 @@ fn releases_watch(profile: &Profile, r: ResourceId, kind: EntryKind, tree: &Tree
     match kind {
         EntryKind::Dir => covers(profile, r, tree),
         EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
-            covers(profile, r, tree) && profile.has_per_file_fds
+            covers(profile, r, tree) && profile.has_per_file_fds()
         }
     }
 }
@@ -307,7 +307,7 @@ pub(crate) fn apply_diff_to_tree(
             continue;
         };
         let want_watch = covers(profile, resource, tree)
-            && (matches!(entry.kind, EntryKind::Dir) || profile.has_per_file_fds);
+            && (matches!(entry.kind, EntryKind::Dir) || profile.has_per_file_fds());
         if want_watch {
             add_watch(tree, resource, key, profile.events(), out);
         }
@@ -496,13 +496,7 @@ pub(crate) fn purge_per_file_fired_subs_for_resources(
     // for the SmallVec inline cap, single-digit in worst-cases).
     let set: BTreeSet<ResourceId> = reaped.iter().copied().collect();
     for (_, p) in profiles.iter_mut() {
-        if p.fired_subs.is_empty() {
-            continue;
-        }
-        p.fired_subs.retain(|k| match *k {
-            FiredKey::PerFile { resource, .. } => !set.contains(&resource),
-            FiredKey::Subtree(_) => true,
-        });
+        p.forget_fired_per_file_at(&set);
     }
 }
 
@@ -541,8 +535,8 @@ mod tests {
     use smallvec::smallvec;
     use specter_core::{
         ChildEntry, ClassSet, Diff, DirChild, DirMeta, DirSnapshot, EntryKind, EntryRef, FiredKey,
-        FsIdentity, LeafEntry, Profile, ProfileMap, ResourceId, ResourceKind, ResourceRole,
-        ScanConfig, StepOutput, SubId, Tree, TreeSnapshot, WatchOp,
+        FsIdentity, LeafEntry, Profile, ProfileIdentity, ProfileMap, ResourceId, ResourceKind,
+        ResourceRole, ScanConfig, StepOutput, SubId, Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -604,10 +598,12 @@ mod tests {
             &mut tree,
             Profile::new(
                 r,
-                ScanConfig::builder().recursive(true).build(),
-                MAX_SETTLE,
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(true).build(),
+                    max_settle: MAX_SETTLE,
+                    events,
+                },
                 SETTLE,
-                events,
                 None,
             ),
         );
@@ -615,7 +611,7 @@ mod tests {
         // off the Profile; `Profile::new` already derives it from the
         // events mask, but this test still depends on the constructor's
         // contract — assert it inline so a future change shouts.
-        debug_assert_eq!(profiles.get(pid).unwrap().has_per_file_fds, per_file);
+        debug_assert_eq!(profiles.get(pid).unwrap().has_per_file_fds(), per_file);
         (tree, profiles, r, pid)
     }
 
@@ -942,7 +938,7 @@ mod tests {
             sub: SubId::default(),
             resource: a_rs_id,
         };
-        profiles.get_mut(pid).unwrap().fired_subs.insert(stale_key);
+        profiles.get_mut(pid).unwrap().record_fire(stale_key);
 
         // a.rs needs a watch contribution so `delete_child`'s
         // `sub_watch` path is reachable; the per-file Profile would
@@ -977,7 +973,7 @@ mod tests {
         );
         let p = profiles.get(pid).unwrap();
         assert!(
-            !p.fired_subs.contains(&stale_key),
+            !p.has_fired(stale_key),
             "stale PerFile entry must be purged after slot reap",
         );
     }
@@ -1003,7 +999,7 @@ mod tests {
             sub: SubId::default(),
             resource: a_rs_id,
         };
-        profiles.get_mut(pid).unwrap().fired_subs.insert(live_key);
+        profiles.get_mut(pid).unwrap().record_fire(live_key);
 
         // Response: same a.rs name+inode (no delete). Bumped root mtime
         // forces graft to walk the level rather than equal-hash early-out.
@@ -1027,7 +1023,7 @@ mod tests {
         );
         let p = profiles.get(pid).unwrap();
         assert!(
-            p.fired_subs.contains(&live_key),
+            p.has_fired(live_key),
             "live PerFile entry must be preserved across graft",
         );
     }
@@ -1052,11 +1048,7 @@ mod tests {
         // Subtree key references a *Profile*, not a Resource. The SubId
         // value is arbitrary for this test.
         let subtree_key = FiredKey::Subtree(SubId::default());
-        profiles
-            .get_mut(pid)
-            .unwrap()
-            .fired_subs
-            .insert(subtree_key);
+        profiles.get_mut(pid).unwrap().record_fire(subtree_key);
 
         // Probe response deletes a.rs. The reap fires; the purge runs;
         // the Subtree entry should survive.
@@ -1076,7 +1068,7 @@ mod tests {
 
         let p = profiles.get(pid).unwrap();
         assert!(
-            p.fired_subs.contains(&subtree_key),
+            p.has_fired(subtree_key),
             "Subtree-keyed entries are bounded by Profile lifecycle, \
              not Resource lifecycle — purge must leave them alone",
         );
@@ -1096,10 +1088,12 @@ mod tests {
             &mut tree,
             Profile::new(
                 root,
-                ScanConfig::builder().recursive(true).build(),
-                Duration::from_secs(12),
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(true).build(),
+                    max_settle: Duration::from_secs(12),
+                    events: ClassSet::CONTENT,
+                },
                 Duration::from_millis(50),
-                ClassSet::CONTENT,
                 None,
             ),
         );
@@ -1118,8 +1112,7 @@ mod tests {
             profiles
                 .get_mut(pid)
                 .unwrap()
-                .fired_subs
-                .insert(FiredKey::PerFile {
+                .record_fire(FiredKey::PerFile {
                     sub: SubId::default(),
                     resource: a_rs_id,
                 });
@@ -1156,11 +1149,11 @@ mod tests {
             resource: a_rs_id,
         };
         assert!(
-            !profiles.get(pid_a).unwrap().fired_subs.contains(&stale_key),
+            !profiles.get(pid_a).unwrap().has_fired(stale_key),
             "Profile A's stale entry must be purged",
         );
         assert!(
-            !profiles.get(pid_b).unwrap().fired_subs.contains(&stale_key),
+            !profiles.get(pid_b).unwrap().has_fired(stale_key),
             "Profile B's stale entry (cross-Profile) must also be purged",
         );
     }

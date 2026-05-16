@@ -9,7 +9,7 @@
 use crate::effect::DedupKey;
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::resource::ResourceKind;
-use crate::scan_config::{ScanConfig, compute_config_hash};
+use crate::scan_config::{ProfileIdentity, ScanConfig};
 use crate::snapshot::tree::TreeSnapshot;
 use crate::sub::ClassSet;
 use crate::tree::Tree;
@@ -1101,7 +1101,7 @@ impl From<&DedupKey> for FiredKey {
 /// survival witness. The "a present baseline implies no survival
 /// witness" rule is therefore a type property, not a checked
 /// convention.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum SettledState<S> {
     Unset,
     Snapshot(S),
@@ -1188,7 +1188,7 @@ impl<S: AnchorPayload> SettledState<S> {
 /// would duplicate exactly what the snapshot already encodes (and
 /// re-introduce the drift surface this sum removes); the live `Dir`
 /// snapshot is the single source of that membership.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum AnchorClassification {
     /// Kind not yet known, or cleared at anchor loss. No snapshot is
     /// representable here. `witness` carries the pre-loss
@@ -1206,161 +1206,306 @@ enum AnchorClassification {
     },
 }
 
-/// One stability state machine per `(Resource, ScanConfig)`.
+/// Frozen config identity plus the three caches that are *total
+/// functions* of it. Private fields and a sole constructor make
+/// "derived once from a frozen identity, never independently writable"
+/// a structural property rather than a documented convention: there is
+/// no path to a `ProfileConfig` whose `config_hash` disagrees with its
+/// `identity`.
 ///
-/// The state-machine fields (`anchor`, `state`, `anchor_claim`) are
-/// module-private — their invariants are enforced by the
-/// setter/accessor API below, which is the only cross-crate write
-/// surface (`specter-engine` cannot assign them directly). `anchor`
-/// folds the anchor's kind, settled baseline, live snapshot, and
-/// survival witness into one [`AnchorClassification`] sum so the
-/// snapshot-shape and baseline/witness-exclusion invariants are
-/// structural rather than enforced by convention at clear sites. The
-/// remaining fields stay `pub` for engine read/write.
+/// `identity` ([`ProfileIdentity`] = `{config, max_settle, events}`)
+/// is the Profile partition key's config half; `config_hash`,
+/// `exclude_strings`, and `has_per_file_fds` are each a pure projection
+/// of it, materialised once at [`Self::new`].
+#[derive(Debug)]
+struct ProfileConfig {
+    identity: ProfileIdentity,
+    config_hash: u64,
+    exclude_strings: Arc<[CompactString]>,
+    has_per_file_fds: bool,
+}
+
+impl ProfileConfig {
+    /// Derive all three caches from a frozen [`ProfileIdentity`]. The
+    /// canonical hash route is [`ProfileIdentity::config_hash`];
+    /// `exclude_strings` projects `config.exclude` in the
+    /// builder-canonical order (already sorted by source, so no
+    /// re-sort); `has_per_file_fds` is true iff the event mask carries
+    /// CONTENT or METADATA (covered Leaves then need their own FDs).
+    fn new(identity: ProfileIdentity) -> Self {
+        let config_hash = identity.config_hash();
+        let has_per_file_fds = identity
+            .events
+            .intersects(ClassSet::CONTENT | ClassSet::METADATA);
+        let exclude_strings: Arc<[CompactString]> = identity
+            .config
+            .exclude
+            .iter()
+            .map(|g| CompactString::from(g.source()))
+            .collect();
+        Self {
+            identity,
+            config_hash,
+            exclude_strings,
+            has_per_file_fds,
+        }
+    }
+}
+
+/// The Profile's burst state machine: the [`ProfileState`] plus the
+/// draining-cascade descendant counter that correlates the
+/// `Draining → Verifying` reconfirm. Both fields are module-private;
+/// the counter's I4 floor (count ≥ 0) is enforced *inside*
+/// [`Self::apply_dirty_delta`], so no caller can write a negative or
+/// unclamped value — the invariant moves from `stability::propagate`
+/// (enforced at a distance) to the field's owner.
+#[derive(Debug)]
+struct ProfileStateMachine {
+    state: ProfileState,
+    /// Draining-cascade descendant counter. Sole mutator:
+    /// [`Self::apply_dirty_delta`] (driven by `stability::propagate`).
+    dirty_descendants: u32,
+}
+
+impl ProfileStateMachine {
+    /// Apply `delta` to `dirty_descendants`, clamped at the I4 floor
+    /// (count ≥ 0 — underflow is a `debug_assert!` in dev, a clamp in
+    /// release). Returns `true` iff the count just fell from positive
+    /// to zero. `stability::propagate` ANDs that edge with
+    /// [`ProfileState::is_draining`] to drive the same-step
+    /// `Draining → Verifying` reconfirm — the counter owns the "hit
+    /// zero" edge; the *phase* combination stays with `propagate`,
+    /// where its rustdoc documents it.
+    ///
+    /// `i64` widening computes the post-delta value without `u32`
+    /// overflow before clamping back into `[0, u32::MAX]`.
+    fn apply_dirty_delta(&mut self, delta: i32) -> bool {
+        let prev = self.dirty_descendants;
+        let next = i64::from(prev) + i64::from(delta);
+        debug_assert!(next >= 0, "dirty_descendants underflow (delta = {delta})");
+        let clamped = next.clamp(0, i64::from(u32::MAX));
+        // `clamped` is in `[0, u32::MAX]` by construction.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let new_value = clamped as u32;
+        self.dirty_descendants = new_value;
+        prev > 0 && new_value == 0
+    }
+}
+
+/// Soft, recomputable cache: the nearest covering ancestor Profile —
+/// the parent edge `stability::propagate` walks at burst-start (`+1`)
+/// and burst-end (`-1`). Drift here is a *perf* regression only: the
+/// slotmap generational key makes a stale read return `None` safely,
+/// and `propagate` halts the walk on it. This is the deliberate
+/// contrast to [`TreeContributions`], whose drift leaks Tree
+/// refcounts. Sole write seam: `stability::write_parent_edge` (the
+/// single home of the self-parent `debug_assert_ne!`).
+#[derive(Debug)]
+struct ProfileTopology {
+    parent_profile: Option<ProfileId>,
+}
+
+/// The Profile's Effect fire history — the [`FiredKey`] set that gates
+/// drift-recovery re-fire and the B1 dedup "has this Sub fired
+/// before?" question. Keys are Profile-free (the owning Profile is the
+/// container).
+///
+/// All set surgery is encapsulated here: the engine asks for the
+/// domain operations it actually performs (`record` an emission,
+/// `forget` one key / a detached Sub / reaped per-file leaves, project
+/// the `subtree_subs` drift basis) and never pattern-matches a
+/// [`FiredKey`] for an ad-hoc `retain`. The variant structure stays a
+/// `FiredSubsHistory` concern.
+#[derive(Debug, Default)]
+struct FiredSubsHistory {
+    fired: BTreeSet<FiredKey>,
+}
+
+impl FiredSubsHistory {
+    /// Record a successful Effect emission ([`Profile::record_fire`]).
+    fn record(&mut self, key: FiredKey) {
+        self.fired.insert(key);
+    }
+
+    /// Drop one key — the `EffectComplete::Failed` clear (a Failed
+    /// Effect produced no observation worth deduplicating against).
+    fn forget(&mut self, key: FiredKey) {
+        self.fired.remove(&key);
+    }
+
+    /// Has this exact key fired? The B1-dedup / SeedDrift gate.
+    fn contains(&self, key: FiredKey) -> bool {
+        self.fired.contains(&key)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.fired.is_empty()
+    }
+
+    /// The `Subtree`-variant Subs — the SeedDrift fire filter basis.
+    /// `BTreeSet` order ⇒ ascending `SubId`, so the caller's emission
+    /// order is deterministic without a re-sort.
+    fn subtree_subs(&self) -> impl Iterator<Item = SubId> + '_ {
+        self.fired.iter().filter_map(|k| match k {
+            FiredKey::Subtree(sub) => Some(*sub),
+            FiredKey::PerFile { .. } => None,
+        })
+    }
+
+    /// Drop every key owned by a detached Sub (both `Subtree` and
+    /// `PerFile`). Detach must not leave a future drift verdict able
+    /// to re-fire an Effect for a Sub the user removed.
+    fn forget_sub(&mut self, sub: SubId) {
+        self.fired.retain(|k| match *k {
+            FiredKey::Subtree(s) | FiredKey::PerFile { sub: s, .. } => s != sub,
+        });
+    }
+
+    /// Drop `PerFile` keys whose covered leaf was reaped. `Subtree`
+    /// keys are anchor-rooted, not per-leaf, and survive.
+    fn forget_per_file_at(&mut self, reaped: &BTreeSet<ResourceId>) {
+        self.fired.retain(|k| match *k {
+            FiredKey::PerFile { resource, .. } => !reaped.contains(&resource),
+            FiredKey::Subtree(_) => true,
+        });
+    }
+}
+
+/// The Profile's deferred-release obligations to the Tree refcount
+/// aggregate. The pure-step `Tree` has no `Drop` reach, so each
+/// obligation is encoded as a cached id/flag here and released
+/// explicitly at detach / reap / purge. Drift between this record and
+/// the Tree's contribution map is a **Tree refcount leak** — the
+/// deliberate contrast to [`ProfileTopology`], a soft perf cache.
+///
+/// **Scope boundary — do not widen.** This holds *only* the two
+/// homeless cached tokens whose sole purpose is deferred release. It
+/// deliberately excludes the other two of the four Tree claims, each
+/// of which is a side-effect of a primary concern that owns it:
+/// - the **descent-prefix** claim *is* `ProfileState::Pending`'s
+///   `DescentState::current_prefix`; release routes through the state
+///   machine.
+/// - the **1-to-N covered-descendant** claims *are*
+///   `AnchorClassification::Dir.current`'s entries (the live snapshot
+///   is the membership set; [`Profile::take_current`] hands it to the
+///   wholesale-deletion walk).
+///
+/// Co-locating either here would duplicate that state and re-create
+/// the exact drift surface this decomposition removes.
+#[derive(Debug)]
+struct TreeContributions {
+    /// "Do I owe `sub_watch(resource, ProfileAnchor(pid))`?" — the
+    /// anchor contribution flag. The reap-time trichotomy
+    /// (materialized / pending / purged) emerges from `(state,
+    /// anchor_claim)`, so this stays orthogonal to the classification
+    /// sum.
+    anchor_claim: AnchorClaim,
+    /// Cached parent Resource carrying this Profile's
+    /// `ContribKey::ProfileParent` STRUCTURE contribution. `None` when
+    /// the anchor is itself a Tree root (root rename detection then
+    /// unavailable). Also the anchor-loss recovery channel —
+    /// deliberately preserved across `discard_anchor_state`; released
+    /// only by reap / `WatchOpRejected` purge. A stale cache here
+    /// leaks the old parent's `+1`.
+    watch_root_parent: Option<ResourceId>,
+}
+
+/// One stability state machine per `(Resource, ProfileIdentity)`,
+/// decomposed into single-concern substructures.
+///
+/// Only `resource` (the slot axis) and `settle` (the per-Profile
+/// mutable debounce param the engine recomputes as
+/// `min(remaining_subs.settles)`) are `pub`. Every other concern is a
+/// module-private substructure exposing a typed accessor/transition
+/// API — the cross-crate write surface is `Profile`'s `pub fn`s, never
+/// a field assignment. Each substructure owns its own invariant:
+/// [`ProfileConfig`] (frozen identity ⇒ derived caches),
+/// [`AnchorClassification`] (snapshot-shape ⊕ baseline/witness
+/// exclusion), [`ProfileStateMachine`] (`state` + the I4-floored
+/// dirty-descendant counter), [`TreeContributions`] (deferred Tree
+/// releases — drift = refcount leak), [`ProfileTopology`] (soft parent
+/// cache — drift = perf only), [`FiredSubsHistory`] (the fire-history
+/// key set).
 #[derive(Debug)]
 pub struct Profile {
+    /// The Tree slot this Profile's stability machine anchors at — the
+    /// slot axis of the `(resource, config_hash)` partition key. Stays
+    /// `pub`: a plain identity read with no invariant to guard.
     pub resource: ResourceId,
-    pub config: ScanConfig,
-    pub exclude_strings: Arc<[CompactString]>,
-    pub config_hash: u64,
-    /// The anchor's classification and settled reference, as one sum
-    /// (kind ⊕ live snapshot ⊕ settled baseline ⊕ survival witness).
-    ///
-    /// The discriminant *is* the anchor kind: there is no parallel
-    /// `kind` field to drift from the snapshot variant, and the
-    /// "no snapshot while unclassified" / "no baseline while a
-    /// survival witness is held" rules hold by construction. Reads go
-    /// through [`Self::kind`] / [`Self::current`] / [`Self::baseline`]
-    /// / [`Self::current_dir`] / [`Self::baseline_dir`] /
-    /// [`Self::settled_hash`] / [`Self::current_is_some`]; writes
-    /// through [`Self::install_dir_current`] /
-    /// [`Self::install_file_current`] (graft), [`Self::rebase_baseline`]
-    /// (settle the current snapshot as the baseline),
-    /// [`Self::take_current`] (release the covered-descendant claim),
-    /// [`Self::clear_anchor_classification`] (anchor loss — captures
-    /// the survival witness), and [`Self::materialize_anchor`]
-    /// (descent materialisation — carries the witness forward).
-    ///
-    /// **Lifecycle.** `Unclassified` while the anchor's kind is
-    /// unknown (descent in flight, fresh resource-attach against an
-    /// `Unknown` slot, or after anchor loss). `File` / `Dir` from the
-    /// materialisation moment until the next loss. The kind is fixed
-    /// for a materialised epoch — an on-disk kind change surfaces as a
-    /// probe `Vanished`, recovers through descent, and re-materialises
-    /// the sum, never mutates the discriminant in place.
-    ///
-    /// **Coherence with `Resource.kind`.** The Tree slot's `kind` is a
-    /// parallel cache updated by reconcile / `Tree::set_kind`; the
-    /// engine reads the anchor's kind here, never `Tree.kind` for the
-    /// anchor's own kind in any post-attach path, so a slot left stale
-    /// across a loss/recover cycle for a shared anchor is never
-    /// observed.
-    anchor: AnchorClassification,
-    /// Sole post-construction writer: [`Self::transition_state`]; read
-    /// via [`Self::state`].
-    state: ProfileState,
-    /// Cached nearest covering ancestor Profile — the parent edge
-    /// `propagate` walks at burst-start (`+1`) and burst-end (`-1`).
-    /// `None` for root Profiles whose ancestor chain holds no
-    /// covering Profile. Re-resolved engine-side at fresh-Profile
-    /// attach, interpose-attach, and parent reap; the cache keeps
-    /// `propagate`'s hot path at O(depth) chain reads (recomputing
-    /// from `covers(P, R)` per step would be O(depth² ×
-    /// profiles_per_resource) with a PathBuf allocation per call).
-    ///
-    /// **Discipline.** Engine writes converge on the
-    /// `stability::write_parent_edge` helper, the single source of
-    /// the self-parent `debug_assert_ne!`. Direct field assignment
-    /// is reserved for testkit / unit-test setup.
-    pub parent_profile: Option<ProfileId>,
-    pub dirty_descendants: u32,
-    pub max_settle: Duration,
-    /// Settle interval driving `start_standard_burst` and the backoff base.
-    /// Cached on construction from the first attached Sub; the engine
-    /// recomputes this as `min(remaining_subs.settles)` on `attach_sub`
-    /// (existing Profile) and `detach_sub`.
+    /// Frozen config identity and its derived caches. Read via
+    /// [`Self::config`] / [`Self::config_hash`] /
+    /// [`Self::exclude_strings`] / [`Self::max_settle`] /
+    /// [`Self::events`] / [`Self::has_per_file_fds`]; never
+    /// independently writable (sole constructor [`ProfileConfig::new`]).
+    cfg: ProfileConfig,
+    /// Per-Profile mutable debounce interval. **Not identity** —
+    /// `max_settle` is the identity half ([`Self::max_settle`]);
+    /// `settle` the engine recomputes as `min(remaining_subs.settles)`
+    /// on attach/detach. Stays `pub`: `recompute_profile_settle` writes
+    /// it directly and there is no cross-field invariant to guard here
+    /// (the config layer's `validate_settle` is the `settle <=
+    /// max_settle` boundary; [`Self::new`] debug-asserts it).
     pub settle: Duration,
-    /// Cached parent Resource that this Profile contributes a watch to.
-    /// `attach_sub` sets it; `detach_sub` releases the contribution via the
-    /// cached id without re-deriving the parent. `None` if the anchor is
-    /// itself a root (no parent in the Tree) — root rename detection is then
-    /// unavailable.
-    pub watch_root_parent: Option<ResourceId>,
-    /// Tracks whether this Profile currently holds the anchor
-    /// contribution at `resource` — [`AnchorClaim::Held`] on the path
-    /// that called `add_watch(anchor, ContribKey::ProfileAnchor(pid), ...)`
-    /// (immediate-Seed in `attach_sub_inner` or descent's anchor
-    /// materialization), cleared to [`AnchorClaim::None`] on the
-    /// matching `sub_watch(anchor, ContribKey::ProfileAnchor(pid))`
-    /// (anchor terminal event, reap, clamp purge).
-    ///
-    /// The claim distinguishes three reap-time lifecycle states that
-    /// otherwise look identical in the Profile/descent registry:
-    /// **materialized** (`Held` ⇒ release anchor), **pending**
-    /// (descent in flight ⇒ release descent prefix instead), and
-    /// **purged** (`None`, descent already removed by
-    /// `Input::WatchOpRejected` ⇒ no contribution to release; the clamp
-    /// already cleared the contributions map).
-    ///
-    /// Without this field a heuristic like `baseline.is_some() ||
-    /// current.is_some()` undercounts `dispatch_seed_vanished` paths
-    /// (which clear the snapshots while leaving the anchor's
-    /// contribution intact) and a heuristic like
-    /// `tree.get(anchor).is_watched()` overcounts in multi-Profile
-    /// sharing (would steal another Profile's contribution).
-    anchor_claim: AnchorClaim,
-    /// Set of [`FiredKey`]s for which this Profile has emitted at least
-    /// one Effect that has not been cleared by a `Failed` outcome,
-    /// `detach_sub`, or covered-leaf reap. Pure existence — no value
-    /// payload. Drives drift recovery's "should we conservative-fire?"
-    /// question by gating the `SeedDrift` filter; B1 dedup derives
-    /// directly from `baseline.hash() == current.hash()` and does not
-    /// consult this field. The `profile` axis of [`DedupKey`] is dropped
-    /// on the way in ([`FiredKey::from`]) — this set's owner *is* the
-    /// Profile, so carrying it per entry would be redundant.
-    ///
-    /// **Lifecycle.** Inserted at successful emit (`emit_effects` Subtree
-    /// and PerFile arms). Removed on `EffectComplete::Failed`,
-    /// `detach_sub_inner`, and `purge_per_file_fired_subs_for_reaped_slots`.
-    /// Preserved across anchor loss by `discard_anchor_state` — the fire
-    /// history is the answer to "which Subs should re-fire on recovery if
-    /// drift is detected?"
-    pub fired_subs: BTreeSet<FiredKey>,
-    /// User-declared event-class mask for this Profile. Every Sub on a
-    /// Profile shares this by construction (the mask folds into
-    /// `config_hash`), so it is invariant for the Profile's lifetime.
-    /// Module-private — [`Self::events`] is the stable read seam; the
-    /// per-Resource union aggregates this across covering Profiles.
-    events: ClassSet,
-    /// True iff covered Leaves need their own FDs. Derived at construction
-    /// from `events.intersects(CONTENT | METADATA)` and invariant for the
-    /// Profile's lifetime (events are part of `config_hash`, so a mask
-    /// change forks a new Profile rather than flipping this flag).
-    ///
-    /// The walker-side reconciler reads this to decide whether
-    /// covered Leaf children get an
-    /// [`crate::ContribKey::ProfileDescendant`] contribution
-    /// installed via `add_watch` — per-file FDs for in-place edit
-    /// detection.
-    pub has_per_file_fds: bool,
+    /// The anchor's classification and settled reference as one sum
+    /// (kind ⊕ live snapshot ⊕ settled baseline ⊕ survival witness).
+    /// The discriminant *is* the kind; "no snapshot while
+    /// unclassified" and "no baseline while a survival witness is
+    /// held" hold by construction. Reads: [`Self::kind`] /
+    /// [`Self::current`] / [`Self::baseline`] / [`Self::current_dir`] /
+    /// [`Self::baseline_dir`] / [`Self::settled_hash`] /
+    /// [`Self::current_is_some`]. Writes: [`Self::install_dir_current`]
+    /// / [`Self::install_file_current`] / [`Self::rebase_baseline`] /
+    /// [`Self::take_current`] / [`Self::clear_anchor_classification`] /
+    /// [`Self::materialize_anchor`]. `Resource.kind` is a separate
+    /// Tree-side parallel cache the engine never consults for the
+    /// anchor's own kind in any post-attach path.
+    anchor: AnchorClassification,
+    /// Burst state machine + draining-cascade descendant counter.
+    /// `state` reads via [`Self::state`], transitions via
+    /// [`Self::transition_state`] / the typed-move accessors; the
+    /// counter via [`Self::dirty_descendants`] /
+    /// [`Self::apply_dirty_delta`].
+    machine: ProfileStateMachine,
+    /// Deferred-release obligations to the Tree refcount aggregate
+    /// (`anchor_claim`, `watch_root_parent`). Drift = refcount leak.
+    /// Read via [`Self::anchor_claim`] / [`Self::watch_root_parent`];
+    /// written via [`Self::install_anchor_claim_held`] /
+    /// [`Self::release_anchor_claim_now`] /
+    /// [`Self::set_watch_root_parent`] /
+    /// [`Self::take_watch_root_parent`].
+    contributions: TreeContributions,
+    /// Soft, recomputable nearest-covering-ancestor cache. Drift =
+    /// perf only. Read via [`Self::parent_profile`]; written only
+    /// through `stability::write_parent_edge` →
+    /// [`Self::set_parent_profile`].
+    topology: ProfileTopology,
+    /// Effect fire history. Domain API: [`Self::record_fire`] /
+    /// [`Self::forget_fire`] / [`Self::has_fired`] /
+    /// [`Self::fired_is_empty`] / [`Self::fired_subtree_subs`] /
+    /// [`Self::forget_fired_sub`] / [`Self::forget_fired_per_file_at`].
+    history: FiredSubsHistory,
 }
 
 impl Profile {
-    /// Construct a fresh Profile: state `Idle` (so no burst-finish
-    /// directive exists yet), no baseline/current, no watch-root parent
-    /// recorded. `config_hash` is computed from
-    /// `(config, max_settle, events)` and is stable for the Profile's
-    /// lifetime — there is no path to a Profile with an unset or stale
-    /// hash.
+    /// Construct a fresh Profile: state `Idle` (no burst-finish
+    /// directive yet), no baseline/current, no watch-root parent, no
+    /// fire history.
     ///
-    /// `events` becomes the Profile's event-class mask and drives
-    /// `has_per_file_fds` (true iff CONTENT or METADATA is in the mask).
-    /// Every Sub on a Profile shares the same `events`, so it is
-    /// invariant for the Profile's lifetime.
+    /// `identity` ([`ProfileIdentity`] = `{config, max_settle,
+    /// events}`) is the Profile partition key's config half, taken by
+    /// value: [`ProfileConfig::new`] folds it once into the lifetime-
+    /// stable `config_hash` plus the `exclude_strings` /
+    /// `has_per_file_fds` projections. There is no path to a Profile
+    /// with an unset or stale hash. The sole production caller
+    /// (`find_or_create_profile`) already holds the `ProfileIdentity`
+    /// and moves it straight in — no field unpack, no clone.
     ///
-    /// `exclude_strings` is projected once here from `config.exclude` —
-    /// the [`ScanConfig`] builder has already sorted the vector by source,
-    /// so the projection is canonical without re-sorting.
+    /// `settle` is the per-Profile mutable debounce interval (recomputed
+    /// by the engine as `min(remaining_subs.settles)`), distinct from
+    /// the identity's `max_settle`. The `settle <= max_settle` relation
+    /// is a `debug_assert!`: the config layer's `validate_settle` is
+    /// the real boundary (it enforces `max_settle >= 4 × settle`); a
+    /// breach here means a caller bypassed config validation.
     ///
     /// `kind` is the anchor's classified shape at construction,
     /// projected into the [`AnchorClassification`] sum: `None` ⇒
@@ -1378,19 +1523,17 @@ impl Profile {
     #[must_use]
     pub fn new(
         resource: ResourceId,
-        config: ScanConfig,
-        max_settle: Duration,
+        identity: ProfileIdentity,
         settle: Duration,
-        events: ClassSet,
         kind: Option<ResourceKind>,
     ) -> Self {
-        let config_hash = compute_config_hash(&config, max_settle, events);
-        let has_per_file_fds = events.intersects(ClassSet::CONTENT | ClassSet::METADATA);
-        let exclude_strings: Arc<[CompactString]> = config
-            .exclude
-            .iter()
-            .map(|g| CompactString::from(g.source()))
-            .collect();
+        debug_assert!(
+            settle <= identity.max_settle,
+            "Profile::new: settle ({settle:?}) must not exceed max_settle ({:?}) — \
+             config-layer validate_settle enforces max_settle >= 4 × settle; a \
+             breach here means a caller bypassed config validation",
+            identity.max_settle,
+        );
         let anchor = match kind {
             None => AnchorClassification::Unclassified { witness: None },
             Some(ResourceKind::Dir) => AnchorClassification::Dir {
@@ -1411,20 +1554,21 @@ impl Profile {
         };
         Self {
             resource,
-            config,
-            exclude_strings,
-            config_hash,
-            anchor,
-            state: ProfileState::Idle,
-            parent_profile: None,
-            dirty_descendants: 0,
-            max_settle,
+            cfg: ProfileConfig::new(identity),
             settle,
-            watch_root_parent: None,
-            anchor_claim: AnchorClaim::None,
-            fired_subs: BTreeSet::new(),
-            events,
-            has_per_file_fds,
+            anchor,
+            machine: ProfileStateMachine {
+                state: ProfileState::Idle,
+                dirty_descendants: 0,
+            },
+            contributions: TreeContributions {
+                anchor_claim: AnchorClaim::None,
+                watch_root_parent: None,
+            },
+            topology: ProfileTopology {
+                parent_profile: None,
+            },
+            history: FiredSubsHistory::default(),
         }
     }
 
@@ -1572,12 +1716,12 @@ impl Profile {
     /// builds compile the asserts out and still classify atomically.
     pub fn materialize_anchor(&mut self, kind: ResourceKind) {
         debug_assert!(
-            matches!(self.state, ProfileState::Pending(_)),
+            matches!(self.machine.state, ProfileState::Pending(_)),
             "materialize_anchor: state must be Pending (was {:?})",
-            self.state.discriminant(),
+            self.machine.state.discriminant(),
         );
         debug_assert!(
-            matches!(self.anchor_claim, AnchorClaim::None),
+            matches!(self.contributions.anchor_claim, AnchorClaim::None),
             "materialize_anchor: anchor_claim must be None",
         );
         debug_assert!(
@@ -1588,8 +1732,8 @@ impl Profile {
             AnchorClassification::Unclassified { witness } => *witness,
             AnchorClassification::File { .. } | AnchorClassification::Dir { .. } => None,
         };
-        self.state = ProfileState::Idle;
-        self.anchor_claim = AnchorClaim::Held;
+        self.machine.state = ProfileState::Idle;
+        self.contributions.anchor_claim = AnchorClaim::Held;
         self.anchor = match kind {
             ResourceKind::Dir => AnchorClassification::Dir {
                 current: None,
@@ -1629,13 +1773,13 @@ impl Profile {
     ///   the STRUCTURE watch; the anchor claim is installed only at
     ///   materialisation. (`reap_profile`'s trichotomy depends on this.)
     pub fn debug_assert_anchor_coherent(&self) {
-        if matches!(self.state, ProfileState::Pending(_)) {
+        if matches!(self.machine.state, ProfileState::Pending(_)) {
             debug_assert!(
                 matches!(self.anchor, AnchorClassification::Unclassified { .. }),
                 "anchor coherence: a Pending Profile must be Unclassified",
             );
             debug_assert!(
-                matches!(self.anchor_claim, AnchorClaim::None),
+                matches!(self.contributions.anchor_claim, AnchorClaim::None),
                 "anchor coherence: a Pending Profile must not hold the anchor claim",
             );
         }
@@ -1651,21 +1795,49 @@ impl Profile {
     /// Not `#[must_use]` — whole-value-replace callers discard the return;
     /// only the typed-move callers bind it.
     pub const fn transition_state(&mut self, new: ProfileState) -> ProfileState {
-        std::mem::replace(&mut self.state, new)
+        std::mem::replace(&mut self.machine.state, new)
     }
 
     /// Install the anchor claim. Idempotent against `Held`. Production
     /// caller: `Engine::bootstrap_immediate`. (The descent-materialised
     /// claim rides [`Self::materialize_anchor`]'s bundled write instead.)
     pub const fn install_anchor_claim_held(&mut self) {
-        self.anchor_claim = AnchorClaim::Held;
+        self.contributions.anchor_claim = AnchorClaim::Held;
     }
 
     /// Release the anchor claim. Idempotent against `None`. Production
     /// caller: `Engine::release_anchor_claim`, which wraps this with the
     /// Tree-side `sub_watch`.
     pub const fn release_anchor_claim_now(&mut self) {
-        self.anchor_claim = AnchorClaim::None;
+        self.contributions.anchor_claim = AnchorClaim::None;
+    }
+
+    /// The cached watch-root parent Resource, if this Profile owes a
+    /// `ContribKey::ProfileParent` STRUCTURE contribution there. `None`
+    /// for a root anchor. Read seam over the release-ledger field;
+    /// `Engine::set_watch_root_parent` uses it for the cache-coherence
+    /// and idempotence checks, `classify_event_carriers` for the
+    /// anchor-recovery channel.
+    #[must_use]
+    pub const fn watch_root_parent(&self) -> Option<ResourceId> {
+        self.contributions.watch_root_parent
+    }
+
+    /// Cache the watch-root parent id. The single write seam, wrapped
+    /// by `Engine::set_watch_root_parent` (which also installs the
+    /// Tree-side `add_watch` and the cache-coherence `debug_assert!`).
+    /// Plain set — idempotence and coherence are the engine wrapper's
+    /// concern, not duplicated here.
+    pub const fn set_watch_root_parent(&mut self, parent: ResourceId) {
+        self.contributions.watch_root_parent = Some(parent);
+    }
+
+    /// Take the cached watch-root parent, clearing it — the symmetric
+    /// deferred-release primitive (`Engine::release_watch_root_parent_claim`
+    /// keys the `sub_watch` removal off the returned id). Idempotent: a
+    /// second call returns `None`.
+    pub const fn take_watch_root_parent(&mut self) -> Option<ResourceId> {
+        self.contributions.watch_root_parent.take()
     }
 
     /// Borrow the pre-fire burst payload iff
@@ -1673,7 +1845,7 @@ impl Profile {
     /// structural shape, *not* a variant transition (the variant-level
     /// move still routes through [`Self::transition_state`]).
     pub const fn pre_fire_burst_mut(&mut self) -> Option<&mut PreFireBurst> {
-        match &mut self.state {
+        match &mut self.machine.state {
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => Some(pre),
             _ => None,
         }
@@ -1681,7 +1853,7 @@ impl Profile {
 
     /// Symmetric with [`Self::pre_fire_burst_mut`] for the post-fire payload.
     pub const fn post_fire_burst_mut(&mut self) -> Option<&mut PostFireBurst> {
-        match &mut self.state {
+        match &mut self.machine.state {
             ProfileState::Active(ActiveBurst::PostFire(post), _) => Some(post),
             _ => None,
         }
@@ -1693,12 +1865,12 @@ impl Profile {
     /// routes through this.
     #[must_use]
     pub const fn state(&self) -> &ProfileState {
-        &self.state
+        &self.machine.state
     }
 
     #[must_use]
     pub const fn anchor_claim(&self) -> AnchorClaim {
-        self.anchor_claim
+        self.contributions.anchor_claim
     }
 
     /// Anchor kind discriminant — the sum's variant projected back to
@@ -1715,10 +1887,52 @@ impl Profile {
 
     /// The Profile's user-declared event-class mask. Invariant for the
     /// Profile's lifetime (folds into `config_hash`). Stable read seam
-    /// over the module-private field.
+    /// over the frozen identity.
     #[must_use]
     pub const fn events(&self) -> ClassSet {
-        self.events
+        self.cfg.identity.events
+    }
+
+    /// The frozen [`ScanConfig`] half of the Profile identity. Borrow
+    /// for the `pattern` / `max_depth` / `recursive` / `exclude`
+    /// coverage reads and the probe-request config clone.
+    #[must_use]
+    pub const fn config(&self) -> &ScanConfig {
+        &self.cfg.identity.config
+    }
+
+    /// The lifetime-stable canonical config hash — the config axis of
+    /// the `(resource, config_hash)` partition key. Bit-identical to
+    /// `ProfileIdentity::config_hash()` of the identity passed to
+    /// [`Self::new`] (it *is* that value, cached once).
+    #[must_use]
+    pub const fn config_hash(&self) -> u64 {
+        self.cfg.config_hash
+    }
+
+    /// The settle-deadline ceiling — the identity half of the burst
+    /// timings (folds into `config_hash`; invariant for the Profile's
+    /// lifetime, in deliberate contrast to the mutable `settle`).
+    #[must_use]
+    pub const fn max_settle(&self) -> Duration {
+        self.cfg.identity.max_settle
+    }
+
+    /// True iff covered Leaves need their own FDs (the event mask
+    /// carries CONTENT or METADATA). Invariant for the Profile's
+    /// lifetime — the reconciler reads it to decide per-file watch
+    /// installation.
+    #[must_use]
+    pub const fn has_per_file_fds(&self) -> bool {
+        self.cfg.has_per_file_fds
+    }
+
+    /// The substitution-side projection of `ScanConfig.exclude` (source
+    /// strings, builder-canonical order). Returned by reference so the
+    /// effect emitter `Arc::clone`s it rather than rebuilding.
+    #[must_use]
+    pub const fn exclude_strings(&self) -> &Arc<[CompactString]> {
+        &self.cfg.exclude_strings
     }
 
     /// The settled baseline as an owned [`TreeSnapshot`] — `Some` only
@@ -1820,21 +2034,99 @@ impl Profile {
     /// Mutable descent payload — thin delegator to
     /// [`ProfileState::descent_state_mut`].
     pub const fn descent_state_mut(&mut self) -> Option<&mut DescentState> {
-        self.state.descent_state_mut()
+        self.machine.state.descent_state_mut()
     }
 
     /// Flip an Active burst's directive to `Reap`. `true` iff the flip
     /// landed (Active). Delegates to [`ProfileState::mark_active_for_reap`].
     #[must_use]
     pub const fn mark_active_for_reap(&mut self) -> bool {
-        self.state.mark_active_for_reap()
+        self.machine.state.mark_active_for_reap()
     }
 
     /// Revive a zombie burst (`Reap → ReturnToIdle`). `true` iff a zombie
     /// was revived. Delegates to [`ProfileState::clear_active_reap`].
     #[must_use]
     pub const fn clear_active_reap(&mut self) -> bool {
-        self.state.clear_active_reap()
+        self.machine.state.clear_active_reap()
+    }
+
+    /// The draining-cascade descendant counter. Read seam for the
+    /// `Draining → Verifying` reconfirm gate (`dirty_descendants() ==
+    /// 0`). Never written directly — see [`Self::apply_dirty_delta`].
+    #[must_use]
+    pub const fn dirty_descendants(&self) -> u32 {
+        self.machine.dirty_descendants
+    }
+
+    /// Apply `delta` to the draining-cascade descendant counter (the
+    /// I4 floor — count ≥ 0 — is enforced inside the state machine, not
+    /// here). Returns `true` iff the count just fell from positive to
+    /// zero; `stability::propagate` ANDs that edge with
+    /// [`ProfileState::is_draining`] to drive the same-step reconfirm.
+    /// Sole mutator of the counter — the field has no public setter.
+    pub fn apply_dirty_delta(&mut self, delta: i32) -> bool {
+        self.machine.apply_dirty_delta(delta)
+    }
+
+    /// The cached nearest covering ancestor Profile (the soft parent
+    /// edge). `Copy` read — both real readers (`propagate`'s chain
+    /// walk, `collect_pointing_at`'s filter) want the id, not a borrow,
+    /// and the slotmap generational key makes a stale id read `None`
+    /// safely downstream.
+    #[must_use]
+    pub const fn parent_profile(&self) -> Option<ProfileId> {
+        self.topology.parent_profile
+    }
+
+    /// Write the cached parent edge. Sole call site:
+    /// `stability::write_parent_edge`, which owns the self-parent
+    /// `debug_assert_ne!` and the stale-`child` short-circuit — this is
+    /// the plain field write that helper funnels through.
+    pub const fn set_parent_profile(&mut self, parent: Option<ProfileId>) {
+        self.topology.parent_profile = parent;
+    }
+
+    /// Record a successful Effect emission in the fire history (the
+    /// `emit_effects` Subtree / PerFile arms).
+    pub fn record_fire(&mut self, key: FiredKey) {
+        self.history.record(key);
+    }
+
+    /// Drop one fire-history key — the `EffectComplete::Failed` clear.
+    pub fn forget_fire(&mut self, key: FiredKey) {
+        self.history.forget(key);
+    }
+
+    /// Has this exact key fired before? The B1-dedup suppress gate.
+    #[must_use]
+    pub fn has_fired(&self, key: FiredKey) -> bool {
+        self.history.contains(key)
+    }
+
+    /// Whether the fire history is empty — the fast `seed_drift_observed`
+    /// and reap-purge guards ("never fired ⇒ nothing to re-fire / purge").
+    #[must_use]
+    pub fn fired_is_empty(&self) -> bool {
+        self.history.is_empty()
+    }
+
+    /// The `Subtree`-variant Subs in fire history, ascending `SubId` —
+    /// the SeedDrift conservative-recovery fire filter basis.
+    pub fn fired_subtree_subs(&self) -> impl Iterator<Item = SubId> + '_ {
+        self.history.subtree_subs()
+    }
+
+    /// Drop every fire-history key owned by `sub` — the `detach_sub`
+    /// purge (a detached Sub must not re-fire on a later drift verdict).
+    pub fn forget_fired_sub(&mut self, sub: SubId) {
+        self.history.forget_sub(sub);
+    }
+
+    /// Drop `PerFile` fire-history keys whose covered leaf was reaped.
+    /// `Subtree` keys (anchor-rooted) survive.
+    pub fn forget_fired_per_file_at(&mut self, reaped: &BTreeSet<ResourceId>) {
+        self.history.forget_per_file_at(reaped);
     }
 
     /// Take the live `current` snapshot, leaving the arm's `current`
@@ -1889,7 +2181,7 @@ impl ProfileMap {
     /// must construct the Resource before attaching a Profile to it.
     pub fn attach(&mut self, tree: &mut Tree, profile: Profile) -> ProfileId {
         let resource = profile.resource;
-        let hash = profile.config_hash;
+        let hash = profile.config_hash();
         debug_assert!(
             self.find(resource, hash).is_none(),
             "ProfileMap::attach called twice for the same (resource, config_hash) — caller must `find` first",
@@ -1916,11 +2208,11 @@ impl ProfileMap {
     pub fn detach(&mut self, tree: &mut Tree, id: ProfileId) -> Option<Profile> {
         let p = self.profiles.remove(id)?;
         if let Some(v) = self.by_resource.get_mut(p.resource) {
-            v.retain(|(h, pid)| !(*pid == id && *h == p.config_hash));
+            v.retain(|(h, pid)| !(*pid == id && *h == p.config_hash()));
         }
         if let Some(r) = tree.get_mut(p.resource) {
             r.profiles
-                .retain(|(h, pid)| !(*pid == id && *h == p.config_hash));
+                .retain(|(h, pid)| !(*pid == id && *h == p.config_hash()));
         }
         Some(p)
     }
@@ -1966,14 +2258,15 @@ impl ProfileMap {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorClassification, ClassSet, Profile, ProfileMap, ProfileState, ScanConfig,
-        SettledState, compute_config_hash,
+        AnchorClassification, ClassSet, Profile, ProfileIdentity, ProfileMap, ProfileState,
+        ScanConfig, SettledState,
     };
     use crate::fs_id::FsIdentity;
     use crate::ids::ResourceId;
     use crate::output::StepOutput;
-    use crate::resource::ResourceRole;
+    use crate::resource::{ResourceKind, ResourceRole};
     use crate::scan_config::GlobPattern;
+    use crate::scan_config::compute_config_hash;
     use crate::snapshot::EntryKind;
     use crate::snapshot::tree::{DirMeta, DirSnapshot, LeafEntry, TreeSnapshot};
     use crate::tree::Tree;
@@ -1994,18 +2287,73 @@ mod tests {
         GlobPattern::compile(source).expect("test glob compiles")
     }
 
+    /// Test constructor preserving the pre-decomposition 6-arg call
+    /// shape: folds `(config, max_settle, events)` into the
+    /// [`ProfileIdentity`] the real [`Profile::new`] now takes by
+    /// value, so every fixture's exact parameters survive the
+    /// decomposition unchanged.
+    fn mk_profile(
+        resource: ResourceId,
+        config: ScanConfig,
+        max_settle: Duration,
+        settle: Duration,
+        events: ClassSet,
+        kind: Option<ResourceKind>,
+    ) -> Profile {
+        Profile::new(
+            resource,
+            ProfileIdentity {
+                config,
+                max_settle,
+                events,
+            },
+            settle,
+            kind,
+        )
+    }
+
     #[test]
     fn new_profile_starts_idle_with_zero_refcounts() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        assert!(matches!(p.state, ProfileState::Idle));
+        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert!(matches!(p.state(), ProfileState::Idle));
         assert!(p.baseline().is_none());
         assert!(!p.current_is_some());
-        assert!(p.parent_profile.is_none());
-        assert_eq!(p.dirty_descendants, 0);
-        assert_eq!(p.max_settle, MAX_SETTLE);
+        assert!(p.parent_profile().is_none());
+        assert_eq!(p.dirty_descendants(), 0);
+        assert_eq!(p.max_settle(), MAX_SETTLE);
         assert_eq!(p.settle, SETTLE);
+    }
+
+    /// `Profile::new` debug-asserts `settle <= max_settle`. The burst
+    /// lifecycle needs the settle (quiet-window) timer to expire before
+    /// the burst deadline; otherwise every burst force-fires without
+    /// ever reaching a stable verdict. The config layer's
+    /// `validate_settle` is the real boundary (it enforces
+    /// `max_settle >= 4 × settle`), so reaching construction with
+    /// `settle > max_settle` means a caller bypassed config validation —
+    /// the constructor trips loudly in debug rather than silently
+    /// shipping a Profile that forces every burst.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "must not exceed max_settle")]
+    fn profile_new_panics_when_settle_exceeds_max_settle() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        // max_settle = 5s, settle = 10s — the rejected-but-representable
+        // combination the config layer should have caught upstream.
+        let _ = mk_profile(
+            r,
+            cfg(),
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            NO_EVENTS,
+            None,
+        );
     }
 
     /// `fired_subs` defaults to an empty map; engine fills it on
@@ -2014,8 +2362,8 @@ mod tests {
     fn new_profile_initialises_fired_subs_empty() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        assert!(p.fired_subs.is_empty());
+        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert!(p.fired_is_empty());
     }
 
     /// `has_per_file_fds` defaults to false when `events` excludes both
@@ -2025,8 +2373,8 @@ mod tests {
     fn new_profile_initialises_has_per_file_fds_false_for_empty_events() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        assert!(!p.has_per_file_fds);
+        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert!(!p.has_per_file_fds());
         assert_eq!(p.events(), ClassSet::EMPTY);
     }
 
@@ -2036,8 +2384,8 @@ mod tests {
     fn new_profile_has_per_file_fds_when_content_in_events() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
-        assert!(p.has_per_file_fds);
+        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
+        assert!(p.has_per_file_fds());
         assert_eq!(p.events(), ClassSet::CONTENT);
     }
 
@@ -2047,8 +2395,8 @@ mod tests {
     fn new_profile_has_per_file_fds_when_metadata_in_events() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA, None);
-        assert!(p.has_per_file_fds);
+        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA, None);
+        assert!(p.has_per_file_fds());
     }
 
     /// STRUCTURE-only watch does not flip `has_per_file_fds` — directory
@@ -2057,8 +2405,8 @@ mod tests {
     fn new_profile_has_per_file_fds_false_for_structure_only() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE, None);
-        assert!(!p.has_per_file_fds);
+        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE, None);
+        assert!(!p.has_per_file_fds());
     }
 
     #[test]
@@ -2067,8 +2415,8 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let c = cfg();
         let expected = compute_config_hash(&c, MAX_SETTLE, NO_EVENTS);
-        let p = Profile::new(r, c, MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        assert_eq!(p.config_hash, expected);
+        let p = mk_profile(r, c, MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert_eq!(p.config_hash(), expected);
     }
 
     /// Different `events` mask produces different `config_hash`
@@ -2077,9 +2425,9 @@ mod tests {
     fn config_hash_partitions_by_events() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p_content = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
-        let p_meta = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA, None);
-        assert_ne!(p_content.config_hash, p_meta.config_hash);
+        let p_content = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
+        let p_meta = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA, None);
+        assert_ne!(p_content.config_hash(), p_meta.config_hash());
     }
 
     #[test]
@@ -2087,8 +2435,8 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        let h = p.config_hash;
+        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let h = p.config_hash();
         let pid = profiles.attach(&mut tree, p);
 
         assert_eq!(profiles.find(r, h), Some(pid));
@@ -2102,7 +2450,7 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let _pid = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
 
         assert!(
@@ -2116,8 +2464,8 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        let h = p.config_hash;
+        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let h = p.config_hash();
         let pid = profiles.attach(&mut tree, p);
 
         let detached = profiles.detach(&mut tree, pid);
@@ -2133,7 +2481,7 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let pid = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
 
         profiles.detach(&mut tree, pid);
@@ -2149,12 +2497,12 @@ mod tests {
 
         let pid_a = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), Duration::from_secs(6), SETTLE, NO_EVENTS, None),
+            mk_profile(r, cfg(), Duration::from_secs(6), SETTLE, NO_EVENTS, None),
         );
         // Different max_settle ⇒ different config_hash ⇒ distinct Profile.
         let pid_b = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), Duration::from_secs(12), SETTLE, NO_EVENTS, None),
+            mk_profile(r, cfg(), Duration::from_secs(12), SETTLE, NO_EVENTS, None),
         );
 
         let mut got: Vec<_> = profiles.at(r).collect();
@@ -2173,11 +2521,11 @@ mod tests {
 
         let p1 = profiles.attach(
             &mut tree,
-            Profile::new(r1, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            mk_profile(r1, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         let p2 = profiles.attach(
             &mut tree,
-            Profile::new(r2, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            mk_profile(r2, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         assert_ne!(p1, p2);
         assert_eq!(profiles.len(), 2);
@@ -2195,12 +2543,12 @@ mod tests {
         let r = tree.ensure_root("x", ResourceRole::User);
         let _pid = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
         // Caller failed to `find` first; second attach hits debug_assert.
         let _pid2 = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
     }
 
@@ -2238,7 +2586,7 @@ mod tests {
     fn rebase_baseline_settles_current_as_baseline() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_dir_current(empty_dir_snapshot());
         assert!(p.baseline().is_none(), "no baseline pre-rebase");
         let current_hash = p.current().expect("current set").hash();
@@ -2256,7 +2604,7 @@ mod tests {
     fn rebase_baseline_consumes_survival_witness() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         // Recovery shape: a classified Dir carrying a live current and a
         // survival witness (baseline cleared at the prior loss).
         let snap = empty_dir_snapshot();
@@ -2284,7 +2632,7 @@ mod tests {
     fn install_dir_current_classifies_and_sets_current() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert_eq!(p.kind(), None, "fresh Profile is unclassified");
         assert!(!p.current_is_some());
 
@@ -2303,7 +2651,7 @@ mod tests {
     fn install_file_current_classifies_and_sets_current() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("file", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         p.install_file_current(empty_leaf_entry());
 
@@ -2319,7 +2667,7 @@ mod tests {
     fn install_dir_current_reinstall_preserves_settled() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_dir_current(empty_dir_snapshot());
         p.rebase_baseline();
         let settled = p.settled_hash();
@@ -2343,7 +2691,7 @@ mod tests {
     fn install_dir_current_carries_witness_from_unclassified() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.anchor = AnchorClassification::Unclassified {
             witness: Some(0x00c0_ffee),
         };
@@ -2376,7 +2724,7 @@ mod tests {
     fn install_dir_current_panics_on_file_kinded_profile_in_debug() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_file_current(empty_leaf_entry());
         // Boundary-bypass: a future caller skips
         // `kind_agrees_or_finalize`; the graft's debug_assert fires.
@@ -2392,7 +2740,7 @@ mod tests {
     fn install_file_current_panics_on_dir_kinded_profile_in_debug() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_dir_current(empty_dir_snapshot());
         p.install_file_current(empty_leaf_entry());
     }
@@ -2414,10 +2762,10 @@ mod tests {
             .exclude(glob("m"))
             .build();
 
-        let p = Profile::new(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let p = mk_profile(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         let actual: Vec<&str> = p
-            .exclude_strings
+            .exclude_strings()
             .iter()
             .map(CompactString::as_str)
             .collect();
@@ -2431,8 +2779,8 @@ mod tests {
     fn profile_new_exclude_strings_empty_for_no_excludes() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        assert!(p.exclude_strings.is_empty());
+        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert!(p.exclude_strings().is_empty());
     }
 
     /// The Arc on `Profile.exclude_strings` is the substitution-side handle
@@ -2448,18 +2796,18 @@ mod tests {
             .exclude(glob("*.bak"))
             .build();
 
-        let p = Profile::new(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let p = mk_profile(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
-        let initial = Arc::strong_count(&p.exclude_strings);
-        let sibling_a = Arc::clone(&p.exclude_strings);
-        let sibling_b = Arc::clone(&p.exclude_strings);
+        let initial = Arc::strong_count(p.exclude_strings());
+        let sibling_a = Arc::clone(p.exclude_strings());
+        let sibling_b = Arc::clone(p.exclude_strings());
 
         assert!(
             Arc::ptr_eq(&sibling_a, &sibling_b),
             "siblings reading exclude_strings observe one allocation",
         );
         assert_eq!(
-            Arc::strong_count(&p.exclude_strings),
+            Arc::strong_count(p.exclude_strings()),
             initial + 2,
             "each sibling clone bumps the strong count",
         );
@@ -2790,7 +3138,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use super::AnchorClaim;
-    use crate::resource::ResourceKind;
 
     fn pending(r: ResourceId) -> ProfileState {
         ProfileState::Pending(DescentState::new(
@@ -2821,7 +3168,7 @@ mod tests {
     fn profile_new_threads_kind_param() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let classified = Profile::new(
+        let classified = mk_profile(
             r,
             cfg(),
             MAX_SETTLE,
@@ -2830,7 +3177,7 @@ mod tests {
             Some(ResourceKind::Dir),
         );
         assert_eq!(classified.kind(), Some(ResourceKind::Dir));
-        let unprobed = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let unprobed = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert_eq!(unprobed.kind(), None);
     }
 
@@ -2838,7 +3185,7 @@ mod tests {
     fn read_accessors_project_the_sum() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         // Fresh: Unclassified — every anchor projection empty.
         assert!(matches!(p.state(), ProfileState::Idle));
@@ -2872,7 +3219,7 @@ mod tests {
     fn transition_state_replaces_and_returns_prior() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         let prior = p.transition_state(pending(r));
         assert!(matches!(prior, ProfileState::Idle));
@@ -2887,7 +3234,7 @@ mod tests {
     fn clear_anchor_classification_unclassifies_and_captures_witness() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         let snap = empty_dir_snapshot();
         let expected = TreeSnapshot::Dir(Arc::clone(&snap)).hash();
         // Active-mode Dir (state E): graft then settle the baseline.
@@ -2910,7 +3257,7 @@ mod tests {
     fn clear_anchor_classification_from_file_baseline_captures_leaf_hash() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("file", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         let leaf = empty_leaf_entry();
         let expected = TreeSnapshot::File(leaf.clone()).hash();
         p.install_file_current(leaf);
@@ -2930,7 +3277,7 @@ mod tests {
     fn clear_anchor_classification_is_idempotent_preserving_witness() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         // Already-lost shape: classified but baseline cleared at the
         // prior loss, only the survival witness remains.
         p.anchor = AnchorClassification::Dir {
@@ -2955,8 +3302,8 @@ mod tests {
     fn materialize_anchor_classifies_from_pending() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        p.state = pending(r);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.transition_state(pending(r));
 
         p.materialize_anchor(ResourceKind::Dir);
 
@@ -2975,8 +3322,8 @@ mod tests {
     fn materialize_anchor_carries_survival_witness() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        p.state = pending(r);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.transition_state(pending(r));
         p.anchor = AnchorClassification::Unclassified {
             witness: Some(0xfeed_face),
         };
@@ -3002,7 +3349,7 @@ mod tests {
     fn materialize_anchor_panics_when_not_pending() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         // Fresh Profile is Idle, not Pending — precondition breach.
         p.materialize_anchor(ResourceKind::Dir);
     }
@@ -3016,9 +3363,9 @@ mod tests {
     fn materialize_anchor_panics_when_claim_held() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        p.state = pending(r);
-        p.anchor_claim = AnchorClaim::Held;
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.transition_state(pending(r));
+        p.install_anchor_claim_held();
         p.materialize_anchor(ResourceKind::Dir);
     }
 
@@ -3031,8 +3378,8 @@ mod tests {
     fn materialize_anchor_panics_when_already_classified() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        p.state = pending(r);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.transition_state(pending(r));
         p.anchor = AnchorClassification::Dir {
             current: None,
             settled: SettledState::Unset,
@@ -3044,7 +3391,7 @@ mod tests {
     fn anchor_claim_setters_are_idempotent() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         p.install_anchor_claim_held();
         assert_eq!(p.anchor_claim(), AnchorClaim::Held);
@@ -3069,15 +3416,15 @@ mod tests {
     fn pre_fire_burst_mut_some_only_on_prefire_and_mutation_persists() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         assert!(p.pre_fire_burst_mut().is_none(), "Idle has no pre-fire");
-        p.state = pending(r);
+        p.transition_state(pending(r));
         assert!(p.pre_fire_burst_mut().is_none(), "Pending has no pre-fire");
-        p.state = active_postfire();
+        p.transition_state(active_postfire());
         assert!(p.pre_fire_burst_mut().is_none(), "PostFire has no pre-fire");
 
-        p.state = active_prefire(r);
+        p.transition_state(active_prefire(r));
         let pre = p.pre_fire_burst_mut().expect("PreFire carries the payload");
         pre.forced = true;
         assert!(
@@ -3090,16 +3437,16 @@ mod tests {
     fn post_fire_burst_mut_some_only_on_postfire_and_mutation_persists() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         assert!(p.post_fire_burst_mut().is_none(), "Idle has no post-fire");
-        p.state = active_prefire(r);
+        p.transition_state(active_prefire(r));
         assert!(
             p.post_fire_burst_mut().is_none(),
             "PreFire has no post-fire"
         );
 
-        p.state = active_postfire();
+        p.transition_state(active_postfire());
         let post = p
             .post_fire_burst_mut()
             .expect("PostFire carries the payload");
@@ -3117,15 +3464,15 @@ mod tests {
     fn delegators_route_to_profile_state() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         // descent_state_mut: Some only on Pending; advancing persists.
         assert!(p.descent_state_mut().is_none());
-        p.state = ProfileState::Pending(DescentState::new(
+        p.transition_state(ProfileState::Pending(DescentState::new(
             r,
             DescentRemaining::from_vec(vec![CompactString::from("a"), CompactString::from("b")])
                 .expect("non-empty"),
-        ));
+        )));
         p.descent_state_mut()
             .expect("Pending carries descent")
             .remaining_components_mut()
@@ -3141,10 +3488,10 @@ mod tests {
         );
 
         // mark/clear_active_for_reap delegate the bool semantics.
-        let mut q = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut q = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(!q.mark_active_for_reap(), "Idle cannot be marked");
         assert!(!q.clear_active_reap(), "Idle has nothing to clear");
-        q.state = active_prefire(r);
+        q.transition_state(active_prefire(r));
         assert!(q.mark_active_for_reap(), "Active flips to Reap");
         assert!(q.mark_active_for_reap(), "already-Reap is idempotent true");
         assert!(q.clear_active_reap(), "zombie revived");
@@ -3155,7 +3502,7 @@ mod tests {
     fn take_current_takes_leaves_settled_and_is_idempotent() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_dir_current(empty_dir_snapshot());
         p.rebase_baseline();
         let settled = p.settled_hash();
@@ -3171,7 +3518,7 @@ mod tests {
         assert!(p.take_current().is_none(), "second take is idempotent");
 
         // Unclassified short-circuits to None.
-        let mut q = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut q = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(q.take_current().is_none(), "Unclassified has no current");
     }
 
@@ -3315,12 +3662,17 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
 
         for _ in 0..16 {
-            let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+            let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
             let mut rng = XorShift64(master.next_u64() | 1);
             assert_invariants(&p, "construction");
 
             for _ in 0..512 {
-                match rng.below(9) {
+                // Ops 0..=5 are the six anchor-classification mutators
+                // (install_dir / install_file / clear / materialize /
+                // rebase / take_current); ops 6..=9 drive the orthogonal
+                // ProfileState axis so the materialize precondition
+                // (`Pending`) is reachable mid-walk.
+                match rng.below(10) {
                     0 => {
                         // Precondition: not File-classified (cross-arm
                         // graft is a dispatcher-boundary breach).
@@ -3360,14 +3712,25 @@ mod tests {
                         }
                     }
                     5 => {
+                        // Total across the sum, no precondition:
+                        // Unclassified ⇒ no-op `None`; File/Dir ⇒ takes
+                        // `current`, leaving `settled` untouched (states
+                        // E→F / D→C). The only route to state F
+                        // (`current` None ∧ `settled` Snapshot) in the
+                        // interleaved walk — the standalone unit test
+                        // can't catch a *sequenced* coherence regression.
+                        p.take_current();
+                        assert_invariants(&p, "take_current");
+                    }
+                    6 => {
                         p.transition_state(ProfileState::Idle);
                         assert_invariants(&p, "transition_state(Idle)");
                     }
-                    6 => {
+                    7 => {
                         p.transition_state(pending(r));
                         assert_invariants(&p, "transition_state(Pending)");
                     }
-                    7 => {
+                    8 => {
                         p.transition_state(active_prefire(r));
                         assert_invariants(&p, "transition_state(PreFire)");
                     }
@@ -3388,7 +3751,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
 
-        let a = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let a = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(matches!(
             a.anchor,
             AnchorClassification::Unclassified { witness: None }
@@ -3396,7 +3759,7 @@ mod tests {
         assert_eq!(a.kind(), None);
         assert_eq!(a.settled_hash(), None);
 
-        let c_dir = Profile::new(
+        let c_dir = mk_profile(
             r,
             cfg(),
             MAX_SETTLE,
@@ -3415,7 +3778,7 @@ mod tests {
         assert!(!c_dir.current_is_some());
         assert_eq!(c_dir.settled_hash(), None);
 
-        let c_file = Profile::new(
+        let c_file = mk_profile(
             r,
             cfg(),
             MAX_SETTLE,
@@ -3447,7 +3810,7 @@ mod tests {
     fn profile_new_unknown_kind_is_defensively_dead() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let _ = Profile::new(
+        let _ = mk_profile(
             r,
             cfg(),
             MAX_SETTLE,
@@ -3464,7 +3827,7 @@ mod tests {
     fn settled_hash_is_total_across_the_sum() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert_eq!(p.settled_hash(), None, "Unclassified, no witness");
 
         let snap = empty_dir_snapshot();
@@ -3488,10 +3851,10 @@ mod tests {
     fn anchor_coherent_is_silent_on_reachable_shapes() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         p.debug_assert_anchor_coherent(); // Idle + Unclassified
-        p.state = pending(r);
+        p.transition_state(pending(r));
         p.debug_assert_anchor_coherent(); // Pending + Unclassified ✓
         p.transition_state(ProfileState::Idle);
         p.install_dir_current(empty_dir_snapshot());
@@ -3507,8 +3870,8 @@ mod tests {
     fn anchor_coherent_trips_on_classified_pending() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut p = Profile::new(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        p.state = pending(r);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.transition_state(pending(r));
         p.anchor = AnchorClassification::Dir {
             current: None,
             settled: SettledState::Unset,

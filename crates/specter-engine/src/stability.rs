@@ -31,15 +31,18 @@ use crate::coverage::nearest_covering_ancestor;
 use smallvec::SmallVec;
 use specter_core::{ProfileId, ProfileMap, ResourceId, Tree};
 
-/// Walk parent edges from `source` and apply `delta` to each ancestor's
-/// `dirty_descendants`. Returns ancestors whose count just hit zero
-/// **and** are in [`specter_core::PreFirePhase::Draining`] — that combined condition
+/// Walk parent edges from `source` and apply `delta` to each
+/// ancestor's draining-cascade descendant counter via
+/// [`specter_core::Profile::apply_dirty_delta`]. Returns ancestors
+/// whose count just fell to zero **and** are in
+/// [`specter_core::PreFirePhase::Draining`] — that combined condition
 /// drives the same-step `Draining → Verifying` reconfirm transition.
 ///
-/// `dirty_descendants` is `u32`; the I4 invariant (`≥ 0`) is enforced
-/// by `debug_assert!` in dev and clamping in release. The `u32 → i64`
-/// widening lets us compute the post-delta value without overflow
-/// before clamping back into `[0, u32::MAX]`.
+/// The counter mechanics (the I4 `≥ 0` floor, the `u32 → i64`
+/// widening, the "just hit zero" edge) live inside `apply_dirty_delta`
+/// — the field's owner enforces its own invariant. This walk owns only
+/// the *phase* combination: ANDing that edge with
+/// [`specter_core::ProfileState::is_draining`].
 ///
 /// Defensive: if the cached chain points at a reaped Profile (a
 /// transient state between `ProfileMap::detach` and the post-reap
@@ -61,19 +64,14 @@ pub(crate) fn propagate(
     }
     let mut hit_zero: SmallVec<[ProfileId; 4]> = SmallVec::new();
     let mut current = source;
-    while let Some(parent) = profiles.get(current).and_then(|p| p.parent_profile) {
+    while let Some(parent) = profiles
+        .get(current)
+        .and_then(specter_core::Profile::parent_profile)
+    {
         let Some(p) = profiles.get_mut(parent) else {
             break;
         };
-        let prev = p.dirty_descendants;
-        let next = i64::from(prev) + i64::from(delta);
-        debug_assert!(next >= 0, "dirty_descendants underflow at {parent:?}");
-        let clamped = next.clamp(0, i64::from(u32::MAX));
-        // `clamped` is in `[0, u32::MAX]` by construction.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let new_value = clamped as u32;
-        p.dirty_descendants = new_value;
-        if prev > 0 && new_value == 0 && p.state().is_draining() {
+        if p.apply_dirty_delta(delta) && p.state().is_draining() {
             hit_zero.push(parent);
         }
         current = parent;
@@ -146,7 +144,7 @@ pub(crate) fn collect_pointing_at(
     scratch.extend(
         profiles
             .iter()
-            .filter(|(_, p)| p.parent_profile == Some(removed_profile))
+            .filter(|(_, p)| p.parent_profile() == Some(removed_profile))
             .map(|(pid, _)| pid),
     );
 }
@@ -188,7 +186,7 @@ pub(crate) fn write_parent_edge(
         debug_assert_ne!(child, p, "self-parent edge would loop propagate");
     }
     if let Some(profile) = profiles.get_mut(child) {
-        profile.parent_profile = parent;
+        profile.set_parent_profile(parent);
     }
 }
 
@@ -198,8 +196,8 @@ mod tests {
     use compact_str::CompactString;
     use specter_core::{
         ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DirMeta, DirSnapshot,
-        FsIdentity, PreFireBurst, PreFirePhase, Profile, ProfileState, ResourceRole, ScanConfig,
-        TimerId,
+        FsIdentity, PreFireBurst, PreFirePhase, Profile, ProfileIdentity, ProfileState,
+        ResourceRole, ScanConfig, TimerId,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -238,15 +236,42 @@ mod tests {
         }
         let p_root = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                root,
+                ProfileIdentity {
+                    config: cfg(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         let p_mid = profiles.attach(
             &mut tree,
-            Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                mid,
+                ProfileIdentity {
+                    config: cfg(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         let p_leaf = profiles.attach(
             &mut tree,
-            Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                leaf,
+                ProfileIdentity {
+                    config: cfg(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         (tree, profiles, p_root, p_mid, p_leaf)
     }
@@ -271,9 +296,9 @@ mod tests {
         resolve_parent(&tree, &mut profiles, p_mid);
         resolve_parent(&tree, &mut profiles, p_root);
 
-        assert_eq!(profiles.get(p_leaf).unwrap().parent_profile, Some(p_mid));
-        assert_eq!(profiles.get(p_mid).unwrap().parent_profile, Some(p_root));
-        assert!(profiles.get(p_root).unwrap().parent_profile.is_none());
+        assert_eq!(profiles.get(p_leaf).unwrap().parent_profile(), Some(p_mid));
+        assert_eq!(profiles.get(p_mid).unwrap().parent_profile(), Some(p_root));
+        assert!(profiles.get(p_root).unwrap().parent_profile().is_none());
     }
 
     /// Burst-start `+1` propagates through a fully-resolved chain;
@@ -288,15 +313,15 @@ mod tests {
 
         let hit = propagate(&mut profiles, p_leaf, 1);
         assert!(hit.is_empty());
-        assert_eq!(profiles.get(p_mid).unwrap().dirty_descendants, 1);
-        assert_eq!(profiles.get(p_root).unwrap().dirty_descendants, 1);
+        assert_eq!(profiles.get(p_mid).unwrap().dirty_descendants(), 1);
+        assert_eq!(profiles.get(p_root).unwrap().dirty_descendants(), 1);
         // The source itself does not propagate to itself.
-        assert_eq!(profiles.get(p_leaf).unwrap().dirty_descendants, 0);
+        assert_eq!(profiles.get(p_leaf).unwrap().dirty_descendants(), 0);
 
         let hit = propagate(&mut profiles, p_leaf, -1);
         assert!(hit.is_empty());
-        assert_eq!(profiles.get(p_mid).unwrap().dirty_descendants, 0);
-        assert_eq!(profiles.get(p_root).unwrap().dirty_descendants, 0);
+        assert_eq!(profiles.get(p_mid).unwrap().dirty_descendants(), 0);
+        assert_eq!(profiles.get(p_root).unwrap().dirty_descendants(), 0);
     }
 
     #[test]
@@ -305,7 +330,7 @@ mod tests {
         resolve_parent(&tree, &mut profiles, p_leaf);
         let hit = propagate(&mut profiles, p_leaf, 0);
         assert!(hit.is_empty());
-        assert_eq!(profiles.get(p_root).unwrap().dirty_descendants, 0);
+        assert_eq!(profiles.get(p_root).unwrap().dirty_descendants(), 0);
     }
 
     #[test]
@@ -351,7 +376,10 @@ mod tests {
                 }),
                 BurstFinish::ReturnToIdle,
             ));
-            mid.dirty_descendants = 1;
+            // Fresh Profile's counter is 0; +1 brings it to the 1 this
+            // test needs. `apply_dirty_delta` is the only mutator —
+            // the counter has no setter (the I4 floor is type-owned).
+            mid.apply_dirty_delta(1);
         }
 
         let hit = propagate(&mut profiles, p_leaf, -1);
@@ -375,7 +403,7 @@ mod tests {
         let _ = propagate(&mut profiles, p_leaf, 1);
         let hit = propagate(&mut profiles, p_leaf, -1);
         assert!(hit.is_empty());
-        assert_eq!(profiles.get(p_root).unwrap().dirty_descendants, 0);
+        assert_eq!(profiles.get(p_root).unwrap().dirty_descendants(), 0);
     }
 
     #[cfg(debug_assertions)]
@@ -407,7 +435,7 @@ mod tests {
         let hit = propagate(&mut profiles, p_leaf, 1);
         assert!(hit.is_empty());
         // p_mid was the live first hop — delta applied there.
-        assert_eq!(profiles.get(p_mid).unwrap().dirty_descendants, 1);
+        assert_eq!(profiles.get(p_mid).unwrap().dirty_descendants(), 1);
     }
 
     /// Detach `removed`, run the `collect_pointing_at +
@@ -431,8 +459,8 @@ mod tests {
         // p_mid had p_root as parent; recomputed edge is `None`
         // (no other covering ancestor). p_leaf still names p_mid as
         // parent (unaffected — its parent wasn't reaped).
-        assert!(profiles.get(p_mid).unwrap().parent_profile.is_none());
-        assert_eq!(profiles.get(p_leaf).unwrap().parent_profile, Some(p_mid));
+        assert!(profiles.get(p_mid).unwrap().parent_profile().is_none());
+        assert_eq!(profiles.get(p_leaf).unwrap().parent_profile(), Some(p_mid));
     }
 
     /// Sequence: leaf's edge currently points at root. Then a Profile
@@ -455,11 +483,29 @@ mod tests {
         }
         let _p_root = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                root,
+                ProfileIdentity {
+                    config: cfg(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         let p_leaf = profiles.attach(
             &mut tree,
-            Profile::new(leaf, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                leaf,
+                ProfileIdentity {
+                    config: cfg(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
 
         // Initial parent edge: p_leaf → p_root (no mid yet).
@@ -469,11 +515,20 @@ mod tests {
         // rewrites its edge to the closer ancestor.
         let p_mid = profiles.attach(
             &mut tree,
-            Profile::new(mid, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                mid,
+                ProfileIdentity {
+                    config: cfg(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         recompute_parent_edges(&tree, &mut profiles, [p_leaf]);
 
-        assert_eq!(profiles.get(p_leaf).unwrap().parent_profile, Some(p_mid));
+        assert_eq!(profiles.get(p_leaf).unwrap().parent_profile(), Some(p_mid));
     }
 
     /// `collect_in_subtree` harvests Profile ids anchored in strict

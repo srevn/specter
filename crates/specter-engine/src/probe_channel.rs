@@ -358,8 +358,8 @@ mod tests {
     use super::{OpenKind, ProbeChannel};
     use crate::Engine;
     use specter_core::{
-        ClassSet, ProbeCorrelation, ProbeOp, ProbeOwner, Profile, ResourceRole, ScanConfig,
-        StepOutput,
+        ClassSet, ProbeCorrelation, ProbeOp, ProbeOwner, Profile, ProfileIdentity, ResourceRole,
+        ScanConfig, StepOutput,
     };
     use std::time::Duration;
 
@@ -377,10 +377,12 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 r,
-                ScanConfig::builder().build(),
-                MAX_SETTLE,
+                ProfileIdentity {
+                    config: ScanConfig::builder().build(),
+                    max_settle: MAX_SETTLE,
+                    events: ClassSet::EMPTY,
+                },
                 SETTLE,
-                ClassSet::EMPTY,
                 None,
             ),
         );
@@ -506,11 +508,29 @@ mod tests {
         let cfg = ScanConfig::builder().build();
         let pid1 = e.profiles.attach(
             &mut e.tree,
-            Profile::new(r1, cfg.clone(), MAX_SETTLE, SETTLE, ClassSet::EMPTY, None),
+            Profile::new(
+                r1,
+                ProfileIdentity {
+                    config: cfg.clone(),
+                    max_settle: MAX_SETTLE,
+                    events: ClassSet::EMPTY,
+                },
+                SETTLE,
+                None,
+            ),
         );
         let pid2 = e.profiles.attach(
             &mut e.tree,
-            Profile::new(r2, cfg, MAX_SETTLE, SETTLE, ClassSet::EMPTY, None),
+            Profile::new(
+                r2,
+                ProfileIdentity {
+                    config: cfg,
+                    max_settle: MAX_SETTLE,
+                    events: ClassSet::EMPTY,
+                },
+                SETTLE,
+                None,
+            ),
         );
         let owner1 = ProbeOwner::Profile(pid1);
         let owner2 = ProbeOwner::Profile(pid2);

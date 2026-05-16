@@ -90,7 +90,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         "watch_root_parent contributes",
     );
     assert_eq!(
-        e.profiles().get(pid).unwrap().watch_root_parent,
+        e.profiles().get(pid).unwrap().watch_root_parent(),
         Some(root),
         "Profile caches its watch_root_parent",
     );
@@ -117,7 +117,7 @@ fn root_anchor_has_no_watch_root_parent() {
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
-    assert!(e.profiles().get(pid).unwrap().watch_root_parent.is_none());
+    assert!(e.profiles().get(pid).unwrap().watch_root_parent().is_none());
 }
 
 #[test]

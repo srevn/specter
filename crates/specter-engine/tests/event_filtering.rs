@@ -164,7 +164,7 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
 
     // Default for SubtreeRoot ⇒ has_per_file_fds = true.
     assert!(
-        e.profiles().get(pid).unwrap().has_per_file_fds,
+        e.profiles().get(pid).unwrap().has_per_file_fds(),
         "default subtree-root mask (STRUCTURE|CONTENT) sets has_per_file_fds",
     );
 
@@ -218,7 +218,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
     );
 
     assert!(
-        !e.profiles().get(pid).unwrap().has_per_file_fds,
+        !e.profiles().get(pid).unwrap().has_per_file_fds(),
         "STRUCTURE-only mask leaves has_per_file_fds = false",
     );
 
@@ -556,7 +556,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
         "anchor's watch_demand released",
     );
     // watch_root_parent is intact for recovery.
-    assert_eq!(p.watch_root_parent, Some(parent));
+    assert_eq!(p.watch_root_parent(), Some(parent));
     assert!(
         e.tree().get(parent).unwrap().watch_demand() >= 1,
         "watch_root_parent contribution survives anchor terminal",
@@ -885,7 +885,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         ProfileState::Idle,
     ));
     // watch_root_parent kept for recovery.
-    assert!(e.profiles().get(pid).unwrap().watch_root_parent == Some(parent));
+    assert!(e.profiles().get(pid).unwrap().watch_root_parent() == Some(parent));
 }
 
 #[test]
@@ -1463,7 +1463,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
         ClassSet::CONTENT,
         ScanConfig::builder().recursive(true).build(),
     );
-    assert!(e.profiles().get(pid).unwrap().has_per_file_fds);
+    assert!(e.profiles().get(pid).unwrap().has_per_file_fds());
 
     // Seed with one File leaf — has_per_file_fds=true ⇒ leaf gets FD.
     let snap = dir_snap(vec![("a.rs", EntryKind::File, 1)]);

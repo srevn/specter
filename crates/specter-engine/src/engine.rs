@@ -34,7 +34,7 @@ use specter_core::{
 // Per-Resource bookkeeping.
 use specter_core::{ClassSet, ContribKey};
 // Probe + effect correlation.
-use specter_core::{CorrelationId, FiredKey, ProbeOwner};
+use specter_core::{CorrelationId, ProbeOwner};
 // Engine step I/O.
 use specter_core::{Diagnostic, Input, StepOutput};
 use std::time::{Duration, Instant};
@@ -617,14 +617,7 @@ impl Engine {
         // identical before and after. Threading it through the
         // constructor removes the post-attach re-borrow + `expect`.
         let anchor_kind = self.tree.get(anchor).and_then(specter_core::Resource::kind);
-        let p = Profile::new(
-            anchor,
-            identity.config,
-            identity.max_settle,
-            params.settle,
-            identity.events,
-            anchor_kind,
-        );
+        let p = Profile::new(anchor, identity, params.settle, anchor_kind);
         let pid = self.profiles.attach(&mut self.tree, p);
         (pid, ProfileOrigin::Fresh)
     }
@@ -667,14 +660,14 @@ impl Engine {
         // cache to key the contribution removal, so a stale cache would
         // leak the old parent's `+1`.
         debug_assert!(
-            self.profiles
-                .get(profile_id)
-                .is_none_or(|p| p.watch_root_parent.is_none_or(|cached| cached == parent_id)),
+            self.profiles.get(profile_id).is_none_or(|p| p
+                .watch_root_parent()
+                .is_none_or(|cached| cached == parent_id)),
             "set_watch_root_parent: cached parent must agree with the materialised \
              anchor's parent (profile = {profile_id:?}, cached = {:?}, tree_parent = {parent_id:?})",
             self.profiles
                 .get(profile_id)
-                .and_then(|p| p.watch_root_parent),
+                .and_then(specter_core::Profile::watch_root_parent),
         );
 
         // Idempotent: "Watch root deletion" recovery re-enters descent
@@ -688,7 +681,7 @@ impl Engine {
         let already_set = self
             .profiles
             .get(profile_id)
-            .is_some_and(|p| p.watch_root_parent == Some(parent_id));
+            .is_some_and(|p| p.watch_root_parent() == Some(parent_id));
         if already_set {
             return;
         }
@@ -713,7 +706,7 @@ impl Engine {
         );
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.watch_root_parent = Some(parent_id);
+            p.set_watch_root_parent(parent_id);
         }
     }
 
@@ -824,9 +817,7 @@ impl Engine {
         // subs-remaining branch.
         if remaining_subs > 0 {
             if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.fired_subs.retain(|k| match k {
-                    FiredKey::Subtree(s) | FiredKey::PerFile { sub: s, .. } => *s != sub,
-                });
+                p.forget_fired_sub(sub);
             }
             // Recompute Profile.settle = min(remaining_subs.settles).
             //
@@ -1312,8 +1303,8 @@ mod tests {
     use super::*;
     use specter_core::{
         DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeOutcome, ProbeResponse,
-        ProfileId, ResourceId, ScanConfig, StepOutput, SubId, TimerId, TimerKind, WatchOp,
-        WatchRegistryDiff,
+        ProfileId, ProfileIdentity, ResourceId, ScanConfig, StepOutput, SubId, TimerId, TimerKind,
+        WatchOp, WatchRegistryDiff,
     };
     use std::time::{Duration, Instant};
 
@@ -1554,10 +1545,12 @@ mod tests {
             &mut e.tree,
             specter_core::Profile::new(
                 r1,
-                cfg.clone(),
-                Duration::from_secs(6),
+                ProfileIdentity {
+                    config: cfg.clone(),
+                    max_settle: Duration::from_secs(6),
+                    events: specter_core::ClassSet::EMPTY,
+                },
                 Duration::from_millis(50),
-                specter_core::ClassSet::EMPTY,
                 None,
             ),
         );
@@ -1565,10 +1558,12 @@ mod tests {
             &mut e.tree,
             specter_core::Profile::new(
                 r2,
-                cfg.clone(),
-                Duration::from_secs(6),
+                ProfileIdentity {
+                    config: cfg.clone(),
+                    max_settle: Duration::from_secs(6),
+                    events: specter_core::ClassSet::EMPTY,
+                },
                 Duration::from_millis(50),
-                specter_core::ClassSet::EMPTY,
                 None,
             ),
         );
@@ -1576,10 +1571,12 @@ mod tests {
             &mut e.tree,
             specter_core::Profile::new(
                 r3,
-                cfg,
-                Duration::from_secs(6),
+                ProfileIdentity {
+                    config: cfg,
+                    max_settle: Duration::from_secs(6),
+                    events: specter_core::ClassSet::EMPTY,
+                },
                 Duration::from_millis(50),
-                specter_core::ClassSet::EMPTY,
                 None,
             ),
         );
@@ -1841,10 +1838,12 @@ mod tests {
             .expect("test live parent");
         let profile = specter_core::Profile::new(
             anchor,
-            ScanConfig::builder().build(),
-            Duration::from_secs(1),
+            ProfileIdentity {
+                config: ScanConfig::builder().build(),
+                max_settle: Duration::from_secs(1),
+                events: specter_core::ClassSet::EMPTY,
+            },
             Duration::from_millis(50),
-            specter_core::ClassSet::EMPTY,
             None,
         );
         let pid = e.profiles.attach(&mut e.tree, profile);
@@ -1854,7 +1853,10 @@ mod tests {
         e.set_watch_root_parent(pid, anchor, &mut out);
         let after_first = e.tree.get(parent).unwrap().watch_demand();
         assert_eq!(after_first, 1, "first call bumps parent watch_demand");
-        assert_eq!(e.profiles.get(pid).unwrap().watch_root_parent, Some(parent));
+        assert_eq!(
+            e.profiles.get(pid).unwrap().watch_root_parent(),
+            Some(parent)
+        );
 
         // Second call with the same anchor: must be a no-op (no bump).
         let mut out2 = StepOutput::default();
@@ -2174,7 +2176,10 @@ mod tests {
                 .profiles
                 .get(pid)
                 .map_or(AnchorClaim::None, specter_core::Profile::anchor_claim),
-            watch_root_parent: e.profiles.get(pid).and_then(|p| p.watch_root_parent),
+            watch_root_parent: e
+                .profiles
+                .get(pid)
+                .and_then(specter_core::Profile::watch_root_parent),
             current_is_none: e.profiles.get(pid).is_none_or(|p| p.current().is_none()),
             anchor_watch_demand: e
                 .tree

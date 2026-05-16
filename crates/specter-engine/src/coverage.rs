@@ -64,20 +64,20 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
 
     let depth = u32::try_from(rev.len()).unwrap_or(u32::MAX);
 
-    if let Some(max) = profile.config.max_depth
+    if let Some(max) = profile.config().max_depth
         && depth > max
     {
         return false;
     }
-    if depth > 1 && !profile.config.recursive {
+    if depth > 1 && !profile.config().recursive {
         return false;
     }
 
-    if !profile.config.exclude.is_empty() {
+    if !profile.config().exclude.is_empty() {
         let mut rel = PathBuf::new();
         for seg in &rev {
             rel.push(seg);
-            for excl in &profile.config.exclude {
+            for excl in &profile.config().exclude {
                 if excl.matches_path(&rel) {
                     return false;
                 }
@@ -85,7 +85,7 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
         }
     }
 
-    if let Some(pat) = &profile.config.pattern {
+    if let Some(pat) = &profile.config().pattern {
         // Unprobed slots collapse to File-shape (the backend-mask
         // convention shared by `fs_event_to_class`, the kqueue / inotify
         // translators, and `recompute_events_union`). The prior raw-`kind`
@@ -157,8 +157,8 @@ pub fn nearest_covering_ancestor(
 mod tests {
     use super::*;
     use specter_core::{
-        ClassSet, GlobPattern, Profile, ProfileMap, ResourceKind, ResourceRole, ScanConfig,
-        ScanConfigBuilder,
+        ClassSet, GlobPattern, Profile, ProfileIdentity, ProfileMap, ResourceKind, ResourceRole,
+        ScanConfig, ScanConfigBuilder,
     };
     use std::time::Duration;
 
@@ -178,7 +178,16 @@ mod tests {
     fn anchor(tree: &mut Tree, segment: &str, builder: ScanConfigBuilder) -> (ResourceId, Profile) {
         let r = tree.ensure_root(segment, ResourceRole::User);
         mark(tree, r, ResourceKind::Dir);
-        let p = Profile::new(r, builder.build(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        let p = Profile::new(
+            r,
+            ProfileIdentity {
+                config: builder.build(),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
+            SETTLE,
+            None,
+        );
         (r, p)
     }
 
@@ -204,10 +213,12 @@ mod tests {
         mark(&mut tree, r, ResourceKind::File);
         let p = Profile::new(
             r,
-            ScanConfig::builder().build(),
-            MAX_SETTLE,
+            ProfileIdentity {
+                config: ScanConfig::builder().build(),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
             SETTLE,
-            NO_EVENTS,
             None,
         );
         assert!(covers(&p, r, &tree));
@@ -222,10 +233,12 @@ mod tests {
         mark(&mut tree, r, ResourceKind::File);
         let p = Profile::new(
             r,
-            ScanConfig::builder().pattern(glob("*.rs")).build(),
-            MAX_SETTLE,
+            ProfileIdentity {
+                config: ScanConfig::builder().pattern(glob("*.rs")).build(),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
             SETTLE,
-            NO_EVENTS,
             None,
         );
         assert!(covers(&p, r, &tree));
@@ -253,10 +266,12 @@ mod tests {
         mark(&mut tree, anchor_id, ResourceKind::Dir);
         let profile = Profile::new(
             anchor_id,
-            recursive_unbounded().build(),
-            MAX_SETTLE,
+            ProfileIdentity {
+                config: recursive_unbounded().build(),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
             SETTLE,
-            NO_EVENTS,
             None,
         );
         assert!(!covers(&profile, parent, &tree));
@@ -574,7 +589,16 @@ mod tests {
         mark_dir(&mut tree, r);
         let pid = profiles.attach(
             &mut tree,
-            Profile::new(r, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                r,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         assert!(nearest_covering_ancestor(&tree, &profiles, pid).is_none());
     }
@@ -595,15 +619,42 @@ mod tests {
         }
         let p_root = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                root,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         let p_a = profiles.attach(
             &mut tree,
-            Profile::new(a, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                a,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                b,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
 
         assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b), Some(p_a));
@@ -635,16 +686,27 @@ mod tests {
             &mut tree,
             Profile::new(
                 root,
-                ScanConfig::builder().recursive(false).build(),
-                MAX_SETTLE,
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(false).build(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 None,
             ),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                b,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b), None);
     }
@@ -661,10 +723,12 @@ mod tests {
             &mut tree,
             Profile::new(
                 r,
-                cfg_recursive(),
-                Duration::from_secs(6),
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: Duration::from_secs(6),
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 None,
             ),
         );
@@ -672,10 +736,12 @@ mod tests {
             &mut tree,
             Profile::new(
                 r,
-                cfg_recursive(),
-                Duration::from_secs(12),
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: Duration::from_secs(12),
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 None,
             ),
         );
@@ -703,10 +769,12 @@ mod tests {
             &mut tree,
             Profile::new(
                 root,
-                cfg_recursive(),
-                Duration::from_secs(6),
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: Duration::from_secs(6),
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 None,
             ),
         );
@@ -714,16 +782,27 @@ mod tests {
             &mut tree,
             Profile::new(
                 root,
-                cfg_recursive(),
-                Duration::from_secs(12),
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: Duration::from_secs(12),
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 None,
             ),
         );
         let p_leaf = profiles.attach(
             &mut tree,
-            Profile::new(leaf, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                leaf,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
 
         let smaller = std::cmp::min(p_root_a, p_root_b);

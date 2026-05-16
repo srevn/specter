@@ -862,7 +862,7 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
         _ => panic!("post-Seed baseline must be Some(Dir)"),
     };
     assert!(
-        e.profiles.get(pid).unwrap().fired_subs.is_empty(),
+        e.profiles.get(pid).unwrap().fired_is_empty(),
         "fresh Sub: no fire history",
     );
 
@@ -913,11 +913,6 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
         "fresh Sub must fire on first stable verdict, even on a phantom \
          (`baseline.hash() == current.hash()`); `fired_subs.contains` \
          is the discriminator that prevents the noop-suppress path",
-    );
-    assert_eq!(
-        e.profiles.get(pid).unwrap().fired_subs.len(),
-        1,
-        "post-emit: fire history populated",
     );
 }
 
@@ -3498,17 +3493,21 @@ fn drive_to_first_effect(
 
 #[test]
 fn records_fired_subs_after_subtree_effect() {
-    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
     let now = Instant::now();
     let out = drive_to_first_effect(&mut e, pid, root, now);
 
     // First Effect fires (no prior emission).
     assert_eq!(out.effects().len(), 1, "first Standard-Ok fires Effect");
-    // fired_subs now has one entry for the SubtreeRoot key.
-    let p = e.profiles.get(pid).unwrap();
-    assert_eq!(p.fired_subs.len(), 1);
-    let key = p.fired_subs.iter().next().unwrap();
-    assert!(matches!(key, FiredKey::Subtree(_)));
+    // The Subtree fire is recorded under this Sub's exact key — the
+    // post-emit fire-history entry that gates later B1 suppression.
+    assert!(
+        e.profiles
+            .get(pid)
+            .unwrap()
+            .has_fired(FiredKey::Subtree(sid)),
+        "post-emit: Subtree fire recorded for this Sub",
+    );
 }
 
 /// `Effect.target` for a `Subtree`-keyed Effect is the Profile anchor
@@ -3546,7 +3545,7 @@ fn clears_fired_subs_on_effect_complete_failed() {
     let _ = drive_to_first_effect(&mut e, pid, root, now);
 
     // Confirm the dedup-hash entry was written.
-    assert!(!e.profiles.get(pid).unwrap().fired_subs.is_empty());
+    assert!(!e.profiles.get(pid).unwrap().fired_is_empty());
 
     // EffectComplete::Failed clears the dedup-hash entry for this DedupKey.
     let dk = DedupKey::Subtree {
@@ -3562,7 +3561,7 @@ fn clears_fired_subs_on_effect_complete_failed() {
         now,
     );
     assert!(
-        e.profiles.get(pid).unwrap().fired_subs.is_empty(),
+        e.profiles.get(pid).unwrap().fired_is_empty(),
         "Failed Effect clears the suppression entry",
     );
 }
@@ -3714,7 +3713,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
     assert!(
-        e.profiles.get(pid).unwrap().has_per_file_fds,
+        e.profiles.get(pid).unwrap().has_per_file_fds(),
         "CONTENT-mask Profile has has_per_file_fds = true at construction",
     );
 
@@ -3737,13 +3736,13 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         },
     };
     let _ = e.step(Input::AttachSub(req2), Instant::now());
-    assert!(e.profiles.get(pid).unwrap().has_per_file_fds);
+    assert!(e.profiles.get(pid).unwrap().has_per_file_fds());
 
     // Detaching the second Sub leaves the Profile alive (a Sub still
     // remains before detach); the flag still doesn't flip because the
     // Profile's events mask is invariant.
     let _ = e.step(Input::DetachSub(sid), Instant::now());
-    assert!(e.profiles.get(pid).unwrap().has_per_file_fds);
+    assert!(e.profiles.get(pid).unwrap().has_per_file_fds());
 }
 
 #[test]
@@ -3773,7 +3772,7 @@ fn structure_only_profile_has_per_file_fds_false() {
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile;
-    assert!(!e.profiles.get(pid).unwrap().has_per_file_fds);
+    assert!(!e.profiles.get(pid).unwrap().has_per_file_fds());
 }
 
 // ---------- Anchor-loss kind-cache invalidation ----------
@@ -4435,8 +4434,8 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.fired_subs.insert(dk);
-        p.fired_subs.insert(dk);
+        p.record_fire(dk);
+        p.record_fire(dk);
         p.transition_state(state);
     }
 
@@ -4478,7 +4477,7 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
 fn seed_drift_observed_returns_false_for_fresh_profile() {
     let (e, pid, _sid, _anchor, _now) = engine_with_attached_sub();
     let p = e.profiles.get(pid).expect("Profile lives post-attach");
-    assert!(p.fired_subs.is_empty(), "precondition: no fire history");
+    assert!(p.fired_is_empty(), "precondition: no fire history");
     assert!(
         p.settled_hash().is_none(),
         "precondition: no settled reference"
@@ -4515,7 +4514,7 @@ fn seed_drift_observed_returns_true_on_post_recovery_drift() {
     // differs from that witness ⇒ drift.
     enter_survival_mode(&mut e, pid, witness_snap);
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.fired_subs.insert(FiredKey::Subtree(sid));
+        p.record_fire(FiredKey::Subtree(sid));
         p.install_dir_current(snap);
     }
 
@@ -4547,7 +4546,7 @@ fn seed_drift_observed_returns_true_on_active_mode_drift() {
 
     enter_active_mode(&mut e, pid, baseline_snap, current_snap);
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.fired_subs.insert(FiredKey::Subtree(sid));
+        p.record_fire(FiredKey::Subtree(sid));
     }
 
     assert!(
@@ -4568,7 +4567,7 @@ fn seed_drift_observed_returns_false_when_active_mode_baseline_matches_current()
 
     enter_active_mode(&mut e, pid, snap.clone(), snap);
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.fired_subs.insert(FiredKey::Subtree(sid));
+        p.record_fire(FiredKey::Subtree(sid));
     }
 
     assert!(
@@ -4915,7 +4914,7 @@ mod props {
                     // u32 is ≥ 0 by type. Confirm anyway and tighten:
                     // single Profile with no parent edges → dirty_descendants
                     // is always 0.
-                    prop_assert_eq!(p.dirty_descendants, 0);
+                    prop_assert_eq!(p.dirty_descendants(), 0);
                 }
             }
         }

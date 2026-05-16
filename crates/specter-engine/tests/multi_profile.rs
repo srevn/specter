@@ -195,7 +195,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
 
     // Parent's dirty_descendants does NOT bump on child's Seed burst.
     assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants,
+        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
         0,
         "Seed bursts don't propagate",
     );
@@ -210,7 +210,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
         now,
     );
     assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants,
+        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
         0,
         "Seed end doesn't propagate either",
     );
@@ -226,7 +226,7 @@ fn parent_child_standard_burst_propagates_dirty_descendants() {
     );
     // Standard burst on child propagates +1 to parent.
     assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants,
+        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
         1,
         "child Standard burst start bumps parent",
     );
@@ -338,7 +338,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         .pending_probe_for(ProbeOwner::Profile(pid_parent))
         .expect("Verifying probe in flight");
     assert!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants >= 1,
+        e.profiles().get(pid_parent).unwrap().dirty_descendants() >= 1,
         "child burst contributes dirty before parent stabilizes",
     );
 

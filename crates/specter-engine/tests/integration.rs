@@ -79,16 +79,27 @@ fn covers_drives_nearest_covering_ancestor() {
             &mut tree,
             Profile::new(
                 root,
-                ScanConfig::builder().recursive(false).build(),
-                MAX_SETTLE,
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(false).build(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 None,
             ),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                b,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
 
         assert!(!covers(profiles.get(p_root).unwrap(), b, &tree));
@@ -111,11 +122,29 @@ fn covers_drives_nearest_covering_ancestor() {
         }
         let p_root = profiles.attach(
             &mut tree,
-            Profile::new(root, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                root,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(b, cfg_recursive(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                b,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         );
 
         assert!(covers(profiles.get(p_root).unwrap(), b, &tree));
@@ -149,13 +178,15 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
         &mut tree,
         Profile::new(
             root,
-            ScanConfig::builder()
-                .recursive(true)
-                .pattern(specter_core::GlobPattern::compile("*.rs").unwrap())
-                .build(),
-            MAX_SETTLE,
+            ProfileIdentity {
+                config: ScanConfig::builder()
+                    .recursive(true)
+                    .pattern(specter_core::GlobPattern::compile("*.rs").unwrap())
+                    .build(),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
             SETTLE,
-            NO_EVENTS,
             None,
         ),
     );

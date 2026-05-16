@@ -325,7 +325,7 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
     complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
     // `set_watch_root_parent` ran at attach; parent has +1 STRUCTURE.
     assert_eq!(
-        e.profiles().get(pid).unwrap().watch_root_parent,
+        e.profiles().get(pid).unwrap().watch_root_parent(),
         Some(parent),
     );
     assert_eq!(e.tree().get(parent).unwrap().watch_demand(), 1);
@@ -347,7 +347,7 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
     );
 
     // Parent's flag cleared on the Profile; anchor stays watched.
-    assert_eq!(e.profiles().get(pid).unwrap().watch_root_parent, None);
+    assert_eq!(e.profiles().get(pid).unwrap().watch_root_parent(), None);
     assert_eq!(
         e.tree()
             .get(parent)

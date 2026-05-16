@@ -322,7 +322,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
-    assert!(e.profiles().get(pid).unwrap().watch_root_parent == Some(root_dir));
+    assert!(e.profiles().get(pid).unwrap().watch_root_parent() == Some(root_dir));
 
     // Anchor gone (Removed event at /src).
     e.step(
@@ -603,7 +603,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         now,
     );
     assert_eq!(
-        e.profiles().get(pid_b).unwrap().watch_root_parent,
+        e.profiles().get(pid_b).unwrap().watch_root_parent(),
         Some(root_dir),
         "B watches its parent /root for anchor recovery",
     );
@@ -617,7 +617,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let p_b = e.profiles().get(pid_b).unwrap();
     assert!(matches!(p_b.state(), ProfileState::Idle));
     assert!(p_b.current().is_none(), "B's anchor is gone");
-    assert_eq!(p_b.watch_root_parent, Some(root_dir));
+    assert_eq!(p_b.watch_root_parent(), Some(root_dir));
 
     // Profile C: anchor at /elsewhere; Seed → Idle. Unrelated to /root.
     let req_c = SubAttachRequest::for_anchor(

@@ -19,8 +19,8 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeRequest, ProbeResponse, ReapTrigger, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, SubAttachAnchor, SubAttachRequest,
+    ProbeOwner, ProbeRequest, ProbeResponse, ProfileIdentity, ReapTrigger, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -708,10 +708,12 @@ fn profile_state_default_is_idle() {
     let r = e.tree_mut().ensure_root("anchor", ResourceRole::User);
     let p = Profile::new(
         r,
-        ScanConfig::builder().build(),
-        MAX_SETTLE,
+        ProfileIdentity {
+            config: ScanConfig::builder().build(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
         SETTLE,
-        NO_EVENTS,
         None,
     );
     assert!(matches!(p.state(), ProfileState::Idle));
@@ -1113,7 +1115,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     // Post-materialization: Profile is Active(Seed Verifying); bar carries
     // events_union; foo carries STRUCTURE from watch_root_parent.
     assert_eq!(
-        e.profiles().get(pid).unwrap().watch_root_parent,
+        e.profiles().get(pid).unwrap().watch_root_parent(),
         Some(foo),
         "watch_root_parent cached at foo on materialization",
     );

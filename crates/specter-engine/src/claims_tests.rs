@@ -142,7 +142,7 @@ fn discard_anchor_state_clears_kind_baseline_current_anchor_claim() {
 fn discard_anchor_state_preserves_watch_root_parent() {
     let (mut e, _sid, pid, _anchor, parent) = engine_with_materialised_profile(ClassSet::EMPTY);
     assert_eq!(
-        e.profiles().get(pid).unwrap().watch_root_parent,
+        e.profiles().get(pid).unwrap().watch_root_parent(),
         Some(parent),
     );
 
@@ -150,7 +150,7 @@ fn discard_anchor_state_preserves_watch_root_parent() {
     e.discard_anchor_state(pid, &mut out);
 
     assert_eq!(
-        e.profiles().get(pid).unwrap().watch_root_parent,
+        e.profiles().get(pid).unwrap().watch_root_parent(),
         Some(parent),
         "recovery channel preserved across anchor loss",
     );
@@ -202,15 +202,20 @@ fn discard_anchor_state_preserves_fired_subs() {
     let (mut e, sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
     let key = FiredKey::Subtree(sid);
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.fired_subs.insert(key);
+        p.record_fire(key);
     }
-    let set_before = e.profiles().get(pid).unwrap().fired_subs.clone();
+    assert!(
+        e.profiles().get(pid).unwrap().has_fired(key),
+        "precondition: key recorded",
+    );
 
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
 
-    let set_after = &e.profiles().get(pid).unwrap().fired_subs;
-    assert_eq!(&set_before, set_after, "fired_subs survives anchor loss");
+    assert!(
+        e.profiles().get(pid).unwrap().has_fired(key),
+        "fired_subs survives anchor loss",
+    );
 }
 
 #[test]
@@ -352,7 +357,7 @@ fn discard_anchor_state_preserves_events_union_and_per_file_fds() {
     let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::CONTENT);
     let (events_before, fds_before) = {
         let p = e.profiles().get(pid).expect("Profile lives");
-        (p.events(), p.has_per_file_fds)
+        (p.events(), p.has_per_file_fds())
     };
     assert_eq!(events_before, ClassSet::CONTENT);
     assert!(fds_before, "CONTENT events ⇒ per-file FDs enabled");
@@ -362,7 +367,11 @@ fn discard_anchor_state_preserves_events_union_and_per_file_fds() {
 
     let p = e.profiles().get(pid).expect("Profile lives");
     assert_eq!(p.events(), events_before, "events_union invariant");
-    assert_eq!(p.has_per_file_fds, fds_before, "has_per_file_fds invariant");
+    assert_eq!(
+        p.has_per_file_fds(),
+        fds_before,
+        "has_per_file_fds invariant"
+    );
 }
 
 #[test]

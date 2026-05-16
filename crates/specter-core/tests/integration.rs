@@ -56,7 +56,16 @@ fn shared_profile_via_config_hash() {
     let pid_a = profiles.find(r, hash).unwrap_or_else(|| {
         profiles.attach(
             &mut tree,
-            Profile::new(r, cfg.clone(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+            Profile::new(
+                r,
+                ProfileIdentity {
+                    config: cfg.clone(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
         )
     });
     let _sid_a = subs.insert(Sub::from_request(
@@ -92,10 +101,12 @@ fn distinct_profile_for_distinct_max_settle() {
         &mut tree,
         Profile::new(
             r,
-            bare_cfg(),
-            Duration::from_secs(6),
+            ProfileIdentity {
+                config: bare_cfg(),
+                max_settle: Duration::from_secs(6),
+                events: NO_EVENTS,
+            },
             SETTLE,
-            NO_EVENTS,
             None,
         ),
     );
@@ -103,10 +114,12 @@ fn distinct_profile_for_distinct_max_settle() {
         &mut tree,
         Profile::new(
             r,
-            bare_cfg(),
-            Duration::from_secs(12),
+            ProfileIdentity {
+                config: bare_cfg(),
+                max_settle: Duration::from_secs(12),
+                events: NO_EVENTS,
+            },
             SETTLE,
-            NO_EVENTS,
             None,
         ),
     );
@@ -132,11 +145,29 @@ fn distinct_profile_for_distinct_pattern() {
 
     let pid_rs = profiles.attach(
         &mut tree,
-        Profile::new(r, cfg_rs, MAX_SETTLE, SETTLE, NO_EVENTS, None),
+        Profile::new(
+            r,
+            ProfileIdentity {
+                config: cfg_rs,
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
+            SETTLE,
+            None,
+        ),
     );
     let pid_txt = profiles.attach(
         &mut tree,
-        Profile::new(r, cfg_txt, MAX_SETTLE, SETTLE, NO_EVENTS, None),
+        Profile::new(
+            r,
+            ProfileIdentity {
+                config: cfg_txt,
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
+            SETTLE,
+            None,
+        ),
     );
 
     assert_ne!(pid_rs, pid_txt);
@@ -150,7 +181,16 @@ fn detach_clears_back_references_on_both_sides() {
     let r = tree.ensure_root("/anchor", ResourceRole::User);
     let pid = profiles.attach(
         &mut tree,
-        Profile::new(r, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+        Profile::new(
+            r,
+            ProfileIdentity {
+                config: bare_cfg(),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
+            SETTLE,
+            None,
+        ),
     );
 
     profiles.detach(&mut tree, pid);
@@ -189,7 +229,16 @@ fn rename_after_detach_yields_fresh_id() {
         .expect("test live parent");
     let pid = profiles.attach(
         &mut tree,
-        Profile::new(id_old, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+        Profile::new(
+            id_old,
+            ProfileIdentity {
+                config: bare_cfg(),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
+            SETTLE,
+            None,
+        ),
     );
 
     // Rename: engine detaches the Profile, then try_reaps the slot.
@@ -225,7 +274,16 @@ fn recreate_at_anchored_slot_keeps_id() {
         .expect("test live parent");
     let _pid = profiles.attach(
         &mut tree,
-        Profile::new(id, bare_cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+        Profile::new(
+            id,
+            ProfileIdentity {
+                config: bare_cfg(),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
+            SETTLE,
+            None,
+        ),
     );
 
     // try_reap without detach: slot is anchored by Profile, refused.

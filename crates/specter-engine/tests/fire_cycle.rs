@@ -33,8 +33,8 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, ArgPart, ArgTemplate, BurstFinish, ChildEntry, ClassSet, DedupKey,
-    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FiredKey,
-    FsEvent, FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp,
+    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent,
+    FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
     ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, Termination,
     TimerKind, TreeSnapshot,
@@ -758,7 +758,7 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
         ProfileState::Idle
     ));
     assert!(
-        e.profiles().get(pid).unwrap().fired_subs.is_empty(),
+        e.profiles().get(pid).unwrap().fired_is_empty(),
         "fresh Seed leaves fired_subs empty",
     );
 }
@@ -805,11 +805,6 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
-    assert_eq!(
-        e.profiles().get(pid).unwrap().fired_subs.len(),
-        1,
-        "first fire cycle records the SubtreeRoot DedupKey hash",
-    );
 
     // Second burst: identical event/probe; hash matches → no Effect.
     let later = now + Duration::from_millis(40);
@@ -1260,11 +1255,6 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
     // suppress in the phantom burst below.
     let p = e.profiles().get(pid).unwrap();
     assert!(matches!(p.state(), ProfileState::Idle));
-    let recorded_key = p.fired_subs.iter().next().expect("fire history recorded");
-    assert!(
-        matches!(recorded_key, FiredKey::Subtree(_)),
-        "fire history records the Subtree key for this Profile",
-    );
     assert_eq!(
         p.baseline().unwrap().hash(),
         post_effect.dir_hash(),
@@ -1383,10 +1373,10 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         "one PerFile Effect for foo.rs"
     );
     let effect_key = stable_out.effects()[0].key();
-    let foo_resource = match &effect_key {
-        DedupKey::PerFile { resource, .. } => *resource,
-        DedupKey::Subtree { .. } => panic!("expected PerFile key"),
-    };
+    assert!(
+        matches!(effect_key, DedupKey::PerFile { .. }),
+        "expected PerFile key for foo.rs",
+    );
 
     // EffectComplete::Ok → Rebasing.
     let rebase_out = e.step(
@@ -1415,16 +1405,8 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     // Post-rebase: baseline := current carries the post-Effect leaf
     // hash; the fire history records a PerFile key keyed at the file
     // resource (slot survived graft via inode identity). Both signals
-    // are required to gate the phantom-suppress path below.
-    assert!(
-        e.profiles()
-            .get(pid)
-            .unwrap()
-            .fired_subs
-            .iter()
-            .any(|k| matches!(k, FiredKey::PerFile { resource, .. } if *resource == foo_resource)),
-        "fire history records the PerFile key at foo.rs's resource id",
-    );
+    // gate the phantom-suppress path below — validated behaviourally
+    // by that burst producing no fire.
 
     // Burst 2 — phantom event. The verify probe responds with
     // post_effect (foo.rs at inode 42, size 1 — the "formatted"

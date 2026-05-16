@@ -81,16 +81,17 @@ impl Engine {
     /// on the eventual anchor reap walks back up and frees the parent
     /// in that same step.
     pub(crate) fn release_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
-        let Some(p) = self.profiles.get(pid) else {
+        // `take_watch_root_parent` reads and clears the cached id in one
+        // move, so the read-then-null pair collapses to a single
+        // `get_mut` (was a `get` for the presence check, then a
+        // `get_mut` to null it).
+        let Some(parent) = self
+            .profiles
+            .get_mut(pid)
+            .and_then(specter_core::Profile::take_watch_root_parent)
+        else {
             return;
         };
-        let Some(parent) = p.watch_root_parent else {
-            return;
-        };
-
-        if let Some(p) = self.profiles.get_mut(pid) {
-            p.watch_root_parent = None;
-        }
 
         sub_watch_then_try_reap(&mut self.tree, parent, ContribKey::ProfileParent(pid), out);
     }
@@ -338,6 +339,16 @@ impl Engine {
         }
 
         self.release_anchor_claim(pid, out);
+
+        // Coordinator-exit coherence tripwire, symmetric with
+        // `Profile::materialize_anchor`'s. The classification collapse
+        // above is structural, but a future regression that reordered
+        // these steps or left the Profile classified / still holding
+        // the anchor claim while `Pending` would trip here at the write
+        // site rather than latently at the next dispatch or reap.
+        if let Some(p) = self.profiles.get(pid) {
+            p.debug_assert_anchor_coherent();
+        }
     }
 }
 

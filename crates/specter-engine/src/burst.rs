@@ -209,7 +209,7 @@ impl Engine {
             return;
         };
         let resource = p.resource;
-        let max_settle = p.max_settle;
+        let max_settle = p.max_settle();
 
         let burst_deadline =
             self.timers
@@ -291,7 +291,7 @@ impl Engine {
         };
         let resource = p.resource;
         let settle = p.settle;
-        let max_settle = p.max_settle;
+        let max_settle = p.max_settle();
 
         let settle_timer = self
             .timers
@@ -737,7 +737,7 @@ impl Engine {
         // duplicated guard.
         let Some(max_settle) = self.profiles.get(profile_id).and_then(|p| {
             matches!(p.state(), ProfileState::Active(ActiveBurst::PreFire(_), _))
-                .then_some(p.max_settle)
+                .then_some(p.max_settle())
         }) else {
             return;
         };
@@ -1062,13 +1062,11 @@ impl Engine {
             Some(ResourceKind::File) => {
                 Self::emit_anchor_probe(owner, correlation, target_path, out);
             }
-            // Dir or unclassified ⇒ unified Subtree fallback. An Unknown
-            // anchor (resource-based attach whose first probe hasn't yet
-            // returned, or a slot whose kind never propagated past the
-            // default) probes as a Dir; the walker returns `Vanished` on
-            // kind mismatch and the engine routes through the
-            // dispatch_*_vanished paths to recover via descent.
-            Some(ResourceKind::Dir | ResourceKind::Unknown) | None => {
+            // Not File-classified (Dir or still Unclassified) ⇒ the
+            // kind-agnostic Subtree probe. `kind()` projects the anchor
+            // sum, so it is only ever None / Some(File) / Some(Dir); the
+            // wildcard is the honest "everything that isn't File" arm.
+            _ => {
                 let baseline_subtree = p
                     .current_dir()
                     .and_then(|root| subtree_at_dir(root, p.resource, target, &self.tree));
@@ -1077,8 +1075,8 @@ impl Engine {
                     owner,
                     correlation,
                     target_path,
-                    p.config.clone(),
-                    p.config_hash,
+                    p.config().clone(),
+                    p.config_hash(),
                     baseline_subtree,
                     force_walk_paths,
                     forced,
@@ -1379,8 +1377,8 @@ mod tests {
     use crate::Engine;
     use specter_core::{
         ActiveBurst, BurstIntent, ClassSet, Input, PreFirePhase, ProbeOp, ProbeOwner, ProbeRequest,
-        Profile, ProfileState, ResourceKind, ResourceRole, ScanConfig, StepOutput, TimerKind,
-        WatchOp,
+        Profile, ProfileIdentity, ProfileState, ResourceKind, ResourceRole, ScanConfig, StepOutput,
+        TimerKind, WatchOp,
     };
     use std::time::{Duration, Instant};
 
@@ -1398,10 +1396,12 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 r,
-                ScanConfig::builder().recursive(true).build(),
-                MAX_SETTLE,
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(true).build(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 None,
             ),
         );
@@ -1915,10 +1915,12 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 root,
-                ScanConfig::builder().recursive(true).build(),
-                MAX_SETTLE,
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(true).build(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 None,
             ),
         );
@@ -2242,10 +2244,12 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 file_anchor,
-                ScanConfig::builder().recursive(false).build(),
-                MAX_SETTLE,
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(false).build(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 Some(ResourceKind::File),
             ),
         );
@@ -2295,10 +2299,12 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 l0,
-                ScanConfig::builder().recursive(true).build(),
-                MAX_SETTLE,
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(true).build(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
                 SETTLE,
-                NO_EVENTS,
                 None,
             ),
         );

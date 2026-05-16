@@ -714,7 +714,7 @@ impl Engine {
         if matches!(result, EffectOutcome::Failed(_))
             && let Some(p) = self.profiles.get_mut(profile_id)
         {
-            p.fired_subs.remove(&FiredKey::from(key));
+            p.forget_fire(FiredKey::from(key));
         }
 
         // Resolve the action under a short read borrow, then mutate.
@@ -920,7 +920,7 @@ impl Engine {
             if matches!(p.anchor_claim(), AnchorClaim::Held) && p.resource == resource {
                 anchor_claimers.push(pid);
             }
-            if p.watch_root_parent == Some(resource) {
+            if p.watch_root_parent() == Some(resource) {
                 parent_claimers.push(pid);
             }
             if let ProfileState::Pending(d) = p.state()
@@ -1609,15 +1609,7 @@ impl Engine {
             let drifted: SmallVec<[SubId; 2]> = self
                 .profiles
                 .get(profile_id)
-                .map(|p| {
-                    p.fired_subs
-                        .iter()
-                        .filter_map(|k| match k {
-                            FiredKey::Subtree(sub) => Some(*sub),
-                            FiredKey::PerFile { .. } => None,
-                        })
-                        .collect()
-                })
+                .map(|p| p.fired_subtree_subs().collect())
                 .unwrap_or_default();
             // `drifted` may be empty if the Profile has only PerFile
             // fires (Subtree filter excludes them) or if every Subtree Sub
@@ -1671,7 +1663,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return false;
         };
-        if p.fired_subs.is_empty() {
+        if p.fired_is_empty() {
             return false;
         }
         let Some(current) = p.current() else {
@@ -1763,7 +1755,7 @@ impl Engine {
                     _ => p.resource,
                 };
                 let prior_hash = crate::reconcile::current_target_hash(p, target, &self.tree);
-                (target, prior_hash, p.dirty_descendants == 0)
+                (target, prior_hash, p.dirty_descendants() == 0)
             }
             None => return,
         };
@@ -2117,7 +2109,7 @@ impl Engine {
         let resource = p.resource;
         let baseline_snap = p.baseline();
         let current_snap = p.current();
-        let pattern = p.config.pattern.clone();
+        let pattern = p.config().pattern.clone();
         // Read the cached anchor classification. `None` falls back to
         // `Dir` — the actuator's `compute_cwd` then anchors at the path
         // itself; if the actuator's later `chdir` discovers the path
@@ -2130,7 +2122,7 @@ impl Engine {
         // Substitution-side projection of `ScanConfig.exclude`. The
         // resolver iterates source strings; the sensor consults compiled
         // matchers. The projection is sorted at `Profile::new`.
-        let exclude_strings = Arc::clone(&p.exclude_strings);
+        let exclude_strings = Arc::clone(p.exclude_strings());
 
         let anchor_path: Arc<Path> = self.tree.path_of(resource).unwrap_or_else(empty_path);
 
@@ -2201,7 +2193,7 @@ impl Engine {
                                 && self
                                     .profiles
                                     .get(profile_id)
-                                    .is_some_and(|p| p.fired_subs.contains(&fk))
+                                    .is_some_and(|p| p.has_fired(fk))
                         }
                         EmitMode::SeedDrift { .. } => false,
                     };
@@ -2241,7 +2233,7 @@ impl Engine {
                     count = count.saturating_add(1);
 
                     if let Some(p) = self.profiles.get_mut(profile_id) {
-                        p.fired_subs.insert(fk);
+                        p.record_fire(fk);
                     }
                 }
                 EffectScope::PerStableFile => {
@@ -2389,7 +2381,7 @@ impl Engine {
             count = count.saturating_add(1);
 
             if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.fired_subs.insert(fk);
+                p.record_fire(fk);
             }
         }
         count
@@ -2468,7 +2460,7 @@ impl Engine {
                     out.descents.push(ProbeOwner::Profile(pid));
                 }
                 ProfileState::Idle
-                    if p.watch_root_parent == Some(resource) && !p.current_is_some() =>
+                    if p.watch_root_parent() == Some(resource) && !p.current_is_some() =>
                 {
                     out.recoveries.push(pid);
                 }
@@ -2666,13 +2658,6 @@ const fn kind_from_entry(k: specter_core::EntryKind) -> ResourceKind {
         specter_core::EntryKind::Dir => ResourceKind::Dir,
     }
 }
-
-// Keep the `ResourceKind` import used by the burst-side probe-kind decision
-// reachable through the engine module surface for tests; this is a no-op at
-// runtime but documents the intentional re-export discipline.
-const _: fn() = || {
-    let _ = ResourceKind::Unknown;
-};
 
 #[cfg(test)]
 #[path = "transitions_tests.rs"]
