@@ -594,10 +594,12 @@ impl Engine {
     /// settle).
     ///
     /// Reschedule path: `now − last_event_time < settle`. Schedules a
-    /// fresh `TimerKind::Settle` at `last_event_time + settle` and
-    /// updates `burst.phase` to point at the new id; the old (just-
-    /// expired) id is no longer referenced and would lazily drop on a
-    /// subsequent `pop_expired`. The phase stays Batching.
+    /// fresh `TimerKind::Settle` at `last_event_time + settle`; the
+    /// `PreFireBurst.phase` re-point routes through
+    /// [`Engine::reschedule_batching`] (the single-source mutator)
+    /// while the quiet-window decision and timer math stay here. The
+    /// old (just-expired) id is no longer referenced and lazily drops
+    /// on a subsequent `pop_expired`. The phase stays Batching.
     ///
     /// Transition path: `now − last_event_time ≥ settle` (or
     /// `last_event_time` is `None`, which only occurs as a defensive
@@ -642,15 +644,7 @@ impl Engine {
             let new_timer = self
                 .timers
                 .schedule(new_deadline, profile_id, TimerKind::Settle);
-            if let Some(pre) = self
-                .profiles
-                .get_mut(profile_id)
-                .and_then(specter_core::Profile::pre_fire_burst_mut)
-            {
-                pre.phase = PreFirePhase::Batching {
-                    settle_timer: new_timer,
-                };
-            }
+            self.reschedule_batching(profile_id, new_timer);
             return;
         }
 
@@ -1975,37 +1969,33 @@ impl Engine {
     /// transitions the phase (Batching/Draining → Verifying) or, if a
     /// probe is already in flight (Verifying), waits for the response.
     ///
-    /// Reads phase inline while flipping `forced`: the caller has
-    /// already validated the timer is live (via `is_timer_referenced`),
-    /// which restricts to pre-fire phases — `is_timer_referenced` for
-    /// `BurstDeadline` returns false in `Awaiting` / `Rebasing`, so a
-    /// stale fire never reaches here.
+    /// The `forced` write is delegated to [`Engine::force_pending`]
+    /// (the single-source `PreFireBurst.forced` mutator); the
+    /// phase-classification — whether to drive a verify now — stays
+    /// here as a routing query, not a mutation. The caller is reached
+    /// only through `is_timer_referenced`, which returns false for
+    /// `BurstDeadline` in `Awaiting` / `Rebasing`, so only pre-fire
+    /// phases arrive and the structurally-unreachable non-pre-fire
+    /// re-read folds to "no verify" — a silent no-op preserving the
+    /// prior inline `else { return; }`.
     fn handle_burst_deadline(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        // Post-fire phases are type-impossible here: PostFireBurst carries
-        // no `forced` field, and `is_timer_referenced` filters
-        // BurstDeadline to PreFire only. A PostFire match arm would be
-        // dead code; instead, falling through the pre-fire match keeps
-        // the helper's body PreFire-typed end-to-end.
-        //
-        // Both pre-fire arms write `pre.forced = true` identically; only
-        // the phase-decision differs (Batching/Draining → transition to
-        // Verifying on the next probe; Verifying → wait for the in-flight
-        // response, which will dispatch with `forced = true`). Lifting
-        // the write out makes "burst-deadline elapsed ⇒ forced fire on
-        // next emission" the helper's first statement.
-        let needs_verify = if let Some(pre) = self
+        // "burst-deadline elapsed ⇒ forced fire on next emission" is the
+        // first action; the phase then decides whether that emission is
+        // driven now (Batching/Draining — no probe in flight) or by the
+        // in-flight verify's response (Verifying), which dispatches with
+        // `forced` observed.
+        self.force_pending(profile_id);
+        let needs_verify = self
             .profiles
-            .get_mut(profile_id)
-            .and_then(specter_core::Profile::pre_fire_burst_mut)
-        {
-            pre.forced = true;
-            matches!(
-                &pre.phase,
-                PreFirePhase::Batching { .. } | PreFirePhase::Draining,
-            )
-        } else {
-            return;
-        };
+            .get(profile_id)
+            .and_then(|p| match p.state() {
+                ProfileState::Active(ActiveBurst::PreFire(pre), _) => Some(matches!(
+                    &pre.phase,
+                    PreFirePhase::Batching { .. } | PreFirePhase::Draining,
+                )),
+                _ => None,
+            })
+            .unwrap_or(false);
         if needs_verify {
             self.transition_to_verifying(profile_id, out);
         }

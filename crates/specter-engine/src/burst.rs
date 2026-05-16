@@ -19,6 +19,10 @@
 //!   Draining → Verifying reconfirm) /
 //!   `transition_to_draining` — pre-fire phase swaps (mutate
 //!   `PreFireBurst`).
+//! - `reschedule_batching` (settle-timer re-point, phase class
+//!   unchanged) / `force_pending` (`forced` flag on burst-deadline) —
+//!   timer-expiry single-field `PreFireBurst` mutators; the caller
+//!   keeps the timer math and the phase-routing decision.
 //! - `transition_to_awaiting` — `Active(PreFire(_))` → `Active(PostFire(_))`,
 //!   the sole site that crosses the fire boundary (via
 //!   `PreFireBurst::into_post_fire`).
@@ -59,8 +63,8 @@ use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, BurstFinish, BurstHelper, BurstIntent, Diagnostic, FsEvent, LcaIntegritySource,
     PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOwner, ProbeSlot, Profile,
-    ProfileId, ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerKind, Tree,
-    TreeSnapshot, subtree_at_dir,
+    ProfileId, ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind,
+    Tree, TreeSnapshot, subtree_at_dir,
 };
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -89,7 +93,11 @@ impl Engine {
     /// [`Self::require_idle`]** — these three cover every helper with a
     /// typed entry precondition. `finish_burst_to_idle` is intentionally
     /// idempotent (handles Idle / Pending as silent no-op) and bypasses
-    /// the gate.
+    /// the gate, as do the timer-expiry single-field mutators
+    /// [`Self::reschedule_batching`] / [`Self::force_pending`]: their
+    /// callers are reached only through `is_timer_referenced`, so the
+    /// non-pre-fire arm is structurally unreachable and a routing
+    /// diagnostic there would be spurious — they silently no-op instead.
     fn require_active_pre_fire(
         &self,
         profile_id: ProfileId,
@@ -550,6 +558,83 @@ impl Engine {
         {
             pre.phase = PreFirePhase::Batching { settle_timer };
             pre.last_event_time = Some(now);
+        }
+    }
+
+    /// `Batching → Batching` settle-timer re-point. The single-source
+    /// `PreFireBurst.phase` mutator for the settle-expiry reschedule:
+    /// when an `FsEvent` arrives after the live settle timer was
+    /// scheduled but before it fires, `on_settle_expired` schedules a
+    /// fresh `Settle` timer at `last_event_time + settle` and routes
+    /// the resulting `TimerId` here. The phase *class* is unchanged —
+    /// only the timer correlation moves.
+    ///
+    /// **Not `unstable_response_drives_batching` minus the pin.** That
+    /// helper re-enters Batching from `Verifying` and pins
+    /// `last_event_time = now` (the verify just responded). This path
+    /// is *already* `Batching` and must **not** touch
+    /// `last_event_time`: pinning it would push the very deadline the
+    /// caller's just-made quiet-window decision is rescheduling toward,
+    /// defeating the check that chose to reschedule.
+    ///
+    /// **Timer math stays with the caller.** `on_settle_expired` owns
+    /// the `now − last_event_time < settle` quiet-window decision and
+    /// the `TimerHeap::schedule` call; this helper owns only the phase
+    /// write, keeping it a pure single-field mutator symmetric with
+    /// [`Self::force_pending`].
+    ///
+    /// **Gate-free by design.** Like [`Self::finish_burst_to_idle`]
+    /// this helper carries no `require_active_pre_fire` precondition:
+    /// its sole caller has already validated
+    /// `Active(PreFire(Batching))` via `is_timer_referenced` plus its
+    /// own defensive phase check, so the non-pre-fire arm is
+    /// structurally unreachable and a routing diagnostic there would be
+    /// spurious. The `debug_assert!` is the loud dev/CI backstop that
+    /// the contract held.
+    pub(crate) fn reschedule_batching(&mut self, profile_id: ProfileId, settle_timer: TimerId) {
+        if let Some(pre) = self
+            .profiles
+            .get_mut(profile_id)
+            .and_then(Profile::pre_fire_burst_mut)
+        {
+            debug_assert!(
+                matches!(pre.phase, PreFirePhase::Batching { .. }),
+                "reschedule_batching off a non-Batching phase (profile = {profile_id:?})",
+            );
+            pre.phase = PreFirePhase::Batching { settle_timer };
+        }
+    }
+
+    /// Set `PreFireBurst.forced` on `BurstDeadline` expiry. The
+    /// single-source mutator for the force-fire flag: once the
+    /// max-settle deadline elapses, the next probe emission must bypass
+    /// the walker's coarse-mtime skip and deliver freshest data —
+    /// `forced` propagates that through `transition_to_verifying` /
+    /// `emit_probe_at`.
+    ///
+    /// **Field write only — the phase decision stays with the caller.**
+    /// `handle_burst_deadline` re-reads the phase after this call to
+    /// decide whether to drive a verify *now* (`Batching | Draining` —
+    /// no probe in flight, so emit) or wait (`Verifying` — a probe is
+    /// already in flight and will dispatch with `forced` observed).
+    /// That classification is a routing query, not a `PreFireBurst`
+    /// mutation, so it is not this helper's concern; keeping the helper
+    /// a pure single-field writer mirrors [`Self::reschedule_batching`].
+    ///
+    /// **Gate-free by design.** Same rationale as
+    /// [`Self::reschedule_batching`]: the caller is reached only
+    /// through `is_timer_referenced`, which returns false for
+    /// `BurstDeadline` in `Awaiting` / `Rebasing`, so only pre-fire
+    /// phases arrive. The non-pre-fire arm silently no-ops (preserving
+    /// the prior inline `else { return; }`) rather than emitting a
+    /// spurious routing diagnostic.
+    pub(crate) fn force_pending(&mut self, profile_id: ProfileId) {
+        if let Some(pre) = self
+            .profiles
+            .get_mut(profile_id)
+            .and_then(Profile::pre_fire_burst_mut)
+        {
+            pre.forced = true;
         }
     }
 
