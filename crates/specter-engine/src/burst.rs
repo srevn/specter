@@ -987,6 +987,13 @@ impl Engine {
     /// invalidation in `pop_expired` drops them when they fire.
     /// Idempotent: silent no-op on already-Idle Profiles.
     ///
+    /// **Cancel-first entry precondition.** No caller may reach here
+    /// with `Profile(profile_id)`'s `ProbeSlot` still armed — the
+    /// swap-to-Idle destructures the prior burst, and an armed
+    /// Verifying/Rebasing slot reaching that drop trips `ProbeSlot`'s
+    /// linearity tripwire. Debug-asserted at entry; the proof that all
+    /// callers satisfy it lives at the assert.
+    ///
     /// **Draining-exit driver.** `propagate(-1)` returns ancestors whose
     /// `dirty_descendants` just hit zero AND are in `PreFirePhase::Draining`.
     /// The Engine drives each through `transition_to_verifying` in the
@@ -1004,6 +1011,44 @@ impl Engine {
     /// reap in `detach_sub_inner`. Otherwise the Profile rests at
     /// [`ProfileState::Idle`].
     pub(crate) fn finish_burst_to_idle(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        // Cancel-first entry precondition (debug). The swap-to-Idle
+        // below destructures the prior burst; an armed
+        // Verifying/Rebasing slot reaching that drop trips ProbeSlot's
+        // linearity tripwire. All 15 production callers consume the
+        // slot first:
+        //  - 10 response-path dispatchers (dispatch_{seed,standard,
+        //    rebase}_{ok,vanished,failed}) run only after
+        //    on_profile_probe_response disarmed via take_owner_probe;
+        //    nothing between that disarm and the call re-arms.
+        //  - 2 Awaiting-phase callers (on_effect_complete reap,
+        //    handle_gate_deadline zombie) are guarded to
+        //    Active(PostFire(Awaiting)) — Awaiting holds no slot.
+        //  - 2 pure-teardown callers (finalize_anchor_lost,
+        //    on_anchor_terminal_all_dynamic) cancel_owner_probe first.
+        //  - 1 overflow caller (on_sensor_overflow Active arm) disarms
+        //    first: take_owner_probe on reseed, cancel_owner_probe on
+        //    reap.
+        // Named at this boundary, not left solely to the far-end
+        // ProbeSlot::drop tripwire — that fires frames downstream and
+        // is structurally bypassed by every test that pre-consumes the
+        // slot. The tripwire stays the release fail-stop; this makes
+        // the omission fail in unit tests on the dev (kqueue) platform
+        // too. Deliberately the strong form: pending_probe_for also
+        // covers a Pending Profile's descent slot, so this additionally
+        // forbids reaching here mid-descent armed — vacuous in v1 (no
+        // caller does) but free extra defense at the same boundary;
+        // narrowing to Active-only would add a phase branch for an
+        // unreachable case. Borrow-clean: the &self projection ends
+        // before the &mut get_mut, and a stale id yields None so the
+        // assert holds trivially ahead of the get_mut early-return.
+        debug_assert!(
+            self.pending_probe_for(ProbeOwner::Profile(profile_id))
+                .is_none(),
+            "finish_burst_to_idle: probe slot still armed — the caller \
+             must consume it first (cancel_owner_probe on a teardown or \
+             overflow-reap path; take_owner_probe on the response or \
+             overflow-reseed path); profile = {profile_id:?}",
+        );
         let Some(p) = self.profiles.get_mut(profile_id) else {
             return;
         };
@@ -1743,6 +1788,72 @@ mod tests {
             _ => panic!("expected Active(PreFire)"),
         };
         assert!(matches!(phase, PreFirePhase::Batching { .. }));
+    }
+
+    /// C2 backstop: `finish_burst_to_idle` debug-asserts the owner's
+    /// `ProbeSlot` is already disarmed at function entry. Reaching it
+    /// with a *genuinely armed* `Active(PreFire(Verifying))` (the slot
+    /// in flight, NOT pre-consumed — the F-CRIT-1 reproduction shape)
+    /// must trip the assert loudly rather than silently dropping the
+    /// armed slot. `#[should_panic]` on a `debug_assert!` only triggers
+    /// under debug assertions; nextest runs the debug profile by
+    /// default, so this is exercised.
+    #[test]
+    #[should_panic(expected = "finish_burst_to_idle: probe slot still armed")]
+    fn finish_burst_to_idle_armed_slot_trips_debug_assert() {
+        let (mut e, pid) = engine_with_profile();
+        let mut out = StepOutput::default();
+        e.start_standard_burst(
+            pid,
+            e.profiles.get(pid).unwrap().resource,
+            Instant::now(),
+            &mut out,
+        );
+        e.transition_to_verifying(pid, &mut out);
+        // Genuinely armed: NO `take_owner_probe` pre-consume. This is
+        // the whole point — the slot reaches finish_burst_to_idle armed.
+        assert!(
+            e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
+            "fixture: Verifying slot genuinely armed (NOT pre-consumed)",
+        );
+
+        // Trips the C2 debug_assert at function entry. The slot is
+        // never disarmed, so no `cancel_all_in_flight_probes` teardown
+        // is reachable (and unwinding through it would itself trip the
+        // ProbeSlot Drop tripwire) — `#[should_panic]` is the contract.
+        e.finish_burst_to_idle(pid, &mut out);
+    }
+
+    /// C2 positive: the legitimate caller path — a probe response that
+    /// already disarmed the slot via `take_owner_probe` — does NOT trip
+    /// the assert. `finish_burst_to_idle` returns normally and the
+    /// Profile lands in `Idle`. Pins the assert as a precondition
+    /// witness, not a blanket ban on the function.
+    #[test]
+    fn finish_burst_to_idle_after_disarm_returns_to_idle() {
+        let (mut e, pid) = engine_with_profile();
+        let mut out = StepOutput::default();
+        e.start_standard_burst(
+            pid,
+            e.profiles.get(pid).unwrap().resource,
+            Instant::now(),
+            &mut out,
+        );
+        e.transition_to_verifying(pid, &mut out);
+        // Mirror the real response path: the Verifying slot is disarmed
+        // via `take_owner_probe` before burst-end.
+        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
+        assert!(
+            e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
+            "slot consumed, mirroring on_probe_response",
+        );
+
+        e.finish_burst_to_idle(pid, &mut out);
+
+        assert!(
+            matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle,),
+            "legitimate disarmed caller path returns the Profile to Idle",
+        );
     }
 
     #[test]

@@ -7,6 +7,15 @@
 //! other than the emission sort is unrepresentable. The one residual:
 //! every `StepOutput`-returning entry point must call
 //! [`StepOutput::sort_for_emission`] before returning the value.
+//!
+//! Not every stream's order carries the same weight. `watch_ops` and
+//! `effects` ordering is replay determinism — a reordering changes the
+//! log, not the outcome. `probe_ops` ordering is *operational
+//! correctness*: the sensor drains it into a shared per-owner
+//! expectation map whose `submit` / `cancel` do not commute, so the
+//! sort being *exact* for that stream — guaranteed by the
+//! at-most-one-`ProbeOp`-per-owner invariant asserted in
+//! [`StepOutput::sort_for_emission`] — is load-bearing, not cosmetic.
 
 use crate::diag::Diagnostic;
 use crate::effect::Effect;
@@ -96,12 +105,59 @@ impl StepOutput {
     /// `diagnostics` follow insertion order — they are not part of the
     /// user-visible sort guarantee.
     ///
+    /// `watch_ops` / `effects` order is **replay determinism** only —
+    /// reorder them and the same work still happens, just logged in a
+    /// different sequence. `probe_ops` order is **operational
+    /// correctness**: the sensor applies `submit` / `cancel` against a
+    /// shared per-owner expectation map whose insert and remove do not
+    /// commute, so a mis-ordered same-owner pair can drop a live probe.
+    /// The injective-key property that makes the sort exact (not merely
+    /// stable) for that stream is the debug-asserted invariant below.
+    ///
     /// Pure: every key is derived from the op/effect's own fields, so
     /// this method needs no engine state.
     pub fn sort_for_emission(&mut self) {
         self.watch_ops.sort_by_key(WatchOp::resource);
         self.probe_ops.sort_by_key(ProbeOp::owner);
         self.effects.reseal();
+        #[cfg(debug_assertions)]
+        self.debug_assert_one_probe_op_per_owner();
+    }
+
+    /// Debug-only structural witness for the probe-protocol invariant:
+    /// **at most one [`ProbeOp`] per owner per `StepOutput`**. This is
+    /// what makes [`ProbeOp::owner`] an *injective* key over a step's
+    /// `probe_ops`: with it, `sort_by_key` vs `sort_unstable_by_key` is
+    /// immaterial, and the engine→sensor `submit` / `cancel` drain —
+    /// which is *not* commutative over the sensor's shared per-owner
+    /// expectation map — cannot reorder a redundant `Cancel` ahead of a
+    /// `Probe` and lose it.
+    ///
+    /// Holds by construction: a `Probe` is preceded by arming the
+    /// owner's `ProbeSlot` (construct-time `ProbeSlot::armed`, or
+    /// `ProbeSlot::arm`'s unconditional arm-once assert); a `Cancel` is
+    /// emitted only by `cancel_owner_probe`, which disarms iff the slot
+    /// was armed, so it fires at most once per owner per step; and no
+    /// step emits both for one owner — the lone structural candidate,
+    /// the overflow-reseed Active arm, is reseed-XOR-reap (disarm-only
+    /// on reseed; `Cancel`-only on reap). The runtime dual of
+    /// `finish_burst_to_idle`'s cancel-first entry precondition. Zero
+    /// release cost.
+    #[cfg(debug_assertions)]
+    fn debug_assert_one_probe_op_per_owner(&self) {
+        // Post-sort ⇒ equal owners are adjacent ⇒ an O(n) adjacent-pair
+        // scan is exhaustive, with no allocation.
+        for w in self.probe_ops.windows(2) {
+            debug_assert_ne!(
+                w[0].owner(),
+                w[1].owner(),
+                ">1 ProbeOp for one owner in a StepOutput — a redundant \
+                 Cancel beside a Probe, or a double emit. The sensor's \
+                 per-owner expectation-map drain is order-sensitive; one \
+                 ProbeOp per owner per step is the contract (ProbeSlot \
+                 linearity + cancel_owner_probe).",
+            );
+        }
     }
 }
 
@@ -203,6 +259,62 @@ mod tests {
 
     #[test]
     fn sort_for_emission_orders_probe_ops_by_owner() {
+        use crate::op::ProbeOwner;
+        let p1 = pidn(1);
+        let p2 = pidn(2);
+        let mut out = StepOutput::default();
+        out.probe_ops.push(ProbeOp::Cancel {
+            owner: ProbeOwner::Profile(p2),
+        });
+        out.probe_ops.push(ProbeOp::Probe {
+            request: ProbeRequest::AnchorFile {
+                owner: ProbeOwner::Profile(p1),
+                correlation: ProbeCorrelation::from(7),
+                target_path: Arc::from(std::path::Path::new("/y")),
+            },
+        });
+
+        out.sort_for_emission();
+
+        let owners: Vec<ProbeOwner> = out.probe_ops.iter().map(ProbeOp::owner).collect();
+        assert_eq!(
+            owners,
+            vec![ProbeOwner::Profile(p1), ProbeOwner::Profile(p2)]
+        );
+    }
+
+    /// A `Probe` and a `Cancel` for the *same* owner in one step trips
+    /// the debug-only at-most-one-`ProbeOp`-per-owner witness — the
+    /// sensor's per-owner expectation-map drain is order-sensitive, so
+    /// this pair is the contract violation it guards. `should_panic`
+    /// over a `debug_assert` is sound here: nextest's default debug
+    /// profile keeps `debug_assertions` on.
+    #[test]
+    #[should_panic(expected = ">1 ProbeOp for one owner in a StepOutput")]
+    fn sort_for_emission_panics_on_two_probe_ops_for_one_owner() {
+        use crate::op::ProbeOwner;
+        let p = pidn(1);
+        let mut out = StepOutput::default();
+        out.probe_ops.push(ProbeOp::Probe {
+            request: ProbeRequest::AnchorFile {
+                owner: ProbeOwner::Profile(p),
+                correlation: ProbeCorrelation::from(7),
+                target_path: Arc::from(std::path::Path::new("/y")),
+            },
+        });
+        out.probe_ops.push(ProbeOp::Cancel {
+            owner: ProbeOwner::Profile(p),
+        });
+
+        out.sort_for_emission();
+    }
+
+    /// The per-owner witness is owner-keyed, not count-keyed: a `Probe`
+    /// and a `Cancel` for *distinct* owners are the ordinary two-probe
+    /// step and must sort normally (Profile order) without tripping the
+    /// assertion. Guards against the witness being over-eager.
+    #[test]
+    fn sort_for_emission_allows_two_probe_ops_for_distinct_owners() {
         use crate::op::ProbeOwner;
         let p1 = pidn(1);
         let p2 = pidn(2);

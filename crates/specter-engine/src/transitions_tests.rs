@@ -2365,6 +2365,208 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// β★ regression (F-CRIT-1): overflow on a *genuinely armed*
+/// `Active(PreFire(Verifying))` — the verify slot is in flight and was
+/// NOT pre-consumed — must NOT panic. Pre-β★ the `Active(_, finish)`
+/// arm unconditionally dropped the armed slot through
+/// `finish_burst_to_idle` and tripped `ProbeSlot`'s Drop tripwire.
+/// `engine_with_attached_sub` lands the Profile in `Active(Seed,
+/// Verifying)` with the slot armed and never disarmed — exactly the
+/// reproduction state. Reseed (no Reap): disarm-only (no wire
+/// `Cancel`), then `start_seed_burst` emits a fresh `Probe` that
+/// supersedes the old correlation. Owner-scoped: exactly one `Probe`,
+/// zero `Cancel`.
+#[test]
+fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
+    // Fixture leaves the Profile in genuinely-armed Active(Seed,
+    // Verifying): the Seed verify probe is in flight on the slot,
+    // never pre-consumed. (Asserting it here is the whole point —
+    // a pre-consumed slot would not reproduce F-CRIT-1.)
+    let burst = match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
+        s => panic!("fixture: expected Active(PreFire(Verifying)); got {s:?}"),
+    };
+    assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
+    assert!(
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
+        "fixture: Verifying slot genuinely armed (NOT pre-consumed)",
+    );
+
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        Instant::now(),
+    );
+
+    // (b) Owner-scoped probe ops: exactly one Probe, zero Cancel. The
+    // reseed disarms the engine slot only — the fresh submit
+    // supersedes the old correlation, so a wire Cancel would be
+    // strictly redundant and is deliberately omitted.
+    let owner = ProbeOwner::Profile(pid);
+    let probes = out
+        .probe_ops
+        .iter()
+        .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Probe { .. }))
+        .count();
+    let cancels = out
+        .probe_ops
+        .iter()
+        .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Cancel { .. }))
+        .count();
+    assert_eq!(
+        probes, 1,
+        "reseed emits exactly one fresh Probe for the owner"
+    );
+    assert_eq!(
+        cancels, 0,
+        "reseed emits NO Cancel (fresh submit supersedes)"
+    );
+
+    // (c) Profile back in Active(PreFire(Verifying)) with Seed intent.
+    let burst = match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
+        s => panic!("expected Active(Seed) after overflow; got {s:?}"),
+    };
+    assert_eq!(burst.intent, BurstIntent::Seed);
+    assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
+
+    // The reseed left a fresh armed slot; without this the engine
+    // Drop trips the ProbeSlot linearity tripwire.
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// β★ regression: same as above but on a *genuinely armed*
+/// `Active(PostFire(Rebasing))`. The Rebasing slot is the post-effect
+/// rebase probe minted by `transition_to_rebasing` — armed, never
+/// pre-consumed. Overflow must reseed without panicking, disarming the
+/// slot only. Owner-scoped: exactly one `Probe`, zero `Cancel`.
+#[test]
+fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
+    let (mut e, pid, sid, root, _now0) = engine_with_attached_sub();
+    let now = Instant::now();
+    let stable_out = drive_to_first_effect(&mut e, pid, root, now);
+    let key = stable_out.effects()[0].key();
+    // EffectComplete::Ok → transition_to_rebasing mints a fresh probe
+    // and writes Rebasing already armed. No pre-consume follows.
+    let _ = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key,
+            result: EffectOutcome::Ok,
+        },
+        now + SETTLE * 3,
+    );
+    let burst = match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
+        s => panic!("fixture: expected Active(PostFire(Rebasing)); got {s:?}"),
+    };
+    assert!(matches!(burst.phase, PostFirePhase::Rebasing(_)));
+    assert!(
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
+        "fixture: Rebasing slot genuinely armed (NOT pre-consumed)",
+    );
+
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        now + SETTLE * 4,
+    );
+
+    let owner = ProbeOwner::Profile(pid);
+    let probes = out
+        .probe_ops
+        .iter()
+        .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Probe { .. }))
+        .count();
+    let cancels = out
+        .probe_ops
+        .iter()
+        .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Cancel { .. }))
+        .count();
+    assert_eq!(
+        probes, 1,
+        "reseed emits exactly one fresh Probe for the owner"
+    );
+    assert_eq!(
+        cancels, 0,
+        "reseed emits NO Cancel (fresh submit supersedes)"
+    );
+
+    // Reseed re-enters Active(PreFire(Verifying)) with Seed intent —
+    // the prior PostFire(Rebasing) burst was abandoned.
+    let burst = match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
+        s => panic!("expected Active(Seed) after overflow; got {s:?}"),
+    };
+    assert_eq!(burst.intent, BurstIntent::Seed);
+    assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
+
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// β★ reap arm: overflow on a *genuinely armed*
+/// `Active(PreFire(Verifying))` whose `BurstFinish` is `Reap` (the
+/// last Sub was detached mid-burst). Here `will_reap == true`, so the
+/// arm emits the wire `Cancel` via `cancel_owner_probe` (no
+/// superseding submit follows — `start_seed_burst` no-ops on the
+/// detached Profile), then `finish_burst_to_idle` reaps the Profile.
+/// Owner-scoped: exactly one `Cancel`, zero `Probe`; Profile gone.
+#[test]
+fn sensor_overflow_armed_verifying_reap_emits_cancel_only() {
+    let (mut e, pid, sid, _root, _now) = engine_with_attached_sub();
+    // Fixture: genuinely-armed Active(Seed, Verifying).
+    assert!(
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
+        "fixture: Verifying slot genuinely armed (NOT pre-consumed)",
+    );
+    // Detach the sole Sub mid-burst → BurstFinish flips to Reap.
+    let _ = e.step(Input::DetachSub(sid), Instant::now());
+    assert!(
+        matches!(
+            e.profiles.get(pid).unwrap().state().burst_finish(),
+            Some(BurstFinish::Reap)
+        ),
+        "fixture: burst marked Reap by detaching the last Sub",
+    );
+
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        Instant::now(),
+    );
+
+    // (b) Owner-scoped: exactly one Cancel, zero Probe. start_seed_burst
+    // no-ops on the now-detached Profile, so no fresh submit follows —
+    // the wire Cancel spares the worker a doomed walk.
+    let owner = ProbeOwner::Profile(pid);
+    let probes = out
+        .probe_ops
+        .iter()
+        .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Probe { .. }))
+        .count();
+    let cancels = out
+        .probe_ops
+        .iter()
+        .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Cancel { .. }))
+        .count();
+    assert_eq!(
+        cancels, 1,
+        "reap arm emits exactly one Cancel for the owner"
+    );
+    assert_eq!(probes, 0, "reap arm emits NO Probe (Profile detached)");
+
+    // (c) Profile reaped.
+    assert!(
+        e.profiles.get(pid).is_none(),
+        "reap arm tears the Profile down on overflow",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 #[test]
 fn sensor_overflow_pending_profile_is_skipped() {
     // Pending(_) Profile: descent in flight; no baseline to drift-test.

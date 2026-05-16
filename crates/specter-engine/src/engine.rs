@@ -922,9 +922,12 @@ impl Engine {
     ///
     /// 1. **Probe disarm.** [`Engine::cancel_owner_probe`] emits a
     ///    `ProbeOp::Cancel` and disarms the owner's slot for any
-    ///    in-flight probe (Pending Profile's descent probe; Active never
-    ///    reaches this entry — the response-dispatch path disarms the
-    ///    slot before `finish_burst_to_idle` runs `reap_profile`). Must
+    ///    in-flight probe (a Pending Profile's descent probe; an Active
+    ///    burst never reaches this entry with an armed slot — every
+    ///    path that drives a deferred reap from Active disarms first:
+    ///    response dispatch via `take_owner_probe`, or the
+    ///    overflow-reseed reap branch via `cancel_owner_probe`, both
+    ///    *before* `finish_burst_to_idle`). Must
     ///    precede (2) because [`Engine::release_descent_prefix_claim`]'s
     ///    `transition_state(Idle)` *drops* the prior
     ///    `Pending(DescentState)`: an armed descent slot reaching that
@@ -1031,11 +1034,12 @@ impl Engine {
         // Consume any in-flight probe BEFORE the descent-prefix helper
         // transitions the Profile to Idle. Idempotent: emits Cancel
         // iff a probe was in flight (Pending with a descent probe in
-        // flight for this call path; Active+Verifying never reaches
-        // `reap_profile`'s entry — `finish_burst_to_idle` runs
-        // `reap_profile` only after the burst response consumed the
-        // probe). Mirrors `on_watch_op_rejected`'s descent-purge
-        // pattern. A missed disarm is not silently tolerated: the armed
+        // flight for this call path; an Active burst never reaches
+        // `reap_profile`'s entry armed — `finish_burst_to_idle` runs
+        // `reap_profile` only after the slot was consumed, either by
+        // the burst response or by the overflow-reseed reap branch).
+        // Mirrors `on_watch_op_rejected`'s descent-purge pattern. A
+        // missed disarm is not silently tolerated: the armed
         // slot would reach `release_descent_prefix_claim`'s state
         // discard (or `profiles.detach`) and trip `ProbeSlot`'s Drop
         // tripwire in every build — the discard *is* the enforcement.

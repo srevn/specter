@@ -25,8 +25,12 @@ use std::sync::Arc;
 ///
 /// **Determinism.** Derived `Ord` produces variant-declaration-order
 /// (Profile < Promoter), then per-payload [`ProfileId`] /
-/// [`PromoterId`] order. Profile-only [`crate::StepOutput::probe_ops`]
-/// sequences keep the prior byte-stable sort.
+/// [`PromoterId`] order. A [`crate::StepOutput`] carries at most one
+/// [`ProbeOp`] per owner per step (asserted in
+/// [`crate::StepOutput::sort_for_emission`]), so this `Ord` is an
+/// *injective* key over a step's [`crate::StepOutput::probe_ops`] — the
+/// sort is exact, not merely stable, which the order-sensitive
+/// engine→sensor `submit` / `cancel` drain depends on.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ProbeOwner {
     /// Profile-driven probe. The engine homes this owner's in-flight

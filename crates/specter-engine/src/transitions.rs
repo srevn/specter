@@ -1107,19 +1107,61 @@ impl Engine {
                 ProfileState::Idle => {
                     self.start_seed_burst(pid, now, out);
                 }
-                ProfileState::Active(_, _) => {
-                    // Abandon the in-flight burst, then reseed. The two
-                    // helpers compose: `finish_burst_to_idle` returns
-                    // the Profile to Idle (decrementing suppress_count
-                    // by one), and `start_seed_burst` adds it back —
-                    // the anchor remains suppressed across the
-                    // transition. The intervening Idle state is invisible
-                    // to external observers (no `StepOutput` ordering
-                    // dependency on it). If `finish_burst_to_idle`
-                    // reaped the Profile (`reap_pending`), the
-                    // `Engine::profiles.get(pid)` inside
-                    // `start_seed_burst` returns None and the call
-                    // no-ops — correct degenerate behaviour.
+                ProfileState::Active(_, finish) => {
+                    // Overflow on an Active burst is reseed-XOR-reap,
+                    // not a pure teardown. The in-flight probe's wire
+                    // `Cancel` is a syscall-skip optimization only —
+                    // `on_profile_probe_response`'s staleness gate is
+                    // the sole correctness authority for a late
+                    // response; the `Cancel` merely spares a
+                    // not-yet-dequeued worker a wasted recursive walk.
+                    // Whether it is needed turns on whether a
+                    // superseding `submit` follows in THIS step:
+                    //
+                    //  reseed (will_reap == false): finish_burst_to_idle
+                    //    returns the Profile to Idle (the anchor stays
+                    //    suppressed — start_seed_burst re-adds the
+                    //    bracket), then start_seed_burst emits a fresh
+                    //    Probe{P,C2}. The sensor's per-owner expectation
+                    //    map is a last-writer-wins upsert keyed by
+                    //    owner, so submit(P,C2) alone supersedes C1: a
+                    //    not-yet-dequeued C1 worker self-skips on
+                    //    expected[P] != C1. A wire Cancel{P} here would
+                    //    be strictly redundant AND the only same-owner
+                    //    Cancel+Probe pair the engine can emit — so
+                    //    disarm the engine slot only (take_owner_probe,
+                    //    no wire op), exactly as the response path does.
+                    //
+                    //  reap (will_reap == true): finish_burst_to_idle
+                    //    reaps the Profile and start_seed_burst then
+                    //    no-ops (require_idle finds it detached). No
+                    //    superseding submit follows, so the worker would
+                    //    run a full doomed walk — emit the wire Cancel
+                    //    via cancel_owner_probe, the same syscall-skip
+                    //    the pure-teardown sites rely on.
+                    //
+                    // The disarm MUST precede finish_burst_to_idle: that
+                    // helper swaps the Profile to Idle and destructures
+                    // the prior burst, so an armed Verifying/Rebasing
+                    // slot would reach drop *there* and trip ProbeSlot's
+                    // tripwire — before finish_burst_to_idle's own
+                    // deferred reap_profile, whose cancel_owner_probe
+                    // would by then see an already-Idle Profile (too
+                    // late). This pre-finish disarm is the only consume
+                    // that reaches the slot in time; it is not redundant
+                    // with reap_profile's own.
+                    //
+                    // `will_reap` is read off the matched `finish`
+                    // (BurstFinish is Copy) before any &mut self call,
+                    // so NLL ends the &Profile borrow here — the shape
+                    // handle_gate_deadline already compiles.
+                    let will_reap = matches!(finish, BurstFinish::Reap);
+                    let owner = ProbeOwner::Profile(pid);
+                    if will_reap {
+                        self.cancel_owner_probe(owner, out);
+                    } else {
+                        let _ = self.take_owner_probe(owner);
+                    }
                     self.finish_burst_to_idle(pid, out);
                     self.start_seed_burst(pid, now, out);
                 }

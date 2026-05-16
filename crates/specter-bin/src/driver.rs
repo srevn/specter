@@ -751,8 +751,14 @@ impl EngineDriver {
     /// `kevent` forever. Wakes coalesce kernel-side via `EVFILT_USER`'s
     /// `EV_CLEAR`, so the per-send cost is one `kevent` syscall (~1µs)
     /// regardless of whether the watcher is awake. `probe_ops` dispatch
-    /// directly to the prober. `effects` queue to `effects_tx`.
-    /// `diagnostics` log per variant via [`log_diagnostic`].
+    /// directly to the prober, *in order*: the prober folds `submit` /
+    /// `cancel` into a shared per-owner expectation map whose
+    /// operations do not commute, so this drain relies on `probe_ops`
+    /// carrying at most one op per owner per step (the invariant
+    /// asserted in `StepOutput::sort_for_emission`) — a mis-ordered
+    /// same-owner pair would drop a live probe here. `effects` queue to
+    /// `effects_tx`. `diagnostics` log per variant via
+    /// [`log_diagnostic`].
     ///
     /// `Send` errors on disconnected channels are warn-logged and
     /// dropped — the only path here is a downstream-thread crash mid-
