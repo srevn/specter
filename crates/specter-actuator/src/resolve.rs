@@ -123,12 +123,22 @@ use crate::env::EnvSnapshot;
 use crate::spawner::EnvVar;
 use compact_str::CompactString;
 use specter_core::{
-    ArgPart, ArgTemplate, CommandResolved, Diff, Effect, EffectTarget, ExecAction, Placeholder,
-    ResourceKind,
+    ArgPart, ArgTemplate, Diff, Effect, EffectTarget, ExecAction, Placeholder, ResourceKind,
 };
 use std::borrow::Cow;
 use std::path::Path;
 use std::time::SystemTime;
+
+/// The argv [`resolve_step`] renders from an [`Effect`] plus one
+/// [`ExecAction`] — handed straight to the spawner.
+///
+/// Only `Debug` is derived (the strict-env-failure test asserts via
+/// `Result::expect_err`, which bounds the `Ok` type `Debug`); nothing
+/// clones, compares, or defaults it.
+#[derive(Debug)]
+pub(crate) struct CommandResolved {
+    pub argv: Vec<String>,
+}
 
 /// Resolver-side failure. Surfaces only causes the resolver can detect
 /// without spawning a process; OS-level spawn failures take the

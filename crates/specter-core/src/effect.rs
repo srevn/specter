@@ -15,14 +15,6 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Resolved command (substitution output). Constructed by the actuator's
-/// resolver immediately before spawn, from the substitution-domain
-/// projection carried on [`Effect`].
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CommandResolved {
-    pub argv: Vec<String>,
-}
-
 /// Effect — a command-to-be plus the bookkeeping needed to spawn and
 /// coalesce it.
 ///
@@ -282,7 +274,10 @@ impl Default for DedupKey {
 /// `Failed`. The [`Termination`] payload is diagnostic (logging) and
 /// drives the actuator's internal pipe re-aggregation; it is not a
 /// routing input.
-#[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
+///
+/// `Hash` is intentionally not derived — no `HashMap`/`HashSet` keys on
+/// this type and `core` bans `hashbrown` outright.
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub enum EffectOutcome {
     #[default]
     Ok,
@@ -292,7 +287,10 @@ pub enum EffectOutcome {
 /// Why a plan terminated unsuccessfully. The four variants are exactly
 /// the four reachable `(exit_code, signal)` shapes — a total, named
 /// encoding, not a state-space change.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+///
+/// `Hash` is intentionally not derived — no `HashMap`/`HashSet` keys on
+/// this type and `core` bans `hashbrown` outright.
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Termination {
     /// Resolver/spawn failure, waiter panic, or a synthesised plan
     /// outcome — no exit code and no signal.

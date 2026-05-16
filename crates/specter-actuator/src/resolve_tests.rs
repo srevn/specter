@@ -7,6 +7,7 @@
     clippy::too_many_lines
 )]
 
+use super::CommandResolved;
 use crate::env::EnvSnapshot;
 use crate::spawner::EnvVar;
 use compact_str::CompactString;
@@ -14,9 +15,9 @@ use smallvec::smallvec;
 use specter_core::program::SpawnBody;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ArgPart, ArgTemplate, CommandResolved, CorrelationId, Diff, Effect, EffectCommon, EffectScope,
-    EntryKind, EntryRef, ExecAction, FsIdentity, Placeholder, ProfileId, Rename, ResourceId,
-    ResourceKind, SubId,
+    ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon, EffectScope, EntryKind,
+    EntryRef, ExecAction, FsIdentity, Placeholder, ProfileId, Rename, ResourceId, ResourceKind,
+    SubId,
 };
 use std::path::Path;
 use std::sync::Arc;

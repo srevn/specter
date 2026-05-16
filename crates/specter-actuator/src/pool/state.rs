@@ -43,14 +43,12 @@
 
 use crate::env::EnvSnapshot;
 use crate::permits::{Permit, Permits};
-use crate::resolve;
+use crate::resolve::{self, CommandResolved};
 use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, Spawner, StageSpec};
 use crate::timer;
 use crossbeam::channel::Sender;
 use specter_core::program::{BranchTarget, ExecAction, SpawnBody};
-use specter_core::{
-    CommandResolved, CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId, Termination,
-};
+use specter_core::{CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId, Termination};
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
