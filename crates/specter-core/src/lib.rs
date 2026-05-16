@@ -25,7 +25,6 @@ mod resource;
 mod scan_config;
 mod snapshot;
 mod sub;
-mod time;
 mod tree;
 
 pub use diag::{
@@ -65,7 +64,6 @@ pub use sub::{
     ClassSet, EffectScope, Sub, SubAttachAnchor, SubAttachRequest, SubParams, SubRegistry,
     SubRegistryDiff,
 };
-pub use time::{Clock, SystemClock};
 pub use tree::{AttachPathError, FS_ROOT_SEGMENT, StaleIdError, Tree, TreePath};
 
 #[cfg(feature = "testkit")]
