@@ -153,20 +153,20 @@ impl Engine {
 
         // 2. Clear back-ref before the release+reap helper so the
         // helper's `try_reap` sees `has_anchors() == false` for
-        // promoter-only slots. `retain` leaves co-resident Promoters'
-        // entries undisturbed; reordering to here from after
-        // `sub_watch` is safe because `sub_watch` only reads /writes
-        // `contributions`.
+        // promoter-only slots. `remove_proxy_promoter` leaves
+        // co-resident Promoters' entries undisturbed (filter, not
+        // clear); reordering to here from after `sub_watch` is safe
+        // because `sub_watch` only reads / writes `contributions`.
         if let Some(res) = self.tree.get_mut(resource) {
-            res.proxy_promoters.retain(|id| *id != qid);
+            res.remove_proxy_promoter(qid);
         }
 
         // 3. Release the [`ContribKey::PromoterProxy`] contribution
         // and try-reap. With the back-ref cleared (above) and the
-        // `User` role (set by `enter_active`'s `set_role` demotion),
-        // `has_anchors` returns false for promoter-only slots — they
-        // reap. Slots shared with a Profile descent / anchor or
-        // another Promoter's proxy stay.
+        // proxy contribution released here, `has_anchors` returns
+        // false for promoter-only slots — they reap (role is metadata
+        // and never gates retention). Slots shared with a Profile
+        // descent / anchor or another Promoter's proxy stay.
         sub_watch_then_try_reap(
             &mut self.tree,
             resource,

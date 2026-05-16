@@ -520,17 +520,18 @@ fn proxy_event_enqueues_and_dispatches() {
 
 #[test]
 fn proxy_event_for_unregistered_promoter_emits_stale_diagnostic() {
-    // Manually populate `proxy_promoters` on a slot for a Promoter id
-    // that never registered at that slot — the on_promoter_proxy_event
-    // safety check must catch this and emit PromoterProxyStaleEvent
-    // rather than enqueue garbage.
+    // Register a phantom back-ref via the typed `insert_proxy_promoter`
+    // mutator for a Promoter id that never registered at that slot
+    // through the engine — the on_promoter_proxy_event safety check
+    // must catch this and emit PromoterProxyStaleEvent rather than
+    // enqueue garbage.
     use specter_core::PromoterId;
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("phantom", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
-    // Synthesise a Promoter id that's NOT in the registry; push it
-    // onto the back-ref.
+    // Synthesise a Promoter id that's NOT in the registry; register it
+    // onto the back-ref via the typed mutator.
     let phantom = PromoterId::default();
 
     // Bump watch_demand so the on_fs_event head guard doesn't drop the
@@ -546,8 +547,7 @@ fn proxy_event_for_unregistered_promoter_emits_stale_diagnostic() {
     e.tree_mut()
         .get_mut(r)
         .unwrap()
-        .proxy_promoters
-        .push(phantom);
+        .insert_proxy_promoter(phantom);
 
     let out = e.step(
         Input::FsEvent {
@@ -913,6 +913,68 @@ fn register_proxy_is_idempotent_on_re_registration() {
         e.tree().get(var_log).unwrap().proxy_promoters(),
         &[pid],
         "back-ref unchanged (single entry) on re-registration",
+    );
+}
+
+#[test]
+fn register_then_release_proxy_clears_both_halves_of_the_join() {
+    // The proxy join is two-sided: `Resource.proxy_promoters` holds
+    // the back-ref to the Promoter, and `Promoter.state.proxies`
+    // holds the forward entry to the Resource. Releasing a registered
+    // proxy must tear down BOTH halves — neither a dangling back-ref
+    // on the slot nor a stale forward entry on the Promoter may
+    // survive the round-trip.
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+
+    let out = e.step(
+        Input::AttachPromoter(req_for("logs", "/var/log/*.log")),
+        Instant::now(),
+    );
+    let pid =
+        specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
+
+    // `attach` materialised an immediate proxy at the existing prefix:
+    // both halves of the join are present.
+    assert!(
+        active_proxies(&e, pid).contains_key(&var_log),
+        "forward entry present in Promoter.proxies pre-release",
+    );
+    assert!(
+        e.tree()
+            .get(var_log)
+            .unwrap()
+            .proxy_promoters()
+            .contains(&pid),
+        "back-ref present on the slot pre-release",
+    );
+
+    // `attach` left an enumeration probe in flight at the proxy.
+    // `unregister_proxy`'s cancel-first contract requires the
+    // owner probe be disarmed before release — the same ordering
+    // every production release path observes.
+    let mut out = specter_core::StepOutput::default();
+    e.cancel_owner_probe(ProbeOwner::Promoter(pid), &mut out);
+
+    // Release the proxy via the documented inverse of `register_proxy`.
+    let mut out = specter_core::StepOutput::default();
+    e.unregister_proxy(pid, var_log, &mut out);
+
+    // Forward half: the Promoter's `proxies` map no longer carries the
+    // resource.
+    assert!(
+        !active_proxies(&e, pid).contains_key(&var_log),
+        "forward entry cleared from Promoter.proxies after release",
+    );
+    // Back-ref half: the slot's `proxy_promoters` no longer points at
+    // the Promoter. The User-roled, promoter-only slot reaps once the
+    // back-ref drops, so the slot may be absent entirely — either way
+    // no dangling back-ref survives.
+    assert!(
+        e.tree()
+            .get(var_log)
+            .is_none_or(|r| !r.proxy_promoters().contains(&pid)),
+        "back-ref cleared from the slot after release (or slot reaped)",
     );
 }
 

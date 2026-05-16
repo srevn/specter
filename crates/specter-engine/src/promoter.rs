@@ -388,13 +388,11 @@ impl Engine {
         }
 
         // Back-ref: keep `Resource.proxy_promoters` in lockstep with
-        // `Promoter.proxies`. The contains check handles cross-Promoter
-        // sharing on the same slot — typical case is no overlap, so
-        // the SmallVec inline cap of 1 absorbs.
-        if let Some(r) = self.tree.get_mut(resource)
-            && !r.proxy_promoters.contains(&promoter_id)
-        {
-            r.proxy_promoters.push(promoter_id);
+        // `Promoter.proxies`. `insert_proxy_promoter` absorbs the
+        // cross-Promoter / re-registration dedup internally; the
+        // SmallVec inline cap of 1 covers the typical no-overlap case.
+        if let Some(r) = self.tree.get_mut(resource) {
+            r.insert_proxy_promoter(promoter_id);
         }
 
         if !already_carries {
@@ -481,7 +479,7 @@ impl Engine {
             let has_back_ref = self
                 .tree
                 .get(node)
-                .is_some_and(|res| res.proxy_promoters.contains(&promoter_id));
+                .is_some_and(|res| res.proxy_promoters().contains(&promoter_id));
             if has_back_ref {
                 to_unregister.push(node);
             }
@@ -908,7 +906,7 @@ impl Engine {
                 let has_back_ref = self
                     .tree
                     .get(child)
-                    .is_some_and(|res| res.proxy_promoters.contains(&promoter_id));
+                    .is_some_and(|res| res.proxy_promoters().contains(&promoter_id));
                 if !has_back_ref {
                     return false;
                 }

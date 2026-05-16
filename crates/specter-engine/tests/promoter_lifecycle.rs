@@ -668,7 +668,7 @@ fn two_promoters_sharing_proxy_unwind_independently() {
     // proxy_promoters carries both ids.
     assert_eq!(e.tree().get(shared).unwrap().watch_demand(), 2);
     {
-        let bv = &e.tree().get(shared).unwrap().proxy_promoters;
+        let bv = e.tree().get(shared).unwrap().proxy_promoters();
         assert!(bv.contains(&q1));
         assert!(bv.contains(&q2));
     }
@@ -715,7 +715,7 @@ fn two_promoters_sharing_proxy_unwind_independently() {
         "no Unwatch — Q2 still anchors /shared's kernel watch",
     );
     {
-        let bv = &e.tree().get(shared).unwrap().proxy_promoters;
+        let bv = e.tree().get(shared).unwrap().proxy_promoters();
         assert!(!bv.contains(&q1), "Q1 back-ref cleared");
         assert!(bv.contains(&q2), "Q2 back-ref intact");
     }

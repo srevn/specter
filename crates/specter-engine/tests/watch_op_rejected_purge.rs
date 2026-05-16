@@ -634,7 +634,7 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
     let still_back_refed = e
         .tree()
         .get(a)
-        .is_some_and(|r| r.proxy_promoters.contains(&qid));
+        .is_some_and(|r| r.proxy_promoters().contains(&qid));
     assert!(!still_back_refed, "back-ref cleared");
 
     // PromoterClaimPurged{ActiveProxy} surfaces.

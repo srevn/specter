@@ -89,7 +89,7 @@ impl Engine {
         let proxies: SmallVec<[specter_core::PromoterId; 1]> = self
             .tree
             .get(resource)
-            .map(|r| r.proxy_promoters.iter().copied().collect())
+            .map(|r| r.proxy_promoters().iter().copied().collect())
             .unwrap_or_default();
 
         // Single-pass classification of the event's carriers: Profiles

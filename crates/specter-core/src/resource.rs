@@ -15,7 +15,7 @@
 //! `Option<ResourceKind>`) and [`Resource::kind_or_file`] (collapses
 //! Unknown to File-shape, the backend-mask convention) makes that
 //! choice explicit at every call site. Writes go through
-//! [`crate::Tree::set_kind`], same pattern as `Tree::set_role`.
+//! [`crate::Tree::set_kind`].
 //!
 //! `contributions` and `suppress_count` are `pub(crate)` — every
 //! engine-side mutation flows through the typed methods on `Resource`
@@ -30,6 +30,18 @@
 //! demand summary goes through [`Resource::contributions`],
 //! [`Resource::watch_demand`], [`Resource::events_union`],
 //! [`Resource::suppress_count`].
+//!
+//! `proxy_promoters` is `pub(crate)` — a back-ref vector kept in
+//! lockstep with `Promoter.proxies` (the engine's promoter side). A
+//! raw push / retain could desynchronise the two halves of that join,
+//! so the sole mutators are the typed
+//! [`Resource::insert_proxy_promoter`] /
+//! [`Resource::remove_proxy_promoter`]; each returns the
+//! empty ↔ non-empty retention-edge `bool` (same convention as the
+//! suppression counter) and absorbs the dedup / no-op guard
+//! internally. Read access is via [`Resource::proxy_promoters`]; the
+//! vector is also one of the four structural claimants on
+//! [`Resource::has_anchors`].
 //!
 //! `role` is `pub`; the engine writes it directly. Role is metadata
 //! (no refcount edges), so a typed setter would buy nothing.
@@ -128,12 +140,17 @@ pub struct Resource {
     /// ([`crate::Tree::children_ids`]).
     pub(crate) children: BTreeMap<CompactString, ResourceId>,
     pub(crate) profiles: SmallVec<[(u64, ProfileId); 1]>,
-    /// Promoter back-ref. Maintained in lockstep with
-    /// `Promoter.proxies` by the engine's promoter-side helpers
-    /// (`register_proxy` / `unregister_proxy`). Inline cap 1 covers
-    /// the typical case: most Resources have zero proxies, and
-    /// cross-Promoter sharing on the same slot is rare.
-    pub proxy_promoters: SmallVec<[PromoterId; 1]>,
+    /// Promoter back-ref — the right side of the `Promoter.proxies`
+    /// join, one entry per Promoter proxying this slot. The engine's
+    /// `register_proxy` inserts (via
+    /// [`Resource::insert_proxy_promoter`]) and
+    /// `release_promoter_proxy_claim` removes (via
+    /// [`Resource::remove_proxy_promoter`]), keeping this vector and
+    /// `Promoter.proxies` in lockstep. `pub(crate)` so a raw push /
+    /// retain can't break that lockstep. Inline cap 1 covers the
+    /// typical case: most Resources have zero proxies, and
+    /// cross-Promoter sharing on one slot is rare.
+    pub(crate) proxy_promoters: SmallVec<[PromoterId; 1]>,
     /// Probed kind of this slot. `ResourceKind::Unknown` is the
     /// pre-classification placeholder — fresh slots created by
     /// `Tree::ensure_root` / `Tree::ensure_child`, `Tree::vacate`-reset
@@ -366,13 +383,53 @@ impl Resource {
         &self.profiles
     }
 
-    /// Promoter back-references at this slot. Each entry corresponds to a
-    /// live `Promoter.proxies` entry keyed by this Resource. Maintained in
-    /// lockstep by the engine's `register_proxy` / `unregister_proxy`
-    /// helpers.
+    /// Promoter back-references at this slot. Each entry corresponds to
+    /// a live `Promoter.proxies` entry keyed by this Resource.
+    /// Read-only view; the lockstep with `Promoter.proxies` is held
+    /// through [`Resource::insert_proxy_promoter`] /
+    /// [`Resource::remove_proxy_promoter`].
     #[must_use]
     pub fn proxy_promoters(&self) -> &[PromoterId] {
         &self.proxy_promoters
+    }
+
+    /// Register `id` as a Promoter back-ref, keeping this slot's
+    /// `proxy_promoters` in lockstep with `Promoter.proxies`.
+    /// Idempotent: an `id` already present (cross-Promoter sharing on
+    /// one slot, or a re-registration of the same Promoter) is left
+    /// untouched and reports no edge — this absorbs the dedup the
+    /// engine's `register_proxy` previously open-coded.
+    ///
+    /// Returns `true` iff this call traversed the empty → non-empty
+    /// retention edge (the slot just gained its first proxy back-ref),
+    /// mirroring [`Self::inc_suppress`]'s `0 → 1` convention so an
+    /// edge-driven caller can react without the `SmallVec` shape
+    /// leaking. The current caller does not consume the edge; the
+    /// signal is kept symmetric with the suppression / contribution
+    /// mutators rather than special-cased away.
+    pub fn insert_proxy_promoter(&mut self, id: PromoterId) -> bool {
+        if self.proxy_promoters.contains(&id) {
+            return false;
+        }
+        let was_empty = self.proxy_promoters.is_empty();
+        self.proxy_promoters.push(id);
+        was_empty
+    }
+
+    /// Drop `id`'s back-ref, leaving every co-resident Promoter's entry
+    /// in place (filter, not clear). Idempotent: an absent `id`, or an
+    /// already-empty vector (reachable post-[`crate::Tree::vacate`] or
+    /// on a double release), is a no-op that reports no edge.
+    ///
+    /// Returns `true` iff this call traversed the non-empty → empty
+    /// retention edge (the slot just lost its last proxy back-ref),
+    /// mirroring [`Self::dec_suppress`]'s `1 → 0` convention.
+    pub fn remove_proxy_promoter(&mut self, id: PromoterId) -> bool {
+        if self.proxy_promoters.is_empty() {
+            return false;
+        }
+        self.proxy_promoters.retain(|p| *p != id);
+        self.proxy_promoters.is_empty()
     }
 
     /// Probed kind of this slot. `None` means the slot has not yet been
@@ -569,7 +626,7 @@ mod tests {
     #[test]
     fn anchored_when_proxy_promoters_present() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        r.proxy_promoters.push(crate::ids::PromoterId::default());
+        r.insert_proxy_promoter(crate::ids::PromoterId::default());
         assert!(r.has_anchors());
         assert_eq!(r.proxy_promoters().len(), 1);
     }
@@ -753,5 +810,67 @@ mod tests {
         r.inc_suppress();
         assert_eq!(r.clear_suppress(), 3);
         assert_eq!(r.suppress_count(), 0);
+    }
+
+    /// `insert_proxy_promoter` reports the empty → non-empty retention
+    /// edge exactly once. A second *distinct* id is an intermediate
+    /// (vector already non-empty: no edge); a *duplicate* id is an
+    /// idempotent no-op (no edge, no growth) — the dedup the engine's
+    /// `register_proxy` previously open-coded now lives in the mutator.
+    #[test]
+    fn insert_proxy_promoter_reports_edge_dedups_and_is_intermediate_for_second_id() {
+        use crate::ids::PromoterId;
+        let mut km: slotmap::SlotMap<PromoterId, ()> = slotmap::SlotMap::with_key();
+        let a = km.insert(());
+        let b = km.insert(());
+
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
+        assert!(r.insert_proxy_promoter(a), "empty → non-empty edge");
+        assert!(
+            !r.insert_proxy_promoter(a),
+            "duplicate id: idempotent no-op, no edge",
+        );
+        assert_eq!(r.proxy_promoters().len(), 1, "duplicate did not grow");
+        assert!(
+            !r.insert_proxy_promoter(b),
+            "second distinct id: vector already non-empty, intermediate",
+        );
+        assert_eq!(r.proxy_promoters().len(), 2);
+    }
+
+    /// `remove_proxy_promoter` reports the non-empty → empty retention
+    /// edge exactly once and leaves co-resident Promoters' entries in
+    /// place (filter, not clear). Removing an absent id, or hitting an
+    /// already-empty vector, is an idempotent no-op (no edge, no panic).
+    #[test]
+    fn remove_proxy_promoter_reports_edge_retains_coresidents_and_is_idempotent() {
+        use crate::ids::PromoterId;
+        let mut km: slotmap::SlotMap<PromoterId, ()> = slotmap::SlotMap::with_key();
+        let a = km.insert(());
+        let b = km.insert(());
+
+        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
+        assert!(
+            !r.remove_proxy_promoter(a),
+            "no-op on empty vector: no edge, no panic",
+        );
+
+        r.insert_proxy_promoter(a);
+        r.insert_proxy_promoter(b);
+        assert!(
+            !r.remove_proxy_promoter(a),
+            "co-resident `b` remains: non-empty → non-empty, no edge",
+        );
+        assert_eq!(
+            r.proxy_promoters(),
+            &[b],
+            "filter, not clear: co-resident entry survives",
+        );
+        assert!(
+            !r.remove_proxy_promoter(a),
+            "absent id, vector still non-empty: idempotent no-op",
+        );
+        assert!(r.remove_proxy_promoter(b), "1 → 0 edge: last back-ref gone");
+        assert!(r.proxy_promoters().is_empty());
     }
 }

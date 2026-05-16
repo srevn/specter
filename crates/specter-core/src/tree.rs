@@ -256,17 +256,6 @@ impl Tree {
         Ok(cur)
     }
 
-    /// In-place role mutation. Sole legitimate use: scaffold materialization
-    /// (`DescentScaffold → User`) when a pending path's anchor first
-    /// appears in a probe response. Demotion (`User → DescentScaffold`)
-    /// is not a defined operation; the API doesn't enforce, but discipline
-    /// is single-call-site (the engine's descent module).
-    pub fn set_role(&mut self, id: ResourceId, role: ResourceRole) {
-        if let Some(r) = self.nodes.get_mut(id) {
-            r.role = role;
-        }
-    }
-
     /// Promote a `DescentScaffold`-roled slot to `new_role`. No-op if
     /// the slot is already `User` / `WatchRootParent` (preserves the
     /// existing role — never demote a real role to its scaffold
@@ -282,7 +271,7 @@ impl Tree {
     /// claimants on [`Resource::has_anchors`] (`children`, `profiles`,
     /// `proxy_promoters`, `contributions`), so the tag mutation is
     /// observer-only. The helper exists to keep the four-line "get +
-    /// matches + set_role" idiom from drifting across call sites.
+    /// role-match + role-write" idiom from drifting across call sites.
     pub fn promote_scaffold(&mut self, id: ResourceId, new_role: ResourceRole) {
         if let Some(r) = self.nodes.get_mut(id)
             && matches!(r.role, ResourceRole::DescentScaffold)
@@ -294,8 +283,7 @@ impl Tree {
     /// Set the probed kind on the slot. No-op for stale `id`. The engine
     /// calls this from `reconcile::create_child`, `descent::dispatch`,
     /// and the entry-validate path inside reconcile — every site that
-    /// has just observed the inode and classified it. Symmetric with
-    /// [`Tree::set_role`]; mirrors the
+    /// has just observed the inode and classified it. Mirrors the
     /// `Resource.kind` field's `pub(crate)` visibility (see the
     /// rustdoc on [`crate::Resource`]).
     pub fn set_kind(&mut self, id: ResourceId, kind: ResourceKind) {
@@ -848,16 +836,16 @@ mod tests {
             prop_assert_eq!(actual.as_deref(), Some(expected.as_path()));
         }
 
-        /// F-CRIT-1 forward regression guard. Populate N
-        /// distinct-segment children under a parent kept alive by a
-        /// contribution (so the reap cascade cannot take the parent
-        /// out from under the assertion), then reap each child. Every
-        /// child slot and every children-map entry must return to the
-        /// pre-population baseline. Together with the structural
-        /// guarantee — the Tree holds no second segment store, a
-        /// compile-time fact — this pins the unbounded-growth class
-        /// shut: segment strings die with their slots by construction,
-        /// with no reclaim API required.
+        /// Forward regression guard for the segment-store growth
+        /// class. Populate N distinct-segment children under a parent
+        /// kept alive by a contribution (so the reap cascade cannot
+        /// take the parent out from under the assertion), then reap
+        /// each child. Every child slot and every children-map entry
+        /// must return to the pre-population baseline. Together with
+        /// the structural guarantee — the Tree holds no second segment
+        /// store, a compile-time fact — this pins the unbounded-growth
+        /// class shut: segment strings die with their slots by
+        /// construction, with no reclaim API required.
         #[test]
         fn prop_reap_releases_segment(
             raw in proptest::collection::vec(any_segment(), 1..16),
@@ -1312,21 +1300,49 @@ mod tests {
     }
 
     #[test]
-    fn set_role_promotes_scaffold_to_user() {
-        // Scaffold materialization at descent's anchor branch.
+    fn promote_scaffold_flips_descent_scaffold_to_new_role() {
+        // The materialization path: a descent-walk scaffold acquires a
+        // real purpose and its tag flips for diagnostic clarity.
         let mut tree = Tree::new();
         let id = tree.ensure_root("x", ResourceRole::DescentScaffold);
-        tree.set_role(id, ResourceRole::User);
+        tree.promote_scaffold(id, ResourceRole::User);
         assert!(matches!(tree.get(id).unwrap().role, ResourceRole::User));
     }
 
+    /// Anchor materialization relies on this strictly-safer property: a
+    /// slot a co-resident peer already promoted to a real role (`User`
+    /// or `WatchRootParent`) is never clobbered back by a later
+    /// promotion. Pinning it keeps the conditional-promote contract
+    /// regression-protected.
     #[test]
-    fn set_role_on_stale_id_is_noop() {
+    fn promote_scaffold_is_noop_on_an_already_real_role() {
         let mut tree = Tree::new();
-        let id = tree.ensure_root("x", ResourceRole::User);
+
+        let user = tree.ensure_root("u", ResourceRole::User);
+        tree.promote_scaffold(user, ResourceRole::WatchRootParent);
+        assert!(
+            matches!(tree.get(user).unwrap().role, ResourceRole::User),
+            "User is a real role; promote_scaffold must not overwrite it",
+        );
+
+        let parent = tree.ensure_root("p", ResourceRole::WatchRootParent);
+        tree.promote_scaffold(parent, ResourceRole::User);
+        assert!(
+            matches!(
+                tree.get(parent).unwrap().role,
+                ResourceRole::WatchRootParent,
+            ),
+            "WatchRootParent is a real role; a peer's claim survives",
+        );
+    }
+
+    #[test]
+    fn promote_scaffold_on_stale_id_is_noop() {
+        let mut tree = Tree::new();
+        let id = tree.ensure_root("x", ResourceRole::DescentScaffold);
         assert!(tree.try_reap(id, &mut discard()));
-        tree.set_role(id, ResourceRole::User);
-        // No panic; lookups still return None.
+        tree.promote_scaffold(id, ResourceRole::User);
+        // No panic; the reaped slot stays gone.
         assert!(tree.get(id).is_none());
     }
 

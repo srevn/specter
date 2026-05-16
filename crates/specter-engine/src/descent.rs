@@ -35,7 +35,7 @@
 //! 3. `dispatch_descent_probe` consumes the response:
 //!    - `Ok(snap)`: look for the next remaining component as a
 //!      single-level child. Found and is the anchor → materialize
-//!      (`set_role` to `User`, set kind, bump anchor's `watch_demand`,
+//!      (promote to `User`, set kind, bump anchor's `watch_demand`,
 //!      drop the prefix's, transition Pending → Idle, start a Seed
 //!      burst). Found but not the anchor → advance descent one segment.
 //!      Not found → await the next event.
@@ -362,7 +362,7 @@ impl crate::Engine {
 
         // Materialize the next segment as a Tree slot. Look it up first;
         // if absent, ensure as DescentScaffold (the terminal arms may
-        // promote to User via `set_role`).
+        // promote it to User via `promote_scaffold`).
         let new_resource = match self.tree.lookup(Some(prefix), &next_segment) {
             Some(r) => r,
             None => self
@@ -497,8 +497,10 @@ impl crate::Engine {
     /// to leave `Pending` for `Idle → Active(Seed)`.
     ///
     /// Sequence (load-bearing):
-    /// 1. Flip the slot's role to `User` (was `DescentScaffold` from the
-    ///    descent walk).
+    /// 1. Promote the slot's role to `User` via
+    ///    [`crate::Tree::promote_scaffold`] — a no-op if a co-resident
+    ///    peer already gave the slot a real role (`WatchRootParent` /
+    ///    `User`), so materialization never clobbers a peer's claim.
     /// 2. Capture `Profile.events` for the anchor's contribution.
     /// 3. Transition the Profile **before** any refcount op via
     ///    [`specter_core::Profile::materialize_anchor`] — atomic
@@ -521,7 +523,12 @@ impl crate::Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        self.tree.set_role(new_resource, ResourceRole::User);
+        // `new_resource` is either a freshly-ensured DescentScaffold
+        // or a peer's pre-existing slot (the caller's lookup hit).
+        // `promote_scaffold` flips only a still-scaffold slot and
+        // no-ops on a real role, so materialization never clobbers a
+        // co-resident peer's WatchRootParent / User.
+        self.tree.promote_scaffold(new_resource, ResourceRole::User);
 
         let events_union = self
             .profiles
