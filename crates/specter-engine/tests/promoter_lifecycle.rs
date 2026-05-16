@@ -196,7 +196,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
         "PromoterAttached emitted on attach",
     );
     match &e.promoters().get(pid).expect("promoter registered").state {
-        PromoterState::Active { proxies } => assert!(
+        PromoterState::Active { proxies, .. } => assert!(
             proxies.contains_key(&var_log),
             "proxy registered at the materialised prefix",
         ),
@@ -521,7 +521,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         .lookup(Some(a), "b")
         .expect("/a/b materialised by enter_active");
     match &e.promoters().get(qid).unwrap().state {
-        PromoterState::Active { proxies } => assert!(proxies.contains_key(&a_b)),
+        PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&a_b)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
     assert_eq!(e.tree().get(a_b).unwrap().watch_demand(), 1);
@@ -599,7 +599,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         "no Unwatch on /a/b on the descent vanish — Promoter still claims it",
     );
     match &e.promoters().get(qid).unwrap().state {
-        PromoterState::Active { proxies } => assert!(proxies.contains_key(&a_b)),
+        PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&a_b)),
         s @ PromoterState::PrefixPending(_) => {
             panic!("Promoter state should remain Active{{proxies}}, got {s:?}")
         }
@@ -628,7 +628,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         "single Unwatch at /a/b on the genuine 1 → 0 edge",
     );
     match &e.promoters().get(qid).unwrap().state {
-        PromoterState::Active { proxies } => assert!(!proxies.contains_key(&a_b)),
+        PromoterState::Active { proxies, .. } => assert!(!proxies.contains_key(&a_b)),
         s @ PromoterState::PrefixPending(_) => {
             panic!("Promoter state should remain Active, got {s:?}")
         }
@@ -672,7 +672,7 @@ fn two_promoters_sharing_proxy_unwind_independently() {
     // Both Promoters should be Active with a proxy at /shared.
     for qid in [q1, q2] {
         match &e.promoters().get(qid).unwrap().state {
-            PromoterState::Active { proxies } => assert!(proxies.contains_key(&shared)),
+            PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&shared)),
             s @ PromoterState::PrefixPending(_) => {
                 panic!("Promoter {qid:?} expected Active at /shared, got {s:?}")
             }

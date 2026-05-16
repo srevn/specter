@@ -29,13 +29,15 @@ use std::sync::Arc;
 /// sequences keep the prior byte-stable sort.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ProbeOwner {
-    /// Profile-driven probe. The engine's probe channel keys this
-    /// owner to its in-flight `ProbeCorrelation` and `OpenKind`
-    /// discriminant (Verifying / Rebasing / Descent).
+    /// Profile-driven probe. The engine homes this owner's in-flight
+    /// `ProbeCorrelation` on a state-resident `ProbeSlot` (descent /
+    /// verify / rebase, one per state variant); the response routes by
+    /// inspecting that state.
     Profile(ProfileId),
-    /// Promoter-driven probe. The engine's probe channel keys this
-    /// owner to its in-flight `ProbeCorrelation` and `OpenKind`
-    /// discriminant (Descent / Enumerating { target }).
+    /// Promoter-driven probe. The engine homes this owner's in-flight
+    /// `ProbeCorrelation` on a state-resident `ProbeSlot` (descent, or
+    /// the `Active` enumeration slot tagged with the proxy target);
+    /// the response routes by inspecting that state.
     Promoter(PromoterId),
 }
 
@@ -46,9 +48,10 @@ pub enum ProbeOwner {
 /// walker arm consumes — no over-fetching.
 ///
 /// Boxing the heavy `Subtree` variant was considered and rejected: every
-/// non-Descent burst produces one, the channel ships one Probe per burst,
-/// and `Arc<DirSnapshot>` baselines are already the dominant payload (the
-/// inline allocation is amortised). `#[allow(clippy::large_enum_variant)]`
+/// non-Descent burst produces one, at most one Probe is in flight per
+/// burst, and `Arc<DirSnapshot>` baselines are already the dominant
+/// payload (the inline allocation is amortised).
+/// `#[allow(clippy::large_enum_variant)]`
 /// mirrors the same allowance on `ProbeOp`.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
@@ -140,18 +143,17 @@ pub enum ProbeRequest {
     /// and discards the snapshot (it is never spliced into
     /// `Profile.current`).
     Descent {
-        /// Owner of the probe channel. Echoed back on `ProbeResponse`
+        /// Owner of the probe. Echoed back on `ProbeResponse`
         /// and used by the Sensor's expectation-map insertion.
         owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
         /// Filesystem path of the descent prefix at probe-emission time.
-        /// The engine routes responses by `(owner, correlation)` and the
-        /// matched [`crate::ProbeOwner`]-specific channel state
-        /// (descent prefix lives on engine-side `DescentState`; promoter
-        /// enumeration target lives on the channel's `OpenKind` variant);
-        /// the walker only needs the path. `Arc::clone` of the slot's
-        /// materialised path — no rebuild.
+        /// The engine routes responses by `(owner, correlation)` against
+        /// the owner's state-resident `ProbeSlot` (the descent prefix
+        /// lives on `DescentState`; the promoter enumeration target is
+        /// the `Active` slot's tag); the walker only needs the path.
+        /// `Arc::clone` of the slot's materialised path — no rebuild.
         target_path: Arc<Path>,
     },
 }

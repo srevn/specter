@@ -22,11 +22,15 @@
 //!
 //! ## Single-slot probe
 //!
-//! At most one outstanding probe per Promoter. Concurrent enumerations
-//! queue via `pending_enumerations` and drain into a probe via the
-//! engine's `dispatch_next_enumeration`. The channel itself lives on
-//! the engine (`engine::probe_channel::ProbeChannel`) — the Promoter
-//! type holds no probe-side state.
+//! At most one outstanding probe per Promoter — a representability
+//! property, not a runtime check. `PrefixPending` homes the descent
+//! probe on its `DescentState` slot; `Active` homes the enumeration
+//! probe on its own `enumerating` slot. The two states are mutually
+//! exclusive, so a Promoter holds exactly one probe slot at any
+//! instant. Concurrent enumeration requests queue in
+//! `pending_enumerations` and drain one at a time — the engine arms
+//! the `Active` slot for the popped target and refuses to pop another
+//! while it stays armed.
 //!
 //! ## Dynamic Sub deduplication
 //!
@@ -45,6 +49,7 @@
 
 use crate::ids::{ProbeCorrelation, PromoterId, ResourceId, SubId};
 use crate::pattern::PatternSpec;
+use crate::probe::ProbeSlot;
 use crate::profile::DescentState;
 use crate::program::ActionProgram;
 use crate::scan_config::ProfileIdentity;
@@ -117,9 +122,10 @@ pub struct Promoter {
 /// Mutually-exclusive Promoter state. `PrefixPending` covers the
 /// pre-materialised case; `Active` covers the operating case.
 ///
-/// The variant payload is the *correlation token* of the input the
-/// Promoter is currently awaiting. `PrefixPending` carries the
-/// `DescentState`; `Active` carries the proxy fan-out.
+/// Each variant homes this Promoter's single probe slot —
+/// `PrefixPending` on its `DescentState`, `Active` on `enumerating` —
+/// so "at most one probe per Promoter" is structural: there is only
+/// ever one slot, selected by which state the Promoter is in.
 #[derive(Debug)]
 pub enum PromoterState {
     /// Literal-prefix doesn't yet exist on disk. `DescentState.current_prefix`
@@ -132,8 +138,17 @@ pub enum PromoterState {
     /// the position in `pattern.components` to enumerate next.
     ///
     /// `BTreeMap` for deterministic iteration order across replays.
+    ///
+    /// `enumerating` is this Promoter's single in-flight enumeration
+    /// probe. Armed while a proxy enumeration is outstanding — it holds
+    /// both the correlation the response must echo and the proxy
+    /// `ResourceId` the probe targets. The wire is path-only, so this
+    /// tag is the sole authority for the dispatch key on every outcome
+    /// (`SubtreeOk` / `Vanished` / `Failed`). Empty while the Promoter
+    /// operates with no enumeration in flight.
     Active {
         proxies: BTreeMap<ResourceId, ProxyState>,
+        enumerating: ProbeSlot<ResourceId>,
     },
 }
 
@@ -162,25 +177,68 @@ impl PromoterState {
     }
 
     /// The correlation of this Promoter's in-flight probe, or `None`.
-    /// A total projection: only a `PrefixPending` descent with an
-    /// armed slot yields a correlation. Owner-symmetric with
+    /// A total projection over both states: a `PrefixPending` descent
+    /// or an `Active` enumeration answers from its armed slot; an empty
+    /// slot in either state yields `None`. Owner-symmetric with
     /// [`crate::ProfileState::probe_correlation`].
     #[must_use]
     pub const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
         match self {
             Self::PrefixPending(d) => d.probe.correlation(),
-            Self::Active { .. } => None,
+            Self::Active { enumerating, .. } => enumerating.correlation(),
         }
     }
 
     /// Disarm this Promoter's probe-bearing carrier and return the
     /// prior correlation — the single state-level consume, total over
-    /// the state space. Owner-symmetric with
+    /// both states (`PrefixPending` descent slot or `Active`
+    /// enumeration slot; an already-empty slot is a `None` no-op). The
+    /// disarm leaves the state variant intact, so a route computed
+    /// before this call stays valid after it. Owner-symmetric with
     /// [`crate::ProfileState::take_probe`].
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
         match self {
             Self::PrefixPending(d) => d.probe.disarm(),
-            Self::Active { .. } => None,
+            Self::Active { enumerating, .. } => enumerating.disarm(),
+        }
+    }
+
+    /// Arm the `Active` enumeration slot with a freshly-minted
+    /// `correlation` for `target` (the proxy the probe enumerates).
+    /// The mint-side twin of [`DescentState::arm_probe`] for the
+    /// enumeration carrier; the consume direction is deliberately not
+    /// exposed here — it routes through [`Self::take_probe`] so
+    /// consume-once stays one law. [`ProbeSlot::arm`] asserts the slot
+    /// was empty: a re-arm without an intervening disarm would orphan
+    /// the prior correlation, so it must surface in every build.
+    ///
+    /// `PrefixPending` has no enumeration slot. Reaching that arm is a
+    /// caller-discipline breach — enumeration is dispatched only by
+    /// draining `pending_enumerations`, which is populated solely while
+    /// `Active`. Surfaced loudly rather than silently dropped: a silent
+    /// miss would emit a probe whose response then stale-detects
+    /// against an empty slot.
+    pub fn arm_enumeration(&mut self, correlation: ProbeCorrelation, target: ResourceId) {
+        match self {
+            Self::Active { enumerating, .. } => enumerating.arm(correlation, target),
+            Self::PrefixPending(_) => unreachable!(
+                "arm_enumeration requires Active: enumeration drains \
+                 pending_enumerations, which is non-empty only in Active",
+            ),
+        }
+    }
+
+    /// The proxy `ResourceId` the in-flight enumeration probe targets,
+    /// or `None` (`Active` with no probe out, or `PrefixPending`). The
+    /// single read the cancel-gate sites share so they cannot drift:
+    /// "is the in-flight enumeration aimed at *this* proxy?" The wire
+    /// is path-only, so this slot tag is the sole authority for the
+    /// dispatch key across every enumeration outcome.
+    #[must_use]
+    pub const fn enumeration_target(&self) -> Option<ResourceId> {
+        match self {
+            Self::Active { enumerating, .. } => enumerating.tag(),
+            Self::PrefixPending(_) => None,
         }
     }
 }
@@ -334,6 +392,7 @@ mod tests {
             log_output: false,
             state: PromoterState::Active {
                 proxies: BTreeMap::new(),
+                enumerating: ProbeSlot::empty(),
             },
             pending_enumerations: BTreeSet::new(),
             dynamic_subs: BTreeMap::new(),
@@ -492,8 +551,11 @@ mod tests {
                 pattern_component_index: 3,
             },
         );
-        let state = PromoterState::Active { proxies };
-        let PromoterState::Active { proxies } = state else {
+        let state = PromoterState::Active {
+            proxies,
+            enumerating: ProbeSlot::empty(),
+        };
+        let PromoterState::Active { proxies, .. } = state else {
             panic!("expected Active");
         };
         assert_eq!(proxies.len(), 1);
@@ -526,6 +588,7 @@ mod tests {
 
         let active = PromoterState::Active {
             proxies: BTreeMap::new(),
+            enumerating: ProbeSlot::empty(),
         };
         assert!(active.descent_state().is_none());
     }
@@ -557,6 +620,7 @@ mod tests {
         // Mutator returns None on Active.
         let mut active = PromoterState::Active {
             proxies: BTreeMap::new(),
+            enumerating: ProbeSlot::empty(),
         };
         assert!(active.descent_state_mut().is_none());
     }
@@ -589,6 +653,7 @@ mod tests {
         // Active holds no descent slot — total projection ⇒ None.
         let mut active = PromoterState::Active {
             proxies: BTreeMap::new(),
+            enumerating: ProbeSlot::empty(),
         };
         assert_eq!(active.probe_correlation(), None);
         assert_eq!(active.take_probe(), None);

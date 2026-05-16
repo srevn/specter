@@ -1566,13 +1566,6 @@ mod tests {
             Some(projected),
             "the Verifying slot carries the in-flight correlation",
         );
-
-        // The channel is NOT the home: no Profile entry exists for it.
-        assert_eq!(
-            e.probe_channel.correlation_for(owner),
-            None,
-            "the lift moved verify identity off the channel onto state",
-        );
     }
 
     #[test]

@@ -34,9 +34,10 @@
 //!   "always cancel before release" is the safe default.
 
 use crate::Engine;
-use crate::probe_channel::OpenKind;
 use crate::refcounts::sub_watch_then_try_reap;
-use specter_core::{ContribKey, ProbeOwner, PromoterId, PromoterState, ResourceId, StepOutput};
+use specter_core::{
+    ContribKey, ProbeOwner, ProbeSlot, PromoterId, PromoterState, ResourceId, StepOutput,
+};
 use std::collections::BTreeMap;
 
 impl Engine {
@@ -86,6 +87,7 @@ impl Engine {
         if let Some(q) = self.promoters.get_mut(qid) {
             q.state = PromoterState::Active {
                 proxies: BTreeMap::new(),
+                enumerating: ProbeSlot::empty(),
             };
         }
 
@@ -103,13 +105,13 @@ impl Engine {
     ///
     /// **Cancel-first contract for in-flight enumeration probes
     /// targeting this proxy.** Callers MUST cancel the probe first;
-    /// the `debug_assert!` below pins the contract by inspecting the
-    /// probe channel's [`crate::probe_channel::OpenKind`] for the
-    /// Promoter owner — an `OpenKind::PromoterEnumerating { target =
-    /// resource }` entry would mean an enumeration is targeting this
-    /// proxy. If the channel is closed, or its variant points at any
-    /// other proxy of the same Promoter, the probe is unaffected by
-    /// our release and stays in flight.
+    /// the `debug_assert!` below pins the contract by reading the
+    /// `Active` enumeration slot's tag via
+    /// [`specter_core::PromoterState::enumeration_target`] — a tag
+    /// equal to `resource` means an enumeration is in flight for *this*
+    /// proxy. An empty slot, or a tag pointing at any sibling proxy of
+    /// the same Promoter, means the probe is unaffected by our release
+    /// and stays in flight.
     ///
     /// Sole production callers post-Tier-1: [`Engine::unregister_proxy`]
     /// (which delegates here), [`Engine::on_watch_op_rejected`]'s proxy
@@ -122,7 +124,7 @@ impl Engine {
         out: &mut StepOutput,
     ) {
         let active_with_proxy = self.promoters.get(qid).is_some_and(|q| match &q.state {
-            PromoterState::Active { proxies } => proxies.contains_key(&resource),
+            PromoterState::Active { proxies, .. } => proxies.contains_key(&resource),
             PromoterState::PrefixPending(_) => false,
         });
         if !active_with_proxy {
@@ -130,11 +132,11 @@ impl Engine {
         }
 
         debug_assert!(
-            !matches!(
-                self.probe_channel.kind_for(ProbeOwner::Promoter(qid)),
-                Some(OpenKind::PromoterEnumerating { target }) if *target == resource,
-            ),
-            "release_promoter_proxy_claim: probe channel for this proxy must be closed first; \
+            self.promoters
+                .get(qid)
+                .and_then(|q| q.state.enumeration_target())
+                != Some(resource),
+            "release_promoter_proxy_claim: in-flight enumeration targets this proxy; \
              caller must invoke cancel_owner_probe before release \
              (promoter = {qid:?}, proxy = {resource:?})",
         );
@@ -143,7 +145,7 @@ impl Engine {
         // contribution map's [`ContribKey::PromoterProxy`] key is the
         // refcount source of truth and is removed below.
         if let Some(q) = self.promoters.get_mut(qid) {
-            if let PromoterState::Active { proxies } = &mut q.state {
+            if let PromoterState::Active { proxies, .. } = &mut q.state {
                 proxies.remove(&resource);
             }
             q.pending_enumerations.remove(&resource);

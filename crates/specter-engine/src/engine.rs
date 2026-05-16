@@ -72,10 +72,11 @@ pub struct Engine {
     /// registry the Promoter helpers mutate.
     pub(crate) promoters: PromoterRegistry,
     pub(crate) timers: TimerHeap,
-    /// Probe-channel state. Owns the per-owner outstanding-probe map
-    /// and the [`ProbeCorrelation`] monotonic counter. See
-    /// [`crate::probe_channel::ProbeChannel`] for the channel's
-    /// invariants and API.
+    /// The engine-wide [`ProbeCorrelation`] monotone floor — the one
+    /// irreducible engine-resident probe datum now that every
+    /// probe-bearing fact homes on its owner's state slot. See
+    /// [`crate::probe_channel::ProbeChannel`] for the mint API and the
+    /// state-derived projection surface beside it.
     pub(crate) probe_channel: crate::probe_channel::ProbeChannel,
     /// Monotonic counter for [`CorrelationId`] minting. Bumped at
     /// every `Effect` push in `transitions.rs::emit_effects` so the
@@ -1530,78 +1531,32 @@ mod tests {
 
     #[test]
     fn probe_channel_open_is_monotonic_per_owner() {
-        // Three Profiles, each opened once: the channel's correlation
-        // counter advances monotonically across opens regardless of
-        // which Profile owns each open channel. Distinct owners avoid
-        // the I5 double-open panic (one open channel per owner).
-        use crate::probe_channel::OpenKind;
+        // Successive probe correlations are globally monotone: each
+        // `mint_probe_correlation` advances the engine-wide counter,
+        // yielding strictly-increasing distinct ids in one id space
+        // (no per-owner channel state — slots hold their own).
         let mut e = Engine::new();
-        let r1 = e.tree.ensure_root("x", specter_core::ResourceRole::User);
-        let r2 = e.tree.ensure_root("y", specter_core::ResourceRole::User);
-        let r3 = e.tree.ensure_root("z", specter_core::ResourceRole::User);
-        let cfg = ScanConfig::builder().build();
-        let pid1 = e.profiles.attach(
-            &mut e.tree,
-            specter_core::Profile::new(
-                r1,
-                ProfileIdentity {
-                    config: cfg.clone(),
-                    max_settle: Duration::from_secs(6),
-                    events: specter_core::ClassSet::EMPTY,
-                },
-                Duration::from_millis(50),
-                None,
-            ),
-        );
-        let pid2 = e.profiles.attach(
-            &mut e.tree,
-            specter_core::Profile::new(
-                r2,
-                ProfileIdentity {
-                    config: cfg.clone(),
-                    max_settle: Duration::from_secs(6),
-                    events: specter_core::ClassSet::EMPTY,
-                },
-                Duration::from_millis(50),
-                None,
-            ),
-        );
-        let pid3 = e.profiles.attach(
-            &mut e.tree,
-            specter_core::Profile::new(
-                r3,
-                ProfileIdentity {
-                    config: cfg,
-                    max_settle: Duration::from_secs(6),
-                    events: specter_core::ClassSet::EMPTY,
-                },
-                Duration::from_millis(50),
-                None,
-            ),
-        );
-
-        let a = e.probe_channel.open(
-            ProbeOwner::Profile(pid1),
-            OpenKind::PromoterEnumerating { target: r1 },
-        );
-        let b = e.probe_channel.open(
-            ProbeOwner::Profile(pid2),
-            OpenKind::PromoterEnumerating { target: r2 },
-        );
-        let c = e.probe_channel.open(
-            ProbeOwner::Profile(pid3),
-            OpenKind::PromoterEnumerating { target: r3 },
-        );
+        let a = e.mint_probe_correlation();
+        let b = e.mint_probe_correlation();
+        let c = e.mint_probe_correlation();
         assert!(a < b);
         assert!(b < c);
         assert_eq!(a, ProbeCorrelation::from(1));
         assert_eq!(b, ProbeCorrelation::from(2));
         assert_eq!(c, ProbeCorrelation::from(3));
+    }
 
-        // Channel populated symmetrically.
-        assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid1)), Some(a));
-        assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid2)), Some(b));
-        assert_eq!(e.pending_probe_for(ProbeOwner::Profile(pid3)), Some(c));
+    /// Counter saturation on the probe side — release-runnable. Proves
+    /// `mint_probe_correlation` routes through the panicking
+    /// `MonotonicCounter::next` rather than reimplementing the bump,
+    /// symmetric with `effect_correlations_panic_on_counter_saturation`.
+    /// Pairs with the `MonotonicCounter` unit tests in `counter.rs`.
+    #[test]
+    #[should_panic(expected = "MonotonicCounter")]
+    fn mint_probe_correlation_panics_on_counter_saturation() {
+        let mut e = Engine::new();
+        e.probe_channel.prime_counter(u64::MAX);
+        let _ = e.mint_probe_correlation();
     }
 
     #[test]

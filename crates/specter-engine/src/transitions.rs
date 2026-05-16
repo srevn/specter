@@ -7,13 +7,14 @@
 //! rows (e.g., emit Effects on Standard stable verdict) is factored into
 //! private helpers within this module.
 //!
-//! `on_probe_response` routes a Profile response by *state*: the
-//! gated correlation lives on a state-resident
-//! [`specter_core::ProbeSlot`], the routing class comes from
-//! [`Engine::probe_route`], and the slot is disarmed once on dispatch.
-//! Promoter enumeration is the one response still routed on the
-//! channel's [`crate::probe_channel::OpenKind`]. Per-intent fan-out
-//! for the Verifying route lives in `dispatch_burst_outcome`.
+//! `on_probe_response` routes every response by *state*: the gated
+//! correlation lives on a state-resident [`specter_core::ProbeSlot`],
+//! the routing class comes from [`Engine::probe_route`] (snapshotted
+//! pre-disarm), and the slot is disarmed once on dispatch. This holds
+//! uniformly for Profile *and* Promoter owners — Promoter enumeration
+//! homes on the `Active` variant's slot like every other carrier.
+//! Per-intent fan-out for the Verifying route lives in
+//! `dispatch_burst_outcome`.
 
 use crate::Engine;
 use crate::engine::is_timer_referenced;
@@ -225,23 +226,20 @@ impl Engine {
     /// Dispatch a [`ProbeResponse`] by routing to the per-owner
     /// handler.
     ///
-    /// **Staleness.** The Profile handler (and the Promoter descent
-    /// path) gate on `pending_probe_for(owner) == Some(received)` — the
-    /// state-resident slot's own correlation. Promoter enumeration
-    /// still gates on the channel's atomic
-    /// [`crate::probe_channel::ProbeChannel::close_if`]. Either way a
+    /// **Staleness.** Both handlers gate on
+    /// `pending_probe_for(owner) == Some(received)` — the
+    /// state-resident slot's own correlation, uniform across Profile
+    /// and Promoter owners (descent, verify, rebase, enumeration). A
     /// mismatch covers every stale path (stale id, response after
     /// Cancel, response after a fresh mint, out-of-order response),
     /// leaves live state intact, and yields
     /// [`Diagnostic::StaleProbeResponse`].
     ///
-    /// **Routing.** State-resident probes route on
-    /// [`Engine::probe_route`] (a [`Copy`] snapshot taken before the
-    /// slot is disarmed); the correlation lives on the carrier itself,
-    /// so a channel-vs-state divergence is structurally
-    /// unrepresentable. Promoter enumeration routes on the
-    /// [`crate::probe_channel::OpenKind`] the channel records at
-    /// open-time.
+    /// **Routing.** Every probe routes on [`Engine::probe_route`] (a
+    /// [`Copy`] snapshot taken before the slot is disarmed); the
+    /// correlation — and the enumeration `target` — lives on the
+    /// carrier itself, so a routing-vs-identity divergence is
+    /// structurally unrepresentable.
     ///
     /// **Walker-contract violations.** A descent probe receiving
     /// `AnchorOk` (the walker contracted to return `SubtreeOk` or
@@ -359,16 +357,17 @@ impl Engine {
                 }
             },
 
-            None => {
-                // A correlation matched `pending_probe_for` but no
-                // state-derived route exists: unconstructable for a
-                // Profile owner post-lift (the gated correlation lives
-                // on exactly one routable carrier). The loud arm
-                // replaces the old channel-vs-state divergence bail.
+            Some(ProbeRoute::Enumerating { .. }) | None => {
+                // A correlation matched `pending_probe_for` but the
+                // route is `Enumerating` (a Promoter-only class) or
+                // none: both unconstructable for a Profile owner — its
+                // gated correlation lives on exactly one Profile
+                // carrier. The loud arm replaces the old
+                // channel-vs-state divergence bail.
                 debug_assert!(
                     false,
-                    "matched correlation but Profile state is not probe-bearing \
-                     (profile = {profile_id:?})",
+                    "matched correlation but Profile state is not a Profile-probe-bearing \
+                     carrier (profile = {profile_id:?})",
                 );
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
                     owner,
@@ -933,7 +932,7 @@ impl Engine {
                 PromoterState::PrefixPending(d) if d.current_prefix() == resource => {
                     promoter_descent_claimers.push(qid);
                 }
-                PromoterState::Active { proxies } if proxies.contains_key(&resource) => {
+                PromoterState::Active { proxies, .. } if proxies.contains_key(&resource) => {
                     promoter_proxy_claimers.push(qid);
                 }
                 PromoterState::PrefixPending(_) | PromoterState::Active { .. } => {}
@@ -1023,12 +1022,11 @@ impl Engine {
         // `release_promoter_proxy_claim` gates on this exact
         // condition.
         for qid in promoter_proxy_claimers {
-            let target_matches = matches!(
-                self.probe_channel
-                    .kind_for(ProbeOwner::Promoter(qid)),
-                Some(crate::probe_channel::OpenKind::PromoterEnumerating { target })
-                    if *target == resource,
-            );
+            let target_matches = self
+                .promoters
+                .get(qid)
+                .and_then(|q| q.state.enumeration_target())
+                == Some(resource);
             if target_matches {
                 self.cancel_owner_probe(ProbeOwner::Promoter(qid), out);
             }
@@ -1168,7 +1166,7 @@ impl Engine {
                     // probe's response will reflect the post-overflow
                     // state. No double-probe.
                     PromoterState::PrefixPending(_) => PromoterReseedAction::Skip,
-                    PromoterState::Active { proxies } => {
+                    PromoterState::Active { proxies, .. } => {
                         PromoterReseedAction::Enumerate(proxies.keys().copied().collect())
                     }
                 },
@@ -1241,7 +1239,7 @@ impl Engine {
                     d.current_prefix() == r
                         || self.tree.ancestors(d.current_prefix()).any(|a| a == r)
                 }
-                PromoterState::Active { proxies } => proxies
+                PromoterState::Active { proxies, .. } => proxies
                     .keys()
                     .any(|&p| p == r || self.tree.ancestors(p).any(|a| a == r)),
             })

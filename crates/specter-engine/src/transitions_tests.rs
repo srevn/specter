@@ -721,12 +721,13 @@ fn probe_response_for_idle_profile_drops_with_diagnostic() {
     assert!(stale);
 }
 
-// I5-breach panic/diagnostic tests deleted: the forged "channel-open in
+// I5-breach panic/diagnostic tests deleted: the forged "probe armed in
 // non-mint phase" shape they exercised is structurally unrepresentable
-// post-ProbeChannel — `ProbeChannel::open` panics on double-open and
-// dispatchers route on `OpenKind`, so the (state, phase)-mismatch arm
-// cannot be reached without bypassing the channel's mint API. Structural
-// property tests live in `probe_channel.rs`'s `#[cfg(test)] mod tests`.
+// once probe correlation lives on a state-resident `ProbeSlot` — a
+// slot can only be armed via its owning phase's typed transition, so
+// the (state, phase)-mismatch arm cannot be reached without forging an
+// invalid state. Structural property tests live in `probe_channel.rs`'s
+// `#[cfg(test)] mod tests`.
 
 // ---- Standard burst dispatch ----
 
@@ -4851,13 +4852,13 @@ mod props {
                     outstanding,
                 );
 
-                // Channel-discipline I5: at most one outstanding probe
-                // per Profile, expressed as a single `ProbeChannel` entry
-                // keyed by `ProbeOwner::Profile(pid)`. `correlation_for`
-                // returns `Option<ProbeCorrelation>` so `<= 1` is
-                // trivially true; the assertion is a regression guard
-                // against a future widening of the channel's per-owner
-                // slot shape.
+                // Slot-discipline I5: at most one outstanding probe per
+                // Profile, expressed as a single state-resident probe
+                // slot reachable via `ProbeOwner::Profile(pid)`.
+                // `pending_probe_for` returns `Option<ProbeCorrelation>`
+                // so `<= 1` is trivially true; the assertion is a
+                // regression guard against a future widening of the
+                // per-owner slot shape.
                 let probing_count =
                     u32::from(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
                 prop_assert!(

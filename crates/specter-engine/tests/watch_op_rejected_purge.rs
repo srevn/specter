@@ -601,7 +601,7 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
     let qid = specter_core::testkit::first_attached_promoter(&attach_out)
         .expect("attach_promoter succeeded");
     match &e.promoters().get(qid).unwrap().state {
-        PromoterState::Active { proxies } => assert!(proxies.contains_key(&a)),
+        PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active at /a, got {s:?}"),
     }
     assert_eq!(e.tree().get(a).unwrap().watch_demand(), 1);
@@ -628,7 +628,7 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
 
     // Proxy unregistered. Counter zeroed by clamp; back-ref cleared.
     match &e.promoters().get(qid).unwrap().state {
-        PromoterState::Active { proxies } => assert!(!proxies.contains_key(&a)),
+        PromoterState::Active { proxies, .. } => assert!(!proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
     assert_eq!(
@@ -674,7 +674,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
     let qid = specter_core::testkit::first_attached_promoter(&attach_q_out)
         .expect("attach_promoter succeeded");
     match &e.promoters().get(qid).unwrap().state {
-        PromoterState::Active { proxies } => assert!(proxies.contains_key(&a)),
+        PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
     // Drain the enumeration so `pending_enumeration_target` is None.
@@ -731,7 +731,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         ProfileState::Idle,
     ));
     match &e.promoters().get(qid).unwrap().state {
-        PromoterState::Active { proxies } => assert!(!proxies.contains_key(&a)),
+        PromoterState::Active { proxies, .. } => assert!(!proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
 

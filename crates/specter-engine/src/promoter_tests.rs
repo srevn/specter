@@ -27,7 +27,6 @@
 )]
 
 use crate::Engine;
-use crate::probe_channel::OpenKind;
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
@@ -138,7 +137,7 @@ fn pending_enumerations(e: &Engine, pid: PromoterId) -> Vec<ResourceId> {
 /// state is `PrefixPending`).
 fn active_proxies(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, specter_core::ProxyState> {
     match e.promoters.get(pid).map(|q| &q.state) {
-        Some(PromoterState::Active { proxies }) => proxies.clone(),
+        Some(PromoterState::Active { proxies, .. }) => proxies.clone(),
         s => panic!("expected Active state, got {s:?}"),
     }
 }
@@ -927,9 +926,9 @@ fn register_proxy_is_idempotent_on_re_registration() {
 
 #[test]
 fn dispatch_next_enumeration_records_pending_target() {
-    // `OpenKind::PromoterEnumerating { target }` is stamped on the
-    // channel at probe-emit time so `Vanished` / `Failed` responses
-    // (which carry no payload) can identify the proxy.
+    // The in-flight proxy resource is tagged on the state-resident
+    // enumeration slot at probe-emit time so `Vanished` / `Failed`
+    // responses (which carry no payload) can identify the proxy.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
@@ -940,27 +939,30 @@ fn dispatch_next_enumeration_records_pending_target() {
     let pid =
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     // Initial enumeration was dispatched by `enter_active`; the
-    // channel's OpenKind carries the in-flight proxy resource.
-    let kind = e
-        .probe_channel
-        .kind_for(ProbeOwner::Promoter(pid))
-        .expect("enumeration channel open");
-    assert!(
-        matches!(kind, OpenKind::PromoterEnumerating { target } if *target == var_log),
-        "channel kind carries the in-flight proxy target (got {kind:?})",
+    // enumeration slot's tag carries the in-flight proxy resource.
+    let target = e
+        .promoters
+        .get(pid)
+        .expect("promoter alive")
+        .state
+        .enumeration_target();
+    assert_eq!(
+        target,
+        Some(var_log),
+        "enumeration slot tag carries the in-flight proxy target (got {target:?})",
     );
     // The probe correlation is also live.
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
-        "probe correlation in flight alongside the channel kind",
+        "probe correlation in flight alongside the enumeration slot tag",
     );
 }
 
 #[test]
 fn pending_enumeration_target_clears_on_response() {
-    // The channel closes on response — both the correlation slot and
-    // the kind tag go away atomically (`close_if` removes the Open
-    // entry as one operation).
+    // The enumeration slot disarms on response — both the correlation
+    // and the proxy-target tag go away atomically (single `take_probe`
+    // / `disarm` on the state-resident slot).
     let mut e = Engine::new();
     let _var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
@@ -982,10 +984,13 @@ fn pending_enumeration_target_clears_on_response() {
     );
 
     assert!(
-        e.probe_channel
-            .kind_for(ProbeOwner::Promoter(pid))
+        e.promoters
+            .get(pid)
+            .expect("promoter alive")
+            .state
+            .enumeration_target()
             .is_none(),
-        "enumeration channel closed after response",
+        "enumeration slot disarmed after response",
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
@@ -995,9 +1000,9 @@ fn pending_enumeration_target_clears_on_response() {
 
 #[test]
 fn cancel_owner_probe_clears_promoter_enumeration_channel() {
-    // `cancel_owner_probe` is the canonical close-on-cancel path. For
-    // a Promoter owner with an open enumeration channel it closes the
-    // channel and emits a Cancel op.
+    // `cancel_owner_probe` is the canonical disarm-on-cancel path. For
+    // a Promoter owner with an armed enumeration slot it disarms the
+    // slot and emits a Cancel op.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
@@ -1006,23 +1011,29 @@ fn cancel_owner_probe_clears_promoter_enumeration_channel() {
     );
     let pid =
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
-    let pre_kind = e
-        .probe_channel
-        .kind_for(ProbeOwner::Promoter(pid))
-        .expect("enumeration channel open pre-cancel");
-    assert!(
-        matches!(pre_kind, OpenKind::PromoterEnumerating { target } if *target == var_log),
-        "pre-cancel channel targets /var/log (got {pre_kind:?})",
+    let pre_target = e
+        .promoters
+        .get(pid)
+        .expect("promoter alive")
+        .state
+        .enumeration_target();
+    assert_eq!(
+        pre_target,
+        Some(var_log),
+        "pre-cancel enumeration slot targets /var/log (got {pre_target:?})",
     );
 
     let mut out = specter_core::StepOutput::default();
     e.cancel_owner_probe(ProbeOwner::Promoter(pid), &mut out);
 
     assert!(
-        e.probe_channel
-            .kind_for(ProbeOwner::Promoter(pid))
+        e.promoters
+            .get(pid)
+            .expect("promoter alive")
+            .state
+            .enumeration_target()
             .is_none(),
-        "enumeration channel closed by cancel_owner_probe",
+        "enumeration slot disarmed by cancel_owner_probe",
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),
@@ -1103,7 +1114,7 @@ fn enumeration_vanished_unregisters_proxy_and_emits_diagnostic() {
     // invariant (back-ref absent, proxies map empty).
     let q = e.promoters.get(pid).expect("promoter alive");
     let proxies = match &q.state {
-        PromoterState::Active { proxies } => proxies,
+        PromoterState::Active { proxies, .. } => proxies,
         PromoterState::PrefixPending(_) => panic!("expected Active, got PrefixPending"),
     };
     assert!(
