@@ -57,7 +57,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
     for (name, kind, inode) in children {
         let child = match kind {
             EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::new(
+            _ => ChildEntry::Leaf(LeafEntry::synthetic(
                 kind,
                 0,
                 UNIX_EPOCH,
@@ -67,10 +67,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: UNIX_EPOCH,
-            fs_id: FsIdentity::synthetic(0, 0),
-        },
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
         0,
         map,
     ))
@@ -1175,7 +1172,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     match baseline {
         TreeSnapshot::Dir(arc) => {
             assert!(
-                arc.entries.contains_key("user_edit.txt"),
+                arc.entries().contains_key("user_edit.txt"),
                 "baseline includes the user's edit",
             );
         }
@@ -1303,7 +1300,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
         map.insert(
             CompactString::new(name),
-            ChildEntry::Leaf(LeafEntry::new(
+            ChildEntry::Leaf(LeafEntry::synthetic(
                 kind,
                 size,
                 UNIX_EPOCH,
@@ -1311,10 +1308,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
             )),
         );
         Arc::new(DirSnapshot::new(
-            DirMeta {
-                mtime: UNIX_EPOCH,
-                fs_id: FsIdentity::synthetic(0, 0),
-            },
+            DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
             0,
             map,
         ))

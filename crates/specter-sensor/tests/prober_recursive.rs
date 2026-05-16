@@ -52,7 +52,7 @@ fn segments(
 }
 
 fn collect_paths(d: &DirSnapshot, prefix: &str, out: &mut BTreeSet<String>) {
-    for (name, child) in &d.entries {
+    for (name, child) in d.entries() {
         let composed = if prefix.is_empty() {
             name.to_string()
         } else {

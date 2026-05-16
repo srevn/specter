@@ -2670,17 +2670,14 @@ mod tests {
 
     fn empty_dir_snapshot() -> Arc<DirSnapshot> {
         Arc::new(DirSnapshot::new(
-            DirMeta {
-                mtime: UNIX_EPOCH,
-                fs_id: FsIdentity::synthetic(0, 0),
-            },
+            DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
             0,
             BTreeMap::new(),
         ))
     }
 
     fn empty_leaf_entry() -> LeafEntry {
-        LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(0, 0))
+        LeafEntry::synthetic(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(0, 0))
     }
 
     #[test]

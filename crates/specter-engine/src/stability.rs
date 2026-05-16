@@ -349,10 +349,7 @@ mod tests {
         // `transition_to_draining`).
         let mid_resource = profiles.get(p_mid).unwrap().resource;
         let stable_snapshot = Arc::new(DirSnapshot::new(
-            DirMeta {
-                mtime: UNIX_EPOCH,
-                fs_id: FsIdentity::synthetic(0, 0),
-            },
+            DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
             0,
             BTreeMap::<CompactString, ChildEntry>::new(),
         ));

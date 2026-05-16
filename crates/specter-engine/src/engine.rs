@@ -2091,7 +2091,7 @@ mod tests {
         let mut entries: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
         entries.insert(
             CompactString::from("child"),
-            ChildEntry::Leaf(LeafEntry::new(
+            ChildEntry::Leaf(LeafEntry::synthetic(
                 specter_core::EntryKind::File,
                 0,
                 UNIX_EPOCH,
@@ -2099,10 +2099,7 @@ mod tests {
             )),
         );
         let dir = DirSnapshot::new(
-            DirMeta {
-                mtime: UNIX_EPOCH,
-                fs_id: FsIdentity::synthetic(0, 0),
-            },
+            DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
             0,
             entries,
         );

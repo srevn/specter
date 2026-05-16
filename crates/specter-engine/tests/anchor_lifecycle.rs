@@ -47,7 +47,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     for (name, kind, inode) in children {
         let child = match kind {
             EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::new(
+            _ => ChildEntry::Leaf(LeafEntry::synthetic(
                 kind,
                 0,
                 UNIX_EPOCH,
@@ -57,17 +57,14 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: UNIX_EPOCH,
-            fs_id: FsIdentity::synthetic(0, 0),
-        },
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
         0,
         map,
     ))
 }
 
 fn file_leaf() -> LeafEntry {
-    LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(1, 0))
+    LeafEntry::synthetic(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(1, 0))
 }
 
 fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {

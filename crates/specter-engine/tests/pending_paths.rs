@@ -46,7 +46,7 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSna
     for (name, kind, inode) in children {
         let child = match kind {
             EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::new(
+            _ => ChildEntry::Leaf(LeafEntry::synthetic(
                 kind,
                 0,
                 UNIX_EPOCH,
@@ -56,10 +56,7 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSna
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: UNIX_EPOCH,
-            fs_id: FsIdentity::synthetic(0, 0),
-        },
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
         0,
         map,
     ))

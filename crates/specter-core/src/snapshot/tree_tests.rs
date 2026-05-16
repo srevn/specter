@@ -21,14 +21,14 @@ use std::time::{Duration, UNIX_EPOCH};
 // ---------------------------------------------------------------------------
 
 fn meta(mtime_secs: u64, inode: u64, device: u64) -> DirMeta {
-    DirMeta {
-        mtime: UNIX_EPOCH + Duration::from_secs(mtime_secs),
-        fs_id: FsIdentity::synthetic(inode, device),
-    }
+    DirMeta::synthetic(
+        UNIX_EPOCH + Duration::from_secs(mtime_secs),
+        FsIdentity::synthetic(inode, device),
+    )
 }
 
 fn leaf(kind: EntryKind, size: u64, mtime_secs: u64, inode: u64, device: u64) -> LeafEntry {
-    LeafEntry::new(
+    LeafEntry::synthetic(
         kind,
         size,
         UNIX_EPOCH + Duration::from_secs(mtime_secs),
@@ -94,9 +94,9 @@ fn ensure_chain(tree: &mut Tree, segments: &[&str]) -> Vec<ResourceId> {
 fn dir_snapshot_new_empty_well_formed() {
     let m = meta(1, 100, 1);
     let d = make_dir(m, 7, BTreeMap::new());
-    assert_eq!(d.root_meta, m);
-    assert_eq!(d.captured_with, 7);
-    assert!(d.entries.is_empty());
+    assert_eq!(d.root_meta(), m);
+    assert_eq!(d.captured_with(), 7);
+    assert!(d.entries().is_empty());
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn dir_hash_known_good_golden() {
     let mut entries = BTreeMap::new();
     entries.insert(
         name("foo.c"),
-        ChildEntry::Leaf(LeafEntry::new(
+        ChildEntry::Leaf(LeafEntry::synthetic(
             EntryKind::File,
             100,
             UNIX_EPOCH + Duration::from_secs(1),
@@ -309,10 +309,10 @@ fn dir_hash_known_good_golden() {
         )),
     );
     let d = make_dir(
-        DirMeta {
-            mtime: UNIX_EPOCH + Duration::from_secs(7),
-            fs_id: FsIdentity::synthetic(1, 99),
-        },
+        DirMeta::synthetic(
+            UNIX_EPOCH + Duration::from_secs(7),
+            FsIdentity::synthetic(1, 99),
+        ),
         13,
         entries,
     );
@@ -383,7 +383,7 @@ fn leaf_hash_distinguishes_device() {
 /// review.
 #[test]
 fn leaf_hash_known_good_golden() {
-    let l = LeafEntry::new(
+    let l = LeafEntry::synthetic(
         EntryKind::File,
         100,
         UNIX_EPOCH + Duration::from_secs(1),
@@ -395,119 +395,45 @@ fn leaf_hash_known_good_golden() {
 const GOLDEN_LEAF_HASH: u128 = 0x8b04_357b_6b61_4546_6947_f1f3_280d_d31b;
 
 // ---------------------------------------------------------------------------
-// LeafEntry::new_or_inherit
+// LeafEntry inherit-equivalence (no core unit test by design)
 //
-// Under eager construction, `new_or_inherit` is the single safe public
-// surface for the walker's per-leaf cache-transfer optimisation. The
-// inherited hash is semantically equivalent to a recomputed hash (both
-// are pure functions of the identity fields), so positive-case tests
-// pin the no-op observable behaviour and negative-case tests pin that
-// identity-mismatched baselines do not leak.
+// `from_metadata_or_inherit` reuses `baseline.leaf_hash` only on a full
+// (kind, size, mtime, fs_id) match. Every `LeafEntry` is built through
+// `from_parts` (or `synthetic`), so `leaf_hash == compute_leaf_hash(fields)`
+// holds for the baseline too — on an identity match the inherited value is
+// byte-identical to recomputation by the type invariant, not by test. The
+// `&Metadata` entry point cannot be exercised fs-free in `core`; the
+// end-to-end walker inherit path is covered in
+// `specter-sensor::prober::tests` (`cache_transfer_*`).
 // ---------------------------------------------------------------------------
 
-fn fields() -> (EntryKind, u64, std::time::SystemTime, FsIdentity) {
-    (
+// ---------------------------------------------------------------------------
+// entry_kind_from_flags — leaf-kind derivation (fs-free)
+// ---------------------------------------------------------------------------
+
+/// Pins the leaf-kind decision over its two booleans. `(false, false)`
+/// is the load-bearing case: a directory `FileType` (is_file=false,
+/// is_symlink=false) maps to `Other`, never a panic or a stray kind —
+/// fifo/socket/block/char land here too. Leaf construction is never
+/// reached for a directory (the walker routes `is_dir` dirents to
+/// `build_dir_child`), so this documents the degrade-to-Other contract;
+/// the `is_dir` arm is structurally absent (the fn cannot observe it).
+/// `is_file` dominates — a regular file via `lstat` is never also a
+/// symlink.
+#[test]
+fn entry_kind_from_flags_maps_every_shape() {
+    use super::entry_kind_from_flags;
+    assert_eq!(entry_kind_from_flags(true, false), EntryKind::File);
+    assert_eq!(entry_kind_from_flags(false, true), EntryKind::Symlink);
+    assert_eq!(
+        entry_kind_from_flags(false, false),
+        EntryKind::Other,
+        "directory / fifo / socket / block / char degrade to Other",
+    );
+    assert_eq!(
+        entry_kind_from_flags(true, true),
         EntryKind::File,
-        10,
-        UNIX_EPOCH + Duration::from_secs(1),
-        FsIdentity::synthetic(7, 0),
-    )
-}
-
-#[test]
-fn new_or_inherit_no_baseline_equals_new() {
-    let (kind, size, mtime, fs_id) = fields();
-    let fresh = LeafEntry::new(kind, size, mtime, fs_id);
-    let inherited = LeafEntry::new_or_inherit(kind, size, mtime, fs_id, None);
-    assert_eq!(fresh.leaf_hash(), inherited.leaf_hash());
-}
-
-#[test]
-fn new_or_inherit_matches_baseline_hash_on_identity_match() {
-    let (kind, size, mtime, fs_id) = fields();
-    let baseline = LeafEntry::new(kind, size, mtime, fs_id);
-    let inherited = LeafEntry::new_or_inherit(kind, size, mtime, fs_id, Some(&baseline));
-    assert_eq!(inherited.leaf_hash(), baseline.leaf_hash());
-}
-
-#[test]
-fn new_or_inherit_returns_fresh_hash_on_any_field_mismatch() {
-    // Construct a baseline whose hash genuinely differs from the fresh
-    // fields' canonical hash: each call varies exactly one field. The
-    // assertion shape is "fresh result equals `LeafEntry::new(fresh fields)`,
-    // not baseline" — the constructor must NOT inherit when identity
-    // differs, regardless of which field flipped.
-    fn assert_fresh(
-        baseline_fields: (EntryKind, u64, std::time::SystemTime, FsIdentity),
-        fresh_fields: (EntryKind, u64, std::time::SystemTime, FsIdentity),
-        label: &str,
-    ) {
-        let baseline = LeafEntry::new(
-            baseline_fields.0,
-            baseline_fields.1,
-            baseline_fields.2,
-            baseline_fields.3,
-        );
-        let fresh_canonical = LeafEntry::new(
-            fresh_fields.0,
-            fresh_fields.1,
-            fresh_fields.2,
-            fresh_fields.3,
-        );
-        let inherited = LeafEntry::new_or_inherit(
-            fresh_fields.0,
-            fresh_fields.1,
-            fresh_fields.2,
-            fresh_fields.3,
-            Some(&baseline),
-        );
-        assert_eq!(
-            inherited.leaf_hash(),
-            fresh_canonical.leaf_hash(),
-            "{label}: inherited must equal fresh canonical hash",
-        );
-        assert_ne!(
-            inherited.leaf_hash(),
-            baseline.leaf_hash(),
-            "{label}: inherited must NOT equal baseline hash",
-        );
-    }
-
-    let base = fields();
-    assert_fresh(
-        base,
-        (EntryKind::Symlink, base.1, base.2, base.3),
-        "kind mismatch",
-    );
-    assert_fresh(
-        base,
-        (base.0, base.1.wrapping_add(1), base.2, base.3),
-        "size mismatch",
-    );
-    assert_fresh(
-        base,
-        (base.0, base.1, base.2 + Duration::from_secs(1), base.3),
-        "mtime mismatch",
-    );
-    assert_fresh(
-        base,
-        (
-            base.0,
-            base.1,
-            base.2,
-            FsIdentity::synthetic(base.3.inode() + 1, base.3.device()),
-        ),
-        "inode mismatch",
-    );
-    assert_fresh(
-        base,
-        (
-            base.0,
-            base.1,
-            base.2,
-            FsIdentity::synthetic(base.3.inode(), base.3.device() + 1),
-        ),
-        "device mismatch",
+        "is_file dominates is_symlink",
     );
 }
 
@@ -723,7 +649,7 @@ fn subtree_at_one_level_deep() {
     let anchor = ids[0];
     let a = ids[1];
     let got = snap.subtree_at(anchor, a, &tree).expect("a resolves");
-    assert!(got.entries.contains_key("b"));
+    assert!(got.entries().contains_key("b"));
 }
 
 #[test]
@@ -732,7 +658,7 @@ fn subtree_at_three_levels_deep() {
     let anchor = ids[0];
     let c = ids[3];
     let got = snap.subtree_at(anchor, c, &tree).expect("c resolves");
-    assert!(got.entries.is_empty());
+    assert!(got.entries().is_empty());
 }
 
 #[test]
@@ -742,8 +668,8 @@ fn subtree_at_returns_arc_ptr_eq_with_internal_subtree() {
     let b = ids[2];
     let got = snap.subtree_at(anchor, b, &tree).expect("b resolves");
     if let TreeSnapshot::Dir(root) = &snap {
-        let internal_a = dir_subtree(root.entries.get("a").unwrap());
-        let internal_b = dir_subtree(internal_a.entries.get("b").unwrap());
+        let internal_a = dir_subtree(root.entries().get("a").unwrap());
+        let internal_b = dir_subtree(internal_a.entries().get("b").unwrap());
         assert!(Arc::ptr_eq(&got, internal_b));
     } else {
         panic!("expected Dir snapshot");
@@ -930,7 +856,7 @@ fn splice_one_level_deep_off_path_arc_ptr_eq() {
     let TreeSnapshot::Dir(new_root) = s else {
         panic!()
     };
-    let off_path_after = dir_subtree(new_root.entries.get("off_path").unwrap());
+    let off_path_after = dir_subtree(new_root.entries().get("off_path").unwrap());
     assert!(
         Arc::ptr_eq(off_path_after, &off_path),
         "off-path sibling Arc preserved",
@@ -974,13 +900,13 @@ fn splice_three_levels_deep_off_path_arc_ptr_eq() {
     let TreeSnapshot::Dir(new_root) = s else {
         panic!()
     };
-    let top_sib_after = dir_subtree(new_root.entries.get("top_sib").unwrap());
+    let top_sib_after = dir_subtree(new_root.entries().get("top_sib").unwrap());
     assert!(
         Arc::ptr_eq(top_sib_after, &top_sib),
         "top-level sibling Arc preserved",
     );
-    let new_a = dir_subtree(new_root.entries.get("a").unwrap());
-    let mid_sib_after = dir_subtree(new_a.entries.get("mid_sib").unwrap());
+    let new_a = dir_subtree(new_root.entries().get("a").unwrap());
+    let mid_sib_after = dir_subtree(new_a.entries().get("mid_sib").unwrap());
     assert!(
         Arc::ptr_eq(mid_sib_after, &mid_sib),
         "mid-level sibling Arc preserved",
@@ -2290,7 +2216,7 @@ proptest! {
         let SpliceResult::Spliced(TreeSnapshot::Dir(new_root)) = s else { unreachable!() };
         for (i, sib) in siblings.iter().enumerate() {
             let key = format!("sib_{i}");
-            let after = dir_subtree(new_root.entries.get(key.as_str()).unwrap());
+            let after = dir_subtree(new_root.entries().get(key.as_str()).unwrap());
             prop_assert!(Arc::ptr_eq(after, sib));
         }
     }

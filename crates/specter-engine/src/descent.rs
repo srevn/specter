@@ -349,7 +349,7 @@ impl crate::Engine {
         // Descent probes ship `recursive=false`, so the response is a
         // single-level Dir snapshot — look up the next segment by name in
         // the BTreeMap directly.
-        let entry_kind = match snapshot.entries.get(next_segment.as_str()) {
+        let entry_kind = match snapshot.entries().get(next_segment.as_str()) {
             Some(child) => child.kind(),
             None => {
                 // Next segment not yet present; await next event. v1

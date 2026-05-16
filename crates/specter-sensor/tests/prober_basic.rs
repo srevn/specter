@@ -70,8 +70,8 @@ fn anchor_file_round_trip_emits_anchor_ok_with_leaf() {
     let ProbeOutcome::AnchorOk(leaf) = resp.outcome else {
         panic!("expected AnchorOk, got {:?}", resp.outcome);
     };
-    assert_eq!(leaf.kind, EntryKind::File);
-    assert_eq!(leaf.size, 5);
+    assert_eq!(leaf.kind(), EntryKind::File);
+    assert_eq!(leaf.size(), 5);
 
     let _ = prober.shutdown();
 }
@@ -95,7 +95,7 @@ fn subtree_round_trip_emits_subtree_ok_with_children() {
         panic!("expected SubtreeOk");
     };
     let names: Vec<&str> = arc
-        .entries
+        .entries()
         .keys()
         .map(compact_str::CompactString::as_str)
         .collect();
@@ -104,7 +104,7 @@ fn subtree_round_trip_emits_subtree_ok_with_children() {
     let sub_arc = arc
         .lookup_covered_dir("sub")
         .expect("recursive subtree present");
-    assert!(sub_arc.entries.contains_key("b.c"));
+    assert!(sub_arc.entries().contains_key("b.c"));
 
     let _ = prober.shutdown();
 }

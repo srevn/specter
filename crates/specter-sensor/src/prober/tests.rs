@@ -69,7 +69,7 @@ fn segments(outcome: &ProbeOutcome) -> Vec<String> {
 }
 
 fn collect_paths(d: &DirSnapshot, prefix: &str, out: &mut Vec<String>) {
-    for (name, child) in &d.entries {
+    for (name, child) in d.entries() {
         let composed = if prefix.is_empty() {
             name.to_string()
         } else {
@@ -94,8 +94,8 @@ fn probe_anchor_file_returns_leaf_for_regular_file() {
     let ProbeOutcome::AnchorOk(leaf) = outcome else {
         panic!("expected AnchorOk, got {outcome:?}");
     };
-    assert_eq!(leaf.kind, EntryKind::File);
-    assert_eq!(leaf.size, 5);
+    assert_eq!(leaf.kind(), EntryKind::File);
+    assert_eq!(leaf.size(), 5);
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn probe_subtree_empty_dir_returns_zero_entries() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("expected Ok(Dir)");
     };
-    assert!(arc.entries.is_empty());
+    assert!(arc.entries().is_empty());
 }
 
 #[test]
@@ -354,11 +354,11 @@ fn probe_subtree_emits_symlink_entry_kind() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("expected Ok(Dir)");
     };
-    let link_entry = arc.entries.get("link").expect("link entry");
+    let link_entry = arc.entries().get("link").expect("link entry");
     let ChildEntry::Leaf(l) = link_entry else {
         panic!("symlink emits as Leaf");
     };
-    assert_eq!(l.kind, EntryKind::Symlink);
+    assert_eq!(l.kind(), EntryKind::Symlink);
 }
 
 #[test]
@@ -417,7 +417,7 @@ fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
         panic!("expected SubtreeOk, got {result:?}");
     };
     let forbidden_entry = arc
-        .entries
+        .entries()
         .get("forbidden")
         .expect("forbidden entry present in parent map");
     let ChildEntry::Dir(dc) = forbidden_entry else {
@@ -432,9 +432,9 @@ fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
         ),
     };
     assert!(
-        sub.entries.is_empty(),
+        sub.entries().is_empty(),
         "EACCES read_dir produces an empty entries map; got {} entries",
-        sub.entries.len(),
+        sub.entries().len(),
     );
 }
 
@@ -465,7 +465,7 @@ fn probe_subtree_recursive_false_emits_uncovered_at_depth_one_dir_child() {
     let ProbeOutcome::SubtreeOk(arc) = psub(tmp.path(), &cfg) else {
         panic!("expected SubtreeOk");
     };
-    let ChildEntry::Dir(dc) = arc.entries.get("sub").expect("sub entry") else {
+    let ChildEntry::Dir(dc) = arc.entries().get("sub").expect("sub entry") else {
         panic!("sub must be a Dir entry");
     };
     assert!(
@@ -494,7 +494,7 @@ fn probe_subtree_max_depth_emits_uncovered_at_boundary() {
     let a_sub = arc
         .lookup_covered_dir("a")
         .expect("a must be Covered — its depth-1 gate `0+1 < 2` is true");
-    let ChildEntry::Dir(dc) = a_sub.entries.get("b").expect("b entry") else {
+    let ChildEntry::Dir(dc) = a_sub.entries().get("b").expect("b entry") else {
         panic!("b must be a Dir entry");
     };
     assert!(
@@ -508,7 +508,7 @@ fn probe_subtree_max_depth_emits_uncovered_at_boundary() {
 // ---------------------------------------------------------------- walk: mtime-skip
 //
 // The mtime-skip path: equal `(mtime, inode, device)` between
-// `baseline.root_meta` and the freshly `lstat`ed directory ⇒ return
+// `baseline.root_meta()` and the freshly `lstat`ed directory ⇒ return
 // `Arc::clone(baseline)`. These tests pin the exact-match success case
 // and each defeat case.
 
@@ -553,12 +553,9 @@ fn mtime_skip_does_not_match_when_mtime_differs() {
     };
     // Forge a baseline with a different mtime; walker enumerates fresh.
     let forged = Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: std::time::UNIX_EPOCH,
-            ..baseline.root_meta
-        },
-        baseline.captured_with,
-        baseline.entries.clone(),
+        DirMeta::synthetic(std::time::UNIX_EPOCH, baseline.root_meta().fs_id()),
+        baseline.captured_with(),
+        baseline.entries().clone(),
     ));
     let result = probe_subtree(tmp.path(), &cfg, 0, Some(&forged), &BTreeSet::new(), false);
     let ProbeOutcome::SubtreeOk(arc2) = result else {
@@ -580,15 +577,15 @@ fn mtime_skip_does_not_match_when_inode_differs() {
         panic!("first probe failed");
     };
     let forged = Arc::new(DirSnapshot::new(
-        DirMeta {
-            fs_id: FsIdentity::synthetic(
-                baseline.root_meta.fs_id.inode().wrapping_add(1),
-                baseline.root_meta.fs_id.device(),
+        DirMeta::synthetic(
+            baseline.root_meta().mtime(),
+            FsIdentity::synthetic(
+                baseline.root_meta().fs_id().inode().wrapping_add(1),
+                baseline.root_meta().fs_id().device(),
             ),
-            ..baseline.root_meta
-        },
-        baseline.captured_with,
-        baseline.entries.clone(),
+        ),
+        baseline.captured_with(),
+        baseline.entries().clone(),
     ));
     let result = probe_subtree(tmp.path(), &cfg, 0, Some(&forged), &BTreeSet::new(), false);
     let ProbeOutcome::SubtreeOk(arc2) = result else {
@@ -607,15 +604,15 @@ fn mtime_skip_does_not_match_when_device_differs() {
         panic!("first probe failed");
     };
     let forged = Arc::new(DirSnapshot::new(
-        DirMeta {
-            fs_id: FsIdentity::synthetic(
-                baseline.root_meta.fs_id.inode(),
-                baseline.root_meta.fs_id.device().wrapping_add(1),
+        DirMeta::synthetic(
+            baseline.root_meta().mtime(),
+            FsIdentity::synthetic(
+                baseline.root_meta().fs_id().inode(),
+                baseline.root_meta().fs_id().device().wrapping_add(1),
             ),
-            ..baseline.root_meta
-        },
-        baseline.captured_with,
-        baseline.entries.clone(),
+        ),
+        baseline.captured_with(),
+        baseline.entries().clone(),
     ));
     let result = probe_subtree(tmp.path(), &cfg, 0, Some(&forged), &BTreeSet::new(), false);
     let ProbeOutcome::SubtreeOk(arc2) = result else {
@@ -850,33 +847,30 @@ fn forced_false_default_path_unaffected() {
 
 /// Forge a baseline whose `a.c` entry has the contents `leaf_override`
 /// (defaulting to a leaf with the same identity as the disk file).
-/// `root_meta.mtime` is set to `UNIX_EPOCH` to defeat the walker's
+/// `root_meta`'s mtime is set to `UNIX_EPOCH` to defeat the walker's
 /// top-level mtime-skip, forcing the per-child cache-transfer path to
 /// run.
 fn baseline_at_unix_epoch(
     real: &Arc<DirSnapshot>,
     leaf_override: Option<LeafEntry>,
 ) -> Arc<DirSnapshot> {
-    let real_leaf = match real.entries.get("a.c").expect("fixture has a.c") {
+    let real_leaf = match real.entries().get("a.c").expect("fixture has a.c") {
         ChildEntry::Leaf(l) => l.clone(),
         ChildEntry::Dir(_) => panic!("a.c expected to be a leaf"),
     };
     let overlay = leaf_override.unwrap_or_else(|| {
-        LeafEntry::new(
-            real_leaf.kind,
-            real_leaf.size,
-            real_leaf.mtime,
-            real_leaf.fs_id,
+        LeafEntry::synthetic(
+            real_leaf.kind(),
+            real_leaf.size(),
+            real_leaf.mtime(),
+            real_leaf.fs_id(),
         )
     });
-    let mut entries = real.entries.clone();
+    let mut entries = real.entries().clone();
     entries.insert(CompactString::new("a.c"), ChildEntry::Leaf(overlay));
     Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: std::time::UNIX_EPOCH,
-            ..real.root_meta
-        },
-        real.captured_with,
+        DirMeta::synthetic(std::time::UNIX_EPOCH, real.root_meta().fs_id()),
+        real.captured_with(),
         entries,
     ))
 }
@@ -890,7 +884,7 @@ fn cache_transfer_matches_baseline_hash_on_identity_match() {
     let ProbeOutcome::SubtreeOk(real) = first else {
         panic!("first probe failed");
     };
-    let baseline_leaf_hash = match real.entries.get("a.c").unwrap() {
+    let baseline_leaf_hash = match real.entries().get("a.c").unwrap() {
         ChildEntry::Leaf(l) => l.leaf_hash(),
         ChildEntry::Dir(_) => panic!(),
     };
@@ -907,7 +901,7 @@ fn cache_transfer_matches_baseline_hash_on_identity_match() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("re-probe failed");
     };
-    let fresh = match arc.entries.get("a.c").unwrap() {
+    let fresh = match arc.entries().get("a.c").unwrap() {
         ChildEntry::Leaf(l) => l,
         ChildEntry::Dir(_) => panic!(),
     };
@@ -927,7 +921,7 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
     let ProbeOutcome::SubtreeOk(real) = first else {
         panic!("first probe failed");
     };
-    let real_leaf = match real.entries.get("a.c").unwrap() {
+    let real_leaf = match real.entries().get("a.c").unwrap() {
         ChildEntry::Leaf(l) => l.clone(),
         ChildEntry::Dir(_) => panic!(),
     };
@@ -937,11 +931,11 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
     // — the freshly-stat'd leaf must report its true (real-fields)
     // hash, equal to `real_leaf.leaf_hash()` and unequal to the
     // mismatched baseline's hash.
-    let mismatch = LeafEntry::new(
-        real_leaf.kind,
-        real_leaf.size.wrapping_add(1),
-        real_leaf.mtime,
-        real_leaf.fs_id,
+    let mismatch = LeafEntry::synthetic(
+        real_leaf.kind(),
+        real_leaf.size().wrapping_add(1),
+        real_leaf.mtime(),
+        real_leaf.fs_id(),
     );
     let mismatch_hash = mismatch.leaf_hash();
     let baseline = baseline_at_unix_epoch(&real, Some(mismatch));
@@ -957,7 +951,7 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("re-probe failed");
     };
-    let fresh = match arc.entries.get("a.c").unwrap() {
+    let fresh = match arc.entries().get("a.c").unwrap() {
         ChildEntry::Leaf(l) => l,
         ChildEntry::Dir(_) => panic!(),
     };
@@ -987,41 +981,35 @@ fn cache_transfer_threads_through_recursion() {
         panic!("first probe failed");
     };
     let real_sub = Arc::clone(real.lookup_covered_dir("sub").unwrap());
-    let real_leaf = match real_sub.entries.get("file.c").unwrap() {
+    let real_leaf = match real_sub.entries().get("file.c").unwrap() {
         ChildEntry::Leaf(l) => l.clone(),
         ChildEntry::Dir(_) => panic!(),
     };
     let baseline_leaf_hash = real_leaf.leaf_hash();
 
-    let mut sub_entries = real_sub.entries.clone();
+    let mut sub_entries = real_sub.entries().clone();
     sub_entries.insert(
         CompactString::new("file.c"),
-        ChildEntry::Leaf(LeafEntry::new(
-            real_leaf.kind,
-            real_leaf.size,
-            real_leaf.mtime,
-            real_leaf.fs_id,
+        ChildEntry::Leaf(LeafEntry::synthetic(
+            real_leaf.kind(),
+            real_leaf.size(),
+            real_leaf.mtime(),
+            real_leaf.fs_id(),
         )),
     );
     let baseline_sub = Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: std::time::UNIX_EPOCH,
-            ..real_sub.root_meta
-        },
-        real_sub.captured_with,
+        DirMeta::synthetic(std::time::UNIX_EPOCH, real_sub.root_meta().fs_id()),
+        real_sub.captured_with(),
         sub_entries,
     ));
-    let mut root_entries = real.entries.clone();
+    let mut root_entries = real.entries().clone();
     root_entries.insert(
         CompactString::new("sub"),
         ChildEntry::Dir(DirChild::Covered(Arc::clone(&baseline_sub))),
     );
     let baseline = Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: std::time::UNIX_EPOCH,
-            ..real.root_meta
-        },
-        real.captured_with,
+        DirMeta::synthetic(std::time::UNIX_EPOCH, real.root_meta().fs_id()),
+        real.captured_with(),
         root_entries,
     ));
 
@@ -1037,7 +1025,7 @@ fn cache_transfer_threads_through_recursion() {
         panic!("re-probe failed");
     };
     let new_sub = top.lookup_covered_dir("sub").unwrap().as_ref();
-    let fresh = match new_sub.entries.get("file.c").unwrap() {
+    let fresh = match new_sub.entries().get("file.c").unwrap() {
         ChildEntry::Leaf(l) => l,
         ChildEntry::Dir(_) => panic!(),
     };
@@ -1061,8 +1049,8 @@ fn dir_snapshot_root_meta_carries_lstat_triple() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("expected Ok(Dir)");
     };
-    assert_eq!(arc.root_meta.fs_id.inode(), raw.ino());
-    assert_eq!(arc.root_meta.fs_id.device(), raw.dev());
+    assert_eq!(arc.root_meta().fs_id().inode(), raw.ino());
+    assert_eq!(arc.root_meta().fs_id().device(), raw.dev());
 }
 
 #[test]
@@ -1075,7 +1063,7 @@ fn dir_snapshot_captured_with_carries_request_value() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
-    assert_eq!(arc.captured_with, STAMP);
+    assert_eq!(arc.captured_with(), STAMP);
 }
 
 #[test]
@@ -1092,7 +1080,7 @@ fn dir_snapshot_uncovered_branches_have_subtree_none() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
-    match arc.entries.get("sub").unwrap() {
+    match arc.entries().get("sub").unwrap() {
         ChildEntry::Dir(dc) => {
             assert!(
                 matches!(dc, DirChild::Uncovered(_)),
@@ -1115,8 +1103,8 @@ fn dir_snapshot_pattern_filtered_files_absent() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
-    assert!(arc.entries.contains_key("main.c"));
-    assert!(!arc.entries.contains_key("foo.txt"));
+    assert!(arc.entries().contains_key("main.c"));
+    assert!(!arc.entries().contains_key("foo.txt"));
 }
 
 #[test]
@@ -1133,13 +1121,13 @@ fn dir_snapshot_excluded_paths_absent() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!();
     };
-    assert!(arc.entries.contains_key("main.c"));
+    assert!(arc.entries().contains_key("main.c"));
     // `target/foo` excluded; `target` itself depends on glob semantics —
     // `target/**` matches paths under target, so `target` itself is in
     // (the prober_recursive integration test pins the same).
-    let target_present = arc.entries.contains_key("target");
-    let target_uncov = match arc.entries.get("target") {
-        Some(ChildEntry::Dir(DirChild::Covered(s))) => s.entries.is_empty(),
+    let target_present = arc.entries().contains_key("target");
+    let target_uncov = match arc.entries().get("target") {
+        Some(ChildEntry::Dir(DirChild::Covered(s))) => s.entries().is_empty(),
         Some(ChildEntry::Dir(DirChild::Uncovered(_))) => true,
         _ => true,
     };
@@ -1165,7 +1153,7 @@ fn entries_are_lex_sorted_by_btreemap() {
         panic!();
     };
     let names: Vec<&str> = arc
-        .entries
+        .entries()
         .keys()
         .map(compact_str::CompactString::as_str)
         .collect();
@@ -1242,8 +1230,8 @@ fn run_probe_dispatches_descent_to_probe_descent() {
         panic!("expected SubtreeOk, got {outcome:?}");
     };
     // Descent enumerates one level — both children appear directly.
-    assert!(arc.entries.contains_key("alpha"));
-    assert!(arc.entries.contains_key("beta"));
+    assert!(arc.entries().contains_key("alpha"));
+    assert!(arc.entries().contains_key("beta"));
 }
 
 #[test]
@@ -1261,9 +1249,9 @@ fn probe_descent_uses_hardcoded_override_config() {
     let ProbeOutcome::SubtreeOk(arc) = outcome else {
         panic!("expected SubtreeOk, got {outcome:?}");
     };
-    assert!(arc.entries.contains_key(".hidden"));
-    assert!(arc.entries.contains_key("foo.tmp"));
-    assert!(arc.entries.contains_key("main.c"));
+    assert!(arc.entries().contains_key(".hidden"));
+    assert!(arc.entries().contains_key("foo.tmp"));
+    assert!(arc.entries().contains_key("main.c"));
 }
 
 // ---------------------------------------------------------------- pool: run_worker

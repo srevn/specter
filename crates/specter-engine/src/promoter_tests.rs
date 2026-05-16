@@ -78,7 +78,7 @@ fn dir_snap_at(children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
     for (name, kind, inode) in children.iter().copied() {
         let child = match kind {
             EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::new(
+            _ => ChildEntry::Leaf(LeafEntry::synthetic(
                 kind,
                 0,
                 UNIX_EPOCH,
@@ -88,10 +88,7 @@ fn dir_snap_at(children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: UNIX_EPOCH,
-            fs_id: FsIdentity::synthetic(0, 0),
-        },
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
         0,
         map,
     ))

@@ -43,15 +43,13 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, LeafEntry, ProbeOutcome,
-    ScanConfig,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ProbeOutcome, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 /// Recursion-invariant inputs shared across every frame of one subtree
 /// probe. Built once at probe entry ([`probe_subtree`]) from the
@@ -138,7 +136,7 @@ impl WalkContext<'_> {
             return None;
         }
         let prior = baseline?;
-        if prior.root_meta != *root_meta {
+        if prior.root_meta() != *root_meta {
             return None;
         }
         Some(Arc::clone(prior))
@@ -184,12 +182,9 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
     if !meta.is_file() {
         return ProbeOutcome::Vanished;
     }
-    let leaf = LeafEntry::new(
-        EntryKind::File,
-        meta.len(),
-        meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        FsIdentity::from_metadata(&meta),
-    );
+    // The `is_file` guard above upholds `from_metadata`'s non-directory
+    // precondition; `entry_kind_from_file_type` resolves it to `File`.
+    let leaf = LeafEntry::from_metadata(&meta);
     ProbeOutcome::AnchorOk(leaf)
 }
 
@@ -241,17 +236,14 @@ pub(super) fn probe_subtree(
     if !root_meta_raw.is_dir() {
         return ProbeOutcome::Vanished;
     }
-    let root_meta = DirMeta {
-        mtime: root_meta_raw.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        fs_id: FsIdentity::from_metadata(&root_meta_raw),
-    };
+    let root_meta = DirMeta::from_metadata(&root_meta_raw);
     let ctx = WalkContext {
         anchor_path: target_path,
         config,
         force_walk,
         forced,
         captured_with,
-        root_dev: root_meta.fs_id.device(),
+        root_dev: root_meta.fs_id().device(),
     };
     let arc = snapshot_dir(&ctx, target_path, root_meta, baseline, 0);
     ProbeOutcome::SubtreeOk(arc)
@@ -378,8 +370,7 @@ fn enumerate_dir(
         let Ok(cmeta) = std::fs::symlink_metadata(&child_path) else {
             continue;
         };
-        let file_type = cmeta.file_type();
-        let is_dir = file_type.is_dir();
+        let is_dir = cmeta.file_type().is_dir();
 
         // Pattern semantics: directories are always covered (we descend
         // through them); files (and symlinks/other) are gated by the
@@ -395,7 +386,7 @@ fn enumerate_dir(
         let child_entry = if is_dir {
             build_dir_child(ctx, &child_path, baseline, depth, &cmeta, name_str)
         } else {
-            build_leaf_child(&cmeta, file_type, name_str, baseline)
+            build_leaf_child(&cmeta, name_str, baseline)
         };
 
         entries.insert(key, child_entry);
@@ -430,16 +421,11 @@ fn build_dir_child(
         // Walker stores the entry but does not recurse.
         return ChildEntry::Dir(DirChild::Uncovered(fs_id));
     }
-    // Reuse the caller-held `cmeta` to build the subdir's `root_meta`
-    // — a second `symlink_metadata(child_path)` here would be redundant
-    // in the happy path and the entire race surface in the unhappy path
-    // (cmeta says is_dir; concurrent unlink / kind-flip / parent-x-revoke
-    // could make the second lstat disagree). Threading `root_meta`
-    // through closes the gap.
-    let root_meta = DirMeta {
-        mtime: cmeta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        fs_id,
-    };
+    // Build the subdir's DirMeta from the caller-held `cmeta`: a second
+    // `symlink_metadata(child_path)` would be redundant in the happy
+    // path and a race surface in the unhappy one (concurrent unlink /
+    // kind-flip could make it disagree with the is_dir just checked).
+    let root_meta = DirMeta::from_metadata(cmeta);
     // Pull the child's prior subtree from baseline so mtime-skip composes
     // recursively. BTreeMap key match by string segment is the snapshot's
     // native lookup; `lookup_covered_dir` collapses the "Dir entry + covered"
@@ -452,29 +438,19 @@ fn build_dir_child(
 /// Build a `ChildEntry::Leaf` for one non-directory dirent. Inherits
 /// the baseline leaf's `leaf_hash` when the prior entry's identity
 /// matches — re-enumeration of an unchanged leaf elides the SipHash24
-/// fold the walker would otherwise pay at construction. Identity
-/// mismatch falls back to fresh `LeafEntry::new`, which computes the
-/// real hash from the freshly-`lstat`ed fields.
+/// fold the walker would otherwise pay. Identity mismatch recomputes
+/// the hash from the freshly-`lstat`ed fields. Kind, size, mtime, and
+/// `fs_id` all derive from the one `cmeta`, so the leaf is atomic by
+/// construction.
+///
+/// The caller's `is_dir` dispatch in [`enumerate_dir`] upholds
+/// `LeafEntry::from_metadata`'s non-directory precondition (dirents
+/// with `is_dir` route to [`build_dir_child`], never here).
 fn build_leaf_child(
     cmeta: &std::fs::Metadata,
-    file_type: std::fs::FileType,
     name: &str,
     baseline: Option<&DirSnapshot>,
 ) -> ChildEntry {
-    let kind = if file_type.is_file() {
-        EntryKind::File
-    } else if file_type.is_symlink() {
-        EntryKind::Symlink
-    } else {
-        EntryKind::Other
-    };
     let baseline_leaf = baseline.and_then(|b| b.lookup_leaf(name));
-    let leaf = LeafEntry::new_or_inherit(
-        kind,
-        cmeta.len(),
-        cmeta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        FsIdentity::from_metadata(cmeta),
-        baseline_leaf,
-    );
-    ChildEntry::Leaf(leaf)
+    ChildEntry::Leaf(LeafEntry::from_metadata_or_inherit(cmeta, baseline_leaf))
 }

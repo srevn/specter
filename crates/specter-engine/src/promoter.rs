@@ -779,7 +779,7 @@ impl Engine {
         let next_component = &components[pattern_component_index];
         match next_component {
             PatternComponent::Literal(lit) => {
-                if let Some((name, child)) = snapshot.entries.get_key_value(lit.as_str()) {
+                if let Some((name, child)) = snapshot.entries().get_key_value(lit.as_str()) {
                     let name_str: &str = name.as_str();
                     let child_kind = child.kind();
                     if is_final {
@@ -841,7 +841,7 @@ impl Engine {
                 }
             }
             PatternComponent::Glob(g) => {
-                for (name, child) in &snapshot.entries {
+                for (name, child) in snapshot.entries() {
                     let name_str: &str = name.as_str();
                     if !g.matches_path(Path::new(name_str)) {
                         continue;
@@ -896,8 +896,11 @@ impl Engine {
         // "iterate Promoter.proxies" with "walk the Tree's right side
         // of the join via `proxy_promoters` back-ref"). Deeper proxies
         // cascade through the BFS inside `unregister_proxy_subtree`.
-        let snapshot_names: BTreeSet<&str> =
-            snapshot.entries.keys().map(CompactString::as_str).collect();
+        let snapshot_names: BTreeSet<&str> = snapshot
+            .entries()
+            .keys()
+            .map(CompactString::as_str)
+            .collect();
         let stale: Vec<ResourceId> = self
             .tree
             .children_ids(target)

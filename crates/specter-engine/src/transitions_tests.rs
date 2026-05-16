@@ -103,7 +103,7 @@ fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     for (name, kind, inode) in children {
         let child = match kind {
             EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::new(
+            _ => ChildEntry::Leaf(LeafEntry::synthetic(
                 kind,
                 0,
                 UNIX_EPOCH,
@@ -113,10 +113,7 @@ fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
         map.insert(CompactString::new(name), child);
     }
     Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: UNIX_EPOCH,
-            fs_id: FsIdentity::synthetic(0, 0),
-        },
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
         0,
         map,
     ))
@@ -127,7 +124,7 @@ fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
 /// the engine-internal `Profile.current`, not the wire response.
 #[allow(dead_code)]
 fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> LeafEntry {
-    LeafEntry::new(kind, size, mtime, FsIdentity::synthetic(inode, 0))
+    LeafEntry::synthetic(kind, size, mtime, FsIdentity::synthetic(inode, 0))
 }
 
 /// Drive the Profile from fresh-attach through Seed-Ok → Idle (post-Seed
@@ -1131,7 +1128,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         Some(TreeSnapshot::File(_)) => {} // navigation invariant preserved
         Some(TreeSnapshot::Dir(arc)) => panic!(
             "Profile.current corrupted to Dir(root_meta={:?}); expected File(leaf)",
-            arc.root_meta,
+            arc.root_meta(),
         ),
         None => panic!("Profile.current must be Some(File(leaf)) post-Standard"),
     }

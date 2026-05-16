@@ -103,10 +103,75 @@ use std::time::SystemTime;
 /// directory was unlinked and recreated at the same path between probes
 /// (the recreation gets a fresh inode under POSIX semantics — same name,
 /// different identity).
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+///
+/// ## Atomicity invariant
+///
+/// `mtime` and `fs_id` are meaningful only as the pair read from a
+/// *single* `lstat`: across two `lstat`s the kernel can bump the mtime
+/// and recycle the inode independently, so a torn `(mtime, fs_id)`
+/// assembled from separate observations names no coherent directory
+/// state. The fields are private and the sole production constructor,
+/// [`DirMeta::from_metadata`], reads both halves from one `&Metadata`.
+/// The pair feeds both `compute_dir_hash` (via `fs_id`) and the
+/// walker's whole-`DirMeta` mtime-skip compare, so a torn pair is
+/// correctness-adjacent, not hygiene — the invariant is discharged by
+/// the type, not by caller convention.
+///
+/// `Ord`/`PartialOrd` are intentionally absent: nothing orders
+/// `DirMeta` (the `pair_renames` index keys on `FsIdentity`). `Eq`/
+/// `PartialEq` are load-bearing — the walker's mtime-skip compares the
+/// whole pair and [`DirSnapshot`]'s derived `PartialEq` composes it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DirMeta {
-    pub mtime: SystemTime,
-    pub fs_id: FsIdentity,
+    mtime: SystemTime,
+    fs_id: FsIdentity,
+}
+
+impl DirMeta {
+    /// Construct from a single freshly-`lstat`ed `Metadata`.
+    ///
+    /// Both halves are read here, inside the constructor, from the
+    /// *same* `&Metadata` — this is what discharges the atomicity
+    /// invariant at the type boundary. `Metadata::modified` and
+    /// `MetadataExt::ino`/`dev` read fields the sensor's `lstat`
+    /// already populated; they are *not* syscalls, so this stays
+    /// consistent with `core`'s no-I/O discipline (I1).
+    ///
+    /// The `UNIX_EPOCH` mtime fallback (platform without a usable
+    /// modified-time) is centralised here — the single production
+    /// source of a `DirMeta` mtime, so the sentinel cannot vary
+    /// across walker call sites.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        Self {
+            mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            fs_id: FsIdentity::from_metadata(meta),
+        }
+    }
+
+    /// The directory mtime observed at `lstat` time — the walker's
+    /// mtime-skip key.
+    #[must_use]
+    pub const fn mtime(self) -> SystemTime {
+        self.mtime
+    }
+
+    /// The directory's kernel identity observed at `lstat` time.
+    #[must_use]
+    pub const fn fs_id(self) -> FsIdentity {
+        self.fs_id
+    }
+
+    /// Test-only constructor from explicit halves, bypassing the
+    /// single-`lstat` provenance [`DirMeta::from_metadata`] enforces.
+    /// Compiled only under `cfg(test)` or the `testkit` feature,
+    /// mirroring [`FsIdentity::synthetic`].
+    #[cfg(any(test, feature = "testkit"))]
+    #[must_use]
+    pub const fn synthetic(mtime: SystemTime, fs_id: FsIdentity) -> Self {
+        Self { mtime, fs_id }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -115,57 +180,81 @@ pub struct DirMeta {
 
 /// Direct child that is *not* a directory: file, symlink, or other.
 ///
-/// `leaf_hash` is the 128-bit fingerprint of `(kind, size, mtime, fs_id)`
-/// — see [`LeafEntry::leaf_hash`]. Computed eagerly in the constructor
-/// from the identity fields; stored as a plain field, so `Clone` /
-/// `PartialEq` / `Debug` auto-derive correctly (the hash is a pure
-/// function of the data, so deriving on it is equivalent to deriving on
-/// the four identity fields alone).
+/// `leaf_hash` is the 128-bit fingerprint of `(kind, size, mtime,
+/// fs_id)` — see [`LeafEntry::leaf_hash`]. All five fields are private:
+/// every production leaf is built from one `&Metadata` via
+/// [`LeafEntry::from_metadata`] / [`LeafEntry::from_metadata_or_inherit`],
+/// so the four identity fields are atomic (one `lstat`) and `leaf_hash
+/// == compute_leaf_hash(fields)` holds by construction. `Clone` /
+/// `PartialEq` / `Debug` auto-derive correctly because the hash is a
+/// pure function of the data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeafEntry {
-    pub kind: EntryKind,
-    pub size: u64,
-    pub mtime: SystemTime,
-    pub fs_id: FsIdentity,
+    kind: EntryKind,
+    size: u64,
+    mtime: SystemTime,
+    fs_id: FsIdentity,
     leaf_hash: u128,
 }
 
 impl LeafEntry {
-    /// Construct from the four identity fields, computing `leaf_hash`
-    /// eagerly. The hash is a pure function of the inputs — call this
-    /// when no baseline is available.
-    #[must_use]
-    pub fn new(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> Self {
-        let leaf_hash = compute_leaf_hash(kind, size, mtime, fs_id);
+    /// The single hash-computing constructor: every leaf whose hash is
+    /// *computed* (rather than inherited) routes through here, so the
+    /// eager-hash invariant `leaf_hash == compute_leaf_hash(fields)`
+    /// has exactly one production enforcement point. Private — callers
+    /// reach it via `from_metadata` / `synthetic`.
+    fn from_parts(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> Self {
         Self {
             kind,
             size,
             mtime,
             fs_id,
-            leaf_hash,
+            leaf_hash: compute_leaf_hash(kind, size, mtime, fs_id),
         }
     }
 
-    /// Construct from the four identity fields, inheriting `baseline`'s
-    /// `leaf_hash` iff every identity field matches. Otherwise falls
-    /// back to [`Self::new`] — equivalent observable behaviour, since
-    /// the inherited value equals what fresh computation would produce.
+    /// Construct from a single freshly-`lstat`ed `Metadata`, computing
+    /// `leaf_hash` eagerly. `kind` is derived from `meta.file_type()`
+    /// (file → `File`, symlink → `Symlink`, else → `Other`).
     ///
-    /// The inheritance is a pure walker-thread optimisation: when a
-    /// directory's mtime bumps because of a sibling change but a child
-    /// leaf is observably unchanged, the prior leaf's hash flows
-    /// through without paying the SipHash24 fold. The identity-match
-    /// gate at the constructor makes "transferring the wrong hash"
-    /// unrepresentable — there is no public surface that can install a
-    /// hash that disagrees with the identity fields.
+    /// **Precondition:** `meta` is *not* a directory. There is no
+    /// `is_dir` arm — a directory `FileType` would degrade to
+    /// `EntryKind::Other`. Leaf construction is never reached for a
+    /// directory by the walker's dispatch (`enumerate_dir` routes
+    /// `is_dir` dirents to `build_dir_child`); the precondition holds
+    /// by caller contract and is not re-checked here.
+    ///
+    /// `Metadata` field reads are not syscalls — consistent with
+    /// `core`'s no-I/O discipline (I1).
+    #[cfg(unix)]
     #[must_use]
-    pub fn new_or_inherit(
-        kind: EntryKind,
-        size: u64,
-        mtime: SystemTime,
-        fs_id: FsIdentity,
-        baseline: Option<&Self>,
-    ) -> Self {
+    pub fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        Self::from_parts(
+            entry_kind_from_file_type(meta.file_type()),
+            meta.len(),
+            meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            FsIdentity::from_metadata(meta),
+        )
+    }
+
+    /// As [`LeafEntry::from_metadata`], but inherits `baseline`'s
+    /// `leaf_hash` iff every identity field matches — eliding one
+    /// SipHash24 fold per unchanged leaf in a dirent-bumped directory.
+    /// Observably equivalent to recomputation: `baseline` was itself
+    /// built through `from_parts` (or `synthetic`), so on a full
+    /// identity match `baseline.leaf_hash == compute_leaf_hash(kind,
+    /// size, mtime, fs_id)` already — the inherited value *is* the
+    /// recomputed one. This is the single deliberate bypass of
+    /// `from_parts`; the identity gate makes "transferring the wrong
+    /// hash" unrepresentable. Same non-directory precondition as
+    /// [`LeafEntry::from_metadata`].
+    #[cfg(unix)]
+    #[must_use]
+    pub fn from_metadata_or_inherit(meta: &std::fs::Metadata, baseline: Option<&Self>) -> Self {
+        let kind = entry_kind_from_file_type(meta.file_type());
+        let size = meta.len();
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let fs_id = FsIdentity::from_metadata(meta);
         if let Some(b) = baseline
             && b.kind == kind
             && b.size == size
@@ -180,7 +269,31 @@ impl LeafEntry {
                 leaf_hash: b.leaf_hash,
             };
         }
-        Self::new(kind, size, mtime, fs_id)
+        Self::from_parts(kind, size, mtime, fs_id)
+    }
+
+    /// The leaf's entry kind (file / symlink / other) at `lstat` time.
+    #[must_use]
+    pub const fn kind(&self) -> EntryKind {
+        self.kind
+    }
+
+    /// The leaf's byte size at `lstat` time.
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The leaf's mtime — its per-file content-fingerprint component.
+    #[must_use]
+    pub const fn mtime(&self) -> SystemTime {
+        self.mtime
+    }
+
+    /// The leaf's kernel identity observed at `lstat` time.
+    #[must_use]
+    pub const fn fs_id(&self) -> FsIdentity {
+        self.fs_id
     }
 
     /// 128-bit fingerprint of `(kind, size, mtime, fs_id)`. Computed at
@@ -189,6 +302,53 @@ impl LeafEntry {
     #[must_use]
     pub const fn leaf_hash(&self) -> u128 {
         self.leaf_hash
+    }
+
+    /// Test-only constructor from explicit identity fields, computing
+    /// `leaf_hash` so fixtures uphold the eager-hash invariant too.
+    /// Bypasses the single-`lstat` provenance
+    /// [`LeafEntry::from_metadata`] enforces; compiled only under
+    /// `cfg(test)` or the `testkit` feature, mirroring
+    /// [`FsIdentity::synthetic`].
+    #[cfg(any(test, feature = "testkit"))]
+    #[must_use]
+    pub fn synthetic(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> Self {
+        Self::from_parts(kind, size, mtime, fs_id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Leaf-kind derivation
+// ---------------------------------------------------------------------------
+
+/// Map a `std::fs::FileType` to the leaf [`EntryKind`] the snapshot
+/// stores. **Not total over the filesystem:** there is deliberately no
+/// `is_dir` arm — a directory `FileType` falls through to
+/// `EntryKind::Other`. The contract is that leaf construction is never
+/// reached for a directory (the walker's `enumerate_dir` routes
+/// `is_dir` dirents to `build_dir_child`); callers of
+/// [`LeafEntry::from_metadata`] uphold that precondition.
+#[cfg(unix)]
+#[must_use]
+fn entry_kind_from_file_type(ft: std::fs::FileType) -> EntryKind {
+    entry_kind_from_flags(ft.is_file(), ft.is_symlink())
+}
+
+/// The leaf-kind decision over just the two booleans it depends on:
+/// `is_file` ⇒ `File`; else `is_symlink` ⇒ `Symlink`; else `Other`
+/// (directory / fifo / socket / block / char all map to `Other`). The
+/// signature *structurally* excludes an `is_dir` input, so the "no
+/// `is_dir` arm" guarantee is enforced by the type, not by a comment.
+/// `const fn` and fs-free, so it is unit-testable in `core` without
+/// I/O.
+#[must_use]
+const fn entry_kind_from_flags(is_file: bool, is_symlink: bool) -> EntryKind {
+    if is_file {
+        EntryKind::File
+    } else if is_symlink {
+        EntryKind::Symlink
+    } else {
+        EntryKind::Other
     }
 }
 
@@ -305,17 +465,25 @@ impl ChildEntry {
 /// `Option<Arc<DirSnapshot>>`. The `Arc` discipline lets splice and the
 /// walker's mtime-skip share subtrees across snapshots without copying.
 ///
-/// Every field is immutable post-construction. `dir_hash` is computed
-/// eagerly from the directory's identity and entries in [`Self::new`]
-/// and stored as a plain field, so `Clone` / `PartialEq` / `Debug`
-/// auto-derive correctly (the hash is a pure function of the data).
-/// `Send + Sync` are trivially derived (all fields are themselves
-/// `Send + Sync`); compile-time pinned in tests.
+/// ## Immutability boundary
+///
+/// All data fields are private and there is no mutator, so **no crate
+/// outside this module can desync the eager `dir_hash` or assemble a
+/// snapshot from torn observations** — the engine/sensor lifecycle the
+/// seal closes. `root_meta` is an atomic-by-construction [`DirMeta`]
+/// (one `lstat`, via [`DirMeta::from_metadata`]); the sole constructor
+/// [`Self::new`] folds `dir_hash` eagerly from the inputs. Within this
+/// module every constructor folds eagerly, so the module — not a caller
+/// convention — is the trust boundary: there is no public surface, in
+/// any crate, that installs a `dir_hash` disagreeing with the data.
+/// `Clone` / `PartialEq` / `Debug` auto-derive correctly because the
+/// hash is a pure function of the rest. `Send + Sync` are trivially
+/// derived; compile-time pinned in tests.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirSnapshot {
-    pub root_meta: DirMeta,
-    pub captured_with: u64,
-    pub entries: BTreeMap<CompactString, ChildEntry>,
+    root_meta: DirMeta,
+    captured_with: u64,
+    entries: BTreeMap<CompactString, ChildEntry>,
     dir_hash: u128,
 }
 
@@ -340,6 +508,28 @@ impl DirSnapshot {
         }
     }
 
+    /// The directory's atomic `lstat` pair ([`DirMeta`]) at capture
+    /// time. `DirMeta` is `Copy`; the walker's mtime-skip compares the
+    /// whole pair against a fresh `lstat`.
+    #[must_use]
+    pub const fn root_meta(&self) -> DirMeta {
+        self.root_meta
+    }
+
+    /// The `ScanConfig` hash this directory was captured under — equal
+    /// values mean two snapshots share one filter regime.
+    #[must_use]
+    pub const fn captured_with(&self) -> u64 {
+        self.captured_with
+    }
+
+    /// The direct children, string-keyed and lex-ordered by `BTreeMap`.
+    /// Borrowed read-only — the map is immutable post-construction.
+    #[must_use]
+    pub const fn entries(&self) -> &BTreeMap<CompactString, ChildEntry> {
+        &self.entries
+    }
+
     /// 128-bit fingerprint of `(captured_with, root_meta.fs_id,
     /// entries)`. `root_meta.mtime` is intentionally absent from the
     /// fold — `dir_hash` is filter-aware identity, while the raw `lstat`
@@ -357,11 +547,12 @@ impl DirSnapshot {
     /// for `Dir` entries.
     ///
     /// Sole intended caller is the walker's per-leaf cache-transfer
-    /// site, which feeds the result into [`LeafEntry::new_or_inherit`]
-    /// to elide the SipHash24 fold on identity-matching baselines. The
-    /// identity check that gates the inheritance lives in
-    /// `new_or_inherit`, not here — this primitive returns the raw
-    /// reference; callers compose the gate.
+    /// site, which feeds the result into
+    /// [`LeafEntry::from_metadata_or_inherit`] to elide the SipHash24
+    /// fold on identity-matching baselines. The identity check that
+    /// gates the inheritance lives in `from_metadata_or_inherit`, not
+    /// here — this primitive returns the raw reference; callers compose
+    /// the gate.
     #[must_use]
     pub fn lookup_leaf(&self, name: &str) -> Option<&LeafEntry> {
         match self.entries.get(name)? {

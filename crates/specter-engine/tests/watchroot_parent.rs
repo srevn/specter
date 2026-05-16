@@ -38,10 +38,7 @@ fn empty_program() -> Arc<ActionProgram> {
 /// Empty `TreeSnapshot::Dir`.
 fn dir_snap() -> std::sync::Arc<DirSnapshot> {
     Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: UNIX_EPOCH,
-            fs_id: FsIdentity::synthetic(0, 0),
-        },
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
         0,
         BTreeMap::new(),
     ))

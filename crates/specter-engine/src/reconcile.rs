@@ -550,14 +550,11 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn meta(inode: u64) -> DirMeta {
-        DirMeta {
-            mtime: UNIX_EPOCH,
-            fs_id: FsIdentity::synthetic(inode, 0),
-        }
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(inode, 0))
     }
 
     fn leaf(kind: EntryKind, inode: u64) -> ChildEntry {
-        ChildEntry::Leaf(LeafEntry::new(
+        ChildEntry::Leaf(LeafEntry::synthetic(
             kind,
             0,
             UNIX_EPOCH,
@@ -1291,8 +1288,8 @@ mod tests {
         // ⇒ this is the kind-flip-with-inode-reuse case that
         // `walk_pair` mishandled. Confirms the regression's failing
         // pre-condition.
-        let prior_foo_child = prior_current.entries.get("foo").unwrap();
-        let new_foo_child = response.entries.get("foo").unwrap();
+        let prior_foo_child = prior_current.entries().get("foo").unwrap();
+        let new_foo_child = response.entries().get("foo").unwrap();
         assert_eq!(
             prior_foo_child.fs_id().inode(),
             new_foo_child.fs_id().inode()

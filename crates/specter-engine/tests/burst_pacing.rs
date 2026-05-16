@@ -38,10 +38,7 @@ fn empty_program() -> Arc<ActionProgram> {
 
 fn empty_dir_snap() -> Arc<DirSnapshot> {
     Arc::new(DirSnapshot::new(
-        DirMeta {
-            mtime: UNIX_EPOCH,
-            fs_id: FsIdentity::synthetic(0, 0),
-        },
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
         0,
         BTreeMap::<CompactString, ChildEntry>::new(),
     ))
@@ -249,7 +246,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
         let mut entries = BTreeMap::<CompactString, ChildEntry>::new();
         entries.insert(
             CompactString::new("file"),
-            ChildEntry::Leaf(specter_core::LeafEntry::new(
+            ChildEntry::Leaf(specter_core::LeafEntry::synthetic(
                 specter_core::EntryKind::File,
                 u64::from(cycle),
                 UNIX_EPOCH,
@@ -257,10 +254,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
             )),
         );
         let unstable_snap = Arc::new(DirSnapshot::new(
-            DirMeta {
-                mtime: UNIX_EPOCH,
-                fs_id: FsIdentity::synthetic(0, 0),
-            },
+            DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
             0,
             entries,
         ));
