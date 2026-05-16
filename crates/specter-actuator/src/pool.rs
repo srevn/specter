@@ -258,7 +258,7 @@ mod tests {
     use crate::testkit::{MockSpawner, SignalRecord};
     use compact_str::CompactString;
     use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
-    use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
+    use specter_core::program::{BranchTarget, MultiStage, ProgramBuilder, SpawnBody};
     use specter_core::testkit::{predicate_then_program, single_exec_program};
     use specter_core::{
         ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon,
@@ -1845,7 +1845,9 @@ mod tests {
     /// `on_failed = Terminate`.
     fn pipe_program(stages: Arc<[ExecAction]>) -> Arc<ActionProgram> {
         let mut b = ProgramBuilder::new();
-        let h = b.emit(SpawnBody::Pipe(stages));
+        let h = b.emit(SpawnBody::Pipe(
+            MultiStage::new(stages).expect("test pipe has >=2 stages"),
+        ));
         b.patch_on_ok(h, BranchTarget::Escape).unwrap();
         b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
         Arc::new(b.build().unwrap())
@@ -1993,7 +1995,9 @@ mod tests {
         ]);
         let program = {
             let mut b = ProgramBuilder::new();
-            let p = b.emit(SpawnBody::Pipe(pipe_stages));
+            let p = b.emit(SpawnBody::Pipe(
+                MultiStage::new(pipe_stages).expect("test pipe has >=2 stages"),
+            ));
             let after = b.continue_to_next();
             b.patch_on_ok(p, after).unwrap();
             b.patch_on_failed(p, BranchTarget::Terminate).unwrap();

@@ -23,12 +23,14 @@
 //! ```
 
 mod builder;
+mod error;
 mod exec;
 mod op;
 
-pub use builder::{Edge, OpHandle, ProgramBuilder, ProgramError};
+pub use builder::{Edge, OpHandle, ProgramBuilder};
+pub use error::ProgramError;
 pub use exec::{ArgPart, ArgTemplate, ExecAction, Placeholder};
-pub use op::{BranchIndex, BranchTarget, ProgramOp, SpawnBody};
+pub use op::{BranchIndex, BranchTarget, MultiStage, ProgramOp, SpawnBody};
 
 /// Lowered execution program — a CFG-shaped bytecode IR.
 ///

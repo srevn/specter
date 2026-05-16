@@ -19,6 +19,7 @@
 //!   the top-level escape — also the no-else fall-through of a
 //!   conditional ("branch, not guard" outcome elision).
 
+use super::error::ProgramError;
 use super::exec::ExecAction;
 use crate::effect::EffectOutcome;
 use std::sync::Arc;
@@ -104,8 +105,66 @@ impl ProgramOp {
     pub fn references_diff_derived(&self) -> bool {
         match &self.body {
             SpawnBody::Exec(e) => e.references_diff_derived(),
-            SpawnBody::Pipe(stages) => stages.iter().any(ExecAction::references_diff_derived),
+            SpawnBody::Pipe(stages) => stages
+                .stages()
+                .iter()
+                .any(ExecAction::references_diff_derived),
         }
+    }
+}
+
+/// A pipe's stage list — **≥2 stages, guaranteed by construction**.
+///
+/// The payload of [`SpawnBody::Pipe`]. Wraps the shared
+/// `Arc<[ExecAction]>` so coalesced Effects share one stages allocation
+/// (the newtype is zero-cost over the `Arc`; [`Self::shared`] proves
+/// it). The sole constructor [`Self::new`] enforces the arity the
+/// actuator's pipe path assumes — stdout→stdin wiring and pipefail
+/// aggregation are meaningless below two stages. This is the
+/// spawn-body-shape analogue of the control-flow seal [`BranchIndex`]
+/// and [`ProgramOp`] already apply: the type admits no bad value
+/// because its constructor, not the caller, does.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiStage(Arc<[ExecAction]>);
+
+impl MultiStage {
+    /// Reify a validated stage list. `Err(ProgramError::DegeneratePipe)`
+    /// on fewer than two stages.
+    ///
+    /// The config validator rejects 0/1-stage pipes upstream
+    /// (`IssueKind::EmptyPipe` / `SingleStagePipe`) before an
+    /// `Action::Pipe` is built, so reaching here with <2 is a
+    /// lowering-hygiene bug — surfaced (not panicked) so it rides the
+    /// contained `LoweringInternal` channel like every other
+    /// [`ProgramError`].
+    ///
+    /// `pub` (not `pub(super)`): the sole producer is `specter-config`
+    /// lowering, a different crate — the same crate-boundary rationale
+    /// as [`ExecAction::new`]. ([`BranchIndex`] / [`ProgramOp`] are
+    /// sealed `pub(super)` because the in-crate builder is their only
+    /// producer; a pipe body is reified cross-crate.)
+    pub fn new(stages: Arc<[ExecAction]>) -> Result<Self, ProgramError> {
+        if stages.len() < 2 {
+            return Err(ProgramError::DegeneratePipe {
+                stages: stages.len(),
+            });
+        }
+        Ok(Self(stages))
+    }
+
+    /// The stage slice — spawn order, stage 0's stdout feeds stage 1's
+    /// stdin, etc. Length is ≥2 by construction.
+    #[must_use]
+    pub fn stages(&self) -> &[ExecAction] {
+        &self.0
+    }
+
+    /// The shared backing `Arc`. Exposed so a consumer can prove two
+    /// coalesced Effects share one stages allocation (no per-Effect
+    /// re-clone) — the optimization this newtype exists to preserve.
+    #[must_use]
+    pub const fn shared(&self) -> &Arc<[ExecAction]> {
+        &self.0
     }
 }
 
@@ -113,16 +172,19 @@ impl ProgramOp {
 ///
 /// `Exec` is one process; `Pipe` is N processes wired stdout→stdin
 /// with pipefail-on aggregation (last non-zero exit, first observed
-/// signal). Single-stage pipes are legal but pointless — lowering
-/// produces them only from explicit `pipe = [...]` config.
+/// signal). A `Pipe` always has ≥2 stages: [`MultiStage`] is its sole
+/// producer and rejects fewer, so a single-stage "pipe" is
+/// unrepresentable — one command lowers to a top-level `Exec`, not a
+/// `Pipe`.
 ///
-/// `Pipe` carries `Arc<[ExecAction]>` so coalesced Effects share one
-/// stages allocation; the Arc travels from `lower_to_program` into
-/// every emitted `Effect` without rewrapping.
+/// `Pipe`'s [`MultiStage`] is a zero-cost wrapper over the shared
+/// `Arc<[ExecAction]>`, so coalesced Effects still share one stages
+/// allocation; the Arc travels from `lower_to_program` into every
+/// emitted `Effect` without rewrapping.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SpawnBody {
     Exec(ExecAction),
-    Pipe(Arc<[ExecAction]>),
+    Pipe(MultiStage),
 }
 
 /// Edge endpoint chosen on outcome.
@@ -190,8 +252,9 @@ impl BranchIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::{BranchIndex, BranchTarget, ProgramOp, SpawnBody};
+    use super::{BranchIndex, BranchTarget, MultiStage, ProgramOp, SpawnBody};
     use crate::effect::{EffectOutcome, Termination};
+    use crate::program::ProgramError;
     use crate::program::exec::{ArgPart, ArgTemplate, ExecAction, Placeholder};
     use std::sync::Arc;
 
@@ -201,6 +264,61 @@ mod tests {
 
     fn op_with_edges(body: SpawnBody, on_ok: BranchTarget, on_failed: BranchTarget) -> ProgramOp {
         ProgramOp::new(body, on_ok, on_failed)
+    }
+
+    fn exec_arc(literals: &[&str]) -> Arc<[ExecAction]> {
+        Arc::from(
+            literals
+                .iter()
+                .map(|s| exec_with(ArgPart::literal(*s)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// `MultiStage::new` is the spawn-body-shape seal: a pipe with
+    /// fewer than two stages is a lowering-hygiene bug, surfaced as
+    /// `DegeneratePipe` (never panicked) with the rejected count.
+    #[test]
+    fn multi_stage_new_rejects_fewer_than_two_stages() {
+        let zero: Arc<[ExecAction]> = Arc::from(Vec::<ExecAction>::new());
+        assert_eq!(
+            MultiStage::new(zero),
+            Err(ProgramError::DegeneratePipe { stages: 0 }),
+        );
+
+        let one = exec_arc(&["/bin/solo"]);
+        assert_eq!(
+            MultiStage::new(one),
+            Err(ProgramError::DegeneratePipe { stages: 1 }),
+        );
+    }
+
+    /// ≥2 stages construct; `stages()` returns the slice verbatim with
+    /// length preserved.
+    #[test]
+    fn multi_stage_new_accepts_two_or_more_stages() {
+        let stages = exec_arc(&["/bin/a", "/bin/b"]);
+        let ms = MultiStage::new(Arc::clone(&stages)).expect(">=2 stages is valid");
+        assert_eq!(ms.stages().len(), 2);
+        assert_eq!(ms.stages(), &stages[..]);
+
+        let three = exec_arc(&["/bin/a", "/bin/b", "/bin/c"]);
+        let ms3 = MultiStage::new(three).expect(">=3 stages is valid");
+        assert_eq!(ms3.stages().len(), 3);
+    }
+
+    /// `shared()` exposes the *same* backing allocation — the zero-cost
+    /// wrapping that is the entire reason `MultiStage` wraps the `Arc`
+    /// rather than reshaping the body. Coalesced Effects depend on this:
+    /// the stage vector is never re-cloned per Effect.
+    #[test]
+    fn multi_stage_shared_preserves_the_backing_arc() {
+        let stages = exec_arc(&["/bin/a", "/bin/b"]);
+        let ms = MultiStage::new(Arc::clone(&stages)).expect(">=2 stages is valid");
+        assert!(
+            Arc::ptr_eq(ms.shared(), &stages),
+            "MultiStage must wrap the original Arc, not re-allocate",
+        );
     }
 
     #[test]
@@ -263,7 +381,7 @@ mod tests {
         let plain_then_diff: Arc<[ExecAction]> =
             Arc::from(vec![plain.clone(), diff].into_boxed_slice());
         let op = op_with_edges(
-            SpawnBody::Pipe(plain_then_diff),
+            SpawnBody::Pipe(MultiStage::new(plain_then_diff).expect("test pipe has >=2 stages")),
             BranchTarget::Escape,
             BranchTarget::Terminate,
         );
@@ -272,22 +390,7 @@ mod tests {
         let plain_only: Arc<[ExecAction]> =
             Arc::from(vec![plain.clone(), plain].into_boxed_slice());
         let op = op_with_edges(
-            SpawnBody::Pipe(plain_only),
-            BranchTarget::Escape,
-            BranchTarget::Terminate,
-        );
-        assert!(!op.references_diff_derived());
-    }
-
-    /// Empty `Pipe` stages slice — `iter().any()` returns `false`. The
-    /// type allows it but the builder/lowering enforces non-empty pipes.
-    /// Pinning the predicate's response to the degenerate shape catches
-    /// any future refactor that would special-case empty pipes.
-    #[test]
-    fn references_diff_derived_pipe_false_for_empty_stages() {
-        let empty: Arc<[ExecAction]> = Arc::from(Vec::<ExecAction>::new().into_boxed_slice());
-        let op = op_with_edges(
-            SpawnBody::Pipe(empty),
+            SpawnBody::Pipe(MultiStage::new(plain_only).expect("test pipe has >=2 stages")),
             BranchTarget::Escape,
             BranchTarget::Terminate,
         );

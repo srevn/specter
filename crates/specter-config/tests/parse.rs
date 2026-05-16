@@ -551,11 +551,17 @@ fn pipe_two_stages_lowers_to_single_op() {
     assert_eq!(p.ops().len(), 1);
     match &p.ops()[0].body() {
         SpawnBody::Pipe(stages) => {
-            assert_eq!(stages.len(), 2);
-            assert_eq!(stages[0].argv().len(), 2);
-            assert_eq!(stages[1].argv().len(), 1);
-            assert_eq!(stages[0].argv()[0].parts()[0], ArgPart::literal("grep"));
-            assert_eq!(stages[1].argv()[0].parts()[0], ArgPart::literal("sort"));
+            assert_eq!(stages.stages().len(), 2);
+            assert_eq!(stages.stages()[0].argv().len(), 2);
+            assert_eq!(stages.stages()[1].argv().len(), 1);
+            assert_eq!(
+                stages.stages()[0].argv()[0].parts()[0],
+                ArgPart::literal("grep")
+            );
+            assert_eq!(
+                stages.stages()[1].argv()[0].parts()[0],
+                ArgPart::literal("sort")
+            );
         }
         other @ SpawnBody::Exec(_) => panic!("expected SpawnBody::Pipe; got {other:?}"),
     }
@@ -581,9 +587,12 @@ fn pipe_stage_timeouts_threaded_per_stage() {
     let SpawnBody::Pipe(stages) = &cfg.watches[0].program.ops()[0].body() else {
         panic!("expected SpawnBody::Pipe");
     };
-    assert_eq!(stages[0].timeout(), Some(Duration::from_millis(500)));
-    assert_eq!(stages[1].timeout(), None);
-    assert_eq!(stages[2].timeout(), Some(Duration::from_secs(2)));
+    assert_eq!(
+        stages.stages()[0].timeout(),
+        Some(Duration::from_millis(500))
+    );
+    assert_eq!(stages.stages()[1].timeout(), None);
+    assert_eq!(stages.stages()[2].timeout(), Some(Duration::from_secs(2)));
 }
 
 /// Empty pipe is rejected as `IssueKind::EmptyPipe`.

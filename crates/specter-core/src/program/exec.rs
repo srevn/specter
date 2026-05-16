@@ -246,10 +246,12 @@ mod tests {
         assert!(!part.is_multivalue());
     }
 
-    /// `ExecAction::with_timeout` sets the per-step deadline; default
-    /// (no setter call) leaves `timeout = None`.
+    /// `ExecAction::new(argv, Some(d))` records the per-step deadline;
+    /// `ExecAction::new(argv, None)` leaves `timeout = None`. There is
+    /// no separate setter — the constructor's `Option<Duration>` is the
+    /// with/without encoding.
     #[test]
-    fn exec_action_with_timeout_records_duration() {
+    fn exec_action_new_records_optional_timeout() {
         let exec = ExecAction::new(
             [ArgTemplate::new([ArgPart::literal("/bin/true")])],
             Some(Duration::from_secs(2)),

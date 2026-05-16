@@ -40,8 +40,8 @@
 //! by construction (no `Loop`-like surface).
 
 use specter_core::program::{
-    ActionProgram, BranchTarget, Edge, ExecAction, OpHandle, ProgramBuilder, ProgramError,
-    SpawnBody,
+    ActionProgram, BranchTarget, Edge, ExecAction, MultiStage, OpHandle, ProgramBuilder,
+    ProgramError, SpawnBody,
 };
 use std::sync::Arc;
 
@@ -62,11 +62,14 @@ pub(crate) enum Action {
     /// per-stage timer thread enforces them independently.
     ///
     /// `stages: Arc<[ExecAction]>` (not `Box<[…]>`) so lowering can
-    /// `Arc::clone` directly into [`SpawnBody::Pipe`] without
-    /// re-allocating the leaf vector. Validation guarantees
-    /// `stages.len() >= 2` (single-stage pipes are rejected as
-    /// [`crate::error::IssueKind::SingleStagePipe`] — use top-level
-    /// `exec` instead).
+    /// `Arc::clone` it into [`MultiStage::new`], which reifies the
+    /// validated `stages.len() >= 2` guarantee into [`SpawnBody::Pipe`]
+    /// without re-allocating the leaf vector (`MultiStage` is a
+    /// zero-cost wrapper over the shared `Arc`). Validation rejects
+    /// 0/1-stage pipes upstream as
+    /// [`crate::error::IssueKind::EmptyPipe`] /
+    /// [`crate::error::IssueKind::SingleStagePipe`] — one command uses
+    /// top-level `exec`.
     Pipe { stages: Arc<[ExecAction]> },
     /// Predicate + then-branch + optional else-branch.
     ///
@@ -186,7 +189,9 @@ fn lower_block(actions: &[Action], b: &mut ProgramBuilder) -> Result<Vec<Tail>, 
 fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, ProgramError> {
     match action {
         Action::Exec(e) => lower_spawn(SpawnBody::Exec(e.clone()), b),
-        Action::Pipe { stages } => lower_spawn(SpawnBody::Pipe(Arc::clone(stages)), b),
+        Action::Pipe { stages } => {
+            lower_spawn(SpawnBody::Pipe(MultiStage::new(Arc::clone(stages))?), b)
+        }
         Action::Conditional {
             when,
             then,
@@ -313,9 +318,9 @@ mod tests {
         assert_eq!(program.ops().len(), 1);
         match ops(&program)[0].body() {
             SpawnBody::Pipe(s) => {
-                assert_eq!(s.len(), 2);
+                assert_eq!(s.stages().len(), 2);
                 assert!(
-                    Arc::ptr_eq(s, &stages_for_assert),
+                    Arc::ptr_eq(s.shared(), &stages_for_assert),
                     "lowering must Arc::clone the stages slice, not re-allocate",
                 );
             }

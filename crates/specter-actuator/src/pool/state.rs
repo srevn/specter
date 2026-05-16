@@ -996,10 +996,14 @@ impl ActuatorState {
                 reap_tx,
             ),
             SpawnBody::Pipe(stages) => {
-                // Borrow the stages slice via the Arc held inside the
-                // op body. The Arc lifetime is tied to `effect`; the
-                // slice survives the resolve/spawn_pipe sequence.
-                let stages_slice: &[ExecAction] = stages.as_ref();
+                // `MultiStage::stages()` borrows the shared stage slice;
+                // its Arc lifetime is tied to `effect`, so the slice
+                // outlives the resolve/spawn_pipe sequence. The slice is
+                // ≥2 by construction — `MultiStage::new` is the sole
+                // producer of `SpawnBody::Pipe` and rejects fewer — so
+                // the pipe path's stdout→stdin / pipefail assumptions
+                // hold with no runtime arity check on this path.
+                let stages_slice: &[ExecAction] = stages.stages();
                 self.spawn_pipe_with_permit(
                     key,
                     sub,
@@ -1162,6 +1166,12 @@ impl ActuatorState {
 
     /// Multi-stage spawn path for [`SpawnBody::Pipe`].
     ///
+    /// `stages` is ≥2 by construction: `MultiStage::new` is the sole
+    /// producer of [`SpawnBody::Pipe`] and rejects fewer, and the lone
+    /// caller passes `MultiStage::stages()`. The stdout→stdin wiring
+    /// and pipefail aggregation below assume that arity — it is sealed
+    /// at the type's constructor, not re-checked on this path.
+    ///
     /// The shape mirrors [`Self::spawn_exec_with_permit`] at every
     /// step, scaled to N stages:
     ///
@@ -1211,11 +1221,6 @@ impl ActuatorState {
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
     ) -> Result<(), SpawnFailureCause> {
-        debug_assert!(
-            stages.len() >= 2,
-            "validation rejects empty / single-stage pipes",
-        );
-
         // Resolve every stage's argv + env. The result tuples own
         // the argv `Vec<String>` and the env `Vec<EnvVar<'_>>`; the
         // env's `Cow::Borrowed` slots borrow from `effect`, the

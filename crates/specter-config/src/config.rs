@@ -739,8 +739,10 @@ fn validate_one_action(
 ///   unambiguous; stage-local errors don't short-circuit later stages.
 ///
 /// Stages are stored as `Arc<[ExecAction]>` so lowering can
-/// `Arc::clone` into [`specter_core::program::SpawnBody::Pipe`] without
-/// re-allocating.
+/// `Arc::clone` them into [`specter_core::program::MultiStage::new`],
+/// which reifies the validated `>= 2` guarantee into
+/// [`specter_core::program::SpawnBody::Pipe`] without re-allocating
+/// (the newtype is zero-cost over the shared `Arc`).
 fn validate_pipe(
     watch_idx: usize,
     path: &str,

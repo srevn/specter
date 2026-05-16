@@ -15,7 +15,7 @@
 mod common;
 
 use common::{Harness, next_corr, perfile_effect_with_program, unique_sub_id};
-use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
+use specter_core::program::{BranchTarget, MultiStage, ProgramBuilder, SpawnBody};
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, EffectOutcome, ExecAction, Input, Termination,
 };
@@ -40,7 +40,9 @@ fn pipe_program(stages: Vec<Vec<String>>) -> Arc<ActionProgram> {
         .collect::<Vec<_>>()
         .into();
     let mut b = ProgramBuilder::new();
-    let h = b.emit(SpawnBody::Pipe(action_stages));
+    let h = b.emit(SpawnBody::Pipe(
+        MultiStage::new(action_stages).expect("test pipe has >=2 stages"),
+    ));
     b.patch_on_ok(h, BranchTarget::Escape).unwrap();
     b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
     Arc::new(b.build().unwrap())
