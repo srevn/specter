@@ -1,8 +1,11 @@
 //! Scan configuration.
 //!
-//! `ScanConfig` is the only data folded by [`compute_config_hash`], the
-//! canonical hash of `(scan_config, max_settle)`. Two Subs whose hashes match
-//! share one Profile; different `max_settle` values produce different hashes.
+//! [`compute_config_hash`] is the canonical hash of
+//! `(ScanConfig, max_settle, events)`; [`ProfileIdentity`] is its reified
+//! preimage and [`ProfileIdentity::config_hash`] the sole public route.
+//! Equal hash ⇒ Subs share one Profile (snapshot, burst lifecycle). Both
+//! fold sites destructure exhaustively, so a new identity-bearing field is
+//! a compile error until folded — the fold-completeness ratchet.
 //!
 //! `GlobPattern` carries the canonical `source` string alongside the compiled
 //! `globset::GlobMatcher`. Equality and ordering are over `source` only — the
@@ -18,6 +21,11 @@ use std::cmp::Ordering;
 use std::path::Path;
 use std::time::Duration;
 
+/// A glob pattern: the canonical `source` text and its compiled matcher.
+///
+/// `source` is the sole identity axis across `PartialEq`/`Eq`/`Ord` and
+/// the [`compute_config_hash`] fold. `matcher` is a transient compiled
+/// artifact derived from `source` — never key any of those four on it.
 #[derive(Clone, Debug)]
 pub struct GlobPattern {
     source: CompactString,
@@ -173,21 +181,34 @@ pub(crate) fn compute_config_hash(
     max_settle: Duration,
     events: ClassSet,
 ) -> u64 {
+    // Fold-completeness ratchet: this exhaustive destructure makes a new
+    // `ScanConfig` field a compile error (E0027) until it is folded into
+    // the digest below — promoting Profile-partition completeness from a
+    // hand-maintained test convention to a compiler invariant. Never add
+    // `..`: it silently re-opens the silent-Profile-merge hole.
+    let ScanConfig {
+        recursive,
+        hidden,
+        exclude,
+        pattern,
+        max_depth,
+    } = scan;
+
     let mut h = hasher();
 
-    h.put_u8(u8::from(scan.recursive));
-    h.put_u8(u8::from(scan.hidden));
+    h.put_u8(u8::from(*recursive));
+    h.put_u8(u8::from(*hidden));
 
     // Canonical width: u32 for the count. Saturate on the absurd
     // overflow case — the alternative is an explicit panic, which buys
     // nothing for a config layer that cannot realistically reach 2^32 globs.
-    let exclude_count = u32::try_from(scan.exclude.len()).unwrap_or(u32::MAX);
+    let exclude_count = u32::try_from(exclude.len()).unwrap_or(u32::MAX);
     h.put_u32(exclude_count);
-    for g in &scan.exclude {
+    for g in exclude {
         h.put_str(g.source.as_str());
     }
 
-    match &scan.pattern {
+    match pattern {
         Some(g) => {
             h.put_u8(1);
             h.put_str(g.source.as_str());
@@ -206,10 +227,10 @@ pub(crate) fn compute_config_hash(
     // Deliberately *not* unified with `pattern`'s 1-byte presence flag
     // above (that is the pre-existing explicit encoding, kept verbatim);
     // collapsing the two is a digest re-encoding, out of scope here.
-    match scan.max_depth {
+    match max_depth {
         Some(d) => {
             h.put_u64(1);
-            h.put_u32(d);
+            h.put_u32(*d);
         }
         None => h.put_u64(0),
     }
@@ -238,7 +259,17 @@ impl ProfileIdentity {
     /// route for Profile partitioning.
     #[must_use]
     pub fn config_hash(&self) -> u64 {
-        compute_config_hash(&self.config, self.max_settle, self.events)
+        // Fold-completeness ratchet, identity tier: a new axis on
+        // `ProfileIdentity` is a compile error here until it is threaded
+        // into the canonical hash below (the `ScanConfig` ratchet does
+        // not cover an axis that is neither scan-config, max_settle, nor
+        // events).
+        let Self {
+            config,
+            max_settle,
+            events,
+        } = self;
+        compute_config_hash(config, *max_settle, *events)
     }
 }
 
@@ -427,6 +458,84 @@ mod tests {
         assert_eq!(
             compute_config_hash(&cfg, SETTLE, a),
             compute_config_hash(&cfg, SETTLE, b),
+        );
+    }
+
+    /// Discrimination complement to the fold-completeness destructure:
+    /// the exhaustive pattern makes a new field a *compile error* until
+    /// folded; this test makes the fold *distinguish*, so the ratchet
+    /// cannot be satisfied by folding a new field as a constant.
+    ///
+    /// The base is fully-populated and non-default: toggling any single
+    /// field must move the hash. (`hash_known_good` pins a *default*
+    /// config, where a new field left at its default would never shift
+    /// the digest — this is the structural complement that closes that
+    /// gap.)
+    ///
+    /// Not itself ratcheted: a new field still needs a new `assert_ne!`
+    /// line here. The compile error from the destructure is the forcing
+    /// function that drives the author to add it; this test then guards
+    /// that the fold actually discriminates.
+    #[test]
+    fn hash_discriminates_every_populated_field() {
+        fn populated() -> ProfileIdentity {
+            ProfileIdentity {
+                config: ScanConfig::builder()
+                    .recursive(true)
+                    .hidden(true)
+                    .exclude(glob("a"))
+                    .exclude(glob("b"))
+                    .pattern(glob("*.rs"))
+                    .max_depth(Some(7))
+                    .build(),
+                max_settle: Duration::from_secs(7),
+                events: ClassSet::CONTENT | ClassSet::METADATA,
+            }
+        }
+
+        fn rehash(base: &ProfileIdentity, mutate: impl FnOnce(&mut ProfileIdentity)) -> u64 {
+            let mut id = base.clone();
+            mutate(&mut id);
+            id.config_hash()
+        }
+
+        let base = populated();
+        let h0 = base.config_hash();
+
+        assert_ne!(
+            h0,
+            rehash(&base, |id| id.config.recursive = false),
+            "recursive must discriminate"
+        );
+        assert_ne!(
+            h0,
+            rehash(&base, |id| id.config.hidden = false),
+            "hidden must discriminate"
+        );
+        assert_ne!(
+            h0,
+            rehash(&base, |id| id.config.exclude.push(glob("c"))),
+            "exclude must discriminate"
+        );
+        assert_ne!(
+            h0,
+            rehash(&base, |id| id.config.pattern = None),
+            "pattern must discriminate"
+        );
+        assert_ne!(
+            h0,
+            rehash(&base, |id| id.config.max_depth = Some(8)),
+            "max_depth must discriminate"
+        );
+        assert_ne!(
+            h0,
+            rehash(&base, |id| id.max_settle = Duration::from_secs(8)),
+            "max_settle must discriminate"
+        );
+        assert_ne!(
+            h0,
+            rehash(&base, |id| id.events = ClassSet::CONTENT),
+            "events must discriminate"
         );
     }
 
