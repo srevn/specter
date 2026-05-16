@@ -1206,7 +1206,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             specter_core::ActiveBurst::PreFire(specter_core::PreFireBurst {
-                phase: specter_core::PreFirePhase::Verifying,
+                phase: specter_core::PreFirePhase::Verifying(_),
                 ..
             }),
             _,

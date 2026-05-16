@@ -38,8 +38,9 @@
 use crate::Engine;
 use crate::counter::MonotonicCounter;
 use specter_core::{
-    DirSnapshot, ProbeCorrelation, ProbeOp, ProbeOwner, ProbeRequest, Profile, ResourceId,
-    ScanConfig, StepOutput,
+    ActiveBurst, BurstIntent, DirSnapshot, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOp,
+    ProbeOwner, ProbeRequest, Profile, ProfileState, PromoterState, ResourceId, ScanConfig,
+    StepOutput,
 };
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,21 +92,16 @@ impl Open {
     }
 }
 
-/// Typed routing tag for a channel-resident outstanding probe.
+/// Typed routing tag for the one remaining channel-resident probe
+/// class: Promoter proxy enumeration.
 ///
-/// Owner affinity is encoded in the variant name so the mint-site
-/// discipline (Profile owners open with `Profile*` kinds; Promoter
-/// owners with `Promoter*`) is named. Dispatchers route by [`Self`]
-/// discriminant rather than by inspecting owner state:
-/// `on_profile_probe_response` matches the two `Profile*` variants;
-/// `on_promoter_probe_response` matches the `Promoter*` variant; any
-/// cross-affinity match is a regression-detection arm (`debug_assert!`
-/// + [`specter_core::Diagnostic::StaleProbeResponse`]).
-///
-/// Descent probes (Profile pending-anchor, Promoter literal-prefix)
-/// are *not* here: their correlation is state-resident on the
-/// descent's own probe slot, routed by state rather than by an
-/// open-map entry.
+/// Every other probe (Profile descent, Profile verify, Profile rebase,
+/// Promoter literal-prefix descent) is state-resident — its correlation
+/// lives on a [`specter_core::ProbeSlot`] in the owner's state and is
+/// routed by inspecting that state, not by an open-map entry. Promoter
+/// enumeration is the sole holdout: its dispatch key (the proxy
+/// `target`) is not derivable from the wire (path-only) and does not
+/// yet live on Promoter state, so the channel still carries it.
 ///
 /// [`Self::PromoterEnumerating`] carries the proxy [`ResourceId`] the
 /// enumeration probe targets. The dispatcher reads it on every outcome
@@ -114,17 +110,40 @@ impl Open {
 /// being echoed by the walker.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum OpenKind {
-    /// Profile pre-fire stability check (Seed or Standard burst).
-    /// Dispatcher reads `(intent, forced)` off the `PreFireBurst`.
-    ProfileVerifying,
-    /// Profile post-fire rebase. Dispatcher routes the outcome through
-    /// `dispatch_rebase_*`.
-    ProfileRebasing,
     /// Promoter proxy enumeration. `target` identifies the proxy the
     /// probe is enumerating. The dispatcher reads it on every outcome
     /// (`SubtreeOk` / `Vanished` / `Failed`) — the wire is path-only,
     /// so this variant is the canonical source of the dispatch key.
     PromoterEnumerating { target: ResourceId },
+}
+
+/// State-derived routing class for a probe response — the replacement
+/// for matching a channel-resident [`OpenKind`] on the response path.
+///
+/// Computed by [`Engine::probe_route`] from the owner's *current*
+/// state, so it is the minimal non-derivable read the dispatcher needs
+/// that the response wire does not supply. It is [`Copy`] and is
+/// snapshotted *before* the slot is disarmed: disarm empties the slot
+/// but leaves the carrier's variant intact, so a route captured first
+/// stays valid through dispatch.
+///
+/// `Verifying` carries `(intent, forced)` because those drive the
+/// per-intent fan-out and are *not* recoverable from the state variant
+/// alone. `Rebasing` and `Descent` need no payload — the variant (and,
+/// for descent, the owner the handler already holds) is the whole
+/// routing decision.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum ProbeRoute {
+    /// Pending-path descent (Profile `Pending` or Promoter
+    /// `PrefixPending`). The handler routes on the owner it already
+    /// holds; the outcome variant selects advance / rewind / fail.
+    Descent,
+    /// Profile pre-fire stability probe. `intent` / `forced` are read
+    /// off the `PreFireBurst` for the per-intent dispatch fan-out.
+    Verifying { intent: BurstIntent, forced: bool },
+    /// Profile post-fire baseline-capture probe. The outcome routes
+    /// straight through `dispatch_rebase_*`.
+    Rebasing,
 }
 
 impl ProbeChannel {
@@ -250,10 +269,10 @@ impl ProbeChannel {
 impl Engine {
     /// The owner's in-flight probe correlation, or `None` if it has
     /// none. Single source of truth across both homes: the
-    /// state-resident descent slot (`Pending` / `PrefixPending`) when
-    /// armed, else the channel (verify / rebase / enumeration). The two
-    /// are disjoint per owner — a carrier is in exactly one state — so
-    /// at most one home answers.
+    /// state-resident slot (Profile descent / verify / rebase, Promoter
+    /// descent) when armed, else the channel (Promoter enumeration
+    /// only). The two are disjoint per owner — a carrier is in exactly
+    /// one state — so at most one home answers.
     ///
     /// `pub` (not `pub(crate)`) — the engine crate's `tests/`
     /// directory is an external crate from a Rust visibility
@@ -274,6 +293,43 @@ impl Engine {
         from_state.or_else(|| self.probe_channel.correlation_for(owner))
     }
 
+    /// The owner's probe routing class derived purely from its current
+    /// state, or `None` if the owner is in no probe-bearing carrier.
+    ///
+    /// Owner-symmetric with [`Self::pending_probe_for`] /
+    /// [`Self::take_owner_probe`]; it is the routing twin of the
+    /// staleness gate. The caller snapshots this *before*
+    /// [`Self::take_owner_probe`] (the route is [`Copy`], the disarm
+    /// leaves the carrier variant intact), then dispatches on it.
+    ///
+    /// Promoter enumeration has no state-resident route yet (its
+    /// dispatch key lives on the channel), so a Promoter `Active`
+    /// returns `None` here and that owner's handler still routes on the
+    /// channel's [`OpenKind`].
+    pub(crate) fn probe_route(&self, owner: ProbeOwner) -> Option<ProbeRoute> {
+        match owner {
+            ProbeOwner::Profile(pid) => match self.profiles.get(pid)?.state() {
+                ProfileState::Pending(_) => Some(ProbeRoute::Descent),
+                ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
+                    PreFirePhase::Verifying(_) => Some(ProbeRoute::Verifying {
+                        intent: pre.intent,
+                        forced: pre.forced,
+                    }),
+                    PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
+                },
+                ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
+                    PostFirePhase::Rebasing(_) => Some(ProbeRoute::Rebasing),
+                    PostFirePhase::Awaiting { .. } => None,
+                },
+                ProfileState::Idle => None,
+            },
+            ProbeOwner::Promoter(qid) => match &self.promoters.get(qid)?.state {
+                PromoterState::PrefixPending(_) => Some(ProbeRoute::Descent),
+                PromoterState::Active { .. } => None,
+            },
+        }
+    }
+
     /// Mint a fresh [`ProbeCorrelation`] off the engine-wide monotonic
     /// floor — the sole mint driver for every state-resident probe
     /// slot. Shares the channel's counter so slot- and channel-minted
@@ -284,8 +340,9 @@ impl Engine {
     }
 
     /// Consume the owner's in-flight probe and return its correlation
-    /// (`None` if none was in flight). Disarms the state-resident
-    /// descent slot if armed; otherwise closes the channel entry. The
+    /// (`None` if none was in flight). Disarms the state-resident slot
+    /// (Profile descent / verify / rebase, Promoter descent) if armed;
+    /// otherwise closes the channel entry (Promoter enumeration). The
     /// single consume primitive both the response path and the cancel
     /// path route through — disjoint per owner, so exactly one home
     /// fires.
@@ -410,8 +467,8 @@ mod tests {
     use super::{OpenKind, ProbeChannel};
     use crate::Engine;
     use specter_core::{
-        ClassSet, ProbeCorrelation, ProbeOp, ProbeOwner, Profile, ProfileIdentity, ResourceRole,
-        ScanConfig, StepOutput,
+        ClassSet, ProbeCorrelation, ProbeOp, ProbeOwner, Profile, ProfileIdentity, ResourceId,
+        ResourceRole, ScanConfig, StepOutput,
     };
     use std::time::Duration;
 
@@ -419,10 +476,11 @@ mod tests {
     const MAX_SETTLE: Duration = Duration::from_secs(6);
 
     /// Attach a fresh `Idle` Profile at a synthetic anchor, returning
-    /// the engine and the new [`ProbeOwner`]. The Profile carries no
-    /// Subs and no claims — purely a vehicle for exercising the
-    /// channel state in isolation.
-    fn fresh_engine_with_idle_profile() -> (Engine, ProbeOwner) {
+    /// the engine, the new [`ProbeOwner`], and the anchor
+    /// [`ResourceId`] (handy as a channel-mechanism `OpenKind` target).
+    /// The Profile carries no Subs and no claims — purely a vehicle for
+    /// exercising the channel state in isolation.
+    fn fresh_engine_with_idle_profile() -> (Engine, ProbeOwner, ResourceId) {
         let mut e = Engine::new();
         let r = e.tree.ensure_root("anchor", ResourceRole::User);
         let pid = e.profiles.attach(
@@ -438,19 +496,21 @@ mod tests {
                 None,
             ),
         );
-        (e, ProbeOwner::Profile(pid))
+        (e, ProbeOwner::Profile(pid), r)
     }
 
     /// Open returns a fresh correlation; channel reports it on
     /// `correlation_for`.
     #[test]
     fn open_returns_correlation_and_records_kind() {
-        let (mut e, owner) = fresh_engine_with_idle_profile();
-        let corr = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
+        let (mut e, owner, r) = fresh_engine_with_idle_profile();
+        let corr = e
+            .probe_channel
+            .open(owner, OpenKind::PromoterEnumerating { target: r });
         assert_eq!(e.pending_probe_for(owner), Some(corr));
         assert_eq!(
             e.probe_channel.kind_for(owner),
-            Some(&OpenKind::ProfileVerifying),
+            Some(&OpenKind::PromoterEnumerating { target: r }),
         );
     }
 
@@ -460,9 +520,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "I5 violated")]
     fn open_panics_on_double_open() {
-        let (mut e, owner) = fresh_engine_with_idle_profile();
-        let _ = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
-        let _ = e.probe_channel.open(owner, OpenKind::ProfileVerifying); // panics
+        let (mut e, owner, r) = fresh_engine_with_idle_profile();
+        let _ = e
+            .probe_channel
+            .open(owner, OpenKind::PromoterEnumerating { target: r });
+        let _ = e
+            .probe_channel
+            .open(owner, OpenKind::PromoterEnumerating { target: r }); // panics
     }
 
     /// Counter saturation — release-runnable. Pairs with the
@@ -472,23 +536,27 @@ mod tests {
     #[test]
     #[should_panic(expected = "MonotonicCounter")]
     fn open_panics_on_counter_saturation() {
-        let (mut e, owner) = fresh_engine_with_idle_profile();
+        let (mut e, owner, r) = fresh_engine_with_idle_profile();
         e.probe_channel.prime_counter(u64::MAX);
-        let _ = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
+        let _ = e
+            .probe_channel
+            .open(owner, OpenKind::PromoterEnumerating { target: r });
     }
 
     /// `close_if` succeeds on matched correlation and returns the
     /// `Open` with the expected kind.
     #[test]
     fn close_if_matched_returns_open() {
-        let (mut e, owner) = fresh_engine_with_idle_profile();
-        let corr = e.probe_channel.open(owner, OpenKind::ProfileRebasing);
+        let (mut e, owner, r) = fresh_engine_with_idle_profile();
+        let corr = e
+            .probe_channel
+            .open(owner, OpenKind::PromoterEnumerating { target: r });
         let open = e
             .probe_channel
             .close_if(owner, corr)
             .expect("matched correlation closes");
         assert_eq!(open.correlation(), corr);
-        assert_eq!(open.kind(), &OpenKind::ProfileRebasing);
+        assert_eq!(open.kind(), &OpenKind::PromoterEnumerating { target: r });
         assert!(
             e.pending_probe_for(owner).is_none(),
             "channel closed post-close_if",
@@ -500,8 +568,10 @@ mod tests {
     /// legitimately-outstanding probe).
     #[test]
     fn close_if_mismatch_preserves_entry() {
-        let (mut e, owner) = fresh_engine_with_idle_profile();
-        let corr = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
+        let (mut e, owner, r) = fresh_engine_with_idle_profile();
+        let corr = e
+            .probe_channel
+            .open(owner, OpenKind::PromoterEnumerating { target: r });
         let bogus = ProbeCorrelation::from(corr.as_u64() + 9_999);
         assert!(
             e.probe_channel.close_if(owner, bogus).is_none(),
@@ -517,7 +587,7 @@ mod tests {
     /// `close_if` on a closed channel is a clean `None`. No surprise.
     #[test]
     fn close_if_closed_returns_none() {
-        let (mut e, owner) = fresh_engine_with_idle_profile();
+        let (mut e, owner, _r) = fresh_engine_with_idle_profile();
         let bogus = ProbeCorrelation::from(42);
         assert!(e.probe_channel.close_if(owner, bogus).is_none());
         assert!(e.pending_probe_for(owner).is_none());
@@ -528,7 +598,7 @@ mod tests {
     /// regardless of phase.
     #[test]
     fn cancel_owner_probe_idempotent_on_closed_channel() {
-        let (mut e, owner) = fresh_engine_with_idle_profile();
+        let (mut e, owner, _r) = fresh_engine_with_idle_profile();
         assert!(e.pending_probe_for(owner).is_none());
         let mut out = StepOutput::default();
         e.cancel_owner_probe(owner, &mut out);
@@ -539,8 +609,10 @@ mod tests {
     /// `cancel_owner_probe` on open channel: single Cancel + close.
     #[test]
     fn cancel_owner_probe_emits_and_clears_on_open_channel() {
-        let (mut e, owner) = fresh_engine_with_idle_profile();
-        let corr = e.probe_channel.open(owner, OpenKind::ProfileVerifying);
+        let (mut e, owner, r) = fresh_engine_with_idle_profile();
+        let corr = e
+            .probe_channel
+            .open(owner, OpenKind::PromoterEnumerating { target: r });
         assert_eq!(e.pending_probe_for(owner), Some(corr));
         let mut out = StepOutput::default();
         e.cancel_owner_probe(owner, &mut out);
@@ -586,8 +658,12 @@ mod tests {
         );
         let owner1 = ProbeOwner::Profile(pid1);
         let owner2 = ProbeOwner::Profile(pid2);
-        let c1 = e.probe_channel.open(owner1, OpenKind::ProfileVerifying);
-        let c2 = e.probe_channel.open(owner2, OpenKind::ProfileRebasing);
+        let c1 = e
+            .probe_channel
+            .open(owner1, OpenKind::PromoterEnumerating { target: r1 });
+        let c2 = e
+            .probe_channel
+            .open(owner2, OpenKind::PromoterEnumerating { target: r2 });
 
         let mut out = StepOutput::default();
         e.cancel_owner_probe(owner1, &mut out);

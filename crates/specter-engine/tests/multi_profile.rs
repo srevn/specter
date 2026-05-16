@@ -460,7 +460,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         e.profiles().get(pid_parent).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PreFire(PreFireBurst {
-                phase: PreFirePhase::Verifying,
+                phase: PreFirePhase::Verifying(_),
                 ..
             }),
             BurstFinish::ReturnToIdle

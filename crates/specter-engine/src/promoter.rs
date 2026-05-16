@@ -634,18 +634,6 @@ impl Engine {
                 out.diagnostics
                     .push(Diagnostic::StaleProbeResponse { owner, correlation });
             }
-
-            // ----- Cross-affinity: Promoter owner with Profile kind -----
-            (OpenKind::ProfileVerifying | OpenKind::ProfileRebasing, _) => {
-                debug_assert!(
-                    false,
-                    "owner-affinity violated: Promoter owner with Profile kind \
-                     (promoter = {promoter_id:?}, kind = {:?})",
-                    open.kind(),
-                );
-                out.diagnostics
-                    .push(Diagnostic::StaleProbeResponse { owner, correlation });
-            }
         }
     }
 

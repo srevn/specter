@@ -185,25 +185,38 @@ pub struct PreFireBurst {
 /// Pre-fire phase discriminator.
 ///
 /// `Batching` carries its own correlation token (`settle_timer: TimerId`)
-/// because timer correlation is per-Burst and has no peer slot to live on.
-/// `Verifying` is unit: the probe correlation lives on the engine's
-/// `ProbeChannel` keyed by `ProbeOwner::Profile(_)` with
-/// `OpenKind::ProfileVerifying`, so the burst phase only encodes
-/// "probe in flight" as state-machine identity. `Draining` is
-/// correlated externally by `Profile.dirty_descendants` and carries no
-/// token of its own.
+/// because timer correlation is per-Burst and has no peer slot to live
+/// on. `Verifying` carries a [`ProbeSlot`]: the pre-fire stability
+/// probe's liveness *and* identity live on the phase, so a verify in
+/// flight without its correlation is unconstructable and I5 ("at most
+/// one outstanding probe") is a representability property of the single
+/// slot. `Draining` is correlated externally by
+/// `Profile.dirty_descendants` and carries no token of its own.
 #[derive(Debug)]
 pub enum PreFirePhase {
     /// Activity-gap detection. `settle_timer` is the armed debounce
     /// timer; an `FsEvent` reschedules it (`event_drives_batching`),
     /// timer expiry advances to `Verifying` (`transition_to_verifying`).
     Batching { settle_timer: TimerId },
-    /// Probe in flight. The matching `ProbeCorrelation` lives on the
-    /// engine's `ProbeChannel` (keyed by `ProbeOwner::Profile(_)` with
-    /// `OpenKind::ProfileVerifying`); this variant is unit because
-    /// the channel is the single source of truth (encoding the
-    /// correlation twice would invite drift).
-    Verifying,
+    /// Pre-fire stability probe. The [`ProbeSlot`] is armed with the
+    /// correlation the response must echo while the probe is in flight;
+    /// it is empty only for the transient post-Cancel window before the
+    /// burst re-arms `Batching` (`event_drives_batching`). Consuming the
+    /// response disarms the slot exactly once — the structural
+    /// consume-once guarantee. Constructing the variant *requires* a
+    /// slot, so a verify phase without a correlation cannot exist:
+    ///
+    /// ```compile_fail
+    /// use specter_core::PreFirePhase;
+    /// // `Verifying` is not unit — a bare tag is not a `PreFirePhase`.
+    /// let _: PreFirePhase = PreFirePhase::Verifying;
+    /// ```
+    ///
+    /// ```
+    /// use specter_core::{PreFirePhase, ProbeSlot};
+    /// let _ = PreFirePhase::Verifying(ProbeSlot::empty());
+    /// ```
+    Verifying(ProbeSlot),
     /// Self-stable; descendants pending. The stable snapshot lives on
     /// `Profile.current` — `dispatch_standard_ok` updates `current` to
     /// the stable response immediately before transitioning here, so the
@@ -263,19 +276,28 @@ pub struct PostFireBurst {
 /// — its expiry forces the burst into `Rebasing` (or, on a zombie
 /// burst, directly into [`crate::ProfileState::Idle`] via reap).
 ///
-/// `Rebasing`: post-fire probe in flight at the anchor. Correlation
-/// lives on the engine's `ProbeChannel` (keyed by
-/// `ProbeOwner::Profile(_)` with `OpenKind::ProfileRebasing`; Verifying
-/// and Rebasing are time-disjoint within one burst so the same channel
-/// key is reused). `dispatch_rebase_ok` then sets `baseline := current`
-/// and finishes the burst to Idle.
+/// `Rebasing` carries a [`ProbeSlot`]: the post-fire baseline-capture
+/// probe's liveness *and* identity live on the phase, so a rebase in
+/// flight without its correlation is unconstructable. `dispatch_rebase_ok`
+/// disarms the slot, then sets `baseline := current` and finishes the
+/// burst to Idle.
 #[derive(Debug)]
 pub enum PostFirePhase {
     Awaiting {
         outstanding: u32,
         gate_deadline: TimerId,
     },
-    Rebasing,
+    /// Post-fire baseline-capture probe at the anchor. The [`ProbeSlot`]
+    /// holds the correlation the rebase response must echo while it is
+    /// in flight; the single disarm at response dispatch is the
+    /// consume-once guarantee. The variant requires the slot, so a
+    /// rebase phase without a correlation is unrepresentable:
+    ///
+    /// ```compile_fail
+    /// use specter_core::PostFirePhase;
+    /// let _: PostFirePhase = PostFirePhase::Rebasing;
+    /// ```
+    Rebasing(ProbeSlot),
 }
 
 impl PreFireBurst {
@@ -302,7 +324,7 @@ impl PreFireBurst {
         match kind {
             TimerKind::Settle => match &self.phase {
                 PreFirePhase::Batching { settle_timer } => Some(*settle_timer),
-                PreFirePhase::Verifying | PreFirePhase::Draining => None,
+                PreFirePhase::Verifying(_) | PreFirePhase::Draining => None,
             },
             TimerKind::BurstDeadline => Some(self.burst_deadline),
             TimerKind::AwaitGateDeadline => None,
@@ -371,7 +393,7 @@ impl PostFireBurst {
         match kind {
             TimerKind::AwaitGateDeadline => match &self.phase {
                 PostFirePhase::Awaiting { gate_deadline, .. } => Some(*gate_deadline),
-                PostFirePhase::Rebasing => None,
+                PostFirePhase::Rebasing(_) => None,
             },
             TimerKind::Settle | TimerKind::BurstDeadline => None,
         }
@@ -516,13 +538,18 @@ pub enum ReapTrigger {
 ///   field); the variant payload structurally bans the illegal
 ///   `(Idle, reap_pending = true)` combination.
 ///
-/// I5 (at most one outstanding probe per Profile) is enforced
-/// **structurally** by the engine's `ProbeChannel`: at most one map
-/// entry per `ProbeOwner`. Open via `ProbeChannel::open` (panics on
-/// double-open); close via `close_if` (correlation-matched) or
-/// `close` (unconditional). The dispatch site routes on the channel's
-/// `OpenKind` discriminant rather than per-state inspection (see
-/// `Engine::on_probe_response` in `specter-engine`).
+/// I5 (at most one outstanding probe per Profile) is a
+/// **representability** property: the in-flight probe's liveness *and*
+/// identity live on the state itself, in the single [`ProbeSlot`] of
+/// whichever carrier the Profile currently is — the `Pending` descent
+/// slot, the `Active(PreFire(Verifying))` slot, or the
+/// `Active(PostFire(Rebasing))` slot. One Profile is exactly one of
+/// these carriers, so it holds exactly one slot and two simultaneous
+/// probes are unconstructable. The response handler routes by state,
+/// gates on [`Self::probe_correlation`], and consumes by disarming
+/// that slot once via [`Self::take_probe`] — the structural
+/// consume-once guarantee, with no separate side-table to drift
+/// against.
 #[derive(Debug, Default)]
 pub enum ProfileState {
     #[default]
@@ -721,25 +748,48 @@ impl ProfileState {
 
     /// The correlation of this state's in-flight probe, or `None` if
     /// the carrier holds none. A total projection over the state space:
-    /// only a `Pending` descent with an armed slot yields a
-    /// correlation. Owner-symmetric with
+    /// the three probe-bearing carriers — a `Pending` descent, an
+    /// `Active(PreFire(Verifying))`, an `Active(PostFire(Rebasing))` —
+    /// answer from their armed slot; every other state (including a
+    /// disarmed slot) yields `None`. Owner-symmetric with
     /// [`crate::PromoterState::probe_correlation`].
     #[must_use]
     pub const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
         match self {
+            Self::Active(ActiveBurst::PreFire(burst), _) => match &burst.phase {
+                PreFirePhase::Verifying(slot) => slot.correlation(),
+                PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
+            },
+            Self::Active(ActiveBurst::PostFire(burst), _) => match &burst.phase {
+                PostFirePhase::Rebasing(slot) => slot.correlation(),
+                PostFirePhase::Awaiting { .. } => None,
+            },
             Self::Pending(d) => d.probe.correlation(),
-            Self::Idle | Self::Active(_, _) => None,
+            Self::Idle => None,
         }
     }
 
     /// Disarm whichever probe-bearing carrier this state holds and
     /// return the prior correlation — the single state-level consume.
-    /// Total: a non-probe-bearing state is a `None` no-op. Owner-
-    /// symmetric with [`crate::PromoterState::take_probe`].
+    /// Total: the three probe-bearing carriers (`Pending` descent,
+    /// `Active(PreFire(Verifying))`, `Active(PostFire(Rebasing))`) disarm
+    /// their slot; every other state (including an already-disarmed
+    /// slot) is a `None` no-op. The disarm leaves the carrier's variant
+    /// intact — only the slot empties — so a route computed before this
+    /// call stays valid after it. Owner-symmetric with
+    /// [`crate::PromoterState::take_probe`].
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
         match self {
+            Self::Active(ActiveBurst::PreFire(burst), _) => match &mut burst.phase {
+                PreFirePhase::Verifying(slot) => slot.disarm(),
+                PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
+            },
+            Self::Active(ActiveBurst::PostFire(burst), _) => match &mut burst.phase {
+                PostFirePhase::Rebasing(slot) => slot.disarm(),
+                PostFirePhase::Awaiting { .. } => None,
+            },
             Self::Pending(d) => d.probe.disarm(),
-            Self::Idle | Self::Active(_, _) => None,
+            Self::Idle => None,
         }
     }
 }
@@ -2939,7 +2989,7 @@ mod tests {
             PreFirePhase::Batching {
                 settle_timer: tid(1),
             },
-            PreFirePhase::Verifying,
+            PreFirePhase::Verifying(ProbeSlot::empty()),
             PreFirePhase::Draining,
         ] {
             let pre = unit_pre(phase, tid(42), r);
@@ -2953,7 +3003,10 @@ mod tests {
     fn timer_token_settle_is_none_on_verifying_or_draining() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        for phase in [PreFirePhase::Verifying, PreFirePhase::Draining] {
+        for phase in [
+            PreFirePhase::Verifying(ProbeSlot::empty()),
+            PreFirePhase::Draining,
+        ] {
             let pre = unit_pre(phase, tid(42), r);
             assert!(pre.timer_token(TimerKind::Settle).is_none());
         }
@@ -2991,7 +3044,7 @@ mod tests {
     fn timer_token_await_gate_is_none_on_rebasing() {
         let post = PostFireBurst {
             intent: BurstIntent::Standard,
-            phase: PostFirePhase::Rebasing,
+            phase: PostFirePhase::Rebasing(ProbeSlot::empty()),
             force_walk_resources: BTreeSet::new(),
         };
         assert!(post.timer_token(TimerKind::AwaitGateDeadline).is_none());
@@ -3006,7 +3059,7 @@ mod tests {
                 outstanding: 1,
                 gate_deadline: tid(99),
             },
-            PostFirePhase::Rebasing,
+            PostFirePhase::Rebasing(ProbeSlot::empty()),
         ] {
             let post = PostFireBurst {
                 intent: BurstIntent::Standard,
@@ -3115,7 +3168,11 @@ mod tests {
                 ProbeSlot::empty(),
             )),
             ProfileState::Active(
-                ActiveBurst::PreFire(unit_pre(PreFirePhase::Verifying, tid(1), r)),
+                ActiveBurst::PreFire(unit_pre(
+                    PreFirePhase::Verifying(ProbeSlot::empty()),
+                    tid(1),
+                    r,
+                )),
                 BurstFinish::ReturnToIdle,
             ),
             ProfileState::Active(
@@ -3136,7 +3193,7 @@ mod tests {
             ProfileState::Active(
                 ActiveBurst::PostFire(PostFireBurst {
                     intent: BurstIntent::Standard,
-                    phase: PostFirePhase::Rebasing,
+                    phase: PostFirePhase::Rebasing(ProbeSlot::empty()),
                     force_walk_resources: BTreeSet::new(),
                 }),
                 BurstFinish::ReturnToIdle,
@@ -3270,7 +3327,7 @@ mod tests {
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
                 intent: BurstIntent::Standard,
-                phase: PostFirePhase::Rebasing,
+                phase: PostFirePhase::Rebasing(ProbeSlot::empty()),
                 force_walk_resources: BTreeSet::new(),
             }),
             BurstFinish::ReturnToIdle,

@@ -1580,15 +1580,18 @@ mod tests {
             ),
         );
 
-        let a = e
-            .probe_channel
-            .open(ProbeOwner::Profile(pid1), OpenKind::ProfileVerifying);
-        let b = e
-            .probe_channel
-            .open(ProbeOwner::Profile(pid2), OpenKind::ProfileVerifying);
-        let c = e
-            .probe_channel
-            .open(ProbeOwner::Profile(pid3), OpenKind::ProfileVerifying);
+        let a = e.probe_channel.open(
+            ProbeOwner::Profile(pid1),
+            OpenKind::PromoterEnumerating { target: r1 },
+        );
+        let b = e.probe_channel.open(
+            ProbeOwner::Profile(pid2),
+            OpenKind::PromoterEnumerating { target: r2 },
+        );
+        let c = e.probe_channel.open(
+            ProbeOwner::Profile(pid3),
+            OpenKind::PromoterEnumerating { target: r3 },
+        );
         assert!(a < b);
         assert!(b < c);
         assert_eq!(a, ProbeCorrelation::from(1));

@@ -300,7 +300,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
         _ => panic!("expected Active(Rebasing)"),
     };
-    assert!(matches!(phase, PostFirePhase::Rebasing));
+    assert!(matches!(phase, PostFirePhase::Rebasing(_)));
 
     // ProbeResponse Ok (idempotent — same snap) → Idle, baseline rebased.
     e.step(
@@ -454,7 +454,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::Rebasing,
+                phase: PostFirePhase::Rebasing(_),
                 ..
             }),
             BurstFinish::ReturnToIdle
@@ -537,7 +537,7 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::Rebasing,
+                phase: PostFirePhase::Rebasing(_),
                 ..
             }),
             BurstFinish::ReturnToIdle
@@ -581,7 +581,7 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::Rebasing,
+                phase: PostFirePhase::Rebasing(_),
                 ..
             }),
             BurstFinish::ReturnToIdle
@@ -610,7 +610,7 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::Rebasing,
+                phase: PostFirePhase::Rebasing(_),
                 ..
             }),
             BurstFinish::ReturnToIdle
@@ -700,7 +700,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::Rebasing,
+                phase: PostFirePhase::Rebasing(_),
                 ..
             }),
             BurstFinish::ReturnToIdle
@@ -916,7 +916,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::Rebasing,
+                phase: PostFirePhase::Rebasing(_),
                 ..
             }),
             BurstFinish::ReturnToIdle

@@ -7,16 +7,18 @@
 //! rows (e.g., emit Effects on Standard stable verdict) is factored into
 //! private helpers within this module.
 //!
-//! `on_probe_response` routes each response by
-//! [`crate::probe_channel::OpenKind`]: the response handler closes the
-//! channel atomically via [`crate::probe_channel::ProbeChannel::close_if`]
-//! and matches `(open.kind(), outcome)`. Per-intent fan-out for the
-//! Verifying arm lives in `dispatch_burst_outcome`.
+//! `on_probe_response` routes a Profile response by *state*: the
+//! gated correlation lives on a state-resident
+//! [`specter_core::ProbeSlot`], the routing class comes from
+//! [`Engine::probe_route`], and the slot is disarmed once on dispatch.
+//! Promoter enumeration is the one response still routed on the
+//! channel's [`crate::probe_channel::OpenKind`]. Per-intent fan-out
+//! for the Verifying route lives in `dispatch_burst_outcome`.
 
 use crate::Engine;
 use crate::engine::is_timer_referenced;
 use crate::path::empty_path;
-use crate::probe_channel::OpenKind;
+use crate::probe_channel::ProbeRoute;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use compact_str::CompactString;
 use smallvec::SmallVec;
@@ -223,23 +225,23 @@ impl Engine {
     /// Dispatch a [`ProbeResponse`] by routing to the per-owner
     /// handler.
     ///
-    /// **Staleness.** Each per-owner handler closes the channel
-    /// atomically via
-    /// [`crate::probe_channel::ProbeChannel::close_if`]; the call
-    /// returns `Some(Open)` iff the channel is open AND its
-    /// correlation matches the received one. A `None` covers every
-    /// stale path — stale id, response after Cancel, out-of-order
-    /// response — and yields [`Diagnostic::StaleProbeResponse`].
+    /// **Staleness.** The Profile handler (and the Promoter descent
+    /// path) gate on `pending_probe_for(owner) == Some(received)` — the
+    /// state-resident slot's own correlation. Promoter enumeration
+    /// still gates on the channel's atomic
+    /// [`crate::probe_channel::ProbeChannel::close_if`]. Either way a
+    /// mismatch covers every stale path (stale id, response after
+    /// Cancel, response after a fresh mint, out-of-order response),
+    /// leaves live state intact, and yields
+    /// [`Diagnostic::StaleProbeResponse`].
     ///
-    /// **Routing.** The returned [`crate::probe_channel::Open`]
-    /// carries the [`crate::probe_channel::OpenKind`] the channel
-    /// recorded at open-time. The handlers match `(open.kind(),
-    /// outcome)` directly — no per-(state, phase) projection, so
-    /// state-phase divergence that used to surface as
-    /// `debug_assert!(false, "I5 violated")` is structurally
-    /// unrepresentable (a channel opened with `ProfileVerifying`
-    /// cannot drift into a state where the dispatch arm rejects it,
-    /// because the kind is what's matched).
+    /// **Routing.** State-resident probes route on
+    /// [`Engine::probe_route`] (a [`Copy`] snapshot taken before the
+    /// slot is disarmed); the correlation lives on the carrier itself,
+    /// so a channel-vs-state divergence is structurally
+    /// unrepresentable. Promoter enumeration routes on the
+    /// [`crate::probe_channel::OpenKind`] the channel records at
+    /// open-time.
     ///
     /// **Walker-contract violations.** A descent probe receiving
     /// `AnchorOk` (the walker contracted to return `SubtreeOk` or
@@ -263,31 +265,32 @@ impl Engine {
         }
     }
 
-    /// Profile-side probe response handler. Two disjoint homes by
-    /// state: a `Pending` descent consumes via its state-resident
-    /// probe slot; an `Active` burst (Verifying / Rebasing) consumes
-    /// via the channel.
+    /// Profile-side probe response handler. Every Profile probe —
+    /// `Pending` descent, `Active(PreFire(Verifying))`,
+    /// `Active(PostFire(Rebasing))` — carries its correlation on a
+    /// state-resident [`specter_core::ProbeSlot`]. One uniform
+    /// sequence, no per-carrier branch:
     ///
-    /// **Staleness.** For descent, the gate is `pending_probe_for(owner)
-    /// == Some(received)` — the slot's own correlation. For the burst,
-    /// [`crate::probe_channel::ProbeChannel::close_if`] is the atomic
-    /// check-and-take. Either way a mismatch leaves live state intact
-    /// and yields [`Diagnostic::StaleProbeResponse`], covering every
-    /// stale path (stale `ProfileId`, response after Cancel, response
-    /// after a fresh mint, out-of-order response).
+    /// **Staleness.** `pending_probe_for(owner) == Some(received)` —
+    /// the gated slot's own correlation. A mismatch (stale `ProfileId`,
+    /// response after Cancel, response after a fresh mint, out-of-order
+    /// response, no probe in flight) leaves live state intact and
+    /// yields [`Diagnostic::StaleProbeResponse`].
     ///
-    /// **Consume-once.** The descent path disarms the slot exactly
-    /// once (via `take_owner_probe`) before dispatching; `close_if`
-    /// removes the channel entry for the burst path. The received
-    /// correlation is absent from state before any dispatch, so it
-    /// cannot route twice.
+    /// **Consume-once.** `take_owner_probe` disarms the slot exactly
+    /// once, *after* the route is snapshotted and *before* any
+    /// dispatch. The received correlation is absent from state before
+    /// dispatch, so it cannot route twice — the structural dual of the
+    /// old channel close-on-response.
     ///
-    /// **Routing.** Descent routes on state (`Pending`). The burst
-    /// matches the [`OpenKind`] discriminant the channel records at
-    /// open-time; the Promoter-kind arm catches a cross-affinity
-    /// regression (`debug_assert!` + diagnostic). Walker-contract
-    /// violations (descent receiving `AnchorOk`) are handled in-arm:
-    /// production walkers never emit those shapes.
+    /// **Routing.** [`Engine::probe_route`] reads the routing class off
+    /// state pre-disarm ([`crate::probe_channel::ProbeRoute`] is
+    /// [`Copy`]; disarm leaves the carrier variant intact). `None` is
+    /// dead-by-construction for a Profile owner that passed the
+    /// staleness gate (the matched correlation lives on exactly one
+    /// routable carrier) — kept as a loud regression arm. A descent
+    /// receiving `AnchorOk` is a walker-contract violation handled
+    /// in-arm; production walkers never emit that shape.
     fn on_profile_probe_response(
         &mut self,
         profile_id: ProfileId,
@@ -298,25 +301,45 @@ impl Engine {
         let owner = response.owner;
         let received = response.correlation;
 
-        // Descent (Pending) carries its probe on the state-resident
-        // slot. Route on state; gate on the slot's own correlation;
-        // consume via the single state-level take.
-        if self.descent_state(owner).is_some() {
-            if self.pending_probe_for(owner) != Some(received) {
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    owner,
-                    correlation: received,
-                });
-                return;
+        if self.pending_probe_for(owner) != Some(received) {
+            out.diagnostics.push(Diagnostic::StaleProbeResponse {
+                owner,
+                correlation: received,
+            });
+            return;
+        }
+
+        // Snapshot the route before the disarm: `take_owner_probe`
+        // empties the slot but leaves the carrier variant intact, so a
+        // route captured here stays valid through dispatch.
+        let route = self.probe_route(owner);
+        let consumed = self.take_owner_probe(owner);
+        debug_assert_eq!(
+            consumed,
+            Some(received),
+            "consume-once: state-slot disarm must yield the gated correlation \
+             (profile = {profile_id:?})",
+        );
+
+        match route {
+            Some(ProbeRoute::Verifying { intent, forced }) => {
+                self.dispatch_burst_outcome(profile_id, intent, forced, response.outcome, now, out);
             }
-            let consumed = self.take_owner_probe(owner);
-            debug_assert_eq!(
-                consumed,
-                Some(received),
-                "consume-once: descent slot disarm must yield the gated correlation \
-                 (profile = {profile_id:?})",
-            );
-            match response.outcome {
+
+            Some(ProbeRoute::Rebasing) => match response.outcome {
+                ProbeOutcome::AnchorOk(leaf) => {
+                    self.dispatch_rebase_ok(profile_id, TreeSnapshot::File(leaf), out);
+                }
+                ProbeOutcome::SubtreeOk(arc) => {
+                    self.dispatch_rebase_ok(profile_id, TreeSnapshot::Dir(arc), out);
+                }
+                ProbeOutcome::Vanished => self.dispatch_rebase_vanished(profile_id, out),
+                ProbeOutcome::Failed { errno } => {
+                    self.dispatch_rebase_failed(profile_id, errno, out);
+                }
+            },
+
+            Some(ProbeRoute::Descent) => match response.outcome {
                 ProbeOutcome::SubtreeOk(arc) => self.dispatch_descent_ok(owner, &arc, now, out),
                 ProbeOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
                 ProbeOutcome::Failed { errno } => self.dispatch_descent_failed(owner, errno, out),
@@ -334,75 +357,18 @@ impl Engine {
                         correlation: received,
                     });
                 }
-            }
-            return;
-        }
+            },
 
-        // Active burst (Verifying / Rebasing) still channel-routed.
-        let Some(open) = self.probe_channel.close_if(owner, received) else {
-            out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                owner,
-                correlation: received,
-            });
-            return;
-        };
-
-        match (open.kind(), response.outcome) {
-            // ----- ProfileVerifying -----
-            (OpenKind::ProfileVerifying, outcome) => {
-                // Read `(intent, forced)` off the PreFireBurst. State
-                // agreement is structural: only `start_seed_burst` and
-                // `transition_to_verifying` mint with this kind, and
-                // both write `phase = Verifying` before opening the
-                // channel. The bail covers a test forging a channel
-                // open without a matching phase write — never reached
-                // in production.
-                let Some((intent, forced)) = self.profiles.get(profile_id).and_then(|p| {
-                    if let ProfileState::Active(ActiveBurst::PreFire(pre), _) = p.state() {
-                        Some((pre.intent, pre.forced))
-                    } else {
-                        None
-                    }
-                }) else {
-                    debug_assert!(
-                        false,
-                        "channel ProfileVerifying but profile state diverges \
-                         (profile = {profile_id:?})",
-                    );
-                    out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                        owner,
-                        correlation: received,
-                    });
-                    return;
-                };
-                self.dispatch_burst_outcome(profile_id, intent, forced, outcome, now, out);
-            }
-
-            // ----- ProfileRebasing -----
-            (OpenKind::ProfileRebasing, ProbeOutcome::AnchorOk(leaf)) => {
-                self.dispatch_rebase_ok(profile_id, TreeSnapshot::File(leaf), out);
-            }
-            (OpenKind::ProfileRebasing, ProbeOutcome::SubtreeOk(arc)) => {
-                self.dispatch_rebase_ok(profile_id, TreeSnapshot::Dir(arc), out);
-            }
-            (OpenKind::ProfileRebasing, ProbeOutcome::Vanished) => {
-                self.dispatch_rebase_vanished(profile_id, out);
-            }
-            (OpenKind::ProfileRebasing, ProbeOutcome::Failed { errno }) => {
-                self.dispatch_rebase_failed(profile_id, errno, out);
-            }
-
-            // ----- Cross-affinity: Profile owner with Promoter kind -----
-            // Mint-site discipline forbids; this arm is regression
-            // detection. A Promoter-kinded entry under a Profile key
-            // requires either a future buggy mint site or test forgery
-            // — neither reachable in production.
-            (OpenKind::PromoterEnumerating { .. }, _) => {
+            None => {
+                // A correlation matched `pending_probe_for` but no
+                // state-derived route exists: unconstructable for a
+                // Profile owner post-lift (the gated correlation lives
+                // on exactly one routable carrier). The loud arm
+                // replaces the old channel-vs-state divergence bail.
                 debug_assert!(
                     false,
-                    "owner-affinity violated: Profile owner with Promoter kind \
-                     (profile = {profile_id:?}, kind = {:?})",
-                    open.kind(),
+                    "matched correlation but Profile state is not probe-bearing \
+                     (profile = {profile_id:?})",
                 );
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
                     owner,
@@ -764,7 +730,7 @@ impl Engine {
                         AwaitAction::Decrement
                     }
                 }
-                PostFirePhase::Rebasing => AwaitAction::Diagnose,
+                PostFirePhase::Rebasing(_) => AwaitAction::Diagnose,
             },
             // PreFire phases (Batching / Verifying / Draining), Idle,
             // Pending, stale Profile (None): not waiting for this

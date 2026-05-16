@@ -25,9 +25,9 @@ use specter_core::{
     ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FiredKey, FsEvent, FsIdentity, Input,
     LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
-    PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileIdentity,
-    ProfileState, PromoterAttachRequest, PromoterId, PromoterRegistryDiff, PromoterState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
+    PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProbeSlot,
+    ProfileIdentity, ProfileState, PromoterAttachRequest, PromoterId, PromoterRegistryDiff,
+    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
     SubAttachRequest, SubId, SubParams, Termination, TimerKind, TreeSnapshot, WatchOp,
     WatchRegistryDiff,
 };
@@ -2293,7 +2293,7 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
     assert_eq!(burst.intent, BurstIntent::Seed);
-    assert!(matches!(burst.phase, PreFirePhase::Verifying));
+    assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
         "seed burst armed a fresh verify probe",
@@ -4172,7 +4172,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
         _ => panic!("expected Active(Rebasing)"),
     };
-    assert!(matches!(burst.phase, PostFirePhase::Rebasing));
+    assert!(matches!(burst.phase, PostFirePhase::Rebasing(_)));
     assert!(
         burst.force_walk_resources.is_empty(),
         "transition_to_rebasing clears force_walk_resources after \
@@ -4322,7 +4322,7 @@ fn dispatch_rebase_ok_consumes_survival_witness() {
     let state = active_post_fire_burst(
         &mut e,
         pid,
-        PostFirePhase::Rebasing,
+        PostFirePhase::Rebasing(ProbeSlot::empty()),
         BurstIntent::Standard,
         anchor,
         now,
@@ -4377,7 +4377,7 @@ fn dispatch_seed_ok_no_drift_branch_consumes_survival_witness() {
     let state = active_pre_fire_burst(
         &mut e,
         pid,
-        PreFirePhase::Verifying,
+        PreFirePhase::Verifying(ProbeSlot::empty()),
         BurstIntent::Seed,
         anchor,
         now,
@@ -4428,7 +4428,7 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
     let state = active_pre_fire_burst(
         &mut e,
         pid,
-        PreFirePhase::Verifying,
+        PreFirePhase::Verifying(ProbeSlot::empty()),
         BurstIntent::Seed,
         anchor,
         now,
