@@ -225,9 +225,11 @@ impl crate::Engine {
     /// contribution attribution coherent with the Profile's claim shape
     /// at the moment of the refcount edge.
     ///
-    /// **Pre-condition.** Profile must be `Idle` with no in-flight
-    /// probe. The debug_assert below catches any caller passing a
-    /// non-Idle Profile or one whose probe is still outstanding.
+    /// **Pre-condition.** Profile must be `Idle`. The debug_assert
+    /// below catches any caller passing a non-Idle Profile. ("No
+    /// in-flight probe" is implied, not separately asserted: `Idle`
+    /// carries no `DescentState`, so an idle Profile structurally has
+    /// no probe slot.)
     ///
     /// **Caller responsibility.** Parent-edge work
     /// ([`Engine::install_parent_edges_for`]) is NOT done here — the
@@ -256,11 +258,12 @@ impl crate::Engine {
         debug_assert!(
             self.profiles
                 .get(profile_id)
-                .is_some_and(|p| matches!(p.state(), ProfileState::Idle))
-                && self.pending_probe_for(owner).is_none(),
-            "enter_pending_descent: Profile must be Idle with no in-flight probe; \
-             caller must invoke cancel_owner_probe (or take the response-dispatch path) \
-             and release prior state before re-entering descent (profile = {profile_id:?})",
+                .is_some_and(|p| matches!(p.state(), ProfileState::Idle)),
+            "enter_pending_descent: Profile must be Idle before re-entering \
+             descent; caller must release prior state first. ('No in-flight \
+             probe' is not a separate condition — `Idle` carries no \
+             `DescentState`, so an idle Profile structurally has no probe \
+             slot.) (profile = {profile_id:?})",
         );
 
         // Step 1: mint the correlation. Runs first so the Pending state

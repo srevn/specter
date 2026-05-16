@@ -920,14 +920,16 @@ impl Engine {
     /// groups (1) and (4) members are unordered — any permutation
     /// produces an equivalent [`StepOutput`]:
     ///
-    /// 1. **Probe channel close.** [`Engine::cancel_owner_probe`] emits a
-    ///    `ProbeOp::Cancel` for any in-flight probe (Pending Profile's
-    ///    descent probe; Active never reaches this entry — the response-
-    ///    dispatch path closes the channel before `finish_burst_to_idle`
-    ///    runs `reap_profile`). Must precede (2) because
-    ///    [`Engine::release_descent_prefix_claim`] debug-asserts the
-    ///    channel is closed (the cancel-first contract; see the helper's
-    ///    rustdoc).
+    /// 1. **Probe disarm.** [`Engine::cancel_owner_probe`] emits a
+    ///    `ProbeOp::Cancel` and disarms the owner's slot for any
+    ///    in-flight probe (Pending Profile's descent probe; Active never
+    ///    reaches this entry — the response-dispatch path disarms the
+    ///    slot before `finish_burst_to_idle` runs `reap_profile`). Must
+    ///    precede (2) because [`Engine::release_descent_prefix_claim`]'s
+    ///    `transition_state(Idle)` *drops* the prior
+    ///    `Pending(DescentState)`: an armed descent slot reaching that
+    ///    discard trips `ProbeSlot`'s Drop tripwire (the cancel-first
+    ///    contract, now structurally enforced; see the helper's rustdoc).
     ///
     /// 2. **Release quartet** — `release_descent_prefix_claim`,
     ///    `release_descendant_claim`, `release_anchor_claim`,
@@ -1033,14 +1035,11 @@ impl Engine {
         // `reap_profile`'s entry — `finish_burst_to_idle` runs
         // `reap_profile` only after the burst response consumed the
         // probe). Mirrors `on_watch_op_rejected`'s descent-purge
-        // pattern.
+        // pattern. A missed disarm is not silently tolerated: the armed
+        // slot would reach `release_descent_prefix_claim`'s state
+        // discard (or `profiles.detach`) and trip `ProbeSlot`'s Drop
+        // tripwire in every build — the discard *is* the enforcement.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
-        debug_assert!(
-            self.pending_probe_for(ProbeOwner::Profile(profile_id))
-                .is_none(),
-            "reap_profile: probe still in flight for profile = {profile_id:?} \
-             after cancel_owner_probe; cancel-first contract violated",
-        );
 
         // Release quartet — group (2) of the partial order (see rustdoc).
         // Members are mutually independent; the four helpers touch

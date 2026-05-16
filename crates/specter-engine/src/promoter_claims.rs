@@ -27,17 +27,26 @@
 //!   map's [`ContribKey::PromoterPrefix`] /
 //!   [`ContribKey::PromoterProxy`] entry has already been cleared by a
 //!   prior path).
-//! - **Cancel-first.** A `debug_assert!` enforces the
-//!   probe-channel-closed precondition. Callers that may have an
-//!   in-flight probe MUST invoke [`Engine::cancel_owner_probe`]
-//!   first; `cancel_owner_probe` is a no-op on a closed channel, so
-//!   "always cancel before release" is the safe default.
+//! - **Cancel-first.** Callers that may have an in-flight probe MUST
+//!   invoke [`Engine::cancel_owner_probe`] first (idempotent — a no-op
+//!   on an already-disarmed slot, so "always cancel before release" is
+//!   the safe default). The two release paths enforce this differently
+//!   because they differ structurally:
+//!   - **Descent prefix.** `release_promoter_descent_prefix_claim`'s
+//!     `PrefixPending → Active{empty}` flip *drops* the prior
+//!     `PrefixPending(DescentState)`. An armed descent slot reaching
+//!     that drop trips `ProbeSlot`'s Drop tripwire in every build —
+//!     the discard *is* the enforcement; no local witness is kept.
+//!   - **Active proxy.** `release_promoter_proxy_claim` removes one
+//!     proxy but keeps the Promoter `Active`, so the `enumerating`
+//!     slot is *not* dropped — the Drop tripwire cannot see this. A
+//!     `debug_assert!` is retained there: it guards a distinct
+//!     invariant (the in-flight enumeration must not target the proxy
+//!     being torn down), which the linear-slot guard does not cover.
 
 use crate::Engine;
 use crate::refcounts::sub_watch_then_try_reap;
-use specter_core::{
-    ContribKey, ProbeOwner, ProbeSlot, PromoterId, PromoterState, ResourceId, StepOutput,
-};
+use specter_core::{ContribKey, ProbeSlot, PromoterId, PromoterState, ResourceId, StepOutput};
 use std::collections::BTreeMap;
 
 impl Engine {
@@ -57,11 +66,13 @@ impl Engine {
     /// descent probe (e.g., `on_watch_op_rejected`'s descent purge,
     /// `dispatch_descent_vanished`'s no-rewind arm via
     /// `release_owner_descent_prefix`) MUST invoke
-    /// [`Engine::cancel_owner_probe`] first; the `debug_assert!` below
-    /// catches the regression. The empty-remaining arm in
-    /// [`Engine::dispatch_descent_ok`] reaches us with a closed channel
-    /// because `on_promoter_probe_response` closes the channel before
-    /// dispatch.
+    /// [`Engine::cancel_owner_probe`] first. `ProbeSlot`'s Drop tripwire
+    /// enforces this structurally: the `PrefixPending → Active{empty}`
+    /// flip below drops the prior `PrefixPending(DescentState)`, and an
+    /// armed descent slot reaching that drop panics in every build. The
+    /// empty-remaining arm in [`Engine::dispatch_descent_ok`] reaches us
+    /// with the slot already disarmed because `on_promoter_probe_response`
+    /// consumes it before dispatch.
     pub(crate) fn release_promoter_descent_prefix_claim(
         &mut self,
         qid: PromoterId,
@@ -74,16 +85,12 @@ impl Engine {
             return;
         };
 
-        debug_assert!(
-            self.pending_probe_for(ProbeOwner::Promoter(qid)).is_none(),
-            "release_promoter_descent_prefix_claim: no probe must be in flight before release; \
-             caller must invoke cancel_owner_probe (or take the response-dispatch path) \
-             first to avoid losing the Cancel emission (promoter = {qid:?})",
-        );
-
         // State flip is owner-bookkeeping: the contribution map's
         // [`ContribKey::PromoterPrefix`] key is removed below by
-        // explicit key, independent of state.
+        // explicit key, independent of state. The cancel-first contract
+        // is enforced here: this flip drops the prior
+        // `PrefixPending(DescentState)`; an armed descent slot trips
+        // `ProbeSlot`'s Drop tripwire.
         if let Some(q) = self.promoters.get_mut(qid) {
             q.state = PromoterState::Active {
                 proxies: BTreeMap::new(),

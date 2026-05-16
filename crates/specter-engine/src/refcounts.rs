@@ -223,10 +223,13 @@ pub(crate) fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput)
 /// - Owner-side bookkeeping (state flag, snapshot field, etc.) is
 ///   the caller's responsibility — this helper only mutates the
 ///   contributions map and the slot lifecycle.
-/// - Cancel-first preconditions (probe-channel closed) are the
-///   caller's responsibility — see the `debug_assert!`s on the
-///   higher-level `release_*_claim` helpers in [`crate::claims`] and
-///   [`crate::promoter_claims`].
+/// - Cancel-first preconditions are the caller's responsibility. For
+///   the descent-prefix `release_*_claim` helpers in [`crate::claims`]
+///   / [`crate::promoter_claims`] this is enforced structurally: their
+///   state-discard drops an armed `ProbeSlot` and trips its Drop
+///   tripwire. (`release_promoter_proxy_claim` keeps a `debug_assert!`
+///   for its distinct "enumeration must not target the released proxy"
+///   invariant, which the linear-slot guard does not cover.)
 pub(crate) fn sub_watch_then_try_reap(
     tree: &mut Tree,
     r: ResourceId,

@@ -111,6 +111,20 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) -> Option<PromoterId> {
+        // Structural post-insert token: carried out of step 5's `match`
+        // so the `Pending ⇒ correlation` pairing is type-enforced
+        // rather than re-derived from a surviving `materialize` via
+        // `expect`. Declared at function top (no items-after-statements).
+        enum PostInsert {
+            EnterActive {
+                proxy_resource: ResourceId,
+            },
+            PendingDescent {
+                prefix: ResourceId,
+                correlation: ProbeCorrelation,
+            },
+        }
+
         // 1. Render the literal prefix. components[0..literal_prefix_len]
         // are all Literal post-parse; the loop is a fold.
         let prefix_path = render_literal_prefix(&req.pattern_spec);
@@ -143,20 +157,8 @@ impl Engine {
         // constructed already armed — there is no window where the
         // PrefixPending phase exists without its probe correlation.
         // `materialize` is consumed exactly once: `remaining` moves
-        // straight into the linear descent slot (no clone), and the
-        // post-insert step is carried as a structural token rather
-        // than re-derived from a surviving `materialize` — the
-        // `Pending ⇒ correlation` pairing is type-enforced, not an
-        // `expect`.
-        enum PostInsert {
-            EnterActive {
-                proxy_resource: ResourceId,
-            },
-            PendingDescent {
-                prefix: ResourceId,
-                correlation: ProbeCorrelation,
-            },
-        }
+        // straight into the linear descent slot (no clone); the
+        // post-insert step rides out as the `PostInsert` token above.
         let (initial_state, post_insert) = match materialize {
             MaterializeResult::Materialized(proxy_resource) => (
                 PromoterState::Active {
@@ -1276,20 +1278,19 @@ impl Engine {
         }
 
         // 1. Consume any in-flight probe. `cancel_owner_probe` disarms
-        // the descent slot (PrefixPending) or closes the enumeration
-        // channel entry (Active), and emits `ProbeOp::Cancel` iff one
-        // was in flight. `pending_enumerations` drains as a side effect
-        // of the proxy-release pass below: every queued entry
+        // the owner's slot — the descent slot (PrefixPending) or the
+        // enumeration slot (Active) — and emits `ProbeOp::Cancel` iff
+        // one was in flight. `pending_enumerations` drains as a side
+        // effect of the proxy-release pass below: every queued entry
         // corresponds to a registered proxy, and
         // `release_promoter_proxy_claim` removes its own queue entry
-        // inside `unregister_proxy`.
+        // inside `unregister_proxy`. A missed disarm is not silently
+        // tolerated: the armed slot would reach
+        // `release_promoter_descent_prefix_claim`'s `Active{empty}` flip
+        // (PrefixPending) or `promoters.remove` (Active) and trip
+        // `ProbeSlot`'s Drop tripwire — the Promoter dual of
+        // `reap_profile`'s structural enforcement.
         self.cancel_owner_probe(ProbeOwner::Promoter(promoter_id), out);
-        debug_assert!(
-            self.pending_probe_for(ProbeOwner::Promoter(promoter_id))
-                .is_none(),
-            "reap_promoter_inner: probe still in flight for promoter = {promoter_id:?} \
-             after cancel_owner_probe; cancel-first contract violated",
-        );
 
         // 2. Detach every dynamic Sub. Pre-clear `dynamic_subs` so
         // cascading paths observe an empty map; then iterate the
@@ -1317,8 +1318,9 @@ impl Engine {
         // already `Active`; when state is `PrefixPending` it captures
         // `current_prefix`, flips state to `Active{empty}`, and releases
         // the [`ContribKey::PromoterPrefix`] contribution + try-reaps
-        // the slot. The cancel-first precondition (channel closed) is
-        // satisfied by the cancel above.
+        // the slot. The cancel-first precondition (descent slot
+        // disarmed) is satisfied by the cancel above, and the flip's
+        // discard is itself the `ProbeSlot` Drop enforcement point.
         self.release_promoter_descent_prefix_claim(promoter_id, out);
 
         // Snapshot the proxy keys post-release: state is now

@@ -87,19 +87,23 @@ pub struct ProbeSlot<Tag: Copy = ()> {
 /// drop-glue already propagates this tripwire.
 impl<Tag: Copy> Drop for ProbeSlot<Tag> {
     fn drop(&mut self) {
-        if let Some((correlation, _)) = &self.inner {
-            if !std::thread::panicking() {
-                panic!(
-                    "ProbeSlot dropped while armed: probe correlation \
-                     {correlation:?} orphaned — a probe-bearing state \
-                     variant was destroyed or overwritten without a \
-                     preceding disarm; the response path \
-                     (take_owner_probe) or an abandon site \
-                     (cancel_owner_probe) must consume the slot before \
-                     teardown",
-                );
-            }
+        let Some((correlation, _)) = &self.inner else {
+            return; // idle / disarmed — the sanctioned terminal state.
+        };
+        if std::thread::panicking() {
+            // Already unwinding: a second panic aborts the process and
+            // masks the first failure — stay silent instead.
+            return;
         }
+        panic!(
+            "ProbeSlot dropped while armed: probe correlation \
+             {correlation:?} orphaned — a probe-bearing state \
+             variant was destroyed or overwritten without a \
+             preceding disarm; the response path \
+             (take_owner_probe) or an abandon site \
+             (cancel_owner_probe) must consume the slot before \
+             teardown",
+        );
     }
 }
 

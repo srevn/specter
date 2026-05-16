@@ -110,11 +110,13 @@ impl Engine {
     ///
     /// **Cancel-first contract.** Callers that may have an in-flight probe
     /// (e.g., `reap_profile`, `on_watch_op_rejected` descent purge) MUST
-    /// invoke [`Engine::cancel_owner_probe`] before this helper. The
-    /// debug_assert below catches any future regression: in release builds
-    /// a missed cancel leaks one `ProbeOp::Cancel` emission, and the
-    /// prober's eventual response is dropped as `StaleProbeResponse` —
-    /// benign degradation, but worth surfacing loudly in dev / CI.
+    /// invoke [`Engine::cancel_owner_probe`] before this helper.
+    /// `ProbeSlot`'s Drop tripwire enforces this structurally: the
+    /// `transition_state(ProfileState::Idle)` below drops the prior
+    /// `Pending(DescentState)`, and an armed descent slot reaching that
+    /// drop panics in every build — its orphaned correlation would
+    /// otherwise stale-detect its own response. The discard *is* the
+    /// enforcement site; no local witness is needed.
     pub(crate) fn release_descent_prefix_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(prefix) = self
             .descent_state(ProbeOwner::Profile(pid))
@@ -123,14 +125,10 @@ impl Engine {
             return;
         };
 
-        debug_assert!(
-            self.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
-            "release_descent_prefix_claim: no probe must be in flight before release; \
-             caller must invoke cancel_owner_probe (or take the response-dispatch path) \
-             first to avoid losing the Cancel emission (profile = {pid:?})",
-        );
-
         if let Some(p) = self.profiles.get_mut(pid) {
+            // The cancel-first contract is enforced here: this discard
+            // drops the prior `Pending(DescentState)`; an armed descent
+            // slot trips `ProbeSlot`'s Drop tripwire.
             p.transition_state(ProfileState::Idle);
         }
 

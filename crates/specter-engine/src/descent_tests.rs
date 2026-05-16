@@ -1209,18 +1209,18 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Cancel-first contract on `release_descent_prefix_claim`: invoking the
-/// helper on a Pending Profile whose descent probe is still in flight
-/// fires the debug_assert. The four production cancel-paths each call
-/// `cancel_owner_probe` first — this test guards against future
-/// regressions that bypass the order.
+/// Cancel-first contract on `release_descent_prefix_claim`: invoked
+/// without a prior `cancel_owner_probe`, on a Pending Profile whose
+/// descent probe is still in flight, the helper's
+/// `transition_state(ProfileState::Idle)` discard drops the armed
+/// `Pending(DescentState)`, tripping `ProbeSlot`'s Drop tripwire. The
+/// tripwire is unconditional (fires in debug AND release), so the test
+/// runs in every build profile. The four production cancel-paths each
+/// call `cancel_owner_probe` first — this guards against future
+/// regressions that bypass the cancel-first order.
 #[test]
-#[cfg_attr(
-    not(debug_assertions),
-    ignore = "debug_assert! is compiled out in release"
-)]
-#[should_panic(expected = "no probe must be in flight")]
-fn release_descent_prefix_claim_panics_on_open_channel() {
+#[should_panic(expected = "ProbeSlot dropped while armed")]
+fn release_descent_prefix_claim_without_cancel_trips_probeslot_drop() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
