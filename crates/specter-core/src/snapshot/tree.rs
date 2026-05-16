@@ -60,12 +60,13 @@
 //! - 128-bit width (`siphasher::sip128`): pair-comparison space at scale
 //!   (`O(levels × bursts × profiles)`) makes 64-bit collision probability
 //!   uncomfortable; 128 bits is astronomically safe.
-//! - `#[derive(Hash)]` on [`FsIdentity`] emits `inode.hash; device.hash;`
-//!   in declaration order with no struct discriminator, so `fs_id.hash(h)`
-//!   is byte-identical to the historical `inode.hash(h); device.hash(h);`
-//!   sequence. Pinned by `fs_id::tests::fs_identity_hash_matches_inode_then_device`
-//!   so a future derive-semantics change or field reorder fires at nextest
-//!   time before goldens silently drift.
+//! - `FsIdentity` folds into a digest only via
+//!   [`crate::fs_id::encode_into`] (`inode` then `device`, each a
+//!   little-endian `u64`); nested digests (`leaf_hash`, `dir_hash`)
+//!   fold through `StableHasher::put_u128`, an endian-explicit width.
+//!   Pinned by `fs_id::tests::encode_into_matches_inode_then_device`
+//!   plus the snapshot goldens so a field reorder or encoding change
+//!   fires at nextest time before goldens silently drift.
 //!
 //! ## Mutability and concurrency
 //!
@@ -79,15 +80,14 @@
 
 use crate::diag::SpliceFailureCause;
 use crate::diff::{Diff, EntryRef, Rename};
-use crate::fs_id::FsIdentity;
-use crate::hash::{Hasher128Ext, hash_systemtime_into, hasher_128};
+use crate::fs_id::{FsIdentity, encode_into};
+use crate::hash::{hasher_128, put_systemtime_into};
 use crate::ids::ResourceId;
 use crate::snapshot::EntryKind;
 use crate::tree::Tree;
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::Hash;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -103,7 +103,7 @@ use std::time::SystemTime;
 /// directory was unlinked and recreated at the same path between probes
 /// (the recreation gets a fresh inode under POSIX semantics — same name,
 /// different identity).
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct DirMeta {
     pub mtime: SystemTime,
     pub fs_id: FsIdentity,
@@ -472,11 +472,11 @@ const DIR_UNCOVERED_TAG: u8 = 3;
 
 fn compute_leaf_hash(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> u128 {
     let mut h = hasher_128();
-    (kind as u8).hash(&mut h);
-    size.hash(&mut h);
-    hash_systemtime_into(mtime, &mut h);
-    fs_id.hash(&mut h);
-    h.finish_128_u128()
+    h.put_u8(kind as u8);
+    h.put_u64(size);
+    put_systemtime_into(mtime, &mut h);
+    encode_into(fs_id, &mut h);
+    h.finish_u128()
 }
 
 fn compute_dir_hash(
@@ -492,12 +492,12 @@ fn compute_dir_hash(
     // entries bump mtime without changing the user-visible state).
     // The walker reads `root_meta.mtime` directly off the struct
     // field for its mtime-skip; no consumer needs it via the hash.
-    captured_with.hash(&mut h);
-    root_meta.fs_id.hash(&mut h);
+    h.put_u64(captured_with);
+    encode_into(root_meta.fs_id, &mut h);
 
     // Length prefix: belt-and-suspenders alongside SipHash24's
     // prefix-freeness. Keeps the golden test legible.
-    (entries.len() as u64).hash(&mut h);
+    h.put_u64(entries.len() as u64);
 
     // Sequential lex-order fold (BTreeMap iterates in lex order). XOR
     // was rejected: sequential preserves ordering information and avoids
@@ -516,24 +516,24 @@ fn compute_dir_hash(
     // - `Dir(Uncovered)` contributes the raw `fs_id` — the walker has
     //                   no observation beyond the directory's identity.
     for (name, child) in entries {
-        name.as_str().hash(&mut h);
+        h.put_str(name.as_str());
         match child {
             ChildEntry::Leaf(l) => {
-                LEAF_TAG.hash(&mut h);
-                l.leaf_hash().hash(&mut h);
+                h.put_u8(LEAF_TAG);
+                h.put_u128(l.leaf_hash());
             }
             ChildEntry::Dir(DirChild::Covered(s)) => {
-                DIR_COVERED_TAG.hash(&mut h);
-                s.dir_hash().hash(&mut h);
+                h.put_u8(DIR_COVERED_TAG);
+                h.put_u128(s.dir_hash());
             }
             ChildEntry::Dir(DirChild::Uncovered(fs_id)) => {
-                DIR_UNCOVERED_TAG.hash(&mut h);
-                fs_id.hash(&mut h);
+                h.put_u8(DIR_UNCOVERED_TAG);
+                encode_into(*fs_id, &mut h);
             }
         }
     }
 
-    h.finish_128_u128()
+    h.finish_u128()
 }
 
 // ---------------------------------------------------------------------------

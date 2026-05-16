@@ -15,7 +15,6 @@ use crate::sub::ClassSet;
 use compact_str::CompactString;
 use globset::{Glob, GlobMatcher};
 use std::cmp::Ordering;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Duration;
 
@@ -176,33 +175,48 @@ pub(crate) fn compute_config_hash(
 ) -> u64 {
     let mut h = hasher();
 
-    scan.recursive.hash(&mut h);
-    scan.hidden.hash(&mut h);
+    h.put_u8(u8::from(scan.recursive));
+    h.put_u8(u8::from(scan.hidden));
 
     // Canonical width: u32 for the count. Saturate on the absurd
     // overflow case — the alternative is an explicit panic, which buys
     // nothing for a config layer that cannot realistically reach 2^32 globs.
     let exclude_count = u32::try_from(scan.exclude.len()).unwrap_or(u32::MAX);
-    exclude_count.hash(&mut h);
+    h.put_u32(exclude_count);
     for g in &scan.exclude {
-        g.source.as_str().hash(&mut h);
+        h.put_str(g.source.as_str());
     }
 
     match &scan.pattern {
         Some(g) => {
-            1u8.hash(&mut h);
-            g.source.as_str().hash(&mut h);
+            h.put_u8(1);
+            h.put_str(g.source.as_str());
         }
         None => {
-            0u8.hash(&mut h);
+            h.put_u8(0);
         }
     }
 
-    scan.max_depth.hash(&mut h);
-    max_settle.as_nanos().hash(&mut h);
-    events.bits().hash(&mut h);
+    // `max_depth` reproduces the legacy blanket `Option::<u32>::hash`
+    // byte stream verbatim: the derive folds the discriminant as an
+    // `isize` (→ `usize`-width) integer, then the inner `u32`. Pinned
+    // as a width-canonical `u64` discriminant (0 = None, 1 = Some) plus
+    // the `u32` payload — byte-identical on the 64-bit target, and now
+    // stable across `usize` widths where the legacy path was not.
+    // Deliberately *not* unified with `pattern`'s 1-byte presence flag
+    // above (that is the pre-existing explicit encoding, kept verbatim);
+    // collapsing the two is a digest re-encoding, out of scope here.
+    match scan.max_depth {
+        Some(d) => {
+            h.put_u64(1);
+            h.put_u32(d);
+        }
+        None => h.put_u64(0),
+    }
+    h.put_u128(max_settle.as_nanos());
+    h.put_u8(events.bits());
 
-    h.finish()
+    h.finish_u64()
 }
 
 /// The Profile partition key's config half, reified.
@@ -440,4 +454,41 @@ mod tests {
     }
 
     const GOLDEN_HASH: u64 = 0x35A4_7E13_BE87_7324;
+
+    /// Pins the compiler-generated `Option<u32>` `derive(Hash)`
+    /// discriminant encoding that `compute_config_hash` reproduces
+    /// explicitly through the seam for `max_depth`. The blanket
+    /// `Option::hash` folds the discriminant as an `isize` (→ `usize`
+    /// width) before the inner `u32`; the seam reproduces that as a
+    /// width-canonical `u64` discriminant + `u32` payload, byte-identical
+    /// on the 64-bit target. If a future rustc changes the enum
+    /// discriminant hash shape this fires here, in isolation, rather
+    /// than as a silent `GOLDEN_HASH` drift.
+    #[test]
+    fn max_depth_seam_encoding_matches_option_u32_hash() {
+        use crate::hash::hasher;
+        use siphasher::sip::SipHasher24 as RawSip64;
+        use std::hash::{Hash, Hasher};
+
+        for md in [None, Some(7u32), Some(0u32)] {
+            let mut reference = RawSip64::new();
+            md.hash(&mut reference);
+
+            let mut seam = hasher();
+            match md {
+                Some(d) => {
+                    seam.put_u64(1);
+                    seam.put_u32(d);
+                }
+                None => seam.put_u64(0),
+            }
+
+            assert_eq!(
+                seam.finish_u64(),
+                reference.finish(),
+                "seam max_depth encoding diverged from Option::<u32>::hash \
+                 for {md:?}; GOLDEN_HASH would shift",
+            );
+        }
+    }
 }

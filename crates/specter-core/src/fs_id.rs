@@ -31,64 +31,46 @@
 //! identity is [`crate::ResourceId`] (slotmap-generational, survives
 //! delete-and-recreate); the two layers compose but are independent.
 
-use std::hash::Hash;
+use crate::hash::StableHasher;
+use std::hash::Hasher;
 
 /// Kernel-side observable identity of an inode at `lstat` time.
 ///
 /// See the module-level docs for the semantics and atomicity invariant.
 ///
-/// ## Hash byte equivalence
+/// ## Digest encoding
 ///
-/// `#[derive(Hash)]` calls `Hash::hash` on each field in declaration
-/// order with no discriminator byte and no length prefix. The byte
-/// stream emitted by `fs_id.hash(h)` is therefore byte-identical to
-/// the historical `inode.hash(h); device.hash(h);` sequence — pinned
-/// by the `fs_identity_hash_matches_inode_then_device` regression
-/// test below so a future Rust derive change or field reorder fires
-/// at `cargo nextest` time. The 128-bit snapshot hashes
-/// (`compute_leaf_hash`, `compute_dir_hash`) depend on this equivalence
-/// to preserve goldens across the migration.
+/// Snapshot digests fold `FsIdentity` **exclusively** through
+/// [`encode_into`] — `inode` then `device`, each as a little-endian
+/// `u64`, in declaration order, with no discriminator or length prefix.
+/// That order is byte-identical to the historical `inode.hash(h);
+/// device.hash(h)` sequence; the `encode_into_matches_inode_then_device`
+/// regression pins the equivalence and the snapshot goldens
+/// (`compute_leaf_hash` / `compute_dir_hash`) pin it end-to-end, so a
+/// future field reorder fires at `cargo nextest` time. `derive(Hash)`
+/// is **not** a digest path.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FsIdentity {
     pub inode: u64,
     pub device: u64,
 }
 
+/// Fold a [`FsIdentity`] into a stable digest: `inode` then `device`,
+/// each as a little-endian `u64`.
+///
+/// The single named route for committing `FsIdentity` to a digest —
+/// the seam analogue beside the type (the kernel identity is the
+/// domain knowledge the primitive-only [`StableHasher`] deliberately
+/// does not carry). Byte-identical to the historical derived-`Hash`
+/// fold on every target.
+pub fn encode_into<H: Hasher>(id: FsIdentity, h: &mut StableHasher<H>) {
+    h.put_u64(id.inode);
+    h.put_u64(id.device);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::FsIdentity;
-    use crate::hash::{Hasher128Ext, hasher_128};
-    use std::hash::Hash;
-
-    /// Load-bearing regression: `#[derive(Hash)]` on `FsIdentity` must
-    /// produce the same byte stream as `inode.hash(h); device.hash(h);`
-    /// in declaration order. The snapshot hash collapse depends on this
-    /// equivalence to preserve every existing 128-bit golden.
-    ///
-    /// A failure here means either Rust's derive(Hash) changed semantics
-    /// (struct discriminator added, length prefix added, …) or the
-    /// declaration order of `FsIdentity`'s fields drifted from
-    /// `(inode, device)`. Both would silently invalidate every persisted
-    /// snapshot hash; this assertion fires at nextest time so the breakage
-    /// is caught before a release.
-    #[test]
-    fn fs_identity_hash_matches_inode_then_device() {
-        let id = FsIdentity {
-            inode: 0x1234_5678_9abc_def0,
-            device: 0xfedc_ba98_7654_3210,
-        };
-        let mut combined = hasher_128();
-        id.hash(&mut combined);
-        let mut sequential = hasher_128();
-        id.inode.hash(&mut sequential);
-        id.device.hash(&mut sequential);
-        assert_eq!(
-            combined.finish_128_u128(),
-            sequential.finish_128_u128(),
-            "FsIdentity derive(Hash) diverged from inode-then-device fold; \
-             snapshot goldens will break",
-        );
-    }
+    use super::{FsIdentity, encode_into};
 
     #[test]
     fn default_is_zero_pair() {
@@ -122,5 +104,37 @@ mod tests {
             device: 100,
         };
         assert!(c < d, "device breaks ties when inodes are equal");
+    }
+
+    /// `encode_into` reproduces the historical derived `Hash` byte
+    /// stream for `FsIdentity` — `inode` then `device`, each as a
+    /// little-endian `u64`, in declaration order, with no discriminator
+    /// or length prefix. Production folds `FsIdentity` exclusively
+    /// through this seam encoder; pinning it against the legacy
+    /// `inode.hash(h); device.hash(h)` reference proves every persisted
+    /// 128-bit snapshot golden survives the migration off `derive(Hash)`.
+    #[test]
+    fn encode_into_matches_inode_then_device() {
+        use siphasher::sip128::{Hasher128, SipHasher24 as RawSip128};
+        use std::hash::Hash;
+
+        let id = FsIdentity {
+            inode: 0x1234_5678_9abc_def0,
+            device: 0xfedc_ba98_7654_3210,
+        };
+
+        let mut seam = crate::hash::hasher_128();
+        encode_into(id, &mut seam);
+
+        let mut reference = RawSip128::new();
+        id.inode.hash(&mut reference);
+        id.device.hash(&mut reference);
+
+        assert_eq!(
+            seam.finish_u128(),
+            u128::from(reference.finish128()),
+            "encode_into diverged from the historical inode-then-device \
+             fold; every snapshot golden would shift",
+        );
     }
 }
