@@ -908,10 +908,7 @@ mod tests {
             created: smallvec![EntryRef {
                 segment: CompactString::from("a.rs"),
                 kind: EntryKind::File,
-                fs_id: FsIdentity {
-                    inode: 1,
-                    device: 0
-                },
+                fs_id: FsIdentity::synthetic(1, 0),
             }],
             ..Default::default()
         });
@@ -1045,10 +1042,7 @@ mod tests {
             created: smallvec![EntryRef {
                 segment: CompactString::from("a.rs"),
                 kind: EntryKind::File,
-                fs_id: FsIdentity {
-                    inode: 1,
-                    device: 0
-                },
+                fs_id: FsIdentity::synthetic(1, 0),
             }],
             ..Default::default()
         });

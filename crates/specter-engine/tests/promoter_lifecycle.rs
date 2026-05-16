@@ -79,12 +79,12 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device: 0 })),
+            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
             _ => ChildEntry::Leaf(LeafEntry::new(
                 kind,
                 0,
                 UNIX_EPOCH,
-                FsIdentity { inode, device: 0 },
+                FsIdentity::synthetic(inode, 0),
             )),
         };
         map.insert(CompactString::new(name), child);
@@ -92,10 +92,7 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     Arc::new(DirSnapshot::new(
         DirMeta {
             mtime: UNIX_EPOCH,
-            fs_id: FsIdentity {
-                inode: 0,
-                device: 0,
-            },
+            fs_id: FsIdentity::synthetic(0, 0),
         },
         0,
         map,
@@ -326,15 +323,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
     // things look right now" against which future Standard bursts
     // observe drift. This is `dispatch_seed_ok`'s no-drift terminal
     // arm.
-    let leaf = LeafEntry::new(
-        EntryKind::File,
-        0,
-        UNIX_EPOCH,
-        FsIdentity {
-            inode: 10,
-            device: 0,
-        },
-    );
+    let leaf = LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(10, 0));
     let baseline_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(dynamic_profile),

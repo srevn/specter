@@ -102,12 +102,12 @@ fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device: 0 })),
+            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
             _ => ChildEntry::Leaf(LeafEntry::new(
                 kind,
                 0,
                 UNIX_EPOCH,
-                FsIdentity { inode, device: 0 },
+                FsIdentity::synthetic(inode, 0),
             )),
         };
         map.insert(CompactString::new(name), child);
@@ -115,10 +115,7 @@ fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     Arc::new(DirSnapshot::new(
         DirMeta {
             mtime: UNIX_EPOCH,
-            fs_id: FsIdentity {
-                inode: 0,
-                device: 0,
-            },
+            fs_id: FsIdentity::synthetic(0, 0),
         },
         0,
         map,
@@ -130,7 +127,7 @@ fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
 /// the engine-internal `Profile.current`, not the wire response.
 #[allow(dead_code)]
 fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> LeafEntry {
-    LeafEntry::new(kind, size, mtime, FsIdentity { inode, device: 0 })
+    LeafEntry::new(kind, size, mtime, FsIdentity::synthetic(inode, 0))
 }
 
 /// Drive the Profile from fresh-attach through Seed-Ok → Idle (post-Seed

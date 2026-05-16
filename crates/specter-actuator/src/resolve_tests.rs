@@ -113,7 +113,7 @@ fn entry_ref(seg: &str, inode: u64) -> EntryRef {
     EntryRef {
         segment: CompactString::from(seg),
         kind: EntryKind::File,
-        fs_id: FsIdentity { inode, device: 0 },
+        fs_id: FsIdentity::synthetic(inode, 0),
     }
 }
 

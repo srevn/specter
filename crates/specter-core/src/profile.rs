@@ -2672,10 +2672,7 @@ mod tests {
         Arc::new(DirSnapshot::new(
             DirMeta {
                 mtime: UNIX_EPOCH,
-                fs_id: FsIdentity {
-                    inode: 0,
-                    device: 0,
-                },
+                fs_id: FsIdentity::synthetic(0, 0),
             },
             0,
             BTreeMap::new(),
@@ -2683,15 +2680,7 @@ mod tests {
     }
 
     fn empty_leaf_entry() -> LeafEntry {
-        LeafEntry::new(
-            EntryKind::File,
-            0,
-            UNIX_EPOCH,
-            FsIdentity {
-                inode: 0,
-                device: 0,
-            },
-        )
+        LeafEntry::new(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(0, 0))
     }
 
     #[test]

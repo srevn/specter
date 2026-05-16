@@ -23,7 +23,7 @@ use std::time::{Duration, UNIX_EPOCH};
 fn meta(mtime_secs: u64, inode: u64, device: u64) -> DirMeta {
     DirMeta {
         mtime: UNIX_EPOCH + Duration::from_secs(mtime_secs),
-        fs_id: FsIdentity { inode, device },
+        fs_id: FsIdentity::synthetic(inode, device),
     }
 }
 
@@ -32,14 +32,14 @@ fn leaf(kind: EntryKind, size: u64, mtime_secs: u64, inode: u64, device: u64) ->
         kind,
         size,
         UNIX_EPOCH + Duration::from_secs(mtime_secs),
-        FsIdentity { inode, device },
+        FsIdentity::synthetic(inode, device),
     )
 }
 
 fn dir(inode: u64, device: u64, subtree: Option<Arc<DirSnapshot>>) -> ChildEntry {
     match subtree {
         Some(s) => ChildEntry::Dir(DirChild::Covered(s)),
-        None => ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device })),
+        None => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, device))),
     }
 }
 
@@ -305,19 +305,13 @@ fn dir_hash_known_good_golden() {
             EntryKind::File,
             100,
             UNIX_EPOCH + Duration::from_secs(1),
-            FsIdentity {
-                inode: 42,
-                device: 99,
-            },
+            FsIdentity::synthetic(42, 99),
         )),
     );
     let d = make_dir(
         DirMeta {
             mtime: UNIX_EPOCH + Duration::from_secs(7),
-            fs_id: FsIdentity {
-                inode: 1,
-                device: 99,
-            },
+            fs_id: FsIdentity::synthetic(1, 99),
         },
         13,
         entries,
@@ -393,10 +387,7 @@ fn leaf_hash_known_good_golden() {
         EntryKind::File,
         100,
         UNIX_EPOCH + Duration::from_secs(1),
-        FsIdentity {
-            inode: 42,
-            device: 99,
-        },
+        FsIdentity::synthetic(42, 99),
     );
     assert_eq!(l.leaf_hash(), GOLDEN_LEAF_HASH);
 }
@@ -419,10 +410,7 @@ fn fields() -> (EntryKind, u64, std::time::SystemTime, FsIdentity) {
         EntryKind::File,
         10,
         UNIX_EPOCH + Duration::from_secs(1),
-        FsIdentity {
-            inode: 7,
-            device: 0,
-        },
+        FsIdentity::synthetic(7, 0),
     )
 }
 
@@ -507,10 +495,7 @@ fn new_or_inherit_returns_fresh_hash_on_any_field_mismatch() {
             base.0,
             base.1,
             base.2,
-            FsIdentity {
-                inode: base.3.inode + 1,
-                device: base.3.device,
-            },
+            FsIdentity::synthetic(base.3.inode() + 1, base.3.device()),
         ),
         "inode mismatch",
     );
@@ -520,10 +505,7 @@ fn new_or_inherit_returns_fresh_hash_on_any_field_mismatch() {
             base.0,
             base.1,
             base.2,
-            FsIdentity {
-                inode: base.3.inode,
-                device: base.3.device + 1,
-            },
+            FsIdentity::synthetic(base.3.inode(), base.3.device() + 1),
         ),
         "device mismatch",
     );
@@ -605,28 +587,13 @@ fn lookup_covered_dir_returns_none_for_leaf_entry() {
 fn dirchild_fs_id_covered_sources_from_root_meta() {
     let inner = make_dir(meta(2, 200, 1), 0, BTreeMap::new());
     let dc = DirChild::Covered(inner);
-    assert_eq!(
-        dc.fs_id(),
-        FsIdentity {
-            inode: 200,
-            device: 1,
-        },
-    );
+    assert_eq!(dc.fs_id(), FsIdentity::synthetic(200, 1),);
 }
 
 #[test]
 fn dirchild_fs_id_uncovered_returns_stored_value() {
-    let dc = DirChild::Uncovered(FsIdentity {
-        inode: 42,
-        device: 99,
-    });
-    assert_eq!(
-        dc.fs_id(),
-        FsIdentity {
-            inode: 42,
-            device: 99,
-        },
-    );
+    let dc = DirChild::Uncovered(FsIdentity::synthetic(42, 99));
+    assert_eq!(dc.fs_id(), FsIdentity::synthetic(42, 99),);
 }
 
 // ---------------------------------------------------------------------------
@@ -1439,8 +1406,8 @@ fn diff_tree_same_name_different_inode_emits_pair() {
     assert_eq!(d.created.len(), 1);
     assert_eq!(d.deleted[0].segment.as_str(), "foo");
     assert_eq!(d.created[0].segment.as_str(), "foo");
-    assert_eq!(d.deleted[0].fs_id.inode, 7);
-    assert_eq!(d.created[0].fs_id.inode, 8);
+    assert_eq!(d.deleted[0].fs_id.inode(), 7);
+    assert_eq!(d.created[0].fs_id.inode(), 8);
 }
 
 #[test]
@@ -1587,10 +1554,10 @@ fn diff_tree_same_name_kind_change_with_inode_collision() {
     );
     assert_eq!(d.deleted.len(), 1);
     assert_eq!(d.deleted[0].kind, EntryKind::Dir);
-    assert_eq!(d.deleted[0].fs_id.inode, 100);
+    assert_eq!(d.deleted[0].fs_id.inode(), 100);
     assert_eq!(d.created.len(), 1);
     assert_eq!(d.created[0].kind, EntryKind::File);
-    assert_eq!(d.created[0].fs_id.inode, 100);
+    assert_eq!(d.created[0].fs_id.inode(), 100);
 }
 
 #[test]
@@ -1757,9 +1724,9 @@ fn diff_tree_rename_into_kind_change_slot() {
         "kind change at /old must surface as Created (Dir); /old/x was paired as Rename",
     );
     assert_eq!(d.deleted[0].kind, EntryKind::File);
-    assert_eq!(d.deleted[0].fs_id.inode, 100);
+    assert_eq!(d.deleted[0].fs_id.inode(), 100);
     assert_eq!(d.created[0].kind, EntryKind::Dir);
-    assert_eq!(d.created[0].fs_id.inode, 200);
+    assert_eq!(d.created[0].fs_id.inode(), 200);
 }
 
 #[test]
@@ -1771,8 +1738,8 @@ fn diff_tree_file_pair_device_change_is_delete_create() {
     let d = diff_tree(&a, &b);
     assert_eq!(d.deleted.len(), 1);
     assert_eq!(d.created.len(), 1);
-    assert_eq!(d.deleted[0].fs_id.inode, 7);
-    assert_eq!(d.created[0].fs_id.inode, 7);
+    assert_eq!(d.deleted[0].fs_id.inode(), 7);
+    assert_eq!(d.created[0].fs_id.inode(), 7);
     assert!(d.modified.is_empty());
     assert!(d.renamed.is_empty());
 }
@@ -1853,7 +1820,7 @@ fn diff_tree_file_to_file_modified() {
     let d = diff_tree(&a, &b);
     assert_eq!(d.modified.len(), 1);
     assert_eq!(d.modified[0].segment.as_str(), "");
-    assert_eq!(d.modified[0].fs_id.inode, 7);
+    assert_eq!(d.modified[0].fs_id.inode(), 7);
 }
 
 #[test]
@@ -1863,8 +1830,8 @@ fn diff_tree_file_to_file_inode_change() {
     let d = diff_tree(&a, &b);
     assert_eq!(d.deleted.len(), 1);
     assert_eq!(d.created.len(), 1);
-    assert_eq!(d.deleted[0].fs_id.inode, 7);
-    assert_eq!(d.created[0].fs_id.inode, 8);
+    assert_eq!(d.deleted[0].fs_id.inode(), 7);
+    assert_eq!(d.created[0].fs_id.inode(), 8);
     assert!(
         d.renamed.is_empty(),
         "File-anchor inode flip is delete+create, not rename",
@@ -1951,7 +1918,7 @@ fn diff_all_created_single_leaf_emits_one_created_entry() {
     assert_eq!(d.created.len(), 1);
     assert_eq!(d.created[0].segment.as_str(), "a.rs");
     assert_eq!(d.created[0].kind, EntryKind::File);
-    assert_eq!(d.created[0].fs_id.inode, 42);
+    assert_eq!(d.created[0].fs_id.inode(), 42);
     assert!(d.deleted.is_empty());
     assert!(d.modified.is_empty());
     assert!(d.renamed.is_empty());
@@ -1970,7 +1937,7 @@ fn diff_all_deleted_single_leaf_emits_one_deleted_entry() {
     assert_eq!(d.deleted.len(), 1);
     assert_eq!(d.deleted[0].segment.as_str(), "a.rs");
     assert_eq!(d.deleted[0].kind, EntryKind::File);
-    assert_eq!(d.deleted[0].fs_id.inode, 42);
+    assert_eq!(d.deleted[0].fs_id.inode(), 42);
     assert!(d.created.is_empty());
     assert!(d.modified.is_empty());
     assert!(d.renamed.is_empty());
@@ -1989,7 +1956,7 @@ fn diff_all_created_uncovered_dir_emits_dir_only_no_descendants() {
     assert_eq!(d.created.len(), 1);
     assert_eq!(d.created[0].segment.as_str(), "sub");
     assert_eq!(d.created[0].kind, EntryKind::Dir);
-    assert_eq!(d.created[0].fs_id.inode, 7);
+    assert_eq!(d.created[0].fs_id.inode(), 7);
 }
 
 #[test]
@@ -2093,12 +2060,12 @@ fn diff_all_created_matches_diff_against_empty_baseline() {
     let canon_tuples: Vec<(String, EntryKind, u64)> = canonical
         .created
         .iter()
-        .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode))
+        .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode()))
         .collect();
     let short_tuples: Vec<(String, EntryKind, u64)> = shorthand
         .created
         .iter()
-        .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode))
+        .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode()))
         .collect();
     assert_eq!(canon_tuples, short_tuples);
 
@@ -2132,12 +2099,12 @@ fn diff_all_deleted_matches_diff_from_empty_target() {
     let canon_tuples: Vec<(String, EntryKind, u64)> = canonical
         .deleted
         .iter()
-        .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode))
+        .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode()))
         .collect();
     let short_tuples: Vec<(String, EntryKind, u64)> = shorthand
         .deleted
         .iter()
-        .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode))
+        .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode()))
         .collect();
     assert_eq!(canon_tuples, short_tuples);
 }
@@ -2262,24 +2229,24 @@ proptest! {
         let fwd_created: std::collections::BTreeSet<(String, EntryKind, u64)> = fwd
             .created
             .iter()
-            .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode))
+            .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode()))
             .collect();
         let rev_deleted: std::collections::BTreeSet<(String, EntryKind, u64)> = rev
             .deleted
             .iter()
-            .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode))
+            .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode()))
             .collect();
         prop_assert_eq!(fwd_created, rev_deleted);
 
         let fwd_deleted: std::collections::BTreeSet<(String, EntryKind, u64)> = fwd
             .deleted
             .iter()
-            .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode))
+            .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode()))
             .collect();
         let rev_created: std::collections::BTreeSet<(String, EntryKind, u64)> = rev
             .created
             .iter()
-            .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode))
+            .map(|e| (e.segment.to_string(), e.kind, e.fs_id.inode()))
             .collect();
         prop_assert_eq!(fwd_deleted, rev_created);
     }

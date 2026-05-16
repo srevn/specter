@@ -51,12 +51,12 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
         let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device: 0 })),
+            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
             _ => ChildEntry::Leaf(LeafEntry::new(
                 kind,
                 0,
                 UNIX_EPOCH,
-                FsIdentity { inode, device: 0 },
+                FsIdentity::synthetic(inode, 0),
             )),
         };
         map.insert(CompactString::new(name), child);
@@ -64,10 +64,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
     Arc::new(DirSnapshot::new(
         DirMeta {
             mtime: UNIX_EPOCH,
-            fs_id: FsIdentity {
-                inode: 0,
-                device: 0,
-            },
+            fs_id: FsIdentity::synthetic(0, 0),
         },
         0,
         map,
@@ -1933,10 +1930,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     let response = Arc::new(DirSnapshot::new(
         DirMeta {
             mtime: UNIX_EPOCH,
-            fs_id: FsIdentity {
-                inode: 0,
-                device: 0,
-            },
+            fs_id: FsIdentity::synthetic(0, 0),
         },
         0,
         BTreeMap::new(),

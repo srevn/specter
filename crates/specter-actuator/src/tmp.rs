@@ -59,7 +59,7 @@ fn write_entry(f: &mut std::fs::File, kind: &str, e: &EntryRef) -> io::Result<()
         f,
         "{kind}\t{seg}\t{inode}",
         seg = e.segment,
-        inode = e.fs_id.inode,
+        inode = e.fs_id.inode(),
     )
 }
 
@@ -68,13 +68,13 @@ fn write_rename(f: &mut std::fs::File, r: &Rename) -> io::Result<()> {
         f,
         "renamed_from\t{seg}\t{inode}",
         seg = r.from.segment,
-        inode = r.from.fs_id.inode,
+        inode = r.from.fs_id.inode(),
     )?;
     writeln!(
         f,
         "renamed_to\t{seg}\t{inode}",
         seg = r.to.segment,
-        inode = r.to.fs_id.inode,
+        inode = r.to.fs_id.inode(),
     )?;
     Ok(())
 }
@@ -103,7 +103,7 @@ mod tests {
         EntryRef {
             segment: CompactString::from(seg),
             kind: EntryKind::File,
-            fs_id: FsIdentity { inode, device: 0 },
+            fs_id: FsIdentity::synthetic(inode, 0),
         }
     }
 

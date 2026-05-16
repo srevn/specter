@@ -351,10 +351,7 @@ mod tests {
         let stable_snapshot = Arc::new(DirSnapshot::new(
             DirMeta {
                 mtime: UNIX_EPOCH,
-                fs_id: FsIdentity {
-                    inode: 0,
-                    device: 0,
-                },
+                fs_id: FsIdentity::synthetic(0, 0),
             },
             0,
             BTreeMap::<CompactString, ChildEntry>::new(),

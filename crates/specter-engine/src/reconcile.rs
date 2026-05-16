@@ -552,7 +552,7 @@ mod tests {
     fn meta(inode: u64) -> DirMeta {
         DirMeta {
             mtime: UNIX_EPOCH,
-            fs_id: FsIdentity { inode, device: 0 },
+            fs_id: FsIdentity::synthetic(inode, 0),
         }
     }
 
@@ -561,12 +561,12 @@ mod tests {
             kind,
             0,
             UNIX_EPOCH,
-            FsIdentity { inode, device: 0 },
+            FsIdentity::synthetic(inode, 0),
         ))
     }
 
     fn dir_uncovered(inode: u64) -> ChildEntry {
-        ChildEntry::Dir(DirChild::Uncovered(FsIdentity { inode, device: 0 }))
+        ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0)))
     }
 
     fn dir_covered(subtree: Arc<DirSnapshot>) -> ChildEntry {
@@ -721,10 +721,7 @@ mod tests {
             deleted: smallvec![EntryRef {
                 segment: CompactString::new("sub"),
                 kind: EntryKind::Dir,
-                fs_id: FsIdentity {
-                    inode: 2,
-                    device: 0
-                },
+                fs_id: FsIdentity::synthetic(2, 0),
             }],
             ..Default::default()
         };
@@ -763,10 +760,7 @@ mod tests {
             deleted: smallvec![EntryRef {
                 segment: CompactString::new("a.rs"),
                 kind: EntryKind::File,
-                fs_id: FsIdentity {
-                    inode: 1,
-                    device: 0
-                },
+                fs_id: FsIdentity::synthetic(1, 0),
             }],
             ..Default::default()
         };
@@ -811,18 +805,12 @@ mod tests {
             deleted: smallvec![EntryRef {
                 segment: CompactString::new("foo"),
                 kind: EntryKind::Dir,
-                fs_id: FsIdentity {
-                    inode: 1,
-                    device: 0
-                },
+                fs_id: FsIdentity::synthetic(1, 0),
             }],
             created: smallvec![EntryRef {
                 segment: CompactString::new("foo"),
                 kind: EntryKind::Dir,
-                fs_id: FsIdentity {
-                    inode: 2,
-                    device: 0
-                },
+                fs_id: FsIdentity::synthetic(2, 0),
             }],
             ..Default::default()
         };
@@ -1305,8 +1293,14 @@ mod tests {
         // pre-condition.
         let prior_foo_child = prior_current.entries.get("foo").unwrap();
         let new_foo_child = response.entries.get("foo").unwrap();
-        assert_eq!(prior_foo_child.fs_id().inode, new_foo_child.fs_id().inode);
-        assert_eq!(prior_foo_child.fs_id().device, new_foo_child.fs_id().device);
+        assert_eq!(
+            prior_foo_child.fs_id().inode(),
+            new_foo_child.fs_id().inode()
+        );
+        assert_eq!(
+            prior_foo_child.fs_id().device(),
+            new_foo_child.fs_id().device()
+        );
         assert_ne!(
             prior_foo_child.kind(),
             new_foo_child.kind(),

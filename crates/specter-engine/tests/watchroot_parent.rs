@@ -40,10 +40,7 @@ fn dir_snap() -> std::sync::Arc<DirSnapshot> {
     Arc::new(DirSnapshot::new(
         DirMeta {
             mtime: UNIX_EPOCH,
-            fs_id: FsIdentity {
-                inode: 0,
-                device: 0,
-            },
+            fs_id: FsIdentity::synthetic(0, 0),
         },
         0,
         BTreeMap::new(),

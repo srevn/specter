@@ -581,10 +581,10 @@ fn mtime_skip_does_not_match_when_inode_differs() {
     };
     let forged = Arc::new(DirSnapshot::new(
         DirMeta {
-            fs_id: FsIdentity {
-                inode: baseline.root_meta.fs_id.inode.wrapping_add(1),
-                device: baseline.root_meta.fs_id.device,
-            },
+            fs_id: FsIdentity::synthetic(
+                baseline.root_meta.fs_id.inode().wrapping_add(1),
+                baseline.root_meta.fs_id.device(),
+            ),
             ..baseline.root_meta
         },
         baseline.captured_with,
@@ -608,10 +608,10 @@ fn mtime_skip_does_not_match_when_device_differs() {
     };
     let forged = Arc::new(DirSnapshot::new(
         DirMeta {
-            fs_id: FsIdentity {
-                inode: baseline.root_meta.fs_id.inode,
-                device: baseline.root_meta.fs_id.device.wrapping_add(1),
-            },
+            fs_id: FsIdentity::synthetic(
+                baseline.root_meta.fs_id.inode(),
+                baseline.root_meta.fs_id.device().wrapping_add(1),
+            ),
             ..baseline.root_meta
         },
         baseline.captured_with,
@@ -1061,8 +1061,8 @@ fn dir_snapshot_root_meta_carries_lstat_triple() {
     let ProbeOutcome::SubtreeOk(arc) = result else {
         panic!("expected Ok(Dir)");
     };
-    assert_eq!(arc.root_meta.fs_id.inode, raw.ino());
-    assert_eq!(arc.root_meta.fs_id.device, raw.dev());
+    assert_eq!(arc.root_meta.fs_id.inode(), raw.ino());
+    assert_eq!(arc.root_meta.fs_id.device(), raw.dev());
 }
 
 #[test]

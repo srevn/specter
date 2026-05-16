@@ -40,10 +40,7 @@ fn empty_dir_snap() -> Arc<DirSnapshot> {
     Arc::new(DirSnapshot::new(
         DirMeta {
             mtime: UNIX_EPOCH,
-            fs_id: FsIdentity {
-                inode: 0,
-                device: 0,
-            },
+            fs_id: FsIdentity::synthetic(0, 0),
         },
         0,
         BTreeMap::<CompactString, ChildEntry>::new(),
@@ -256,19 +253,13 @@ fn sustained_unstable_response_storm_paces_at_settle() {
                 specter_core::EntryKind::File,
                 u64::from(cycle),
                 UNIX_EPOCH,
-                FsIdentity {
-                    inode: u64::from(cycle) + 1,
-                    device: 0,
-                },
+                FsIdentity::synthetic(u64::from(cycle) + 1, 0),
             )),
         );
         let unstable_snap = Arc::new(DirSnapshot::new(
             DirMeta {
                 mtime: UNIX_EPOCH,
-                fs_id: FsIdentity {
-                    inode: 0,
-                    device: 0,
-                },
+                fs_id: FsIdentity::synthetic(0, 0),
             },
             0,
             entries,

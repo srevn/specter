@@ -188,10 +188,7 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
         EntryKind::File,
         meta.len(),
         meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        FsIdentity {
-            inode: meta.ino(),
-            device: meta.dev(),
-        },
+        FsIdentity::from_metadata(&meta),
     );
     ProbeOutcome::AnchorOk(leaf)
 }
@@ -246,10 +243,7 @@ pub(super) fn probe_subtree(
     }
     let root_meta = DirMeta {
         mtime: root_meta_raw.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        fs_id: FsIdentity {
-            inode: root_meta_raw.ino(),
-            device: root_meta_raw.dev(),
-        },
+        fs_id: FsIdentity::from_metadata(&root_meta_raw),
     };
     let ctx = WalkContext {
         anchor_path: target_path,
@@ -257,7 +251,7 @@ pub(super) fn probe_subtree(
         force_walk,
         forced,
         captured_with,
-        root_dev: root_meta.fs_id.device,
+        root_dev: root_meta.fs_id.device(),
     };
     let arc = snapshot_dir(&ctx, target_path, root_meta, baseline, 0);
     ProbeOutcome::SubtreeOk(arc)
@@ -430,10 +424,7 @@ fn build_dir_child(
     cmeta: &std::fs::Metadata,
     name: &str,
 ) -> ChildEntry {
-    let fs_id = FsIdentity {
-        inode: cmeta.ino(),
-        device: cmeta.dev(),
-    };
+    let fs_id = FsIdentity::from_metadata(cmeta);
     if !ctx.should_recurse(depth + 1, cmeta.dev()) {
         // Uncovered branch: not recursive, beyond max_depth, or cross-fs.
         // Walker stores the entry but does not recurse.
@@ -482,10 +473,7 @@ fn build_leaf_child(
         kind,
         cmeta.len(),
         cmeta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        FsIdentity {
-            inode: cmeta.ino(),
-            device: cmeta.dev(),
-        },
+        FsIdentity::from_metadata(cmeta),
         baseline_leaf,
     );
     ChildEntry::Leaf(leaf)
