@@ -1200,16 +1200,16 @@ fn enter_pending_descent_recovery_overlap_invariant() {
 }
 
 /// Cancel-first contract on `release_descent_prefix_claim`: invoking the
-/// helper on a Pending Profile with an open probe channel fires the
-/// debug_assert. The four production cancel-paths each call
-/// `cancel_pending_probe` first — this test guards against future
+/// helper on a Pending Profile whose descent probe is still in flight
+/// fires the debug_assert. The four production cancel-paths each call
+/// `cancel_owner_probe` first — this test guards against future
 /// regressions that bypass the order.
 #[test]
 #[cfg_attr(
     not(debug_assertions),
     ignore = "debug_assert! is compiled out in release"
 )]
-#[should_panic(expected = "probe channel must be closed")]
+#[should_panic(expected = "no probe must be in flight")]
 fn release_descent_prefix_claim_panics_on_open_channel() {
     let (mut e, _sid, pid) = setup_pending_one_level();
     assert!(

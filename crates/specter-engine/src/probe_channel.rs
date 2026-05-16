@@ -38,8 +38,8 @@
 use crate::Engine;
 use crate::counter::MonotonicCounter;
 use specter_core::{
-    DirSnapshot, ProbeCorrelation, ProbeOp, ProbeOwner, ProbeRequest, ResourceId, ScanConfig,
-    StepOutput,
+    DirSnapshot, ProbeCorrelation, ProbeOp, ProbeOwner, ProbeRequest, Profile, ResourceId,
+    ScanConfig, StepOutput,
 };
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,16 +91,21 @@ impl Open {
     }
 }
 
-/// Typed routing tag for an outstanding probe.
+/// Typed routing tag for a channel-resident outstanding probe.
 ///
-/// Five variants — owner affinity is encoded in the variant name so the
-/// mint-site discipline (Profile owners open with `Profile*` kinds;
-/// Promoter owners with `Promoter*`) is named. Dispatchers route by
-/// [`Self`] discriminant rather than by inspecting owner state:
-/// `on_profile_probe_response` matches the three `Profile*` variants;
-/// `on_promoter_probe_response` matches the two `Promoter*` variants;
-/// any cross-affinity match is a regression-detection arm
-/// (`debug_assert!` + [`specter_core::Diagnostic::StaleProbeResponse`]).
+/// Owner affinity is encoded in the variant name so the mint-site
+/// discipline (Profile owners open with `Profile*` kinds; Promoter
+/// owners with `Promoter*`) is named. Dispatchers route by [`Self`]
+/// discriminant rather than by inspecting owner state:
+/// `on_profile_probe_response` matches the two `Profile*` variants;
+/// `on_promoter_probe_response` matches the `Promoter*` variant; any
+/// cross-affinity match is a regression-detection arm (`debug_assert!`
+/// + [`specter_core::Diagnostic::StaleProbeResponse`]).
+///
+/// Descent probes (Profile pending-anchor, Promoter literal-prefix)
+/// are *not* here: their correlation is state-resident on the
+/// descent's own probe slot, routed by state rather than by an
+/// open-map entry.
 ///
 /// [`Self::PromoterEnumerating`] carries the proxy [`ResourceId`] the
 /// enumeration probe targets. The dispatcher reads it on every outcome
@@ -115,12 +120,6 @@ pub(crate) enum OpenKind {
     /// Profile post-fire rebase. Dispatcher routes the outcome through
     /// `dispatch_rebase_*`.
     ProfileRebasing,
-    /// Profile pending-anchor descent. Dispatcher routes through
-    /// `dispatch_descent_*` with `ProbeOwner::Profile(_)`.
-    ProfileDescent,
-    /// Promoter literal-prefix descent. Dispatcher routes through
-    /// `dispatch_descent_*` with `ProbeOwner::Promoter(_)`.
-    PromoterDescent,
     /// Promoter proxy enumeration. `target` identifies the proxy the
     /// probe is enumerating. The dispatcher reads it on every outcome
     /// (`SubtreeOk` / `Vanished` / `Failed`) — the wire is path-only,
@@ -157,6 +156,19 @@ impl ProbeChannel {
              (prior = {prior:?}, attempted kind = {kind:?})",
         );
         correlation
+    }
+
+    /// Mint a fresh [`ProbeCorrelation`] from the monotonic counter
+    /// **without** inserting an open-map entry. The counter is the
+    /// engine-wide probe-id floor: state-resident probe slots mint
+    /// through here so their correlations stay globally unique against
+    /// every channel-minted one (same counter, one id space).
+    ///
+    /// **Counter saturation.** Inherited from
+    /// [`MonotonicCounter::next`]: unconditional panic at [`u64::MAX`].
+    #[must_use]
+    pub(crate) fn mint(&mut self) -> ProbeCorrelation {
+        self.counter.next()
     }
 
     /// Atomic check-and-take. Returns `Some(Open)` iff a channel is
@@ -236,30 +248,70 @@ impl ProbeChannel {
 }
 
 impl Engine {
-    /// Read accessor for the owner's pending-probe correlation.
-    /// Returns `None` for a closed channel or stale owner.
+    /// The owner's in-flight probe correlation, or `None` if it has
+    /// none. Single source of truth across both homes: the
+    /// state-resident descent slot (`Pending` / `PrefixPending`) when
+    /// armed, else the channel (verify / rebase / enumeration). The two
+    /// are disjoint per owner — a carrier is in exactly one state — so
+    /// at most one home answers.
     ///
     /// `pub` (not `pub(crate)`) — the engine crate's `tests/`
     /// directory is an external crate from a Rust visibility
     /// standpoint, and ~35 integration-test call sites depend on this
-    /// for channel-state assertions. Plain delegate to
-    /// [`ProbeChannel::correlation_for`].
+    /// for probe-state assertions.
     #[must_use]
     pub fn pending_probe_for(&self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
-        self.probe_channel.correlation_for(owner)
+        let from_state = match owner {
+            ProbeOwner::Profile(pid) => self
+                .profiles
+                .get(pid)
+                .and_then(|p| p.state().probe_correlation()),
+            ProbeOwner::Promoter(qid) => self
+                .promoters
+                .get(qid)
+                .and_then(|q| q.state.probe_correlation()),
+        };
+        from_state.or_else(|| self.probe_channel.correlation_for(owner))
     }
 
-    /// Close the channel for `owner` and emit [`ProbeOp::Cancel`] iff
-    /// it was open. Idempotent on closed channels.
+    /// Mint a fresh [`ProbeCorrelation`] off the engine-wide monotonic
+    /// floor — the sole mint driver for every state-resident probe
+    /// slot. Shares the channel's counter so slot- and channel-minted
+    /// correlations never collide (one id space).
+    #[must_use]
+    pub(crate) fn mint_probe_correlation(&mut self) -> ProbeCorrelation {
+        self.probe_channel.mint()
+    }
+
+    /// Consume the owner's in-flight probe and return its correlation
+    /// (`None` if none was in flight). Disarms the state-resident
+    /// descent slot if armed; otherwise closes the channel entry. The
+    /// single consume primitive both the response path and the cancel
+    /// path route through — disjoint per owner, so exactly one home
+    /// fires.
+    pub(crate) fn take_owner_probe(&mut self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
+        let from_slot = match owner {
+            ProbeOwner::Profile(pid) => self.profiles.get_mut(pid).and_then(Profile::take_probe),
+            ProbeOwner::Promoter(qid) => self
+                .promoters
+                .get_mut(qid)
+                .and_then(|q| q.state.take_probe()),
+        };
+        from_slot.or_else(|| self.probe_channel.close(owner).map(|o| o.correlation()))
+    }
+
+    /// Consume the owner's in-flight probe and emit [`ProbeOp::Cancel`]
+    /// iff one was in flight. The disarm/close *is* the consume, atomic
+    /// with the Cancel emission within this one `&mut self` window.
     ///
-    /// Sole "close + emit Cancel" choke point used at every cancel
+    /// Sole "consume + emit Cancel" choke point used at every cancel
     /// site — `event_drives_batching`, `finalize_anchor_lost`,
     /// `on_watch_op_rejected` descent / proxy purges, `reap_profile`,
-    /// `reap_promoter_inner`. Inlining at each site loses the named
-    /// contract that "you must Cancel if-and-only-if you held the
-    /// channel".
+    /// `reap_promoter_inner`. Idempotent when no probe is in flight.
+    /// Inlining at each site loses the named contract that "you must
+    /// Cancel if-and-only-if a probe was outstanding".
     pub(crate) fn cancel_owner_probe(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
-        if self.probe_channel.close(owner).is_some() {
+        if self.take_owner_probe(owner).is_some() {
             out.probe_ops.push(ProbeOp::Cancel { owner });
         }
     }
@@ -535,7 +587,7 @@ mod tests {
         let owner1 = ProbeOwner::Profile(pid1);
         let owner2 = ProbeOwner::Profile(pid2);
         let c1 = e.probe_channel.open(owner1, OpenKind::ProfileVerifying);
-        let c2 = e.probe_channel.open(owner2, OpenKind::ProfileDescent);
+        let c2 = e.probe_channel.open(owner2, OpenKind::ProfileRebasing);
 
         let mut out = StepOutput::default();
         e.cancel_owner_probe(owner1, &mut out);

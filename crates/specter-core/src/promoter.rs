@@ -43,7 +43,7 @@
 //! `on_dynamic_sub_reaped` (remove on anchor-terminal), and
 //! `reap_promoter_inner` (full drain on Promoter teardown).
 
-use crate::ids::{PromoterId, ResourceId, SubId};
+use crate::ids::{ProbeCorrelation, PromoterId, ResourceId, SubId};
 use crate::pattern::PatternSpec;
 use crate::profile::DescentState;
 use crate::program::ActionProgram;
@@ -160,6 +160,29 @@ impl PromoterState {
             Self::Active { .. } => None,
         }
     }
+
+    /// The correlation of this Promoter's in-flight probe, or `None`.
+    /// A total projection: only a `PrefixPending` descent with an
+    /// armed slot yields a correlation. Owner-symmetric with
+    /// [`crate::ProfileState::probe_correlation`].
+    #[must_use]
+    pub const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
+        match self {
+            Self::PrefixPending(d) => d.probe.correlation(),
+            Self::Active { .. } => None,
+        }
+    }
+
+    /// Disarm this Promoter's probe-bearing carrier and return the
+    /// prior correlation — the single state-level consume, total over
+    /// the state space. Owner-symmetric with
+    /// [`crate::ProfileState::take_probe`].
+    pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
+        match self {
+            Self::PrefixPending(d) => d.probe.disarm(),
+            Self::Active { .. } => None,
+        }
+    }
 }
 
 /// Per-proxy enumeration cursor.
@@ -264,8 +287,9 @@ mod tests {
         Promoter, PromoterAttachRequest, PromoterRegistry, PromoterRegistryDiff, PromoterState,
         ProxyState,
     };
-    use crate::ids::{PromoterId, ResourceId, SubId};
+    use crate::ids::{ProbeCorrelation, PromoterId, ResourceId, SubId};
     use crate::pattern::PatternSpec;
+    use crate::probe::ProbeSlot;
     use crate::profile::{DescentRemaining, DescentState};
     use crate::program::{
         ActionProgram, ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder,
@@ -447,6 +471,7 @@ mod tests {
                 CompactString::from("log"),
             ])
             .expect("non-empty by test construction"),
+            ProbeSlot::empty(),
         ));
         let PromoterState::PrefixPending(d) = state else {
             panic!("expected PrefixPending");
@@ -495,6 +520,7 @@ mod tests {
         let pending = PromoterState::PrefixPending(DescentState::new(
             ResourceId::default(),
             DescentRemaining::from_vec(vec![CompactString::from("var")]).expect("non-empty"),
+            ProbeSlot::empty(),
         ));
         assert!(pending.descent_state().is_some());
 
@@ -515,6 +541,7 @@ mod tests {
                 CompactString::from("log"),
             ])
             .expect("non-empty"),
+            ProbeSlot::empty(),
         ));
 
         {
@@ -532,5 +559,38 @@ mod tests {
             proxies: BTreeMap::new(),
         };
         assert!(active.descent_state_mut().is_none());
+    }
+
+    /// `probe_correlation` projects the PrefixPending descent slot;
+    /// `take_probe` consumes it once and idles it. Total over the
+    /// state space — `Active` carries no descent slot.
+    #[test]
+    fn promoter_probe_correlation_and_take_probe_track_prefix_pending_slot() {
+        let c = ProbeCorrelation::from(13);
+        let mut s = PromoterState::PrefixPending(DescentState::new(
+            ResourceId::default(),
+            DescentRemaining::from_vec(vec![CompactString::from("var")]).expect("non-empty"),
+            ProbeSlot::armed(c, ()),
+        ));
+        assert_eq!(s.probe_correlation(), Some(c));
+        assert_eq!(s.take_probe(), Some(c));
+        assert_eq!(s.probe_correlation(), None, "slot idled after take");
+        assert_eq!(s.take_probe(), None, "second take is a None no-op");
+
+        // PrefixPending + empty ⇒ no correlation, no consume.
+        let mut idle = PromoterState::PrefixPending(DescentState::new(
+            ResourceId::default(),
+            DescentRemaining::from_vec(vec![CompactString::from("var")]).expect("non-empty"),
+            ProbeSlot::empty(),
+        ));
+        assert_eq!(idle.probe_correlation(), None);
+        assert_eq!(idle.take_probe(), None);
+
+        // Active holds no descent slot — total projection ⇒ None.
+        let mut active = PromoterState::Active {
+            proxies: BTreeMap::new(),
+        };
+        assert_eq!(active.probe_correlation(), None);
+        assert_eq!(active.take_probe(), None);
     }
 }

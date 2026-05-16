@@ -7,7 +7,8 @@
 //! of either index.
 
 use crate::effect::DedupKey;
-use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
+use crate::ids::{ProbeCorrelation, ProfileId, ResourceId, SubId, TimerId};
+use crate::probe::ProbeSlot;
 use crate::resource::ResourceKind;
 use crate::scan_config::{ProfileIdentity, ScanConfig};
 use crate::snapshot::tree::TreeSnapshot;
@@ -717,6 +718,30 @@ impl ProfileState {
             Self::Idle | Self::Active(_, _) => None,
         }
     }
+
+    /// The correlation of this state's in-flight probe, or `None` if
+    /// the carrier holds none. A total projection over the state space:
+    /// only a `Pending` descent with an armed slot yields a
+    /// correlation. Owner-symmetric with
+    /// [`crate::PromoterState::probe_correlation`].
+    #[must_use]
+    pub const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
+        match self {
+            Self::Pending(d) => d.probe.correlation(),
+            Self::Idle | Self::Active(_, _) => None,
+        }
+    }
+
+    /// Disarm whichever probe-bearing carrier this state holds and
+    /// return the prior correlation — the single state-level consume.
+    /// Total: a non-probe-bearing state is a `None` no-op. Owner-
+    /// symmetric with [`crate::PromoterState::take_probe`].
+    pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
+        match self {
+            Self::Pending(d) => d.probe.disarm(),
+            Self::Idle | Self::Active(_, _) => None,
+        }
+    }
 }
 
 /// Variant tag for [`ProfileState`], carried on diagnostics that report
@@ -751,12 +776,13 @@ pub enum ProfileStateDiscriminant {
 ///   itself is the last component, and descent transitions Pending → Idle
 ///   on materialization rather than emptying the path.
 ///
-/// I5 ("at most one outstanding probe per Profile") for the Pending
-/// lifecycle is enforced structurally by the engine's `ProbeChannel`
-/// (keyed by `ProbeOwner::Profile(_)`; descent probes carry
-/// `OpenKind::ProfileDescent`). The descent's variant payload holds no
-/// probe-correlation data of its
-/// own.
+/// I5 ("at most one outstanding probe per descent") is a
+/// representability property: the descent probe's liveness *and*
+/// identity live in `probe`, a single [`ProbeSlot`] on this payload.
+/// An armed slot is a probe in flight; an empty slot is descent
+/// awaiting the next structural event with nothing out. One descent
+/// holds exactly one slot, so two simultaneous descent probes are
+/// unconstructable.
 #[derive(Clone, Debug)]
 pub struct DescentState {
     /// Deepest existing ancestor currently Watched. The Profile
@@ -766,6 +792,12 @@ pub struct DescentState {
     /// anchor (inclusive). Non-empty by type construction;
     /// single-component segments (no `/`).
     pub(crate) remaining_components: DescentRemaining,
+    /// The descent probe slot. Armed while a probe is in flight at
+    /// `current_prefix` (carrying the correlation the response must
+    /// echo); empty while descent awaits the next structural event.
+    /// Armed at every fresh-descent / advance / rewind mint; disarmed
+    /// once when the response is consumed or the descent is cancelled.
+    pub(crate) probe: ProbeSlot,
 }
 
 impl DescentState {
@@ -776,18 +808,26 @@ impl DescentState {
     /// anchor-terminal event.
     ///
     /// Field-private; callers route through this constructor so the
-    /// invariants on `current_prefix` (Watched, refcounted) and
+    /// invariants on `current_prefix` (Watched, refcounted),
     /// `remaining_components` (non-empty by [`DescentRemaining`]'s
-    /// own constructor) are pinned at a single boundary. The engine's
-    /// refcount setup runs around this constructor (the contribution
-    /// at `current_prefix` is installed by `add_watch` separately) —
-    /// the struct itself only carries the bookkeeping needed to
-    /// dispatch the next descent step.
+    /// own constructor), and `probe` (the descent's single in-flight
+    /// slot) are pinned at a single boundary. Every fresh descent
+    /// entry mints a correlation and emits a probe, so an honest
+    /// constructor takes the `probe` slot — typically
+    /// [`ProbeSlot::armed`] with the just-minted correlation. The
+    /// engine's refcount setup runs around this constructor (the
+    /// contribution at `current_prefix` is installed by `add_watch`
+    /// separately).
     #[must_use]
-    pub const fn new(current_prefix: ResourceId, remaining_components: DescentRemaining) -> Self {
+    pub const fn new(
+        current_prefix: ResourceId,
+        remaining_components: DescentRemaining,
+        probe: ProbeSlot,
+    ) -> Self {
         Self {
             current_prefix,
             remaining_components,
+            probe,
         }
     }
 
@@ -828,6 +868,19 @@ impl DescentState {
     /// only moves under refcount-aware control.
     pub const fn advance_to(&mut self, new_prefix: ResourceId) {
         self.current_prefix = new_prefix;
+    }
+
+    /// Arm the descent's single probe slot with a freshly-minted
+    /// correlation. The mint-side typed mutator the engine calls when
+    /// re-probing in place (forward advance, rewind, event re-trigger);
+    /// the fresh-descent entry instead constructs the slot armed via
+    /// [`Self::new`]. Asserts the slot was empty (the response handler
+    /// or cancel path disarmed it first) — a double-arm would orphan
+    /// the prior correlation. The consume direction is deliberately
+    /// *not* exposed here: it routes through the owning state's single
+    /// `take_probe` so consume-once stays one law.
+    pub fn arm_probe(&mut self, correlation: ProbeCorrelation) {
+        self.probe.arm(correlation, ());
     }
 }
 
@@ -2037,6 +2090,14 @@ impl Profile {
         self.machine.state.descent_state_mut()
     }
 
+    /// Disarm this Profile's in-flight probe and return its prior
+    /// correlation — thin delegator to [`ProfileState::take_probe`],
+    /// joining the in-place state-mutator family beside
+    /// [`Self::descent_state_mut`] / [`Self::mark_active_for_reap`].
+    pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
+        self.machine.state.take_probe()
+    }
+
     /// Flip an Active burst's directive to `Reap`. `true` iff the flip
     /// landed (Active). Delegates to [`ProfileState::mark_active_for_reap`].
     #[must_use]
@@ -2264,6 +2325,7 @@ mod tests {
     use crate::fs_id::FsIdentity;
     use crate::ids::ResourceId;
     use crate::output::StepOutput;
+    use crate::probe::ProbeSlot;
     use crate::resource::{ResourceKind, ResourceRole};
     use crate::scan_config::GlobPattern;
     use crate::scan_config::compute_config_hash;
@@ -2821,7 +2883,7 @@ mod tests {
         ActiveBurst, BurstFinish, BurstIntent, DescentRemaining, DescentState, PostFireBurst,
         PostFirePhase, PreFireBurst, PreFirePhase, TimerKind,
     };
-    use crate::ids::TimerId;
+    use crate::ids::{ProbeCorrelation, TimerId};
     use std::collections::BTreeSet;
 
     fn tid(n: u64) -> TimerId {
@@ -2999,6 +3061,7 @@ mod tests {
         let s = ProfileState::Pending(DescentState::new(
             ResourceId::default(),
             DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
+            ProbeSlot::empty(),
         ));
         for k in [
             TimerKind::Settle,
@@ -3049,6 +3112,7 @@ mod tests {
             ProfileState::Pending(DescentState::new(
                 r,
                 DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
+                ProbeSlot::empty(),
             )),
             ProfileState::Active(
                 ActiveBurst::PreFire(unit_pre(PreFirePhase::Verifying, tid(1), r)),
@@ -3091,6 +3155,7 @@ mod tests {
         let descent = DescentState::new(
             r,
             DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
+            ProbeSlot::empty(),
         );
         let pending = ProfileState::Pending(descent);
         assert!(pending.descent_state().is_some());
@@ -3113,6 +3178,7 @@ mod tests {
             r,
             DescentRemaining::from_vec(vec![CompactString::from("a"), CompactString::from("b")])
                 .expect("non-empty"),
+            ProbeSlot::empty(),
         ));
 
         {
@@ -3131,6 +3197,52 @@ mod tests {
         assert!(idle.descent_state_mut().is_none());
     }
 
+    /// `probe_correlation` projects the Pending descent slot;
+    /// `take_probe` consumes it once and idles it. Both are total over
+    /// the state space — Idle and Active carry no descent slot.
+    #[test]
+    fn probe_correlation_and_take_probe_track_pending_slot() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let c = ProbeCorrelation::from(42);
+
+        let armed = || {
+            ProfileState::Pending(DescentState::new(
+                r,
+                DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
+                ProbeSlot::armed(c, ()),
+            ))
+        };
+
+        // Pending + armed ⇒ projects the correlation.
+        let mut s = armed();
+        assert_eq!(s.probe_correlation(), Some(c));
+
+        // take_probe consumes exactly once and idles the slot.
+        assert_eq!(s.take_probe(), Some(c));
+        assert_eq!(s.probe_correlation(), None, "slot idled after take");
+        assert_eq!(s.take_probe(), None, "second take is a None no-op");
+
+        // Pending + empty ⇒ no correlation, no consume.
+        let mut idle_pending = ProfileState::Pending(DescentState::new(
+            r,
+            DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
+            ProbeSlot::empty(),
+        ));
+        assert_eq!(idle_pending.probe_correlation(), None);
+        assert_eq!(idle_pending.take_probe(), None);
+
+        // Idle / Active hold no descent slot — total projection ⇒ None.
+        assert_eq!(ProfileState::Idle.probe_correlation(), None);
+        assert_eq!(ProfileState::Idle.take_probe(), None);
+        let mut active = ProfileState::Active(
+            ActiveBurst::PreFire(batching_burst(tid(1), tid(2), r)),
+            BurstFinish::ReturnToIdle,
+        );
+        assert_eq!(active.probe_correlation(), None);
+        assert_eq!(active.take_probe(), None);
+    }
+
     // -----------------------------------------------------------------------
     // State-machine setter / accessor API (clear_anchor_classification,
     // materialize_anchor, transition_state, anchor_claim setters,
@@ -3143,6 +3255,7 @@ mod tests {
         ProfileState::Pending(DescentState::new(
             r,
             DescentRemaining::from_vec(vec![CompactString::from("seg")]).expect("non-empty"),
+            ProbeSlot::empty(),
         ))
     }
 
@@ -3472,6 +3585,7 @@ mod tests {
             r,
             DescentRemaining::from_vec(vec![CompactString::from("a"), CompactString::from("b")])
                 .expect("non-empty"),
+            ProbeSlot::empty(),
         )));
         p.descent_state_mut()
             .expect("Pending carries descent")
@@ -3486,6 +3600,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![CompactString::from("b")],
         );
+
+        // take_probe delegates to ProfileState::take_probe: arming the
+        // Pending descent slot then taking it idles the machine state.
+        p.descent_state_mut()
+            .expect("still Pending")
+            .probe
+            .arm(ProbeCorrelation::from(7), ());
+        assert_eq!(p.take_probe(), Some(ProbeCorrelation::from(7)));
+        assert_eq!(p.take_probe(), None, "delegate idled the slot");
 
         // mark/clear_active_for_reap delegate the bool semantics.
         let mut q = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);

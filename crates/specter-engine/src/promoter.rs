@@ -16,28 +16,31 @@
 //!                          │ rewind on Vanished
 //! ```
 //!
-//! Single-slot probe per Promoter: the descent probe and the proxy
-//! enumeration probe share the engine's `ProbeChannel` entry keyed by
-//! `ProbeOwner::Promoter(_)`. Concurrent enumerations queue via
-//! `pending_enumerations`; `dispatch_next_enumeration` pops one target
-//! at a time and opens the channel with
-//! `OpenKind::PromoterEnumerating { target }`.
+//! Single-slot probe per Promoter, structural by mutually-exclusive
+//! state: the descent probe lives on the `PrefixPending` descent's own
+//! [`specter_core::ProbeSlot`]; the proxy enumeration probe lives in
+//! the engine's `ProbeChannel` entry keyed by `ProbeOwner::Promoter(_)`
+//! (`Active`). Concurrent enumerations queue via `pending_enumerations`;
+//! `dispatch_next_enumeration` pops one target at a time and opens the
+//! channel with `OpenKind::PromoterEnumerating { target }`.
 //!
-//! Two response dispatchers route on [`crate::probe_channel::OpenKind`]:
-//! - `OpenKind::PromoterDescent` → descent. Arms route to the
-//!   owner-polymorphic [`Engine::dispatch_descent_ok`] /
+//! Response routing splits by state:
+//! - `PrefixPending` → descent. `on_promoter_probe_response` gates on
+//!   the descent slot's correlation, disarms it (consume-once), and
+//!   routes the outcome to the owner-polymorphic
+//!   [`Engine::dispatch_descent_ok`] /
 //!   [`Engine::dispatch_descent_vanished`] /
 //!   [`Engine::dispatch_descent_failed`] in `descent.rs`; on completion
 //!   of the last literal segment, [`Engine::enter_active`] (the
 //!   Promoter-side terminal-arm helper) flips the state and registers
 //!   the first proxy.
-//! - `OpenKind::PromoterEnumerating { target }` → enumeration
-//!   (`dispatch_promoter_enumeration_*`); each response either
-//!   registers sub-proxies (intermediate components), mints dynamic
-//!   Subs (final component), or unregisters proxies that no longer
-//!   correspond to a directory entry. All three response arms read
-//!   `target` directly off the channel's variant payload — the wire
-//!   carries paths only, so the channel state is the single
+//! - `Active` → enumeration (`dispatch_promoter_enumeration_*`), routed
+//!   on the channel's `OpenKind::PromoterEnumerating { target }`; each
+//!   response either registers sub-proxies (intermediate components),
+//!   mints dynamic Subs (final component), or unregisters proxies that
+//!   no longer correspond to a directory entry. All three response
+//!   arms read `target` directly off the channel's variant payload —
+//!   the wire carries paths only, so the channel state is the single
 //!   authoritative source for the proxy `ResourceId`.
 
 use crate::Engine;
@@ -48,9 +51,9 @@ use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
     ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
-    PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, Promoter, PromoterAttachRequest,
-    PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, SubParams, Tree,
+    PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
+    PromoterAttachRequest, PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole,
+    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Tree,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -134,14 +137,30 @@ impl Engine {
         // carries this index in `pattern.components`.
         let lpl = req.pattern_spec.literal_prefix_len();
 
-        // 5. Construct the initial state directly. No placeholder.
-        let initial_state = match &materialize {
-            MaterializeResult::Materialized(_) => PromoterState::Active {
-                proxies: BTreeMap::new(),
-            },
+        // 5. Construct the initial state directly. No placeholder. A
+        // pending descent mints its correlation *here* so the slot is
+        // constructed already armed — there is no window where the
+        // PrefixPending phase exists without its probe correlation.
+        let (initial_state, pending_descent) = match &materialize {
+            MaterializeResult::Materialized(_) => (
+                PromoterState::Active {
+                    proxies: BTreeMap::new(),
+                },
+                None,
+            ),
             MaterializeResult::Pending {
                 prefix, remaining, ..
-            } => PromoterState::PrefixPending(DescentState::new(*prefix, remaining.clone())),
+            } => {
+                let correlation = self.mint_probe_correlation();
+                (
+                    PromoterState::PrefixPending(DescentState::new(
+                        *prefix,
+                        remaining.clone(),
+                        ProbeSlot::armed(correlation, ()),
+                    )),
+                    Some((*prefix, correlation)),
+                )
+            }
         };
 
         // 6. Mint the Promoter with the final state. The slotmap key is
@@ -190,10 +209,13 @@ impl Engine {
                     out,
                 );
             }
-            MaterializeResult::Pending { prefix, .. } => {
+            MaterializeResult::Pending { .. } => {
+                let (prefix, correlation) =
+                    pending_descent.expect("Pending materialise ⇒ correlation minted at step 5");
                 // PrefixPending: install the
                 // [`ContribKey::PromoterPrefix`] STRUCTURE
-                // contribution and emit the descent probe.
+                // contribution, then emit the descent probe carrying
+                // the already-armed slot's correlation.
                 add_watch(
                     &mut self.tree,
                     prefix,
@@ -202,7 +224,6 @@ impl Engine {
                     out,
                 );
                 let owner = ProbeOwner::Promoter(promoter_id);
-                let correlation = self.probe_channel.open(owner, OpenKind::PromoterDescent);
                 let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
                 Self::emit_descent_probe(owner, correlation, target_path, out);
             }
@@ -482,15 +503,21 @@ impl Engine {
         }
     }
 
-    /// Promoter-side probe response handler. Atomic check-and-take on
-    /// the probe channel, then [`OpenKind`]-routed dispatch.
+    /// Promoter-side probe response handler. Two disjoint homes by
+    /// state: a `PrefixPending` descent consumes via its state-resident
+    /// probe slot; an `Active` enumeration consumes via the channel.
+    ///
+    /// **Staleness / consume-once.** Descent gates on
+    /// `pending_probe_for(owner) == Some(received)` and disarms the
+    /// slot once via `take_owner_probe`; enumeration uses the atomic
+    /// `close_if`. Either mismatch leaves live state intact and yields
+    /// [`Diagnostic::StaleProbeResponse`].
     ///
     /// **Target read.** `Vanished` / `Failed` enumeration responses
     /// carry no wire payload; the dispatcher reads the proxy
     /// `ResourceId` directly off the
     /// [`OpenKind::PromoterEnumerating { target }`] variant the
-    /// channel recorded at open-time. No separate per-Promoter slot to
-    /// thread through.
+    /// channel recorded at open-time.
     ///
     /// **Cross-affinity.** Mint-site discipline forbids Promoter
     /// owners from holding `Profile*` kinds; the catch-all arm exists
@@ -505,6 +532,50 @@ impl Engine {
         let owner = response.owner;
         let received = response.correlation;
 
+        // Descent (PrefixPending) carries its probe on the
+        // state-resident slot. Route on state; gate on the slot's
+        // correlation; consume via the single state-level take.
+        if self.descent_state(owner).is_some() {
+            if self.pending_probe_for(owner) != Some(received) {
+                out.diagnostics.push(Diagnostic::StaleProbeResponse {
+                    owner,
+                    correlation: received,
+                });
+                return;
+            }
+            let consumed = self.take_owner_probe(owner);
+            debug_assert_eq!(
+                consumed,
+                Some(received),
+                "consume-once: promoter descent slot disarm must yield the gated \
+                 correlation (promoter = {promoter_id:?})",
+            );
+            match response.outcome {
+                ProbeOutcome::SubtreeOk(arc) => self.dispatch_descent_ok(owner, &arc, now, out),
+                ProbeOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
+                ProbeOutcome::Failed { errno } => self.dispatch_descent_failed(owner, errno, out),
+                ProbeOutcome::AnchorOk(_) => {
+                    debug_assert!(
+                        false,
+                        "walker contract violated: Promoter descent received AnchorOk \
+                         (promoter = {promoter_id:?})",
+                    );
+                    out.diagnostics.push(Diagnostic::StaleProbeResponse {
+                        owner,
+                        correlation: received,
+                    });
+                }
+            }
+            // Tail drain: a terminal descent flipped the Promoter to
+            // Active and `enter_active` already drained its first
+            // enumeration; a non-terminal advance keeps PrefixPending
+            // (empty queue). Guarded no-op either way — preserved so
+            // behaviour is identical to the channel era.
+            self.dispatch_next_enumeration(promoter_id, out);
+            return;
+        }
+
+        // Enumeration (Active) still channel-routed.
         let Some(open) = self.probe_channel.close_if(owner, received) else {
             out.diagnostics.push(Diagnostic::StaleProbeResponse {
                 owner,
@@ -516,8 +587,7 @@ impl Engine {
         self.dispatch_promoter_open_outcome(promoter_id, &open, response.outcome, now, out);
 
         // Drain the next queued enumeration (if any). No-op if a probe
-        // is in flight (descent advance reopened the channel) or the
-        // queue is empty.
+        // is in flight or the queue is empty.
         self.dispatch_next_enumeration(promoter_id, out);
     }
 
@@ -541,26 +611,6 @@ impl Engine {
         let correlation = open.correlation();
 
         match (open.kind(), outcome) {
-            // ----- PromoterDescent -----
-            (OpenKind::PromoterDescent, ProbeOutcome::SubtreeOk(arc)) => {
-                self.dispatch_descent_ok(owner, &arc, now, out);
-            }
-            (OpenKind::PromoterDescent, ProbeOutcome::Vanished) => {
-                self.dispatch_descent_vanished(owner, now, out);
-            }
-            (OpenKind::PromoterDescent, ProbeOutcome::Failed { errno }) => {
-                self.dispatch_descent_failed(owner, errno, out);
-            }
-            (OpenKind::PromoterDescent, ProbeOutcome::AnchorOk(_)) => {
-                debug_assert!(
-                    false,
-                    "walker contract violated: PromoterDescent received AnchorOk \
-                     (promoter = {promoter_id:?})",
-                );
-                out.diagnostics
-                    .push(Diagnostic::StaleProbeResponse { owner, correlation });
-            }
-
             // ----- PromoterEnumerating -----
             (OpenKind::PromoterEnumerating { target }, ProbeOutcome::SubtreeOk(arc)) => {
                 // The channel's `target` is the canonical dispatch key
@@ -586,10 +636,7 @@ impl Engine {
             }
 
             // ----- Cross-affinity: Promoter owner with Profile kind -----
-            (
-                OpenKind::ProfileVerifying | OpenKind::ProfileRebasing | OpenKind::ProfileDescent,
-                _,
-            ) => {
+            (OpenKind::ProfileVerifying | OpenKind::ProfileRebasing, _) => {
                 debug_assert!(
                     false,
                     "owner-affinity violated: Promoter owner with Profile kind \
@@ -1220,21 +1267,20 @@ impl Engine {
             return;
         }
 
-        // 1. Close the probe channel. `cancel_owner_probe` closes the
-        // channel structurally (any `OpenKind::PromoterEnumerating`'s
-        // `target` is dropped with the entry) and emits
-        // `ProbeOp::Cancel` iff the channel was open.
-        // `pending_enumerations` drains as a side effect of the
-        // proxy-release pass below: every queued entry corresponds to
-        // a registered proxy, and `release_promoter_proxy_claim`
-        // removes its own queue entry inside `unregister_proxy`.
+        // 1. Consume any in-flight probe. `cancel_owner_probe` disarms
+        // the descent slot (PrefixPending) or closes the enumeration
+        // channel entry (Active), and emits `ProbeOp::Cancel` iff one
+        // was in flight. `pending_enumerations` drains as a side effect
+        // of the proxy-release pass below: every queued entry
+        // corresponds to a registered proxy, and
+        // `release_promoter_proxy_claim` removes its own queue entry
+        // inside `unregister_proxy`.
         self.cancel_owner_probe(ProbeOwner::Promoter(promoter_id), out);
         debug_assert!(
-            self.probe_channel
-                .correlation_for(ProbeOwner::Promoter(promoter_id))
+            self.pending_probe_for(ProbeOwner::Promoter(promoter_id))
                 .is_none(),
-            "reap_promoter_inner: probe channel still open for promoter = {promoter_id:?} \
-             after cancel_owner_probe; channel-close contract violated",
+            "reap_promoter_inner: probe still in flight for promoter = {promoter_id:?} \
+             after cancel_owner_probe; cancel-first contract violated",
         );
 
         // 2. Detach every dynamic Sub. Pre-clear `dynamic_subs` so

@@ -3,11 +3,11 @@
 //! Pending descent runs **outside** the Burst lifecycle. A Profile whose
 //! anchor doesn't yet exist on the filesystem lives in
 //! `ProfileState::Pending(DescentState)`. The descent emits its own
-//! probes through the engine's `ProbeChannel` (keyed by
-//! `ProbeOwner::Profile(_)` with `OpenKind::ProfileDescent`), advances
-//! one path component per probe response, and ends by materializing
-//! the anchor — at which point the Profile transitions Pending → Idle
-//! and immediately Idle → Active(Seed) to establish its baseline.
+//! probes correlated by the `ProbeSlot` on `DescentState` (armed at
+//! every mint, disarmed when the response is consumed), advances one
+//! path component per probe response, and ends by materializing the
+//! anchor — at which point the Profile transitions Pending → Idle and
+//! immediately Idle → Active(Seed) to establish its baseline.
 //!
 //! **Why a parallel state machine?** Burst semantics don't fit:
 //! - Probe target ≠ `Profile.resource` during descent (probes go to the
@@ -20,8 +20,9 @@
 //! - I5 stays intact: at most one outstanding probe per Profile.
 //!   `Pending` and `Active` are mutually exclusive `ProfileState`
 //!   variants (the compiler proves it); within `Pending`, an in-flight
-//!   probe is signalled by an open entry in the engine's `ProbeChannel`
-//!   under `ProbeOwner::Profile(_)` — same channel used by `Active`.
+//!   probe is exactly an armed `DescentState.probe` slot — one slot
+//!   per descent, so two simultaneous descent probes are
+//!   unconstructable.
 //!
 //! **Lifecycle.**
 //! 1. `Engine::attach_sub` with a path-based request walks the path; if
@@ -45,16 +46,15 @@
 //!      next event.
 //! 4. `on_descent_event` triggers a fresh probe (no settle) on
 //!    `StructureChanged` at `current_prefix`. I5: drops the event if a
-//!    probe is already in flight (channel open for this owner).
+//!    probe is already in flight (the descent slot is armed).
 
 use crate::path::empty_path;
-use crate::probe_channel::OpenKind;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
     ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, DirSnapshot, EntryKind,
-    FS_ROOT_SEGMENT, ProbeOwner, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    StepOutput, TreePath,
+    FS_ROOT_SEGMENT, ProbeOwner, ProbeSlot, ProfileId, ProfileState, ResourceId, ResourceKind,
+    ResourceRole, StepOutput, TreePath,
 };
 use std::time::Instant;
 
@@ -219,16 +219,15 @@ impl crate::Engine {
     ///
     /// **Ordering: mint → state-flip → add_watch → emit.** Symmetric with
     /// [`Self::materialize_profile_anchor`]'s state-before-refcount
-    /// pattern. The mint runs *first* so a precondition violation
-    /// (correlation slot already busy) leaves the engine with no side
-    /// effects: no leaked `+1 STRUCTURE` contribution at the prefix, no
-    /// state flip, no probe emission. State-flip *then* refcount keeps
-    /// the contribution attribution coherent with the Profile's claim
-    /// shape at the moment of the refcount edge.
+    /// pattern. The mint runs *first* so the `Pending` state is
+    /// constructed with its probe slot already armed — phase-without-
+    /// correlation cannot exist. State-flip *then* refcount keeps the
+    /// contribution attribution coherent with the Profile's claim shape
+    /// at the moment of the refcount edge.
     ///
-    /// **Pre-condition.** Profile must be `Idle` with a closed probe
-    /// channel. The debug_assert below catches any caller passing a
-    /// non-Idle Profile or one with an open channel entry.
+    /// **Pre-condition.** Profile must be `Idle` with no in-flight
+    /// probe. The debug_assert below catches any caller passing a
+    /// non-Idle Profile or one whose probe is still outstanding.
     ///
     /// **Caller responsibility.** Parent-edge work
     /// ([`Engine::install_parent_edges_for`]) is NOT done here — the
@@ -258,23 +257,28 @@ impl crate::Engine {
             self.profiles
                 .get(profile_id)
                 .is_some_and(|p| matches!(p.state(), ProfileState::Idle))
-                && self.probe_channel.correlation_for(owner).is_none(),
-            "enter_pending_descent: Profile must be Idle with closed probe channel; \
+                && self.pending_probe_for(owner).is_none(),
+            "enter_pending_descent: Profile must be Idle with no in-flight probe; \
              caller must invoke cancel_owner_probe (or take the response-dispatch path) \
              and release prior state before re-entering descent (profile = {profile_id:?})",
         );
 
-        // Step 1: open the channel. Probe-channel opens panic on I5
-        // breach (double-open); a stale Profile here would be a
-        // programming error caught upstream.
-        let correlation = self.probe_channel.open(owner, OpenKind::ProfileDescent);
+        // Step 1: mint the correlation. Runs first so the Pending state
+        // below is constructed with its slot already armed — no window
+        // where the phase exists without a correlation.
+        let correlation = self.mint_probe_correlation();
 
-        // Step 2: state-flip Idle → Pending. Done before the refcount
-        // edge so any reader between this point and step 3 sees the
-        // Profile's claim shape that the contribution will attribute
-        // to (matches `materialize_profile_anchor`'s sequencing).
+        // Step 2: state-flip Idle → Pending, constructed armed. Done
+        // before the refcount edge so any reader between this point and
+        // step 3 sees the Profile's claim shape that the contribution
+        // will attribute to (matches `materialize_profile_anchor`'s
+        // sequencing).
         if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.transition_state(ProfileState::Pending(DescentState::new(prefix, remaining)));
+            p.transition_state(ProfileState::Pending(DescentState::new(
+                prefix,
+                remaining,
+                ProbeSlot::armed(correlation, ()),
+            )));
         }
 
         // Step 3: install the prefix's STRUCTURE contribution.
@@ -309,10 +313,9 @@ impl crate::Engine {
     /// non-terminal advance — are identical and operate via the
     /// owner-polymorphic descent state accessors.
     ///
-    /// **Caller (`on_*_probe_response`).** The probe channel was
-    /// closed (via `ProbeChannel::close_if`) before dispatch; this
-    /// function may re-open it via `ProbeChannel::open` in the
-    /// advance branch.
+    /// **Caller (`on_*_probe_response`).** The descent probe slot was
+    /// disarmed (consume-once) before dispatch; the advance / rewind
+    /// branches re-arm it with a freshly-minted correlation.
     pub(crate) fn dispatch_descent_ok(
         &mut self,
         owner: ProbeOwner,
@@ -408,10 +411,12 @@ impl crate::Engine {
     /// owner-polymorphic `descent_state_mut` already routes.
     ///
     /// Sequence:
-    /// 1. Mint a fresh probe correlation for `owner` (opens channel).
+    /// 1. Mint a fresh probe correlation for `owner`.
     /// 2. Mutate descent state in place: advance `current_prefix` to
-    ///    the new resource and drop the consumed head segment from
-    ///    `remaining_components`.
+    ///    the new resource, drop the consumed head segment from
+    ///    `remaining_components`, and re-arm the probe slot with the
+    ///    fresh correlation (the response handler disarmed it before
+    ///    routing here, so `arm`'s empty-slot precondition holds).
     /// 3. Release the old prefix's STRUCTURE contribution; install the
     ///    new prefix's.
     /// 4. Emit the fresh descent probe at the new prefix.
@@ -430,7 +435,7 @@ impl crate::Engine {
         new_prefix: ResourceId,
         out: &mut StepOutput,
     ) {
-        let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
+        let correlation = self.mint_probe_correlation();
         if let Some(d) = self.descent_state_mut(owner) {
             d.advance_to(new_prefix);
             // Non-terminal by caller contract — `dispatch_descent_ok`
@@ -439,6 +444,7 @@ impl crate::Engine {
             // inside `DescentRemaining::advance` pins this for
             // regression detection.
             d.remaining_components_mut().advance();
+            d.arm_probe(correlation);
         }
 
         let key = descent_key(owner);
@@ -631,12 +637,13 @@ impl crate::Engine {
                 // `remaining_components` rather than cloning + rebuilding
                 // a fresh DescentState — saves both the whole-vec clone
                 // and the per-element CompactString clone.
-                let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
+                let correlation = self.mint_probe_correlation();
                 if let Some(d) = self.descent_state_mut(owner) {
                     d.advance_to(parent_id);
                     if let Some(name) = prefix_name {
                         d.remaining_components_mut().prepend(name);
                     }
+                    d.arm_probe(correlation);
                 }
 
                 let key = descent_key(owner);
@@ -652,9 +659,9 @@ impl crate::Engine {
                 // the per-owner release helper (state-flip terminal +
                 // counter-aware sub + try_reap), matching the
                 // empty-remaining arm in `dispatch_descent_ok`. The
-                // helper's preconditions hold here: the probe channel
-                // was closed by `on_*_probe_response` before dispatch
-                // (cancel-first contract) and descent state is
+                // helper's preconditions hold here: the descent probe
+                // slot was disarmed by `on_*_probe_response` before
+                // dispatch (cancel-first contract) and descent state is
                 // unflipped at entry.
                 //
                 // The owner is left stuck without a usable descent path —
@@ -688,15 +695,15 @@ impl crate::Engine {
     /// `current_prefix`. Triggers a fresh probe (no settle wait —
     /// descent is event-driven). I5: drops the event if a probe is
     /// already in flight (the in-flight probe will pick up the change
-    /// in its response). The "in flight" signal is the open channel
-    /// entry for this owner.
+    /// in its response). The "in flight" signal is an armed descent
+    /// probe slot for this owner.
     pub(crate) fn on_descent_event(
         &mut self,
         owner: ProbeOwner,
         _now: Instant,
         out: &mut StepOutput,
     ) {
-        if self.probe_channel.correlation_for(owner).is_some() {
+        if self.pending_probe_for(owner).is_some() {
             return;
         }
         let prefix = match self.descent_state(owner) {
@@ -704,7 +711,10 @@ impl crate::Engine {
             None => return,
         };
 
-        let correlation = self.probe_channel.open(owner, descent_open_kind(owner));
+        let correlation = self.mint_probe_correlation();
+        if let Some(d) = self.descent_state_mut(owner) {
+            d.arm_probe(correlation);
+        }
         let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
         Self::emit_descent_probe(owner, correlation, target_path, out);
     }
@@ -727,18 +737,6 @@ const fn descent_key(owner: ProbeOwner) -> ContribKey {
     match owner {
         ProbeOwner::Profile(pid) => ContribKey::ProfileDescent(pid),
         ProbeOwner::Promoter(qid) => ContribKey::PromoterPrefix(qid),
-    }
-}
-
-/// Owner-polymorphic [`OpenKind`] for descent probes. Profile descents
-/// open with [`OpenKind::ProfileDescent`]; Promoter descents with
-/// [`OpenKind::PromoterDescent`]. Pairs with [`descent_key`]: both
-/// fan-outs are 1-to-1 with the owner discriminant and mirror the
-/// shape of `ProbeOwner` itself.
-const fn descent_open_kind(owner: ProbeOwner) -> OpenKind {
-    match owner {
-        ProbeOwner::Profile(_) => OpenKind::ProfileDescent,
-        ProbeOwner::Promoter(_) => OpenKind::PromoterDescent,
     }
 }
 

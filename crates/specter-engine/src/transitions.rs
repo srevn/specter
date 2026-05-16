@@ -263,24 +263,31 @@ impl Engine {
         }
     }
 
-    /// Profile-side probe response handler. Atomic check-and-take on
-    /// the probe channel, then [`OpenKind`]-routed dispatch.
+    /// Profile-side probe response handler. Two disjoint homes by
+    /// state: a `Pending` descent consumes via its state-resident
+    /// probe slot; an `Active` burst (Verifying / Rebasing) consumes
+    /// via the channel.
     ///
-    /// **Staleness.** [`crate::probe_channel::ProbeChannel::close_if`]
-    /// is atomic: it returns `Some(Open)` iff the channel is open AND
-    /// its correlation matches `received`, and leaves the entry
-    /// intact on mismatch. A `None` covers every stale path — stale
-    /// `ProfileId`, response after Cancel, response after a fresh
-    /// mint, out-of-order response — and yields
-    /// [`Diagnostic::StaleProbeResponse`].
+    /// **Staleness.** For descent, the gate is `pending_probe_for(owner)
+    /// == Some(received)` — the slot's own correlation. For the burst,
+    /// [`crate::probe_channel::ProbeChannel::close_if`] is the atomic
+    /// check-and-take. Either way a mismatch leaves live state intact
+    /// and yields [`Diagnostic::StaleProbeResponse`], covering every
+    /// stale path (stale `ProfileId`, response after Cancel, response
+    /// after a fresh mint, out-of-order response).
     ///
-    /// **Routing.** Match on the [`OpenKind`] discriminant the channel
-    /// records at open-time. Profile owners mint with
-    /// `ProfileVerifying` / `ProfileRebasing` / `ProfileDescent`; the
-    /// Promoter-kind arm catches a cross-affinity regression
-    /// (`debug_assert!` + diagnostic). Walker-contract violations
-    /// (descent receiving `AnchorOk`) are handled in-arm: production
-    /// walkers never emit those shapes.
+    /// **Consume-once.** The descent path disarms the slot exactly
+    /// once (via `take_owner_probe`) before dispatching; `close_if`
+    /// removes the channel entry for the burst path. The received
+    /// correlation is absent from state before any dispatch, so it
+    /// cannot route twice.
+    ///
+    /// **Routing.** Descent routes on state (`Pending`). The burst
+    /// matches the [`OpenKind`] discriminant the channel records at
+    /// open-time; the Promoter-kind arm catches a cross-affinity
+    /// regression (`debug_assert!` + diagnostic). Walker-contract
+    /// violations (descent receiving `AnchorOk`) are handled in-arm:
+    /// production walkers never emit those shapes.
     fn on_profile_probe_response(
         &mut self,
         profile_id: ProfileId,
@@ -291,6 +298,47 @@ impl Engine {
         let owner = response.owner;
         let received = response.correlation;
 
+        // Descent (Pending) carries its probe on the state-resident
+        // slot. Route on state; gate on the slot's own correlation;
+        // consume via the single state-level take.
+        if self.descent_state(owner).is_some() {
+            if self.pending_probe_for(owner) != Some(received) {
+                out.diagnostics.push(Diagnostic::StaleProbeResponse {
+                    owner,
+                    correlation: received,
+                });
+                return;
+            }
+            let consumed = self.take_owner_probe(owner);
+            debug_assert_eq!(
+                consumed,
+                Some(received),
+                "consume-once: descent slot disarm must yield the gated correlation \
+                 (profile = {profile_id:?})",
+            );
+            match response.outcome {
+                ProbeOutcome::SubtreeOk(arc) => self.dispatch_descent_ok(owner, &arc, now, out),
+                ProbeOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
+                ProbeOutcome::Failed { errno } => self.dispatch_descent_failed(owner, errno, out),
+                ProbeOutcome::AnchorOk(_) => {
+                    // Walker contract: descent probes a Dir prefix and
+                    // returns `SubtreeOk` / `Vanished`. `AnchorOk` is a
+                    // walker-side regression.
+                    debug_assert!(
+                        false,
+                        "walker contract violated: Profile descent received AnchorOk \
+                         (profile = {profile_id:?})",
+                    );
+                    out.diagnostics.push(Diagnostic::StaleProbeResponse {
+                        owner,
+                        correlation: received,
+                    });
+                }
+            }
+            return;
+        }
+
+        // Active burst (Verifying / Rebasing) still channel-routed.
         let Some(open) = self.probe_channel.close_if(owner, received) else {
             out.diagnostics.push(Diagnostic::StaleProbeResponse {
                 owner,
@@ -344,37 +392,12 @@ impl Engine {
                 self.dispatch_rebase_failed(profile_id, errno, out);
             }
 
-            // ----- ProfileDescent -----
-            (OpenKind::ProfileDescent, ProbeOutcome::SubtreeOk(arc)) => {
-                self.dispatch_descent_ok(owner, &arc, now, out);
-            }
-            (OpenKind::ProfileDescent, ProbeOutcome::Vanished) => {
-                self.dispatch_descent_vanished(owner, now, out);
-            }
-            (OpenKind::ProfileDescent, ProbeOutcome::Failed { errno }) => {
-                self.dispatch_descent_failed(owner, errno, out);
-            }
-            (OpenKind::ProfileDescent, ProbeOutcome::AnchorOk(_)) => {
-                // Walker contract: descent probes a Dir prefix, walker
-                // returns `SubtreeOk` or `Vanished`. `AnchorOk` here is
-                // a walker-side regression.
-                debug_assert!(
-                    false,
-                    "walker contract violated: ProfileDescent received AnchorOk \
-                     (profile = {profile_id:?})",
-                );
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    owner,
-                    correlation: received,
-                });
-            }
-
             // ----- Cross-affinity: Profile owner with Promoter kind -----
             // Mint-site discipline forbids; this arm is regression
             // detection. A Promoter-kinded entry under a Profile key
             // requires either a future buggy mint site or test forgery
             // — neither reachable in production.
-            (OpenKind::PromoterDescent | OpenKind::PromoterEnumerating { .. }, _) => {
+            (OpenKind::PromoterEnumerating { .. }, _) => {
                 debug_assert!(
                     false,
                     "owner-affinity violated: Profile owner with Promoter kind \
@@ -1164,15 +1187,15 @@ impl Engine {
         for qid in promoters_to_reseed {
             // Project the relevant state into a local enum so the
             // borrow on `self.promoters.get(qid)` ends before the
-            // `&mut self` calls below (probe_channel.open,
+            // `&mut self` calls below (mint, descent_state_mut,
             // dispatch_next_enumeration). Stale id ⇒ skip without
             // emitting the reseed diagnostic — the Promoter is gone.
             let qowner = ProbeOwner::Promoter(qid);
-            let channel_open = self.probe_channel.correlation_for(qowner).is_some();
+            let probe_in_flight = self.pending_probe_for(qowner).is_some();
             let action = match self.promoters.get(qid) {
                 None => continue,
                 Some(q) => match &q.state {
-                    PromoterState::PrefixPending(d) if !channel_open => {
+                    PromoterState::PrefixPending(d) if !probe_in_flight => {
                         PromoterReseedAction::DescentProbe(d.current_prefix())
                     }
                     // PrefixPending with in-flight descent probe: the
@@ -1187,9 +1210,10 @@ impl Engine {
 
             match action {
                 PromoterReseedAction::DescentProbe(prefix) => {
-                    let correlation = self
-                        .probe_channel
-                        .open(qowner, crate::probe_channel::OpenKind::PromoterDescent);
+                    let correlation = self.mint_probe_correlation();
+                    if let Some(d) = self.descent_state_mut(qowner) {
+                        d.arm_probe(correlation);
+                    }
                     let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
                     Self::emit_descent_probe(qowner, correlation, target_path, out);
                 }

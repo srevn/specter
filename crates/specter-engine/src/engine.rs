@@ -1013,21 +1013,20 @@ impl Engine {
             "reap_profile: Pending + AnchorClaim::Held must be mutually exclusive",
         );
 
-        // Close the probe channel BEFORE the descent-prefix helper
+        // Consume any in-flight probe BEFORE the descent-prefix helper
         // transitions the Profile to Idle. Idempotent: emits Cancel
         // iff a probe was in flight (Pending with a descent probe in
         // flight for this call path; Active+Verifying never reaches
         // `reap_profile`'s entry — `finish_burst_to_idle` runs
-        // `reap_profile` only after the burst response cleared the
-        // channel). Mirrors `on_watch_op_rejected`'s descent-purge
+        // `reap_profile` only after the burst response consumed the
+        // probe). Mirrors `on_watch_op_rejected`'s descent-purge
         // pattern.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
         debug_assert!(
-            self.probe_channel
-                .correlation_for(ProbeOwner::Profile(profile_id))
+            self.pending_probe_for(ProbeOwner::Profile(profile_id))
                 .is_none(),
-            "reap_profile: probe channel still open for profile = {profile_id:?} \
-             after cancel_owner_probe; channel-close contract violated",
+            "reap_profile: probe still in flight for profile = {profile_id:?} \
+             after cancel_owner_probe; cancel-first contract violated",
         );
 
         // Release quartet — group (2) of the partial order (see rustdoc).

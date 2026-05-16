@@ -74,10 +74,8 @@ impl Engine {
         };
 
         debug_assert!(
-            self.probe_channel
-                .correlation_for(ProbeOwner::Promoter(qid))
-                .is_none(),
-            "release_promoter_descent_prefix_claim: probe channel must be closed before release; \
+            self.pending_probe_for(ProbeOwner::Promoter(qid)).is_none(),
+            "release_promoter_descent_prefix_claim: no probe must be in flight before release; \
              caller must invoke cancel_owner_probe (or take the response-dispatch path) \
              first to avoid losing the Cancel emission (promoter = {qid:?})",
         );
