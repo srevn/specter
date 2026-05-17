@@ -115,12 +115,11 @@ pub enum Input {
     /// doesn't already index one, registers the Sub, and starts the
     /// Seed burst (immediate path) or descent (pending path).
     ///
-    /// The minted [`SubId`] surfaces via [`crate::Diagnostic::SubAttached`] in the
-    /// `StepOutput.diagnostics` stream; on path rejection
-    /// (`Tree::parse_attach_path` failure), surfaces via
-    /// [`crate::Diagnostic::AttachPathInvalid`] instead with no Sub registered.
-    /// The bin's loader keys its `name → SubId` map off the diagnostic
-    /// stream rather than the (deleted) synchronous-return shape.
+    /// The minted [`SubId`] is owned by the engine's registry and
+    /// resolved by name through its `by_name` index. A successful
+    /// attach narrates [`crate::Diagnostic::SubAttached`]; a path
+    /// rejection (`Tree::parse_attach_path` failure) narrates
+    /// [`crate::Diagnostic::AttachPathInvalid`] with no Sub registered.
     AttachSub(SubAttachRequest),
     /// Detach a Sub. The engine drops the Sub from the registry and
     /// either reaps the Profile (Idle/Pending: immediate, once no Subs
@@ -142,11 +141,13 @@ pub enum Input {
 /// generalisation that carries both Sub and Promoter changes.
 ///
 /// Composes the Sub side ([`SubRegistryDiff`]) and the Promoter side
-/// ([`PromoterRegistryDiff`]). The engine's `on_config_diff` applies
-/// both halves atomically in one step: Sub removals → Sub modifications
-/// → Sub additions → Promoter removals → Promoter modifications →
-/// Promoter additions, all merging into a single sorted
-/// [`crate::StepOutput`].
+/// ([`PromoterRegistryDiff`]). Both halves are **name-keyed**: the
+/// loader carries operator names, never engine ids. The engine's
+/// `on_config_diff` resolves each name to its live id through the
+/// owning registry's `by_name` index, then applies both halves
+/// atomically in one step: Sub removals → Sub modifications → Sub
+/// additions → Promoter removals → Promoter modifications → Promoter
+/// additions, all merging into a single sorted [`crate::StepOutput`].
 ///
 /// `Default` is derived so call sites that touch only one half can
 /// construct via struct-update syntax: `WatchRegistryDiff { subs,

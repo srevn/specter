@@ -26,8 +26,8 @@ use specter_core::{
     EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FiredKey, FsEvent, FsIdentity, Input,
     LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
     PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProbeSlot,
-    ProfileIdentity, ProfileState, PromoterAttachRequest, PromoterId, PromoterRegistryDiff,
-    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
+    ProfileIdentity, ProfileState, PromoterAttachRequest, PromoterRegistryDiff, PromoterState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
     SubAttachRequest, SubId, SubParams, Termination, TimerKind, TreeSnapshot, WatchOp,
     WatchRegistryDiff,
 };
@@ -77,7 +77,7 @@ fn engine_with_attached_sub() -> (
             events: NO_EVENTS,
         },
         params: SubParams {
-            name: String::from("test-sub"),
+            name: "test-sub".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -198,7 +198,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
             events: NO_EVENTS,
         },
         params: SubParams {
-            name: String::from("test-sub"),
+            name: "test-sub".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -258,7 +258,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
             events: NO_EVENTS,
         },
         params: SubParams {
-            name: String::from("test-sub"),
+            name: "test-sub".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -321,7 +321,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
             events: NO_EVENTS,
         },
         params: SubParams {
-            name: String::from("test-sub"),
+            name: "test-sub".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -452,7 +452,7 @@ fn dispatch_standard_ok_with_kind_mismatched_response_routes_through_finalize_an
             events: NO_EVENTS,
         },
         params: SubParams {
-            name: String::from("test-sub"),
+            name: "test-sub".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -538,7 +538,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
             events: NO_EVENTS,
         },
         params: SubParams {
-            name: String::from("second"),
+            name: "second".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -1039,7 +1039,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
             events: NO_EVENTS,
         },
         params: SubParams {
-            name: String::from("build"),
+            name: "build".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -1444,7 +1444,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
             events: ClassSet::STRUCTURE,
         },
         params: SubParams {
-            name: String::from("test-sub"),
+            name: "test-sub".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -1831,7 +1831,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
             events: NO_EVENTS,
         },
         params: SubParams {
-            name: String::from("fmt"),
+            name: "fmt".into(),
             program: diff_program(), // references ${specter.created}
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -1951,7 +1951,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
             events: NO_EVENTS,
         },
         params: SubParams {
-            name: String::from("file-sub"),
+            name: "file-sub".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -3011,7 +3011,7 @@ fn config_diff_removed_then_added_atomic() {
         false,
     );
     let mut diff = specter_core::SubRegistryDiff::default();
-    diff.removed.push(sid_a);
+    diff.removed.push(CompactString::from("test-sub"));
     diff.added.push(req_b);
 
     let out = e.step(
@@ -3029,11 +3029,78 @@ fn config_diff_removed_then_added_atomic() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// The name-keyed shim resolves `removed` / `modified` against the
+/// engine's own registry:
+///
+/// - a `removed` name the engine never attached emits
+///   `Diagnostic::ConfigDiffUnknownSub` — not a silent skip, and not a
+///   stale-id `DetachUnknownSub`;
+/// - a `modified` name the engine never attached degrades to an
+///   attach-only retry — the watch is registered fresh rather than
+///   skipped, so a name whose earlier attach failed
+///   (`AttachPathInvalid`) can recover on a later reload.
+///
+/// Pins the Sub side; the Promoter twin is
+/// `config_diff_promoter_removed_with_unknown_name_emits_diagnostic`.
+#[test]
+fn config_diff_unknown_removed_diagnoses_unknown_modified_retries_as_attach() {
+    let mut e = Engine::new();
+
+    let revenant = SubAttachRequest::for_anchor(
+        "revenant".into(),
+        SubAttachAnchor::Path(std::path::PathBuf::from("/revenant-anchor")),
+        ScanConfig::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
+    let mut subs = specter_core::SubRegistryDiff::default();
+    subs.removed.push(CompactString::from("ghost")); // never attached
+    subs.modified.push(revenant); // never attached ⇒ attach-only
+
+    let out = e.step(
+        Input::ConfigDiff(WatchRegistryDiff {
+            subs,
+            ..Default::default()
+        }),
+        Instant::now(),
+    );
+
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ConfigDiffUnknownSub { name } if name == "ghost"
+        )),
+        "unresolved `removed` name must emit ConfigDiffUnknownSub; got {:?}",
+        out.diagnostics,
+    );
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DetachUnknownSub { .. })),
+        "the shim must not route an unknown removed name through the \
+         stale-id detach path",
+    );
+    assert!(
+        e.subs().find_by_name("revenant").is_some(),
+        "a `modified` name the engine never attached retries as a fresh \
+         attach (registered, not skipped forever)",
+    );
+    assert!(
+        e.subs().find_by_name("ghost").is_none(),
+        "the unknown `removed` name attached nothing",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 // ---- on_config_diff: promoter half ----
 
 fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
     PromoterAttachRequest {
-        name: name.to_owned(),
+        name: name.into(),
         pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
         identity: ProfileIdentity {
             config: ScanConfig::builder().recursive(true).build(),
@@ -3110,7 +3177,7 @@ fn config_diff_promoter_removed_reaps_promoter() {
     let diff = WatchRegistryDiff {
         promoters: PromoterRegistryDiff {
             added: Vec::new(),
-            removed: vec![pid],
+            removed: vec![CompactString::from("logs")],
             modified: Vec::new(),
         },
         ..Default::default()
@@ -3152,7 +3219,7 @@ fn config_diff_promoter_modified_reaps_and_attaches() {
         promoters: PromoterRegistryDiff {
             added: Vec::new(),
             removed: Vec::new(),
-            modified: vec![(old_pid, promoter_req("logs", "/var/log/*.json"))],
+            modified: vec![promoter_req("logs", "/var/log/*.json")],
         },
         ..Default::default()
     };
@@ -3262,19 +3329,19 @@ fn config_diff_applies_both_halves_in_one_step() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Stale `PromoterId` in `removed` is a silent no-op (mirrors
-/// `reap_promoter_inner`'s defensive idempotence). The bin can race
-/// a ConfigDiff against an in-flight reap; this test confirms the
-/// engine doesn't panic on it.
+/// An unresolved `removed` Promoter name is handled gracefully: the
+/// name-resolution shim emits `ConfigDiffUnknownPromoter` (never a
+/// reap) and the engine doesn't panic. The bin can race a ConfigDiff
+/// against an in-flight reap, leaving a dangling `removed` name; this
+/// test confirms the benign path.
 #[test]
-fn config_diff_promoter_removed_with_stale_id_is_silent_noop() {
+fn config_diff_promoter_removed_with_unknown_name_emits_diagnostic() {
     let mut e = Engine::new();
-    let stale = PromoterId::default();
 
     let diff = WatchRegistryDiff {
         promoters: PromoterRegistryDiff {
             added: Vec::new(),
-            removed: vec![stale],
+            removed: vec![CompactString::from("never-attached")],
             modified: Vec::new(),
         },
         ..Default::default()
@@ -3282,13 +3349,21 @@ fn config_diff_promoter_removed_with_stale_id_is_silent_noop() {
 
     let out = e.step(Input::ConfigDiff(diff), Instant::now());
 
-    // No PromoterReaped diagnostic — the stale id branch returns
-    // before the lifecycle emit.
+    // No PromoterReaped diagnostic — the name resolves to nothing,
+    // so the shim emits the dedicated unknown diagnostic instead.
     assert!(
         !out.diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::PromoterReaped { .. })),
-        "stale id must not emit PromoterReaped; got {:?}",
+        "unknown name must not emit PromoterReaped; got {:?}",
+        out.diagnostics,
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ConfigDiffUnknownPromoter { name } if name == "never-attached"
+        )),
+        "unresolved removed name must emit ConfigDiffUnknownPromoter; got {:?}",
         out.diagnostics,
     );
 }
@@ -3327,7 +3402,7 @@ fn config_diff_promoter_modify_during_prefix_pending() {
         promoters: PromoterRegistryDiff {
             added: Vec::new(),
             removed: Vec::new(),
-            modified: vec![(old_pid, promoter_req("logs", "/different/dir/*.log"))],
+            modified: vec![promoter_req("logs", "/different/dir/*.log")],
         },
         ..Default::default()
     };
@@ -3826,7 +3901,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
             events: ClassSet::CONTENT,
         },
         params: SubParams {
-            name: String::from("fmt"),
+            name: "fmt".into(),
             program: empty_program(),
             scope: EffectScope::PerStableFile,
             settle: SETTLE,
@@ -3918,7 +3993,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
             events: ClassSet::CONTENT,
         },
         params: SubParams {
-            name: String::from("formatter"),
+            name: "formatter".into(),
             program: empty_program(),
             scope: EffectScope::PerStableFile,
             settle: SETTLE,
@@ -3944,7 +4019,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
             events: ClassSet::CONTENT,
         },
         params: SubParams {
-            name: String::from("formatter-2"),
+            name: "formatter-2".into(),
             program: empty_program(),
             scope: EffectScope::PerStableFile,
             settle: SETTLE,
@@ -3979,7 +4054,7 @@ fn structure_only_profile_has_per_file_fds_false() {
             events: ClassSet::STRUCTURE,
         },
         params: SubParams {
-            name: String::from("ls-only"),
+            name: "ls-only".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -4296,7 +4371,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
             events: ClassSet::CONTENT,
         },
         params: SubParams {
-            name: String::from("test-sub"),
+            name: "test-sub".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -4974,7 +5049,7 @@ mod props {
                 events: NO_EVENTS,
             },
             params: SubParams {
-                name: String::from("test"),
+                name: "test".into(),
                 program: empty_program(),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,

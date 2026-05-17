@@ -109,7 +109,7 @@ fn attach_sub_with_events(
     config: ScanConfig,
 ) -> (specter_core::SubId, ProfileId, StepOutput) {
     let req = SubAttachRequest::for_anchor(
-        name.to_string(),
+        name.into(),
         SubAttachAnchor::Resource(resource),
         config,
         MAX_SETTLE,

@@ -167,9 +167,9 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         now,
     );
 
-    // Profile is Idle. Remove via ConfigDiff.
+    // Profile is Idle. Remove via ConfigDiff (by operator watch name).
     let mut diff = SubRegistryDiff::default();
-    diff.removed.push(sid_a);
+    diff.removed.push(CompactString::from("A"));
     let out = e.step(
         Input::ConfigDiff(WatchRegistryDiff {
             subs: diff,
@@ -246,9 +246,9 @@ fn config_diff_mid_burst_remove_defers_reap() {
         t1,
     );
 
-    // Mid-burst ConfigDiff: remove A.
+    // Mid-burst ConfigDiff: remove A (by operator watch name).
     let mut diff = SubRegistryDiff::default();
-    diff.removed.push(sid_a);
+    diff.removed.push(CompactString::from("A"));
     let _ = e.step(
         Input::ConfigDiff(WatchRegistryDiff {
             subs: diff,
@@ -298,10 +298,11 @@ fn config_diff_mid_burst_remove_defers_reap() {
 
 #[test]
 fn config_diff_mid_burst_modify_revives_profile() {
-    // Engine has Sub A; Standard burst in flight; ConfigDiff modifies A
-    // to B with the SAME `config_hash` (different command, same anchor /
-    // max_settle / events). The internal `detach_sub_inner` →
-    // `attach_sub_inner` sequence triggers the zombie-revival branch.
+    // Engine has Sub A; Standard burst in flight; ConfigDiff modifies
+    // the watch named "A" in place with the SAME `config_hash`
+    // (different command, same anchor / max_settle / events). The
+    // name-keyed shim resolves "A" → old SubId, runs `detach_sub_inner`
+    // → `attach_sub_inner`, triggering the zombie-revival branch.
     // Production path that the user-API tests in `engine.rs` cannot
     // exercise on their own.
     let mut e = Engine::new();
@@ -354,23 +355,21 @@ fn config_diff_mid_burst_modify_revives_profile() {
     );
     let watch_demand_before = e.tree().get(r).unwrap().watch_demand();
 
-    // Mid-burst ConfigDiff: modify A → B (same config_hash; different
-    // name + command). Internally: detach A (refcount→0, reap_pending),
-    // then attach B (zombie revival).
+    // Mid-burst ConfigDiff: modify the watch "A" in place (same
+    // config_hash; different command). The shim resolves "A" → old
+    // SubId: detach A (refcount→0, reap_pending), then attach the
+    // fresh "A" (zombie revival).
     let mut diff = SubRegistryDiff::default();
-    diff.modified.push((
-        sid_a,
-        SubAttachRequest::for_anchor(
-            "B".into(),
-            SubAttachAnchor::Resource(r),
-            cfg,
-            MAX_SETTLE,
-            SETTLE,
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            NO_EVENTS,
-            false,
-        ),
+    diff.modified.push(SubAttachRequest::for_anchor(
+        "A".into(),
+        SubAttachAnchor::Resource(r),
+        cfg,
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
     ));
     let out = e.step(
         Input::ConfigDiff(WatchRegistryDiff {
@@ -380,15 +379,18 @@ fn config_diff_mid_burst_modify_revives_profile() {
         t1,
     );
 
-    let sid_b = e.subs().find_by_name("B").expect("B attached");
+    let sid_b = e.subs().find_by_name("A").expect("A re-attached");
     let pid_b = e.subs().get(sid_b).unwrap().profile;
-    assert_eq!(pid_b, pid, "B revives A's Profile (same config_hash)");
+    assert_eq!(
+        pid_b, pid,
+        "re-attached A revives its Profile (same config_hash)"
+    );
     let p = e.profiles().get(pid).unwrap();
     assert!(
         !matches!(p.state().burst_finish(), Some(BurstFinish::Reap)),
         "reap_pending cleared by revival"
     );
-    assert_eq!(e.subs().at(pid).len(), 1, "exactly one live Sub (B)");
+    assert_eq!(e.subs().at(pid).len(), 1, "exactly one live Sub (A)");
     assert_eq!(
         e.tree().get(r).unwrap().watch_demand(),
         watch_demand_before,
@@ -454,9 +456,9 @@ fn effect_complete_after_detach_drops_silently() {
         now,
     );
 
-    // Detach via ConfigDiff.
+    // Detach via ConfigDiff (by operator watch name).
     let mut diff = SubRegistryDiff::default();
-    diff.removed.push(sid);
+    diff.removed.push(CompactString::from("A"));
     e.step(
         Input::ConfigDiff(WatchRegistryDiff {
             subs: diff,
@@ -494,10 +496,11 @@ fn effect_complete_after_detach_drops_silently() {
 
 #[test]
 fn config_diff_modified_remove_then_add() {
-    // Sub A at /src with recursive=true; ConfigDiff modifies it to
-    // recursive=false. Engine processes as remove + add. The new Sub
-    // gets a fresh Profile (different config_hash) anchored at the same
-    // path (path-based add re-materializes if needed).
+    // Sub "A" at /src with recursive=true; ConfigDiff modifies the
+    // watch "A" in place to recursive=false. The name-keyed shim
+    // resolves "A" → old SubId and processes as detach + attach. The
+    // new Sub gets a fresh Profile (different config_hash) anchored at
+    // the same path (path-based add re-materializes if needed).
     let mut e = Engine::new();
     let r = e
         .tree_mut()
@@ -539,22 +542,20 @@ fn config_diff_modified_remove_then_add() {
         now,
     );
 
-    // Modified entry: same SubId; new request with different config_hash.
-    // Path-based to handle anchor re-materialization safely.
+    // Modified entry: same watch name "A"; new request with a
+    // different config_hash. Path-based to handle anchor
+    // re-materialization safely.
     let mut diff = SubRegistryDiff::default();
-    diff.modified.push((
-        sid_a,
-        SubAttachRequest::for_anchor(
-            "A-renamed".into(),
-            SubAttachAnchor::Path(PathBuf::from("/src")),
-            ScanConfig::builder().recursive(false).build(),
-            MAX_SETTLE,
-            SETTLE,
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            NO_EVENTS,
-            false,
-        ),
+    diff.modified.push(SubAttachRequest::for_anchor(
+        "A".into(),
+        SubAttachAnchor::Path(PathBuf::from("/src")),
+        ScanConfig::builder().recursive(false).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
     ));
     let _out = e.step(
         Input::ConfigDiff(WatchRegistryDiff {

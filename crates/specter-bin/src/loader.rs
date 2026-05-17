@@ -1,24 +1,18 @@
 //! `Loader` — the bin's persistent reload state.
 //!
-//! Holds the most recently applied [`Config`] (the snapshot the engine
-//! was last reconciled against) and the `name → SubId` map the bin
-//! needs to compute hot-reload diffs (`specter_config::diff` reads
-//! `ids` to look up the [`SubId`] for each "removed" or "modified" Sub
-//! by name).
+//! Holds the most recently applied [`Config`] (the snapshot the next
+//! reload diffs against) plus its resolved `[log]` block and on-disk
+//! [`FileMeta`] identity. It carries **no** `name → id` map: hot-reload
+//! diffs are name-keyed and the engine resolves names to ids through
+//! its own authoritative registries, so the bin never mirrors engine
+//! identity.
 //!
 //! Lives on the engine driver thread — file I/O on SIGHUP runs there
 //! too, eliminating the Mutex an early design sketch anticipated.
 //! Sole writer: `EngineDriver::handle_reload` and
 //! `EngineDriver::run_initial_attach`.
-//!
-//! `BTreeMap` (not `HashMap`) for `ids` so iteration order is stable
-//! (I7 discipline is uniform across the workspace, even where the bin
-//! isn't directly subject to it).
 
-use compact_str::CompactString;
 use specter_config::{Config, FileMeta, LogConfig};
-use specter_core::{PromoterId, SubId};
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Bin-side reload state. See module rustdoc.
@@ -43,35 +37,14 @@ pub struct Loader {
     /// lstat that differs from the stored value forever, looping
     /// `handle_reload` against the same content.
     pub config_meta: FileMeta,
-    /// `name → SubId` map for currently-attached static Subs. Threaded
-    /// into `specter_config::diff` so the diff function can populate
-    /// `removed` / `modified` with the live `SubId`s. Mutated only on
-    /// the engine driver thread.
-    pub ids: BTreeMap<CompactString, SubId>,
-    /// `name → PromoterId` map for currently-attached Promoters —
-    /// the dynamic-watch analogue of [`Self::ids`]. Threaded into
-    /// `specter_config::diff` so the Promoter half of
-    /// [`specter_core::WatchRegistryDiff`] can populate `removed` /
-    /// `modified` with live ids.
-    ///
-    /// Population is deferred to the diagnostic-driven reconciliation
-    /// landing with the Promoter initial-attach pass — until that
-    /// lands, the field stays empty, and Promoter `removed` /
-    /// `modified` entries silently no-op (which is safe because no
-    /// Promoter is ever attached through the bin without that
-    /// reconciliation also running).
-    pub promoter_ids: BTreeMap<CompactString, PromoterId>,
 }
 
 impl Loader {
-    /// Fresh loader starting from `current_config` with empty id maps.
-    /// The static map fills as `EngineDriver::run_initial_attach`
-    /// walks `current_config.watches`; the Promoter map fills via the
-    /// engine's `Diagnostic::PromoterAttached` once the corresponding
-    /// reconciliation lands. `current_log` is the resolved log config —
-    /// the bin computes it once at startup (config + CLI merge) and
-    /// hands it in. `config_meta` is the inode-level identity captured
-    /// atomically with `current_config` (see [`Self::config_meta`]).
+    /// Fresh loader starting from `current_config`. `current_log` is
+    /// the resolved log config — the bin computes it once at startup
+    /// (config + CLI merge) and hands it in. `config_meta` is the
+    /// inode-level identity captured atomically with `current_config`
+    /// (see [`Self::config_meta`]).
     #[must_use]
     pub const fn new(
         current_config: Config,
@@ -82,8 +55,6 @@ impl Loader {
             current_config,
             current_log,
             config_meta,
-            ids: BTreeMap::new(),
-            promoter_ids: BTreeMap::new(),
         }
     }
 
@@ -153,70 +124,6 @@ mod tests {
             uid: 0,
             gid: 0,
         }
-    }
-
-    fn config_with_one_watch() -> Config {
-        let toml = r#"
-    [[watch]]
-    name    = "build"
-    path    = "/tmp"
-    actions = [{ exec = ["true"] }]
-    "#;
-        Config::from_str(toml).expect("fixture parses")
-    }
-
-    fn fresh_loader() -> Loader {
-        let cfg = config_with_one_watch();
-        let log = cfg.log.clone();
-        Loader::new(cfg, log, dummy_meta())
-    }
-
-    #[test]
-    fn new_starts_with_empty_ids() {
-        let loader = fresh_loader();
-        assert!(loader.ids.is_empty());
-        assert!(loader.promoter_ids.is_empty());
-        assert_eq!(loader.current_config.watches.len(), 1);
-    }
-
-    #[test]
-    fn promoter_ids_insert_round_trip() {
-        let mut loader = fresh_loader();
-        let pid = PromoterId::default();
-        loader.promoter_ids.insert("logs".into(), pid);
-        assert_eq!(loader.promoter_ids.get("logs"), Some(&pid));
-    }
-
-    #[test]
-    fn ids_insert_round_trip() {
-        let mut loader = fresh_loader();
-        let sid = SubId::default();
-        loader.ids.insert("build".into(), sid);
-        assert_eq!(loader.ids.get("build"), Some(&sid));
-    }
-
-    #[test]
-    fn ids_retain_drops_target_id() {
-        let mut loader = fresh_loader();
-        let id_a = SubId::default();
-        loader.ids.insert("a".into(), id_a);
-        loader.ids.insert("b".into(), id_a);
-        loader.ids.retain(|_, v| *v != id_a);
-        assert!(loader.ids.is_empty());
-    }
-
-    #[test]
-    fn ids_iteration_is_sorted_by_name() {
-        let mut loader = fresh_loader();
-        loader.ids.insert("c".into(), SubId::default());
-        loader.ids.insert("a".into(), SubId::default());
-        loader.ids.insert("b".into(), SubId::default());
-        let names: Vec<&str> = loader
-            .ids
-            .keys()
-            .map(compact_str::CompactString::as_str)
-            .collect();
-        assert_eq!(names, vec!["a", "b", "c"]);
     }
 
     fn loader_with_toml(toml: &str) -> Loader {

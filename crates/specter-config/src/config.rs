@@ -178,7 +178,7 @@ impl SubSpec {
     #[must_use]
     pub fn to_attach_request(&self) -> SubAttachRequest {
         SubAttachRequest::for_anchor(
-            self.name.to_string(),
+            self.name.clone(),
             SubAttachAnchor::Path(self.path.clone()),
             self.scan.clone(),
             self.max_settle,
@@ -238,7 +238,7 @@ impl PromoterSpec {
     #[must_use]
     pub fn to_attach_request(&self) -> PromoterAttachRequest {
         PromoterAttachRequest {
-            name: self.name.to_string(),
+            name: self.name.clone(),
             pattern_spec: self.pattern.clone(),
             identity: ProfileIdentity {
                 config: self.scan.clone(),

@@ -57,7 +57,7 @@ fn empty_program() -> Arc<ActionProgram> {
 
 fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
     PromoterAttachRequest {
-        name: name.to_owned(),
+        name: name.into(),
         pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
         identity: ProfileIdentity {
             config: ScanConfig::builder().recursive(true).build(),
@@ -354,7 +354,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
     // at /var/log, and drops the Promoter (PromoterReaped).
     let reap_diff = WatchRegistryDiff {
         promoters: PromoterRegistryDiff {
-            removed: vec![pid],
+            removed: vec![CompactString::from("logs")],
             ..Default::default()
         },
         ..Default::default()

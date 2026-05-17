@@ -56,7 +56,7 @@ fn empty_program() -> Arc<ActionProgram> {
 /// Build a `PromoterAttachRequest` with a freshly parsed `PatternSpec`.
 fn req_for(name: &str, pattern: &str) -> PromoterAttachRequest {
     PromoterAttachRequest {
-        name: name.to_owned(),
+        name: name.into(),
         pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
         identity: ProfileIdentity {
             config: cfg(),
@@ -1650,7 +1650,7 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
             events: ClassSet::EMPTY,
         },
         params: SubParams {
-            name: String::from("static-foo"),
+            name: "static-foo".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -1726,7 +1726,7 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
             events: ClassSet::EMPTY,
         },
         params: SubParams {
-            name: String::from("static"),
+            name: "static".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
@@ -1776,7 +1776,7 @@ fn anchor_terminal_predicate_static_sub_makes_mixed() {
             events: ClassSet::EMPTY,
         },
         params: SubParams {
-            name: String::from("static"),
+            name: "static".into(),
             program: empty_program(),
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,

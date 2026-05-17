@@ -68,9 +68,12 @@ use std::time::Duration;
 /// [`PromoterId`] at attach. `Clone` serves the rare multi-Engine
 /// fan-out. No `Eq`/`PartialEq`: [`ProfileIdentity::config_hash`] is the
 /// only identity comparison, never a structural derive.
+///
+/// `name` is `CompactString`, moved end to end from the already-
+/// `CompactString` `PromoterSpec.name` — no `String` round-trip.
 #[derive(Clone, Debug)]
 pub struct PromoterAttachRequest {
-    pub name: String,
+    pub name: CompactString,
     pub pattern_spec: PatternSpec,
     pub identity: ProfileIdentity,
     pub settle: Duration,
@@ -355,14 +358,17 @@ impl PromoterRegistry {
 ///
 /// Computed by the TOML loader, consumed via
 /// `Input::ConfigDiff(WatchRegistryDiff)`. Mirrors
-/// `SubRegistryDiff`'s shape; `modified` carries the new spec — the
-/// engine wholesale-replaces (`reap_promoter_inner` then
-/// `attach_promoter_inner`) on each entry.
+/// [`SubRegistryDiff`](crate::sub::SubRegistryDiff)'s name-keyed
+/// shape: `removed` carries operator Promoter names; `modified`
+/// carries the new [`PromoterAttachRequest`] (name inside). The engine
+/// resolves name → [`PromoterId`] through its own `by_name` index and
+/// wholesale-replaces (`reap_promoter_inner` then
+/// `attach_promoter_inner`) on each `modified` entry.
 #[derive(Clone, Debug, Default)]
 pub struct PromoterRegistryDiff {
     pub added: Vec<PromoterAttachRequest>,
-    pub removed: Vec<PromoterId>,
-    pub modified: Vec<(PromoterId, PromoterAttachRequest)>,
+    pub removed: Vec<CompactString>,
+    pub modified: Vec<PromoterAttachRequest>,
 }
 
 #[cfg(test)]
@@ -523,7 +529,7 @@ mod tests {
     #[test]
     fn promoter_registry_diff_carries_added_modified_removed() {
         let req = PromoterAttachRequest {
-            name: "logs".to_owned(),
+            name: "logs".into(),
             pattern_spec: PatternSpec::parse("/var/log/*.log").expect("valid"),
             identity: ProfileIdentity {
                 config: ScanConfig::builder().recursive(true).build(),
@@ -537,8 +543,8 @@ mod tests {
         };
         let d = PromoterRegistryDiff {
             added: vec![req.clone()],
-            removed: vec![PromoterId::default()],
-            modified: vec![(PromoterId::default(), req)],
+            removed: vec!["logs".into()],
+            modified: vec![req],
         };
         assert_eq!(d.added.len(), 1);
         assert_eq!(d.removed.len(), 1);

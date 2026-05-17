@@ -25,6 +25,7 @@
     clippy::too_many_lines
 )]
 
+use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ClassSet, Diagnostic, EffectScope, Input, PatternSpec, ProfileIdentity,
@@ -48,7 +49,7 @@ fn sub_req_at_root(name: &str, e: &mut Engine) -> SubAttachRequest {
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     SubAttachRequest::for_anchor(
-        name.to_owned(),
+        name.into(),
         SubAttachAnchor::Resource(r),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
@@ -62,7 +63,7 @@ fn sub_req_at_root(name: &str, e: &mut Engine) -> SubAttachRequest {
 
 fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
     PromoterAttachRequest {
-        name: name.to_owned(),
+        name: name.into(),
         pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
         identity: ProfileIdentity {
             config: ScanConfig::builder().recursive(true).build(),
@@ -170,7 +171,7 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
         anchor: sub_req.anchor,
         identity: sub_req.identity,
         params: SubParams {
-            name: "build".to_owned(),
+            name: "build".into(),
             ..sub_req.params
         },
     };
@@ -178,11 +179,11 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
 
     let diff = WatchRegistryDiff {
         subs: SubRegistryDiff {
-            modified: vec![(old_sid, modify_sub_req)],
+            modified: vec![modify_sub_req],
             ..Default::default()
         },
         promoters: PromoterRegistryDiff {
-            modified: vec![(old_pid, modify_promoter_req)],
+            modified: vec![modify_promoter_req],
             ..Default::default()
         },
     };
@@ -261,11 +262,11 @@ fn mixed_remove_diff_emits_promoter_reaped_only() {
 
     let diff = WatchRegistryDiff {
         subs: SubRegistryDiff {
-            removed: vec![sid],
+            removed: vec![CompactString::from("build")],
             ..Default::default()
         },
         promoters: PromoterRegistryDiff {
-            removed: vec![pid],
+            removed: vec![CompactString::from("logs")],
             ..Default::default()
         },
     };
@@ -312,7 +313,7 @@ fn static_to_dynamic_migration_diff_swaps_via_diagnostic_stream() {
 
     let diff = WatchRegistryDiff {
         subs: SubRegistryDiff {
-            removed: vec![sid],
+            removed: vec![CompactString::from("foo")],
             ..Default::default()
         },
         promoters: PromoterRegistryDiff {
@@ -362,7 +363,7 @@ fn dynamic_to_static_migration_diff_swaps_via_diagnostic_stream() {
             ..Default::default()
         },
         promoters: PromoterRegistryDiff {
-            removed: vec![pid],
+            removed: vec![CompactString::from("foo")],
             ..Default::default()
         },
     };

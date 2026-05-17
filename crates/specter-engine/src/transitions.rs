@@ -787,35 +787,47 @@ impl Engine {
 
     /// Dispatch a [`Input::ConfigDiff`].
     ///
-    /// Atomic apply of *both* halves of the [`WatchRegistryDiff`] in
-    /// the canonical order:
+    /// Atomic, name-keyed apply of *both* halves of the
+    /// [`WatchRegistryDiff`] in the canonical order. The diff carries
+    /// operator names, never engine ids: name → id resolution is a
+    /// registry-owner operation and homes here against the engine's
+    /// authoritative `by_name` indices, never bin-side off the
+    /// order-unguaranteed diagnostic stream.
     ///
-    /// 1. **Sub `removed`** — `detach_sub_inner` decrements each
-    ///    Sub's Profile refcount (reaping the Profile if it hits zero,
-    ///    deferring if active).
-    /// 2. **Sub `modified`** — remove-then-add (`config_hash` may
-    ///    change ⇒ different Profile).
+    /// 1. **Sub `removed`** — resolve the name. `Some` ⇒
+    ///    `detach_sub_inner` (reap the Profile if its last Sub left,
+    ///    defer if active). `None` ⇒ [`Diagnostic::ConfigDiffUnknownSub`]
+    ///    (a name whose prior attach failed and never entered the
+    ///    registry — nothing to detach).
+    /// 2. **Sub `modified`** — resolve the name; detach the old id if
+    ///    present, then `attach_sub_inner`. A name the engine never
+    ///    attached resolves `None` ⇒ attach-only: the modify becomes a
+    ///    retrying fresh attach against the now-maybe-valid path
+    ///    (strictly more correct than the prior silent-skip-forever).
     /// 3. **Sub `added`** — `attach_sub_inner` materialises the anchor
     ///    and registers the Sub.
-    /// 4. **Promoter `removed`** — `reap_promoter_inner` cancels the
-    ///    in-flight probe, detaches every dynamic Sub, releases the
-    ///    per-Resource watch_demand contributions, and removes the
-    ///    Promoter from the registry.
-    /// 5. **Promoter `modified`** — wholesale: `reap_promoter_inner`
-    ///    then `attach_promoter_inner`. The `name` survives across
-    ///    the cycle (the diff keys on it), but the underlying
-    ///    `PromoterId` is freshly minted; the bin reconciles via the
-    ///    `PromoterAttached` / `PromoterReaped` diagnostic stream.
-    /// 6. **Promoter `added`** — `attach_promoter_inner` runs
-    ///    descent or immediate-Active per the literal-prefix
-    ///    materialisation outcome.
+    /// 4. **Promoter `removed`** — resolve the name. `Some` ⇒
+    ///    `reap_promoter_inner` (cancel the in-flight probe, detach
+    ///    every dynamic Sub, release per-Resource contributions, drop
+    ///    the registry entry). `None` ⇒
+    ///    [`Diagnostic::ConfigDiffUnknownPromoter`] (closes the old
+    ///    asymmetry where this case was a silent no-op).
+    /// 5. **Promoter `modified`** — wholesale: resolve, reap the old
+    ///    id if present, then `attach_promoter_inner`. The `name`
+    ///    survives across the cycle (the diff keys on it); the
+    ///    `PromoterId` is freshly minted.
+    /// 6. **Promoter `added`** — `attach_promoter_inner` runs descent
+    ///    or immediate-Active per the literal-prefix materialisation
+    ///    outcome.
     ///
-    /// Sub-side runs first so that any Promoter modification observes
-    /// a registry that already reflects the freshly-applied static
-    /// Subs — relevant for cross-Promoter / static-Sub `Profile` dedup.
-    /// Within each kind, removals run before additions so a
-    /// name-recycling rename doesn't transiently alias against the old
-    /// entry.
+    /// Sub-side runs fully before the Promoter side so a static↔dynamic
+    /// migration observes a registry that already reflects the
+    /// freshly-applied static Subs. Within each kind, removals run
+    /// before additions so a name-recycling rename doesn't transiently
+    /// alias against the old entry. The three lists per side are
+    /// name-disjoint by diff construction, and each `find_by_name`
+    /// reads the live registry *after* prior mutations in the same
+    /// step — exactly the id the bin mirror used to supply.
     ///
     /// Parent-edge recompute is **lazy**: each `detach_sub_inner` /
     /// `attach_sub_inner` calls the appropriate
@@ -829,24 +841,38 @@ impl Engine {
     ) {
         let WatchRegistryDiff { subs, promoters } = diff;
 
-        // ---- Sub side ----
-        for sub_id in subs.removed {
-            self.detach_sub_inner(sub_id, out);
+        // ---- Sub side (removed → modified → added) ----
+        for name in subs.removed {
+            match self.subs.find_by_name(&name) {
+                Some(sid) => self.detach_sub_inner(sid, out),
+                None => out
+                    .diagnostics
+                    .push(Diagnostic::ConfigDiffUnknownSub { name }),
+            }
         }
-        for (sub_id, req) in subs.modified {
-            self.detach_sub_inner(sub_id, out);
+        for req in subs.modified {
+            if let Some(old) = self.subs.find_by_name(&req.params.name) {
+                self.detach_sub_inner(old, out);
+            }
             let _ = self.attach_sub_inner(req, now, out);
         }
         for req in subs.added {
             let _ = self.attach_sub_inner(req, now, out);
         }
 
-        // ---- Promoter side ----
-        for pid in promoters.removed {
-            self.reap_promoter_inner(pid, out);
+        // ---- Promoter side (structurally identical) ----
+        for name in promoters.removed {
+            match self.promoters.find_by_name(&name) {
+                Some(pid) => self.reap_promoter_inner(pid, out),
+                None => out
+                    .diagnostics
+                    .push(Diagnostic::ConfigDiffUnknownPromoter { name }),
+            }
         }
-        for (pid, req) in promoters.modified {
-            self.reap_promoter_inner(pid, out);
+        for req in promoters.modified {
+            if let Some(old) = self.promoters.find_by_name(&req.name) {
+                self.reap_promoter_inner(old, out);
+            }
             let _ = self.attach_promoter_inner(req, now, out);
         }
         for req in promoters.added {

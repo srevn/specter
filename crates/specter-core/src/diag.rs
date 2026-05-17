@@ -178,12 +178,26 @@ pub enum Diagnostic {
     /// [`Self::DetachUnknownSub`] (a stale-id detach attempt) — the
     /// triggering input is an `EffectComplete`, not a detach request.
     EffectCompleteForUnknownSub { sub: SubId },
-    /// `Engine::detach_sub` (or `Input::ConfigDiff::removed`) targeted a
-    /// `SubId` not in the registry. Reachable when hot reload races with
-    /// a previous detach, or when an external caller submits a stale id.
-    /// Distinct from [`Self::EffectCompleteForUnknownSub`] — that variant
-    /// fires on a stray completion arrival, not on a detach miss.
+    /// [`crate::Input::DetachSub`] targeted a `SubId` not in the
+    /// registry — an external caller submitted a stale id. Hot reload
+    /// no longer reaches here: `Input::ConfigDiff` resolves operator
+    /// names to ids through the registry's own `by_name` index, so an
+    /// unresolved `removed` name surfaces as
+    /// [`Self::ConfigDiffUnknownSub`] instead. Distinct from
+    /// [`Self::EffectCompleteForUnknownSub`] — that variant fires on a
+    /// stray completion arrival, not on a detach miss.
     DetachUnknownSub { sub: SubId },
+    /// `Input::ConfigDiff`'s Sub `removed` list named a watch the
+    /// engine has no record of — typically a name whose prior attach
+    /// failed ([`Self::AttachPathInvalid`]) so it never entered the
+    /// registry. Benign and informational: there is nothing to detach.
+    /// The resolution shim emits this rather than attempting a detach.
+    ConfigDiffUnknownSub { name: CompactString },
+    /// Promoter-side twin of [`Self::ConfigDiffUnknownSub`]:
+    /// `Input::ConfigDiff`'s Promoter `removed` list named a Promoter
+    /// the engine has no record of. Benign and informational: there is
+    /// nothing to reap.
+    ConfigDiffUnknownPromoter { name: CompactString },
     /// Probe returned `Vanished` during a `Seed` or `Standard` burst. The
     /// Engine's response differs by intent; the variant preserves the intent
     /// for log readability.
@@ -463,38 +477,36 @@ pub enum Diagnostic {
     /// A Sub has been registered with the engine and assigned `sub`.
     /// Emitted by `attach_sub_inner` on every successful insert —
     /// static (operator-declared) attaches and dynamic Promoter-spawned
-    /// attaches alike. The bin layer reads the variant from
-    /// `StepOutput.diagnostics` to reconcile its `name → SubId` mapping
-    /// after a hot-reload diff applies, dropping the post-step
-    /// `find_by_name` linear scan.
+    /// attaches alike.
+    ///
+    /// Pure operator narration: the bin logs it (INFO for static, DEBUG
+    /// for dynamic). Hot-reload identity resolution does *not* route
+    /// through this stream — name → `SubId` is the engine's own
+    /// authoritative `by_name` index, resolved registry-side. Tests
+    /// read it via `testkit::first_attached_sub` to capture the minted
+    /// id.
     ///
     /// `name` carries the Sub's user-facing name verbatim — for static
     /// Subs the operator's `[[watch]].name`; for dynamic Subs the
     /// engine's synthesized `<promoter_name>@<resolved_path>` shape.
-    /// `source_promoter` lets the consumer route static and dynamic
-    /// emissions independently: the bin's static `Loader.ids` filters
-    /// on `source_promoter.is_none()` because dynamic Subs are owned
-    /// by the `Promoter.dynamic_subs` map inside the engine and would
-    /// leak across reload cycles if mirrored into the static index.
+    /// `source_promoter` distinguishes the two.
     SubAttached {
         sub: SubId,
         name: CompactString,
         source_promoter: Option<PromoterId>,
     },
     /// A Promoter has been registered with the engine and assigned
-    /// `promoter`. Emitted by `attach_promoter`. The bin layer reads
-    /// the variant from `StepOutput.diagnostics` to reconcile its
-    /// `name → PromoterId` mapping after a hot-reload diff applies.
-    /// `name` carries the Promoter's user-facing name verbatim so the
-    /// reload path can update its lookup table without re-reading the
-    /// engine's registry.
+    /// `promoter`. Emitted by `attach_promoter_inner`. Pure operator
+    /// narration (the bin logs it at INFO); `name` carries the
+    /// operator-facing Promoter name verbatim. Hot-reload resolution
+    /// uses the engine's own `by_name` index, not this stream.
     PromoterAttached {
         promoter: PromoterId,
         name: CompactString,
     },
     /// A Promoter has been removed from the engine. Pairs with
-    /// [`Self::PromoterAttached`]; the bin removes the entry from its
-    /// `name → PromoterId` map on receipt.
+    /// [`Self::PromoterAttached`]; pure operator narration (the bin
+    /// logs it at INFO).
     PromoterReaped { promoter: PromoterId },
     /// Promoter literal-prefix descent probe returned `Vanished` for
     /// `prefix`. The engine rewinds descent to the next-existing

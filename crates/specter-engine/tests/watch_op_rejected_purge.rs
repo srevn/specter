@@ -86,7 +86,7 @@ fn attach_subtree_root(
     max_settle: Duration,
 ) -> (SubId, ProfileId, StepOutput) {
     let req = SubAttachRequest::for_anchor(
-        name.to_string(),
+        name.into(),
         SubAttachAnchor::Resource(resource),
         ScanConfig::builder().recursive(true).build(),
         max_settle,
@@ -466,7 +466,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
 
 fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
     PromoterAttachRequest {
-        name: name.to_owned(),
+        name: name.into(),
         pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
         identity: ProfileIdentity {
             config: ScanConfig::builder().recursive(true).build(),

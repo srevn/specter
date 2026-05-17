@@ -16,6 +16,10 @@
 use crate::counter::MonotonicCounter;
 use crate::refcounts::add_watch;
 use crate::timer::{TimerEntry, TimerHeap};
+// Only the inline test module needs `CompactString` now that
+// `register_sub` moves the request's own (it reaches it via
+// `use super::*`); gating keeps the lib build warning-free.
+#[cfg(test)]
 use compact_str::CompactString;
 // Identity.
 use specter_core::{ProfileId, ResourceId, SubId, TimerId};
@@ -152,13 +156,13 @@ impl Engine {
     /// here until a handler lands.
     ///
     /// Lifecycle inputs ([`Input::AttachSub`], [`Input::DetachSub`],
-    /// [`Input::AttachPromoter`]) surface their minted ids via
-    /// `out.diagnostics` ([`Diagnostic::SubAttached`] /
-    /// [`Diagnostic::PromoterAttached`]), not via a synchronous
-    /// return. The bin's loader maps `name → SubId` / `name →
-    /// PromoterId` from those diagnostics, so the dispatcher's
-    /// uniform shape (one input, one [`StepOutput`]) holds across
-    /// every variant.
+    /// [`Input::AttachPromoter`]) take effect on the engine's
+    /// registries and narrate the outcome via `out.diagnostics`
+    /// ([`Diagnostic::SubAttached`] / [`Diagnostic::PromoterAttached`]),
+    /// not via a synchronous return. Identity (`name → SubId` /
+    /// `name → PromoterId`) is resolved engine-side through each
+    /// registry's `by_name` index, so the dispatcher's uniform shape
+    /// (one input, one [`StepOutput`]) holds across every variant.
     pub fn step(&mut self, input: Input, now: Instant) -> StepOutput {
         let mut out = StepOutput::default();
         match input {
@@ -432,21 +436,24 @@ impl Engine {
     /// Phase 2 of `attach_sub_inner` — register the Sub and emit
     /// [`Diagnostic::SubAttached`].
     ///
-    /// Consumes `params` for the [`Sub::from_request`] move; captures
-    /// the diagnostic name + source-promoter first (cheap
-    /// `CompactString` / `Option<PromoterId>` copies) since
-    /// `from_request` then takes `params` by value.
+    /// Consumes `params` for the [`Sub::from_request`] move (which
+    /// moves `params.name` into `Sub.name`), so the narration name is
+    /// captured first as one `CompactString` clone — inline for
+    /// typical short names, the single irreducible copy on the static
+    /// attach path. `source_promoter` is a cheap `Option<PromoterId>`
+    /// copy.
     ///
-    /// Sole emitter of `SubAttached`; downstream Phase-3 helpers
-    /// never re-emit, and the bin's `loader.subs.name → SubId` map
-    /// derives exclusively from this diagnostic stream.
+    /// Sole emitter of `SubAttached`; downstream Phase-3 helpers never
+    /// re-emit. The diagnostic is pure operator narration — identity
+    /// is resolved engine-side via the registry's `by_name` index, not
+    /// from this stream.
     fn register_sub(
         &mut self,
         params: SubParams,
         profile_id: ProfileId,
         out: &mut StepOutput,
     ) -> SubId {
-        let diag_name = CompactString::from(params.name.as_str());
+        let diag_name = params.name.clone();
         let diag_source_promoter = params.source_promoter;
         let sub_id = self.subs.insert(Sub::from_request(profile_id, params));
         out.diagnostics.push(Diagnostic::SubAttached {
@@ -1607,7 +1614,7 @@ mod tests {
         let mut e = Engine::new();
         let bad = std::path::PathBuf::from("./relative/with/dot");
         let req = SubAttachRequest::for_anchor(
-            "bad".to_string(),
+            "bad".into(),
             SubAttachAnchor::Path(bad.clone()),
             ScanConfig::builder().recursive(false).build(),
             Duration::from_millis(100),
@@ -1641,7 +1648,7 @@ mod tests {
 
         let bad = std::path::PathBuf::from("relative/path");
         let req = SubAttachRequest::for_anchor(
-            "rel".to_string(),
+            "rel".into(),
             SubAttachAnchor::Path(bad.clone()),
             ScanConfig::builder().recursive(false).build(),
             Duration::from_millis(100),
@@ -1688,7 +1695,7 @@ mod tests {
         let pre_profile_count = e.profiles.len();
 
         let req = SubAttachRequest::for_anchor(
-            "bad".to_string(),
+            "bad".into(),
             SubAttachAnchor::Path(path.clone()),
             ScanConfig::builder().recursive(false).build(),
             Duration::from_millis(100),
@@ -1729,7 +1736,7 @@ mod tests {
         // `ResourceId::default()` is permanently stale.
         let stale = ResourceId::default();
         let req = SubAttachRequest::for_anchor(
-            "stale".to_string(),
+            "stale".into(),
             SubAttachAnchor::Resource(stale),
             ScanConfig::builder().recursive(false).build(),
             Duration::from_millis(100),

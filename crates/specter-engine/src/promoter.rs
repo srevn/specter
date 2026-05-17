@@ -49,7 +49,7 @@ use crate::descent::{MaterializeResult, kind_from_entry};
 use crate::path::empty_path;
 use crate::probe::ProbeRoute;
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
-use compact_str::CompactString;
+use compact_str::{CompactString, format_compact};
 use specter_core::{
     ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
     PatternSpec, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
@@ -125,9 +125,24 @@ impl Engine {
             },
         }
 
+        // Destructure once: every field moves to exactly one consumer.
+        // `name` moves into `Promoter.name`; the lifecycle diagnostic
+        // takes a single inline `CompactString` clone (`diag_name`)
+        // since the registry owns the original — the one irreducible
+        // copy on the Promoter attach path.
+        let PromoterAttachRequest {
+            name,
+            pattern_spec,
+            identity,
+            settle,
+            program,
+            scope,
+            log_output,
+        } = req;
+
         // 1. Render the literal prefix. components[0..literal_prefix_len]
         // are all Literal post-parse; the loop is a fold.
-        let prefix_path = render_literal_prefix(&req.pattern_spec);
+        let prefix_path = render_literal_prefix(&pattern_spec);
 
         // 2. Parse. Defense-in-depth: PatternSpec::parse should have
         // rejected anything Tree::parse_attach_path would reject. On
@@ -150,7 +165,7 @@ impl Engine {
 
         // 4. Capture the literal_prefix_len; first proxy at materialisation
         // carries this index in `pattern.components`.
-        let lpl = req.pattern_spec.literal_prefix_len();
+        let lpl = pattern_spec.literal_prefix_len();
 
         // 5. Construct the initial state directly. No placeholder. A
         // pending descent mints its correlation *here* so the slot is
@@ -185,33 +200,37 @@ impl Engine {
             }
         };
 
-        // 6. Mint the Promoter with the final state. The slotmap key is
-        // the identity authority — no id is embedded. `pattern_spec`
-        // and `identity` move in (no clone); `program`'s Arc moves in —
-        // the hot dispatcher bumps the refcount per enumeration response
-        // to release the registry's read borrow before the forward pass
-        // takes `&mut self`. Cloning the `PatternSpec` here (rather than
-        // moving) would allocate per `Glob` component on every attach.
+        // 6. Mint the Promoter with the final state. The slotmap key
+        // is the identity authority — no id is embedded. `name`,
+        // `pattern_spec`, and `identity` move in (no clone); the lone
+        // copy is `diag_name` for the narration below. `program`'s Arc
+        // moves in — the hot dispatcher bumps the refcount per
+        // enumeration response to release the registry's read borrow
+        // before the forward pass takes `&mut self`. Cloning the
+        // `PatternSpec` here (rather than moving) would allocate per
+        // `Glob` component on every attach.
+        let diag_name = name.clone();
         let promoter_id = self.promoters.insert(Promoter {
-            name: CompactString::from(req.name.as_str()),
-            pattern: Arc::new(req.pattern_spec),
-            identity: req.identity,
-            program: req.program,
-            scope: req.scope,
-            settle: req.settle,
-            log_output: req.log_output,
+            name,
+            pattern: Arc::new(pattern_spec),
+            identity,
+            program,
+            scope,
+            settle,
+            log_output,
             state: initial_state,
             pending_enumerations: BTreeSet::new(),
             dynamic_subs: BTreeMap::new(),
             warned_at_threshold: false,
         });
 
-        // 7. Lifecycle diagnostic. Emitted before any operation that
-        // could early-return so the bin's `name → PromoterId` map sees
-        // the registration deterministically.
+        // 7. Lifecycle diagnostic — pure operator narration, emitted
+        // before any operation that could early-return so it is
+        // deterministic across the step. Identity resolution uses the
+        // engine's `by_name` index, not this stream.
         out.diagnostics.push(Diagnostic::PromoterAttached {
             promoter: promoter_id,
-            name: CompactString::from(req.name.as_str()),
+            name: diag_name,
         });
 
         // 8. Branch on the post-insert token to set up watches/probes.
@@ -1061,7 +1080,10 @@ impl Engine {
             return;
         };
 
-        let synthesized = format!("{promoter_name}@{}", promote_path.display());
+        // `format_compact!` writes straight into a `CompactString` —
+        // no intermediate `String` allocation before the move into
+        // `SubParams.name`.
+        let synthesized = format_compact!("{promoter_name}@{}", promote_path.display());
 
         // Resource-anchored: `anchor_resource` is the slot the
         // forward-pass just looked up or `ensure_child`'d as `User`, so

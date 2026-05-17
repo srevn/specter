@@ -58,8 +58,9 @@
 //! hand-mapped to tracing.
 //!
 //! `handle_reload` is the SIGHUP pipeline: read the file, compute the
-//! diff, apply via `Input::ConfigDiff`, sync `loader.ids` post-apply,
-//! rotate `current_config`. All on the engine thread — no Mutex.
+//! name-keyed diff, apply via `Input::ConfigDiff` (the engine resolves
+//! names to ids against its own registries), rotate `current_config`.
+//! All on the engine thread — no Mutex.
 
 use crate::app::CliLogOverrides;
 use crate::channels::EngineSide;
@@ -67,7 +68,7 @@ use crate::loader::Loader;
 use crate::observability::{LogReloadKind, ObservabilityHandle};
 use crossbeam::channel::Select;
 use specter_config::{Config, FileMeta};
-use specter_core::{Diagnostic, Input, ProbeOp, PromoterId, StepOutput, SubId};
+use specter_core::{Diagnostic, Input, ProbeOp, StepOutput};
 use specter_engine::Engine;
 use specter_sensor::{DrainWindow, Prober, WakeHandle};
 use std::path::PathBuf;
@@ -215,20 +216,15 @@ impl EngineDriver {
     /// one output and stall the watcher behind the post-call
     /// `forward`.
     ///
-    /// Both id maps populate via the shared
-    /// [`Self::reconcile_loader_from_diagnostics`] helper so the
-    /// initial-attach and SIGHUP-reload paths converge on the same
-    /// reconciliation discipline. Static Subs end up in
-    /// [`Loader::ids`]; Promoters end up in [`Loader::promoter_ids`];
-    /// dynamic Subs (whose `SubAttached` carries
-    /// `source_promoter = Some(_)`) are filtered out by the helper —
-    /// they live in `Promoter.dynamic_subs` and are never observed by
-    /// the bin's diff layer.
+    /// No bin-side reconciliation: the engine owns `name → id`
+    /// resolution through its registries' `by_name` indices. The
+    /// `SubAttached` / `PromoterAttached` diagnostics are pure operator
+    /// narration, logged via `forward`.
     pub fn run_initial_attach(&mut self) {
         let now = Instant::now();
-        // Snapshot the active spec lists — `loader.ids` /
-        // `loader.promoter_ids` mutation invalidates an iterator
-        // over `loader.current_config`.
+        // Snapshot the active spec lists: `self.engine.step` needs
+        // `&mut self`, so the `&self` borrow on `loader.current_config`
+        // cannot be held across the loop.
         let watch_specs: Vec<_> = self
             .loader
             .current_config
@@ -244,13 +240,11 @@ impl EngineDriver {
         for spec in watch_specs {
             let req = spec.to_attach_request();
             let out = self.engine.step(Input::AttachSub(req), now);
-            Self::reconcile_loader_from_diagnostics(&mut self.loader, &[], &[], &out.diagnostics);
             self.forward(out);
         }
         for spec in promoter_specs {
             let req = spec.to_attach_request();
             let out = self.engine.step(Input::AttachPromoter(req), now);
-            Self::reconcile_loader_from_diagnostics(&mut self.loader, &[], &[], &out.diagnostics);
             self.forward(out);
         }
     }
@@ -451,10 +445,10 @@ impl EngineDriver {
     }
 
     /// Read the config from disk; on success, diff against the current
-    /// snapshot, apply via `Input::ConfigDiff`, sync `loader.ids`,
-    /// rotate `loader.current_config` and `loader.config_meta`. On
-    /// failure, log + retain running config + meta (preserving the
-    /// auto-reload retry loop on the next pulse).
+    /// snapshot, apply via `Input::ConfigDiff` (the engine resolves
+    /// names to ids), rotate `loader.current_config` and
+    /// `loader.config_meta`. On failure, log + retain running config +
+    /// meta (preserving the auto-reload retry loop on the next pulse).
     ///
     /// Log-side reload is integrated here:
     ///   - The `[log]` block is re-resolved (CLI overrides re-applied);
@@ -504,30 +498,19 @@ impl EngineDriver {
             return;
         }
 
-        // Snapshot the change-counts (for the post-apply summary log)
-        // and the `removed` id lists before the diff moves into the
-        // engine. Modified entries don't appear here — their old ids
-        // live under the entry's name in `loader.ids` /
-        // `loader.promoter_ids` and are overwritten by the
-        // `SubAttached` / `PromoterAttached` diagnostics emitted for
-        // the freshly-minted entities.
+        // Snapshot the change-counts for the post-apply summary log
+        // before the diff moves into the engine. Name-keyed: the
+        // engine resolves each name to its live id against its own
+        // registries, so the bin keeps no `name → id` mirror to
+        // reconcile afterwards.
         let added_n = diff.subs.added.len();
         let removed_n = diff.subs.removed.len();
         let modified_n = diff.subs.modified.len();
         let promoter_added_n = diff.promoters.added.len();
         let promoter_removed_n = diff.promoters.removed.len();
         let promoter_modified_n = diff.promoters.modified.len();
-        let removed_sub_ids: Vec<SubId> = diff.subs.removed.clone();
-        let removed_promoter_ids: Vec<PromoterId> = diff.promoters.removed.clone();
 
         let out = self.engine.step(Input::ConfigDiff(diff), now);
-
-        Self::reconcile_loader_from_diagnostics(
-            &mut self.loader,
-            &removed_sub_ids,
-            &removed_promoter_ids,
-            &out.diagnostics,
-        );
 
         self.loader.current_config = new_config;
         self.loader.current_log = new_log_resolved;
@@ -597,19 +580,14 @@ impl EngineDriver {
         }
     }
 
-    /// Compute the diff between the running and freshly-parsed config.
-    /// Pure delegation to [`specter_config::diff`] threaded through
-    /// the loader's live id maps.
+    /// Compute the name-keyed diff between the running and
+    /// freshly-parsed config. Pure delegation to [`specter_config::diff`]
+    /// — no id maps; the engine resolves names to ids at apply time.
     pub(crate) fn compute_watch_diff(
         &self,
         new_config: &Config,
     ) -> specter_core::WatchRegistryDiff {
-        specter_config::diff(
-            &self.loader.current_config,
-            new_config,
-            &self.loader.ids,
-            &self.loader.promoter_ids,
-        )
+        specter_config::diff(&self.loader.current_config, new_config)
     }
 
     /// Recompute the watcher's deferred-drain window from the loader's
@@ -626,70 +604,6 @@ impl EngineDriver {
                 new_ms = new_window.as_millis(),
                 "drain_window updated",
             );
-        }
-    }
-
-    /// Apply lifecycle diagnostics emitted by an `Input::ConfigDiff`
-    /// step (or any per-attach `attach_sub` / `attach_promoter` step
-    /// during initial attach) to the [`Loader`]'s name → id maps,
-    /// **and** drop entries whose ids appear in the supplied
-    /// `removed_sub_ids` / `removed_promoter_ids` lists.
-    ///
-    /// Reconciliation discipline:
-    /// - **Removals** are applied from the diff's `removed` lists, not
-    ///   from a putative "SubDetached" diagnostic — `detach_sub_inner`
-    ///   does not emit one (the diff is the authoritative source for
-    ///   what disappeared).
-    /// - **Additions / modifications** flow from
-    ///   [`Diagnostic::SubAttached`] (filtered on
-    ///   `source_promoter.is_none()` — dynamic Subs synthesised by a
-    ///   Promoter live in the engine's
-    ///   `Promoter.dynamic_subs` map and would leak across reload
-    ///   cycles if mirrored into the static `loader.ids` index) and
-    ///   [`Diagnostic::PromoterAttached`].
-    /// - [`Diagnostic::PromoterReaped`] also drains
-    ///   `loader.promoter_ids` as defense-in-depth: the diff's
-    ///   `removed` list already covers operator-driven removals, but
-    ///   reaps cascaded from a Promoter modify (`reap_promoter_inner`
-    ///   then `attach_promoter_inner`) only surface here. Insert order
-    ///   in `on_config_diff` is `reap → attach`, so the freshly-minted
-    ///   entry's `PromoterAttached` overwrites the cleared slot in
-    ///   the same loop pass — correct end state regardless of how
-    ///   many `(reap, attach)` pairs interleave.
-    ///
-    /// `&mut Loader` (no `&mut self`) so the call site keeps `&self`
-    /// available for the surrounding driver work (logging, channel
-    /// sends) without borrow-check gymnastics.
-    fn reconcile_loader_from_diagnostics(
-        loader: &mut Loader,
-        removed_sub_ids: &[SubId],
-        removed_promoter_ids: &[PromoterId],
-        diagnostics: &[Diagnostic],
-    ) {
-        for id in removed_sub_ids {
-            loader.ids.retain(|_, v| v != id);
-        }
-        for id in removed_promoter_ids {
-            loader.promoter_ids.retain(|_, v| v != id);
-        }
-
-        for diag in diagnostics {
-            match diag {
-                Diagnostic::SubAttached {
-                    sub,
-                    name,
-                    source_promoter: None,
-                } => {
-                    loader.ids.insert(name.clone(), *sub);
-                }
-                Diagnostic::PromoterAttached { promoter, name } => {
-                    loader.promoter_ids.insert(name.clone(), *promoter);
-                }
-                Diagnostic::PromoterReaped { promoter } => {
-                    loader.promoter_ids.retain(|_, v| v != promoter);
-                }
-                _ => {}
-            }
         }
     }
 
@@ -828,6 +742,16 @@ pub fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::DetachUnknownSub { sub } => tracing::warn!(
             ?sub,
             "detach for unknown Sub (hot-reload race or stale id; dropped)",
+        ),
+        Diagnostic::ConfigDiffUnknownSub { name } => tracing::info!(
+            %name,
+            "config reload removed a watch the engine never attached \
+             (likely a prior path error); nothing to detach",
+        ),
+        Diagnostic::ConfigDiffUnknownPromoter { name } => tracing::info!(
+            %name,
+            "config reload removed a dynamic watch the engine never \
+             attached (likely a prior path error); nothing to reap",
         ),
         Diagnostic::ProbeVanished { profile, intent } => {
             tracing::warn!(?profile, ?intent, "probe returned Vanished");
@@ -1085,7 +1009,7 @@ mod tests {
     use crate::channels::{ActuatorSide, Channels, WatcherSide};
     use crossbeam::channel::Sender;
     use specter_config::Config;
-    use specter_core::Input;
+    use specter_core::{Input, SubId};
     use specter_sensor::FsWatcher;
     use specter_sensor::testkit::{MockFsWatcher, MockProber, MockWaker};
     use std::sync::Arc;
@@ -1220,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn run_initial_attach_populates_loader_ids_and_emits_watch_op() {
+    fn run_initial_attach_attaches_static_sub_and_emits_watch_op() {
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg_path = tmp.path().join("specter.toml");
         let config = config_with_one_watch(tmp.path());
@@ -1228,10 +1152,15 @@ mod tests {
 
         rig.driver.run_initial_attach();
 
-        // One Sub was attached → loader.ids has one entry under that name.
-        assert_eq!(rig.driver.loader.ids.len(), 1);
-        let sid = *rig.driver.loader.ids.get("build").expect("name present");
-        assert_ne!(sid, SubId::default());
+        // One Sub was attached → the engine's static `by_name` index
+        // resolves that operator name to a live SubId.
+        let sid = rig
+            .driver
+            .engine
+            .subs()
+            .find_by_name("build")
+            .expect("static Sub 'build' attached");
+        assert!(rig.driver.engine.subs().get(sid).is_some());
 
         // The attach emitted a Watch op → forwarded to watch_ops_tx.
         let mut watch_ops = Vec::new();
@@ -1345,20 +1274,31 @@ mod tests {
 
         let mut rig = rig_for(initial.clone(), cfg_path);
         rig.driver.run_initial_attach();
-        let ids_before: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
+        let sid_before = rig
+            .driver
+            .engine
+            .subs()
+            .find_by_name("build")
+            .expect("static Sub 'build' attached");
 
         rig.reload_tx.try_send(()).expect("reload send");
         rig.shutdown_tx.try_send(()).expect("shutdown send");
         rig.driver.tick();
 
-        // No changes → loader.ids unchanged.
-        let ids_after: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
-        assert_eq!(ids_before, ids_after);
+        // No changes → the attached Sub is the same identity (no
+        // reap/re-attach churned its SubId).
+        let sid_after = rig
+            .driver
+            .engine
+            .subs()
+            .find_by_name("build")
+            .expect("static Sub 'build' still attached");
+        assert_eq!(sid_before, sid_after);
         assert_eq!(rig.driver.loader.current_config, initial);
     }
 
     #[test]
-    fn reload_added_watch_appears_in_loader_ids() {
+    fn reload_added_watch_attaches_in_engine() {
         let tmp = tempfile::TempDir::new().unwrap();
         let initial_text = format!(
             r#"
@@ -1390,7 +1330,8 @@ mod tests {
 
         let mut rig = rig_for(initial, cfg_path.clone());
         rig.driver.run_initial_attach();
-        assert_eq!(rig.driver.loader.ids.len(), 1);
+        assert!(rig.driver.engine.subs().find_by_name("a").is_some());
+        assert!(rig.driver.engine.subs().find_by_name("b").is_none());
 
         // Operator edits config; sends SIGHUP (we simulate via the channel).
         std::fs::write(&cfg_path, &new_text).unwrap();
@@ -1398,14 +1339,13 @@ mod tests {
         rig.shutdown_tx.try_send(()).expect("shutdown send");
         rig.driver.tick();
 
-        // Both Subs now in loader.ids.
-        assert_eq!(rig.driver.loader.ids.len(), 2);
-        assert!(rig.driver.loader.ids.contains_key("a"));
-        assert!(rig.driver.loader.ids.contains_key("b"));
+        // Both Subs now attached in the engine.
+        assert!(rig.driver.engine.subs().find_by_name("a").is_some());
+        assert!(rig.driver.engine.subs().find_by_name("b").is_some());
     }
 
     #[test]
-    fn reload_removed_watch_drops_from_loader_ids() {
+    fn reload_removed_watch_detaches_in_engine() {
         let tmp = tempfile::TempDir::new().unwrap();
         let initial_text = format!(
             r#"
@@ -1436,16 +1376,16 @@ mod tests {
 
         let mut rig = rig_for(initial, cfg_path.clone());
         rig.driver.run_initial_attach();
-        assert_eq!(rig.driver.loader.ids.len(), 2);
+        assert!(rig.driver.engine.subs().find_by_name("a").is_some());
+        assert!(rig.driver.engine.subs().find_by_name("b").is_some());
 
         std::fs::write(&cfg_path, &new_text).unwrap();
         rig.reload_tx.try_send(()).expect("reload send");
         rig.shutdown_tx.try_send(()).expect("shutdown send");
         rig.driver.tick();
 
-        assert_eq!(rig.driver.loader.ids.len(), 1);
-        assert!(rig.driver.loader.ids.contains_key("a"));
-        assert!(!rig.driver.loader.ids.contains_key("b"));
+        assert!(rig.driver.engine.subs().find_by_name("a").is_some());
+        assert!(rig.driver.engine.subs().find_by_name("b").is_none());
     }
 
     #[test]
@@ -1555,16 +1495,14 @@ mod tests {
         );
     }
 
-    // ===== diagnostic-driven id reconciliation =====
+    // ===== engine-owned identity across attach / reload =====
     //
-    // The bin's `loader.ids` and `loader.promoter_ids` are populated
-    // from `Diagnostic::SubAttached` and `Diagnostic::PromoterAttached`
-    // emitted by the engine during attach paths, and drained from
-    // diff-supplied `removed` lists plus `Diagnostic::PromoterReaped`.
-    // The shared helper [`EngineDriver::reconcile_loader_from_diagnostics`]
-    // is the single source of truth across `run_initial_attach` and
-    // `handle_reload`. Tests in this section pin the helper's
-    // discipline and the surrounding driver glue.
+    // The bin no longer mirrors `name → id`: the engine's
+    // `SubRegistry`/`PromoterRegistry` `by_name` indices are the sole
+    // authority. Tests in this section drive `run_initial_attach` /
+    // `handle_reload` and assert attachment through the engine
+    // accessors (`engine.subs().find_by_name` /
+    // `engine.promoters().find_by_name`).
 
     /// Build a config with a single dynamic [[watch]] entry. The path
     /// uses brace expansion, exercising the `is_dynamic` auto-detect
@@ -1588,13 +1526,11 @@ mod tests {
         Config::from_str(&toml).expect("test config parses")
     }
 
-    /// `run_initial_attach` for a static-only config emits one
-    /// `SubAttached` diagnostic per `[[watch]]` and the loader's static
-    /// `ids` map gets a corresponding entry. The `(_id, out)` tuple
-    /// from `attach_sub` is no longer the source of truth — the
-    /// diagnostic stream is.
+    /// `run_initial_attach` for a static-only config attaches one Sub
+    /// per `[[watch]]` into the engine's static `by_name` index and
+    /// leaves the Promoter registry empty.
     #[test]
-    fn run_initial_attach_emits_subattached_and_populates_loader_ids() {
+    fn run_initial_attach_attaches_static_only_config() {
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg_path = tmp.path().join("specter.toml");
         let config = config_with_one_watch(tmp.path());
@@ -1602,12 +1538,16 @@ mod tests {
 
         rig.driver.run_initial_attach();
 
-        // Loader's static ids map populated from the SubAttached
-        // diagnostic emitted by the attach.
-        assert_eq!(rig.driver.loader.ids.len(), 1);
-        let sid = *rig.driver.loader.ids.get("build").expect("name present");
-        assert_ne!(sid, SubId::default());
-        assert!(rig.driver.loader.promoter_ids.is_empty());
+        // Engine's static `by_name` resolves the operator name; no
+        // Promoter was created.
+        let sid = rig
+            .driver
+            .engine
+            .subs()
+            .find_by_name("build")
+            .expect("static Sub 'build' attached");
+        assert!(rig.driver.engine.subs().get(sid).is_some());
+        assert!(rig.driver.engine.promoters().is_empty());
 
         // The attach left a Seed-Verifying probe armed. Production
         // always loops to a shutdown tick, which drains it via
@@ -1618,10 +1558,10 @@ mod tests {
 
     /// `run_initial_attach` extension: a config with a dynamic
     /// `[[watch]]` (auto-detected at config load) routes through
-    /// `attach_promoter` and populates `loader.promoter_ids` from the
-    /// `PromoterAttached` diagnostic.
+    /// `attach_promoter` and registers the Promoter in the engine's
+    /// `PromoterRegistry` `by_name` index.
     #[test]
-    fn run_initial_attach_populates_promoter_ids_for_dynamic_watch() {
+    fn run_initial_attach_registers_promoter_for_dynamic_watch() {
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg_path = tmp.path().join("specter.toml");
         let config = config_with_one_promoter(tmp.path());
@@ -1629,16 +1569,16 @@ mod tests {
 
         rig.driver.run_initial_attach();
 
-        // Static map untouched; dynamic map carries the promoter.
-        assert!(rig.driver.loader.ids.is_empty());
-        assert_eq!(rig.driver.loader.promoter_ids.len(), 1);
-        let pid = *rig
+        // No static Sub; the engine's Promoter registry carries the
+        // dynamic entry under its operator name.
+        assert!(rig.driver.engine.subs().is_empty());
+        let pid = rig
             .driver
-            .loader
-            .promoter_ids
-            .get("logs")
-            .expect("promoter name present");
-        assert_ne!(pid, specter_core::PromoterId::default());
+            .engine
+            .promoters()
+            .find_by_name("logs")
+            .expect("Promoter 'logs' registered");
+        assert!(rig.driver.engine.promoters().get(pid).is_some());
 
         // The promoter attach left a descent probe armed. Production
         // always loops to a shutdown tick, which drains it via
@@ -1679,8 +1619,8 @@ mod tests {
 
         rig.driver.run_initial_attach();
 
-        assert!(rig.driver.loader.ids.contains_key("build"));
-        assert!(rig.driver.loader.promoter_ids.contains_key("logs"));
+        assert!(rig.driver.engine.subs().find_by_name("build").is_some());
+        assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
 
         // The attaches left probes armed (static Seed-Verifying +
         // dynamic descent). Production always loops to a shutdown tick,
@@ -1691,10 +1631,10 @@ mod tests {
 
     /// Disabled entries on either side are skipped: the config carries
     /// one enabled + one disabled static watch and one enabled + one
-    /// disabled dynamic watch. After initial attach, only the
-    /// enabled names show up in the loader's id maps; the disabled
-    /// entries leave no engine residue (no `WatchOp::Watch`, no
-    /// descent probe, no diagnostic mention).
+    /// disabled dynamic watch. After initial attach, only the enabled
+    /// names resolve through the engine's registries; the disabled
+    /// entries leave no engine residue (not attached, registries hold
+    /// exactly one each).
     #[test]
     fn run_initial_attach_skips_disabled_entries() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1737,18 +1677,26 @@ mod tests {
 
         rig.driver.run_initial_attach();
 
-        let ids = &rig.driver.loader.ids;
-        let pids = &rig.driver.loader.promoter_ids;
-        assert!(ids.contains_key("build"), "enabled static attached");
-        assert!(!ids.contains_key("build_off"), "disabled static skipped");
-        assert!(pids.contains_key("logs"), "enabled dynamic attached");
-        assert!(!pids.contains_key("logs_off"), "disabled dynamic skipped");
-        assert_eq!(ids.len(), 1, "only the enabled static lives in loader.ids");
-        assert_eq!(
-            pids.len(),
-            1,
-            "only the enabled dynamic lives in promoter_ids"
+        let subs = rig.driver.engine.subs();
+        let promoters = rig.driver.engine.promoters();
+        assert!(
+            subs.find_by_name("build").is_some(),
+            "enabled static attached"
         );
+        assert!(
+            subs.find_by_name("build_off").is_none(),
+            "disabled static skipped"
+        );
+        assert!(
+            promoters.find_by_name("logs").is_some(),
+            "enabled dynamic attached"
+        );
+        assert!(
+            promoters.find_by_name("logs_off").is_none(),
+            "disabled dynamic skipped"
+        );
+        assert_eq!(subs.len(), 1, "only the enabled static is attached");
+        assert_eq!(promoters.len(), 1, "only the enabled dynamic is registered");
 
         // The enabled attaches left probes armed. Production always
         // loops to a shutdown tick, which drains them via
@@ -1757,12 +1705,10 @@ mod tests {
         assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     }
 
-    /// Reload that adds a fresh dynamic [[watch]] populates
-    /// `loader.promoter_ids` via the `PromoterAttached` diagnostic
-    /// emitted from the `Input::ConfigDiff` step. No `find_by_name`
-    /// scan of the engine's promoter registry.
+    /// Reload that adds a fresh dynamic [[watch]] registers a Promoter
+    /// in the engine via the `Input::ConfigDiff` step.
     #[test]
-    fn reload_added_promoter_populates_loader_promoter_ids() {
+    fn reload_added_promoter_registers_in_engine() {
         let tmp = tempfile::TempDir::new().unwrap();
         let initial_text = String::new(); // empty config → no watches
         let new_text = format!(
@@ -1780,25 +1726,22 @@ mod tests {
 
         let mut rig = rig_for(initial, cfg_path.clone());
         rig.driver.run_initial_attach();
-        assert!(rig.driver.loader.promoter_ids.is_empty());
+        assert!(rig.driver.engine.promoters().is_empty());
 
         std::fs::write(&cfg_path, &new_text).unwrap();
         rig.reload_tx.try_send(()).expect("reload send");
         rig.shutdown_tx.try_send(()).expect("shutdown send");
         rig.driver.tick();
 
-        assert_eq!(rig.driver.loader.promoter_ids.len(), 1);
-        assert!(rig.driver.loader.promoter_ids.contains_key("logs"));
+        assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
     }
 
-    /// Reload that removes a dynamic [[watch]] drops the entry from
-    /// `loader.promoter_ids`. The diff's `removed` list (not a
-    /// diagnostic) is the source of truth for removals — but
-    /// `PromoterReaped` is also emitted, and the helper's
-    /// defense-in-depth `retain` on that variant produces the same
-    /// final state regardless of which path drove it.
+    /// Reload that removes a dynamic [[watch]] reaps the Promoter from
+    /// the engine: the diff's name-keyed `removed` list drives the
+    /// `reap_promoter_inner`, after which `find_by_name` no longer
+    /// resolves.
     #[test]
-    fn reload_removed_promoter_drops_from_loader_promoter_ids() {
+    fn reload_removed_promoter_detaches_in_engine() {
         let tmp = tempfile::TempDir::new().unwrap();
         let initial_text = format!(
             r#"
@@ -1816,26 +1759,23 @@ mod tests {
 
         let mut rig = rig_for(initial, cfg_path.clone());
         rig.driver.run_initial_attach();
-        assert_eq!(rig.driver.loader.promoter_ids.len(), 1);
+        assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
 
         std::fs::write(&cfg_path, &new_text).unwrap();
         rig.reload_tx.try_send(()).expect("reload send");
         rig.shutdown_tx.try_send(()).expect("shutdown send");
         rig.driver.tick();
 
-        assert!(rig.driver.loader.promoter_ids.is_empty());
+        assert!(rig.driver.engine.promoters().find_by_name("logs").is_none());
     }
 
     /// Reload that modifies a dynamic [[watch]] (e.g., changes the
     /// command) replaces the old `PromoterId` with a freshly-minted
-    /// one, keyed by the same name. The diff's `removed` list does
-    /// NOT contain the modified id (modifications go through
-    /// reap-then-attach), so the helper relies on the
-    /// `PromoterAttached` diagnostic overwriting the entry and the
-    /// `PromoterReaped` diagnostic clearing the prior id (no-op for
-    /// the kept-name case, but exercises the cascade arm).
+    /// one, keyed by the same name. The engine processes the diff's
+    /// name-keyed `modified` entry as reap-then-attach, so
+    /// `find_by_name("logs")` resolves to a different id afterward.
     #[test]
-    fn reload_modified_promoter_replaces_id_in_loader_promoter_ids() {
+    fn reload_modified_promoter_replaces_id_in_engine() {
         let tmp = tempfile::TempDir::new().unwrap();
         let initial_text = format!(
             r#"
@@ -1861,36 +1801,34 @@ mod tests {
 
         let mut rig = rig_for(initial, cfg_path.clone());
         rig.driver.run_initial_attach();
-        let old_pid = *rig
+        let old_pid = rig
             .driver
-            .loader
-            .promoter_ids
-            .get("logs")
-            .expect("name present pre-reload");
+            .engine
+            .promoters()
+            .find_by_name("logs")
+            .expect("Promoter 'logs' registered pre-reload");
 
         std::fs::write(&cfg_path, &new_text).unwrap();
         rig.reload_tx.try_send(()).expect("reload send");
         rig.shutdown_tx.try_send(()).expect("shutdown send");
         rig.driver.tick();
 
-        assert_eq!(rig.driver.loader.promoter_ids.len(), 1);
-        let new_pid = *rig
+        let new_pid = rig
             .driver
-            .loader
-            .promoter_ids
-            .get("logs")
-            .expect("name present post-reload");
+            .engine
+            .promoters()
+            .find_by_name("logs")
+            .expect("Promoter 'logs' still registered post-reload");
         assert_ne!(new_pid, old_pid, "modify mints a fresh PromoterId");
     }
 
     /// Static→dynamic migration via path edit: a `[[watch]]` named
     /// "foo" with a literal path edits to a glob path. `is_dynamic`
     /// flips, so the diff emits `subs.removed + promoters.added`.
-    /// Loader maps converge: the static entry vanishes from
-    /// `loader.ids`; a Promoter entry appears in
-    /// `loader.promoter_ids`.
+    /// Engine registries converge: the static Sub vanishes from
+    /// `subs().by_name`; a Promoter appears in `promoters().by_name`.
     #[test]
-    fn reload_static_to_dynamic_migration_swaps_loader_maps() {
+    fn reload_static_to_dynamic_migration_swaps_engine_registries() {
         let tmp = tempfile::TempDir::new().unwrap();
         let initial_text = format!(
             r#"
@@ -1916,8 +1854,8 @@ mod tests {
 
         let mut rig = rig_for(initial, cfg_path.clone());
         rig.driver.run_initial_attach();
-        assert_eq!(rig.driver.loader.ids.len(), 1);
-        assert!(rig.driver.loader.promoter_ids.is_empty());
+        assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
+        assert!(rig.driver.engine.promoters().is_empty());
 
         std::fs::write(&cfg_path, &new_text).unwrap();
         rig.reload_tx.try_send(()).expect("reload send");
@@ -1925,20 +1863,20 @@ mod tests {
         rig.driver.tick();
 
         assert!(
-            rig.driver.loader.ids.is_empty(),
-            "static `foo` removed from loader.ids",
+            rig.driver.engine.subs().find_by_name("foo").is_none(),
+            "static `foo` reaped from the Sub registry",
         );
         assert!(
-            rig.driver.loader.promoter_ids.contains_key("foo"),
-            "dynamic `foo` registered in loader.promoter_ids",
+            rig.driver.engine.promoters().find_by_name("foo").is_some(),
+            "dynamic `foo` registered in the Promoter registry",
         );
     }
 
     /// Reverse direction: a dynamic [[watch]] flips to a literal
-    /// path. Diff emits `promoters.removed + subs.added`; loader
-    /// maps mirror the swap.
+    /// path. Diff emits `promoters.removed + subs.added`; engine
+    /// registries mirror the swap.
     #[test]
-    fn reload_dynamic_to_static_migration_swaps_loader_maps() {
+    fn reload_dynamic_to_static_migration_swaps_engine_registries() {
         let tmp = tempfile::TempDir::new().unwrap();
         let initial_text = format!(
             r#"
@@ -1964,8 +1902,8 @@ mod tests {
 
         let mut rig = rig_for(initial, cfg_path.clone());
         rig.driver.run_initial_attach();
-        assert!(rig.driver.loader.ids.is_empty());
-        assert_eq!(rig.driver.loader.promoter_ids.len(), 1);
+        assert!(rig.driver.engine.subs().is_empty());
+        assert!(rig.driver.engine.promoters().find_by_name("foo").is_some());
 
         std::fs::write(&cfg_path, &new_text).unwrap();
         rig.reload_tx.try_send(()).expect("reload send");
@@ -1973,68 +1911,12 @@ mod tests {
         rig.driver.tick();
 
         assert!(
-            rig.driver.loader.promoter_ids.is_empty(),
-            "dynamic `foo` removed from loader.promoter_ids",
+            rig.driver.engine.promoters().find_by_name("foo").is_none(),
+            "dynamic `foo` reaped from the Promoter registry",
         );
         assert!(
-            rig.driver.loader.ids.contains_key("foo"),
-            "static `foo` registered in loader.ids",
-        );
-    }
-
-    /// Filter discipline: a `Diagnostic::SubAttached` carrying
-    /// `source_promoter = Some(_)` (the dynamic-attach stamp) does
-    /// NOT populate `loader.ids`. Dynamic Subs are owned by the
-    /// engine's `Promoter.dynamic_subs` map; mirroring them into
-    /// the static index would leak across reload cycles (the
-    /// helper has no path to reap dynamic-Sub-id entries — the
-    /// diff layer only sees static names).
-    ///
-    /// Drives the helper directly with synthetic diagnostics — the
-    /// full Promoter→try_promote pipeline is exercised under
-    /// `crates/specter-engine/src/promoter_tests.rs`; here we just
-    /// pin the bin-side filter.
-    #[test]
-    fn reconcile_helper_filters_dynamic_sub_attached() {
-        use compact_str::CompactString;
-        use slotmap::KeyData;
-        use specter_core::PromoterId;
-        let mut loader = Loader::new(
-            Config::from_str("").expect("empty config parses"),
-            specter_config::LogConfig::default(),
-            dummy_meta(),
-        );
-        let static_id = SubId::from(KeyData::from_ffi(1));
-        let dynamic_id = SubId::from(KeyData::from_ffi(2));
-        let promoter_id = PromoterId::from(KeyData::from_ffi(3));
-
-        let diags = vec![
-            Diagnostic::SubAttached {
-                sub: static_id,
-                name: CompactString::from("static-watch"),
-                source_promoter: None,
-            },
-            Diagnostic::SubAttached {
-                sub: dynamic_id,
-                name: CompactString::from("logs@/var/log/foo.log"),
-                source_promoter: Some(promoter_id),
-            },
-        ];
-
-        EngineDriver::reconcile_loader_from_diagnostics(&mut loader, &[], &[], &diags);
-
-        assert_eq!(
-            loader.ids.get("static-watch"),
-            Some(&static_id),
-            "static SubAttached populates loader.ids",
-        );
-        assert!(
-            !loader.ids.contains_key("logs@/var/log/foo.log"),
-            "dynamic SubAttached (source_promoter = Some(_)) is filtered",
-        );
-        assert!(
-            loader.promoter_ids.is_empty(),
-            "no PromoterAttached emitted; promoter_ids untouched",
+            rig.driver.engine.subs().find_by_name("foo").is_some(),
+            "static `foo` registered in the Sub registry",
         );
     }
 
@@ -2137,9 +2019,9 @@ settle    = "100ms"
             rig.driver.loader.config_meta, expected_meta,
             "apply-branch reload rotates loader.config_meta to the on-disk identity",
         );
-        // Confirm the apply branch ran (added "b" landed in loader.ids).
+        // Confirm the apply branch ran (added "b" attached in engine).
         assert!(
-            rig.driver.loader.ids.contains_key("b"),
+            rig.driver.engine.subs().find_by_name("b").is_some(),
             "v2's added watch attached — apply-branch path was exercised",
         );
     }
@@ -2170,7 +2052,12 @@ actions   = [{{ exec = ["true"] }}]
 
         let mut rig = rig_for(initial.clone(), cfg_path.clone());
         rig.driver.run_initial_attach();
-        let ids_before: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
+        let sid_before = rig
+            .driver
+            .engine
+            .subs()
+            .find_by_name("build")
+            .expect("static Sub 'build' attached");
 
         // Re-save the same content. Real `FileMeta::from_path` after
         // this returns nonzero inode + nonzero mode (file-type bits),
@@ -2194,15 +2081,21 @@ actions   = [{{ exec = ["true"] }}]
              skipping rotation here would loop the auto-reload settle filter",
         );
         // Confirm the empty-diff branch ran (loader state unchanged
-        // semantically — same config, same ids, same SubIds).
+        // semantically — same config; the attached Sub keeps its
+        // identity, no reap/re-attach churn).
         assert_eq!(
             rig.driver.loader.current_config, initial,
             "v1 ≡ v1 → empty-diff branch was exercised",
         );
-        let ids_after: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
+        let sid_after = rig
+            .driver
+            .engine
+            .subs()
+            .find_by_name("build")
+            .expect("static Sub 'build' still attached");
         assert_eq!(
-            ids_before, ids_after,
-            "ids unchanged across empty-diff reload"
+            sid_before, sid_after,
+            "SubId unchanged across empty-diff reload"
         );
     }
 
@@ -2230,46 +2123,6 @@ actions   = [{{ exec = ["true"] }}]
             rig.driver.loader.config_meta, pre_reload_meta,
             "parse-fail must not rotate meta — would suppress retry pulses",
         );
-    }
-
-    /// `PromoterReaped` clears the matching id from
-    /// `loader.promoter_ids` even when the reap arrives via cascade
-    /// (i.e. not via the diff's `removed` list). This is the cascade
-    /// path triggered by Promoter modify (`reap_promoter_inner` then
-    /// `attach_promoter_inner` in the same step) — the diff doesn't
-    /// list the old id under `removed`, so the diagnostic-driven
-    /// retain is the safety net.
-    #[test]
-    fn reconcile_helper_clears_promoter_on_reaped_diagnostic() {
-        use compact_str::CompactString;
-        use slotmap::KeyData;
-        use specter_core::PromoterId;
-        let mut loader = Loader::new(
-            Config::from_str("").expect("empty config parses"),
-            specter_config::LogConfig::default(),
-            dummy_meta(),
-        );
-        let old_pid = PromoterId::from(KeyData::from_ffi(10));
-        let new_pid = PromoterId::from(KeyData::from_ffi(11));
-        loader.promoter_ids.insert("logs".into(), old_pid);
-
-        // Modify-style emission order: PromoterReaped then PromoterAttached.
-        let diags = vec![
-            Diagnostic::PromoterReaped { promoter: old_pid },
-            Diagnostic::PromoterAttached {
-                promoter: new_pid,
-                name: CompactString::from("logs"),
-            },
-        ];
-
-        EngineDriver::reconcile_loader_from_diagnostics(&mut loader, &[], &[], &diags);
-
-        assert_eq!(
-            loader.promoter_ids.get("logs"),
-            Some(&new_pid),
-            "PromoterAttached overwrites the cleared entry by name",
-        );
-        assert_eq!(loader.promoter_ids.len(), 1);
     }
 
     // ===== Auto-reload settle pipeline =====
@@ -2444,7 +2297,12 @@ actions   = [{{ exec = ["true"] }}]
         // helper's `m != self.loader.config_meta` returns false.
         rig.driver.loader.config_meta = real_meta;
         rig.driver.run_initial_attach();
-        let ids_snapshot: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
+        let sid_snapshot = rig
+            .driver
+            .engine
+            .subs()
+            .find_by_name("build")
+            .expect("static Sub 'build' attached");
 
         // Fire expiry with a `now` past the deadline — helper takes the
         // `now >= deadline` branch.
@@ -2465,9 +2323,14 @@ actions   = [{{ exec = ["true"] }}]
             rig.driver.loader.current_config, initial,
             "silent-drop does not rotate current_config",
         );
-        let ids_after: Vec<_> = rig.driver.loader.ids.keys().cloned().collect();
+        let sid_after = rig
+            .driver
+            .engine
+            .subs()
+            .find_by_name("build")
+            .expect("static Sub 'build' still attached");
         assert_eq!(
-            ids_snapshot, ids_after,
+            sid_snapshot, sid_after,
             "silent-drop does not perturb attached Sub ids",
         );
 
@@ -2502,8 +2365,8 @@ actions   = [{{ exec = ["true"] }}]
         let mut rig = rig_for(v1_config, cfg_path.clone());
         rig.driver.loader.config_meta = v1_meta;
         rig.driver.run_initial_attach();
-        assert_eq!(rig.driver.loader.ids.len(), 1);
-        assert!(rig.driver.loader.ids.contains_key("a"));
+        assert!(rig.driver.engine.subs().find_by_name("a").is_some());
+        assert!(rig.driver.engine.subs().find_by_name("b").is_none());
 
         // Edit the file — atomic write replaces inode; mtime moves.
         let v2_text = format!(
@@ -2547,11 +2410,11 @@ actions   = [{{ exec = ["true"] }}]
             "drift-driven reload rotated config_meta to the v2 lstat",
         );
         assert!(
-            rig.driver.loader.ids.contains_key("a"),
+            rig.driver.engine.subs().find_by_name("a").is_some(),
             "v2 still has watch 'a' — preserved across reload",
         );
         assert!(
-            rig.driver.loader.ids.contains_key("b"),
+            rig.driver.engine.subs().find_by_name("b").is_some(),
             "v2's added watch 'b' attached during reload",
         );
         assert_eq!(rig.driver.loader.current_config.watches.len(), 2);
@@ -2659,7 +2522,7 @@ actions   = [{{ exec = ["true"] }}]
 
         assert_eq!(rig.driver.config_settle_until, None);
         assert!(
-            rig.driver.loader.ids.contains_key("b"),
+            rig.driver.engine.subs().find_by_name("b").is_some(),
             "drift-driven reload attached the new watch",
         );
         assert_ne!(

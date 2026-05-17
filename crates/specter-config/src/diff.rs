@@ -1,20 +1,19 @@
 use crate::config::{Config, PromoterSpec, SubSpec};
 use compact_str::CompactString;
 use specter_core::{
-    PromoterAttachRequest, PromoterId, PromoterRegistryDiff, SubAttachRequest, SubId,
-    SubRegistryDiff, WatchRegistryDiff,
+    PromoterAttachRequest, PromoterRegistryDiff, SubAttachRequest, SubRegistryDiff,
+    WatchRegistryDiff,
 };
 use std::collections::BTreeMap;
 
 /// Compute the full hot-reload diff between two validated [`Config`]s.
 ///
-/// The returned [`WatchRegistryDiff`] carries both halves:
-/// - [`WatchRegistryDiff::subs`] — Sub adds / removes / modifications
-///   keyed against `sub_ids` (the bin's `name → SubId` map for
-///   currently-attached static Subs).
-/// - [`WatchRegistryDiff::promoters`] — Promoter adds / removes /
-///   modifications keyed against `promoter_ids` (the analogous
-///   `name → PromoterId` map).
+/// A pure function of `(old, new)` — no id maps. The returned
+/// [`WatchRegistryDiff`] is **name-keyed**: `removed` carries operator
+/// names; `added` / `modified` carry pre-id requests whose name lives
+/// inside the request. The engine resolves name → id at apply time
+/// through its own authoritative `by_name` index — identity
+/// resolution is a registry-owner operation, not the loader's.
 ///
 /// **Static ↔ dynamic migration via path edit.** A `[[watch]]` whose
 /// path edits across the `is_dynamic` boundary (e.g., `/foo` → `/foo/*`)
@@ -24,18 +23,15 @@ use std::collections::BTreeMap;
 /// semantics meaningfully changed; merging across the boundary would
 /// hide that.
 ///
-/// Determinism: each side's `removed` and `modified` lists are sorted
-/// by id; `added` preserves new-source order.
+/// Determinism: each side's `removed` is sorted by name (defensive —
+/// already name-ordered, built from a `BTreeMap`'s keys); `modified`
+/// is sorted by name (load-bearing — built from source-order
+/// `active_*`); `added` preserves new-source order.
 #[must_use]
-pub fn diff(
-    old: &Config,
-    new: &Config,
-    sub_ids: &BTreeMap<CompactString, SubId>,
-    promoter_ids: &BTreeMap<CompactString, PromoterId>,
-) -> WatchRegistryDiff {
+pub fn diff(old: &Config, new: &Config) -> WatchRegistryDiff {
     WatchRegistryDiff {
-        subs: diff_subs(old, new, sub_ids),
-        promoters: diff_promoters(old, new, promoter_ids),
+        subs: diff_subs(old, new),
+        promoters: diff_promoters(old, new),
     }
 }
 
@@ -51,38 +47,38 @@ pub fn diff(
 /// to the diff (the entry isn't in either filtered set) — they
 /// apply on the next `false → true` transition via the fresh
 /// attach.
-fn diff_subs(old: &Config, new: &Config, ids: &BTreeMap<CompactString, SubId>) -> SubRegistryDiff {
+fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
     let old_by_name: BTreeMap<&CompactString, &SubSpec> =
         old.active_watches().map(|s| (&s.name, s)).collect();
     let new_by_name: BTreeMap<&CompactString, &SubSpec> =
         new.active_watches().map(|s| (&s.name, s)).collect();
 
     let mut added: Vec<SubAttachRequest> = Vec::new();
-    let mut modified: Vec<(SubId, SubAttachRequest)> = Vec::new();
-    let mut removed: Vec<SubId> = Vec::new();
+    let mut modified: Vec<SubAttachRequest> = Vec::new();
+    let mut removed: Vec<CompactString> = Vec::new();
 
     for spec in new.active_watches() {
         match old_by_name.get(&spec.name) {
             None => added.push(spec.to_attach_request()),
-            Some(old_spec) if **old_spec != *spec => {
-                if let Some(&id) = ids.get(&spec.name) {
-                    modified.push((id, spec.to_attach_request()));
-                }
-            }
+            Some(old_spec) if **old_spec != *spec => modified.push(spec.to_attach_request()),
             Some(_) => {}
         }
     }
 
     for name in old_by_name.keys() {
-        if !new_by_name.contains_key(name)
-            && let Some(&id) = ids.get(*name)
-        {
-            removed.push(id);
+        if !new_by_name.contains_key(name) {
+            removed.push((*name).clone());
         }
     }
 
+    // `removed` is collected from a `BTreeMap`'s keys and so is already
+    // name-ordered — the sort is defensive, pinning determinism against
+    // a future change of source collection. `modified` is built from
+    // source-order `active_watches()`, so its name sort is the
+    // load-bearing one: replay stability keys on config content, never
+    // slotmap mint order.
     removed.sort_unstable();
-    modified.sort_by_key(|(id, _)| *id);
+    modified.sort_by(|a, b| a.params.name.cmp(&b.params.name));
 
     SubRegistryDiff {
         added,
@@ -92,46 +88,39 @@ fn diff_subs(old: &Config, new: &Config, ids: &BTreeMap<CompactString, SubId>) -
 }
 
 /// Promoter half of the watch-registry diff. Mirrors [`diff_subs`]
-/// against [`Config::active_promoters`] / `promoter_ids`. Same
-/// `enabled`-as-absent semantics: a disabled Promoter on either side
-/// is filtered before comparison; flipping the flag surfaces as
-/// `promoters.added` / `promoters.removed`.
-fn diff_promoters(
-    old: &Config,
-    new: &Config,
-    ids: &BTreeMap<CompactString, PromoterId>,
-) -> PromoterRegistryDiff {
+/// against [`Config::active_promoters`]. Same `enabled`-as-absent
+/// semantics: a disabled Promoter on either side is filtered before
+/// comparison; flipping the flag surfaces as `promoters.added` /
+/// `promoters.removed`.
+fn diff_promoters(old: &Config, new: &Config) -> PromoterRegistryDiff {
     let old_by_name: BTreeMap<&CompactString, &PromoterSpec> =
         old.active_promoters().map(|p| (&p.name, p)).collect();
     let new_by_name: BTreeMap<&CompactString, &PromoterSpec> =
         new.active_promoters().map(|p| (&p.name, p)).collect();
 
     let mut added: Vec<PromoterAttachRequest> = Vec::new();
-    let mut modified: Vec<(PromoterId, PromoterAttachRequest)> = Vec::new();
-    let mut removed: Vec<PromoterId> = Vec::new();
+    let mut modified: Vec<PromoterAttachRequest> = Vec::new();
+    let mut removed: Vec<CompactString> = Vec::new();
 
     for spec in new.active_promoters() {
         match old_by_name.get(&spec.name) {
             None => added.push(spec.to_attach_request()),
-            Some(old_spec) if **old_spec != *spec => {
-                if let Some(&id) = ids.get(&spec.name) {
-                    modified.push((id, spec.to_attach_request()));
-                }
-            }
+            Some(old_spec) if **old_spec != *spec => modified.push(spec.to_attach_request()),
             Some(_) => {}
         }
     }
 
     for name in old_by_name.keys() {
-        if !new_by_name.contains_key(name)
-            && let Some(&id) = ids.get(*name)
-        {
-            removed.push(id);
+        if !new_by_name.contains_key(name) {
+            removed.push((*name).clone());
         }
     }
 
+    // Sort rationale mirrors `diff_subs`: `removed` defensive
+    // (BTreeMap-keyed, already name-ordered), `modified` load-bearing
+    // (source-order `active_promoters()`).
     removed.sort_unstable();
-    modified.sort_by_key(|(id, _)| *id);
+    modified.sort_by(|a, b| a.name.cmp(&b.name));
 
     PromoterRegistryDiff {
         added,
@@ -145,9 +134,6 @@ mod tests {
     use super::diff;
     use crate::config::Config;
     use compact_str::CompactString;
-    use slotmap::KeyData;
-    use specter_core::{PromoterId, SubId};
-    use std::collections::BTreeMap;
 
     const ROOT: &str = "/";
 
@@ -189,45 +175,13 @@ mod tests {
         )
     }
 
-    fn sid(n: u64) -> SubId {
-        SubId::from(KeyData::from_ffi(n))
-    }
-
-    fn pid(n: u64) -> PromoterId {
-        PromoterId::from(KeyData::from_ffi(n))
-    }
-
-    fn sub_ids_of(pairs: &[(&str, SubId)]) -> BTreeMap<CompactString, SubId> {
-        pairs
-            .iter()
-            .map(|(n, id)| (CompactString::new(n), *id))
-            .collect()
-    }
-
-    fn promoter_ids_of(pairs: &[(&str, PromoterId)]) -> BTreeMap<CompactString, PromoterId> {
-        pairs
-            .iter()
-            .map(|(n, id)| (CompactString::new(n), *id))
-            .collect()
-    }
-
-    /// Compose a `WatchRegistryDiff` against the trivial maps. Convenience
-    /// for the legacy test bodies that only exercise the static side.
-    fn diff_subs_only(
-        old: &Config,
-        new: &Config,
-        ids: &BTreeMap<CompactString, SubId>,
-    ) -> super::WatchRegistryDiff {
-        diff(old, new, ids, &BTreeMap::new())
-    }
-
-    // ---- Static (Sub) side — preserves all pre-Phase-10 coverage. ----
+    // ---- Static (Sub) side ----
 
     #[test]
     fn empty_vs_empty_is_no_diff() {
         let a = cfg(&[]);
         let b = cfg(&[]);
-        let d = diff_subs_only(&a, &b, &BTreeMap::new());
+        let d = diff(&a, &b);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
         assert!(d.subs.modified.is_empty());
@@ -243,7 +197,7 @@ mod tests {
         let refs: Vec<&str> = new_blocks.iter().map(String::as_str).collect();
         let new = cfg(&refs);
 
-        let d = diff_subs_only(&old, &new, &BTreeMap::new());
+        let d = diff(&old, &new);
         assert_eq!(d.subs.added.len(), 2);
         assert_eq!(d.subs.added[0].params.name, "a");
         assert_eq!(d.subs.added[1].params.name, "b");
@@ -252,16 +206,15 @@ mod tests {
     }
 
     #[test]
-    fn remove_only_populates_removed_with_matching_ids() {
+    fn remove_only_populates_removed_with_watch_name() {
         let old_blocks = [block("a", "echo")];
         let refs: Vec<&str> = old_blocks.iter().map(String::as_str).collect();
         let old = cfg(&refs);
         let new = cfg(&[]);
 
-        let ids = sub_ids_of(&[("a", sid(1))]);
-        let d = diff_subs_only(&old, &new, &ids);
+        let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
-        assert_eq!(d.subs.removed, vec![sid(1)]);
+        assert_eq!(d.subs.removed, vec![CompactString::from("a")]);
         assert!(d.subs.modified.is_empty());
     }
 
@@ -271,7 +224,7 @@ mod tests {
         let refs: Vec<&str> = blocks.iter().map(String::as_str).collect();
         let a = cfg(&refs);
         let b = cfg(&refs);
-        let d = diff_subs_only(&a, &b, &sub_ids_of(&[("a", sid(1))]));
+        let d = diff(&a, &b);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
         assert!(d.subs.modified.is_empty());
@@ -284,13 +237,11 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let ids = sub_ids_of(&[("a", sid(1))]);
-        let d = diff_subs_only(&old, &new, &ids);
+        let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
         assert_eq!(d.subs.modified.len(), 1);
-        assert_eq!(d.subs.modified[0].0, sid(1));
-        assert_eq!(d.subs.modified[0].1.params.name, "a");
+        assert_eq!(d.subs.modified[0].params.name, "a");
     }
 
     #[test]
@@ -300,17 +251,15 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let ids = sub_ids_of(&[("a", sid(1)), ("b", sid(2)), ("c", sid(3))]);
-        let d = diff_subs_only(&old, &new, &ids);
+        let d = diff(&old, &new);
 
         assert_eq!(d.subs.added.len(), 1);
         assert_eq!(d.subs.added[0].params.name, "d");
 
-        assert_eq!(d.subs.removed, vec![sid(2)]);
+        assert_eq!(d.subs.removed, vec![CompactString::from("b")]);
 
         assert_eq!(d.subs.modified.len(), 1);
-        assert_eq!(d.subs.modified[0].0, sid(1));
-        assert_eq!(d.subs.modified[0].1.params.name, "a");
+        assert_eq!(d.subs.modified[0].params.name, "a");
     }
 
     #[test]
@@ -320,8 +269,7 @@ mod tests {
         let old = cfg(&order_a.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&order_b.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let ids = sub_ids_of(&[("a", sid(1)), ("b", sid(2))]);
-        let d = diff_subs_only(&old, &new, &ids);
+        let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
         assert!(d.subs.modified.is_empty());
@@ -334,11 +282,10 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let ids = sub_ids_of(&[("a", sid(1))]);
-        let d = diff_subs_only(&old, &new, &ids);
+        let d = diff(&old, &new);
         assert_eq!(d.subs.added.len(), 1);
         assert_eq!(d.subs.added[0].params.name, "z");
-        assert_eq!(d.subs.removed, vec![sid(1)]);
+        assert_eq!(d.subs.removed, vec![CompactString::from("a")]);
         assert!(d.subs.modified.is_empty());
     }
 
@@ -349,55 +296,42 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let ids = sub_ids_of(&[("a", sid(1))]);
-        let d = diff_subs_only(&old, &new, &ids);
+        let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
         assert_eq!(d.subs.modified.len(), 1);
     }
 
     #[test]
-    fn missing_id_for_removed_silently_skips() {
-        let old_blocks = [block("a", "echo")];
+    fn removed_sorted_by_name() {
+        let old_blocks = [block("c", "echo"), block("a", "echo"), block("b", "echo")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&[]);
-        let d = diff_subs_only(&old, &new, &BTreeMap::new());
-        assert!(
-            d.subs.removed.is_empty(),
-            "missing id_map silences `removed`"
+        let d = diff(&old, &new);
+        assert_eq!(
+            d.subs.removed,
+            vec![
+                CompactString::from("a"),
+                CompactString::from("b"),
+                CompactString::from("c"),
+            ]
         );
     }
 
     #[test]
-    fn missing_id_for_modified_silently_skips() {
-        let old_blocks = [block("a", "echo")];
-        let new_blocks = [block("a", "fmt")];
+    fn modified_sorted_by_name() {
+        let old_blocks = [block("b", "echo"), block("a", "echo")];
+        let new_blocks = [block("b", "fmt"), block("a", "fmt")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let d = diff_subs_only(&old, &new, &BTreeMap::new());
-        assert!(d.subs.modified.is_empty());
-    }
-
-    #[test]
-    fn removed_sorted_by_subid() {
-        let old_blocks = [block("a", "echo"), block("b", "echo"), block("c", "echo")];
-        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let new = cfg(&[]);
-        let ids = sub_ids_of(&[("a", sid(3)), ("b", sid(1)), ("c", sid(2))]);
-        let d = diff_subs_only(&old, &new, &ids);
-        assert_eq!(d.subs.removed, vec![sid(1), sid(2), sid(3)]);
-    }
-
-    #[test]
-    fn modified_sorted_by_subid() {
-        let old_blocks = [block("a", "echo"), block("b", "echo")];
-        let new_blocks = [block("a", "fmt"), block("b", "fmt")];
-        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let ids = sub_ids_of(&[("a", sid(2)), ("b", sid(1))]);
-        let d = diff_subs_only(&old, &new, &ids);
-        let order: Vec<SubId> = d.subs.modified.iter().map(|(id, _)| *id).collect();
-        assert_eq!(order, vec![sid(1), sid(2)]);
+        let d = diff(&old, &new);
+        let order: Vec<&str> = d
+            .subs
+            .modified
+            .iter()
+            .map(|r| r.params.name.as_str())
+            .collect();
+        assert_eq!(order, vec!["a", "b"]);
     }
 
     #[test]
@@ -410,14 +344,13 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let ids = sub_ids_of(&[("a", sid(1))]);
-        let d = diff_subs_only(&old, &new, &ids);
+        let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
         assert_eq!(d.subs.modified.len(), 1);
-        assert_eq!(d.subs.modified[0].0, sid(1));
+        assert_eq!(d.subs.modified[0].params.name, "a");
         assert_eq!(
-            d.subs.modified[0].1.identity.events,
+            d.subs.modified[0].identity.events,
             specter_core::ClassSet::CONTENT
         );
     }
@@ -434,7 +367,7 @@ mod tests {
         )];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let d = diff_subs_only(&old, &new, &sub_ids_of(&[("a", sid(1))]));
+        let d = diff(&old, &new);
         assert!(d.subs.modified.is_empty(), "got {:?}", d.subs.modified);
     }
 
@@ -452,15 +385,15 @@ mod tests {
         )];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let d = diff_subs_only(&old, &new, &sub_ids_of(&[("a", sid(1))]));
+        let d = diff(&old, &new);
         assert!(d.subs.modified.is_empty(), "got {:?}", d.subs.modified);
     }
 
     // ---- Promoter (dynamic) side ----
 
     /// Adding a fresh dynamic [[watch]] populates `promoters.added` in
-    /// source order. The `promoter_ids` map is empty (no Promoter is
-    /// attached on the old side), so no removed / modified entries.
+    /// source order. Nothing on the old side, so no removed / modified
+    /// entries.
     #[test]
     fn promoter_added_populates_added_in_source_order() {
         let old = cfg(&[]);
@@ -471,7 +404,7 @@ mod tests {
         let refs: Vec<&str> = new_blocks.iter().map(String::as_str).collect();
         let new = cfg(&refs);
 
-        let d = diff(&old, &new, &BTreeMap::new(), &BTreeMap::new());
+        let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert_eq!(d.promoters.added.len(), 2);
         assert_eq!(d.promoters.added[0].name, "logs");
@@ -481,16 +414,15 @@ mod tests {
     }
 
     /// Removing a dynamic [[watch]] populates `promoters.removed` with
-    /// the looked-up `PromoterId`.
+    /// the operator Promoter name.
     #[test]
-    fn promoter_removed_populates_removed_with_matching_ids() {
+    fn promoter_removed_populates_removed_with_promoter_name() {
         let old_blocks = [dyn_block("logs", "/var/log/*", "echo")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&[]);
 
-        let promoter_ids = promoter_ids_of(&[("logs", pid(1))]);
-        let d = diff(&old, &new, &BTreeMap::new(), &promoter_ids);
-        assert_eq!(d.promoters.removed, vec![pid(1)]);
+        let d = diff(&old, &new);
+        assert_eq!(d.promoters.removed, vec![CompactString::from("logs")]);
         assert!(d.promoters.added.is_empty());
         assert!(d.promoters.modified.is_empty());
     }
@@ -504,13 +436,11 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let promoter_ids = promoter_ids_of(&[("logs", pid(1))]);
-        let d = diff(&old, &new, &BTreeMap::new(), &promoter_ids);
+        let d = diff(&old, &new);
         assert!(d.promoters.added.is_empty());
         assert!(d.promoters.removed.is_empty());
         assert_eq!(d.promoters.modified.len(), 1);
-        assert_eq!(d.promoters.modified[0].0, pid(1));
-        assert_eq!(d.promoters.modified[0].1.name, "logs");
+        assert_eq!(d.promoters.modified[0].name, "logs");
     }
 
     /// Pattern source change is a structural modification (different
@@ -524,11 +454,10 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let promoter_ids = promoter_ids_of(&[("logs", pid(1))]);
-        let d = diff(&old, &new, &BTreeMap::new(), &promoter_ids);
+        let d = diff(&old, &new);
         assert_eq!(d.promoters.modified.len(), 1);
         assert_eq!(
-            d.promoters.modified[0].1.pattern_spec.source(),
+            d.promoters.modified[0].pattern_spec.source(),
             "/var/log/*.json",
         );
     }
@@ -541,8 +470,7 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let promoter_ids = promoter_ids_of(&[("logs", pid(1))]);
-        let d = diff(&old, &new, &BTreeMap::new(), &promoter_ids);
+        let d = diff(&old, &new);
         assert_eq!(d.promoters.modified.len(), 1);
     }
 
@@ -553,67 +481,51 @@ mod tests {
         let refs: Vec<&str> = blocks.iter().map(String::as_str).collect();
         let a = cfg(&refs);
         let b = cfg(&refs);
-        let d = diff(
-            &a,
-            &b,
-            &BTreeMap::new(),
-            &promoter_ids_of(&[("logs", pid(1))]),
-        );
+        let d = diff(&a, &b);
         assert!(d.promoters.added.is_empty());
         assert!(d.promoters.removed.is_empty());
         assert!(d.promoters.modified.is_empty());
     }
 
-    /// `promoters.removed` sorts by id (mirrors `subs.removed`).
+    /// `promoters.removed` sorts by name (mirrors `subs.removed`).
     #[test]
-    fn promoter_removed_sorted_by_promoter_id() {
+    fn promoter_removed_sorted_by_name() {
         let old_blocks = [
-            dyn_block("a", "/a/*", "echo"),
-            dyn_block("b", "/b/*", "echo"),
             dyn_block("c", "/c/*", "echo"),
-        ];
-        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let new = cfg(&[]);
-        let promoter_ids = promoter_ids_of(&[("a", pid(3)), ("b", pid(1)), ("c", pid(2))]);
-        let d = diff(&old, &new, &BTreeMap::new(), &promoter_ids);
-        assert_eq!(d.promoters.removed, vec![pid(1), pid(2), pid(3)]);
-    }
-
-    /// `promoters.modified` sorts by id (mirrors `subs.modified`).
-    #[test]
-    fn promoter_modified_sorted_by_promoter_id() {
-        let old_blocks = [
             dyn_block("a", "/a/*", "echo"),
             dyn_block("b", "/b/*", "echo"),
         ];
-        let new_blocks = [dyn_block("a", "/a/*", "fmt"), dyn_block("b", "/b/*", "fmt")];
-        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let promoter_ids = promoter_ids_of(&[("a", pid(2)), ("b", pid(1))]);
-        let d = diff(&old, &new, &BTreeMap::new(), &promoter_ids);
-        let order: Vec<PromoterId> = d.promoters.modified.iter().map(|(id, _)| *id).collect();
-        assert_eq!(order, vec![pid(1), pid(2)]);
-    }
-
-    /// Missing id for removed promoter silently skips (mirrors Sub side).
-    #[test]
-    fn promoter_missing_id_for_removed_silently_skips() {
-        let old_blocks = [dyn_block("logs", "/var/log/*", "echo")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&[]);
-        let d = diff(&old, &new, &BTreeMap::new(), &BTreeMap::new());
-        assert!(d.promoters.removed.is_empty());
+        let d = diff(&old, &new);
+        assert_eq!(
+            d.promoters.removed,
+            vec![
+                CompactString::from("a"),
+                CompactString::from("b"),
+                CompactString::from("c"),
+            ]
+        );
     }
 
-    /// Missing id for modified promoter silently skips.
+    /// `promoters.modified` sorts by name (mirrors `subs.modified`).
     #[test]
-    fn promoter_missing_id_for_modified_silently_skips() {
-        let old_blocks = [dyn_block("logs", "/var/log/*", "echo")];
-        let new_blocks = [dyn_block("logs", "/var/log/*", "fmt")];
+    fn promoter_modified_sorted_by_name() {
+        let old_blocks = [
+            dyn_block("b", "/b/*", "echo"),
+            dyn_block("a", "/a/*", "echo"),
+        ];
+        let new_blocks = [dyn_block("b", "/b/*", "fmt"), dyn_block("a", "/a/*", "fmt")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let d = diff(&old, &new, &BTreeMap::new(), &BTreeMap::new());
-        assert!(d.promoters.modified.is_empty());
+        let d = diff(&old, &new);
+        let order: Vec<&str> = d
+            .promoters
+            .modified
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(order, vec!["a", "b"]);
     }
 
     // ---- Cross-kind: static ↔ dynamic migration via path edit ----
@@ -630,10 +542,9 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let sub_ids = sub_ids_of(&[("foo", sid(1))]);
-        let d = diff(&old, &new, &sub_ids, &BTreeMap::new());
+        let d = diff(&old, &new);
 
-        assert_eq!(d.subs.removed, vec![sid(1)]);
+        assert_eq!(d.subs.removed, vec![CompactString::from("foo")]);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.modified.is_empty());
         assert_eq!(d.promoters.added.len(), 1);
@@ -652,10 +563,9 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let promoter_ids = promoter_ids_of(&[("foo", pid(1))]);
-        let d = diff(&old, &new, &BTreeMap::new(), &promoter_ids);
+        let d = diff(&old, &new);
 
-        assert_eq!(d.promoters.removed, vec![pid(1)]);
+        assert_eq!(d.promoters.removed, vec![CompactString::from("foo")]);
         assert!(d.promoters.added.is_empty());
         assert!(d.promoters.modified.is_empty());
         assert_eq!(d.subs.added.len(), 1);
@@ -683,16 +593,14 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
-        let sub_ids = sub_ids_of(&[("static_keep", sid(1)), ("static_drop", sid(2))]);
-        let promoter_ids = promoter_ids_of(&[("dyn_keep", pid(1)), ("dyn_drop", pid(2))]);
-        let d = diff(&old, &new, &sub_ids, &promoter_ids);
+        let d = diff(&old, &new);
 
-        assert_eq!(d.subs.removed, vec![sid(2)]);
+        assert_eq!(d.subs.removed, vec![CompactString::from("static_drop")]);
         assert!(d.subs.added.is_empty());
         assert_eq!(d.subs.modified.len(), 1);
-        assert_eq!(d.subs.modified[0].0, sid(1));
+        assert_eq!(d.subs.modified[0].params.name, "static_keep");
 
-        assert_eq!(d.promoters.removed, vec![pid(2)]);
+        assert_eq!(d.promoters.removed, vec![CompactString::from("dyn_drop")]);
         assert_eq!(d.promoters.added.len(), 1);
         assert_eq!(d.promoters.added[0].name, "dyn_new");
         assert!(d.promoters.modified.is_empty());
@@ -722,21 +630,19 @@ mod tests {
     fn enabled_true_to_false_yields_subs_removed() {
         let old = cfg(&[block_with_enabled("a", "echo", true).as_str()]);
         let new = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
-        let ids = sub_ids_of(&[("a", sid(1))]);
-        let d = diff_subs_only(&old, &new, &ids);
-        assert_eq!(d.subs.removed, vec![sid(1)]);
+        let d = diff(&old, &new);
+        assert_eq!(d.subs.removed, vec![CompactString::from("a")]);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.modified.is_empty());
     }
 
     /// Reverse: `false → true` re-introduces the entry, surfacing as
-    /// `subs.added` (the bin's `name → SubId` map has no entry on the
-    /// old side because nothing was attached).
+    /// `subs.added`.
     #[test]
     fn enabled_false_to_true_yields_subs_added() {
         let old = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
         let new = cfg(&[block_with_enabled("a", "echo", true).as_str()]);
-        let d = diff_subs_only(&old, &new, &BTreeMap::new());
+        let d = diff(&old, &new);
         assert_eq!(d.subs.added.len(), 1);
         assert_eq!(d.subs.added[0].params.name, "a");
         assert!(d.subs.removed.is_empty());
@@ -751,8 +657,7 @@ mod tests {
     fn disabled_to_disabled_with_field_change_yields_empty_diff() {
         let old = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
         let new = cfg(&[block_with_enabled("a", "fmt", false).as_str()]);
-        let ids = sub_ids_of(&[("a", sid(1))]);
-        let d = diff_subs_only(&old, &new, &ids);
+        let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
         assert!(d.subs.modified.is_empty());
@@ -766,9 +671,8 @@ mod tests {
     fn promoter_enabled_true_to_false_yields_promoters_removed() {
         let old = cfg(&[dyn_block_with_enabled("logs", "/var/log/*", "echo", true).as_str()]);
         let new = cfg(&[dyn_block_with_enabled("logs", "/var/log/*", "echo", false).as_str()]);
-        let promoter_ids = promoter_ids_of(&[("logs", pid(1))]);
-        let d = diff(&old, &new, &BTreeMap::new(), &promoter_ids);
-        assert_eq!(d.promoters.removed, vec![pid(1)]);
+        let d = diff(&old, &new);
+        assert_eq!(d.promoters.removed, vec![CompactString::from("logs")]);
         assert!(d.promoters.added.is_empty());
         assert!(d.promoters.modified.is_empty());
     }

@@ -41,11 +41,12 @@ pub enum SubAttachAnchor {
 /// The per-Sub reaction declaration: everything that is *not* Profile
 /// identity or the anchor.
 ///
-/// `name` is `String` so callers need no `compact_str` dependency at
-/// this seam ([`Sub::from_request`] converts via `Into<CompactString>`).
-/// `program` is `Arc<ActionProgram>` so the Arc minted by the config
-/// layer's `lower_to_program` flows through to `Sub.program` without a
-/// re-allocation.
+/// `name` is `CompactString`, moved end to end: `SubSpec.name`
+/// (config) is already `CompactString`, so the attach request carries
+/// it without a `String` round-trip and [`Sub::from_request`] moves it
+/// into `Sub.name` unchanged. `program` is `Arc<ActionProgram>` so the
+/// Arc minted by the config layer's `lower_to_program` flows through to
+/// `Sub.program` without a re-allocation.
 ///
 /// Carries no Profile-identity field, so a Sub cannot express (or
 /// leak) a sibling Profile's config/mask — demonstrated
@@ -57,7 +58,7 @@ pub enum SubAttachAnchor {
 /// ```
 #[derive(Clone, Debug)]
 pub struct SubParams {
-    pub name: String,
+    pub name: CompactString,
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
     /// Per-Sub debounce floor — min-folded across the Profile's Subs by
@@ -98,9 +99,10 @@ pub struct SubAttachRequest {
 }
 
 impl SubAttachRequest {
-    /// Canonical constructor. [`Self::for_anchor`] /
-    /// [`Self::for_anchor_dynamic`] are flat-argument ergonomics over
-    /// this for the config layer and tests.
+    /// Canonical constructor. [`Self::for_anchor`] is the
+    /// flat-argument ergonomic over this for the config layer and
+    /// tests; the engine's `try_promote` builds dynamic
+    /// (Promoter-synthesised) Subs through this directly.
     #[must_use]
     pub const fn from_parts(
         anchor: SubAttachAnchor,
@@ -114,13 +116,14 @@ impl SubAttachRequest {
         }
     }
 
-    /// Build a static (operator-declared) attach request.
-    /// `source_promoter` is `None`; use [`Self::for_anchor_dynamic`]
-    /// when a Promoter is the source.
+    /// Build a static (operator-declared) attach request —
+    /// `source_promoter` is `None`. Dynamic (Promoter-synthesised)
+    /// Subs are built by the engine's `try_promote` via
+    /// [`Self::from_parts`] directly.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub const fn for_anchor(
-        name: String,
+        name: CompactString,
         anchor: SubAttachAnchor,
         config: ScanConfig,
         max_settle: Duration,
@@ -147,55 +150,23 @@ impl SubAttachRequest {
             },
         )
     }
-
-    /// Promoter-synthesised counterpart to [`Self::for_anchor`].
-    /// `source` is non-optional — a dynamic Sub always has an
-    /// originating promoter.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub const fn for_anchor_dynamic(
-        name: String,
-        anchor: SubAttachAnchor,
-        config: ScanConfig,
-        max_settle: Duration,
-        settle: Duration,
-        program: Arc<ActionProgram>,
-        scope: EffectScope,
-        events: ClassSet,
-        log_output: bool,
-        source: PromoterId,
-    ) -> Self {
-        Self::from_parts(
-            anchor,
-            ProfileIdentity {
-                config,
-                max_settle,
-                events,
-            },
-            SubParams {
-                name,
-                program,
-                scope,
-                settle,
-                log_output,
-                source_promoter: Some(source),
-            },
-        )
-    }
 }
 
 /// Hot-reload diff. Computed by the TOML loader; consumed by
 /// `Engine::step(Input::ConfigDiff(_))`.
 ///
-/// `added` and `modified` carry pre-id [`SubAttachRequest`] data; `removed`
-/// carries existing [`SubId`]s. Engine processes `removed → modified →
-/// added` atomically in one step, with parent-edge recompute after each
-/// detach/attach.
+/// Name-keyed: `removed` carries operator watch names; `added` and
+/// `modified` carry pre-id [`SubAttachRequest`]s (the name lives
+/// inside `params.name`). The engine resolves name → [`SubId`] at
+/// apply time through its own authoritative `by_name` index —
+/// identity resolution is a registry-owner operation, not the
+/// loader's. Engine processes `removed → modified → added` atomically
+/// in one step, with parent-edge recompute after each detach/attach.
 #[derive(Clone, Debug, Default)]
 pub struct SubRegistryDiff {
     pub added: Vec<SubAttachRequest>,
-    pub removed: Vec<SubId>,
-    pub modified: Vec<(SubId, SubAttachRequest)>,
+    pub removed: Vec<CompactString>,
+    pub modified: Vec<SubAttachRequest>,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
@@ -331,15 +302,16 @@ impl Sub {
     /// diff-derived placeholder. Pre-computed once; never re-evaluated.
     ///
     /// The slotmap key is the Sub's identity authority — there is no
-    /// `id` field. `params.program`'s Arc flows through unchanged (no
-    /// re-wrap); one Arc per Sub, refcount-bumped on each emitted
-    /// [`crate::Effect`].
+    /// `id` field. `params.name` (`CompactString`) and
+    /// `params.program`'s Arc both move through unchanged (no
+    /// re-allocation, no Arc re-wrap); one Arc per Sub, refcount-bumped
+    /// on each emitted [`crate::Effect`].
     #[must_use]
     pub fn from_request(profile: ProfileId, params: SubParams) -> Self {
         let needs_diff =
             params.scope == EffectScope::PerStableFile || params.program.references_diff_derived();
         Self {
-            name: params.name.into(),
+            name: params.name,
             profile,
             program: params.program,
             scope: params.scope,
@@ -558,7 +530,7 @@ mod tests {
         let sub = Sub::from_request(
             ProfileId::default(),
             SubParams {
-                name: "fmt".to_string(),
+                name: "fmt".into(),
                 program: anchor_only_program(),
                 scope: EffectScope::PerStableFile,
                 settle: SETTLE,
@@ -574,7 +546,7 @@ mod tests {
         let sub = Sub::from_request(
             ProfileId::default(),
             SubParams {
-                name: "report".to_string(),
+                name: "report".into(),
                 program: program_with(Placeholder::Created),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
@@ -590,7 +562,7 @@ mod tests {
         let sub = Sub::from_request(
             ProfileId::default(),
             SubParams {
-                name: "build".to_string(),
+                name: "build".into(),
                 program: anchor_only_program(),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
@@ -609,7 +581,7 @@ mod tests {
         let s1 = reg.insert(Sub::from_request(
             pid,
             SubParams {
-                name: "a".to_string(),
+                name: "a".into(),
                 program: anchor_only_program(),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
@@ -620,7 +592,7 @@ mod tests {
         let s2 = reg.insert(Sub::from_request(
             pid,
             SubParams {
-                name: "b".to_string(),
+                name: "b".into(),
                 program: anchor_only_program(),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
@@ -655,7 +627,7 @@ mod tests {
             Sub::from_request(
                 pid,
                 SubParams {
-                    name: name.to_string(),
+                    name: name.into(),
                     program: anchor_only_program(),
                     scope: EffectScope::SubtreeRoot,
                     settle: SETTLE,
@@ -701,7 +673,7 @@ mod tests {
         let id = reg.insert(Sub::from_request(
             pid,
             SubParams {
-                name: "build".to_string(),
+                name: "build".into(),
                 program: anchor_only_program(),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
@@ -725,7 +697,7 @@ mod tests {
         let id = reg.insert(Sub::from_request(
             pid,
             SubParams {
-                name: "build".to_string(),
+                name: "build".into(),
                 program: anchor_only_program(),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
@@ -750,7 +722,7 @@ mod tests {
             Sub::from_request(
                 pid,
                 SubParams {
-                    name: "shared".to_string(),
+                    name: "shared".into(),
                     program: anchor_only_program(),
                     scope: EffectScope::SubtreeRoot,
                     settle: SETTLE,
@@ -788,7 +760,7 @@ mod tests {
             Sub::from_request(
                 pid,
                 SubParams {
-                    name: "x".to_string(),
+                    name: "x".into(),
                     program: anchor_only_program(),
                     scope: EffectScope::SubtreeRoot,
                     settle: SETTLE,
@@ -822,7 +794,7 @@ mod tests {
         let sid = reg.insert(Sub::from_request(
             pid,
             SubParams {
-                name: "build".to_string(),
+                name: "build".into(),
                 program: anchor_only_program(),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
@@ -845,7 +817,7 @@ mod tests {
         let sub = Sub::from_request(
             ProfileId::default(),
             SubParams {
-                name: "build".to_string(),
+                name: "build".into(),
                 program: anchor_only_program(),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
@@ -877,7 +849,7 @@ mod tests {
         let sub = Sub::from_request(
             ProfileId::default(),
             SubParams {
-                name: "build".to_string(),
+                name: "build".into(),
                 program: Arc::clone(&program),
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
