@@ -128,9 +128,9 @@ pub enum Input {
     /// [`crate::Diagnostic::DetachUnknownSub`].
     DetachSub(SubId),
     /// Attach a Promoter. The engine renders the literal-prefix path,
-    /// materialises the Tree, opens the probe channel, and starts the
-    /// Promoter in either `Active` (prefix materialised) or
-    /// `PrefixPending` (descent needed). The minted
+    /// materialises the Tree, arms the Promoter's state-resident probe
+    /// slot, and starts the Promoter in either `Active` (prefix
+    /// materialised) or `PrefixPending` (descent needed). The minted
     /// [`crate::PromoterId`] surfaces via
     /// [`crate::Diagnostic::PromoterAttached`]; on
     /// path rejection, via [`crate::Diagnostic::AttachPathInvalid`].

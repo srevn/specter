@@ -344,7 +344,7 @@ impl crate::Engine {
         let prefix = descent.current_prefix();
 
         // The walker echoes `(owner, correlation)` verbatim — the
-        // probe channel's match in `on_*_probe_response` already
+        // `probe_gate` match in `on_*_probe_response` already
         // enforces request/response pairing, so any divergence would
         // surface as `StaleProbeResponse`, not reach this point. The
         // snapshot itself carries pure content; engine identity stays

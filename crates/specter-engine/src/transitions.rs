@@ -281,8 +281,7 @@ impl Engine {
     /// **Consume-once.** `take_owner_probe` disarms the slot exactly
     /// once, *after* the gate captured the route and *before* any
     /// dispatch. The received correlation is absent from state before
-    /// dispatch, so it cannot route twice — the structural dual of the
-    /// old channel close-on-response.
+    /// dispatch, so it cannot route twice — disarm *is* the consume.
     ///
     /// **Routing.** [`Engine::probe_gate`] captures the routing class
     /// *with* the staleness correlation, one resolution
@@ -1008,8 +1007,8 @@ impl Engine {
             });
         }
 
-        // Descent claimers: close the probe channel (idempotent —
-        // emits Cancel iff a descent probe was in flight), then release
+        // Descent claimers: `cancel_owner_probe` (disarm + Cancel iff a
+        // descent probe was in flight, idempotent), then release
         // the prefix claim (transitions Profile → Idle). Without the
         // cancel-before-release, a late `ProbeResponse` would arrive
         // after the Profile transitions out of Pending and drop with
@@ -1456,8 +1455,8 @@ impl Engine {
     /// on the Profile's `by_profile` list is a structural impossibility
     /// (the registry maintains by_profile in lockstep with subs).
     fn on_anchor_terminal_all_dynamic(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        // 1. Close the probe channel — Active+Verifying may have one
-        // in flight. Idempotent on a closed channel.
+        // 1. Disarm + Cancel iff a probe is in flight — Active+Verifying
+        // may have one. Idempotent when the slot is already unarmed.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
 
         // 2. Resolve the anchor resource + path ONCE for the per-Sub
@@ -1566,8 +1565,8 @@ impl Engine {
         // that touches state.
         let was_active = matches!(p.state(), ProfileState::Active(_, _));
 
-        // Idempotent: emits Cancel iff the probe channel is open
-        // (Active+Verifying ⇒ channel open). For Active+Batching /
+        // Idempotent: emits Cancel iff a probe is in flight
+        // (Active+Verifying ⇒ slot armed). For Active+Batching /
         // Draining no probe is in flight and the helper is a no-op —
         // structural equivalent of the prior `was_verifying` snapshot.
         // Required by discard_anchor_state's cancel-first contract.
@@ -1619,7 +1618,7 @@ impl Engine {
         // call (see those setters' rustdoc).
         //
         // Seed only reaches here from `Active(PreFire(Verifying))` (the
-        // probe-channel dispatcher). The fallback to `p.resource` on
+        // probe-response dispatcher). The fallback to `p.resource` on
         // non-Active arms is defensive — never observed in v1's
         // single-threaded step, but matches the prior `unwrap_or(anchor)`
         // semantics one-for-one.

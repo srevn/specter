@@ -499,8 +499,8 @@ impl Engine {
     }
 
     /// Caller: `dispatch_standard_ok` not-stable + not-forced — a verify
-    /// just responded with an unstable verdict. The probe channel was
-    /// already closed at the top of `on_probe_response`; no Cancel needed.
+    /// just responded with an unstable verdict. The verify slot was
+    /// already disarmed at the top of `on_probe_response`; no Cancel needed.
     /// Arms a fresh settle timer and writes
     /// `phase = Batching { settle_timer }`.
     ///
@@ -1595,7 +1595,7 @@ mod tests {
         }
         let correlation = e
             .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("Verifying probe in flight on probe channel");
+            .expect("Verifying probe in flight on the state slot");
 
         // Output: one Probe whose correlation matches.
         let probe_correlation = out.probe_ops.iter().find_map(|op| match op {
@@ -1606,13 +1606,12 @@ mod tests {
         let _ = e.cancel_all_in_flight_probes();
     }
 
-    /// The lift's central invariant: a Verifying burst's probe
-    /// correlation lives on the state-resident `ProbeSlot`, not on the
-    /// engine's probe channel. `pending_probe_for` abstracts over both
-    /// homes so it cannot witness this alone — assert the slot carries
-    /// the correlation *and* the channel holds no entry for the owner.
+    /// Central invariant: a Verifying burst's probe correlation lives on
+    /// the state-resident `ProbeSlot` (there is no probe side table).
+    /// Assert `pending_probe_for`'s projection equals the correlation
+    /// read directly off the `Verifying` slot.
     #[test]
-    fn verify_probe_correlation_is_state_resident_not_channel() {
+    fn verify_probe_correlation_is_state_resident() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_standard_burst(

@@ -1242,10 +1242,9 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
 }
 
 /// Field-discipline pin for `event_drives_batching`: an FsEvent during
-/// Verifying closes the probe channel atomically with the Cancel emission.
-/// Pre-refactor the close was implicit in the `PreFirePhase::Verifying { ... }
-/// → Batching { ... }` variant rewrite; post-refactor it must clear the
-/// per-Profile `pending_probe` slot explicitly.
+/// Verifying disarms the verify slot atomically with the Cancel
+/// emission, so the `Verifying → Batching` rewrite cannot leave an
+/// armed slot behind for the just-cancelled probe.
 #[test]
 fn event_drives_batching_clears_pending_probe() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
@@ -1264,7 +1263,7 @@ fn event_drives_batching_clears_pending_probe() {
 
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
-        "channel closed atomically with Verifying → Batching transition",
+        "slot disarmed atomically with Verifying → Batching transition",
     );
 }
 
@@ -1289,7 +1288,7 @@ fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
 
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
-        "anchor terminal during Verifying closes the channel",
+        "anchor terminal during Verifying disarms the slot",
     );
     let cancels = out
         .probe_ops
@@ -5172,7 +5171,7 @@ mod props {
                     u32::from(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
                 prop_assert!(
                     probing_count <= 1,
-                    "I5 channel-discipline: probe channel carries at most one outstanding probe per Profile",
+                    "I5 representability: a Profile's single state-resident ProbeSlot carries at most one in-flight probe",
                 );
             }
             let _ = e.cancel_all_in_flight_probes();

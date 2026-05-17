@@ -71,7 +71,8 @@ pub(crate) const FANOUT_WARNING_THRESHOLD: usize = 1000;
 impl Engine {
     /// Attach a Promoter to the engine. Materialises the literal-prefix
     /// path on the Tree (creating scaffolds where the prefix doesn't
-    /// yet exist on disk), opens the probe channel, and emits a
+    /// yet exist on disk), arms the Promoter's state-resident probe
+    /// slot, and emits a
     /// [`Diagnostic::PromoterAttached`] carrying the minted
     /// [`PromoterId`].
     ///
@@ -429,7 +430,7 @@ impl Engine {
     /// ([`Self::unregister_proxy_subtree`] from
     /// `dispatch_promoter_enumeration_*` and
     /// [`Self::reap_promoter_inner`]) all reach the helper with the
-    /// channel closed.
+    /// enumeration slot already disarmed.
     pub(crate) fn unregister_proxy(
         &mut self,
         promoter_id: PromoterId,

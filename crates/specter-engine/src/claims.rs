@@ -276,9 +276,9 @@ impl Engine {
     ///   sum — the old `baseline.is_some() ⇒ …is_none()` rule is a type
     ///   property now, not a step-boundary invariant.
     ///
-    /// **Pre-condition.** The probe channel must already be closed.
-    /// Callers either took the response-dispatch path (which closes
-    /// the channel before any dispatch arm runs, see
+    /// **Pre-condition.** The owner's probe slot must already be
+    /// disarmed. Callers either took the response-dispatch path (which
+    /// disarms the slot before any dispatch arm runs, see
     /// `on_probe_response`) or invoked [`Engine::cancel_owner_probe`]
     /// first (`finalize_anchor_lost`'s pattern). The helper does not
     /// call `cancel_owner_probe` itself — matches the

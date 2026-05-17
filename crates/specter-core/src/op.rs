@@ -9,19 +9,21 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Probe-channel owner — the engine-resident entity that minted a probe.
+/// The engine-resident entity that minted a probe — the key the engine
+/// demuxes a response back to.
 ///
 /// Echoed verbatim through [`ProbeRequest`] / [`ProbeResponse`] /
-/// [`ProbeOp::Cancel`] so the engine can demux each response to the
+/// [`ProbeOp::Cancel`] so the engine can route each response to the
 /// entity that's awaiting it.
 ///
 /// Two owner kinds. [`Self::Profile`] drives the burst / descent /
 /// rebase lifecycle. [`Self::Promoter`] drives the literal-prefix
-/// descent and proxy-enumeration lifecycle. The engine's probe channel
-/// keys an outstanding-probe map on this enum: at most one open entry
-/// per owner, with isolated counters per owner-kind by construction
-/// (one Profile and one Promoter can each carry an outstanding probe
-/// simultaneously without collision).
+/// descent and proxy-enumeration lifecycle. There is no
+/// outstanding-probe map this enum keys: "at most one in-flight probe
+/// per owner" (I5) is a *representability* property of the owner's
+/// single state-resident `ProbeSlot`, so one Profile and one Promoter
+/// can each carry an in-flight probe simultaneously without collision
+/// by construction.
 ///
 /// **Determinism.** Derived `Ord` produces variant-declaration-order
 /// (Profile < Promoter), then per-payload [`ProfileId`] /
@@ -67,8 +69,9 @@ pub enum ProbeRequest {
     /// (the path is one syscall), no `forced` (mtime-skip is not a
     /// concept for `lstat`).
     AnchorFile {
-        /// Owner of the probe channel. Echoed back on `ProbeResponse`
-        /// and used by the Sensor's expectation-map insertion.
+        /// Owner the engine demuxes the response back to. Echoed back
+        /// on `ProbeResponse` and used by the Sensor's expectation-map
+        /// insertion.
         owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
@@ -83,8 +86,9 @@ pub enum ProbeRequest {
     /// `ProbeOutcome::SubtreeOk(Arc<DirSnapshot>)` rooted at
     /// `target_path` (or `Vanished` / `Failed`).
     Subtree {
-        /// Owner of the probe channel. Echoed back on `ProbeResponse`
-        /// and used by the Sensor's expectation-map insertion.
+        /// Owner the engine demuxes the response back to. Echoed back
+        /// on `ProbeResponse` and used by the Sensor's expectation-map
+        /// insertion.
         owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
@@ -147,8 +151,9 @@ pub enum ProbeRequest {
     /// and discards the snapshot (it is never spliced into
     /// `Profile.current`).
     Descent {
-        /// Owner of the probe. Echoed back on `ProbeResponse`
-        /// and used by the Sensor's expectation-map insertion.
+        /// Owner the engine demuxes the response back to. Echoed back
+        /// on `ProbeResponse` and used by the Sensor's expectation-map
+        /// insertion.
         owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
@@ -163,7 +168,7 @@ pub enum ProbeRequest {
 }
 
 impl ProbeRequest {
-    /// Owner of the probe channel. Determinism-sort key for
+    /// Owner the engine demuxes the response back to. Determinism-sort key for
     /// [`crate::StepOutput::probe_ops`] (via [`ProbeOp::owner`]).
     #[must_use]
     pub const fn owner(&self) -> ProbeOwner {
@@ -201,7 +206,8 @@ impl ProbeRequest {
 }
 
 /// Walker→engine probe response. Flat — `(owner, correlation)` is the
-/// I5 invariant key; `outcome` carries the per-variant payload.
+/// staleness key the engine gates against the owner's in-flight
+/// `ProbeSlot`; `outcome` carries the per-variant payload.
 #[derive(Debug, Clone)]
 pub struct ProbeResponse {
     pub owner: ProbeOwner,
@@ -225,7 +231,7 @@ pub enum ProbeOutcome {
     /// differs is the engine-side dispatch state, not the data the walker
     /// hands back. The snapshot is pure content (`root_meta`,
     /// `captured_with`, `entries`); engine-side identity stays at the
-    /// dispatch layer (probe channel + Profile state).
+    /// dispatch layer (the owner's state-resident `ProbeSlot`).
     SubtreeOk(Arc<DirSnapshot>),
     /// Path absent (`ENOENT`) or kind mismatch (file probe found dir, dir
     /// probe found file). Routed to whichever `dispatch_*_vanished`

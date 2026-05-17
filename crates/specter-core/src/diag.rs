@@ -145,8 +145,8 @@ pub enum PromoterClaimKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Diagnostic {
     /// `ProbeResponse` whose `(owner, correlation)` doesn't match the
-    /// owner's live probe channel. Catches stale-id (post-detach),
-    /// post-cancel arrivals, and out-of-order responses across all
+    /// owner's in-flight `ProbeSlot` correlation. Catches stale-id
+    /// (post-detach), post-cancel arrivals, and out-of-order responses across all
     /// owner kinds. The `owner` field carries the [`ProbeOwner`] so
     /// operators can demux which entity (Profile in v1) saw the stale
     /// response.
@@ -463,9 +463,9 @@ pub enum Diagnostic {
     /// [`Self::SensorOverflow`]'s peer reseed loop). Per-Promoter
     /// dispatch is state-keyed:
     /// - `PrefixPending(_)` ⇒ a fresh descent probe is emitted at
-    ///   `current_prefix` (gated on the probe channel being closed for
-    ///   this Promoter; an in-flight descent probe's response will
-    ///   reflect the post-overflow state).
+    ///   `current_prefix` (gated on the Promoter's descent slot being
+    ///   unarmed; an in-flight descent probe's response will reflect
+    ///   the post-overflow state).
     /// - `Active { proxies }` ⇒ every proxy is enqueued into
     ///   `pending_enumerations`; the dispatcher drains one immediately
     ///   into a probe, with the rest queued behind the single-slot.

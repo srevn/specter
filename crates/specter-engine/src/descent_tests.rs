@@ -1035,7 +1035,7 @@ fn descent_remaining_from_empty_vec_is_none() {
 // ───────────────────────────────────────────────────────────────────────
 
 /// `on_watch_op_rejected` descent purge: cancel-then-release ordering
-/// closes the probe channel and emits exactly one `ProbeOp::Cancel`. The
+/// disarms the descent slot and emits exactly one `ProbeOp::Cancel`. The
 /// Profile transitions Pending → Idle in the same step.
 #[test]
 fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
@@ -1065,10 +1065,10 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
         Instant::now(),
     );
 
-    // Field-discipline: channel closed atomically with the purge.
+    // Field-discipline: slot disarmed atomically with the purge.
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
-        "channel closed by cancel-before-release",
+        "slot disarmed by cancel-before-release",
     );
     // Profile transitioned via `release_descent_prefix_claim`.
     assert!(matches!(
@@ -1153,7 +1153,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     ));
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
-        "channel closed after Seed Vanished",
+        "slot disarmed after Seed Vanished",
     );
     let foo_demand_pre = e.tree().get(foo).unwrap().watch_demand();
     // Bar's anchor contribution was released; only watch_root_parent's
@@ -1176,8 +1176,8 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     );
 
     // Recovery overlap: foo's watch_demand is now +2 (watch_root_parent
-    // STRUCTURE + descent STRUCTURE). The helper opened the channel and
-    // emitted a descent probe.
+    // STRUCTURE + descent STRUCTURE). The helper armed the descent slot
+    // and emitted a descent probe.
     assert_eq!(
         e.tree().get(foo).unwrap().watch_demand(),
         foo_demand_pre + 1,
