@@ -75,7 +75,14 @@ pub struct ProbeSlot<Tag: Copy = ()> {
 /// second panic while already unwinding aborts the process and masks
 /// the first failure — strictly less diagnosable, the opposite of the
 /// intent. The engine `step` is single-threaded, so an orphan observed
-/// only during an unrelated unwind is moot — no further step runs.
+/// only during an unrelated unwind is moot — no further step runs,
+/// **because no `catch_unwind` wraps the engine driver: a mid-`step`
+/// panic terminates the process** (the driver's `run`/`tick` carry a
+/// matching no-`catch_unwind` note). The `catch_unwind`s that *do*
+/// exist (sensor prober workers, actuator pipe/pool waiters, the
+/// bin's watcher / config-watcher / actuator supervision loops) are
+/// all on threads that hold no `ProbeSlot`; this silence-in-unwind
+/// carve-out depends on that separation.
 ///
 /// This is the **sole** explicit `Drop` in `core`/`engine`. Every
 /// enclosing carrier (`PreFirePhase`, `PostFirePhase`, `PreFireBurst`,

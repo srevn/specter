@@ -250,6 +250,11 @@ impl EngineDriver {
     }
 
     /// Loop wrapping [`Self::tick`] until shutdown.
+    ///
+    /// MUST NOT be wrapped in `catch_unwind`: `ProbeSlot`'s in-unwind
+    /// silence (`specter_core::probe`) depends on a mid-`step` panic
+    /// being fatal — catching it here would let the daemon carry on
+    /// with a probe-bearing state torn down mid-flight.
     pub fn run(&mut self) -> ExitReason {
         loop {
             match self.tick() {
@@ -285,6 +290,12 @@ impl EngineDriver {
     /// disconnect) it runs [`Self::begin_shutdown`] before returning
     /// [`TickOutcome::Shutdown`], so the engine is probe-drained
     /// whether the daemon ([`Self::run`]) or a test drove the tick.
+    ///
+    /// MUST NOT be wrapped in `catch_unwind`: `ProbeSlot`'s in-unwind
+    /// silence (`specter_core::probe`) depends on a mid-`step` panic
+    /// being fatal — the graceful drain above is the *only* sanctioned
+    /// path to a probe-free engine; catching a `step` panic would
+    /// bypass it and resume on torn-down probe state.
     pub fn tick(&mut self) -> TickOutcome {
         let now = Instant::now();
 
