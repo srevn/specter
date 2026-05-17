@@ -42,10 +42,11 @@
 //! slot from reaping for the dedup entry's lifetime. The dedup entry
 //! drops at `on_dynamic_sub_reaped` *before* `reap_profile` releases
 //! the anchor contribution, so a re-mint after the slot reaps lands at
-//! a fresh `ResourceId` and never collides with stale state. Mutators
-//! are three sites: `try_promote` (insert with contains check),
-//! `on_dynamic_sub_reaped` (remove on anchor-terminal), and
-//! `reap_promoter_inner` (full drain on Promoter teardown).
+//! a fresh `ResourceId` and never collides with stale state. The map
+//! is private: the only mutators are [`Promoter::promote`] (insert,
+//! dedup-asserted), [`Promoter::forget_dynamic_sub`] (anchor-terminal
+//! remove), and [`Promoter::drain_dynamic_subs`] (teardown drain) —
+//! the discipline is structural, not a documented convention.
 
 use crate::ids::{ProbeCorrelation, PromoterId, ResourceId, SubId};
 use crate::pattern::PatternSpec;
@@ -84,11 +85,28 @@ pub struct PromoterAttachRequest {
 
 /// Engine-resident Promoter.
 ///
-/// Mirrors `Profile`'s registry-stored shape. No `id` field — the
-/// slotmap [`PromoterId`] is the identity authority; helper code that
-/// needs the id receives it as a parameter. `identity` is the
-/// Sub-spec's Profile partition key, threaded verbatim into every
-/// synthesised dynamic Sub.
+/// Mirrors `Profile`'s registry-stored shape and its encapsulation
+/// discipline. No `id` field — the slotmap [`PromoterId`] is the
+/// identity authority; helper code that needs the id receives it as a
+/// parameter. `identity` is the Sub-spec's Profile partition key,
+/// threaded verbatim into every synthesised dynamic Sub.
+///
+/// The seven spec fields are `pub`: frozen at [`Self::from_request`],
+/// never written post-construction (the `Sub`-frozen shape — benign
+/// all-`pub`). The four **runtime** fields are module-private; the
+/// cross-crate write surface is this type's `pub fn`s, never a field
+/// assignment. Each runtime mutator owns its invariant structurally
+/// (matching `Profile`'s sealed state machine and CLAUDE.md "single
+/// source per transition"): the one-shot `PrefixPending → Active` move
+/// ([`Self::enter_active_empty`]); the in-`state` linear [`ProbeSlot`]
+/// (armed only via [`Self::arm_enumeration`], consumed only via
+/// [`Self::take_probe`]); the dedup map ([`Self::promote`] /
+/// [`Self::forget_dynamic_sub`] / [`Self::drain_dynamic_subs`]); the
+/// enumeration queue ([`Self::enqueue_enumeration`] /
+/// [`Self::pop_enumeration`] / [`Self::unregister_proxy_slot`]); and
+/// the one-shot fan-out latch ([`Self::latch_fanout_warning`]). Reads
+/// project through [`Self::state`] / [`Self::dynamic_subs`] /
+/// [`Self::pending_enumerations`].
 #[derive(Debug)]
 pub struct Promoter {
     pub name: CompactString,
@@ -99,27 +117,234 @@ pub struct Promoter {
     pub settle: Duration,
     pub log_output: bool,
 
-    pub state: PromoterState,
+    /// State machine (`PrefixPending` XOR `Active`); homes this
+    /// Promoter's single linear [`ProbeSlot`]. Private — an out-of-band
+    /// `state` write would drop an armed slot past its `Drop` tripwire
+    /// or bypass [`ProbeSlot::arm`]'s arm-once assert, defeating the
+    /// "one probe per Promoter" representability property. Read via
+    /// [`Self::state`]; the only transition is [`Self::enter_active_empty`].
+    state: PromoterState,
 
-    /// Deterministic queue of proxies awaiting enumeration. `BTreeSet` for
-    /// stable iteration; insertion is gated on `!already_carries` in
-    /// `register_proxy` so re-registration of an already-known proxy is
-    /// structurally idempotent on the queue and the per-Resource counter.
-    pub pending_enumerations: BTreeSet<ResourceId>,
+    /// Deterministic queue of proxies awaiting enumeration. `BTreeSet`
+    /// for stable iteration; the single-slot drain pops one at a time.
+    /// Private — mutate via [`Self::enqueue_enumeration`] /
+    /// [`Self::pop_enumeration`] / [`Self::unregister_proxy_slot`].
+    pending_enumerations: BTreeSet<ResourceId>,
 
-    /// `anchor_resource → SubId`. Resource identity is `(parent, segment)`
-    /// — bijective with the resolved path while the slot is live; the
-    /// Sub's `AnchorClaim::Held` contribution keeps the slot from
-    /// reaping for the dedup entry's lifetime. Three documented
-    /// mutators — `try_promote` (insert with contains check),
-    /// `on_dynamic_sub_reaped` (remove on anchor-terminal), and
-    /// `reap_promoter_inner` (full drain).
-    pub dynamic_subs: BTreeMap<ResourceId, SubId>,
+    /// `anchor_resource → SubId`. Resource identity is
+    /// `(parent, segment)` — bijective with the resolved path while the
+    /// slot is live; the Sub's `AnchorClaim::Held` contribution keeps
+    /// the slot from reaping for the dedup entry's lifetime. Private:
+    /// the dedup invariant (one Sub per `(promoter, anchor)`) is
+    /// enforced at [`Self::promote`].
+    dynamic_subs: BTreeMap<ResourceId, SubId>,
 
-    /// Fanout-warning latch. Set on the first crossing of the threshold;
-    /// suppresses repeats so pathological patterns warn once per Promoter
-    /// lifetime.
-    pub warned_at_threshold: bool,
+    /// One-shot fan-out warning latch. Fully private — its only
+    /// interaction is the atomic check-and-latch in
+    /// [`Self::latch_fanout_warning`], so a pathological pattern warns
+    /// once per Promoter lifetime by construction.
+    warned_at_threshold: bool,
+}
+
+impl Promoter {
+    /// Construct an engine-resident Promoter from its frozen spec
+    /// ([`PromoterAttachRequest`]) and the engine-computed initial
+    /// `state`. The runtime fields start empty/unset — at attach the
+    /// Promoter has minted no dynamic Subs and queued no enumeration.
+    /// `pattern_spec` is `Arc`-wrapped here (the hot enumeration
+    /// dispatcher bumps the refcount per response to release the
+    /// registry read borrow). The slotmap [`PromoterId`] assigned by
+    /// [`PromoterRegistry::insert`] is the identity authority — no `id`
+    /// is embedded. Mirrors `Sub::from_request` for the static side.
+    #[must_use]
+    pub fn from_request(req: PromoterAttachRequest, state: PromoterState) -> Self {
+        Self {
+            name: req.name,
+            pattern: Arc::new(req.pattern_spec),
+            identity: req.identity,
+            program: req.program,
+            scope: req.scope,
+            settle: req.settle,
+            log_output: req.log_output,
+            state,
+            pending_enumerations: BTreeSet::new(),
+            dynamic_subs: BTreeMap::new(),
+            warned_at_threshold: false,
+        }
+    }
+
+    /// Immutable projection of the state machine — the sole read seam
+    /// for `state`. Mirrors [`Profile::state`](crate::Profile::state):
+    /// callers pattern-match the returned `&PromoterState`
+    /// (`PrefixPending` XOR `Active`); the write surface is the named
+    /// mutators below, never a field assignment.
+    #[must_use]
+    pub const fn state(&self) -> &PromoterState {
+        &self.state
+    }
+
+    /// The single `PrefixPending → Active` transition (once per
+    /// Promoter lifetime — the prefix materialised, or its claim is
+    /// being released). Replaces `state` with
+    /// `Active { proxies: ∅, enumerating: ∅ }`; the prior state is
+    /// dropped here.
+    ///
+    /// **Cancel-first contract (structural).** The discarded prior
+    /// carries this Promoter's probe slot — the descent slot in
+    /// `PrefixPending`, the `enumerating` slot in `Active`. If it is
+    /// still armed, [`ProbeSlot`]'s `Drop` tripwire fires. Callers MUST
+    /// consume the in-flight probe (`cancel_owner_probe` /
+    /// [`Self::take_probe`]) before this — the discard *is* the
+    /// enforcement, the Promoter dual of `reap_profile`'s structural
+    /// guard. No cancel-first asserts scattered at call sites.
+    pub fn enter_active_empty(&mut self) {
+        self.state = PromoterState::Active {
+            proxies: BTreeMap::new(),
+            enumerating: ProbeSlot::empty(),
+        };
+    }
+
+    /// Mutable descent projection — `Some` only in `PrefixPending`
+    /// (`Active` yields `None`). The sole `&mut` seam into the descent
+    /// payload (probe arm / segment advance). Symmetric with
+    /// [`Profile::descent_state_mut`](crate::Profile::descent_state_mut).
+    pub const fn descent_state_mut(&mut self) -> Option<&mut DescentState> {
+        self.state.descent_state_mut()
+    }
+
+    /// Disarm this Promoter's in-flight probe (descent slot in
+    /// `PrefixPending`, enumeration slot in `Active`) and return its
+    /// correlation, or `None`. The single state-level consume; the
+    /// disarm leaves the state variant intact. Symmetric with
+    /// [`Profile::take_probe`](crate::Profile::take_probe).
+    pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
+        self.state.take_probe()
+    }
+
+    /// Arm the `Active` enumeration slot for `target` with a freshly
+    /// minted `correlation`. Delegates to
+    /// [`PromoterState::arm_enumeration`]; its `PrefixPending` arm is
+    /// `unreachable!()` (enumeration drains `pending_enumerations`,
+    /// non-empty only in `Active`), and [`ProbeSlot::arm`]'s arm-once
+    /// assert surfaces a re-arm in every build.
+    pub fn arm_enumeration(&mut self, correlation: ProbeCorrelation, target: ResourceId) {
+        self.state.arm_enumeration(correlation, target);
+    }
+
+    /// Register a proxy at `resource` in the `Active` proxies map with
+    /// enumeration cursor `pattern_component_index`. Overwrites an
+    /// existing entry (re-registration is gated idempotent at the
+    /// caller). `unreachable!()` in `PrefixPending` — the sole callers
+    /// (`enter_active`, the enumeration forward pass) guarantee
+    /// `Active` by construction; a wrong call surfaces loudly in every
+    /// build rather than silently no-op.
+    pub fn insert_proxy(&mut self, resource: ResourceId, pattern_component_index: usize) {
+        match &mut self.state {
+            PromoterState::Active { proxies, .. } => {
+                proxies.insert(
+                    resource,
+                    ProxyState {
+                        pattern_component_index,
+                    },
+                );
+            }
+            PromoterState::PrefixPending(_) => unreachable!(
+                "insert_proxy requires Active: enter_active and the enumeration \
+                 forward pass are the sole callers and both ensure Active",
+            ),
+        }
+    }
+
+    /// Drop the proxy at `resource`: remove it from the `Active`
+    /// proxies map (no-op if not `Active` / absent) **and** from
+    /// `pending_enumerations` (unconditional — a queued enumeration for
+    /// a now-gone proxy must not resurrect after the slot reaps). The
+    /// inverse of [`Self::insert_proxy`] plus the queue cleanup the two
+    /// always pair at the call site.
+    pub fn unregister_proxy_slot(&mut self, resource: ResourceId) {
+        if let PromoterState::Active { proxies, .. } = &mut self.state {
+            proxies.remove(&resource);
+        }
+        self.pending_enumerations.remove(&resource);
+    }
+
+    /// Immutable view of the enumeration queue (introspection and
+    /// determinism assertions). Mutated only via
+    /// [`Self::enqueue_enumeration`] / [`Self::pop_enumeration`] /
+    /// [`Self::unregister_proxy_slot`].
+    #[must_use]
+    pub const fn pending_enumerations(&self) -> &BTreeSet<ResourceId> {
+        &self.pending_enumerations
+    }
+
+    /// Queue `resource` for enumeration. `BTreeSet`-idempotent —
+    /// concurrent events at one proxy collapse to a single
+    /// enumeration. Returns `true` iff newly queued.
+    pub fn enqueue_enumeration(&mut self, resource: ResourceId) -> bool {
+        self.pending_enumerations.insert(resource)
+    }
+
+    /// Pop the next queued enumeration target (`BTreeSet` order — the
+    /// deterministic single-slot drain), or `None` when empty.
+    pub fn pop_enumeration(&mut self) -> Option<ResourceId> {
+        self.pending_enumerations.pop_first()
+    }
+
+    /// Immutable view of the dynamic-Sub dedup map — the caller's
+    /// dedup gate read (`contains_key`) plus introspection. At most one
+    /// entry per `(promoter, anchor_resource)`; the invariant is
+    /// enforced at [`Self::promote`].
+    #[must_use]
+    pub const fn dynamic_subs(&self) -> &BTreeMap<ResourceId, SubId> {
+        &self.dynamic_subs
+    }
+
+    /// Record the dynamic Sub minted for `anchor_resource`. The dedup
+    /// invariant (one Sub per `(promoter, anchor)`) is the caller's
+    /// `dynamic_subs().contains_key` gate + early-return; this
+    /// `debug_assert!`s the key was absent as the loud dev/CI backstop.
+    /// A release-mode escape overwrites the map entry but orphans
+    /// nothing: the prior Sub still reaps via its own anchor-terminal
+    /// path.
+    pub fn promote(&mut self, anchor_resource: ResourceId, sub_id: SubId) {
+        let prev = self.dynamic_subs.insert(anchor_resource, sub_id);
+        debug_assert!(
+            prev.is_none(),
+            "promote: dedup invariant breached — anchor {anchor_resource:?} already \
+             mapped (caller must gate on dynamic_subs().contains_key)",
+        );
+    }
+
+    /// Drop the dedup entry for `anchor_resource` (the Sub's
+    /// anchor-terminal reap), returning the `SubId` that was mapped, or
+    /// `None` if absent (a concurrent [`Self::drain_dynamic_subs`]
+    /// already cleared it — benign).
+    pub fn forget_dynamic_sub(&mut self, anchor_resource: ResourceId) -> Option<SubId> {
+        self.dynamic_subs.remove(&anchor_resource)
+    }
+
+    /// Drain every dedup entry (Promoter teardown), returning the
+    /// minted `SubId`s for the caller to detach. The map is left empty
+    /// so cascading detach paths observe no entries.
+    #[must_use]
+    pub fn drain_dynamic_subs(&mut self) -> Vec<SubId> {
+        let ids = self.dynamic_subs.values().copied().collect();
+        self.dynamic_subs.clear();
+        ids
+    }
+
+    /// One-shot fan-out warning latch. Returns `Some(count)` the first
+    /// time `dynamic_subs` exceeds `threshold` and latches so later
+    /// crossings return `None` — a pathological pattern warns once per
+    /// Promoter lifetime. The check-and-latch is atomic here, so the
+    /// one-shot property is structural rather than a caller convention.
+    pub fn latch_fanout_warning(&mut self, threshold: usize) -> Option<usize> {
+        let count = self.dynamic_subs.len();
+        (count > threshold && !self.warned_at_threshold).then(|| {
+            self.warned_at_threshold = true;
+            count
+        })
+    }
 }
 
 /// Mutually-exclusive Promoter state. `PrefixPending` covers the
@@ -388,7 +613,8 @@ mod tests {
     use crate::scan_config::{ProfileIdentity, ScanConfig};
     use crate::sub::{ClassSet, EffectScope};
     use compact_str::CompactString;
-    use std::collections::{BTreeMap, BTreeSet};
+    use slotmap::SlotMap;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -409,27 +635,30 @@ mod tests {
         Arc::new(b.build().unwrap())
     }
 
+    /// Build an `Active`-state Promoter through the real
+    /// [`Promoter::from_request`] constructor (not a parallel struct
+    /// literal — the test path and the production path stay one).
     fn build_promoter(name: &str, pattern: &str) -> Promoter {
-        Promoter {
+        let req = PromoterAttachRequest {
             name: CompactString::from(name),
-            pattern: Arc::new(PatternSpec::parse(pattern).expect("valid pattern")),
+            pattern_spec: PatternSpec::parse(pattern).expect("valid pattern"),
             identity: ProfileIdentity {
                 config: ScanConfig::builder().recursive(true).build(),
                 max_settle: MAX_SETTLE,
                 events: ClassSet::DEFAULT_SUBTREE_ROOT,
             },
+            settle: SETTLE,
             program: program(),
             scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
             log_output: false,
-            state: PromoterState::Active {
+        };
+        Promoter::from_request(
+            req,
+            PromoterState::Active {
                 proxies: BTreeMap::new(),
                 enumerating: ProbeSlot::empty(),
             },
-            pending_enumerations: BTreeSet::new(),
-            dynamic_subs: BTreeMap::new(),
-            warned_at_threshold: false,
-        }
+        )
     }
 
     /// `insert` minted a key and registered the `by_name` mapping;
@@ -593,18 +822,114 @@ mod tests {
         assert_eq!(proxies.len(), 1);
     }
 
-    /// Dynamic Sub dedup map round-trips `ResourceId → SubId`. The map
-    /// is the unique-key store for the per-(promoter, anchor) dedup;
-    /// path-keying was replaced with resource-keying because Tree slot
-    /// identity already encodes a path-bijective key for live slots
-    /// (cheaper to store, no path-string allocation per entry).
+    /// Dynamic Sub dedup map round-trips `ResourceId → SubId` through
+    /// the sealed [`Promoter::promote`] / [`Promoter::dynamic_subs`]
+    /// surface (resource-keying: Tree slot identity is path-bijective
+    /// for live slots — cheaper than path-keying, no per-entry string).
     #[test]
     fn promoter_dynamic_subs_round_trip() {
         let mut p = build_promoter("logs", "/var/log/*.log");
         let resource = ResourceId::default();
         let sid = SubId::default();
-        p.dynamic_subs.insert(resource, sid);
-        assert_eq!(p.dynamic_subs.get(&resource), Some(&sid));
+        p.promote(resource, sid);
+        assert_eq!(p.dynamic_subs().get(&resource), Some(&sid));
+    }
+
+    /// [`Promoter::promote`] then [`Promoter::forget_dynamic_sub`]
+    /// returns the mapped `SubId`; a second forget is a `None` no-op
+    /// (the concurrent-drain-already-cleared edge).
+    #[test]
+    fn promote_then_forget_round_trips_and_is_idempotent() {
+        let mut p = build_promoter("logs", "/var/log/*.log");
+        let r = ResourceId::default();
+        let sid = SubId::default();
+        p.promote(r, sid);
+        assert_eq!(p.forget_dynamic_sub(r), Some(sid));
+        assert_eq!(p.forget_dynamic_sub(r), None);
+        assert!(p.dynamic_subs().is_empty());
+    }
+
+    /// [`Promoter::drain_dynamic_subs`] returns every minted `SubId`
+    /// and leaves the map empty so cascading detach sees no entries.
+    #[test]
+    fn drain_dynamic_subs_returns_all_and_clears() {
+        let mut rk: SlotMap<ResourceId, ()> = SlotMap::with_key();
+        let mut sk: SlotMap<SubId, ()> = SlotMap::with_key();
+        let mut p = build_promoter("logs", "/var/log/*.log");
+        let (r0, r1) = (rk.insert(()), rk.insert(()));
+        let (s0, s1) = (sk.insert(()), sk.insert(()));
+        p.promote(r0, s0);
+        p.promote(r1, s1);
+        let mut drained = p.drain_dynamic_subs();
+        drained.sort_unstable();
+        let mut want = vec![s0, s1];
+        want.sort_unstable();
+        assert_eq!(drained, want);
+        assert!(p.dynamic_subs().is_empty());
+        assert!(p.drain_dynamic_subs().is_empty(), "second drain is empty");
+    }
+
+    /// The fan-out latch is one-shot and structural: `Some(count)` on
+    /// the first crossing, `None` on every later check regardless of
+    /// further growth.
+    #[test]
+    fn latch_fanout_warning_fires_once() {
+        let mut rk: SlotMap<ResourceId, ()> = SlotMap::with_key();
+        let mut sk: SlotMap<SubId, ()> = SlotMap::with_key();
+        let mut p = build_promoter("logs", "/var/log/*.log");
+        for _ in 0..3 {
+            p.promote(rk.insert(()), sk.insert(()));
+        }
+        assert_eq!(p.latch_fanout_warning(2), Some(3), "first crossing warns");
+        assert_eq!(p.latch_fanout_warning(2), None, "latched — no repeat");
+        p.promote(rk.insert(()), sk.insert(()));
+        assert_eq!(
+            p.latch_fanout_warning(2),
+            None,
+            "still latched after growth"
+        );
+        assert_eq!(p.latch_fanout_warning(100), None, "below threshold ⇒ None");
+    }
+
+    /// [`Promoter::enter_active_empty`] is the one-shot
+    /// `PrefixPending → Active` move: the prior (disarmed) descent slot
+    /// drops without tripping the [`ProbeSlot`] guard, and the result
+    /// is `Active` with empty proxies + an empty enumeration slot.
+    #[test]
+    fn enter_active_empty_transitions_from_disarmed_prefix_pending() {
+        let req = PromoterAttachRequest {
+            name: "logs".into(),
+            pattern_spec: PatternSpec::parse("/var/log/*.log").expect("valid"),
+            identity: ProfileIdentity {
+                config: ScanConfig::builder().recursive(true).build(),
+                max_settle: MAX_SETTLE,
+                events: ClassSet::DEFAULT_SUBTREE_ROOT,
+            },
+            settle: SETTLE,
+            program: program(),
+            scope: EffectScope::SubtreeRoot,
+            log_output: false,
+        };
+        let mut p = Promoter::from_request(
+            req,
+            PromoterState::PrefixPending(DescentState::new(
+                ResourceId::default(),
+                DescentRemaining::from_vec(vec![CompactString::from("var")]).expect("non-empty"),
+                ProbeSlot::empty(), // disarmed ⇒ Drop guard stays silent
+            )),
+        );
+        assert!(p.state().descent_state().is_some());
+        p.enter_active_empty();
+        match p.state() {
+            PromoterState::Active {
+                proxies,
+                enumerating,
+            } => {
+                assert!(proxies.is_empty());
+                assert!(enumerating.correlation().is_none());
+            }
+            PromoterState::PrefixPending(_) => panic!("expected Active after transition"),
+        }
     }
 
     /// `PromoterState::descent_state` borrows the descent in

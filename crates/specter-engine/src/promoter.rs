@@ -64,9 +64,9 @@ use std::time::Instant;
 /// Threshold beyond which the engine emits a one-shot
 /// [`Diagnostic::PromoterFanoutThreshold`] for a Promoter. Operator
 /// signal that the pattern is matching more targets than typical —
-/// likely a too-broad pattern. The latch on
-/// `Promoter.warned_at_threshold` suppresses repeats so a steady-state
-/// busy Promoter only warns once per lifetime.
+/// likely a too-broad pattern. `Promoter::latch_fanout_warning`
+/// check-and-latches atomically, so a steady-state busy Promoter only
+/// warns once per lifetime by construction.
 pub(crate) const FANOUT_WARNING_THRESHOLD: usize = 1000;
 
 impl Engine {
@@ -125,24 +125,16 @@ impl Engine {
             },
         }
 
-        // Destructure once: every field moves to exactly one consumer.
-        // `name` moves into `Promoter.name`; the lifecycle diagnostic
-        // takes a single inline `CompactString` clone (`diag_name`)
-        // since the registry owns the original — the one irreducible
-        // copy on the Promoter attach path.
-        let PromoterAttachRequest {
-            name,
-            pattern_spec,
-            identity,
-            settle,
-            program,
-            scope,
-            log_output,
-        } = req;
+        // `req` stays intact until construction: `Promoter::from_request`
+        // is its single consumer (every field moves there once). The
+        // pattern spec is borrowed twice pre-insert (prefix render +
+        // literal length); the lifecycle diagnostic takes the one
+        // irreducible inline `CompactString` clone since the registry
+        // owns the original.
 
         // 1. Render the literal prefix. components[0..literal_prefix_len]
         // are all Literal post-parse; the loop is a fold.
-        let prefix_path = render_literal_prefix(&pattern_spec);
+        let prefix_path = render_literal_prefix(&req.pattern_spec);
 
         // 2. Parse. Defense-in-depth: PatternSpec::parse should have
         // rejected anything Tree::parse_attach_path would reject. On
@@ -165,7 +157,7 @@ impl Engine {
 
         // 4. Capture the literal_prefix_len; first proxy at materialisation
         // carries this index in `pattern.components`.
-        let lpl = pattern_spec.literal_prefix_len();
+        let lpl = req.pattern_spec.literal_prefix_len();
 
         // 5. Construct the initial state directly. No placeholder. A
         // pending descent mints its correlation *here* so the slot is
@@ -201,28 +193,15 @@ impl Engine {
         };
 
         // 6. Mint the Promoter with the final state. The slotmap key
-        // is the identity authority — no id is embedded. `name`,
-        // `pattern_spec`, and `identity` move in (no clone); the lone
-        // copy is `diag_name` for the narration below. `program`'s Arc
-        // moves in — the hot dispatcher bumps the refcount per
-        // enumeration response to release the registry's read borrow
-        // before the forward pass takes `&mut self`. Cloning the
-        // `PatternSpec` here (rather than moving) would allocate per
-        // `Glob` component on every attach.
-        let diag_name = name.clone();
-        let promoter_id = self.promoters.insert(Promoter {
-            name,
-            pattern: Arc::new(pattern_spec),
-            identity,
-            program,
-            scope,
-            settle,
-            log_output,
-            state: initial_state,
-            pending_enumerations: BTreeSet::new(),
-            dynamic_subs: BTreeMap::new(),
-            warned_at_threshold: false,
-        });
+        // is the identity authority — no id is embedded.
+        // `from_request` moves every spec field in (Arc-wrapping the
+        // pattern so the hot dispatcher can refcount-bump it per
+        // enumeration response) and starts the runtime fields empty;
+        // the lone copy is `diag_name` for the narration below.
+        let diag_name = req.name.clone();
+        let promoter_id = self
+            .promoters
+            .insert(Promoter::from_request(req, initial_state));
 
         // 7. Lifecycle diagnostic — pure operator narration, emitted
         // before any operation that could early-return so it is
@@ -333,10 +312,7 @@ impl Engine {
         // key below; the state-flip aligns
         // [`PromoterState`] readers with the post-release shape.
         if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.state = PromoterState::Active {
-                proxies: BTreeMap::new(),
-                enumerating: ProbeSlot::empty(),
-            };
+            q.enter_active_empty();
         }
 
         // 2. Release the prior prefix's STRUCTURE contribution if any.
@@ -395,7 +371,7 @@ impl Engine {
         let already_carries = self
             .promoters
             .get(promoter_id)
-            .is_some_and(|q| match &q.state {
+            .is_some_and(|q| match q.state() {
                 PromoterState::Active { proxies, .. } => proxies.contains_key(&resource),
                 PromoterState::PrefixPending(_) => unreachable!(
                     "register_proxy: state must be Active (promoter = {promoter_id:?}); \
@@ -405,25 +381,13 @@ impl Engine {
             });
 
         if let Some(q) = self.promoters.get_mut(promoter_id) {
-            match &mut q.state {
-                PromoterState::Active { proxies, .. } => {
-                    proxies.insert(
-                        resource,
-                        ProxyState {
-                            pattern_component_index,
-                        },
-                    );
-                }
-                PromoterState::PrefixPending(_) => unreachable!(
-                    "register_proxy: state must be Active (promoter = {promoter_id:?})"
-                ),
-            }
+            q.insert_proxy(resource, pattern_component_index);
             // Only enqueue when NEWLY registered. Re-registration is
             // structurally idempotent — both on the contribution map
             // (`already_carries` skips `add_watch` below) and on the
             // queue (this gate).
             if !already_carries {
-                q.pending_enumerations.insert(resource);
+                q.enqueue_enumeration(resource);
             }
         }
 
@@ -506,7 +470,7 @@ impl Engine {
     ) {
         // BFS-collect every Tree descendant of `r` (inclusive) that
         // carries a back-ref to this Promoter. The lockstep invariant
-        // (`Resource.proxy_promoters` ↔ `Promoter.state.proxies`)
+        // (`Resource.proxy_promoters` ↔ the Promoter's `Active` proxies)
         // means the back-ref is the right-side projection of the join
         // and yields exactly the same set as the prior
         // ancestor-filter approach. A stale `r` (already reaped) is
@@ -706,14 +670,14 @@ impl Engine {
         let target = self
             .promoters
             .get_mut(promoter_id)
-            .and_then(|q| q.pending_enumerations.pop_first());
+            .and_then(Promoter::pop_enumeration);
         let Some(target) = target else {
             return;
         };
 
         let correlation = self.mint_probe_correlation();
         if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.state.arm_enumeration(correlation, target);
+            q.arm_enumeration(correlation, target);
         }
 
         let target_path = self.tree.path_of(target).unwrap_or_else(empty_path);
@@ -749,7 +713,7 @@ impl Engine {
     ) {
         // Look up this proxy's pattern_component_index.
         let proxy_state = self.promoters.get(promoter_id).and_then(|q| {
-            if let PromoterState::Active { proxies, .. } = &q.state {
+            if let PromoterState::Active { proxies, .. } = q.state() {
                 proxies.get(&target).copied()
             } else {
                 None
@@ -1056,7 +1020,7 @@ impl Engine {
         let already_present = self
             .promoters
             .get(promoter_id)
-            .is_some_and(|q| q.dynamic_subs.contains_key(&anchor_resource));
+            .is_some_and(|q| q.dynamic_subs().contains_key(&anchor_resource));
         if already_present {
             return;
         }
@@ -1109,9 +1073,10 @@ impl Engine {
         );
 
         // Dedup map. `anchor_resource: Copy` — no consumption
-        // constraint against the diagnostic move below.
+        // constraint against the diagnostic move below. `promote`
+        // debug-asserts the dedup invariant the gate above upholds.
         if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.dynamic_subs.insert(anchor_resource, sub_id);
+            q.promote(anchor_resource, sub_id);
         }
 
         // Diagnostic. Last use of `promote_path` — move into the
@@ -1122,23 +1087,19 @@ impl Engine {
             kind: kind_from_entry(observed_kind),
         });
 
-        // Fanout warning. One-shot per Promoter lifetime. Single read
-        // of the Promoter — within this `&mut self` step nothing else
-        // can mutate `dynamic_subs.len()` or `warned_at_threshold`
-        // between two reads, so the fused projection makes the
-        // no-races contract locally visible.
-        let crossed = self.promoters.get(promoter_id).and_then(|q| {
-            let count = q.dynamic_subs.len();
-            (count > FANOUT_WARNING_THRESHOLD && !q.warned_at_threshold).then_some(count)
-        });
-        if let Some(count) = crossed {
+        // Fan-out warning — one-shot per Promoter lifetime. The
+        // check-and-latch is atomic inside `latch_fanout_warning`, so
+        // "warn once" is structural rather than a two-read window the
+        // caller must reason about.
+        if let Some(count) = self
+            .promoters
+            .get_mut(promoter_id)
+            .and_then(|q| q.latch_fanout_warning(FANOUT_WARNING_THRESHOLD))
+        {
             out.diagnostics.push(Diagnostic::PromoterFanoutThreshold {
                 promoter: promoter_id,
                 count,
             });
-            if let Some(q) = self.promoters.get_mut(promoter_id) {
-                q.warned_at_threshold = true;
-            }
         }
     }
 
@@ -1163,7 +1124,7 @@ impl Engine {
         let has_proxy = self
             .promoters
             .get(promoter_id)
-            .is_some_and(|q| match &q.state {
+            .is_some_and(|q| match q.state() {
                 PromoterState::Active { proxies, .. } => proxies.contains_key(&resource),
                 PromoterState::PrefixPending(_) => false,
             });
@@ -1175,10 +1136,10 @@ impl Engine {
             return;
         }
 
-        // Enqueue. BTreeSet::insert is idempotent — concurrent
+        // Enqueue. The queue is `BTreeSet`-idempotent — concurrent
         // events at the same proxy collapse to one enumeration.
         if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.pending_enumerations.insert(resource);
+            q.enqueue_enumeration(resource);
         }
         self.dispatch_next_enumeration(promoter_id, out);
     }
@@ -1187,11 +1148,12 @@ impl Engine {
     /// Sub's anchor disappeared, and the all-dynamic teardown branch of
     /// [`Engine::on_anchor_terminal_event`] is unwinding the Profile).
     ///
-    /// Removes the `(anchor_resource → sub_id)` entry from
-    /// `Promoter.dynamic_subs` and emits
-    /// [`Diagnostic::DynamicSubReaped`]. This is one of three documented
-    /// mutators of `dynamic_subs` (alongside [`Self::try_promote`] for
-    /// inserts and [`Self::reap_promoter_inner`] for full drains).
+    /// Removes the `(anchor_resource → sub_id)` entry via the sealed
+    /// `Promoter::forget_dynamic_sub` and emits
+    /// [`Diagnostic::DynamicSubReaped`]. The dedup map's mutators are
+    /// structurally the only three (`promote` insert here,
+    /// `forget_dynamic_sub` anchor-terminal remove,
+    /// `drain_dynamic_subs` on [`Self::reap_promoter_inner`]).
     ///
     /// `anchor_resource` is the dedup-map key — by construction, the
     /// same `Profile.resource` `try_promote` stamped into the map.
@@ -1220,7 +1182,7 @@ impl Engine {
         let removed = self
             .promoters
             .get_mut(promoter_id)
-            .and_then(|q| q.dynamic_subs.remove(&anchor_resource));
+            .and_then(|q| q.forget_dynamic_sub(anchor_resource));
         if let Some(stored_sub_id) = removed {
             debug_assert_eq!(
                 stored_sub_id, sub_id,
@@ -1314,19 +1276,17 @@ impl Engine {
         // `reap_profile`'s structural enforcement.
         self.cancel_owner_probe(ProbeOwner::Promoter(promoter_id), out);
 
-        // 2. Detach every dynamic Sub. Pre-clear `dynamic_subs` so
-        // cascading paths observe an empty map; then iterate the
-        // captured Sub ids and route each through `detach_sub_inner`
-        // (which decrements profile refcount and reaps the underlying
-        // Profile when the dynamic Sub was its last attachment).
+        // 2. Detach every dynamic Sub. `drain_dynamic_subs` atomically
+        // empties the map (cascading paths observe no entries) and
+        // hands back the captured Sub ids; route each through
+        // `detach_sub_inner` (which decrements profile refcount and
+        // reaps the underlying Profile when the dynamic Sub was its
+        // last attachment).
         let sub_ids: Vec<SubId> = self
             .promoters
-            .get(promoter_id)
-            .map(|q| q.dynamic_subs.values().copied().collect())
+            .get_mut(promoter_id)
+            .map(Promoter::drain_dynamic_subs)
             .unwrap_or_default();
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.dynamic_subs.clear();
-        }
         for sub_id in sub_ids {
             self.detach_sub_inner(sub_id, out);
         }
@@ -1358,7 +1318,7 @@ impl Engine {
         let proxy_list: Vec<ResourceId> = self
             .promoters
             .get(promoter_id)
-            .map(|q| match &q.state {
+            .map(|q| match q.state() {
                 PromoterState::Active { proxies, .. } => proxies.keys().copied().collect(),
                 PromoterState::PrefixPending(_) => Vec::new(),
             })

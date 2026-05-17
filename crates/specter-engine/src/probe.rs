@@ -37,8 +37,8 @@
 use crate::Engine;
 use specter_core::{
     ActiveBurst, BurstIntent, DirSnapshot, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOp,
-    ProbeOwner, ProbeRequest, Profile, ProfileState, PromoterState, ResourceId, ScanConfig,
-    StepOutput,
+    ProbeOwner, ProbeRequest, Profile, ProfileState, Promoter, PromoterState, ResourceId,
+    ScanConfig, StepOutput,
 };
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -140,7 +140,7 @@ impl Engine {
             ProbeOwner::Promoter(qid) => self
                 .promoters
                 .get(qid)
-                .and_then(|q| q.state.probe_correlation()),
+                .and_then(|q| q.state().probe_correlation()),
         }
     }
 
@@ -175,7 +175,7 @@ impl Engine {
                 },
                 ProfileState::Idle => None,
             },
-            ProbeOwner::Promoter(qid) => match &self.promoters.get(qid)?.state {
+            ProbeOwner::Promoter(qid) => match self.promoters.get(qid)?.state() {
                 PromoterState::PrefixPending(_) => Some(ProbeRoute::Descent),
                 PromoterState::Active { enumerating, .. } => enumerating
                     .tag()
@@ -204,10 +204,7 @@ impl Engine {
     pub(crate) fn take_owner_probe(&mut self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
         match owner {
             ProbeOwner::Profile(pid) => self.profiles.get_mut(pid).and_then(Profile::take_probe),
-            ProbeOwner::Promoter(qid) => self
-                .promoters
-                .get_mut(qid)
-                .and_then(|q| q.state.take_probe()),
+            ProbeOwner::Promoter(qid) => self.promoters.get_mut(qid).and_then(Promoter::take_probe),
         }
     }
 
@@ -271,7 +268,7 @@ impl Engine {
                     .map(|_| ProbeOwner::Profile(pid))
             })
             .chain(self.promoters.iter().filter_map(|(qid, q)| {
-                q.state
+                q.state()
                     .probe_correlation()
                     .map(|_| ProbeOwner::Promoter(qid))
             }))

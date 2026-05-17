@@ -950,7 +950,7 @@ impl Engine {
         let mut promoter_proxy_claimers: smallvec::SmallVec<[PromoterId; 2]> =
             smallvec::SmallVec::new();
         for (qid, q) in self.promoters.iter() {
-            match &q.state {
+            match q.state() {
                 PromoterState::PrefixPending(d) if d.current_prefix() == resource => {
                     promoter_descent_claimers.push(qid);
                 }
@@ -1047,7 +1047,7 @@ impl Engine {
             let target_matches = self
                 .promoters
                 .get(qid)
-                .and_then(|q| q.state.enumeration_target())
+                .and_then(|q| q.state().enumeration_target())
                 == Some(resource);
             if target_matches {
                 self.cancel_owner_probe(ProbeOwner::Promoter(qid), out);
@@ -1222,7 +1222,7 @@ impl Engine {
             let probe_in_flight = self.pending_probe_for(qowner).is_some();
             let action = match self.promoters.get(qid) {
                 None => continue,
-                Some(q) => match &q.state {
+                Some(q) => match q.state() {
                     PromoterState::PrefixPending(d) if !probe_in_flight => {
                         PromoterReseedAction::DescentProbe(d.current_prefix())
                     }
@@ -1251,7 +1251,7 @@ impl Engine {
                     // each response. Empty proxies vec is a no-op.
                     if let Some(qmut) = self.promoters.get_mut(qid) {
                         for r in proxy_keys {
-                            qmut.pending_enumerations.insert(r);
+                            qmut.enqueue_enumeration(r);
                         }
                     }
                     self.dispatch_next_enumeration(qid, out);
@@ -1298,7 +1298,7 @@ impl Engine {
     fn promoters_in_subtree(&self, r: ResourceId) -> smallvec::SmallVec<[PromoterId; 4]> {
         self.promoters
             .iter()
-            .filter(|(_, q)| match &q.state {
+            .filter(|(_, q)| match q.state() {
                 PromoterState::PrefixPending(d) => {
                     d.current_prefix() == r
                         || self.tree.ancestors(d.current_prefix()).any(|a| a == r)
@@ -2516,7 +2516,7 @@ impl Engine {
             }
         }
         for (qid, q) in self.promoters.iter() {
-            if let specter_core::PromoterState::PrefixPending(d) = &q.state
+            if let specter_core::PromoterState::PrefixPending(d) = q.state()
                 && d.current_prefix() == resource
             {
                 out.descents.push(ProbeOwner::Promoter(qid));

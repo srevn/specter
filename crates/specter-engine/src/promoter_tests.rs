@@ -32,9 +32,9 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, PatternSpec,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, PromoterAttachRequest,
-    PromoterId, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
-    SubAttachRequest, SubId, SubParams,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, Promoter,
+    PromoterAttachRequest, PromoterId, PromoterState, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -123,14 +123,14 @@ fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf>
 fn pending_enumerations(e: &Engine, pid: PromoterId) -> Vec<ResourceId> {
     e.promoters
         .get(pid)
-        .map(|q| q.pending_enumerations.iter().copied().collect())
+        .map(|q| q.pending_enumerations().iter().copied().collect())
         .unwrap_or_default()
 }
 
 /// Read the `Active { proxies }` map from a Promoter (panicking if the
 /// state is `PrefixPending`).
 fn active_proxies(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, specter_core::ProxyState> {
-    match e.promoters.get(pid).map(|q| &q.state) {
+    match e.promoters.get(pid).map(Promoter::state) {
         Some(PromoterState::Active { proxies, .. }) => proxies.clone(),
         s => panic!("expected Active state, got {s:?}"),
     }
@@ -214,8 +214,8 @@ fn attach_pending_when_literal_prefix_missing() {
     // State: PrefixPending(d). d.current_prefix() == FS-root slot;
     // remaining_components = ["var", "log"].
     let q = e.promoters.get(pid).expect("promoter registered");
-    let PromoterState::PrefixPending(d) = &q.state else {
-        panic!("expected PrefixPending, got {:?}", q.state);
+    let PromoterState::PrefixPending(d) = q.state() else {
+        panic!("expected PrefixPending, got {:?}", q.state());
     };
     let fs_root = e
         .tree()
@@ -326,7 +326,7 @@ fn enumeration_ok_promotes_final_match() {
         .promoters
         .get(pid)
         .unwrap()
-        .dynamic_subs
+        .dynamic_subs()
         .keys()
         .copied()
         .collect();
@@ -404,7 +404,7 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
     // No promotion: /srv/alpha/site and /srv/beta/site enumerations are
     // queued, not yet probed. dynamic_subs is empty.
     assert!(
-        e.promoters.get(pid).unwrap().dynamic_subs.is_empty(),
+        e.promoters.get(pid).unwrap().dynamic_subs().is_empty(),
         "no promotions at intermediate level",
     );
 
@@ -443,7 +443,7 @@ fn try_promote_is_idempotent_on_repeated_match() {
         }),
         Instant::now(),
     );
-    let dynamic_count_after_cycle_1 = e.promoters.get(pid).unwrap().dynamic_subs.len();
+    let dynamic_count_after_cycle_1 = e.promoters.get(pid).unwrap().dynamic_subs().len();
     assert_eq!(dynamic_count_after_cycle_1, 1);
 
     // Re-trigger enumeration via FsEvent at the proxy. Inject the same
@@ -467,7 +467,7 @@ fn try_promote_is_idempotent_on_repeated_match() {
         Instant::now(),
     );
     assert_eq!(
-        e.promoters.get(pid).unwrap().dynamic_subs.len(),
+        e.promoters.get(pid).unwrap().dynamic_subs().len(),
         1,
         "dedup gate prevents re-promotion of the same path",
     );
@@ -588,7 +588,7 @@ fn descent_vanished_rewinds_to_parent() {
     let corr1 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
     // Sanity: descent is at /var with remaining=["log"].
     let q = e.promoters.get(pid).unwrap();
-    let PromoterState::PrefixPending(d) = &q.state else {
+    let PromoterState::PrefixPending(d) = q.state() else {
         panic!("expected PrefixPending pre-vanish");
     };
     assert_eq!(d.current_prefix(), var, "descent at /var pre-vanish");
@@ -617,7 +617,7 @@ fn descent_vanished_rewinds_to_parent() {
     // with "var" (prepended) and ends with "log" (the original
     // remaining segment).
     let q = e.promoters.get(pid).expect("Promoter still alive");
-    let PromoterState::PrefixPending(d) = &q.state else {
+    let PromoterState::PrefixPending(d) = q.state() else {
         panic!("expected PrefixPending after rewind");
     };
     let fs_root = e.tree().lookup(None, FS_ROOT_SEGMENT).unwrap();
@@ -697,7 +697,7 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
     );
     assert!(
         matches!(
-            e.promoters.get(pid).map(|q| &q.state),
+            e.promoters.get(pid).map(Promoter::state),
             Some(PromoterState::PrefixPending(_)),
         ),
         "still PrefixPending — segment not yet present",
@@ -862,7 +862,7 @@ fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
     );
     assert!(
         matches!(
-            e.promoters.get(pid).map(|q| &q.state),
+            e.promoters.get(pid).map(Promoter::state),
             Some(PromoterState::PrefixPending(_)),
         ),
         "PrefixPending retained after Failed",
@@ -1013,7 +1013,7 @@ fn dispatch_next_enumeration_records_pending_target() {
         .promoters
         .get(pid)
         .expect("promoter alive")
-        .state
+        .state()
         .enumeration_target();
     assert_eq!(
         target,
@@ -1057,7 +1057,7 @@ fn pending_enumeration_target_clears_on_response() {
         e.promoters
             .get(pid)
             .expect("promoter alive")
-            .state
+            .state()
             .enumeration_target()
             .is_none(),
         "enumeration slot disarmed after response",
@@ -1085,7 +1085,7 @@ fn cancel_owner_probe_clears_promoter_enumeration_slot() {
         .promoters
         .get(pid)
         .expect("promoter alive")
-        .state
+        .state()
         .enumeration_target();
     assert_eq!(
         pre_target,
@@ -1100,7 +1100,7 @@ fn cancel_owner_probe_clears_promoter_enumeration_slot() {
         e.promoters
             .get(pid)
             .expect("promoter alive")
-            .state
+            .state()
             .enumeration_target()
             .is_none(),
         "enumeration slot disarmed by cancel_owner_probe",
@@ -1183,7 +1183,7 @@ fn enumeration_vanished_unregisters_proxy_and_emits_diagnostic() {
     // `try_reap` collects it; we only assert the Promoter-side
     // invariant (back-ref absent, proxies map empty).
     let q = e.promoters.get(pid).expect("promoter alive");
-    let proxies = match &q.state {
+    let proxies = match q.state() {
         PromoterState::Active { proxies, .. } => proxies,
         PromoterState::PrefixPending(_) => panic!("expected Active, got PrefixPending"),
     };
@@ -1384,7 +1384,7 @@ fn reap_promoter_prefix_pending_releases_prefix() {
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     let fs_root = e.tree().lookup(None, FS_ROOT_SEGMENT).unwrap();
     assert!(matches!(
-        e.promoters.get(pid).unwrap().state,
+        e.promoters.get(pid).unwrap().state(),
         PromoterState::PrefixPending(_),
     ));
     assert_eq!(
@@ -1442,13 +1442,13 @@ fn reap_promoter_drains_dynamic_subs() {
         }),
         Instant::now(),
     );
-    let dynamic_count_after_promotion = e.promoters.get(pid).unwrap().dynamic_subs.len();
+    let dynamic_count_after_promotion = e.promoters.get(pid).unwrap().dynamic_subs().len();
     assert_eq!(dynamic_count_after_promotion, 1, "dynamic Sub minted");
     let sub_id = *e
         .promoters
         .get(pid)
         .unwrap()
-        .dynamic_subs
+        .dynamic_subs()
         .values()
         .next()
         .unwrap();
@@ -1572,7 +1572,7 @@ fn promote_one(
         Instant::now(),
     );
     let q = e.promoters.get(pid).expect("promoter alive");
-    let sid = *q.dynamic_subs.values().next().expect("Sub minted");
+    let sid = *q.dynamic_subs().values().next().expect("Sub minted");
     (pid, sid, anchor_resource)
 }
 
@@ -1585,7 +1585,7 @@ fn anchor_terminal_all_dynamic_reaps_profile_and_notifies_promoter() {
     let mut e = Engine::new();
     let (pid, sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
     assert_eq!(
-        e.promoters.get(pid).unwrap().dynamic_subs.len(),
+        e.promoters.get(pid).unwrap().dynamic_subs().len(),
         1,
         "exactly one dynamic Sub minted",
     );
@@ -1628,7 +1628,7 @@ fn anchor_terminal_all_dynamic_reaps_profile_and_notifies_promoter() {
         "dynamic Sub removed from registry"
     );
     assert!(
-        e.promoters.get(pid).unwrap().dynamic_subs.is_empty(),
+        e.promoters.get(pid).unwrap().dynamic_subs().is_empty(),
         "dynamic_subs entry dropped",
     );
 }
@@ -1701,7 +1701,7 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
     );
     assert!(e.subs().get(dyn_sid).is_some(), "dynamic Sub retained");
     assert_eq!(
-        e.promoters.get(pid).unwrap().dynamic_subs.len(),
+        e.promoters.get(pid).unwrap().dynamic_subs().len(),
         1,
         "Promoter.dynamic_subs entry retained",
     );

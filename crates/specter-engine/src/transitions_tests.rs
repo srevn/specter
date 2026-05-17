@@ -26,8 +26,8 @@ use specter_core::{
     EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FiredKey, FsEvent, FsIdentity, Input,
     LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
     PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProbeSlot,
-    ProfileIdentity, ProfileState, PromoterAttachRequest, PromoterRegistryDiff, PromoterState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
+    ProfileIdentity, ProfileState, Promoter, PromoterAttachRequest, PromoterRegistryDiff,
+    PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
     SubAttachRequest, SubId, SubParams, Termination, TimerKind, TreeSnapshot, WatchOp,
     WatchRegistryDiff,
 };
@@ -3386,7 +3386,7 @@ fn config_diff_promoter_modify_during_prefix_pending() {
     let old_pid = specter_core::testkit::first_attached_promoter(&attach_out)
         .expect("attach_promoter succeeded");
     assert!(matches!(
-        e.promoters.get(old_pid).map(|q| &q.state),
+        e.promoters.get(old_pid).map(Promoter::state),
         Some(PromoterState::PrefixPending(_)),
     ));
     // Descent probe was emitted.

@@ -46,8 +46,7 @@
 
 use crate::Engine;
 use crate::refcounts::sub_watch_then_try_reap;
-use specter_core::{ContribKey, ProbeSlot, PromoterId, PromoterState, ResourceId, StepOutput};
-use std::collections::BTreeMap;
+use specter_core::{ContribKey, PromoterId, PromoterState, ResourceId, StepOutput};
 
 impl Engine {
     /// Release the Promoter's literal-prefix
@@ -78,7 +77,7 @@ impl Engine {
         qid: PromoterId,
         out: &mut StepOutput,
     ) {
-        let Some(prefix) = self.promoters.get(qid).and_then(|q| match &q.state {
+        let Some(prefix) = self.promoters.get(qid).and_then(|q| match q.state() {
             PromoterState::PrefixPending(d) => Some(d.current_prefix()),
             PromoterState::Active { .. } => None,
         }) else {
@@ -87,15 +86,12 @@ impl Engine {
 
         // State flip is owner-bookkeeping: the contribution map's
         // [`ContribKey::PromoterPrefix`] key is removed below by
-        // explicit key, independent of state. The cancel-first contract
-        // is enforced here: this flip drops the prior
-        // `PrefixPending(DescentState)`; an armed descent slot trips
-        // `ProbeSlot`'s Drop tripwire.
+        // explicit key, independent of state. `enter_active_empty`
+        // drops the prior `PrefixPending(DescentState)`; an armed
+        // descent slot trips `ProbeSlot`'s Drop tripwire — the
+        // cancel-first contract is structural at that one transition.
         if let Some(q) = self.promoters.get_mut(qid) {
-            q.state = PromoterState::Active {
-                proxies: BTreeMap::new(),
-                enumerating: ProbeSlot::empty(),
-            };
+            q.enter_active_empty();
         }
 
         sub_watch_then_try_reap(&mut self.tree, prefix, ContribKey::PromoterPrefix(qid), out);
@@ -130,7 +126,7 @@ impl Engine {
         resource: ResourceId,
         out: &mut StepOutput,
     ) {
-        let active_with_proxy = self.promoters.get(qid).is_some_and(|q| match &q.state {
+        let active_with_proxy = self.promoters.get(qid).is_some_and(|q| match q.state() {
             PromoterState::Active { proxies, .. } => proxies.contains_key(&resource),
             PromoterState::PrefixPending(_) => false,
         });
@@ -141,7 +137,7 @@ impl Engine {
         debug_assert!(
             self.promoters
                 .get(qid)
-                .and_then(|q| q.state.enumeration_target())
+                .and_then(|q| q.state().enumeration_target())
                 != Some(resource),
             "release_promoter_proxy_claim: in-flight enumeration targets this proxy; \
              caller must invoke cancel_owner_probe before release \
@@ -152,10 +148,7 @@ impl Engine {
         // contribution map's [`ContribKey::PromoterProxy`] key is the
         // refcount source of truth and is removed below.
         if let Some(q) = self.promoters.get_mut(qid) {
-            if let PromoterState::Active { proxies, .. } = &mut q.state {
-                proxies.remove(&resource);
-            }
-            q.pending_enumerations.remove(&resource);
+            q.unregister_proxy_slot(resource);
         }
 
         // 2. Clear back-ref before the release+reap helper so the

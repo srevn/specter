@@ -189,7 +189,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
         )),
         "PromoterAttached emitted on attach",
     );
-    match &e.promoters().get(pid).expect("promoter registered").state {
+    match e.promoters().get(pid).expect("promoter registered").state() {
         PromoterState::Active { proxies, .. } => assert!(
             proxies.contains_key(&var_log),
             "proxy registered at the materialised prefix",
@@ -231,8 +231,8 @@ fn full_lifecycle_attach_promote_seed_reap() {
     let dynamic_sub_id = {
         let (anchor_resource, sid) = {
             let q = e.promoters().get(pid).unwrap();
-            assert_eq!(q.dynamic_subs.len(), 1, "one promotion");
-            let (r, s) = q.dynamic_subs.iter().next().unwrap();
+            assert_eq!(q.dynamic_subs().len(), 1, "one promotion");
+            let (r, s) = q.dynamic_subs().iter().next().unwrap();
             (*r, *s)
         };
         let path = e
@@ -482,7 +482,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     let qid = specter_core::testkit::first_attached_promoter(&attach_q_out)
         .expect("attach_promoter succeeded");
     assert!(matches!(
-        e.promoters().get(qid).unwrap().state,
+        e.promoters().get(qid).unwrap().state(),
         PromoterState::PrefixPending(_),
     ));
     let descent_q_corr =
@@ -507,7 +507,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         .tree()
         .lookup(Some(a), "b")
         .expect("/a/b materialised by enter_active");
-    match &e.promoters().get(qid).unwrap().state {
+    match e.promoters().get(qid).unwrap().state() {
         PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&a_b)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
@@ -585,7 +585,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         !unwatch_at_a_b,
         "no Unwatch on /a/b on the descent vanish — Promoter still claims it",
     );
-    match &e.promoters().get(qid).unwrap().state {
+    match e.promoters().get(qid).unwrap().state() {
         PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&a_b)),
         s @ PromoterState::PrefixPending(_) => {
             panic!("Promoter state should remain Active{{proxies}}, got {s:?}")
@@ -614,7 +614,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         unwatch_count, 1,
         "single Unwatch at /a/b on the genuine 1 → 0 edge",
     );
-    match &e.promoters().get(qid).unwrap().state {
+    match e.promoters().get(qid).unwrap().state() {
         PromoterState::Active { proxies, .. } => assert!(!proxies.contains_key(&a_b)),
         s @ PromoterState::PrefixPending(_) => {
             panic!("Promoter state should remain Active, got {s:?}")
@@ -659,7 +659,7 @@ fn two_promoters_sharing_proxy_unwind_independently() {
 
     // Both Promoters should be Active with a proxy at /shared.
     for qid in [q1, q2] {
-        match &e.promoters().get(qid).unwrap().state {
+        match e.promoters().get(qid).unwrap().state() {
             PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&shared)),
             s @ PromoterState::PrefixPending(_) => {
                 panic!("Promoter {qid:?} expected Active at /shared, got {s:?}")
@@ -869,7 +869,7 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
         .expect("attach_promoter succeeded");
     let descent_corr = first_probe_corr(&attach_out).expect("descent probe in flight");
     assert!(matches!(
-        e.promoters().get(qid).unwrap().state,
+        e.promoters().get(qid).unwrap().state(),
         PromoterState::PrefixPending(_),
     ));
 
@@ -891,7 +891,7 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
         "channel closed after Failed response",
     );
     assert!(matches!(
-        e.promoters().get(qid).unwrap().state,
+        e.promoters().get(qid).unwrap().state(),
         PromoterState::PrefixPending(_),
     ));
 
@@ -952,7 +952,7 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
         .pending_probe_for(ProbeOwner::Promoter(qid))
         .expect("descent probe in flight");
     assert!(matches!(
-        e.promoters().get(qid).unwrap().state,
+        e.promoters().get(qid).unwrap().state(),
         PromoterState::PrefixPending(_),
     ));
 
@@ -1051,8 +1051,8 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     // with the `BurstDeadline` timer scheduled.
     let dynamic_sub_id = {
         let q = e.promoters().get(pid).expect("promoter alive");
-        assert_eq!(q.dynamic_subs.len(), 1, "exactly one dynamic Sub minted");
-        *q.dynamic_subs.values().next().unwrap()
+        assert_eq!(q.dynamic_subs().len(), 1, "exactly one dynamic Sub minted");
+        *q.dynamic_subs().values().next().unwrap()
     };
     assert_ne!(
         dynamic_sub_id,

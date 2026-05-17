@@ -136,7 +136,7 @@ impl Engine {
     pub(crate) fn descent_state(&self, owner: ProbeOwner) -> Option<&DescentState> {
         match owner {
             ProbeOwner::Profile(pid) => self.profiles.get(pid)?.state().descent_state(),
-            ProbeOwner::Promoter(pid) => self.promoters.get(pid)?.state.descent_state(),
+            ProbeOwner::Promoter(pid) => self.promoters.get(pid)?.state().descent_state(),
         }
     }
 
@@ -144,7 +144,7 @@ impl Engine {
     pub(crate) fn descent_state_mut(&mut self, owner: ProbeOwner) -> Option<&mut DescentState> {
         match owner {
             ProbeOwner::Profile(pid) => self.profiles.get_mut(pid)?.descent_state_mut(),
-            ProbeOwner::Promoter(pid) => self.promoters.get_mut(pid)?.state.descent_state_mut(),
+            ProbeOwner::Promoter(pid) => self.promoters.get_mut(pid)?.descent_state_mut(),
         }
     }
 

@@ -526,7 +526,7 @@ fn watch_op_rejected_purges_promoter_descent_prefix() {
     let qid = specter_core::testkit::first_attached_promoter(&attach_out)
         .expect("attach_promoter succeeded");
     assert!(matches!(
-        e.promoters().get(qid).unwrap().state,
+        e.promoters().get(qid).unwrap().state(),
         PromoterState::PrefixPending(_),
     ));
     let descent_corr = e
@@ -538,7 +538,7 @@ fn watch_op_rejected_purges_promoter_descent_prefix() {
 
     // Promoter transitioned out of PrefixPending; channel closed.
     assert!(matches!(
-        e.promoters().get(qid).unwrap().state,
+        e.promoters().get(qid).unwrap().state(),
         PromoterState::Active { .. },
     ));
     assert!(e.pending_probe_for(ProbeOwner::Promoter(qid)).is_none());
@@ -594,7 +594,7 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
     let attach_out = e.step(Input::AttachPromoter(promoter_req("logs", "/a/*.log")), now);
     let qid = specter_core::testkit::first_attached_promoter(&attach_out)
         .expect("attach_promoter succeeded");
-    match &e.promoters().get(qid).unwrap().state {
+    match e.promoters().get(qid).unwrap().state() {
         PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active at /a, got {s:?}"),
     }
@@ -621,7 +621,7 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
     let purge_out = e.step(watch_op_rejected_input(a, "/a"), now);
 
     // Proxy unregistered. Counter zeroed by clamp; back-ref cleared.
-    match &e.promoters().get(qid).unwrap().state {
+    match e.promoters().get(qid).unwrap().state() {
         PromoterState::Active { proxies, .. } => assert!(!proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
@@ -667,7 +667,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
     let attach_q_out = e.step(Input::AttachPromoter(promoter_req("logs", "/a/*.log")), now);
     let qid = specter_core::testkit::first_attached_promoter(&attach_q_out)
         .expect("attach_promoter succeeded");
-    match &e.promoters().get(qid).unwrap().state {
+    match e.promoters().get(qid).unwrap().state() {
         PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
@@ -724,7 +724,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
-    match &e.promoters().get(qid).unwrap().state {
+    match e.promoters().get(qid).unwrap().state() {
         PromoterState::Active { proxies, .. } => assert!(!proxies.contains_key(&a)),
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
