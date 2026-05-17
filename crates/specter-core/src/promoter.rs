@@ -255,12 +255,24 @@ pub struct ProxyState {
     pub pattern_component_index: usize,
 }
 
-/// Slotmap-backed registry. Mirrors `ProfileMap`'s shape: a `SlotMap`
-/// keyed on `PromoterId` plus a `BTreeMap<name, PromoterId>` for
-/// configuration-driven lookup at hot-reload time.
+/// Slotmap-backed Promoter registry with a name index.
 ///
-/// `by_name` mirrors the lifetime of the slotmap entry — `insert`
-/// populates both; `remove` clears both. Lookup is O(log N) on names.
+/// Mirrors `ProfileMap`'s shape: a `SlotMap` keyed on `PromoterId`
+/// plus a `BTreeMap<name, PromoterId>` for configuration-driven lookup
+/// at hot-reload time. Every Promoter is operator-named (there is no
+/// synthesised Promoter), so `by_name` indexes all of them — the
+/// asymmetry with [`SubRegistry`](crate::sub::SubRegistry)'s
+/// static-only index.
+///
+/// `by_name` mirrors the slotmap entry's lifetime: `insert` populates
+/// both; `remove` clears both **id-checked** (the entry drops only if
+/// it still points at the removed id). Lookup is O(log N) and is
+/// load-bearing — the engine's hot-reload shim resolves every
+/// `removed`/`modified` Promoter name through [`Self::find_by_name`].
+/// The `insert` `debug_assert!` is the dev/CI duplicate-name signal;
+/// config validation makes a duplicate unreachable in correct
+/// operation, and the id-checked `remove` is the release backstop for
+/// the mapping.
 #[derive(Debug, Default)]
 pub struct PromoterRegistry {
     promoters: SlotMap<PromoterId, Promoter>,
@@ -277,18 +289,32 @@ impl PromoterRegistry {
     /// identity authority (the Promoter carries no `id` field). The
     /// `by_name` index is updated in lockstep. Mirrors
     /// [`SubRegistry::insert`](crate::sub::SubRegistry::insert).
+    ///
+    /// The `debug_assert!` fires on a duplicate name — the dev/CI
+    /// signal only; config validation makes a duplicate unreachable in
+    /// correct operation, and a release-mode breach is contained by
+    /// the id-checked [`Self::remove`].
     pub fn insert(&mut self, promoter: Promoter) -> PromoterId {
         let name = promoter.name.clone();
         let id = self.promoters.insert(promoter);
+        debug_assert!(
+            !self.by_name.contains_key(&name),
+            "duplicate Promoter name escaped config validation: {name:?}",
+        );
         self.by_name.insert(name, id);
         id
     }
 
-    /// Remove a Promoter, returning the owned value. Clears `by_name` in
-    /// lockstep. Returns `None` for a stale id.
+    /// Remove a Promoter, returning the owned value. The `by_name`
+    /// clear is **id-checked** — the entry drops only if it still
+    /// points at `id`, so removing a duplicate-name escape's shadowed
+    /// id (a release-mode diff bug) cannot clobber the live id's
+    /// mapping. Returns `None` for a stale id.
     pub fn remove(&mut self, id: PromoterId) -> Option<Promoter> {
         let p = self.promoters.remove(id)?;
-        self.by_name.remove(&p.name);
+        if self.by_name.get(&p.name) == Some(&id) {
+            self.by_name.remove(&p.name);
+        }
         Some(p)
     }
 
@@ -305,10 +331,10 @@ impl PromoterRegistry {
         self.promoters.iter()
     }
 
-    /// O(log N) lookup by user-facing name. Uniqueness is the config
-    /// layer's responsibility (the validator rejects duplicate names
-    /// upstream); `insert` overwrites a same-name entry without
-    /// notification.
+    /// O(log N) lookup by user-facing name. Load-bearing for the
+    /// engine's hot-reload resolution shim. Config validation rejects
+    /// duplicate names upstream and [`Self::insert`] `debug_assert!`s
+    /// the same invariant, so the mapping is 1:1.
     #[must_use]
     pub fn find_by_name(&self, name: &str) -> Option<PromoterId> {
         self.by_name.get(name).copied()

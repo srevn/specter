@@ -351,10 +351,34 @@ impl Sub {
     }
 }
 
+/// Slotmap-backed Sub store with two secondary indices.
+///
+/// - `by_profile` groups Subs by `ProfileId` (insertion order within a
+///   Profile).
+/// - `by_name` resolves an operator-facing watch name to its `SubId`.
+///   **Static Subs only** (`source_promoter.is_none()`): dynamic Subs
+///   carry synthesised `<promoter>@<path>` names the config diff never
+///   references, and indexing them would let a synthesised name alias
+///   an operator watch name. Dynamic Subs are reached id-only via
+///   `Promoter.dynamic_subs`. The index is load-bearing — hot-reload
+///   resolves every `removed`/`modified` name to an id through
+///   [`Self::find_by_name`] (O(log N)).
+///
+/// `by_name` mirrors the slotmap entry's lifetime for static Subs:
+/// [`Self::insert`] populates it, [`Self::remove`] clears it
+/// id-checked. The `insert` `debug_assert!` is the dev/CI signal for a
+/// duplicate static name; the hot-reload diff invariant
+/// (`added = new ∖ old`, where `old` is the applied config and so
+/// equals `by_name`'s contents) makes a duplicate insert unreachable
+/// in correct operation. A release-mode breach is contained by the
+/// id-checked `remove`: the *mapping* stays 1:1; only a hypothetical
+/// orphaned slotmap entry (never the wrong name→id edge) could
+/// survive.
 #[derive(Debug, Default)]
 pub struct SubRegistry {
     subs: SlotMap<SubId, Sub>,
     by_profile: BTreeMap<ProfileId, SmallVec<[SubId; 2]>>,
+    by_name: BTreeMap<CompactString, SubId>,
 }
 
 impl SubRegistry {
@@ -364,15 +388,37 @@ impl SubRegistry {
     }
 
     /// Insert a Sub; the returned slotmap [`SubId`] is its identity
-    /// authority (the Sub carries no `id` field). The `by_profile`
-    /// index is updated in lockstep.
+    /// authority (the Sub carries no `id` field). Both secondary
+    /// indices update in lockstep: `by_profile` always; `by_name` only
+    /// for static Subs (`source_promoter.is_none()` — see the struct
+    /// rustdoc for why dynamic Subs are excluded).
+    ///
+    /// The `debug_assert!` fires on a duplicate static name — the
+    /// dev/CI signal only. The hot-reload diff invariant makes a
+    /// duplicate insert unreachable in correct operation; a
+    /// release-mode breach is contained by the id-checked
+    /// [`Self::remove`] (the mapping stays consistent).
     pub fn insert(&mut self, sub: Sub) -> SubId {
         let profile = sub.profile;
+        let static_name = sub.source_promoter.is_none().then(|| sub.name.clone());
         let id = self.subs.insert(sub);
         self.by_profile.entry(profile).or_default().push(id);
+        if let Some(name) = static_name {
+            debug_assert!(
+                !self.by_name.contains_key(&name),
+                "duplicate static Sub name escaped config validation: {name:?}",
+            );
+            self.by_name.insert(name, id);
+        }
         id
     }
 
+    /// Remove a Sub by id, returning the owned value. Clears both
+    /// secondary indices. The `by_name` clear is **id-checked** — the
+    /// entry drops only if it still points at `id`, so removing a
+    /// duplicate-name escape's shadowed id (a release-mode diff bug)
+    /// cannot clobber the live id's mapping. Returns `None` for a
+    /// stale id.
     pub fn remove(&mut self, id: SubId) -> Option<Sub> {
         let sub = self.subs.remove(id)?;
         if let Some(v) = self.by_profile.get_mut(&sub.profile) {
@@ -380,6 +426,9 @@ impl SubRegistry {
             if v.is_empty() {
                 self.by_profile.remove(&sub.profile);
             }
+        }
+        if sub.source_promoter.is_none() && self.by_name.get(&sub.name) == Some(&id) {
+            self.by_name.remove(&sub.name);
         }
         Some(sub)
     }
@@ -409,22 +458,25 @@ impl SubRegistry {
         self.subs.is_empty()
     }
 
-    /// Linear-scan lookup of a Sub by its user-facing `name`. `O(N_subs)`
-    /// per call; uniqueness is the caller's responsibility (the loader's
-    /// validation rejects duplicates upstream — when two Subs share a
-    /// name the first match in `SlotMap` iteration order wins).
+    /// Resolve a static Sub's user-facing `name` to its [`SubId`] in
+    /// O(log N) via `by_name`. `None` if no static Sub holds `name`
+    /// (dynamic Subs are not indexed — see the struct rustdoc).
+    ///
+    /// Load-bearing: the engine's hot-reload shim resolves every
+    /// `removed`/`modified` name through here. Config validation
+    /// rejects duplicate operator names upstream and [`Self::insert`]
+    /// `debug_assert!`s the same invariant, so the mapping is 1:1 for
+    /// every name the diff can reference.
     #[must_use]
     pub fn find_by_name(&self, name: &str) -> Option<SubId> {
-        self.subs
-            .iter()
-            .find_map(|(id, s)| (s.name == name).then_some(id))
+        self.by_name.get(name).copied()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ActionProgram, EffectScope, Sub, SubParams, SubRegistry};
-    use crate::ids::{ProfileId, SubId};
+    use crate::ids::{ProfileId, PromoterId, SubId};
     use crate::program::{
         ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder, SpawnBody,
     };
@@ -685,34 +737,82 @@ mod tests {
         assert!(reg.find_by_name("build").is_none());
     }
 
+    /// `by_name` indexes static Subs only. A dynamic Sub
+    /// (`source_promoter = Some(_)`) is reachable by id but never via
+    /// `find_by_name`, even when its synthesised name collides with a
+    /// static watch name — structurally preventing a dynamic name from
+    /// aliasing an operator watch.
     #[test]
-    fn find_by_name_resolves_one_of_duplicates() {
+    fn by_name_indexes_static_subs_only() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let a = reg.insert(Sub::from_request(
-            pid,
-            SubParams {
-                name: "shared".to_string(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                source_promoter: None,
-            },
-        ));
-        let b = reg.insert(Sub::from_request(
-            pid,
-            SubParams {
-                name: "shared".to_string(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                source_promoter: None,
-            },
-        ));
-        let found = reg.find_by_name("shared").expect("at least one match");
-        assert!(found == a || found == b, "find returns one of the matches");
+        let mk = |source: Option<PromoterId>| {
+            Sub::from_request(
+                pid,
+                SubParams {
+                    name: "shared".to_string(),
+                    program: anchor_only_program(),
+                    scope: EffectScope::SubtreeRoot,
+                    settle: SETTLE,
+                    log_output: false,
+                    source_promoter: source,
+                },
+            )
+        };
+        let dynamic = reg.insert(mk(Some(PromoterId::default())));
+        assert!(
+            reg.find_by_name("shared").is_none(),
+            "dynamic Sub is not indexed by name",
+        );
+        let static_id = reg.insert(mk(None));
+        assert_eq!(
+            reg.find_by_name("shared"),
+            Some(static_id),
+            "static Sub resolves; the colliding dynamic name stays invisible",
+        );
+        assert!(
+            reg.get(dynamic).is_some(),
+            "dynamic Sub remains reachable by id",
+        );
+    }
+
+    /// `remove` clears `by_name` id-checked: removing the dynamic Sub
+    /// whose name collides with a live static Sub must not drop the
+    /// static mapping (the dynamic side never owned the entry).
+    /// Removing the static Sub then clears it.
+    #[test]
+    fn remove_is_id_checked_against_by_name() {
+        let mut reg = SubRegistry::new();
+        let pid = ProfileId::default();
+        let mk = |source: Option<PromoterId>| {
+            Sub::from_request(
+                pid,
+                SubParams {
+                    name: "x".to_string(),
+                    program: anchor_only_program(),
+                    scope: EffectScope::SubtreeRoot,
+                    settle: SETTLE,
+                    log_output: false,
+                    source_promoter: source,
+                },
+            )
+        };
+        let dynamic = reg.insert(mk(Some(PromoterId::default())));
+        let static_id = reg.insert(mk(None));
+        assert_eq!(reg.find_by_name("x"), Some(static_id));
+
+        reg.remove(dynamic).expect("dynamic removed");
+        assert_eq!(
+            reg.find_by_name("x"),
+            Some(static_id),
+            "removing the dynamic twin leaves the static mapping intact",
+        );
+
+        reg.remove(static_id).expect("static removed");
+        assert!(
+            reg.find_by_name("x").is_none(),
+            "removing the static Sub clears its by_name entry",
+        );
     }
 
     #[test]
