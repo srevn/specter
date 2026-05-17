@@ -40,31 +40,31 @@
 //! makes a stray Cancel on the just-responded path structurally
 //! impossible.
 //!
-//! Probe emission flows through two structural primitives that every
-//! burst-launch helper routes through:
+//! Probe emission flows through two structural primitives:
 //!
 //! - [`pre_fire_target`] — pure function returning the `ResourceId` the
 //!   next pre-fire probe should target. Centralizes the
 //!   `(anchor_kind, intent)` rule (File anchor → anchor; Seed → anchor;
 //!   Standard → LCA of `dirty_resources`). Post-fire rebases target the
 //!   anchor unconditionally and bypass this helper.
-//! - [`Engine::emit_probe_at`] — Engine method that dispatches on
-//!   `Profile.kind` and constructs the probe via the typed helpers in
-//!   `probe` (`emit_anchor_probe` / `emit_subtree_probe`). The
-//!   single site that maps a `(profile_id, target)` pair to a
-//!   `ProbeOp::Probe` op. Unclassified anchors take the Subtree arm —
-//!   the walker returns `Vanished` on kind mismatch and the engine
-//!   recovers via descent.
+//!   `transition_to_verifying` resolves the target through it and writes
+//!   it onto `pre.probe_target` for the choke to read back.
+//! - [`Engine::emit_owner_probe`] (in `probe`) — the single
+//!   owner-polymorphic emission choke. Each burst-launch helper is
+//!   `mint → arm (loud) → emit_owner_probe(owner)`; the choke resolves
+//!   the owner's state once, reads the correlation back off the armed
+//!   slot, kind-dispatches, and drains the force-walk accumulator.
+//!   Unclassified anchors take the Subtree arm — the walker returns
+//!   `Vanished` on kind mismatch and the engine recovers via descent.
 
 use crate::Engine;
-use crate::path::empty_path;
 use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, BurstFinish, BurstHelper, BurstIntent, Diagnostic, FsEvent, LcaIntegritySource,
-    PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOwner, ProbeSlot, Profile,
-    ProfileId, ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind,
-    Tree, TreeSnapshot, subtree_at_dir,
+    PostFirePhase, PreFireBurst, PreFirePhase, ProbeOwner, ProbeSlot, Profile, ProfileId,
+    ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind, Tree,
+    TreeSnapshot,
 };
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -237,44 +237,50 @@ impl Engine {
         );
         let correlation = self.mint_probe_correlation();
 
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.transition_state(ProfileState::Active(
-                ActiveBurst::PreFire(PreFireBurst {
-                    burst_deadline,
-                    phase: PreFirePhase::Verifying(ProbeSlot::armed(correlation, ())),
-                    intent: BurstIntent::Seed,
-                    forced: false,
-                    dirty_resources: BTreeSet::new(),
-                    force_walk_resources: BTreeSet::new(),
-                    // Seed targets the anchor; the field is invariant for the
-                    // Seed burst's pre-fire lifetime (`transition_to_verifying`
-                    // re-runs for Seed only on Draining-reconfirm, which Seed
-                    // bursts never reach because they skip Batching).
-                    probe_target: resource,
-                    suppressed_resources: BTreeSet::new(),
-                    // Seed bursts skip Batching; the field has no consumer
-                    // until a fresh FsEvent during the verify routes through
-                    // `event_drives_batching` and repopulates it.
-                    last_event_time: None,
-                }),
-                // Fresh burst — directive starts at `ReturnToIdle`. Flips
-                // to `Reap` only on mid-burst `mark_active_for_reap`.
-                BurstFinish::ReturnToIdle,
-            ));
-        }
+        // Loud arm. `require_idle` proved the Profile live + Idle, so
+        // `get_mut` resolving `None` here means the state machine broke
+        // between the precondition and the arm — a silent skip would
+        // leave a fresh `Verifying` slot un-constructed while the emit
+        // below still fires (no probe, no diagnostic: a wedge). The
+        // construct-armed slot makes this site structurally safe, but
+        // the loud arm is non-optional at every launch site by one
+        // discipline, not a per-site judgement.
+        let Some(p) = self.profiles.get_mut(profile_id) else {
+            unreachable!(
+                "start_seed_burst: Profile {profile_id:?} vanished between \
+                 require_idle and the construct-armed transition"
+            );
+        };
+        p.transition_state(ProfileState::Active(
+            ActiveBurst::PreFire(PreFireBurst {
+                burst_deadline,
+                phase: PreFirePhase::Verifying(ProbeSlot::armed(correlation, ())),
+                intent: BurstIntent::Seed,
+                forced: false,
+                dirty_resources: BTreeSet::new(),
+                force_walk_resources: BTreeSet::new(),
+                // Seed targets the anchor; the field is invariant for the
+                // Seed burst's pre-fire lifetime (`transition_to_verifying`
+                // re-runs for Seed only on Draining-reconfirm, which Seed
+                // bursts never reach because they skip Batching).
+                probe_target: resource,
+                suppressed_resources: BTreeSet::new(),
+                // Seed bursts skip Batching; the field has no consumer
+                // until a fresh FsEvent during the verify routes through
+                // `event_drives_batching` and repopulates it.
+                last_event_time: None,
+            }),
+            // Fresh burst — directive starts at `ReturnToIdle`. Flips
+            // to `Reap` only on mid-burst `mark_active_for_reap`.
+            BurstFinish::ReturnToIdle,
+        ));
 
         add_suppress(&mut self.tree, resource, out);
-        // Seed bursts always target the anchor; `force_walk` is empty
-        // because no events have been observed yet. An empty `BTreeSet`
-        // allocates no heap storage — passing a reference is cheap.
-        self.emit_probe_at(
-            profile_id,
-            correlation,
-            resource,
-            &BTreeSet::new(),
-            false,
-            out,
-        );
+        // The choke reads the correlation back off the Verifying slot
+        // just constructed, resolves the anchor target off
+        // `pre.probe_target`, and drains the (empty, fresh-Seed)
+        // force-walk accumulator — the caller threads nothing.
+        self.emit_owner_probe(owner, out);
     }
 
     /// Start a Standard burst: schedule settle + `burst_deadline`,
@@ -609,8 +615,8 @@ impl Engine {
     /// single-source mutator for the force-fire flag: once the
     /// max-settle deadline elapses, the next probe emission must bypass
     /// the walker's coarse-mtime skip and deliver freshest data —
-    /// `forced` propagates that through `transition_to_verifying` /
-    /// `emit_probe_at`.
+    /// `forced` lives on the `PreFireBurst` and `emit_owner_probe`
+    /// reads it back off the armed `Verifying` slot at emit time.
     ///
     /// **Field write only — the phase decision stays with the caller.**
     /// `handle_burst_deadline` re-reads the phase after this call to
@@ -661,14 +667,14 @@ impl Engine {
     /// `LCA(dirty)` on the reconfirm matches the LCA computed at the
     /// original Verifying entry up to slot reaping.
     ///
-    /// **Emission.** Probe construction lives in [`Engine::emit_probe_at`].
-    /// `force_walk_resources` (consumed via `mem::take` below) ships as
-    /// the walker's force-walk hint so events the engine knows about
-    /// defeat mtime-skip; `Burst.forced` propagates so the walker
-    /// bypasses mtime-skip on a force-fire (max-settle deadline
-    /// elapsed). New events arriving during `Verifying` accumulate into
-    /// the cleared `force_walk_resources` set and ship on the next
-    /// emission.
+    /// **Emission.** This helper writes the `Verifying` phase + armed
+    /// slot + `probe_target`, then calls [`Engine::emit_owner_probe`] —
+    /// the single choke that reads the correlation back off the slot,
+    /// drains `force_walk_resources` (the walker's force-walk hint, so
+    /// events the engine knows about defeat mtime-skip), and reads
+    /// `forced` (so the walker bypasses mtime-skip on a force-fire).
+    /// New events arriving during `Verifying` accumulate into the
+    /// drained `force_walk_resources` set and ship on the next emission.
     pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToVerifying, out) {
             return;
@@ -702,21 +708,21 @@ impl Engine {
         // effect wait is still in flight — that would orphan the prior
         // correlation; the I5 `debug_assert` below is the loud backstop.
         //
-        // `force_walk_resources` and `suppressed_resources` are
-        // single-use accumulators consumed by this transition;
-        // `mem::take` moves them out and leaves the fields empty (no
-        // follow-up `clear()` required). `dirty_resources` is preserved
-        // — it carries the LCA basis across the whole burst.
-        let (force_set, suppressed_drain, forced) = match self
+        // `suppressed_resources` is a single-use accumulator consumed by
+        // *this transition* — `sub_suppress` below is refcount /
+        // Unsuppress bookkeeping, not probe emission, so it stays here.
+        // `force_walk_resources` and `forced` are consumed by
+        // `emit_owner_probe` (the single probe-emission choke) off the
+        // armed `Verifying` slot it resolves — the transition no longer
+        // drains a copy and threads it through a wide constructor.
+        // `dirty_resources` is preserved — it carries the LCA basis
+        // across the whole burst.
+        let suppressed_drain = match self
             .profiles
             .get_mut(profile_id)
             .and_then(Profile::pre_fire_burst_mut)
         {
-            Some(pre) => (
-                std::mem::take(&mut pre.force_walk_resources),
-                std::mem::take(&mut pre.suppressed_resources),
-                pre.forced,
-            ),
+            Some(pre) => std::mem::take(&mut pre.suppressed_resources),
             None => return,
         };
 
@@ -748,16 +754,27 @@ impl Engine {
         );
         let correlation = self.mint_probe_correlation();
 
-        if let Some(pre) = self
+        // Loud arm. `require_active_pre_fire` proved `Active(PreFire)`,
+        // so `pre_fire_burst_mut` resolving `None` means the state
+        // machine broke between the gate and the arm. Silent skip ⇒ the
+        // emit below reads an un-armed slot and produces no probe and no
+        // diagnostic (a wedge); loud ⇒ a crash. Co-required with the
+        // choke's read-back: read-back stops an orphaned wire, the loud
+        // arm stops the silent wedge — neither subsumes the other.
+        let Some(pre) = self
             .profiles
             .get_mut(profile_id)
             .and_then(Profile::pre_fire_burst_mut)
-        {
-            pre.phase = PreFirePhase::Verifying(ProbeSlot::armed(correlation, ()));
-            pre.probe_target = target;
-        }
+        else {
+            unreachable!(
+                "transition_to_verifying: Profile {profile_id:?} not \
+                 Active(PreFire) after require_active_pre_fire proved it"
+            );
+        };
+        pre.phase = PreFirePhase::Verifying(ProbeSlot::armed(correlation, ()));
+        pre.probe_target = target;
 
-        self.emit_probe_at(profile_id, correlation, target, &force_set, forced, out);
+        self.emit_owner_probe(owner, out);
     }
 
     /// Phase: `Verifying` → `Draining`. Phase swap only — the exit body
@@ -938,27 +955,13 @@ impl Engine {
         if !self.require_active_post_fire(profile_id, BurstHelper::TransitionToRebasing, out) {
             return;
         }
-        // Take absorbed events for the rebase walker's force_walk and
-        // capture the anchor (`target = p.resource`) in one mut-borrow
-        // window. `force_walk_resources` on `PostFireBurst` is the
-        // post-fire accumulator fed by `absorb_event_into_fire_tail`.
-        // `post_fire_burst_mut` projects `post`; the precondition
-        // guaranteed PostFire above.
-        let (force_set, target) = match self.profiles.get_mut(profile_id) {
-            Some(p) => {
-                let target = p.resource;
-                match p.post_fire_burst_mut() {
-                    Some(post) => (std::mem::take(&mut post.force_walk_resources), target),
-                    None => return,
-                }
-            }
-            None => return,
-        };
-
         // Mint, then write the `Rebasing` phase already armed with the
         // correlation. The prior phase is `Awaiting` (no probe slot),
         // so I5 holds by representability; the assert is the loud
-        // dev/CI backstop.
+        // dev/CI backstop. The absorbed-fire-tail `force_walk_resources`
+        // accumulator and the anchor target are no longer captured here
+        // — `emit_owner_probe` drains `PostFireBurst.force_walk_resources`
+        // and resolves the rebase target (the anchor) off state itself.
         let owner = ProbeOwner::Profile(profile_id);
         debug_assert!(
             self.pending_probe_for(owner).is_none(),
@@ -968,18 +971,27 @@ impl Engine {
         );
         let correlation = self.mint_probe_correlation();
 
-        if let Some(post) = self
+        // Loud arm. `require_active_post_fire` proved `Active(PostFire)`,
+        // so `post_fire_burst_mut` resolving `None` means the state
+        // machine broke between the gate and the arm — loud crash, not a
+        // silent no-probe wedge (co-required with the choke's read-back).
+        let Some(post) = self
             .profiles
             .get_mut(profile_id)
             .and_then(Profile::post_fire_burst_mut)
-        {
-            post.phase = PostFirePhase::Rebasing(ProbeSlot::armed(correlation, ()));
-        }
+        else {
+            unreachable!(
+                "transition_to_rebasing: Profile {profile_id:?} not \
+                 Active(PostFire) after require_active_post_fire proved it"
+            );
+        };
+        post.phase = PostFirePhase::Rebasing(ProbeSlot::armed(correlation, ()));
 
-        // `forced = false`: the rebase probe is never forced — that
-        // field is pre-fire-only (a `BurstDeadline` decision) and
-        // doesn't survive the typed move into `PostFireBurst`.
-        self.emit_probe_at(profile_id, correlation, target, &force_set, false, out);
+        // The choke reads the correlation back off the `Rebasing` slot,
+        // targets the anchor (`forced` is pre-fire-only ⇒ `false`), and
+        // drains `PostFireBurst.force_walk_resources` (the absorbed
+        // fire-tail events) itself.
+        self.emit_owner_probe(owner, out);
     }
 
     /// Active → Idle. Single source of `-suppress` and `propagate(-1)`.
@@ -1170,76 +1182,6 @@ impl Engine {
             });
         }
     }
-
-    /// Emit a probe at `target` on behalf of `Profile(profile_id)`. The
-    /// single probe-emit primitive shared by the three burst-launch
-    /// helpers — `start_seed_burst`, `transition_to_verifying`,
-    /// `transition_to_rebasing` — so the kind dispatch lives in exactly
-    /// one place.
-    ///
-    /// Routes on `Profile.kind`:
-    /// - `Some(File)` → [`Engine::emit_anchor_probe`] at `target_path`.
-    /// - `Some(Dir | Unknown) | None` → [`Engine::emit_subtree_probe`]
-    ///   at `(target, target_path)` carrying the Profile's
-    ///   `(config, config_hash)`, `baseline_subtree =
-    ///   p.current.subtree_at(target)`, and `force_walk_paths`
-    ///   pre-filtered to `target`'s subtree.
-    ///
-    /// Callers pass only the structural inputs they own: the
-    /// just-minted `correlation`, the resolved `target`, the
-    /// pre-/post-fire `force_walk_resources` accumulator, and `forced`.
-    /// The helper derives `target_path`, `baseline_subtree`,
-    /// `force_walk_paths`, and the Profile's `scan_config` /
-    /// `config_hash` directly from `(profile_id, target)` — avoiding a
-    /// per-call-site preamble that repeated the same Profile borrow.
-    ///
-    /// Defensive early-return on a stale `profile_id` matches the
-    /// surrounding lifecycle helpers' silent-no-op policy: a Profile
-    /// reaped between mint and emit yields nothing rather than emitting
-    /// a probe against a nonexistent owner. In production every caller
-    /// has already validated the Profile under one of the lifecycle
-    /// helpers' guards.
-    fn emit_probe_at(
-        &self,
-        profile_id: ProfileId,
-        correlation: ProbeCorrelation,
-        target: ResourceId,
-        force_walk_resources: &BTreeSet<ResourceId>,
-        forced: bool,
-        out: &mut StepOutput,
-    ) {
-        let Some(p) = self.profiles.get(profile_id) else {
-            return;
-        };
-        let owner = ProbeOwner::Profile(profile_id);
-        let target_path = self.tree.path_of(target).unwrap_or_else(empty_path);
-        match p.kind() {
-            Some(ResourceKind::File) => {
-                Self::emit_anchor_probe(owner, correlation, target_path, out);
-            }
-            // Not File-classified (Dir or still Unclassified) ⇒ the
-            // kind-agnostic Subtree probe. `kind()` projects the anchor
-            // sum, so it is only ever None / Some(File) / Some(Dir); the
-            // wildcard is the honest "everything that isn't File" arm.
-            _ => {
-                let baseline_subtree = p
-                    .current_dir()
-                    .and_then(|root| subtree_at_dir(root, p.resource, target, &self.tree));
-                let force_walk_paths = build_force_walk(force_walk_resources, target, &self.tree);
-                Self::emit_subtree_probe(
-                    owner,
-                    correlation,
-                    target_path,
-                    p.config().clone(),
-                    p.config_hash(),
-                    baseline_subtree,
-                    force_walk_paths,
-                    forced,
-                    out,
-                );
-            }
-        }
-    }
 }
 
 // `TreeSnapshot` reachable for downstream consumers via the burst module
@@ -1254,11 +1196,12 @@ const _: fn() = || {
 ///
 /// **Caller contract.** This helper is intended for Dir-anchored Profiles
 /// only. File-anchored Profiles probe the anchor itself unconditionally
-/// (kqueue per-file FDs surface events at the file directly); the
-/// [`pre_fire_target`] / [`Engine::emit_probe_at`] pair routes File
-/// anchors to [`Engine::emit_anchor_probe`] without consulting this
-/// helper, so a File-anchored Profile never reaches `lca_target` in
-/// production. The `live.contains(&anchor)` short-circuit below remains
+/// (kqueue per-file FDs surface events at the file directly):
+/// [`pre_fire_target`] returns the anchor for a File kind and
+/// [`Engine::emit_owner_probe`]'s kind dispatch routes it to a
+/// `ProbeRequest::AnchorFile` without consulting this helper, so a
+/// File-anchored Profile never reaches `lca_target` in production.
+/// The `live.contains(&anchor)` short-circuit below remains
 /// valid for the Dir-anchor case where the anchor itself is the event
 /// source (e.g., an in-place mtime bump on the anchor directory).
 ///

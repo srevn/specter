@@ -1229,8 +1229,10 @@ impl Engine {
             let action = match self.promoters.get(qid) {
                 None => continue,
                 Some(q) => match q.state() {
-                    PromoterState::PrefixPending(d) if !probe_in_flight => {
-                        PromoterReseedAction::DescentProbe(d.current_prefix())
+                    // Target is no longer carried — `emit_owner_probe`
+                    // reads `current_prefix` back off the descent slot.
+                    PromoterState::PrefixPending(_) if !probe_in_flight => {
+                        PromoterReseedAction::DescentProbe
                     }
                     // PrefixPending with in-flight descent probe: the
                     // probe's response will reflect the post-overflow
@@ -1243,13 +1245,24 @@ impl Engine {
             };
 
             match action {
-                PromoterReseedAction::DescentProbe(prefix) => {
+                PromoterReseedAction::DescentProbe => {
                     let correlation = self.mint_probe_correlation();
-                    if let Some(d) = self.descent_state_mut(qowner) {
-                        d.arm_probe(correlation);
-                    }
-                    let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
-                    Self::emit_descent_probe(qowner, correlation, target_path, out);
+                    // Loud arm — the classification just above proved
+                    // `PrefixPending` under a `promoters.get(qid)` that
+                    // resolved `Some`, and nothing mutated `qid` since,
+                    // so `descent_state_mut` is structurally `Some`. The
+                    // `!probe_in_flight` guard means the slot is empty,
+                    // so `arm_probe`'s empty-slot precondition holds.
+                    let Some(d) = self.descent_state_mut(qowner) else {
+                        unreachable!(
+                            "overflow reseed: Promoter {qid:?} left \
+                             PrefixPending between classification and re-arm"
+                        );
+                    };
+                    d.arm_probe(correlation);
+                    // The choke reads the correlation and the prefix
+                    // target back off the descent slot.
+                    self.emit_owner_probe(qowner, out);
                 }
                 PromoterReseedAction::Enumerate(proxy_keys) => {
                     // Enqueue every proxy. Single-slot drain processes
@@ -2652,15 +2665,17 @@ enum AwaitAction {
 /// rules without re-querying the registry per access.
 ///
 /// Variants:
-/// - `DescentProbe(prefix)`: `PrefixPending` Promoter with no
-///   in-flight descent probe; emit one at `prefix`.
+/// - `DescentProbe`: `PrefixPending` Promoter with no in-flight descent
+///   probe; re-arm and emit. The prefix target is not carried —
+///   `emit_owner_probe` reads `current_prefix` back off the descent
+///   slot, so a stale snapshot cannot diverge from state.
 /// - `Enumerate(proxies)`: `Active` Promoter; enqueue every proxy and
 ///   drain the first into a probe via `dispatch_next_enumeration`.
 /// - `Skip`: `PrefixPending` Promoter with an in-flight descent probe;
 ///   the probe's response will reflect the post-overflow state, so a
 ///   second probe would be redundant.
 enum PromoterReseedAction {
-    DescentProbe(ResourceId),
+    DescentProbe,
     Enumerate(Vec<ResourceId>),
     Skip,
 }

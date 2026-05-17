@@ -8,7 +8,7 @@
 //! The bug surface: after anchor loss, `Profile.kind` was retained
 //! across the lost-recovered cycle. A subsequent `start_seed_burst`
 //! routed by stale `kind`, misrouting `Some(File)` against a
-//! recreated-as-Dir slot through `emit_anchor_probe` and wasting a
+//! recreated-as-Dir slot as a `ProbeRequest::AnchorFile` and wasting a
 //! round-trip. The fix clears `Profile.kind` inside
 //! `discard_anchor_state`; the Subtree fallback in the post-loss
 //! window is the new invariant.
@@ -122,7 +122,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     // kind=None, start_seed_burst routes through the kind-agnostic
     // Subtree arm — recovery in one round-trip via descent regardless
     // of the recreated anchor's shape. Pre-fix the cached `Some(File)`
-    // misrouted through `emit_anchor_probe` and wasted a round-trip.
+    // misrouted as a `ProbeRequest::AnchorFile` and wasted a round-trip.
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
@@ -196,8 +196,8 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
 
     // Find P's freshly emitted Seed probe. With kind=None
     // post-fix, start_seed_burst routes through the Subtree arm;
-    // pre-fix the cached `Some(File)` would have routed through
-    // `emit_anchor_probe` (`ProbeRequest::Anchor`).
+    // pre-fix the cached `Some(File)` would have emitted a
+    // `ProbeRequest::AnchorFile`.
     let p_probe = recovery_out
         .probe_ops
         .iter()

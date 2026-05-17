@@ -506,9 +506,9 @@ pub(crate) fn purge_per_file_fired_subs_for_resources(
 /// observation at `target` (covered-in-this-probe path; treat as not-stable).
 ///
 /// File-anchored Profiles never reach this helper with `target != anchor`:
-/// the burst-launch helpers' kind dispatch (`Engine::emit_probe_at`) routes
-/// File anchors through `emit_anchor_probe` whose response feeds straight
-/// into the leaf's stability comparison without needing this helper at a
+/// `emit_owner_probe`'s kind dispatch routes a File anchor through a
+/// `ProbeRequest::AnchorFile` whose response feeds straight into the
+/// leaf's stability comparison without needing this helper at a
 /// non-anchor target.
 pub(crate) fn current_target_hash(
     profile: &Profile,

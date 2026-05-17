@@ -46,13 +46,12 @@
 
 use crate::Engine;
 use crate::descent::{MaterializeResult, kind_from_entry};
-use crate::path::empty_path;
 use crate::probe::ProbeRoute;
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use compact_str::{CompactString, format_compact};
 use specter_core::{
     ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
-    PatternSpec, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
+    PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
     PromoterAttachRequest, PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole,
     StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Tree,
 };
@@ -112,17 +111,16 @@ impl Engine {
         out: &mut StepOutput,
     ) -> Option<PromoterId> {
         // Structural post-insert token: carried out of step 5's `match`
-        // so the `Pending ⇒ correlation` pairing is type-enforced
-        // rather than re-derived from a surviving `materialize` via
-        // `expect`. Declared at function top (no items-after-statements).
+        // so the post-insert work is type-enforced rather than
+        // re-derived from a surviving `materialize` via `expect`.
+        // `PendingDescent` carries only `prefix` (the `add_watch`
+        // target); the correlation is no longer threaded — the slot is
+        // constructed armed inside the inserted Promoter and
+        // `emit_owner_probe` reads it back off state. Declared at
+        // function top (no items-after-statements).
         enum PostInsert {
-            EnterActive {
-                proxy_resource: ResourceId,
-            },
-            PendingDescent {
-                prefix: ResourceId,
-                correlation: ProbeCorrelation,
-            },
+            EnterActive { proxy_resource: ResourceId },
+            PendingDescent { prefix: ResourceId },
         }
 
         // `req` stays intact until construction: `Promoter::from_request`
@@ -184,10 +182,7 @@ impl Engine {
                         remaining,
                         ProbeSlot::armed(correlation, ()),
                     )),
-                    PostInsert::PendingDescent {
-                        prefix,
-                        correlation,
-                    },
+                    PostInsert::PendingDescent { prefix },
                 )
             }
         };
@@ -229,14 +224,17 @@ impl Engine {
                     out,
                 );
             }
-            PostInsert::PendingDescent {
-                prefix,
-                correlation,
-            } => {
+            PostInsert::PendingDescent { prefix } => {
                 // PrefixPending: install the
-                // [`ContribKey::PromoterPrefix`] STRUCTURE
-                // contribution, then emit the descent probe carrying
-                // the already-armed slot's correlation.
+                // [`ContribKey::PromoterPrefix`] STRUCTURE contribution,
+                // then route through the choke. The descent slot was
+                // *constructed armed* inside the inserted Promoter
+                // (`promoters.insert` is infallible — no fallible arm
+                // guard, so no loud `.expect`; this is the second
+                // construct-armed-then-infallible-write launch site,
+                // the Promoter twin of `start_seed_burst`), so
+                // `emit_owner_probe` reads the correlation and the
+                // prefix target straight back off state.
                 add_watch(
                     &mut self.tree,
                     prefix,
@@ -244,9 +242,7 @@ impl Engine {
                     ClassSet::STRUCTURE,
                     out,
                 );
-                let owner = ProbeOwner::Promoter(promoter_id);
-                let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
-                Self::emit_descent_probe(owner, correlation, target_path, out);
+                self.emit_owner_probe(ProbeOwner::Promoter(promoter_id), out);
             }
         }
 
@@ -683,12 +679,25 @@ impl Engine {
         };
 
         let correlation = self.mint_probe_correlation();
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.arm_enumeration(correlation, target);
-        }
+        // Loud arm — `pop_enumeration` resolved this same Promoter one
+        // statement above, so the re-`get_mut` is structurally `Some`;
+        // a `None` is a state-machine breach, not a benign race. Silent
+        // skip ⇒ no arm, then the choke emits nothing and no diagnostic
+        // (a wedge). (`arm_enumeration`'s own `unreachable!` is the
+        // inner `PrefixPending` guard; this is the registry-resolution
+        // arm.)
+        let Some(q) = self.promoters.get_mut(promoter_id) else {
+            unreachable!(
+                "dispatch_next_enumeration: Promoter {promoter_id:?} \
+                 vanished between pop_enumeration and arm_enumeration"
+            );
+        };
+        q.arm_enumeration(correlation, target);
 
-        let target_path = self.tree.path_of(target).unwrap_or_else(empty_path);
-        Self::emit_descent_probe(owner, correlation, target_path, out);
+        // The choke reads the correlation and the proxy target back off
+        // the `Active` enumeration slot's tag (the path-only wire cannot
+        // echo the `ResourceId`).
+        self.emit_owner_probe(owner, out);
     }
 
     /// Successful enumeration response — the walker enumerated one

@@ -48,7 +48,6 @@
 //!    `StructureChanged` at `current_prefix`. I5: drops the event if a
 //!    probe is already in flight (the descent slot is armed).
 
-use crate::path::empty_path;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
@@ -275,14 +274,23 @@ impl crate::Engine {
         // before the refcount edge so any reader between this point and
         // step 3 sees the Profile's claim shape that the contribution
         // will attribute to (matches `materialize_profile_anchor`'s
-        // sequencing).
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.transition_state(ProfileState::Pending(DescentState::new(
-                prefix,
-                remaining,
-                ProbeSlot::armed(correlation, ()),
-            )));
-        }
+        // sequencing). Loud arm — the entry `debug_assert` proved the
+        // Profile live + Idle, so `get_mut` resolving `None` is a
+        // state-machine breach, not a benign race; a silent skip would
+        // leave the slot un-constructed while the emit below still fires
+        // (no probe, no diagnostic — a wedge).
+        let Some(p) = self.profiles.get_mut(profile_id) else {
+            unreachable!(
+                "enter_pending_descent: Profile {profile_id:?} vanished \
+                 between the Idle precondition and the construct-armed \
+                 Pending transition"
+            );
+        };
+        p.transition_state(ProfileState::Pending(DescentState::new(
+            prefix,
+            remaining,
+            ProbeSlot::armed(correlation, ()),
+        )));
 
         // Step 3: install the prefix's STRUCTURE contribution.
         add_watch(
@@ -293,9 +301,9 @@ impl crate::Engine {
             out,
         );
 
-        // Step 4: emit the descent probe at the prefix.
-        let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
-        Self::emit_descent_probe(owner, correlation, target_path, out);
+        // Step 4: the choke reads the correlation back off the Pending
+        // descent slot and resolves the prefix target off state.
+        self.emit_owner_probe(owner, out);
     }
 
     /// Dispatch a successful descent response. The walker honoured the
@@ -439,23 +447,33 @@ impl crate::Engine {
         out: &mut StepOutput,
     ) {
         let correlation = self.mint_probe_correlation();
-        if let Some(d) = self.descent_state_mut(owner) {
-            d.advance_to(new_prefix);
-            // Non-terminal by caller contract — `dispatch_descent_ok`
-            // routes terminal descents through anchor materialization
-            // before reaching `advance_descent`. The debug_assert
-            // inside `DescentRemaining::advance` pins this for
-            // regression detection.
-            d.remaining_components_mut().advance();
-            d.arm_probe(correlation);
-        }
+        // Loud arm — `dispatch_descent_ok` reaches here only for an owner
+        // the response gate proved in descent (slot disarmed before
+        // routing), so `descent_state_mut` resolving `None` is a
+        // state-machine breach. Silent skip ⇒ no re-arm, no probe, no
+        // diagnostic (a wedge); loud ⇒ crash.
+        let Some(d) = self.descent_state_mut(owner) else {
+            unreachable!(
+                "advance_descent: owner {owner:?} not in descent after \
+                 dispatch_descent_ok proved it"
+            );
+        };
+        d.advance_to(new_prefix);
+        // Non-terminal by caller contract — `dispatch_descent_ok`
+        // routes terminal descents through anchor materialization
+        // before reaching `advance_descent`. The debug_assert
+        // inside `DescentRemaining::advance` pins this for
+        // regression detection.
+        d.remaining_components_mut().advance();
+        d.arm_probe(correlation);
 
         let key = descent_key(owner);
         sub_watch(&mut self.tree, old_prefix, key, out);
         add_watch(&mut self.tree, new_prefix, key, ClassSet::STRUCTURE, out);
 
-        let target_path = self.tree.path_of(new_prefix).unwrap_or_else(empty_path);
-        Self::emit_descent_probe(owner, correlation, target_path, out);
+        // The choke reads the correlation back off the descent slot and
+        // resolves the (just-advanced) prefix target off state.
+        self.emit_owner_probe(owner, out);
     }
 
     /// Owner-polymorphic descent-prefix release. Routes to the per-owner
@@ -648,21 +666,32 @@ impl crate::Engine {
                 // a fresh DescentState — saves both the whole-vec clone
                 // and the per-element CompactString clone.
                 let correlation = self.mint_probe_correlation();
-                if let Some(d) = self.descent_state_mut(owner) {
-                    d.advance_to(parent_id);
-                    if let Some(name) = prefix_name {
-                        d.remaining_components_mut().prepend(name);
-                    }
-                    d.arm_probe(correlation);
+                // Loud arm — `dispatch_descent_vanished` already resolved
+                // `descent_state(owner)` at entry, so this `_mut`
+                // re-projection is structurally `Some`; a `None` is a
+                // state-machine breach, not a benign race. (The inner
+                // `prefix_name` `if let` is a genuine `Option` — the root
+                // prefix has no segment name — and stays a conditional.)
+                let Some(d) = self.descent_state_mut(owner) else {
+                    unreachable!(
+                        "dispatch_descent_vanished: owner {owner:?} not in \
+                         descent after the entry resolution proved it"
+                    );
+                };
+                d.advance_to(parent_id);
+                if let Some(name) = prefix_name {
+                    d.remaining_components_mut().prepend(name);
                 }
+                d.arm_probe(correlation);
 
                 let key = descent_key(owner);
                 sub_watch_then_try_reap(&mut self.tree, prefix, key, out);
 
                 add_watch(&mut self.tree, parent_id, key, ClassSet::STRUCTURE, out);
 
-                let target_path = self.tree.path_of(parent_id).unwrap_or_else(empty_path);
-                Self::emit_descent_probe(owner, correlation, target_path, out);
+                // The choke reads the correlation back off the descent
+                // slot and resolves the (rewound) parent target off state.
+                self.emit_owner_probe(owner, out);
             }
             None => {
                 // Root prefix vanished — no rewind target. Delegate to
@@ -716,17 +745,28 @@ impl crate::Engine {
         if self.pending_probe_for(owner).is_some() {
             return;
         }
-        let prefix = match self.descent_state(owner) {
-            Some(d) => d.current_prefix(),
-            None => return,
-        };
+        // Liveness gate: an `FsEvent` for an owner no longer descending
+        // is a benign post-transition race — nothing to re-probe. The
+        // target is no longer extracted here; the choke reads
+        // `current_prefix` back off the descent slot at emit time.
+        if self.descent_state(owner).is_none() {
+            return;
+        }
 
         let correlation = self.mint_probe_correlation();
-        if let Some(d) = self.descent_state_mut(owner) {
-            d.arm_probe(correlation);
-        }
-        let target_path = self.tree.path_of(prefix).unwrap_or_else(empty_path);
-        Self::emit_descent_probe(owner, correlation, target_path, out);
+        // Loud arm — the `descent_state` gate just above proved the
+        // owner in descent and (no in-flight probe ⇒) nothing mutated
+        // it, so this `_mut` re-projection is structurally `Some`.
+        let Some(d) = self.descent_state_mut(owner) else {
+            unreachable!(
+                "on_descent_event: owner {owner:?} left descent between \
+                 the liveness gate and the re-arm"
+            );
+        };
+        d.arm_probe(correlation);
+        // The choke reads the correlation back off the descent slot and
+        // resolves the prefix target off state.
+        self.emit_owner_probe(owner, out);
     }
 }
 
