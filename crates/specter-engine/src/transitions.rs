@@ -819,9 +819,7 @@ impl Engine {
     /// reads the live registry *after* prior mutations in the same
     /// step — exactly the id the bin mirror used to supply.
     ///
-    /// Parent-edge recompute is **lazy**: each `detach_sub_inner` /
-    /// `attach_sub_inner` calls the appropriate
-    /// `StabilityIndex::recompute_parent_edges_for_*` variant. All ops
+    /// All resulting ops (across every attach / detach in the diff)
     /// merge into a single sorted `StepOutput`.
     pub(crate) fn on_config_diff(
         &mut self,
@@ -1069,9 +1067,8 @@ impl Engine {
     ///   fires-on-drift.
     /// - **`Active(_)`** — abandon the in-flight burst via
     ///   [`Engine::finish_burst_to_idle`] (which cancels any pending
-    ///   probe, decrements the anchor's `suppress_count`, and runs
-    ///   `propagate(-1)` for Standard bursts including its
-    ///   Draining→Verifying ancestor cascade), then start a fresh seed
+    ///   probe, decrements the anchor's `suppress_count`, and runs the
+    ///   Draining-sweep reconfirm cascade), then start a fresh seed
     ///   burst. The Standard burst's accumulated `dirty_resources` are
     ///   discarded — the seed re-baselines against the post-overflow
     ///   tree, which strictly dominates whatever the Standard burst was
@@ -1832,7 +1829,20 @@ impl Engine {
                     _ => p.resource,
                 };
                 let prior_hash = crate::reconcile::current_target_hash(p, target, &self.tree);
-                (target, prior_hash, p.dirty_descendants() == 0)
+                // Fire-gate component: no covered strict-descendant
+                // Profile is still in an Active Standard burst.
+                // Evaluated fresh from the live tree — the derived
+                // replacement for the deleted `dirty_descendants`
+                // refcount. `profile_id` is the ancestor under test;
+                // the strict-subtree walk excludes it as a candidate.
+                // Borrow-safe: `p`, `&self.tree`, `&self.profiles` are
+                // all shared.
+                let dirty_zero = !crate::coverage::has_active_standard_descendant(
+                    &self.tree,
+                    &self.profiles,
+                    profile_id,
+                );
+                (target, prior_hash, dirty_zero)
             }
             None => return,
         };
@@ -1963,14 +1973,17 @@ impl Engine {
     ///
     /// **Post-rebase residual.** Events absorbed during `Rebasing` while
     /// the probe was already in flight have, until this point, no
-    /// consumer. A Standard [`BurstFinish::ReturnToIdle`] burst with a
-    /// non-empty residual restarts a fresh debounced burst over the
-    /// rebased baseline (`restart_burst_from_fire_tail_residual`) so the
-    /// change is not lost. Every other shape finishes to Idle as before:
-    /// an empty residual (idempotent command — the hot path), a zombie
-    /// `Reap` burst (no consumer for a rebased baseline), or a
-    /// Seed-origin burst (its finish must not emit an unbalanced
-    /// `propagate(-1)` — it never took the matching `+1`).
+    /// consumer. A [`BurstFinish::ReturnToIdle`] burst with a non-empty
+    /// residual restarts a fresh debounced burst over the rebased
+    /// baseline (`restart_burst_from_fire_tail_residual`) so the change
+    /// is not lost — **regardless of origin**. A Seed-origin burst
+    /// (Seed drift → fire → rebase) restarts here too: the reconfirm is
+    /// a fresh query, not a per-origin refcount, so there is no balance
+    /// to keep and `into_pre_fire_residual` simply rejoins it to the
+    /// Standard debounce lifecycle (this closes the former
+    /// Seed-residual event-loss). The remaining shapes still finish to
+    /// Idle: an empty residual (idempotent command — the hot path) or a
+    /// zombie `Reap` burst (no consumer for a rebased baseline).
     ///
     /// **No drift check.** Recovery / post-Effect drift detection is
     /// gated on Seed-Ok in v1; Rebasing is a phase of the Standard burst
@@ -2003,10 +2016,9 @@ impl Engine {
         // Restart-vs-finish on the post-rebase residual. Resolved under
         // one read borrow (the bool carries no borrow out); pass 2 takes
         // `&mut self`. Restart iff the fire-tail residual is non-empty
-        // AND the burst returns to Idle AND the origin is Standard — the
-        // last clause is refcount-load-bearing (a Seed origin never
-        // `propagate(+1)`'d, so a Standard-forced restart's finish would
-        // emit an unbalanced `propagate(-1)`; see
+        // AND the burst returns to Idle. Origin-agnostic: the reconfirm
+        // is a fresh query, not a per-origin refcount, so a Seed origin
+        // restarts exactly as a Standard one does (see
         // `PostFireBurst::into_pre_fire_residual`).
         let should_restart = match self
             .profiles
@@ -2014,9 +2026,7 @@ impl Engine {
             .map(specter_core::Profile::state)
         {
             Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => {
-                !post.force_walk_resources.is_empty()
-                    && matches!(finish, BurstFinish::ReturnToIdle)
-                    && matches!(post.intent, BurstIntent::Standard)
+                !post.force_walk_resources.is_empty() && matches!(finish, BurstFinish::ReturnToIdle)
             }
             _ => false,
         };
@@ -2141,7 +2151,7 @@ impl Engine {
     /// [`BurstFinish::Reap`] has no consumer for the rebased baseline
     /// — its Profile is dying. Skip the rebase probe entirely and route
     /// straight through `finish_burst_to_idle`, which runs the
-    /// `propagate(-1) / sub_suppress` drain and then dispatches
+    /// `sub_suppress` / Draining-sweep drain and then dispatches
     /// `reap_profile`. The diagnostic still fires so operators see the
     /// actuator-hang signal; only the wasted rebase round-trip is
     /// elided.

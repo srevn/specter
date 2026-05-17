@@ -1,8 +1,13 @@
 //! Multi-Profile composition end-to-end. Two Profiles co-located on one
-//! Resource share `watch_demand`/`suppress_count` via refcount aggregation;
-//! parent–child Profiles propagate `dirty_descendants` through the
-//! cached `Profile.parent_profile` chain; the `Active(Draining)` exit
-//! row drives the reconfirm probe.
+//! Resource share `watch_demand`/`suppress_count` via refcount
+//! aggregation. The `Draining → Verifying` reconfirm is exercised
+//! through the burst lifecycle: a parent that stabilises while a
+//! covered descendant is mid-Standard-burst enters `Draining`, and the
+//! `finish_burst_to_idle` sweep re-evaluates the fresh
+//! covered-descendant query for every Draining Profile — reconfirming
+//! exactly when no covered descendant remains in an Active Standard
+//! burst, robust under mid-burst topology moves (interpose / reap) and
+//! across a fire-tail residual restart.
 
 #![allow(
     clippy::items_after_statements,
@@ -126,121 +131,17 @@ fn two_profiles_one_resource_share_watch_demand() {
 }
 
 #[test]
-fn parent_child_standard_burst_propagates_dirty_descendants() {
-    // Parent Profile at /src (recursive); child Profile at /src/foo.
-    // only Standard bursts propagate (+1 at start, -1 at end).
-    // Seed bursts establish the baseline and don't count as "dirty" for
-    // ancestors.
-    let mut e = Engine::new();
-    let src = e.tree_mut().ensure_root("src", ResourceRole::User);
-    e.tree_mut().set_kind(src, ResourceKind::Dir);
-    let foo = e
-        .tree_mut()
-        .ensure_child(src, "foo", ResourceRole::User)
-        .expect("test live parent");
-    e.tree_mut().set_kind(foo, ResourceKind::Dir);
-
-    let cfg = ScanConfig::builder().recursive(true).build();
-    let now = Instant::now();
-    let out_p = e.step(
-        Input::AttachSub(SubAttachRequest::for_anchor(
-            "parent".into(),
-            SubAttachAnchor::Resource(src),
-            cfg.clone(),
-            MAX_SETTLE,
-            SETTLE,
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            NO_EVENTS,
-            false,
-        )),
-        now,
-    );
-    let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
-    let pid_parent = e.subs().get(sid_p).unwrap().profile;
-
-    // Drive parent through Seed → Idle.
-    let parent_seed = first_probe_correlation(&out_p).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_parent),
-            correlation: parent_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
-
-    let out_c = e.step(
-        Input::AttachSub(SubAttachRequest::for_anchor(
-            "child".into(),
-            SubAttachAnchor::Resource(foo),
-            cfg,
-            MAX_SETTLE,
-            SETTLE,
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            NO_EVENTS,
-            false,
-        )),
-        now,
-    );
-    let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
-    let pid_child = e.subs().get(sid_c).unwrap().profile;
-    let child_seed = first_probe_correlation(&out_c).unwrap();
-
-    // Parent's dirty_descendants does NOT bump on child's Seed burst.
-    assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
-        0,
-        "Seed bursts don't propagate",
-    );
-
-    // Drive child through Seed → Idle.
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_child),
-            correlation: child_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
-    assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
-        0,
-        "Seed end doesn't propagate either",
-    );
-
-    // Now trigger a Standard burst on the child via FsEvent at /src/foo.
-    let t1 = now + Duration::from_millis(10);
-    e.step(
-        Input::FsEvent {
-            resource: foo,
-            event: FsEvent::Modified,
-        },
-        t1,
-    );
-    // Standard burst on child propagates +1 to parent.
-    assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
-        1,
-        "child Standard burst start bumps parent",
-    );
-}
-
-#[test]
-fn parent_dirty_descendants_held_across_fire_tail_restart() {
-    // The fire-tail residual restart is an in-place typed move: it takes
-    // no propagate edge. The child's `propagate(+1)` (taken at its
-    // Standard burst start) must therefore stay held across the restart
-    // — no finish-then-start flicker on the ancestor counter — and the
-    // single balancing `propagate(-1)` runs only at the restarted
-    // burst's eventual `finish_burst_to_idle`.
-    //
-    // Parent is recursive @ /src with a NO_EVENTS mask: it is the
-    // child's `parent_profile` (covers /src/foo recursively) but never
-    // starts its own burst from a descendant event, so
-    // `parent.dirty_descendants` reflects exactly the child's net
-    // propagate.
+fn parent_stays_gated_across_child_fire_tail_restart() {
+    // Behavioral re-expression of the deleted "ancestor refcount held
+    // across the fire-tail restart". With the refcount gone, the
+    // guarantee is observable as the parent's `Draining` dwell: a parent
+    // that stabilised while a covered child was mid-Standard-burst sits
+    // in `Draining` and must NOT reconfirm while the child cycles
+    // Verifying → Awaiting → Rebasing → (residual restart) → Batching →
+    // Verifying. The child never leaves the Active Standard burst — the
+    // restart is an in-place move, so there is no finish-then-start
+    // flicker — and the parent reconfirms exactly once, at the restarted
+    // burst's single `finish_burst_to_idle`.
     let mut e = Engine::new();
     let src = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(src, ResourceKind::Dir);
@@ -254,19 +155,21 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
         .ensure_child(foo, "bar", ResourceRole::User)
         .expect("test live parent");
     // A File leaf: the restarted burst's LCA of the residual `{bar}`
-    // promotes a leaf to its parent Dir, so the restart re-probes the
+    // promotes the leaf to its parent Dir, so the restart re-probes the
     // anchor `foo` — a deterministic stable + B1-dedup finish.
     e.tree_mut().set_kind(bar, ResourceKind::File);
 
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
-    // The child's view of /src/foo carries `bar` so the engine covers
-    // it as a descendant Dir — an FsEvent there can then absorb. Used
-    // for every child response so all hashes match (stable verdicts +
-    // B1 dedup on the restarted burst).
+    // The child's view of /src/foo carries `bar` so the engine covers it
+    // as a descendant — an FsEvent there can then absorb. Reused for
+    // every child response so all hashes match (stable verdicts + B1
+    // dedup on the restarted burst).
     let child_snap = dir_snap(vec![("bar", EntryKind::File, 9)]);
 
-    // Parent: recursive, NO_EVENTS — ancestor edge only, never bursts.
+    // Parent: recursive @ /src, NO_EVENTS. It covers /src/foo, so a
+    // child mid-Standard-burst gates it; it bursts only from the
+    // explicit FsEvent at its own anchor below.
     let out_p = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
             "parent".into(),
@@ -293,7 +196,7 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
         now,
     );
 
-    // Child: recursive, CONTENT mask so a descendant Modified at
+    // Child: recursive @ /src/foo, CONTENT mask so a Modified at
     // /src/foo/bar reaches the post-fire absorb arm.
     let out_c = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
@@ -320,13 +223,9 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
         }),
         now,
     );
-    assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
-        0,
-        "Seed bursts don't propagate",
-    );
 
-    // Child Standard burst (event at its anchor) → propagate(+1).
+    // Child Standard burst FIRST (so it gates the parent), then the
+    // parent's own Standard burst.
     let t1 = now + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -335,13 +234,15 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
         },
         t1,
     );
-    assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
-        1,
-        "child Standard burst start bumps parent",
+    e.step(
+        Input::FsEvent {
+            resource: src,
+            event: FsEvent::Modified,
+        },
+        t1,
     );
 
-    // Drain to the child's Verifying probe; stable response → Awaiting.
+    // Drain settle timers → both Profiles reach their Verifying probe.
     let t2 = t1 + SETTLE * 2;
     while let Some(entry) = e.pop_expired(t2) {
         e.step(
@@ -353,13 +254,60 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
             t2,
         );
     }
-    let verify_corr = e
+
+    // Parent stabilises while the child is mid-Standard-burst → Draining.
+    let parent_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight");
+    assert!(
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "child gates the parent before the parent stabilises",
+    );
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        t2,
+    );
+
+    // Closures: observe the parent's gate purely from the public surface.
+    let parent_reconfirmed = |out: &StepOutput| {
+        out.probe_ops.iter().any(|op| {
+            matches!(op, ProbeOp::Probe { request }
+                if request.owner() == ProbeOwner::Profile(pid_parent))
+        })
+    };
+    let parent_is_draining = |eng: &Engine| {
+        matches!(
+            eng.profiles().get(pid_parent).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Draining,
+                    ..
+                }),
+                BurstFinish::ReturnToIdle
+            ),
+        )
+    };
+    assert!(
+        parent_is_draining(&e),
+        "parent enters Draining (stable verdict, child still gating)",
+    );
+
+    // Child Verifying stable → fires (Awaiting). No finish, no sweep.
+    let child_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
         .expect("child Verifying probe in flight");
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
-            correlation: verify_corr,
+            correlation: child_corr,
             outcome: ProbeOutcome::SubtreeOk(child_snap.clone()),
         }),
         t2,
@@ -369,14 +317,13 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
         .first()
         .cloned()
         .expect("child fired one Effect at the stable verdict");
-    assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
-        1,
-        "propagate(-1) runs only at burst finish, not at the stable verdict",
+    assert!(
+        !parent_reconfirmed(&stable_out) && parent_is_draining(&e),
+        "parent does not reconfirm at the child's stable verdict",
     );
 
-    // EffectComplete::Ok → child Rebasing.
-    e.step(
+    // EffectComplete → child Rebasing. No finish, no sweep.
+    let rebase_out = e.step(
         Input::EffectComplete {
             sub: sid_c,
             key: child_effect.key(),
@@ -387,26 +334,32 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
     let rebase_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
         .expect("child rebase probe in flight");
+    assert!(
+        !parent_reconfirmed(&rebase_out) && parent_is_draining(&e),
+        "parent does not reconfirm during child Rebasing",
+    );
 
-    // Descendant content edit absorbed while the rebase probe is in
-    // flight — the fire-tail residual.
+    // Descendant edit absorbed while the rebase probe is in flight — the
+    // fire-tail residual.
     let t3 = t2 + Duration::from_millis(5);
-    e.step(
+    let absorb_out = e.step(
         Input::FsEvent {
             resource: bar,
             event: FsEvent::Modified,
         },
         t3,
     );
-    assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
-        1,
-        "still held through Rebasing",
+    assert!(
+        !parent_reconfirmed(&absorb_out) && parent_is_draining(&e),
+        "parent does not reconfirm while the residual is absorbed",
     );
 
-    // Rebase response with a non-empty residual → child restarts.
+    // Rebase response with a non-empty residual → child restarts
+    // in-place. THE key assertion: the child never leaves the Active
+    // Standard burst (no finish-then-start flicker), so the parent must
+    // not reconfirm in this step and stays Draining.
     let t4 = t3 + Duration::from_millis(5);
-    e.step(
+    let restart_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: rebase_corr,
@@ -427,16 +380,24 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
         ),
         "child restarted a fresh debounced burst from the residual",
     );
-    assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
-        1,
-        "propagate(+1) HELD across the restart — the in-place move took \
-         no propagate edge, no finish-then-start flicker",
+    assert!(
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "the restarted burst is still an Active Standard burst (stays counted)",
+    );
+    assert!(
+        !parent_reconfirmed(&restart_out) && parent_is_draining(&e),
+        "parent stays gated across the in-place restart — no flicker",
     );
 
-    // Drive the restarted burst to its finish: Batching → Verifying →
-    // stable (baseline == current, Sub already fired ⇒ B1 dedup, zero
-    // effects) → finish_burst_to_idle → the single propagate(-1).
+    // Drive the restarted burst to its single finish: Batching →
+    // Verifying → stable (baseline == current, Sub already fired ⇒ B1
+    // dedup, zero effects) → finish_burst_to_idle. The sweep runs here
+    // for the first time since the parent entered Draining; the child is
+    // now Idle, so the parent's fresh query is false → reconfirm.
     let t5 = t4 + SETTLE * 2;
     while let Some(entry) = e.pop_expired(t5) {
         e.step(
@@ -451,7 +412,7 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
     let restart_verify_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
         .expect("restarted burst's Verifying probe in flight");
-    e.step(
+    let finish_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: restart_verify_corr,
@@ -466,19 +427,33 @@ fn parent_dirty_descendants_held_across_fire_tail_restart() {
         ),
         "restarted burst dedup-suppressed (baseline == current) and finished",
     );
-    assert_eq!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants(),
-        0,
-        "single balancing propagate(-1) at the restarted burst's finish — \
-         net-zero across start → restart → finish",
+    assert!(
+        parent_reconfirmed(&finish_out),
+        "parent reconfirms exactly once — at the restarted burst's single finish",
     );
+    assert!(
+        matches!(
+            e.profiles().get(pid_parent).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Verifying(_),
+                    ..
+                }),
+                BurstFinish::ReturnToIdle
+            ),
+        ),
+        "parent transitioned Draining → Verifying on the reconfirm",
+    );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
 fn parent_in_draining_reconfirms_after_child_settles() {
-    // Build the topology, get parent into Draining (stable + dirty>0),
-    // then complete the child — propagate(-1) returns parent's id and
-    // the engine emits a reconfirm probe in the same step.
+    // Build the topology, get parent into Draining (stable while a
+    // covered descendant is mid-Standard-burst), then run the child's
+    // full fire cycle to completion — the `finish_burst_to_idle` sweep
+    // re-evaluates the parent's fresh covered-descendant query, finds it
+    // false, and emits the reconfirm probe in the same step.
     let mut e = Engine::new();
     let src = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(src, ResourceKind::Dir);
@@ -542,10 +517,10 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         now,
     );
 
-    // Both Profiles Idle. Trigger child's Standard burst FIRST so it
-    // bumps parent.dirty_descendants to 1 before parent's Standard
+    // Both Profiles Idle. Trigger child's Standard burst FIRST so the
+    // child is in an Active Standard burst before parent's Standard
     // starts; ordering matters because we need parent to enter Draining
-    // (stable + dirty>0).
+    // (stable verdict while a covered descendant still gates it).
     let t1 = now + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -554,7 +529,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         },
         t1,
     );
-    // Now parent.dirty_descendants == 1. Trigger parent's Standard.
+    // The child now gates the parent. Trigger parent's Standard.
     e.step(
         Input::FsEvent {
             resource: src,
@@ -580,8 +555,12 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         .pending_probe_for(ProbeOwner::Profile(pid_parent))
         .expect("Verifying probe in flight");
     assert!(
-        e.profiles().get(pid_parent).unwrap().dirty_descendants() >= 1,
-        "child burst contributes dirty before parent stabilizes",
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "child is mid-Standard-burst — this is what gates the parent into Draining",
     );
 
     // Inject parent's stable response while dirty>0 → Draining.
@@ -605,11 +584,12 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     ));
 
     // Drive child's stable verdict — the post-stable path routes through
-    // Awaiting (effect emitted) → Rebasing (post-fire probe) → Idle.
-    // propagate(-1) runs at finish_burst_to_idle, i.e. at the end of
-    // the *full* fire-cycle, not at the stable verdict. That keeps the
-    // parent from reconfirming while the child's Effect is still
-    // mutating the disk.
+    // Awaiting (effect emitted) → Rebasing (post-fire probe) → Idle. The
+    // sweep only runs at finish_burst_to_idle, i.e. at the end of the
+    // *full* fire-cycle, not at the stable verdict — and the child stays
+    // in an Active Standard burst (post-fire counts) until then. That
+    // keeps the parent from reconfirming while the child's Effect is
+    // still mutating the disk.
     let child_probe_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
         .expect("Verifying probe in flight");
@@ -677,7 +657,8 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     );
 
     // Inject the rebase probe response → child finish_burst_to_idle →
-    // propagate(-1) → parent's reconfirm transition_to_verifying.
+    // the Draining sweep finds the parent's covered-descendant query now
+    // false → parent's reconfirm transition_to_verifying.
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
@@ -708,6 +689,538 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             BurstFinish::ReturnToIdle
         ),
     ));
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+#[test]
+fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
+    // F-CRIT-1 regression. A covered child is mid-Standard-burst; its
+    // Draining ancestor's covering chain is rewritten by a hot-reload
+    // attach that interposes a new covering Profile between them. The
+    // deleted refcount took its `+1` against the *old* chain and its
+    // `-1` against the *new* one — a dev `dirty_descendants underflow`
+    // panic on the interposed Profile, or a release strand of the
+    // ancestor's count `> 0` forever. With the refcount gone and the
+    // exit driven by a fresh sweep query, the topology move is inert:
+    // the ancestor reconfirms when the child finishes, no panic, no
+    // strand.
+    let mut e = Engine::new();
+    let src = e.tree_mut().ensure_root("src", ResourceRole::User);
+    e.tree_mut().set_kind(src, ResourceKind::Dir);
+    let mid = e
+        .tree_mut()
+        .ensure_child(src, "mid", ResourceRole::User)
+        .expect("test live parent");
+    e.tree_mut().set_kind(mid, ResourceKind::Dir);
+    let foo = e
+        .tree_mut()
+        .ensure_child(mid, "foo", ResourceRole::User)
+        .expect("test live parent");
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
+
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let now = Instant::now();
+
+    // Parent @ /src (recursive) — covers /src/mid/foo, no Profile at
+    // /src/mid yet, so the child's covering chain is child → parent.
+    let out_p = e.step(
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "parent".into(),
+            SubAttachAnchor::Resource(src),
+            cfg.clone(),
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
+        now,
+    );
+    let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
+    let pid_parent = e.subs().get(sid_p).unwrap().profile;
+    let parent_seed = first_probe_correlation(&out_p).unwrap();
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_seed,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        now,
+    );
+
+    let out_c = e.step(
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "child".into(),
+            SubAttachAnchor::Resource(foo),
+            cfg.clone(),
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
+        now,
+    );
+    let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
+    let pid_child = e.subs().get(sid_c).unwrap().profile;
+    let child_seed = first_probe_correlation(&out_c).unwrap();
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: child_seed,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        now,
+    );
+
+    // Child Standard burst FIRST (so it gates the parent), then parent's.
+    let t1 = now + Duration::from_millis(10);
+    e.step(
+        Input::FsEvent {
+            resource: foo,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    e.step(
+        Input::FsEvent {
+            resource: src,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+
+    let t2 = t1 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
+    }
+
+    // Parent stabilises while the child gates it → Draining.
+    let parent_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight");
+    assert!(
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "child gates the parent before the parent stabilises",
+    );
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        t2,
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid_parent).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Draining,
+                    ..
+                }),
+                BurstFinish::ReturnToIdle
+            ),
+        ),
+        "parent enters Draining",
+    );
+
+    // HOT-RELOAD INTERPOSE: attach a new covering Profile at /src/mid
+    // while the child is mid-burst and the parent is Draining. This is
+    // the exact mid-burst topology move that desynced the old refcount's
+    // `+1` / `-1` chain walks.
+    let out_m = e.step(
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "mid".into(),
+            SubAttachAnchor::Resource(mid),
+            cfg,
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
+        t2,
+    );
+    let sid_m = specter_core::testkit::first_attached_sub(&out_m).expect("attach_sub succeeded");
+    let pid_mid = e.subs().get(sid_m).unwrap().profile;
+    assert!(
+        !out_m.probe_ops.iter().any(|op| matches!(
+            op,
+            ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_parent)
+        )),
+        "the interpose itself must not reconfirm the parent",
+    );
+    // Interposed Profile is in its own Seed burst — not Standard, so it
+    // does not itself gate the parent.
+    assert!(
+        !e.profiles()
+            .get(pid_mid)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+    );
+
+    // Drive the child through its full fire cycle to completion. No
+    // reconfirm until the child actually finishes.
+    let child_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .expect("child Verifying probe in flight");
+    let stable_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: child_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        t2,
+    );
+    let child_effect = stable_out
+        .effects()
+        .first()
+        .cloned()
+        .expect("child fired one Effect at the stable verdict");
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid_c,
+            key: child_effect.key(),
+            result: specter_core::EffectOutcome::Ok,
+        },
+        t2,
+    );
+    let rebase_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .expect("child rebase probe in flight");
+    let parent_reconfirmed = |out: &StepOutput| {
+        out.probe_ops.iter().any(|op| {
+            matches!(op, ProbeOp::Probe { request }
+                if request.owner() == ProbeOwner::Profile(pid_parent))
+        })
+    };
+    assert!(
+        !parent_reconfirmed(&stable_out) && !parent_reconfirmed(&rebase_out),
+        "parent does not reconfirm until the child's burst finishes",
+    );
+
+    // Child rebase response → child finish_burst_to_idle. The sweep
+    // re-evaluates the parent's fresh query (child now Idle, interposed
+    // Profile only Seed) → false → parent reconfirms. No panic (the old
+    // `dirty_descendants underflow` debug_assert is gone), no strand.
+    let finish_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: rebase_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        t2,
+    );
+    assert!(
+        parent_reconfirmed(&finish_out),
+        "parent reconfirms at the child's finish despite the interposed Profile",
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid_parent).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Verifying(_),
+                    ..
+                }),
+                BurstFinish::ReturnToIdle
+            ),
+        ),
+        "parent is not stranded — it transitioned Draining → Verifying",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+#[test]
+fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
+    // The §3 deeper-layer guard: the Draining-exit trigger is a sweep of
+    // *every* Draining Profile, not a walk of the finishing Profile's
+    // covering chain. `A`(/src, max_depth=1) is gated into Draining by a
+    // deep descendant `P`(/src/mid/foo) *via the intermediate broader*
+    // `B`(/src/mid): A's chain to P is P → B → A. `B` is then reaped
+    // (its Sub detached) while A is still Draining, so P's live chain
+    // collapses to P → (nothing) — A no longer covers `foo` directly
+    // (max_depth=1), so A is unreachable from the finisher. A
+    // chain-coupled trigger would strand A forever; the sweep re-checks
+    // A directly and reconfirms it.
+    //
+    // Event isolation is by the anchor-bypass / class-filter rule, not
+    // by coverage tricks: a `Modified` event is CONTENT-class, and a
+    // NO_EVENTS Profile only bursts from an event at its *own anchor*
+    // (descendant events of an unmatched class are dropped). So the
+    // `foo` event drives only P, and the `src` event only A.
+    let mut e = Engine::new();
+    let src = e.tree_mut().ensure_root("src", ResourceRole::User);
+    e.tree_mut().set_kind(src, ResourceKind::Dir);
+    let mid = e
+        .tree_mut()
+        .ensure_child(src, "mid", ResourceRole::User)
+        .expect("test live parent");
+    e.tree_mut().set_kind(mid, ResourceKind::Dir);
+    let foo = e
+        .tree_mut()
+        .ensure_child(mid, "foo", ResourceRole::User)
+        .expect("test live parent");
+    e.tree_mut().set_kind(foo, ResourceKind::Dir);
+
+    let now = Instant::now();
+    // A covers /src/mid (depth 1) but NOT /src/mid/foo (depth 2): once
+    // the intermediate B is gone, A is off P's chain.
+    let a_cfg = ScanConfig::builder()
+        .recursive(true)
+        .max_depth(Some(1))
+        .build();
+    let unbounded = ScanConfig::builder().recursive(true).build();
+
+    let out_a = e.step(
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "a".into(),
+            SubAttachAnchor::Resource(src),
+            a_cfg,
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
+        now,
+    );
+    let sid_a = specter_core::testkit::first_attached_sub(&out_a).expect("attach_sub succeeded");
+    let pid_a = e.subs().get(sid_a).unwrap().profile;
+    let a_seed = first_probe_correlation(&out_a).unwrap();
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_a),
+            correlation: a_seed,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        now,
+    );
+
+    // B @ /src/mid (recursive): covers /src/mid/foo, so it sits on P's
+    // chain (P → B → A). It never bursts — the only event under it is
+    // the `foo` Modified, a descendant CONTENT event its NO_EVENTS mask
+    // drops — so DetachSub reaps it immediately.
+    let out_b = e.step(
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "b".into(),
+            SubAttachAnchor::Resource(mid),
+            unbounded.clone(),
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
+        now,
+    );
+    let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("attach_sub succeeded");
+    let pid_b = e.subs().get(sid_b).unwrap().profile;
+    let b_seed = first_probe_correlation(&out_b).unwrap();
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_b),
+            correlation: b_seed,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        now,
+    );
+
+    // P @ /src/mid/foo (recursive).
+    let out_pp = e.step(
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "p".into(),
+            SubAttachAnchor::Resource(foo),
+            unbounded,
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
+        now,
+    );
+    let sid_p = specter_core::testkit::first_attached_sub(&out_pp).expect("attach_sub succeeded");
+    let pid_p = e.subs().get(sid_p).unwrap().profile;
+    let p_seed = first_probe_correlation(&out_pp).unwrap();
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_p),
+            correlation: p_seed,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        now,
+    );
+
+    // P's Standard burst from its own anchor `foo` (drives only P), then
+    // A's own Standard burst from its anchor `src`.
+    let t1 = now + Duration::from_millis(10);
+    e.step(
+        Input::FsEvent {
+            resource: foo,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    e.step(
+        Input::FsEvent {
+            resource: src,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    assert!(
+        matches!(e.profiles().get(pid_b).unwrap().state(), ProfileState::Idle),
+        "B stays Idle (the foo event is a descendant CONTENT event its \
+         NO_EVENTS mask drops)",
+    );
+
+    let t2 = t1 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
+    }
+
+    // A stabilises while P gates it through the chain P → B → A → A
+    // enters Draining.
+    let a_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_a))
+        .expect("A Verifying probe in flight");
+    assert!(
+        e.profiles()
+            .get(pid_p)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "P gates A (via the intermediate B) before A stabilises",
+    );
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_a),
+            correlation: a_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        t2,
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid_a).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Draining,
+                    ..
+                }),
+                BurstFinish::ReturnToIdle
+            ),
+        ),
+        "A enters Draining (gated through the intermediate B)",
+    );
+
+    // Reap the intermediate B (Idle ⇒ immediate reap). P's live chain
+    // collapses to P → (nothing): A does not cover `foo` directly
+    // (max_depth=1), so A is OFF the finisher's chain.
+    let detach_out = e.step(Input::DetachSub(sid_b), t2);
+    assert!(
+        e.profiles().get(pid_b).is_none(),
+        "B reaped immediately (it was Idle)",
+    );
+    let a_reconfirmed = |out: &StepOutput| {
+        out.probe_ops.iter().any(|op| {
+            matches!(op, ProbeOp::Probe { request }
+                if request.owner() == ProbeOwner::Profile(pid_a))
+        })
+    };
+    assert!(
+        !a_reconfirmed(&detach_out) && e.profiles().get(pid_a).unwrap().state().is_draining(),
+        "reaping B does not itself reconfirm A — A is still gated by the \
+         still-bursting P, just no longer through a chain that reaches it",
+    );
+
+    // Drive P through its full fire cycle. At P's single
+    // finish_burst_to_idle the sweep re-checks *every* Draining Profile;
+    // A is found and reconfirmed even though P's chain no longer reaches
+    // it. (A chain-coupled trigger would strand A here forever.)
+    let p_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_p))
+        .expect("P Verifying probe in flight");
+    let p_stable = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_p),
+            correlation: p_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        t2,
+    );
+    let p_effect = p_stable
+        .effects()
+        .first()
+        .cloned()
+        .expect("P fired one Effect at the stable verdict");
+    let p_rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid_p,
+            key: p_effect.key(),
+            result: specter_core::EffectOutcome::Ok,
+        },
+        t2,
+    );
+    let p_rebase_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_p))
+        .expect("P rebase probe in flight");
+    assert!(
+        !a_reconfirmed(&p_stable) && !a_reconfirmed(&p_rebase_out),
+        "A does not reconfirm until P's burst actually finishes",
+    );
+    let p_finish = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_p),
+            correlation: p_rebase_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        t2,
+    );
+    assert!(
+        a_reconfirmed(&p_finish),
+        "the sweep reconfirms A even though P's chain no longer reaches it",
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid_a).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Verifying(_),
+                    ..
+                }),
+                BurstFinish::ReturnToIdle
+            ),
+        ),
+        "A is not stranded — sweep drove Draining → Verifying",
+    );
     let _ = e.cancel_all_in_flight_probes();
 }
 

@@ -15,11 +15,14 @@ mod promoter;
 mod promoter_claims;
 mod reconcile;
 mod refcounts;
-mod stability;
 mod timer;
 mod transitions;
 
-pub use coverage::{covers, nearest_covering_ancestor};
+// `covers` is the only cross-crate coverage primitive.
+// `nearest_covering_ancestor` is engine-internal (`pub(crate)` in
+// `coverage`): it is the reconfirm query core, with no external
+// consumer.
+pub use coverage::covers;
 pub use engine::Engine;
 // `TimerHeap` itself is engine-internal (`pub(crate)`); only `TimerEntry`
 // crosses the crate boundary — the bin layer reads its fields off the

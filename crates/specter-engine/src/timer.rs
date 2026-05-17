@@ -91,6 +91,7 @@ impl TimerHeap {
     /// stores it directly without a backing slotmap allocation, and
     /// lazy invalidation makes the per-id state cheap (one heap entry
     /// per schedule; no per-mint slot to free on cancel).
+    #[must_use]
     pub fn schedule(&mut self, deadline: Instant, profile: ProfileId, kind: TimerKind) -> TimerId {
         let id = self.counter.next();
         self.inner.push(Reverse(TimerEntry {
@@ -107,6 +108,7 @@ impl TimerHeap {
         self.inner.peek().map(|r| &r.0)
     }
 
+    #[must_use]
     pub fn pop_top(&mut self) -> Option<TimerEntry> {
         self.inner.pop().map(|r| r.0)
     }
@@ -189,13 +191,13 @@ mod tests {
         let mut h = TimerHeap::default();
         let now = Instant::now();
         assert!(h.is_empty());
-        h.schedule(now, ProfileId::default(), TimerKind::Settle);
-        h.schedule(now, ProfileId::default(), TimerKind::Settle);
+        let _ = h.schedule(now, ProfileId::default(), TimerKind::Settle);
+        let _ = h.schedule(now, ProfileId::default(), TimerKind::Settle);
         assert_eq!(h.len(), 2);
         assert!(!h.is_empty());
-        h.pop_top();
+        let _ = h.pop_top();
         assert_eq!(h.len(), 1);
-        h.pop_top();
+        let _ = h.pop_top();
         assert!(h.is_empty());
     }
 
@@ -206,7 +208,7 @@ mod tests {
         let mut h = TimerHeap::default();
         let now = Instant::now();
         let a = h.schedule(now, ProfileId::default(), TimerKind::Settle);
-        h.pop_top();
+        let _ = h.pop_top();
         let b = h.schedule(now, ProfileId::default(), TimerKind::Settle);
         assert_ne!(a, b);
     }
@@ -217,8 +219,8 @@ mod tests {
         let base = Instant::now();
         let later = base + Duration::from_millis(50);
         let earlier = base + Duration::from_millis(10);
-        h.schedule(later, ProfileId::default(), TimerKind::Settle);
-        h.schedule(earlier, ProfileId::default(), TimerKind::Settle);
+        let _ = h.schedule(later, ProfileId::default(), TimerKind::Settle);
+        let _ = h.schedule(earlier, ProfileId::default(), TimerKind::Settle);
         let top = h.peek_top().unwrap();
         assert_eq!(top.deadline, earlier);
     }
@@ -272,7 +274,7 @@ mod tests {
             let mut h = TimerHeap::default();
             let base = Instant::now();
             for d in &deltas {
-                h.schedule(base + Duration::from_micros(*d), ProfileId::default(), TimerKind::Settle);
+                let _ = h.schedule(base + Duration::from_micros(*d), ProfileId::default(), TimerKind::Settle);
             }
             let mut prev: Option<TimerEntry> = None;
             while let Some(top) = h.pop_top() {
@@ -304,7 +306,7 @@ mod tests {
             let mut h = TimerHeap::default();
             let base = Instant::now();
             for d in &deltas {
-                h.schedule(base + Duration::from_micros(*d), ProfileId::default(), TimerKind::Settle);
+                let _ = h.schedule(base + Duration::from_micros(*d), ProfileId::default(), TimerKind::Settle);
             }
             while !h.is_empty() {
                 let peeked = *h.peek_top().unwrap();

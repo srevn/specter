@@ -1634,8 +1634,9 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
 
     // Stable verdict — same snapshot as seed. dispatch_standard_ok's
     // pre-graft hash captures the prior, post-graft comparison is stable
-    // and `dirty_descendants == 0`, so emit_effects fires one Effect for
-    // the SubtreeRoot Sub → transition_to_awaiting.
+    // and no covered descendant is in an Active Standard burst, so
+    // emit_effects fires one Effect for the SubtreeRoot Sub →
+    // transition_to_awaiting.
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),

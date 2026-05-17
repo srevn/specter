@@ -189,8 +189,10 @@ pub struct PreFireBurst {
 /// probe's liveness *and* identity live on the phase, so a verify in
 /// flight without its correlation is unconstructable and I5 ("at most
 /// one outstanding probe") is a representability property of the single
-/// slot. `Draining` is correlated externally by
-/// `Profile.dirty_descendants` and carries no token of its own.
+/// slot. `Draining` carries no correlation token of its own: its exit
+/// is driven by a fresh query over the live tree
+/// ([`ProfileState::in_active_standard_burst`]), swept at every
+/// `finish_burst_to_idle` — no per-phase token, no cached counter.
 #[derive(Debug)]
 pub enum PreFirePhase {
     /// Activity-gap detection. `settle_timer` is the armed debounce
@@ -219,10 +221,11 @@ pub enum PreFirePhase {
     /// Self-stable; descendants pending. The stable snapshot lives on
     /// `Profile.current` — `dispatch_standard_ok` updates `current` to
     /// the stable response immediately before transitioning here, so the
-    /// reconfirm probe (Draining → Verifying on `dirty_descendants → 0`)
-    /// compares against `Profile.current`. Holding a duplicate
-    /// `TreeSnapshot` on the variant would only invite drift between the
-    /// two references.
+    /// reconfirm probe (Draining → Verifying, fired by the
+    /// `finish_burst_to_idle` sweep once no covered descendant is still
+    /// in an Active Standard burst) compares against `Profile.current`.
+    /// Holding a duplicate `TreeSnapshot` on the variant would only
+    /// invite drift between the two references.
     Draining,
 }
 
@@ -239,14 +242,17 @@ pub enum PreFirePhase {
 ///   pre-fire accumulators, drained at `transition_to_verifying`
 ///   entry (the only path to fire).
 ///
-/// `intent: BurstIntent` survives for two post-fire readers:
-/// `dispatch_rebase_{vanished,failed}` tag the `ProbeVanished` /
+/// `intent: BurstIntent` survives post-fire so
+/// `dispatch_rebase_{vanished,failed}` can tag the `ProbeVanished` /
 /// `ProbeFailed` diagnostic with it (Seed-driven drift rebases and
 /// Standard-driven post-fire rebases both reach PostFire, and the
-/// diagnostic distinguishes them), and `dispatch_rebase_ok` gates the
-/// fire-tail residual restart on it — a Standard origin is
-/// refcount-required, a Seed origin never took the matching
-/// `propagate(+1)`.
+/// diagnostic distinguishes them). It is also the field
+/// [`ProfileState::in_active_standard_burst`] reads — the reconfirm
+/// query treats a post-fire Standard burst as still covering its
+/// ancestors, exactly the lifetime the old refcount bracketed. The
+/// fire-tail residual restart is **not** gated on it: the reconfirm is
+/// a fresh query, not a per-origin refcount, so a Seed origin restarts
+/// just as a Standard one does.
 ///
 /// `force_walk_resources` is a fresh accumulator distinct from the
 /// pre-fire one. Populated by `absorb_event_into_fire_tail` (FsEvents
@@ -315,9 +321,9 @@ pub enum PostFirePhase {
 
 /// Verdict of one `EffectComplete` against the post-fire counter.
 ///
-/// The post-fire analogue of [`Profile::apply_dirty_delta`]'s `bool`
-/// edge — three variants not a `bool` because the route is resolved
-/// from the same call, so "not Awaiting" must be representable.
+/// Three variants, not a `bool`, because the route is resolved from
+/// the same call: "decremented, still in flight" vs "last completion"
+/// vs "not even Awaiting" must each be representable.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AwaitVerdict {
     /// Decremented, still `> 0` — more in flight; stay Awaiting.
@@ -429,8 +435,9 @@ impl PostFireBurst {
 
     /// Apply one `EffectComplete`, returning the zero-edge verdict. The
     /// sole in-life mutator of [`PostFirePhase::Awaiting`]'s
-    /// `outstanding`: floor and decrement live here on the owner, like
-    /// [`Profile::apply_dirty_delta`]. No public setter. `Rebasing` ⇒
+    /// `outstanding`: floor and decrement live here on the owner — a
+    /// total fn with no public setter that returns the edge, so the
+    /// invariant cannot be enforced at a distance. `Rebasing` ⇒
     /// [`AwaitVerdict::NotAwaiting`]. Underflow (more completions than
     /// emitted Effects) trips a `debug_assert!`, saturates in release.
     #[must_use]
@@ -465,27 +472,24 @@ impl PostFireBurst {
     /// burst is torn down, so a descendant change that landed during the
     /// rebase round-trip is seen only by the next unrelated event.
     ///
-    /// **In-place move, never finish-then-start.** A Standard burst takes
-    /// two contributions at start and releases each exactly once at
-    /// finish: the anchor `suppress_count` 0→1 and the `propagate(+1)`
-    /// dirty-descendants cascade. A finish-then-start restart would
-    /// release then re-acquire both, opening a window where the anchor is
-    /// briefly unsuppressed (a self-induced fire-tail event could leak
-    /// into the restarted burst) and the ancestor cascade flickers. This
-    /// move never finishes, so both stay held from the original start
-    /// through the restarted burst's single eventual finish.
+    /// **In-place move, never finish-then-start.** A Standard burst
+    /// takes the anchor `suppress_count` 0→1 once at start and releases
+    /// it once at finish. A finish-then-start restart would release
+    /// then re-acquire it, opening a window where the anchor is briefly
+    /// unsuppressed and a self-induced fire-tail event could leak into
+    /// the restarted burst. This move never finishes, so the suppress
+    /// stays held from the original start through the restarted burst's
+    /// single eventual finish.
     ///
-    /// **Standard origin only.** `propagate(+1)` is a Standard-start-only
-    /// contribution; `finish_burst_to_idle` emits the balancing
-    /// `propagate(-1)` iff the finishing burst is Standard. A Seed-origin
-    /// burst (Seed drift → fire → rebase) never took the `+1`, so forcing
-    /// it to Standard here would let its finish emit a `-1` with no
-    /// matching `+1` — an ancestor `dirty_descendants` underflow. The
-    /// caller gates the restart to a Standard origin; the `debug_assert!`
-    /// is the loud backstop. `intent` is set (not inherited) to
-    /// `Standard`: a restarted debounce burst *is* Standard by
-    /// definition, and under the gate the write is provably its current
-    /// value.
+    /// **Origin-agnostic.** `intent` is *set* (not inherited) to
+    /// `Standard` because a restarted debounce burst *is* Standard by
+    /// definition. This is precisely where a Seed-origin fire-tail
+    /// residual (Seed drift → fire → rebase, with events absorbed while
+    /// the rebase probe was in flight) rejoins the Standard debounce
+    /// lifecycle rather than being dropped — the closed Seed-residual
+    /// event-loss. The reconfirm machinery is a fresh query over the
+    /// live tree, not a refcount, so there is no per-origin balance to
+    /// preserve and no origin gate.
     ///
     /// `last_event_time` reckons from `now` — the rebase-response
     /// instant, not the absorbed events' (those timestamps are discarded
@@ -502,12 +506,6 @@ impl PostFireBurst {
         anchor: ResourceId,
         now: Instant,
     ) -> PreFireBurst {
-        debug_assert!(
-            matches!(self.intent, BurstIntent::Standard),
-            "into_pre_fire_residual: refcount balance requires a Standard \
-             origin — a Seed-origin burst never propagate(+1)'d, so the \
-             restarted burst's finish would propagate(-1) unbalanced",
-        );
         debug_assert!(
             !self.force_walk_resources.is_empty(),
             "into_pre_fire_residual: empty residual — the restart has no \
@@ -542,6 +540,20 @@ impl ActiveBurst {
         }
     }
 
+    /// The burst's [`BurstIntent`]. `intent` is a field on **both**
+    /// [`PreFireBurst`] and [`PostFireBurst`] (it survives the fire
+    /// transition); this is the lifecycle-side projection that reads it
+    /// without re-enumerating the cross-pairs — same wildcard-free
+    /// PreFire/PostFire shape as [`Self::timer_token`]. Sole consumer:
+    /// [`ProfileState::in_active_standard_burst`].
+    #[must_use]
+    pub const fn intent(&self) -> BurstIntent {
+        match self {
+            Self::PreFire(pre) => pre.intent,
+            Self::PostFire(post) => post.intent,
+        }
+    }
+
     /// Delegate to the post-fire counter; [`Self::PreFire`] carries no
     /// fire, folding to [`AwaitVerdict::NotAwaiting`] — same shape-fold
     /// as [`Self::timer_token`], no wildcard.
@@ -560,9 +572,10 @@ impl ActiveBurst {
 /// [`Self::ReturnToIdle`]: the burst completes, the Profile returns to
 /// [`ProfileState::Idle`], and the next `FsEvent` may start a fresh
 /// burst. [`Self::Reap`] flips the directive: the active burst still
-/// runs to completion (so the `propagate(-1) / sub_suppress` drain
-/// ordering is preserved), but `finish_burst_to_idle` then routes
-/// through `reap_profile` instead of returning the Profile to Idle.
+/// runs to completion (so the burst-end drain — `sub_suppress` and the
+/// Draining-sweep reconfirm — runs before the Profile leaves the map),
+/// but `finish_burst_to_idle` then routes through `reap_profile`
+/// instead of returning the Profile to Idle.
 ///
 /// **Why a payload, not a parallel field on Profile.** The directive
 /// is *only* meaningful inside an Active burst. Encoding it as a `bool`
@@ -616,8 +629,8 @@ pub enum BurstFinish {
 ///   `reap_profile` runs immediately, releasing the descent prefix
 ///   (Pending) or the anchor contribution (Idle / materialized).
 /// - [`Self::DeferToBurstEnd`]: the Profile is [`ProfileState::Active`]
-///   — a burst is in flight whose `propagate(-1) / sub_suppress` drain
-///   ordering must run before reap. The caller flips
+///   — a burst is in flight whose burst-end drain (`sub_suppress` and
+///   the Draining-sweep reconfirm) must run before reap. The caller flips
 ///   [`BurstFinish::Reap`] (via [`ProfileState::mark_active_for_reap`])
 ///   so `finish_burst_to_idle` routes through `reap_profile` once the
 ///   burst converges.
@@ -856,12 +869,12 @@ impl ProfileState {
     }
 
     /// True iff the state is `Active(PreFire(Draining))`. The
-    /// reconfirm cascade (the `Draining → Verifying` re-probe driven
-    /// when `dirty_descendants → 0`) keys off this predicate — only
-    /// Draining ancestors care about the descendants-cleared edge.
-    /// `Idle` and `Pending` are structurally not-Draining; the
-    /// post-fire arm and the other pre-fire phases (Batching,
-    /// Verifying) also return `false`.
+    /// reconfirm cascade (the `Draining → Verifying` re-probe) keys off
+    /// this predicate: at every `finish_burst_to_idle` the engine
+    /// sweeps the Draining Profiles and reconfirms each whose
+    /// covered-descendant query has gone false. `Idle` and `Pending`
+    /// are structurally not-Draining; the post-fire arm and the other
+    /// pre-fire phases (Batching, Verifying) also return `false`.
     #[must_use]
     pub const fn is_draining(&self) -> bool {
         match self {
@@ -869,6 +882,36 @@ impl ProfileState {
                 matches!(pre.phase, PreFirePhase::Draining)
             }
             Self::Idle | Self::Pending(_) | Self::Active(ActiveBurst::PostFire(_), _) => false,
+        }
+    }
+
+    /// True iff the state is an Active **Standard** burst, in *any*
+    /// phase — pre-fire (`Batching | Verifying | Draining`) or post-fire
+    /// (`Awaiting | Rebasing`). Wildcard-free, mirroring
+    /// [`Self::is_draining`].
+    ///
+    /// This is the per-Profile half of the derived replacement for the
+    /// old `dirty_descendants` refcount. The refcount's `+1`
+    /// (`start_standard_burst`) / `-1` (`finish_burst_to_idle`) bracketed
+    /// a Standard burst's *entire* lifetime — pre-fire through post-fire,
+    /// across a fire-tail residual restart (the `+1` was held, never
+    /// re-taken). Spanning both pre- and post-fire here is exactly that
+    /// lifetime evaluated fresh: a Standard descendant counts as covering
+    /// its ancestor from burst start until `finish_burst_to_idle`,
+    /// whatever phase it is in. A restarted residual burst is
+    /// `intent: Standard` by construction
+    /// ([`PostFireBurst::into_pre_fire_residual`]), so it stays counted
+    /// with no special accounting. Seed bursts return `false` — they
+    /// never contributed to the old refcount.
+    ///
+    /// Read through [`crate::ProfileState::in_active_standard_burst`] →
+    /// `.state()` exactly as [`Self::is_draining`] is (no `Profile`
+    /// delegate — the accessor convention is `.state().<pred>()`).
+    #[must_use]
+    pub const fn in_active_standard_burst(&self) -> bool {
+        match self {
+            Self::Active(burst, _) => matches!(burst.intent(), BurstIntent::Standard),
+            Self::Idle | Self::Pending(_) => false,
         }
     }
 
@@ -1517,65 +1560,13 @@ impl ProfileConfig {
     }
 }
 
-/// The Profile's burst state machine: the [`ProfileState`] plus the
-/// draining-cascade descendant counter that correlates the
-/// `Draining → Verifying` reconfirm. Both fields are module-private;
-/// the counter's I4 floor (count ≥ 0) is enforced *inside*
-/// [`Self::apply_dirty_delta`], so no caller can write a negative or
-/// unclamped value — the invariant moves from `stability::propagate`
-/// (enforced at a distance) to the field's owner.
-#[derive(Debug)]
-struct ProfileStateMachine {
-    state: ProfileState,
-    /// Draining-cascade descendant counter. Sole mutator:
-    /// [`Self::apply_dirty_delta`] (driven by `stability::propagate`).
-    dirty_descendants: u32,
-}
-
-impl ProfileStateMachine {
-    /// Apply `delta` to `dirty_descendants`, clamped at the I4 floor
-    /// (count ≥ 0 — underflow is a `debug_assert!` in dev, a clamp in
-    /// release). Returns `true` iff the count just fell from positive
-    /// to zero. `stability::propagate` ANDs that edge with
-    /// [`ProfileState::is_draining`] to drive the same-step
-    /// `Draining → Verifying` reconfirm — the counter owns the "hit
-    /// zero" edge; the *phase* combination stays with `propagate`,
-    /// where its rustdoc documents it.
-    ///
-    /// `i64` widening computes the post-delta value without `u32`
-    /// overflow before clamping back into `[0, u32::MAX]`.
-    fn apply_dirty_delta(&mut self, delta: i32) -> bool {
-        let prev = self.dirty_descendants;
-        let next = i64::from(prev) + i64::from(delta);
-        debug_assert!(next >= 0, "dirty_descendants underflow (delta = {delta})");
-        let clamped = next.clamp(0, i64::from(u32::MAX));
-        // `clamped` is in `[0, u32::MAX]` by construction.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let new_value = clamped as u32;
-        self.dirty_descendants = new_value;
-        prev > 0 && new_value == 0
-    }
-}
-
-/// Soft, recomputable cache: the nearest covering ancestor Profile —
-/// the parent edge `stability::propagate` walks at burst-start (`+1`)
-/// and burst-end (`-1`). Drift here is a *perf* regression only: the
-/// slotmap generational key makes a stale read return `None` safely,
-/// and `propagate` halts the walk on it. This is the deliberate
-/// contrast to [`TreeContributions`], whose drift leaks Tree
-/// refcounts. Sole write seam: `stability::write_parent_edge` (the
-/// single home of the self-parent `debug_assert_ne!`).
-#[derive(Debug)]
-struct ProfileTopology {
-    parent_profile: Option<ProfileId>,
-}
-
 /// The Profile's deferred-release obligations to the Tree refcount
 /// aggregate. The pure-step `Tree` has no `Drop` reach, so each
 /// obligation is encoded as a cached id/flag here and released
 /// explicitly at detach / reap / purge. Drift between this record and
-/// the Tree's contribution map is a **Tree refcount leak** — the
-/// deliberate contrast to [`ProfileTopology`], a soft perf cache.
+/// the Tree's contribution map is a **Tree refcount leak**, so every
+/// write routes through a typed accessor that keeps the cache and the
+/// Tree aggregate in lockstep.
 ///
 /// **Scope boundary — do not widen.** This holds *only* the two
 /// homeless cached tokens whose sole purpose is deferred release. It
@@ -1614,16 +1605,22 @@ struct TreeContributions {
 ///
 /// Only `resource` (the slot axis) and `settle` (the per-Profile
 /// mutable debounce param the engine recomputes as
-/// `min(remaining_subs.settles)`) are `pub`. Every other concern is a
-/// module-private substructure exposing a typed accessor/transition
-/// API — the cross-crate write surface is `Profile`'s `pub fn`s, never
-/// a field assignment. Each substructure owns its own invariant:
-/// `ProfileConfig` (frozen identity ⇒ derived caches),
+/// `min(remaining_subs.settles)`) are `pub` fields. Every other
+/// concern is module-private, exposing a typed accessor/transition API
+/// — the cross-crate write surface is `Profile`'s `pub fn`s, never a
+/// field assignment. The substructures that own a cross-field
+/// invariant: `ProfileConfig` (frozen identity ⇒ derived caches),
 /// `AnchorClassification` (snapshot-shape ⊕ baseline/witness
-/// exclusion), `ProfileStateMachine` (`state` + the I4-floored
-/// dirty-descendant counter), `TreeContributions` (deferred Tree
-/// releases — drift = refcount leak), `ProfileTopology` (soft parent
-/// cache — drift = perf only). (Effect fire history is per-Sub —
+/// exclusion), `TreeContributions` (deferred Tree releases — drift =
+/// refcount leak). The burst state machine needs no such wrapper: it
+/// is the plain module-private [`ProfileState`] field `state`, read
+/// via [`Self::state`] and transitioned via [`Self::transition_state`]
+/// / the typed-move accessors — its variants (`Idle | Pending |
+/// Active`) and their payloads (`DescentState`, the `ActiveBurst`
+/// split) are themselves the single source of every burst invariant.
+/// The `Draining → Verifying` reconfirm is a *fresh query*
+/// ([`crate::ProfileState::in_active_standard_burst`] over the live
+/// tree), not a cached counter. (Effect fire history is per-Sub —
 /// [`crate::Sub::has_fired`] — not a Profile substructure.)
 #[derive(Debug)]
 pub struct Profile {
@@ -1659,12 +1656,15 @@ pub struct Profile {
     /// Tree-side parallel cache the engine never consults for the
     /// anchor's own kind in any post-attach path.
     anchor: AnchorClassification,
-    /// Burst state machine + draining-cascade descendant counter.
-    /// `state` reads via [`Self::state`], transitions via
-    /// [`Self::transition_state`] / the typed-move accessors; the
-    /// counter via [`Self::dirty_descendants`] /
-    /// [`Self::apply_dirty_delta`].
-    machine: ProfileStateMachine,
+    /// Burst state machine. Module-private; the variant payloads carry
+    /// every burst invariant by construction (the [`ActiveBurst`] split
+    /// type-bans cross-phase field leaks), so no wrapper or sidecar
+    /// counter is needed. Read via [`Self::state`], transitioned via
+    /// [`Self::transition_state`] / the typed-move accessors. The
+    /// `Draining → Verifying` reconfirm is a fresh query over the live
+    /// tree ([`ProfileState::in_active_standard_burst`]), not cached
+    /// here.
+    state: ProfileState,
     /// Deferred-release obligations to the Tree refcount aggregate
     /// (`anchor_claim`, `watch_root_parent`). Drift = refcount leak.
     /// Read via [`Self::anchor_claim`] / [`Self::watch_root_parent`];
@@ -1673,11 +1673,6 @@ pub struct Profile {
     /// [`Self::set_watch_root_parent`] /
     /// [`Self::take_watch_root_parent`].
     contributions: TreeContributions,
-    /// Soft, recomputable nearest-covering-ancestor cache. Drift =
-    /// perf only. Read via [`Self::parent_profile`]; written only
-    /// through `stability::write_parent_edge` →
-    /// [`Self::set_parent_profile`].
-    topology: ProfileTopology,
 }
 
 impl Profile {
@@ -1752,16 +1747,10 @@ impl Profile {
             cfg: ProfileConfig::new(identity),
             settle,
             anchor,
-            machine: ProfileStateMachine {
-                state: ProfileState::Idle,
-                dirty_descendants: 0,
-            },
+            state: ProfileState::Idle,
             contributions: TreeContributions {
                 anchor_claim: AnchorClaim::None,
                 watch_root_parent: None,
-            },
-            topology: ProfileTopology {
-                parent_profile: None,
             },
         }
     }
@@ -1910,9 +1899,9 @@ impl Profile {
     /// builds compile the asserts out and still classify atomically.
     pub fn materialize_anchor(&mut self, kind: ResourceKind) {
         debug_assert!(
-            matches!(self.machine.state, ProfileState::Pending(_)),
+            matches!(self.state, ProfileState::Pending(_)),
             "materialize_anchor: state must be Pending (was {:?})",
-            self.machine.state.discriminant(),
+            self.state.discriminant(),
         );
         debug_assert!(
             matches!(self.contributions.anchor_claim, AnchorClaim::None),
@@ -1926,7 +1915,7 @@ impl Profile {
             AnchorClassification::Unclassified { witness } => *witness,
             AnchorClassification::File { .. } | AnchorClassification::Dir { .. } => None,
         };
-        self.machine.state = ProfileState::Idle;
+        self.state = ProfileState::Idle;
         self.contributions.anchor_claim = AnchorClaim::Held;
         self.anchor = match kind {
             ResourceKind::Dir => AnchorClassification::Dir {
@@ -1967,7 +1956,7 @@ impl Profile {
     ///   the STRUCTURE watch; the anchor claim is installed only at
     ///   materialisation. (`reap_profile`'s trichotomy depends on this.)
     pub fn debug_assert_anchor_coherent(&self) {
-        if matches!(self.machine.state, ProfileState::Pending(_)) {
+        if matches!(self.state, ProfileState::Pending(_)) {
             debug_assert!(
                 matches!(self.anchor, AnchorClassification::Unclassified { .. }),
                 "anchor coherence: a Pending Profile must be Unclassified",
@@ -1991,7 +1980,7 @@ impl Profile {
     /// Not `#[must_use]` — whole-value-replace callers discard the return;
     /// only the typed-move callers bind it.
     pub const fn transition_state(&mut self, new: ProfileState) -> ProfileState {
-        std::mem::replace(&mut self.machine.state, new)
+        std::mem::replace(&mut self.state, new)
     }
 
     /// Install the anchor claim. Idempotent against `Held`. Production
@@ -2041,7 +2030,7 @@ impl Profile {
     /// structural shape, *not* a variant transition (the variant-level
     /// move still routes through [`Self::transition_state`]).
     pub const fn pre_fire_burst_mut(&mut self) -> Option<&mut PreFireBurst> {
-        match &mut self.machine.state {
+        match &mut self.state {
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => Some(pre),
             _ => None,
         }
@@ -2049,7 +2038,7 @@ impl Profile {
 
     /// Symmetric with [`Self::pre_fire_burst_mut`] for the post-fire payload.
     pub const fn post_fire_burst_mut(&mut self) -> Option<&mut PostFireBurst> {
-        match &mut self.machine.state {
+        match &mut self.state {
             ProfileState::Active(ActiveBurst::PostFire(post), _) => Some(post),
             _ => None,
         }
@@ -2061,7 +2050,7 @@ impl Profile {
     /// routes through this.
     #[must_use]
     pub const fn state(&self) -> &ProfileState {
-        &self.machine.state
+        &self.state
     }
 
     #[must_use]
@@ -2262,7 +2251,7 @@ impl Profile {
     /// Mutable descent payload — thin delegator to
     /// [`ProfileState::descent_state_mut`].
     pub const fn descent_state_mut(&mut self) -> Option<&mut DescentState> {
-        self.machine.state.descent_state_mut()
+        self.state.descent_state_mut()
     }
 
     /// Disarm this Profile's in-flight probe and return its prior
@@ -2270,67 +2259,31 @@ impl Profile {
     /// joining the in-place state-mutator family beside
     /// [`Self::descent_state_mut`] / [`Self::mark_active_for_reap`].
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
-        self.machine.state.take_probe()
+        self.state.take_probe()
     }
 
     /// Flip an Active burst's directive to `Reap`. `true` iff the flip
     /// landed (Active). Delegates to [`ProfileState::mark_active_for_reap`].
     #[must_use]
     pub const fn mark_active_for_reap(&mut self) -> bool {
-        self.machine.state.mark_active_for_reap()
+        self.state.mark_active_for_reap()
     }
 
     /// Revive a zombie burst (`Reap → ReturnToIdle`). `true` iff a zombie
     /// was revived. Delegates to [`ProfileState::clear_active_reap`].
     #[must_use]
     pub const fn clear_active_reap(&mut self) -> bool {
-        self.machine.state.clear_active_reap()
-    }
-
-    /// The draining-cascade descendant counter. Read seam for the
-    /// `Draining → Verifying` reconfirm gate (`dirty_descendants() ==
-    /// 0`). Never written directly — see [`Self::apply_dirty_delta`].
-    #[must_use]
-    pub const fn dirty_descendants(&self) -> u32 {
-        self.machine.dirty_descendants
-    }
-
-    /// Apply `delta` to the draining-cascade descendant counter (the
-    /// I4 floor — count ≥ 0 — is enforced inside the state machine, not
-    /// here). Returns `true` iff the count just fell from positive to
-    /// zero; `stability::propagate` ANDs that edge with
-    /// [`ProfileState::is_draining`] to drive the same-step reconfirm.
-    /// Sole mutator of the counter — the field has no public setter.
-    pub fn apply_dirty_delta(&mut self, delta: i32) -> bool {
-        self.machine.apply_dirty_delta(delta)
+        self.state.clear_active_reap()
     }
 
     /// The single in-life mutator of [`PostFirePhase::Awaiting`]'s
     /// `outstanding` — pure delegation through the state machine, the
-    /// no-public-setter seam of [`Self::clear_active_reap`] /
-    /// [`Self::apply_dirty_delta`]. The floor is enforced by the owner,
+    /// no-public-setter seam shared with [`Self::clear_active_reap`].
+    /// The floor is enforced by the owner,
     /// [`PostFireBurst::note_effect_completion`].
     #[must_use]
     pub fn note_effect_completion(&mut self) -> AwaitVerdict {
-        self.machine.state.note_effect_completion()
-    }
-
-    /// The cached nearest covering ancestor Profile (the soft parent
-    /// edge). `Copy` read — both real readers (`propagate`'s chain
-    /// walk, `collect_pointing_at`'s filter) want the id, not a borrow,
-    /// and the slotmap generational key makes a stale id read `None`
-    /// safely downstream.
-    #[must_use]
-    pub const fn parent_profile(&self) -> Option<ProfileId> {
-        self.topology.parent_profile
-    }
-
-    /// Write the cached parent edge. Sole call site:
-    /// `stability::write_parent_edge`, which owns the self-parent
-    /// `debug_assert_ne!` and the stale-`child` short-circuit — this is
-    /// the plain field write that helper funnels through.
-    pub const fn set_parent_profile(&mut self, parent: Option<ProfileId>) {
-        self.topology.parent_profile = parent;
+        self.state.note_effect_completion()
     }
 
     /// Take the live `current` snapshot, leaving the arm's `current`
@@ -2518,15 +2471,13 @@ mod tests {
     }
 
     #[test]
-    fn new_profile_starts_idle_with_zero_refcounts() {
+    fn new_profile_starts_idle() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(matches!(p.state(), ProfileState::Idle));
         assert!(p.baseline().is_none());
         assert!(!p.current_is_some());
-        assert!(p.parent_profile().is_none());
-        assert_eq!(p.dirty_descendants(), 0);
         assert_eq!(p.max_settle(), MAX_SETTLE);
         assert_eq!(p.settle, SETTLE);
     }
@@ -3525,24 +3476,40 @@ mod tests {
         assert_eq!(pre.last_event_time, Some(now));
     }
 
-    /// A Seed-origin burst never took `propagate(+1)`; restarting it as
-    /// Standard would unbalance the finishing `propagate(-1)`. The move
-    /// is gated by the caller; this is the loud dev/CI backstop.
+    /// A Seed-origin residual restarts just as a Standard one does: the
+    /// move is origin-agnostic and *sets* `intent: Standard` (a
+    /// restarted debounce burst is Standard by definition). This is the
+    /// closed Seed-residual event-loss — a Seed drift → fire → rebase
+    /// with absorbed events rejoins the Standard debounce lifecycle
+    /// instead of being dropped. No origin gate, no panic; the
+    /// reconfirm is a fresh query, so there is no per-origin balance to
+    /// keep.
     #[test]
-    #[should_panic(expected = "refcount balance requires a Standard")]
-    fn into_pre_fire_residual_seed_origin_trips_assert() {
+    fn into_pre_fire_residual_seed_origin_restarts_as_standard() {
         let mut tree = Tree::new();
         let anchor = tree.ensure_root("anchor", ResourceRole::User);
         let c1 = tree
             .ensure_child(anchor, "c1", ResourceRole::User)
             .expect("live");
         let residual: BTreeSet<ResourceId> = std::iter::once(c1).collect();
-        let _ = rebasing_post(BurstIntent::Seed, residual).into_pre_fire_residual(
+        let pre = rebasing_post(BurstIntent::Seed, residual.clone()).into_pre_fire_residual(
             tid(1),
             tid(2),
             anchor,
             std::time::Instant::now(),
         );
+        assert_eq!(
+            pre.intent,
+            BurstIntent::Standard,
+            "Seed origin is rewritten to Standard — a restarted debounce burst is Standard",
+        );
+        assert!(matches!(
+            pre.phase,
+            PreFirePhase::Batching { settle_timer } if settle_timer == tid(2)
+        ));
+        assert_eq!(pre.burst_deadline, tid(1));
+        assert_eq!(pre.dirty_resources, residual);
+        assert_eq!(pre.force_walk_resources, residual);
     }
 
     /// An empty residual is a misuse — the restart would have no seed and

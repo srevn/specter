@@ -859,7 +859,7 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
         Some(TreeSnapshot::Dir(arc)) => arc.dir_hash(),
         _ => panic!("post-Seed baseline must be Some(Dir)"),
     };
-    assert!(!e.subs.any_fired(pid), "fresh Sub: no fire history",);
+    assert!(!e.subs.any_fired(pid), "fresh Sub: no fire history");
 
     // Drive a Standard burst whose probe response equals the Seed
     // baseline byte-for-byte — a phantom (noise FsEvent, no actual
@@ -5541,11 +5541,18 @@ mod props {
             prop_assert!(out.effects().is_empty(), "Seed bursts never emit Effects");
         }
 
-        /// `prop_dirty_descendants_clamps_at_zero` — I4 on a single-Profile
-        /// engine. After any sequence of inputs, the Profile's
-        /// `dirty_descendants` is ≥ 0 (always 0 for a single Profile).
+        /// `prop_single_profile_never_has_active_standard_descendant` —
+        /// the derived replacement for the deleted `dirty_descendants`
+        /// I4 floor. A single-Profile engine has no covered descendant,
+        /// so the fresh reconfirm query that now gates
+        /// `dispatch_standard_ok`'s fire
+        /// (`coverage::has_active_standard_descendant`) must stay false
+        /// after *any* input sequence. This also pins the query's
+        /// self-exclusion: the lone Profile is the ancestor under test
+        /// and must never count itself, through every burst phase the
+        /// random actions drive it into.
         #[test]
-        fn prop_dirty_descendants_clamps_at_zero(
+        fn prop_single_profile_never_has_active_standard_descendant(
             actions in prop::collection::vec(arb_action(), 0..16),
         ) {
             let (mut e, sid, r, mut t, mut last_correlation) =
@@ -5553,11 +5560,12 @@ mod props {
             let pid = e.subs.get(sid).unwrap().profile;
             for action in actions {
                 let _ = run_action(&mut e, sid, r, action, &mut t, &mut last_correlation);
-                if let Some(p) = e.profiles.get(pid) {
-                    // u32 is ≥ 0 by type. Confirm anyway and tighten:
-                    // single Profile with no parent edges → dirty_descendants
-                    // is always 0.
-                    prop_assert_eq!(p.dirty_descendants(), 0);
+                if e.profiles.get(pid).is_some() {
+                    prop_assert!(!crate::coverage::has_active_standard_descendant(
+                        &e.tree,
+                        &e.profiles,
+                        pid,
+                    ));
                 }
             }
             let _ = e.cancel_all_in_flight_probes();

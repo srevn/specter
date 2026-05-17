@@ -230,13 +230,6 @@ impl crate::Engine {
     /// carries no `DescentState`, so an idle Profile structurally has
     /// no probe slot.)
     ///
-    /// **Caller responsibility.** Parent-edge work
-    /// ([`Engine::install_parent_edges_for`]) is NOT done here — the
-    /// fresh-attach path needs it on first entry (called from
-    /// `bootstrap_pending`); the recovery path doesn't (the parent
-    /// edges already exist on the recovering Profile). Keeping the
-    /// helper minimal preserves that contract.
-    ///
     /// **Recovery-overlap invariant.** When called from `start_pending_recovery`,
     /// the Profile already holds a `+1 STRUCTURE` contribution on the
     /// parent via `Profile.watch_root_parent` (set at the original anchor

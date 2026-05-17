@@ -101,16 +101,6 @@ pub struct Engine {
     /// release: zero cost, zero footprint.
     #[cfg(debug_assertions)]
     pub(crate) dispatch_ledger: crate::probe::DispatchLedger,
-    /// Reusable scratch buffer for parent-edge recomputation. The
-    /// `collect_in_subtree` / `collect_pointing_at` producers in
-    /// [`crate::stability`] fill this from an immutable
-    /// `&ProfileMap` borrow; [`crate::stability::recompute_parent_edges`]
-    /// then drains it under the `&mut ProfileMap` borrow. Both
-    /// producers `clear()` on entry — the buffer survives across
-    /// `step` calls but never accumulates state between them. Sole
-    /// rationale for the field: dodge the borrow-checker conflict
-    /// without paying a per-call `Vec` allocation.
-    pub(crate) scratch_profile_ids: Vec<ProfileId>,
 }
 
 impl Engine {
@@ -275,18 +265,19 @@ impl Engine {
     ///    `join_existing`); the `Fresh` arm dispatches on the
     ///    anchor resolution to either `bootstrap_pending` (Idle →
     ///    Pending) or `bootstrap_immediate` (anchor watch +
-    ///    `watch_root_parent` + parent edges + Seed burst).
+    ///    `watch_root_parent` + Seed burst).
     ///
     /// `bootstrap_pending` and `bootstrap_immediate` are *not*
     /// interchangeable orderings of the same operations — they encode
     /// a real semantic divide:
-    /// - **Pending** runs parent-edge work at attach time (Tree
-    ///   topology is available the moment scaffolds materialise) and
-    ///   defers anchor-watch installation to descent's anchor branch
-    ///   (`dispatch_descent_ok`).
+    /// - **Pending** only enters the descent; anchor-watch
+    ///   installation, the `watch_root_parent` bump, and the Seed-burst
+    ///   launch are deferred to descent's anchor branch
+    ///   (`dispatch_descent_ok`), because the anchor slot isn't a live
+    ///   `User` resource yet.
     /// - **Immediate** runs anchor-watch installation, the
-    ///   `watch_root_parent` bump, and parent-edge work all at attach
-    ///   time, then starts the Seed burst directly.
+    ///   `watch_root_parent` bump, and the Seed burst all at attach
+    ///   time.
     pub(crate) fn attach_sub_inner(
         &mut self,
         req: SubAttachRequest,
@@ -522,17 +513,18 @@ impl Engine {
     /// 2. Flip [`AnchorClaim::Held`].
     /// 3. Set up the `watch_root_parent` (STRUCTURE contribution at
     ///    the anchor's parent, for anchor-reappearance detection).
-    /// 4. Compute the Profile's parent edge and recompute parent edges
-    ///    of any strict descendants that may now re-parent to this
-    ///    Profile.
-    /// 5. Start the Seed burst (`PreFire(Verifying)`); the post-probe
+    /// 4. Start the Seed burst (`PreFire(Verifying)`); the post-probe
     ///    `dispatch_seed_ok` establishes the baseline.
     ///
+    /// (No parent-edge step: the `Draining → Verifying` reconfirm is a
+    /// fresh `coverage` query, so an attach maintains no per-Profile
+    /// ancestor cache.)
+    ///
     /// Contrast with [`Self::bootstrap_pending`]: the Pending arm runs
-    /// only the parent-edge work + descent entry — the anchor watch
-    /// and `watch_root_parent` bump are deferred to descent's anchor
-    /// branch (`dispatch_descent_ok::materialize_profile_anchor`),
-    /// which runs them when the anchor becomes live on disk.
+    /// only the descent entry — the anchor watch, `watch_root_parent`
+    /// bump, and Seed burst are deferred to descent's anchor branch
+    /// (`dispatch_descent_ok::materialize_profile_anchor`), which runs
+    /// them when the anchor becomes live on disk.
     fn bootstrap_immediate(
         &mut self,
         profile_id: ProfileId,
@@ -557,28 +549,23 @@ impl Engine {
             p.install_anchor_claim_held();
         }
         self.set_watch_root_parent(profile_id, anchor, out);
-        self.install_parent_edges_for(profile_id);
 
         self.start_seed_burst(profile_id, now, out);
     }
 
     /// Phase 3 of `attach_sub_inner` — fresh-Profile, pending-descent
-    /// arm (anchor scaffolded but not yet materialised on disk).
+    /// arm (anchor scaffolded but not yet materialised on disk). The
+    /// Pending half of the `bootstrap_immediate` / `bootstrap_pending`
+    /// dispatch.
     ///
-    /// Parent-edge work runs at attach time: the Tree topology is
-    /// available the moment the scaffolds are written by
-    /// [`Self::materialize_path_or_pending`], even though the leaf
-    /// isn't yet a live `User`-roled slot. The anchor-watch
-    /// installation, the `watch_root_parent` bump, and the Seed-burst
-    /// launch are all deferred to descent's anchor branch
-    /// (`dispatch_descent_ok::materialize_profile_anchor`).
-    ///
-    /// `enter_pending_descent` itself handles the four-step
-    /// `Idle → Pending` entry sequence
-    /// (`mint correlation → state-flip → add_watch on prefix → emit probe`)
-    /// — by contract the helper does NOT touch parent edges (the
-    /// recovery path's call site doesn't need it). Keeping the helper
-    /// minimal preserves that contract.
+    /// The anchor-watch installation, the `watch_root_parent` bump, and
+    /// the Seed-burst launch are all deferred to descent's anchor
+    /// branch (`dispatch_descent_ok::materialize_profile_anchor`) —
+    /// this arm only enters the descent. It is a thin delegation to
+    /// `enter_pending_descent` (which runs the four-step
+    /// `mint correlation → state-flip → add_watch on prefix → emit probe`
+    /// sequence); the named arm is retained for dispatch symmetry with
+    /// [`Self::bootstrap_immediate`].
     fn bootstrap_pending(
         &mut self,
         profile_id: ProfileId,
@@ -586,7 +573,6 @@ impl Engine {
         remaining: DescentRemaining,
         out: &mut StepOutput,
     ) {
-        self.install_parent_edges_for(profile_id);
         self.enter_pending_descent(profile_id, prefix, remaining, out);
     }
 
@@ -746,62 +732,13 @@ impl Engine {
         }
     }
 
-    /// Rewrite parent-edge cache entries affected by attaching
-    /// `new_profile`. Two classes of edges may move:
-    ///
-    /// 1. **The new Profile's own edge.** Derived from its anchor's
-    ///    strict ancestors via [`crate::coverage::nearest_covering_ancestor`].
-    /// 2. **Strict-descendant Profiles' edges.** A Profile P' at a
-    ///    strict descendant of `new_profile.resource` may now name
-    ///    `new_profile` as its nearest covering ancestor — the new
-    ///    Profile interposes between P' and P''s prior parent.
-    ///    Profiles at sibling subtrees, at ancestor positions, or at
-    ///    the same anchor (different `config_hash`) are not affected
-    ///    (the new Profile is not a covering ancestor for them).
-    ///
-    /// Routes through [`crate::stability::collect_in_subtree`] +
-    /// [`crate::stability::recompute_parent_edges`] with the engine's
-    /// `scratch_profile_ids` buffer mediating the borrow. The
-    /// `collect_in_subtree` call fills the scratch with strict
-    /// descendants; the `push(new_profile)` appends `new_profile`
-    /// itself so the recompute loop handles both classes in one pass.
-    ///
-    /// Recompute order is irrelevant for correctness:
-    /// `nearest_covering_ancestor` reads
-    /// `Resource.profiles` (the back-index) at each ancestor, never
-    /// the `Profile.parent_profile` field rewritten in the loop —
-    /// per-iteration writes do not affect subsequent iterations.
-    fn install_parent_edges_for(&mut self, new_profile: ProfileId) {
-        // The caller (`attach_sub_inner`) just inserted-or-found the
-        // Profile and the slot is still live; a missing slot here is
-        // a structural invariant breach.
-        let new_anchor = self
-            .profiles
-            .get(new_profile)
-            .map(|p| p.resource)
-            .expect("install_parent_edges_for: caller's profile_id must be live");
-        crate::stability::collect_in_subtree(
-            &self.tree,
-            &self.profiles,
-            new_anchor,
-            &mut self.scratch_profile_ids,
-        );
-        self.scratch_profile_ids.push(new_profile);
-        crate::stability::recompute_parent_edges(
-            &self.tree,
-            &mut self.profiles,
-            self.scratch_profile_ids.drain(..),
-        );
-    }
-
     /// Detach a Sub by id.
     ///
     /// Recomputes `Profile.settle = min(remaining_subs.settles)`. If no
     /// Subs remain on the Profile (`subs.at(pid)` empty):
     /// - **Idle / Pending Profile:** reap immediately. Release anchor
     ///   `watch_demand` (1→0 emits Unwatch), release
-    ///   `watch_root_parent` contribution, clear parent edge,
-    ///   recompute parent edges of dependents, and `try_reap` the
+    ///   `watch_root_parent` contribution, and `try_reap` the
     ///   anchor Resource.
     /// - **Active Profile:** flip the burst's [`BurstFinish::Reap`]
     ///   directive via [`ProfileState::mark_active_for_reap`]. The
@@ -866,10 +803,10 @@ impl Engine {
         // No Subs remain: classify the reap path via the typed
         // [`ProfileState::detach_lifecycle`] projection — `ReapNow` for
         // Idle / Pending Profiles (no burst to drain), `DeferToBurstEnd`
-        // for Active Profiles (the burst's `propagate(-1) / sub_suppress`
-        // drain must run first). Pending Profiles reap synchronously
-        // alongside Idle: there is no `finish_burst_to_idle` to
-        // resolve a deferred reap.
+        // for Active Profiles (the burst's `sub_suppress` /
+        // Draining-sweep drain must run first). Pending Profiles reap
+        // synchronously alongside Idle: there is no
+        // `finish_burst_to_idle` to resolve a deferred reap.
         let lifecycle = self
             .profiles
             .get(profile_id)
@@ -901,8 +838,7 @@ impl Engine {
 
     /// Reap a Profile: release every contribution it holds (anchor watch,
     /// watch-root parent watch, descent prefix watch, per-descendant
-    /// watches), clear its parent edge, recompute parent edges of any
-    /// dependents, detach from `ProfileMap`, try-reap the anchor Resource,
+    /// watches), detach from `ProfileMap`, try-reap the anchor Resource,
     /// and emit a [`Diagnostic::ProfileReaped`] carrying the
     /// [`ReapTrigger`] that drove this reap. The trigger is supplied by
     /// the caller (not derived from state) because the two paths reach
@@ -980,21 +916,17 @@ impl Engine {
     ///
     /// 3. **`ProfileMap::detach`.** Must follow (2) — the release
     ///    helpers read `&Profile` (anchor, watch_root_parent,
-    ///    snapshot). Must precede (4) — `collect_pointing_at` filters
-    ///    against the post-detach map.
+    ///    snapshot). Must precede (4) — `Tree::try_reap` only reaps the
+    ///    anchor slot once this Profile no longer occupies it.
     ///
-    /// 4. **Parent-edge recompute and anchor try-reap.** Two operations,
-    ///    mutually independent because they touch disjoint state:
-    ///    - `collect_pointing_at` + `recompute_parent_edges` rewrites
-    ///      dependents' `Profile.parent_profile` fields (touches
-    ///      `ProfileMap` only).
-    ///    - `Tree::try_reap(anchor)` cascades upward through any now-
-    ///      orphaned ancestors (touches `Tree` only; the watch-root
-    ///      parent slot is freed in this step if the anchor was its
-    ///      sole remaining child).
-    ///
-    ///    Code order is parent-edge → try_reap, but the reverse is
-    ///    equally correct.
+    /// 4. **Anchor try-reap.** `Tree::try_reap(anchor)` cascades upward
+    ///    through any now-orphaned ancestors (the watch-root parent
+    ///    slot is freed in this step if the anchor was its sole
+    ///    remaining child). No parent-edge recompute accompanies it:
+    ///    the `Draining → Verifying` reconfirm is a fresh `coverage`
+    ///    query, so a reaped Profile leaves no cached ancestor edge for
+    ///    dependents to have rewritten — they re-derive on their next
+    ///    query against the post-detach topology.
     ///
     /// 5. **`Diagnostic::ProfileReaped` emit.** Last by convention so the
     ///    diagnostic ordering across a step (which is sorted by emission
@@ -1078,27 +1010,17 @@ impl Engine {
         self.release_anchor_claim(profile_id, out);
         self.release_watch_root_parent_claim(profile_id, out);
 
-        // Detach the Profile from the registry. The Profile's
-        // `parent_profile` field dies with the struct — no separate
-        // clear step is needed. Dependents whose `parent_profile`
-        // still points at the now-removed slot are rewritten by the
-        // `collect_pointing_at + recompute_parent_edges` flow below.
-        // The returned `Option<Profile>` carries the detached payload
-        // for diagnostic use only at the inline site; `_detached`
-        // names the discard so a reader doesn't have to chase whether
-        // a field was needed.
+        // Detach the Profile from the registry. No parent-edge cache
+        // to clean: the `Draining → Verifying` reconfirm is a fresh
+        // query (`coverage::nearest_covering_ancestor`), so a dependent
+        // that used to resolve its covering ancestor through this
+        // Profile simply re-derives against the post-detach topology on
+        // its next query — there is no stored edge to rewrite, hence no
+        // post-detach fixup pass. The returned `Option<Profile>`
+        // carries the detached payload for diagnostic use only at the
+        // inline site; `_detached` names the discard so a reader
+        // doesn't have to chase whether a field was needed.
         let _detached = self.profiles.detach(&mut self.tree, profile_id);
-
-        crate::stability::collect_pointing_at(
-            &self.profiles,
-            profile_id,
-            &mut self.scratch_profile_ids,
-        );
-        crate::stability::recompute_parent_edges(
-            &self.tree,
-            &mut self.profiles,
-            self.scratch_profile_ids.drain(..),
-        );
 
         // Try to reap the anchor's slot. No-op if it still has
         // children (a descendant Profile / Promoter / scaffold survives
@@ -1275,9 +1197,8 @@ pub(crate) fn is_timer_referenced(
 /// Find-or-create-or-revive outcome for `attach_sub_inner`. The three
 /// arms drive distinct downstream bookkeeping:
 /// - `Fresh`: brand-new Profile, no prior burst history. Bumps the
-///   anchor's `watch_demand`, sets up `watch_root_parent`, computes
-///   parent edges, starts a Seed burst (immediate) or enters Pending
-///   descent.
+///   anchor's `watch_demand`, sets up `watch_root_parent`, starts a
+///   Seed burst (immediate) or enters Pending descent.
 /// - `ExistingJoin`: Profile is alive with at least one live Sub; the
 ///   attaching Sub joins the existing burst lifecycle (or shares the
 ///   existing baseline if Idle). Only `Profile.settle` may need
@@ -1481,7 +1402,8 @@ mod tests {
         let mut e = Engine::new();
         let now = Instant::now();
         let when = now + Duration::from_millis(100);
-        e.timers
+        let _ = e
+            .timers
             .schedule(when, ProfileId::default(), TimerKind::Settle);
         assert_eq!(e.next_deadline(), Some(when));
     }
@@ -1491,7 +1413,8 @@ mod tests {
         let mut e = Engine::new();
         let now = Instant::now();
         let when = now + Duration::from_secs(10);
-        e.timers
+        let _ = e
+            .timers
             .schedule(when, ProfileId::default(), TimerKind::Settle);
         assert_eq!(e.pop_expired(now), None);
         assert_eq!(e.timers.len(), 1, "future-dated entries are not drained");
@@ -1507,11 +1430,14 @@ mod tests {
         let past = now
             .checked_sub(Duration::from_millis(1))
             .expect("test clock has room for sub-millisecond rewind");
-        e.timers
+        let _ = e
+            .timers
             .schedule(past, ProfileId::default(), TimerKind::Settle);
-        e.timers
+        let _ = e
+            .timers
             .schedule(past, ProfileId::default(), TimerKind::Settle);
-        e.timers
+        let _ = e
+            .timers
             .schedule(past, ProfileId::default(), TimerKind::Settle);
 
         assert_eq!(e.pop_expired(now), None);
@@ -1538,7 +1464,8 @@ mod tests {
         // Schedule one beyond the bound. All stale (default ProfileId
         // has no Active state), so the drain runs through them all.
         for _ in 0..=STALE_DRAIN_BOUND {
-            e.timers
+            let _ = e
+                .timers
                 .schedule(past, ProfileId::default(), TimerKind::Settle);
         }
         let _ = e.pop_expired(now);
@@ -1553,9 +1480,10 @@ mod tests {
         let past = now
             .checked_sub(Duration::from_millis(1))
             .expect("test clock has room for sub-millisecond rewind");
-        e.timers
+        let _ = e
+            .timers
             .schedule(past, ProfileId::default(), TimerKind::Settle);
-        e.timers.schedule(
+        let _ = e.timers.schedule(
             now + Duration::from_secs(10),
             ProfileId::default(),
             TimerKind::Settle,

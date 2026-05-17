@@ -12,9 +12,12 @@
 //!
 //! - **(b) Single-field load-bearing-invariant edges**: a typed
 //!   edge-method on the field's owner in `specter-core` (the method
-//!   *is* the floor — total fn, no public setter). `apply_dirty_delta`
-//!   and `note_effect_completion` are these; a phase helper here would
-//!   only enforce them at a distance.
+//!   *is* the floor — total fn, no public setter). `note_effect_completion`
+//!   is the surviving member; a phase helper here would only enforce
+//!   it at a distance. (The old `apply_dirty_delta` counter edge was
+//!   deleted with the `dirty_descendants` refcount — the
+//!   `Draining → Verifying` reconfirm is now a fresh query, not a
+//!   maintained count.)
 //! - **(c) The sanctioned cross-crate emission drain**:
 //!   [`Engine::emit_owner_probe`] (in `probe`), sole consumer of
 //!   `force_walk_resources`. Its `pub` burst accessors are
@@ -49,13 +52,15 @@
 //! - `absorb_event_into_fire_tail` — FsEvent during post-fire (mutates
 //!   `PostFireBurst.force_walk_resources`).
 //! - `restart_burst_from_fire_tail_residual` — `Active(PostFire)` →
-//!   `Active(PreFire(Batching))` typed move at rebase-ok when a Standard
-//!   `ReturnToIdle` burst carries a non-empty residual. No refcount
-//!   edges: the original burst's `+suppress` / `propagate(+1)` stay
-//!   held (it never finishes) until the restarted burst's single
-//!   `finish_burst_to_idle`.
-//! - `finish_burst_to_idle` — Active → Idle, single point of `-suppress` and
-//!   `propagate(-1)`. Discriminates `PreFire` / `PostFire` at the take.
+//!   `Active(PreFire(Batching))` typed move at rebase-ok when a
+//!   `ReturnToIdle` burst carries a non-empty residual (origin-agnostic
+//!   — Seed-origin restarts too). No refcount edges: the original
+//!   burst's `+suppress` stays held (it never finishes) until the
+//!   restarted burst's single `finish_burst_to_idle`.
+//! - `finish_burst_to_idle` — Active → Idle, single point of
+//!   `-suppress`; then sweeps the Draining Profiles and reconfirms
+//!   each whose fresh covered-descendant query has gone false.
+//!   Discriminates `PreFire` / `PostFire` at the take.
 //!
 //! The two batching helpers exist as a deliberate split rather than one
 //! helper with a runtime flag: each caller has **static knowledge** of
@@ -310,8 +315,11 @@ impl Engine {
     }
 
     /// Start a Standard burst: schedule settle + `burst_deadline`,
-    /// `+suppress`, propagate(+1). No Probe — that fires on `settle_timer`
-    /// expiry via `transition_to_verifying`.
+    /// `+suppress`. No Probe — that fires on `settle_timer` expiry via
+    /// `transition_to_verifying`. No ancestor bookkeeping: the
+    /// `Draining → Verifying` reconfirm is a fresh query
+    /// ([`crate::coverage::has_active_standard_descendant`]) over the
+    /// live tree, so a burst start contributes nothing to maintain.
     ///
     /// `event_resource` is the `FsEvent`'s source. It seeds both
     /// `dirty_resources` (basis for the next probe's LCA) and
@@ -375,7 +383,6 @@ impl Engine {
         }
 
         add_suppress(&mut self.tree, resource, out);
-        let _ = crate::stability::propagate(&mut self.profiles, profile_id, 1);
     }
 
     /// Caller: `drive_burst` Active branch — an `FsEvent` arrived during a
@@ -728,8 +735,8 @@ impl Engine {
         // The post-fire phases never reach this helper — production
         // callers (Settle expiry, BurstDeadline expiry, ancestor
         // reconfirm from `finish_burst_to_idle`) are gated on pre-fire
-        // phases via `is_timer_referenced` and the Draining hit-zero
-        // check respectively. The early return guards a stray call
+        // phases via `is_timer_referenced` and the Draining sweep's
+        // `is_draining()` filter respectively. The early return guards a stray call
         // from construct-arming a fresh `Verifying` slot while an
         // effect wait is still in flight — that would orphan the prior
         // correlation; the I5 `debug_assert` below is the loud backstop.
@@ -804,9 +811,10 @@ impl Engine {
     }
 
     /// Phase: `Verifying` → `Draining`. Phase swap only — the exit body
-    /// (`Draining` → `Verifying` reconfirm) is driven by
-    /// `finish_burst_to_idle` when a child Profile's `propagate(-1)`
-    /// returns this Profile in its hit-zero list.
+    /// (`Draining` → `Verifying` reconfirm) is driven by the
+    /// `finish_burst_to_idle` Draining sweep, when this Profile's fresh
+    /// `has_active_standard_descendant` query has gone false (no
+    /// covered descendant remains in an Active Standard burst).
     ///
     /// `Draining` is a unit variant: the stable snapshot lives on
     /// `Profile.current` (set by `dispatch_standard_ok` immediately
@@ -1031,10 +1039,10 @@ impl Engine {
         self.emit_owner_probe(owner, out);
     }
 
-    /// Active → Idle. Single source of `-suppress` and `propagate(-1)`.
-    /// The active burst's timers are not explicitly cancelled — lazy
-    /// invalidation in `pop_expired` drops them when they fire.
-    /// Idempotent: silent no-op on already-Idle Profiles.
+    /// Active → Idle. Single source of `-suppress`. The active burst's
+    /// timers are not explicitly cancelled — lazy invalidation in
+    /// `pop_expired` drops them when they fire. Idempotent: silent
+    /// no-op on already-Idle Profiles.
     ///
     /// **Cancel-first entry precondition.** No caller may reach here
     /// with `Profile(profile_id)`'s `ProbeSlot` still armed — the
@@ -1043,19 +1051,28 @@ impl Engine {
     /// linearity tripwire. Debug-asserted at entry; the proof that all
     /// callers satisfy it lives at the assert.
     ///
-    /// **Draining-exit driver.** `propagate(-1)` returns ancestors whose
-    /// `dirty_descendants` just hit zero AND are in `PreFirePhase::Draining`.
-    /// The Engine drives each through `transition_to_verifying` in the
-    /// same step — the reconfirm probe compares against the Profile's
-    /// `current` (set when `dispatch_standard_ok` entered Draining).
-    /// Same-step ordering means the `StepOutput` reflects the cascade:
-    /// child's burst end → parent reconfirm Probe in one `step` call.
+    /// **Draining-exit driver.** After the focal Profile is Idle, sweep
+    /// *every* currently-`Draining` Profile and re-evaluate the pure
+    /// query [`crate::coverage::has_active_standard_descendant`]; drive
+    /// each whose query is now false through `transition_to_verifying`
+    /// in the same step. The reconfirm condition can only flip false at
+    /// *some* descendant's burst finish, so re-checking all Draining
+    /// Profiles at every finish is sufficient — and, unlike walking the
+    /// finishing Profile's covering chain, it cannot strand a Draining
+    /// ancestor that a mid-burst topology move took off that chain. The
+    /// exit is then bounded-latency (it waits for the gating
+    /// descendant's own guaranteed, deadline-bounded finish), never a
+    /// permanent strand. The reconfirm probe compares against the
+    /// Profile's `current` (set when `dispatch_standard_ok` entered
+    /// Draining). Same-step ordering means the `StepOutput` reflects
+    /// the cascade: child's burst end → parent reconfirm Probe in one
+    /// `step` call.
     ///
     /// **Burst-finish directive.** If the prior state's
     /// [`BurstFinish`] is [`BurstFinish::Reap`] (the last Sub was
     /// detached mid-burst, or the anchor's all-dynamic teardown
     /// converged on a still-Active Profile), `Engine::reap_profile`
-    /// runs in the same step after `propagate(-1)` — `via =
+    /// runs in the same step after the Draining sweep — `via =
     /// DeferredFromBurst` distinguishes this path from the immediate
     /// reap in `detach_sub_inner`. Otherwise the Profile rests at
     /// [`ProfileState::Idle`].
@@ -1104,20 +1121,22 @@ impl Engine {
         let resource = p.resource;
 
         // Take the burst-by-value via `transition_state(Idle)` and
-        // discriminate on the typed variant. Both pre-fire and post-fire
-        // arms preserve `intent` (the propagate(-1) gate); only the
-        // pre-fire arm carries `suppressed_resources` to drain. PostFire's
-        // `suppressed_resources` is empty by construction —
-        // `transition_to_verifying` drained the set immediately before
-        // the fire, and `into_post_fire`'s debug_assert catches any
-        // future drift.
+        // discriminate on the typed variant. Only the pre-fire arm
+        // carries `suppressed_resources` to drain; PostFire's is empty
+        // by construction — `transition_to_verifying` drained the set
+        // immediately before the fire, and `into_post_fire`'s
+        // debug_assert catches any future drift. `intent` is no longer
+        // read here: the Draining sweep below is intent-agnostic.
         //
-        // After this point `p.state == Idle` for the whole helper window.
-        // The subsequent `sub_suppress` / `propagate(-1)` /
-        // `transition_to_verifying` (ancestor reconfirm) / reap calls all
-        // run against a focal Profile in Idle — future observers (e.g., a
-        // hook firing on state transitions) would see the transition
-        // bracket cleanly.
+        // After this point `p.state == Idle` for the whole helper
+        // window. The subsequent `sub_suppress` / Draining-sweep
+        // `transition_to_verifying` / reap calls all run against a
+        // focal Profile in Idle — future observers (e.g., a hook firing
+        // on state transitions) would see the transition bracket
+        // cleanly. Idle-first is also load-bearing for the sweep: the
+        // finishing Profile is excluded from its own
+        // `has_active_standard_descendant` query precisely because it
+        // is no longer in an Active Standard burst.
         //
         // The defensive `suppressed_resources` drain catches abnormal-
         // end paths that bypass `transition_to_verifying`
@@ -1126,28 +1145,20 @@ impl Engine {
         // (slot reaped between event ingestion and burst end via
         // `discard_anchor_state`'s descendant release) is a no-op —
         // `refcounts::sub_suppress` short-circuits on a missing slot.
-        // Only Standard bursts call `propagate(+1)` at start (the
-        // burst-propagation row), so only Standard bursts call
-        // `propagate(-1)` at end. Seed bursts never contribute to
-        // ancestor `dirty_descendants`.
         let prior = p.transition_state(ProfileState::Idle);
-        // Capture `(was_standard, suppressed_drain, finish)` from the
-        // consumed prior state. `finish` is captured here — not re-read
-        // from `profiles.get(profile_id)` after the swap — so the
-        // directive is locked in at burst-end entry; a hypothetical
-        // future mid-helper write to a re-borrowed Profile can't flip
-        // the reap decision under us.
-        let (was_standard, suppressed_drain, finish) = match prior {
-            ProfileState::Active(ActiveBurst::PreFire(pre), finish) => (
-                matches!(pre.intent, BurstIntent::Standard),
-                pre.suppressed_resources,
-                finish,
-            ),
-            ProfileState::Active(ActiveBurst::PostFire(post), finish) => (
-                matches!(post.intent, BurstIntent::Standard),
-                BTreeSet::new(),
-                finish,
-            ),
+        // Capture `(suppressed_drain, finish)` from the consumed prior
+        // state. `finish` is captured here — not re-read from
+        // `profiles.get(profile_id)` after the swap — so the directive
+        // is locked in at burst-end entry; a hypothetical future
+        // mid-helper write to a re-borrowed Profile can't flip the reap
+        // decision under us. The PostFire burst (whose `ProbeSlot` the
+        // cancel-first precondition guarantees disarmed) is dropped at
+        // the arm's end, exactly as before.
+        let (suppressed_drain, finish) = match prior {
+            ProfileState::Active(ActiveBurst::PreFire(pre), finish) => {
+                (pre.suppressed_resources, finish)
+            }
+            ProfileState::Active(ActiveBurst::PostFire(_), finish) => (BTreeSet::new(), finish),
             other => {
                 // Idle / Pending — no burst-end machinery to run. Restore.
                 p.transition_state(other);
@@ -1161,16 +1172,36 @@ impl Engine {
 
         sub_suppress(&mut self.tree, resource, out);
 
-        if was_standard {
-            let hit_zero = crate::stability::propagate(&mut self.profiles, profile_id, -1);
-
-            // Draining → Verifying reconfirm for ancestors whose count
-            // just hit zero. `transition_to_verifying` mints a fresh
-            // correlation and emits Probe; the response routes through
-            // `dispatch_standard_ok` as a normal Standard burst.
-            for ancestor in hit_zero {
-                self.transition_to_verifying(ancestor, out);
-            }
+        // Intent-agnostic Draining sweep. The reconfirm condition
+        // `has_active_standard_descendant(A)` can only flip false at
+        // *some* descendant's burst finish; rather than walk the
+        // finishing Profile's (possibly topology-moved) covering chain,
+        // re-evaluate the pure query for *every* currently-Draining
+        // Profile. The focal Profile is already Idle (above), so it is
+        // correctly excluded from its own predicate. Pass 1 is pure
+        // reads (`&Tree` + `&ProfileMap`, all shared — borrow-clean
+        // against the inner `&self.profiles` re-borrow); Draining is a
+        // rare, tiny phase (typically 0–1 Profiles). Pass 2 takes
+        // `&mut self` for the unchanged downstream reconfirm:
+        // `transition_to_verifying` mints a fresh correlation and emits
+        // Probe; the response routes through `dispatch_standard_ok` as
+        // a normal Standard burst, comparing against the Profile's
+        // `current` (set when it entered Draining).
+        let reconfirm: SmallVec<[ProfileId; 4]> = self
+            .profiles
+            .iter()
+            .filter_map(|(id, a)| {
+                (a.state().is_draining()
+                    && !crate::coverage::has_active_standard_descendant(
+                        &self.tree,
+                        &self.profiles,
+                        id,
+                    ))
+                .then_some(id)
+            })
+            .collect();
+        for ancestor in reconfirm {
+            self.transition_to_verifying(ancestor, out);
         }
 
         // Honour the burst-finish directive captured from the prior
@@ -1228,19 +1259,19 @@ impl Engine {
     /// inverse of `transition_to_awaiting`'s fire move.
     ///
     /// **Caller.** `dispatch_rebase_ok` only, after `rebase_baseline`,
-    /// and only once it has established the residual is non-empty, the
-    /// burst is [`BurstFinish::ReturnToIdle`], and the origin is
-    /// [`BurstIntent::Standard`]. The first two are the restart's reason;
-    /// the third is refcount-load-bearing — see
-    /// [`PostFireBurst::into_pre_fire_residual`].
+    /// and only once it has established the residual is non-empty and
+    /// the burst is [`BurstFinish::ReturnToIdle`]. Origin-agnostic — a
+    /// Seed-origin residual restarts too; `into_pre_fire_residual` sets
+    /// `intent: Standard` because a restarted debounce burst *is*
+    /// Standard by definition.
     ///
-    /// **No refcount edges.** Deliberately neither `+suppress` /
-    /// `propagate(+1)` nor `-suppress` / `propagate(-1)`. The anchor
-    /// `suppress_count` 0→1 and the dirty-descendants `propagate(+1)`
-    /// were taken once at the original `start_standard_burst` and stay
-    /// held: this restart never finishes, so the single balancing
-    /// release runs at the restarted burst's eventual
-    /// `finish_burst_to_idle`. A finish-then-start would flicker both.
+    /// **No refcount edges.** Deliberately neither `+suppress` nor
+    /// `-suppress`. The anchor `suppress_count` 0→1 was taken once at
+    /// the original `start_*_burst` and stays held: this restart never
+    /// finishes, so the single balancing release runs at the restarted
+    /// burst's eventual `finish_burst_to_idle`. A finish-then-start
+    /// would flicker it. (There is no ancestor counter to balance — the
+    /// reconfirm is a fresh query.)
     ///
     /// **Slot-consumed precondition.** The whole-value swap below
     /// destructures the post-fire burst; an armed `Rebasing` slot
@@ -1545,8 +1576,8 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 /// Centralizes the `(anchor_kind, intent)` rule that drives every
 /// pre-fire probe target choice. The three production scenarios
 /// (settle-expired Standard burst, force-fire under
-/// [`PreFirePhase::Batching`] or [`PreFirePhase::Draining`], hit-zero
-/// Draining reconfirm) all resolve here:
+/// [`PreFirePhase::Batching`] or [`PreFirePhase::Draining`], the
+/// Draining-sweep reconfirm) all resolve here:
 ///
 /// - File anchor (`Profile.kind == Some(File)`) → the anchor itself.
 ///   kqueue per-file FDs surface events at the file directly, and the

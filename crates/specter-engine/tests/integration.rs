@@ -1,10 +1,13 @@
 //! Cross-module integration tests for `specter-engine`.
 //!
 //! Two suites:
-//! - **P3-era primitives**: `covers + nearest_covering_ancestor`
-//!   against a real `Tree` + `ProfileMap`. Propagation behavior lives
-//!   in `stability::tests` (free-function unit tests) and end-to-end
-//!   through the burst lifecycle in `tests/multi_profile.rs`.
+//! - **P3-era primitives**: the `covers` predicate against a real
+//!   `Tree` + `ProfileMap`. Its transitive derivation
+//!   (`nearest_covering_ancestor`) and the reconfirm query built on it
+//!   (`has_active_standard_descendant`) are engine-internal, so their
+//!   units live inline in `coverage::tests`; the `Draining → Verifying`
+//!   reconfirm is exercised end-to-end through the burst lifecycle in
+//!   `tests/multi_profile.rs`.
 //! - **P4 lifecycle**: full `Idle ↔ Active(Burst)` flows driven through
 //!   `Engine::attach_sub` and `Engine::step` against a `MockSensor`-style
 //!   harness (assertions read from `StepOutput`).
@@ -32,7 +35,7 @@ use specter_core::{
     Profile, ProfileIdentity, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig,
     StepOutput, SubAttachAnchor, SubAttachRequest, SubParams, Tree, WatchOp,
 };
-use specter_engine::{Engine, covers, nearest_covering_ancestor};
+use specter_engine::{Engine, covers};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -53,106 +56,6 @@ fn mark_dir(tree: &mut Tree, id: ResourceId) {
 fn engine_default_constructible() {
     let e = Engine::new();
     assert!(e.next_deadline().is_none());
-}
-
-#[test]
-fn covers_drives_nearest_covering_ancestor() {
-    // Three Resources in a chain: root → a → b. A Profile at root with
-    // `recursive = false` does NOT cover b (depth > 1, recursive false);
-    // a Profile at root with `recursive = true` DOES.
-
-    // Flavor 1: root's Profile is non-recursive; b has no covering parent.
-    {
-        let mut tree = Tree::new();
-        let mut profiles = ProfileMap::new();
-        let root = tree.ensure_root("root", ResourceRole::User);
-        let a = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
-        let b = tree
-            .ensure_child(a, "b", ResourceRole::User)
-            .expect("test live parent");
-        for r in [root, a, b] {
-            mark_dir(&mut tree, r);
-        }
-        let p_root = profiles.attach(
-            &mut tree,
-            Profile::new(
-                root,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(false).build(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
-        let p_b = profiles.attach(
-            &mut tree,
-            Profile::new(
-                b,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
-
-        assert!(!covers(profiles.get(p_root).unwrap(), b, &tree));
-        assert!(nearest_covering_ancestor(&tree, &profiles, p_b).is_none());
-    }
-
-    // Flavor 2: root's Profile is recursive; b parents to root.
-    {
-        let mut tree = Tree::new();
-        let mut profiles = ProfileMap::new();
-        let root = tree.ensure_root("root", ResourceRole::User);
-        let a = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
-        let b = tree
-            .ensure_child(a, "b", ResourceRole::User)
-            .expect("test live parent");
-        for r in [root, a, b] {
-            mark_dir(&mut tree, r);
-        }
-        let p_root = profiles.attach(
-            &mut tree,
-            Profile::new(
-                root,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
-        let p_b = profiles.attach(
-            &mut tree,
-            Profile::new(
-                b,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
-
-        assert!(covers(profiles.get(p_root).unwrap(), b, &tree));
-        assert_eq!(
-            nearest_covering_ancestor(&tree, &profiles, p_b),
-            Some(p_root),
-        );
-    }
 }
 
 #[test]

@@ -1,11 +1,21 @@
-//! `covers(P, R)` predicate.
+//! The coverage relation and the reconfirm query derived from it.
 //!
-//! Walks the segment chain from `profile.resource` (the anchor) down to the
-//! candidate `target`, evaluating `max_depth`, the `recursive` flag, the
-//! exclude globs, and the file pattern (with directory bypass) along the
-//! way. The predicate is the gate for two things in the engine: whether an
-//! `FsEvent` at `R` should drive `P`'s burst, and whether `R` contributes
-//! to `P`'s `watch_demand`.
+//! [`covers`] walks the segment chain from `profile.resource` (the
+//! anchor) down to the candidate `target`, evaluating `max_depth`, the
+//! `recursive` flag, the exclude globs, and the file pattern (with
+//! directory bypass) along the way. It is the gate for two things in
+//! the engine: whether an `FsEvent` at `R` should drive `P`'s burst,
+//! and whether `R` contributes to `P`'s `watch_demand`.
+//!
+//! [`nearest_covering_ancestor`] is its transitive derivation, and
+//! [`has_active_standard_descendant`] (via [`chain_reaches`]) is the
+//! pure query that replaced the old `dirty_descendants` refcount: it
+//! answers, fresh at each consult point, "is some Active-Standard
+//! strict-descendant Profile still covering this ancestor?" — the
+//! `Draining → Verifying` reconfirm condition. Evaluating it as a
+//! query rather than maintaining it as a counter is what makes it
+//! robust to mid-burst topology moves; the rationale lives on
+//! [`has_active_standard_descendant`].
 
 use smallvec::SmallVec;
 use specter_core::{Profile, ProfileId, ProfileMap, Resource, ResourceId, ResourceKind, Tree};
@@ -118,7 +128,8 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
 }
 
 /// Resolve the nearest covering ancestor Profile of `child` — the
-/// derivation companion to [`covers`].
+/// derivation companion to [`covers`], and the **query core** of the
+/// `Draining → Verifying` reconfirm.
 ///
 /// Walks Resource ancestors of `child.resource`; at each ancestor
 /// Resource, picks the smallest covering [`ProfileId`] for a
@@ -129,15 +140,23 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
 /// a Resource ancestor with no Profile is skipped; the walk
 /// continues to the next Resource ancestor.
 ///
-/// Coverage-domain by nature: the derivation is purely a `(tree,
-/// profiles, child)` function of the `covers` predicate, with no
-/// caching or peer state. The cached parent edge lives on
-/// `Profile.parent_profile`; engine-side write paths
-/// (`Engine::install_parent_edges_for`,
-/// `stability::recompute_parent_edges`) call this function and route
-/// the result through `stability::write_parent_edge`.
+/// **Pure, never cached.** The result is a total function of `(tree,
+/// profiles, child)` — no peer state, no stored edge. It used to feed
+/// a per-Profile `parent_profile` cache; that cache was deleted
+/// because a refcount keyed on a recomputable derivation could not be
+/// kept balanced across mid-burst topology moves. The derivation now
+/// stands alone: [`chain_reaches`] climbs it hop-by-hop and
+/// [`has_active_standard_descendant`] evaluates the reconfirm
+/// predicate fresh from it. `pub(crate)` — engine-internal; no
+/// cross-crate consumer.
+///
+/// Each `child → result` step is a strict Resource-ancestor move
+/// (`tree.ancestors` is strict, and the same-Resource co-anchor case
+/// is excluded), so iterating it ([`chain_reaches`]) terminates
+/// structurally — a cycle is unrepresentable, with no self-edge
+/// assertion needed.
 #[must_use]
-pub fn nearest_covering_ancestor(
+pub(crate) fn nearest_covering_ancestor(
     tree: &Tree,
     profiles: &ProfileMap,
     child: ProfileId,
@@ -158,6 +177,85 @@ pub fn nearest_covering_ancestor(
         }
     }
     None
+}
+
+/// True iff some **strict-descendant** Profile of `ancestor`'s subtree
+/// is in an Active **Standard** burst (any phase — pre- or post-fire)
+/// **and** has `ancestor` on its transitive
+/// [`nearest_covering_ancestor`] chain.
+///
+/// The derived, never-cached replacement for the old
+/// `Profile.dirty_descendants > 0` refcount. Same chain semantics —
+/// the *transitive nearest-covering-ancestor chain*, **not** the raw
+/// Tree subtree and **not** a single direct [`covers`] test (`covers`
+/// is not transitive: an intermediate broader Profile keeps a deeper
+/// one on `ancestor`'s chain even where `ancestor`'s own
+/// `max_depth`/`pattern` would exclude it). Evaluated fresh at each of
+/// its two consult points — the `dispatch_standard_ok` fire gate and
+/// the `finish_burst_to_idle` Draining sweep — never accumulated, so
+/// no mid-burst topology move can desynchronise it.
+///
+/// Iterative DFS over the **strict** Tree descendants of
+/// `ancestor.resource` (starts at its children, so `ancestor` itself
+/// and any co-anchor Profile sharing its slot are excluded — matching
+/// the old refcount never self-counting). The strict subtree is a
+/// sound superset of `{D : ancestor ∈ chain(D)}` (every chain link is
+/// a Resource-ancestor, so a contributing `D.resource` is necessarily
+/// a Tree-descendant of `ancestor.resource`); [`chain_reaches`] is the
+/// exact filter. Short-circuits on the first witness.
+pub(crate) fn has_active_standard_descendant(
+    tree: &Tree,
+    profiles: &ProfileMap,
+    ancestor: ProfileId,
+) -> bool {
+    let Some(root) = profiles.get(ancestor).map(|p| p.resource) else {
+        return false;
+    };
+    // Strict descendants only: seed the stack with `root`'s children,
+    // never `root` itself.
+    let mut stack: Vec<ResourceId> = tree.children_ids(root).collect();
+    while let Some(node) = stack.pop() {
+        for d in profiles.at(node) {
+            if profiles
+                .get(d)
+                .is_some_and(|p| p.state().in_active_standard_burst())
+                && chain_reaches(tree, profiles, d, ancestor)
+            {
+                return true;
+            }
+        }
+        stack.extend(tree.children_ids(node));
+    }
+    false
+}
+
+/// True iff `ancestor` lies on `descendant`'s transitive
+/// [`nearest_covering_ancestor`] chain — i.e. climbing
+/// `descendant → nca(descendant) → nca(nca(descendant)) → …` reaches
+/// `ancestor`. This is exactly the chain the deleted `propagate` walked
+/// via the cached `parent_profile` edge (that edge *was*
+/// `nearest_covering_ancestor`'s result), recomputed fresh.
+///
+/// Terminates structurally: every hop is a strict Resource-ancestor
+/// move (see [`nearest_covering_ancestor`]), so the climb is bounded
+/// by `descendant`'s Tree depth and a cycle cannot form. A
+/// `descendant == ancestor` call (not produced by
+/// [`has_active_standard_descendant`]'s strict walk, but well-defined)
+/// returns `false`: the chain is strictly above `descendant`.
+fn chain_reaches(
+    tree: &Tree,
+    profiles: &ProfileMap,
+    descendant: ProfileId,
+    ancestor: ProfileId,
+) -> bool {
+    let mut cur = descendant;
+    while let Some(parent) = nearest_covering_ancestor(tree, profiles, cur) {
+        if parent == ancestor {
+            return true;
+        }
+        cur = parent;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -816,6 +914,384 @@ mod tests {
         assert_eq!(
             nearest_covering_ancestor(&tree, &profiles, p_leaf),
             Some(smaller),
+        );
+    }
+
+    #[test]
+    fn nearest_covering_ancestor_skips_resource_ancestor_lacking_profile() {
+        // root(profiled, recursive) → a(NO profile) → b(profiled). The
+        // walk from `b` skips the Profile-less Resource `a` and resolves
+        // to `p_root` two Resource-hops up. (Migrated from the former
+        // external `integration::covers_drives_nearest_covering_ancestor`
+        // flavor-2 — `nearest_covering_ancestor` is now engine-internal,
+        // so the coverage homes inline beside the function it exercises.)
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let root = tree.ensure_root("root", ResourceRole::User);
+        let a = tree
+            .ensure_child(root, "a", ResourceRole::User)
+            .expect("test live parent");
+        let b = tree
+            .ensure_child(a, "b", ResourceRole::User)
+            .expect("test live parent");
+        for r in [root, a, b] {
+            mark_dir(&mut tree, r);
+        }
+        let p_root = profiles.attach(
+            &mut tree,
+            Profile::new(
+                root,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
+        );
+        // `a` deliberately carries no Profile.
+        let p_b = profiles.attach(
+            &mut tree,
+            Profile::new(
+                b,
+                ProfileIdentity {
+                    config: cfg_recursive(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
+        );
+        assert_eq!(
+            nearest_covering_ancestor(&tree, &profiles, p_b),
+            Some(p_root),
+            "Profile-less Resource ancestor is skipped; walk continues",
+        );
+        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_root), None);
+    }
+
+    // ===== has_active_standard_descendant =====
+    //
+    // The derived, never-cached replacement for the old
+    // `dirty_descendants > 0` refcount: "is some Active-Standard
+    // strict-descendant Profile still on this ancestor's transitive
+    // nearest-covering-ancestor chain?" Units pin the load-bearing
+    // distinctions: transitive chain ≠ subtree+direct-`covers`, strict
+    // (co-anchor excluded), Seed never gates, and chain determinism.
+
+    use specter_core::{
+        ActiveBurst, BurstFinish, BurstIntent, PreFireBurst, PreFirePhase, ProfileState, TimerId,
+    };
+    use std::collections::BTreeSet;
+
+    /// A Profile at `r` with `builder`'s config, left `Idle`.
+    fn attach_idle(
+        tree: &mut Tree,
+        profiles: &mut ProfileMap,
+        r: ResourceId,
+        builder: ScanConfigBuilder,
+    ) -> ProfileId {
+        profiles.attach(
+            tree,
+            Profile::new(
+                r,
+                ProfileIdentity {
+                    config: builder.build(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
+        )
+    }
+
+    /// A Profile at `r` driven into an Active burst of `intent`. Phase
+    /// is `Batching` — the lightest `Active` state (no `ProbeSlot`, so
+    /// no correlation plumbing and no armed-slot Drop tripwire at test
+    /// teardown). `has_active_standard_descendant` reads only
+    /// `ActiveBurst::intent()`, so the phase is immaterial; the synthetic
+    /// timer ids are never inspected (these Profiles are never stepped).
+    fn attach_active(
+        tree: &mut Tree,
+        profiles: &mut ProfileMap,
+        r: ResourceId,
+        builder: ScanConfigBuilder,
+        intent: BurstIntent,
+    ) -> ProfileId {
+        let mut p = Profile::new(
+            r,
+            ProfileIdentity {
+                config: builder.build(),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
+            SETTLE,
+            None,
+        );
+        p.transition_state(ProfileState::Active(
+            ActiveBurst::PreFire(PreFireBurst {
+                burst_deadline: TimerId::from(1),
+                phase: PreFirePhase::Batching {
+                    settle_timer: TimerId::from(2),
+                },
+                intent,
+                forced: false,
+                dirty_resources: BTreeSet::new(),
+                force_walk_resources: BTreeSet::new(),
+                probe_target: r,
+                suppressed_resources: BTreeSet::new(),
+                last_event_time: None,
+            }),
+            BurstFinish::ReturnToIdle,
+        ));
+        profiles.attach(tree, p)
+    }
+
+    #[test]
+    fn has_active_standard_descendant_follows_transitive_chain_not_subtree() {
+        // a(recursive, max_depth=1) → mid(recursive, unbounded) →
+        // deep(Active-Standard). `a` does NOT directly cover `deep`
+        // (depth 2 > max_depth 1), but `deep`'s nearest-covering-ancestor
+        // chain is deep → p_mid → p_a, so the predicate is true *via the
+        // intermediate broader Profile*. Pins: the query is the
+        // transitive chain, not the raw subtree filtered by a single
+        // direct `covers(a, ·)` test.
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let a = tree.ensure_root("a", ResourceRole::User);
+        let mid = tree
+            .ensure_child(a, "mid", ResourceRole::User)
+            .expect("test live parent");
+        let deep = tree
+            .ensure_child(mid, "deep", ResourceRole::User)
+            .expect("test live parent");
+        for r in [a, mid, deep] {
+            mark_dir(&mut tree, r);
+        }
+        let p_a = attach_idle(
+            &mut tree,
+            &mut profiles,
+            a,
+            recursive_unbounded().max_depth(Some(1)),
+        );
+        let _ = attach_idle(&mut tree, &mut profiles, mid, recursive_unbounded());
+        let _ = attach_active(
+            &mut tree,
+            &mut profiles,
+            deep,
+            recursive_unbounded(),
+            BurstIntent::Standard,
+        );
+
+        assert!(
+            !covers(profiles.get(p_a).unwrap(), deep, &tree),
+            "premise: `a` does not directly cover `deep` (depth 2 > max_depth 1)",
+        );
+        assert!(
+            has_active_standard_descendant(&tree, &profiles, p_a),
+            "true via the transitive chain deep → p_mid → p_a",
+        );
+        // Sanity: with the deep Profile Idle the predicate is false.
+        let mut profiles_idle = ProfileMap::new();
+        let mut tree2 = Tree::new();
+        let a2 = tree2.ensure_root("a", ResourceRole::User);
+        let mid2 = tree2
+            .ensure_child(a2, "mid", ResourceRole::User)
+            .expect("test live parent");
+        let deep2 = tree2
+            .ensure_child(mid2, "deep", ResourceRole::User)
+            .expect("test live parent");
+        for r in [a2, mid2, deep2] {
+            mark_dir(&mut tree2, r);
+        }
+        let p_a2 = attach_idle(
+            &mut tree2,
+            &mut profiles_idle,
+            a2,
+            recursive_unbounded().max_depth(Some(1)),
+        );
+        let _ = attach_idle(&mut tree2, &mut profiles_idle, mid2, recursive_unbounded());
+        let _ = attach_idle(&mut tree2, &mut profiles_idle, deep2, recursive_unbounded());
+        assert!(!has_active_standard_descendant(
+            &tree2,
+            &profiles_idle,
+            p_a2
+        ));
+    }
+
+    #[test]
+    fn has_active_standard_descendant_excludes_co_anchor_profile() {
+        // Two Profiles co-located at the ancestor's own Resource. The
+        // strict-subtree DFS starts at `root`'s *children*, so a
+        // co-anchor Profile in an Active-Standard burst does NOT make
+        // the predicate true for its sibling — matching the old refcount
+        // never self-counting.
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let root = tree.ensure_root("root", ResourceRole::User);
+        mark_dir(&mut tree, root);
+        let p_a = attach_idle(
+            &mut tree,
+            &mut profiles,
+            root,
+            ScanConfig::builder().recursive(true),
+        );
+        // A second, distinct Profile co-located at the same Resource:
+        // differing `recursive` ⇒ differing config_hash (two Profiles
+        // sharing a slot must differ in identity). Its config is
+        // irrelevant to the assertion — the exclusion is purely
+        // structural (the DFS starts at `root`'s children).
+        let _p_x = attach_active(
+            &mut tree,
+            &mut profiles,
+            root,
+            ScanConfig::builder().recursive(false),
+            BurstIntent::Standard,
+        );
+        assert!(
+            !has_active_standard_descendant(&tree, &profiles, p_a),
+            "a co-anchor Active-Standard Profile is not a strict descendant",
+        );
+    }
+
+    #[test]
+    fn has_active_standard_descendant_true_for_one_active_among_idle_siblings() {
+        // root → {c1(Idle), c2(Active-Standard), c3(Idle)}. A single
+        // witness anywhere in the strict subtree suffices.
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let root = tree.ensure_root("root", ResourceRole::User);
+        let c1 = tree
+            .ensure_child(root, "c1", ResourceRole::User)
+            .expect("test live parent");
+        let c2 = tree
+            .ensure_child(root, "c2", ResourceRole::User)
+            .expect("test live parent");
+        let c3 = tree
+            .ensure_child(root, "c3", ResourceRole::User)
+            .expect("test live parent");
+        for r in [root, c1, c2, c3] {
+            mark_dir(&mut tree, r);
+        }
+        let p_root = attach_idle(
+            &mut tree,
+            &mut profiles,
+            root,
+            ScanConfig::builder().recursive(true),
+        );
+        let _ = attach_idle(
+            &mut tree,
+            &mut profiles,
+            c1,
+            ScanConfig::builder().recursive(true),
+        );
+        let _ = attach_active(
+            &mut tree,
+            &mut profiles,
+            c2,
+            ScanConfig::builder().recursive(true),
+            BurstIntent::Standard,
+        );
+        let _ = attach_idle(
+            &mut tree,
+            &mut profiles,
+            c3,
+            ScanConfig::builder().recursive(true),
+        );
+        assert!(has_active_standard_descendant(&tree, &profiles, p_root));
+    }
+
+    #[test]
+    fn has_active_standard_descendant_false_for_seed_descendant() {
+        // A Seed-burst descendant never gates an ancestor (the old
+        // refcount took no `+1` for Seed); the same descendant in a
+        // Standard burst does. This is the Seed-vs-Standard behavioral
+        // distinction, pinned at the unit level.
+        let topo = |intent: BurstIntent| {
+            let mut tree = Tree::new();
+            let mut profiles = ProfileMap::new();
+            let root = tree.ensure_root("root", ResourceRole::User);
+            let c = tree
+                .ensure_child(root, "c", ResourceRole::User)
+                .expect("test live parent");
+            mark_dir(&mut tree, root);
+            mark_dir(&mut tree, c);
+            let p_root = attach_idle(
+                &mut tree,
+                &mut profiles,
+                root,
+                ScanConfig::builder().recursive(true),
+            );
+            let _ = attach_active(
+                &mut tree,
+                &mut profiles,
+                c,
+                ScanConfig::builder().recursive(true),
+                intent,
+            );
+            has_active_standard_descendant(&tree, &profiles, p_root)
+        };
+        assert!(!topo(BurstIntent::Seed), "Seed descendant never gates");
+        assert!(
+            topo(BurstIntent::Standard),
+            "the same descendant in a Standard burst does gate",
+        );
+    }
+
+    #[test]
+    fn has_active_standard_descendant_chain_uses_min_profile_id_tie_break() {
+        // a(recursive) → mid → deep(Active-Standard), with two co-located
+        // covering Profiles at `mid`. `chain_reaches` climbs
+        // `nearest_covering_ancestor`, whose co-anchor tie-break is the
+        // smallest ProfileId — deterministically resolving `deep`'s first
+        // hop and still reaching `p_a`.
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let a = tree.ensure_root("a", ResourceRole::User);
+        let mid = tree
+            .ensure_child(a, "mid", ResourceRole::User)
+            .expect("test live parent");
+        let deep = tree
+            .ensure_child(mid, "deep", ResourceRole::User)
+            .expect("test live parent");
+        for r in [a, mid, deep] {
+            mark_dir(&mut tree, r);
+        }
+        let p_a = attach_idle(&mut tree, &mut profiles, a, recursive_unbounded());
+        // Two distinct co-located Profiles at `mid`: differing
+        // `recursive` ⇒ differing config_hash ⇒ separate ProfileIds.
+        // Both still cover `deep` (it is their depth-1 child, which a
+        // non-recursive Profile also covers), so the chain hop is a real
+        // smallest-covering-id tie-break, not a fallback to the only
+        // covering one.
+        let p_mid_1 = attach_idle(&mut tree, &mut profiles, mid, recursive_unbounded());
+        let p_mid_2 = attach_idle(
+            &mut tree,
+            &mut profiles,
+            mid,
+            ScanConfig::builder().recursive(false),
+        );
+        let p_deep = attach_active(
+            &mut tree,
+            &mut profiles,
+            deep,
+            recursive_unbounded(),
+            BurstIntent::Standard,
+        );
+        // Both `mid` Profiles cover `deep` (it is their depth-1 child);
+        // the tie-break picks the smaller id.
+        let smaller = std::cmp::min(p_mid_1, p_mid_2);
+        assert_eq!(
+            nearest_covering_ancestor(&tree, &profiles, p_deep),
+            Some(smaller),
+            "deep's first chain hop is the deterministic min-id co-anchor",
+        );
+        assert!(
+            has_active_standard_descendant(&tree, &profiles, p_a),
+            "the chain still reaches `p_a` through the resolved `mid` Profile",
         );
     }
 }
