@@ -998,7 +998,7 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?promoter,
             ?sub,
             path = %path.display(),
-            "dynamic Sub reaped (anchor terminal — Promoter dynamic_subs entry dropped)",
+            "dynamic Sub reaped (anchor terminal — Profile all-dynamic teardown)",
         ),
         Diagnostic::InvalidBurstTransition {
             profile,

@@ -1,10 +1,11 @@
 //! Promoter — engine-resident dynamic-watch source.
 //!
 //! A `Promoter` is a peer to `Profile` in the engine: each one carries a
-//! `PatternSpec`, a literal-prefix probe state, an `Active` proxy fan-out
-//! over matched directories, and a deduplicated map of synthesised
-//! dynamic Subs. The engine drives the lifecycle through a state machine;
-//! `core::promoter` owns the data shapes and the registry.
+//! `PatternSpec`, a literal-prefix probe state, and an `Active` proxy
+//! fan-out over matched directories. The dynamic Subs it synthesises are
+//! owned solely by `SubRegistry` (tagged `source_promoter`); the Promoter
+//! keeps no mirror. The engine drives the lifecycle through a state
+//! machine; `core::promoter` owns the data shapes and the registry.
 //!
 //! ## State
 //!
@@ -31,24 +32,8 @@
 //! `pending_enumerations` and drain one at a time — the engine arms
 //! the `Active` slot for the popped target and refuses to pop another
 //! while it stays armed.
-//!
-//! ## Dynamic Sub deduplication
-//!
-//! `dynamic_subs: BTreeMap<ResourceId, SubId>` enforces at most one
-//! dynamic Sub per `(promoter_id, anchor_resource)`. Resource-keying is
-//! structurally equivalent to path-keying: Tree slot identity is
-//! `(parent, segment)`, bijective with the resolved path while the slot
-//! is live, and the Sub's `AnchorClaim::Held` contribution keeps the
-//! slot from reaping for the dedup entry's lifetime. The dedup entry
-//! drops at `on_dynamic_sub_reaped` *before* `reap_profile` releases
-//! the anchor contribution, so a re-mint after the slot reaps lands at
-//! a fresh `ResourceId` and never collides with stale state. The map
-//! is private: the only mutators are [`Promoter::promote`] (insert,
-//! dedup-asserted), [`Promoter::forget_dynamic_sub`] (anchor-terminal
-//! remove), and [`Promoter::drain_dynamic_subs`] (teardown drain) —
-//! the discipline is structural, not a documented convention.
 
-use crate::ids::{ProbeCorrelation, PromoterId, ResourceId, SubId};
+use crate::ids::{ProbeCorrelation, PromoterId, ResourceId};
 use crate::pattern::PatternSpec;
 use crate::probe::ProbeSlot;
 use crate::profile::DescentState;
@@ -93,20 +78,22 @@ pub struct PromoterAttachRequest {
 ///
 /// The seven spec fields are `pub`: frozen at [`Self::from_request`],
 /// never written post-construction (the `Sub`-frozen shape — benign
-/// all-`pub`). The four **runtime** fields are module-private; the
+/// all-`pub`). The three **runtime** fields are module-private; the
 /// cross-crate write surface is this type's `pub fn`s, never a field
 /// assignment. Each runtime mutator owns its invariant structurally
 /// (matching `Profile`'s sealed state machine and CLAUDE.md "single
 /// source per transition"): the one-shot `PrefixPending → Active` move
 /// ([`Self::enter_active_empty`]); the in-`state` linear [`ProbeSlot`]
 /// (armed only via [`Self::arm_enumeration`], consumed only via
-/// [`Self::take_probe`]); the dedup map ([`Self::promote`] /
-/// [`Self::forget_dynamic_sub`] / [`Self::drain_dynamic_subs`]); the
-/// enumeration queue ([`Self::enqueue_enumeration`] /
-/// [`Self::pop_enumeration`] / [`Self::unregister_proxy_slot`]); and
-/// the one-shot fan-out latch ([`Self::latch_fanout_warning`]). Reads
-/// project through [`Self::state`] / [`Self::dynamic_subs`] /
-/// [`Self::pending_enumerations`].
+/// [`Self::take_probe`]); the enumeration queue
+/// ([`Self::enqueue_enumeration`] / [`Self::pop_enumeration`] /
+/// [`Self::unregister_proxy_slot`]); and the one-shot fan-out latch
+/// ([`Self::latch_fanout_warning`], pre-gated by
+/// [`Self::fanout_warned`]). Reads project through [`Self::state`] /
+/// [`Self::pending_enumerations`]. The dynamic Subs this Promoter
+/// synthesises are owned solely by `SubRegistry` (tagged
+/// `source_promoter`) — there is no Promoter-side mirror to keep
+/// coherent, so the dedup gate is a live registry query.
 #[derive(Debug)]
 pub struct Promoter {
     pub name: CompactString,
@@ -131,18 +118,12 @@ pub struct Promoter {
     /// [`Self::pop_enumeration`] / [`Self::unregister_proxy_slot`].
     pending_enumerations: BTreeSet<ResourceId>,
 
-    /// `anchor_resource → SubId`. Resource identity is
-    /// `(parent, segment)` — bijective with the resolved path while the
-    /// slot is live; the Sub's `AnchorClaim::Held` contribution keeps
-    /// the slot from reaping for the dedup entry's lifetime. Private:
-    /// the dedup invariant (one Sub per `(promoter, anchor)`) is
-    /// enforced at [`Self::promote`].
-    dynamic_subs: BTreeMap<ResourceId, SubId>,
-
     /// One-shot fan-out warning latch. Fully private — its only
     /// interaction is the atomic check-and-latch in
     /// [`Self::latch_fanout_warning`], so a pathological pattern warns
-    /// once per Promoter lifetime by construction.
+    /// once per Promoter lifetime by construction. [`Self::fanout_warned`]
+    /// projects it read-only so the engine can skip the registry count
+    /// scan once latched.
     warned_at_threshold: bool,
 }
 
@@ -168,7 +149,6 @@ impl Promoter {
             log_output: req.log_output,
             state,
             pending_enumerations: BTreeSet::new(),
-            dynamic_subs: BTreeMap::new(),
             warned_at_threshold: false,
         }
     }
@@ -290,56 +270,28 @@ impl Promoter {
         self.pending_enumerations.pop_first()
     }
 
-    /// Immutable view of the dynamic-Sub dedup map — the caller's
-    /// dedup gate read (`contains_key`) plus introspection. At most one
-    /// entry per `(promoter, anchor_resource)`; the invariant is
-    /// enforced at [`Self::promote`].
+    /// Whether the one-shot fan-out warning has already latched.
+    /// Read-only projection of `warned_at_threshold` — the engine's
+    /// cheap pre-gate so an already-warned (pathological) Promoter
+    /// never re-runs the registry count scan
+    /// [`Self::latch_fanout_warning`] consumes. Additive to, not a
+    /// replacement for, that method's own `warned` short-circuit.
     #[must_use]
-    pub const fn dynamic_subs(&self) -> &BTreeMap<ResourceId, SubId> {
-        &self.dynamic_subs
+    pub const fn fanout_warned(&self) -> bool {
+        self.warned_at_threshold
     }
 
-    /// Record the dynamic Sub minted for `anchor_resource`. The dedup
-    /// invariant (one Sub per `(promoter, anchor)`) is the caller's
-    /// `dynamic_subs().contains_key` gate + early-return; this
-    /// `debug_assert!`s the key was absent as the loud dev/CI backstop.
-    /// A release-mode escape overwrites the map entry but orphans
-    /// nothing: the prior Sub still reaps via its own anchor-terminal
-    /// path.
-    pub fn promote(&mut self, anchor_resource: ResourceId, sub_id: SubId) {
-        let prev = self.dynamic_subs.insert(anchor_resource, sub_id);
-        debug_assert!(
-            prev.is_none(),
-            "promote: dedup invariant breached — anchor {anchor_resource:?} already \
-             mapped (caller must gate on dynamic_subs().contains_key)",
-        );
-    }
-
-    /// Drop the dedup entry for `anchor_resource` (the Sub's
-    /// anchor-terminal reap), returning the `SubId` that was mapped, or
-    /// `None` if absent (a concurrent [`Self::drain_dynamic_subs`]
-    /// already cleared it — benign).
-    pub fn forget_dynamic_sub(&mut self, anchor_resource: ResourceId) -> Option<SubId> {
-        self.dynamic_subs.remove(&anchor_resource)
-    }
-
-    /// Drain every dedup entry (Promoter teardown), returning the
-    /// minted `SubId`s for the caller to detach. The map is left empty
-    /// so cascading detach paths observe no entries.
-    #[must_use]
-    pub fn drain_dynamic_subs(&mut self) -> Vec<SubId> {
-        let ids = self.dynamic_subs.values().copied().collect();
-        self.dynamic_subs.clear();
-        ids
-    }
-
-    /// One-shot fan-out warning latch. Returns `Some(count)` the first
-    /// time `dynamic_subs` exceeds `threshold` and latches so later
-    /// crossings return `None` — a pathological pattern warns once per
-    /// Promoter lifetime. The check-and-latch is atomic here, so the
-    /// one-shot property is structural rather than a caller convention.
-    pub fn latch_fanout_warning(&mut self, threshold: usize) -> Option<usize> {
-        let count = self.dynamic_subs.len();
+    /// One-shot fan-out warning latch. `count` is the caller's *live*
+    /// dynamic-Sub tally for this Promoter, derived from `SubRegistry`
+    /// truth (the dedup map this latch once read was deleted — the
+    /// Promoter keeps no mirror). Returns `Some(count)` the first time
+    /// `count` exceeds `threshold` and latches so later crossings
+    /// return `None` — a pathological pattern warns once per Promoter
+    /// lifetime. The check-and-latch is atomic here, so the one-shot
+    /// property is structural rather than a caller convention;
+    /// [`Self::fanout_warned`] lets the caller skip computing `count`
+    /// once latched.
+    pub fn latch_fanout_warning(&mut self, threshold: usize, count: usize) -> Option<usize> {
         (count > threshold && !self.warned_at_threshold).then(|| {
             self.warned_at_threshold = true;
             count
@@ -602,7 +554,7 @@ mod tests {
         Promoter, PromoterAttachRequest, PromoterRegistry, PromoterRegistryDiff, PromoterState,
         ProxyState,
     };
-    use crate::ids::{ProbeCorrelation, PromoterId, ResourceId, SubId};
+    use crate::ids::{ProbeCorrelation, PromoterId, ResourceId};
     use crate::pattern::PatternSpec;
     use crate::probe::ProbeSlot;
     use crate::profile::{DescentRemaining, DescentState};
@@ -613,7 +565,6 @@ mod tests {
     use crate::scan_config::{ProfileIdentity, ScanConfig};
     use crate::sub::{ClassSet, EffectScope};
     use compact_str::CompactString;
-    use slotmap::SlotMap;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::Duration;
@@ -822,73 +773,33 @@ mod tests {
         assert_eq!(proxies.len(), 1);
     }
 
-    /// Dynamic Sub dedup map round-trips `ResourceId → SubId` through
-    /// the sealed [`Promoter::promote`] / [`Promoter::dynamic_subs`]
-    /// surface (resource-keying: Tree slot identity is path-bijective
-    /// for live slots — cheaper than path-keying, no per-entry string).
-    #[test]
-    fn promoter_dynamic_subs_round_trip() {
-        let mut p = build_promoter("logs", "/var/log/*.log");
-        let resource = ResourceId::default();
-        let sid = SubId::default();
-        p.promote(resource, sid);
-        assert_eq!(p.dynamic_subs().get(&resource), Some(&sid));
-    }
-
-    /// [`Promoter::promote`] then [`Promoter::forget_dynamic_sub`]
-    /// returns the mapped `SubId`; a second forget is a `None` no-op
-    /// (the concurrent-drain-already-cleared edge).
-    #[test]
-    fn promote_then_forget_round_trips_and_is_idempotent() {
-        let mut p = build_promoter("logs", "/var/log/*.log");
-        let r = ResourceId::default();
-        let sid = SubId::default();
-        p.promote(r, sid);
-        assert_eq!(p.forget_dynamic_sub(r), Some(sid));
-        assert_eq!(p.forget_dynamic_sub(r), None);
-        assert!(p.dynamic_subs().is_empty());
-    }
-
-    /// [`Promoter::drain_dynamic_subs`] returns every minted `SubId`
-    /// and leaves the map empty so cascading detach sees no entries.
-    #[test]
-    fn drain_dynamic_subs_returns_all_and_clears() {
-        let mut rk: SlotMap<ResourceId, ()> = SlotMap::with_key();
-        let mut sk: SlotMap<SubId, ()> = SlotMap::with_key();
-        let mut p = build_promoter("logs", "/var/log/*.log");
-        let (r0, r1) = (rk.insert(()), rk.insert(()));
-        let (s0, s1) = (sk.insert(()), sk.insert(()));
-        p.promote(r0, s0);
-        p.promote(r1, s1);
-        let mut drained = p.drain_dynamic_subs();
-        drained.sort_unstable();
-        let mut want = vec![s0, s1];
-        want.sort_unstable();
-        assert_eq!(drained, want);
-        assert!(p.dynamic_subs().is_empty());
-        assert!(p.drain_dynamic_subs().is_empty(), "second drain is empty");
-    }
-
     /// The fan-out latch is one-shot and structural: `Some(count)` on
     /// the first crossing, `None` on every later check regardless of
-    /// further growth.
+    /// further growth. `count` is now a caller-supplied parameter (the
+    /// dedup map it once read was deleted); [`Promoter::fanout_warned`]
+    /// projects the latch read-only and flips exactly at the crossing.
     #[test]
     fn latch_fanout_warning_fires_once() {
-        let mut rk: SlotMap<ResourceId, ()> = SlotMap::with_key();
-        let mut sk: SlotMap<SubId, ()> = SlotMap::with_key();
         let mut p = build_promoter("logs", "/var/log/*.log");
-        for _ in 0..3 {
-            p.promote(rk.insert(()), sk.insert(()));
-        }
-        assert_eq!(p.latch_fanout_warning(2), Some(3), "first crossing warns");
-        assert_eq!(p.latch_fanout_warning(2), None, "latched — no repeat");
-        p.promote(rk.insert(()), sk.insert(()));
+        assert!(!p.fanout_warned(), "not warned before any crossing");
+        assert_eq!(p.latch_fanout_warning(2, 1), None, "below threshold ⇒ None");
+        assert!(!p.fanout_warned(), "still not warned below threshold");
         assert_eq!(
-            p.latch_fanout_warning(2),
-            None,
-            "still latched after growth"
+            p.latch_fanout_warning(2, 3),
+            Some(3),
+            "first crossing warns with the supplied count"
         );
-        assert_eq!(p.latch_fanout_warning(100), None, "below threshold ⇒ None");
+        assert!(p.fanout_warned(), "latched at the crossing");
+        assert_eq!(
+            p.latch_fanout_warning(2, 4),
+            None,
+            "latched — no repeat even as the count grows"
+        );
+        assert_eq!(
+            p.latch_fanout_warning(200, 1),
+            None,
+            "still latched, and below threshold anyway"
+        );
     }
 
     /// [`Promoter::enter_active_empty`] is the one-shot

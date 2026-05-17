@@ -543,18 +543,20 @@ pub enum Diagnostic {
     /// Promoter enumeration matched `path` and the engine has minted a
     /// dynamic Sub for it. `kind` is the kind the snapshot reports for
     /// the matched entry. The bin uses this for operator-visible
-    /// "promotion observed" logs; the engine's own bookkeeping is in
-    /// `Promoter.dynamic_subs`.
+    /// "promotion observed" logs; the engine's own dedup bookkeeping is
+    /// the derived `SubRegistry` query (`promoter_already_promoted`),
+    /// not a Promoter-side map.
     PromotionKindObserved {
         promoter: PromoterId,
         path: PathBuf,
         kind: ResourceKind,
     },
-    /// Promoter's `dynamic_subs.len()` crossed a threshold for the
-    /// first time. Operator signal that the pattern is matching more
-    /// targets than typical — likely a too-broad pattern (e.g. `/*`
-    /// without further constraint). One-shot per Promoter lifetime;
-    /// the latch on `Promoter.warned_at_threshold` suppresses repeats.
+    /// The Promoter's live dynamic-Sub count (derived from
+    /// `SubRegistry`) crossed a threshold for the first time. Operator
+    /// signal that the pattern is matching more targets than typical —
+    /// likely a too-broad pattern (e.g. `/*` without further
+    /// constraint). One-shot per Promoter lifetime; the latch on
+    /// `Promoter.warned_at_threshold` suppresses repeats.
     PromoterFanoutThreshold { promoter: PromoterId, count: usize },
     /// `FsEvent` arrived for a Resource that previously held a
     /// `proxy_promoters` back-ref to `promoter`, but the Promoter has
@@ -590,8 +592,9 @@ pub enum Diagnostic {
     },
     /// A dynamic Sub minted by `promoter` at `path` has been reaped
     /// because its anchor disappeared (the all-dynamic teardown of
-    /// `on_anchor_terminal_event`). The Promoter's `dynamic_subs` map
-    /// drops the entry; the Promoter re-promotes if/when the path
+    /// `on_anchor_terminal_event`). Pure operator narration — the Sub
+    /// is removed from `SubRegistry` by the teardown itself; the
+    /// derived dedup gate then re-promotes if/when the path
     /// re-materialises and a fresh enumeration matches it.
     DynamicSubReaped {
         promoter: PromoterId,

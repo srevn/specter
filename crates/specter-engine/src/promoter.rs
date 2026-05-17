@@ -776,132 +776,54 @@ impl Engine {
         let next_index = pattern_component_index + 1;
         let is_final = next_index == components.len();
 
-        // Loop-invariant for the Glob arm's per-entry join below; bind
-        // once. `None` is the defensive target-was-reaped path — the
-        // `proxy_state` lookup above already proved the slot live this
-        // step, so it is unreachable under normal operation; the
-        // `as_deref().map().unwrap_or_default()` chain below degrades to
-        // an empty `PathBuf` (rejected downstream by
+        // Loop-invariant for the per-entry path join; bind once. `None`
+        // is the defensive target-was-reaped path — the `proxy_state`
+        // lookup above already proved the slot live this step, so it is
+        // unreachable under normal operation; the join degrades to an
+        // empty `PathBuf` (rejected downstream by
         // `decompose_attach_path`) rather than panicking.
         let target_path = self.tree.path_of(target);
 
         // Forward pass: state-keyed dispatch on the next pattern
         // component. The Literal arm matches at most one entry by
-        // `BTreeMap` uniqueness — O(log N) `get_key_value` — so the
-        // surrounding loop collapses to an `if let`. The Glob arm
-        // retains the O(N) scan; each entry must be matcher-tested.
-        // The per-match body is duplicated inline rather than
-        // extracted into a helper: the two iteration shapes
-        // structurally differ (no loop, no `continue` in the Literal
-        // arm), and a `(&mut self, ...)` helper would carry nine
-        // arguments for ten lines of body.
+        // `BTreeMap` uniqueness — O(log N) `get_key_value`, so it
+        // collapses to an `if let`; the Glob arm retains the O(N)
+        // matcher scan. Both feed the shared
+        // `promote_or_descend_candidate` (the per-match body) — the
+        // arms now differ only in iteration shape.
         let next_component = &components[pattern_component_index];
         match next_component {
             PatternComponent::Literal(lit) => {
                 if let Some((name, child)) = snapshot.entries().get_key_value(lit.as_str()) {
-                    let name_str: &str = name.as_str();
-                    let child_kind = child.kind();
-                    if is_final {
-                        // Final: resource-anchored try_promote.
-                        // Lookup-or-ensure the slot at (target,
-                        // name_str), stamp the observed kind (so
-                        // Profile.kind cache populates at attach
-                        // instead of waiting for the first Seed
-                        // probe), then mint. `User` role is what
-                        // attach_sub_inner promotes DescentScaffold
-                        // to — pre-ensuring with `User` short-circuits
-                        // that path.
-                        let anchor_resource =
-                            self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
-                                self.tree
-                                    .ensure_child(target, name_str, ResourceRole::User)
-                                    .expect(
-                                        "promoter target held alive by anchor / proxy_promoters",
-                                    )
-                            });
-                        self.tree
-                            .set_kind(anchor_resource, kind_from_entry(child_kind));
-                        let promote_path = target_path
-                            .as_deref()
-                            .map(|p| p.join(name_str))
-                            .unwrap_or_default();
-                        self.try_promote(
-                            promoter_id,
-                            anchor_resource,
-                            promote_path,
-                            child_kind,
-                            now,
-                            out,
-                        );
-                    } else if matches!(child_kind, EntryKind::Dir) {
-                        // Non-final: only descend into Dir matches.
-                        // A literal matching a Leaf at a non-final
-                        // position can't lead anywhere; the engine
-                        // drops without diagnostic (the user's
-                        // pattern was malformed for the actual
-                        // filesystem state).
-                        //
-                        // [S-8] Use User role for promoter sub-proxy
-                        // slots. The back-ref (proxy_promoters) is
-                        // the retention signal; DescentScaffold would
-                        // leak after unregister.
-                        let child_resource =
-                            self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
-                                self.tree
-                                    .ensure_child(target, name_str, ResourceRole::User)
-                                    .expect(
-                                        "promoter target held alive by anchor / proxy_promoters",
-                                    )
-                            });
-                        self.tree
-                            .set_kind(child_resource, kind_from_entry(child_kind));
-                        self.register_proxy(promoter_id, child_resource, next_index, out);
-                    }
+                    self.promote_or_descend_candidate(
+                        promoter_id,
+                        target,
+                        target_path.as_deref(),
+                        name.as_str(),
+                        child.kind(),
+                        is_final,
+                        next_index,
+                        now,
+                        out,
+                    );
                 }
             }
             PatternComponent::Glob(g) => {
                 for (name, child) in snapshot.entries() {
-                    let name_str: &str = name.as_str();
-                    if !g.matches_path(Path::new(name_str)) {
+                    if !g.matches_path(Path::new(name.as_str())) {
                         continue;
                     }
-                    let child_kind = child.kind();
-                    if is_final {
-                        let anchor_resource =
-                            self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
-                                self.tree
-                                    .ensure_child(target, name_str, ResourceRole::User)
-                                    .expect(
-                                        "promoter target held alive by anchor / proxy_promoters",
-                                    )
-                            });
-                        self.tree
-                            .set_kind(anchor_resource, kind_from_entry(child_kind));
-                        let promote_path = target_path
-                            .as_deref()
-                            .map(|p| p.join(name_str))
-                            .unwrap_or_default();
-                        self.try_promote(
-                            promoter_id,
-                            anchor_resource,
-                            promote_path,
-                            child_kind,
-                            now,
-                            out,
-                        );
-                    } else if matches!(child_kind, EntryKind::Dir) {
-                        let child_resource =
-                            self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
-                                self.tree
-                                    .ensure_child(target, name_str, ResourceRole::User)
-                                    .expect(
-                                        "promoter target held alive by anchor / proxy_promoters",
-                                    )
-                            });
-                        self.tree
-                            .set_kind(child_resource, kind_from_entry(child_kind));
-                        self.register_proxy(promoter_id, child_resource, next_index, out);
-                    }
+                    self.promote_or_descend_candidate(
+                        promoter_id,
+                        target,
+                        target_path.as_deref(),
+                        name.as_str(),
+                        child.kind(),
+                        is_final,
+                        next_index,
+                        now,
+                        out,
+                    );
                 }
             }
         }
@@ -938,6 +860,98 @@ impl Engine {
             .collect();
         for stale_proxy in stale {
             self.unregister_proxy_subtree(promoter_id, stale_proxy, out);
+        }
+    }
+
+    /// One enumeration candidate: snapshot entry `name_str` (kind
+    /// `child_kind`) under proxy `target` that matched the next pattern
+    /// component. Final position ⇒ promote; intermediate `Dir` ⇒
+    /// register a sub-proxy; intermediate non-`Dir` ⇒ drop (a
+    /// literal/glob matching a leaf mid-pattern leads nowhere; the
+    /// pattern was malformed for the actual filesystem state).
+    ///
+    /// The single body the Literal and Glob arms of
+    /// [`Self::dispatch_promoter_enumeration_ok`] share — they differ
+    /// only in iteration shape (one `get_key_value`, one filtered
+    /// scan), so the per-match logic lives here once. The flat
+    /// argument list (the `too_many_arguments` allow) is the
+    /// deliberate trade: a context struct for one internal helper with
+    /// two call sites would add a lifetime-bound type for no real
+    /// encapsulation, and the duplication it removes is the worse
+    /// smell.
+    ///
+    /// **Read-only fast-path.** At the final position a pure
+    /// [`Tree::lookup`] + [`Self::promoter_already_promoted`]
+    /// short-circuits an already-promoted anchor *before* any
+    /// `ensure_child` / `set_kind` / path join. On a stable fan-out
+    /// re-enumeration (the common case — a parent's `StructureChanged`
+    /// refire) each already-promoted entry then costs one `lookup`
+    /// plus one per-Profile gate query and zero mutation. It is
+    /// strictly a fast-path: only an existing slot can carry a
+    /// Profile, so a missing slot (`lookup` ⇒ `None`) correctly falls
+    /// through to the mint path, and `try_promote`'s own derived gate
+    /// remains the single mint decision site — the backstop
+    /// re-confirms on the freshly `ensure_child`'d slot, which carries
+    /// no Profile ⇒ `false`.
+    fn promote_or_descend_candidate(
+        &mut self,
+        promoter_id: PromoterId,
+        target: ResourceId,
+        target_path: Option<&Path>,
+        name_str: &str,
+        child_kind: EntryKind,
+        is_final: bool,
+        next_index: usize,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        if is_final {
+            // Read-only fast-path: skip an already-promoted anchor
+            // before any mutation. `lookup` is reused as the
+            // lookup-or-ensure input below — one O(log N) probe, not
+            // two.
+            let existing = self.tree.lookup(Some(target), name_str);
+            if let Some(slot) = existing
+                && self.promoter_already_promoted(promoter_id, slot)
+            {
+                return;
+            }
+
+            // Resource-anchored `try_promote`. Lookup-or-ensure the
+            // slot at (target, name_str), stamp the observed kind (so
+            // `Profile.kind` caches at attach instead of waiting for
+            // the first Seed probe), then mint. `User` is the role
+            // `attach_sub_inner` would promote a `DescentScaffold`
+            // to — pre-ensuring `User` short-circuits that path.
+            let anchor_resource = existing.unwrap_or_else(|| {
+                self.tree
+                    .ensure_child(target, name_str, ResourceRole::User)
+                    .expect("promoter target held alive by anchor / proxy_promoters")
+            });
+            self.tree
+                .set_kind(anchor_resource, kind_from_entry(child_kind));
+            let promote_path = target_path.map(|p| p.join(name_str)).unwrap_or_default();
+            self.try_promote(
+                promoter_id,
+                anchor_resource,
+                promote_path,
+                child_kind,
+                now,
+                out,
+            );
+        } else if matches!(child_kind, EntryKind::Dir) {
+            // Non-final: only descend into `Dir` matches. [S-8] use
+            // `User` role for sub-proxy slots — the `proxy_promoters`
+            // back-ref is the retention signal; a `DescentScaffold`
+            // would leak after unregister.
+            let child_resource = self.tree.lookup(Some(target), name_str).unwrap_or_else(|| {
+                self.tree
+                    .ensure_child(target, name_str, ResourceRole::User)
+                    .expect("promoter target held alive by anchor / proxy_promoters")
+            });
+            self.tree
+                .set_kind(child_resource, kind_from_entry(child_kind));
+            self.register_proxy(promoter_id, child_resource, next_index, out);
         }
     }
 
@@ -994,12 +1008,46 @@ impl Engine {
         });
     }
 
+    /// Whether `promoter_id` already has a live dynamic Sub anchored
+    /// at `anchor` — the promotion dedup gate, derived from
+    /// `SubRegistry` truth (the single source since `dynamic_subs` was
+    /// deleted; nothing to mirror, nothing to drift).
+    ///
+    /// Resolves the same `(resource, config_hash)` partition
+    /// `find_or_create_profile` keys on: a dynamic Sub for this
+    /// `(promoter, anchor)` pair, if one exists, lives on the Profile
+    /// at `(anchor, promoter.identity.config_hash())` tagged
+    /// `source_promoter == Some(promoter_id)`. A stale `promoter_id`,
+    /// or an anchor with no matching Profile, ⇒ not promoted.
+    ///
+    /// Cost is O(Subs on that one Profile) — `subs.at` is the
+    /// per-Profile slice, not a registry-wide scan; a Profile carries
+    /// a single-digit Sub count in practice.
+    fn promoter_already_promoted(&self, promoter_id: PromoterId, anchor: ResourceId) -> bool {
+        let Some(cfg) = self
+            .promoters
+            .get(promoter_id)
+            .map(|q| q.identity.config_hash())
+        else {
+            return false;
+        };
+        let Some(profile) = self.profiles.find(anchor, cfg) else {
+            return false;
+        };
+        self.subs.at(profile).iter().any(|&sid| {
+            self.subs
+                .get(sid)
+                .is_some_and(|s| s.source_promoter == Some(promoter_id))
+        })
+    }
+
     /// Mint a dynamic Sub at `anchor_resource` for `promoter_id`.
     ///
     /// Enumeration ADDS; only anchor-terminal removes. At most one
-    /// dynamic Sub per `(promoter_id, anchor_resource)` — the contains
-    /// check below gates re-promotion at an anchor the engine already
-    /// minted a Sub for.
+    /// dynamic Sub per `(promoter_id, anchor_resource)` —
+    /// [`Self::promoter_already_promoted`] below queries live
+    /// `SubRegistry` truth and early-returns if a dynamic Sub for this
+    /// `(promoter, anchor)` already exists (no cached map to drift).
     ///
     /// **`now` is load-bearing.** `attach_sub_inner` schedules the
     /// new Profile's `BurstDeadline` at `now + max_settle`. Threading
@@ -1021,9 +1069,7 @@ impl Engine {
     /// **`promote_path` is diagnostic-only.** The caller's
     /// `target_path.join(name_str)` flows through as an owned
     /// `PathBuf` so the [`Diagnostic::PromotionKindObserved`] payload
-    /// can move it (last use, no clone). The dedup-map insert keys on
-    /// `anchor_resource: Copy` — no consumption-ordering constraint
-    /// between the insert and the diagnostic.
+    /// can move it (last use, no clone).
     pub(crate) fn try_promote(
         &mut self,
         promoter_id: PromoterId,
@@ -1033,12 +1079,10 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // Dedup gate: one dynamic Sub per `(promoter_id, anchor_resource)`.
-        let already_present = self
-            .promoters
-            .get(promoter_id)
-            .is_some_and(|q| q.dynamic_subs().contains_key(&anchor_resource));
-        if already_present {
+        // Dedup gate: at most one dynamic Sub per `(promoter, anchor)`.
+        // Derived from live `SubRegistry` truth — no cached map to
+        // drift, so a stale entry is unrepresentable by construction.
+        if self.promoter_already_promoted(promoter_id, anchor_resource) {
             return;
         }
 
@@ -1084,17 +1128,16 @@ impl Engine {
             },
         );
 
-        let sub_id = self.attach_sub_inner(req, now, out).expect(
+        // The `SubRegistry` insert inside `attach_sub_inner` *is* the
+        // single source of the `(promoter, anchor)` dynamic-Sub fact —
+        // no Promoter-side mirror to write. The `.expect` records the
+        // liveness invariant rather than masking a soft early-return;
+        // the returned `SubId` is intentionally unused (the registry
+        // owns it now).
+        self.attach_sub_inner(req, now, out).expect(
             "promoter forward-pass anchored at a freshly ensured live User slot; \
              the engine's Resource-arm liveness check cannot trip",
         );
-
-        // Dedup map. `anchor_resource: Copy` — no consumption
-        // constraint against the diagnostic move below. `promote`
-        // debug-asserts the dedup invariant the gate above upholds.
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.promote(anchor_resource, sub_id);
-        }
 
         // Diagnostic. Last use of `promote_path` — move into the
         // variant.
@@ -1104,14 +1147,44 @@ impl Engine {
             kind: kind_from_entry(observed_kind),
         });
 
-        // Fan-out warning — one-shot per Promoter lifetime. The
-        // check-and-latch is atomic inside `latch_fanout_warning`, so
-        // "warn once" is structural rather than a two-read window the
-        // caller must reason about.
+        // Fan-out warning — one-shot per Promoter lifetime, the count
+        // now registry-derived behind a cheap pre-gate.
+        self.maybe_warn_fanout(promoter_id, out);
+    }
+
+    /// Emit the one-shot [`Diagnostic::PromoterFanoutThreshold`] iff
+    /// `promoter_id`'s *live* dynamic-Sub count first crosses
+    /// [`FANOUT_WARNING_THRESHOLD`]. The count is derived from
+    /// `SubRegistry` (the dedup map whose `.len()` once fed the latch
+    /// was deleted — the Promoter keeps no mirror).
+    ///
+    /// [`Promoter::fanout_warned`] is the cheap pre-gate: an
+    /// already-warned (pathological) Promoter never re-runs the
+    /// O(total Subs) scan on its later promotions, so total scan cost
+    /// is bounded by the pre-warning prefix of each Promoter's life.
+    /// The scan only runs on a genuinely *new* promotion anyway — the
+    /// dedup gate (and the read-only fast-path in
+    /// [`Self::promote_or_descend_candidate`]) skip already-promoted
+    /// anchors before reaching here. `latch_fanout_warning`'s own
+    /// atomic check-and-latch remains the structural one-shot; this
+    /// pre-gate is additive, not its replacement.
+    fn maybe_warn_fanout(&mut self, promoter_id: PromoterId, out: &mut StepOutput) {
+        if self
+            .promoters
+            .get(promoter_id)
+            .is_none_or(Promoter::fanout_warned)
+        {
+            return;
+        }
+        let count = self
+            .subs
+            .iter()
+            .filter(|(_, s)| s.source_promoter == Some(promoter_id))
+            .count();
         if let Some(count) = self
             .promoters
             .get_mut(promoter_id)
-            .and_then(|q| q.latch_fanout_warning(FANOUT_WARNING_THRESHOLD))
+            .and_then(|q| q.latch_fanout_warning(FANOUT_WARNING_THRESHOLD, count))
         {
             out.diagnostics.push(Diagnostic::PromoterFanoutThreshold {
                 promoter: promoter_id,
@@ -1161,57 +1234,44 @@ impl Engine {
         self.dispatch_next_enumeration(promoter_id, out);
     }
 
-    /// Notify a Promoter that one of its dynamic Subs has reaped (the
-    /// Sub's anchor disappeared, and the all-dynamic teardown branch of
-    /// [`Engine::on_anchor_terminal_event`] is unwinding the Profile).
+    /// Notify operators that a dynamic Sub minted by `promoter_id` has
+    /// reaped — its anchor disappeared and the all-dynamic teardown
+    /// branch of [`Engine::on_anchor_terminal_event`] is unwinding the
+    /// Profile. Pure narration: emits [`Diagnostic::DynamicSubReaped`]
+    /// and touches no engine state.
     ///
-    /// Removes the `(anchor_resource → sub_id)` entry via the sealed
-    /// `Promoter::forget_dynamic_sub` and emits
-    /// [`Diagnostic::DynamicSubReaped`]. The dedup map's mutators are
-    /// structurally the only three (`promote` insert here,
-    /// `forget_dynamic_sub` anchor-terminal remove,
-    /// `drain_dynamic_subs` on [`Self::reap_promoter_inner`]).
+    /// The Promoter holds no `(anchor → sub)` mirror to drop —
+    /// `dynamic_subs` was deleted in favour of the derived gate
+    /// ([`Self::promoter_already_promoted`]) — and the Sub's removal
+    /// from `SubRegistry` is the caller's job. `anchor_path` is the
+    /// operator-facing payload (the `Diagnostic` variant is path-keyed
+    /// for log readability).
     ///
-    /// `anchor_resource` is the dedup-map key — by construction, the
-    /// same `Profile.resource` `try_promote` stamped into the map.
-    /// `anchor_path` is the operator-facing diagnostic payload (the
-    /// `Diagnostic` variant is path-keyed for log readability).
+    /// `&self` + the `unused_self` allow keep API-shape symmetry with
+    /// [`Self::dispatch_promoter_enumeration_failed`], the other
+    /// diagnostic-only Promoter sibling.
     ///
-    /// The caller ([`Engine::on_anchor_terminal_all_dynamic`]) captures
-    /// both once before the per-Sub loop because every dynamic Sub on
-    /// a Profile shares the same anchor by the
-    /// `(resource, config_hash)` attach dedup; threading them through
-    /// avoids re-walking the ancestor chain inside the inner loop.
-    ///
-    /// **Stale notification.** A concurrent
-    /// [`Self::reap_promoter_inner`] (e.g., reload removing the
-    /// Promoter in the same step) may have already cleared the
-    /// dynamic_subs map, in which case the `remove` returns `None` and
-    /// the call is a benign no-op (no diagnostic emitted).
+    /// **Always emitted.** The sole caller
+    /// ([`Engine::on_anchor_terminal_all_dynamic`]) resolves
+    /// `promoter_id` from the still-attached Sub *before* removing it
+    /// from the registry, so the notification always corresponds to a
+    /// real reap. The old `dynamic_subs`-presence gate (which could
+    /// silently swallow the notification when a concurrent
+    /// [`Self::reap_promoter_inner`] drained the map first) is gone
+    /// with the map — the operator now reliably sees the reap.
+    #[allow(clippy::unused_self)]
     pub(crate) fn on_dynamic_sub_reaped(
-        &mut self,
+        &self,
         promoter_id: PromoterId,
         sub_id: SubId,
-        anchor_resource: ResourceId,
         anchor_path: &Path,
         out: &mut StepOutput,
     ) {
-        let removed = self
-            .promoters
-            .get_mut(promoter_id)
-            .and_then(|q| q.forget_dynamic_sub(anchor_resource));
-        if let Some(stored_sub_id) = removed {
-            debug_assert_eq!(
-                stored_sub_id, sub_id,
-                "on_dynamic_sub_reaped: dynamic_subs entry's SubId disagrees with caller's \
-                 (promoter = {promoter_id:?}, anchor = {anchor_resource:?})",
-            );
-            out.diagnostics.push(Diagnostic::DynamicSubReaped {
-                promoter: promoter_id,
-                sub: sub_id,
-                path: anchor_path.to_path_buf(),
-            });
-        }
+        out.diagnostics.push(Diagnostic::DynamicSubReaped {
+            promoter: promoter_id,
+            sub: sub_id,
+            path: anchor_path.to_path_buf(),
+        });
     }
 
     /// Reap a Promoter by id. Cancels any in-flight probe, detaches
@@ -1246,12 +1306,14 @@ impl Engine {
     /// 1. Cancel any in-flight probe (descent or enumeration). The
     ///    disarm clears the slot's correlation and, for an `Active`
     ///    enumeration, its proxy-target tag along with it.
-    /// 2. Pre-clear `dynamic_subs` so any cascading detach paths see
-    ///    an empty map (defense-in-depth — `detach_sub_inner` itself
-    ///    doesn't read it). Then iterate the captured Sub ids and
-    ///    detach each via [`Engine::detach_sub_inner`]; each detach
-    ///    runs the standard deferred-reap-or-immediate-reap branch
-    ///    on the corresponding Profile.
+    /// 2. Detach every dynamic Sub this Promoter minted. The set is
+    ///    derived by scanning `SubRegistry` for
+    ///    `source_promoter == promoter_id` (the dedup map was deleted;
+    ///    the registry is the single source). Collect first to drop
+    ///    the `subs` borrow, then detach each via
+    ///    [`Engine::detach_sub_inner`]; each detach runs the standard
+    ///    deferred-reap-or-immediate-reap branch on the corresponding
+    ///    Profile.
     /// 3. Release the per-Resource claims by sequencing the two
     ///    idempotent release helpers — `PromoterState` is
     ///    `PrefixPending` XOR `Active`, and each helper is a no-op
@@ -1293,17 +1355,21 @@ impl Engine {
         // `reap_profile`'s structural enforcement.
         self.cancel_owner_probe(ProbeOwner::Promoter(promoter_id), out);
 
-        // 2. Detach every dynamic Sub. `drain_dynamic_subs` atomically
-        // empties the map (cascading paths observe no entries) and
-        // hands back the captured Sub ids; route each through
-        // `detach_sub_inner` (which decrements profile refcount and
-        // reaps the underlying Profile when the dynamic Sub was its
-        // last attachment).
+        // 2. Detach every dynamic Sub this Promoter minted. Derived
+        // from live `SubRegistry` truth (the dedup map was deleted —
+        // nothing to drain, nothing to drift) by scanning for
+        // `source_promoter == promoter_id`. Collect first so the
+        // `subs` read borrow drops before the `detach_sub_inner`
+        // `&mut self` chain. O(total Subs), cold (reap is reload /
+        // shutdown, never the hot path); each `detach_sub_inner`
+        // decrements the Profile refcount and reaps the underlying
+        // Profile when the dynamic Sub was its last attachment.
         let sub_ids: Vec<SubId> = self
-            .promoters
-            .get_mut(promoter_id)
-            .map(Promoter::drain_dynamic_subs)
-            .unwrap_or_default();
+            .subs
+            .iter()
+            .filter(|(_, s)| s.source_promoter == Some(promoter_id))
+            .map(|(sid, _)| sid)
+            .collect();
         for sub_id in sub_ids {
             self.detach_sub_inner(sub_id, out);
         }

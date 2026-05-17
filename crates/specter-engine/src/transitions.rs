@@ -1392,11 +1392,12 @@ impl Engine {
     /// existing recovery flow runs. The dynamic Subs (if any) stay
     /// attached — the static Sub keeps the Profile alive via
     /// `Profile.watch_root_parent`'s recovery channel. On
-    /// re-materialisation, the Promoter's enumeration's
-    /// `dynamic_subs.contains_key(anchor_resource)` check returns
-    /// `true` (the engine never minted a fresh Sub for an already-known
-    /// anchor), so no engine work is needed for correctness — only the
-    /// static Sub's recovery flow drives the burst.
+    /// re-materialisation, the Promoter's enumeration's derived dedup
+    /// gate (`promoter_already_promoted`) finds the still-attached
+    /// dynamic Sub in `SubRegistry` and returns `true` (no fresh Sub
+    /// for an already-known anchor), so no engine work is needed for
+    /// correctness — only the static Sub's recovery flow drives the
+    /// burst.
     ///
     /// The empty-Subs case is structurally unreachable: a Profile with
     /// no Subs reaped on the last detach. Routed defensively to
@@ -1420,9 +1421,10 @@ impl Engine {
     }
 
     /// All-dynamic anchor-terminal teardown. Notifies each source
-    /// Promoter (drops the Sub from the Promoter's `dynamic_subs`
-    /// map), removes every dynamic Sub from `SubRegistry`, then reaps
-    /// the Profile entirely.
+    /// Promoter (operator narration only — the Promoter holds no
+    /// mirror to drop since `dynamic_subs` was deleted), removes every
+    /// dynamic Sub from `SubRegistry`, then reaps the Profile
+    /// entirely.
     ///
     /// The reap delegates to [`Engine::reap_profile`] /
     /// [`Engine::finish_burst_to_idle`] depending on the Profile's
@@ -1444,13 +1446,12 @@ impl Engine {
         // 2. Resolve the anchor resource + path ONCE for the per-Sub
         // loop. Every dynamic Sub on this Profile shares the same
         // anchor by the `(resource, config_hash)` find-or-create dedup
-        // in `attach_sub_inner`; the resource is precisely the key
-        // `try_promote` stamped into each source Promoter's
-        // `dynamic_subs` map, and the path is the diagnostic payload.
-        // The anchor slot is alive at this point — the Profile is not
-        // yet reaped (the slot's anchor_claim contribution is released
-        // only by `reap_profile` below) — so `path_of` returns
-        // `Some(_)`. Fallbacks are defense-in-depth.
+        // in `attach_sub_inner`; the path is the operator-facing
+        // diagnostic payload. The anchor slot is alive at this point —
+        // the Profile is not yet reaped (the slot's anchor_claim
+        // contribution is released only by `reap_profile` below) — so
+        // `path_of` returns `Some(_)`. Fallbacks are
+        // defense-in-depth.
         let anchor_resource: ResourceId = self
             .profiles
             .get(profile_id)
@@ -1472,7 +1473,7 @@ impl Engine {
         let dynamic_subs: SmallVec<[SubId; 2]> = self.subs.at(profile_id).iter().copied().collect();
         for sid in dynamic_subs.iter().copied() {
             if let Some(pid) = self.subs.get(sid).and_then(|s| s.source_promoter) {
-                self.on_dynamic_sub_reaped(pid, sid, anchor_resource, &anchor_path, out);
+                self.on_dynamic_sub_reaped(pid, sid, &anchor_path, out);
             }
         }
         for sid in dynamic_subs {

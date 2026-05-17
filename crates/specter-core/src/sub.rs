@@ -352,10 +352,12 @@ impl Sub {
 ///   **Static Subs only** (`source_promoter.is_none()`): dynamic Subs
 ///   carry synthesised `<promoter>@<path>` names the config diff never
 ///   references, and indexing them would let a synthesised name alias
-///   an operator watch name. Dynamic Subs are reached id-only via
-///   `Promoter.dynamic_subs`. The index is load-bearing — hot-reload
-///   resolves every `removed`/`modified` name to an id through
-///   [`Self::find_by_name`] (O(log N)).
+///   an operator watch name. Dynamic Subs are reached through the
+///   `by_profile` index and their `source_promoter` tag (the engine's
+///   derived dedup gate and Promoter-reap scan), never `by_name`. The
+///   index is load-bearing — hot-reload resolves every
+///   `removed`/`modified` name to an id through [`Self::find_by_name`]
+///   (O(log N)).
 ///
 /// `by_name` mirrors the slotmap entry's lifetime for static Subs:
 /// [`Self::insert`] populates it, [`Self::remove`] clears it

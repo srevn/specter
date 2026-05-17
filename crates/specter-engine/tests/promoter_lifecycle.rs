@@ -37,8 +37,8 @@ use specter_core::{
     ActionProgram, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
     EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp,
     ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, ProfileState, PromoterAttachRequest,
-    PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    SubAttachAnchor, SubAttachRequest, WatchOp, WatchRegistryDiff,
+    PromoterId, PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -104,6 +104,26 @@ fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf>
         ProbeOp::Probe { request } => Some(request.target_path().to_path_buf()),
         ProbeOp::Cancel { .. } => None,
     })
+}
+
+/// Registry-derived stand-in for the deleted `Promoter::dynamic_subs()`,
+/// over the public `Engine` surface: the live `(anchor → SubId)` set
+/// for `pid`, reconstructed from `SubRegistry` truth (now the single
+/// source). A live dynamic Sub's `Profile.resource` *is* the anchor it
+/// was promoted at.
+fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubId> {
+    e.subs()
+        .iter()
+        .filter(|(_, s)| s.source_promoter == Some(pid))
+        .map(|(sid, s)| {
+            let anchor = e
+                .profiles()
+                .get(s.profile)
+                .expect("a live dynamic Sub's Profile is live")
+                .resource;
+            (anchor, sid)
+        })
+        .collect()
 }
 
 /// Pre-place a path on the `Engine`'s Tree as a User-roled chain
@@ -227,14 +247,15 @@ fn full_lifecycle_attach_promote_seed_reap() {
         now,
     );
 
-    // dynamic_subs records exactly one promotion; it's foo.log.
+    // Exactly one promotion (derived from SubRegistry), at foo.log.
     let dynamic_sub_id = {
-        let (anchor_resource, sid) = {
-            let q = e.promoters().get(pid).unwrap();
-            assert_eq!(q.dynamic_subs().len(), 1, "one promotion");
-            let (r, s) = q.dynamic_subs().iter().next().unwrap();
-            (*r, *s)
-        };
+        let promoted = dynamic_subs_of(&e, pid);
+        assert_eq!(promoted.len(), 1, "one promotion");
+        let (anchor_resource, sid) = promoted
+            .iter()
+            .next()
+            .map(|(r, s)| (*r, *s))
+            .expect("one promotion");
         let path = e
             .tree()
             .path_of(anchor_resource)
@@ -1050,9 +1071,9 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     // The new dynamic Sub registered and its Profile is `Active(Seed)`
     // with the `BurstDeadline` timer scheduled.
     let dynamic_sub_id = {
-        let q = e.promoters().get(pid).expect("promoter alive");
-        assert_eq!(q.dynamic_subs().len(), 1, "exactly one dynamic Sub minted");
-        *q.dynamic_subs().values().next().unwrap()
+        let promoted = dynamic_subs_of(&e, pid);
+        assert_eq!(promoted.len(), 1, "exactly one dynamic Sub minted");
+        *promoted.values().next().unwrap()
     };
     assert_ne!(
         dynamic_sub_id,

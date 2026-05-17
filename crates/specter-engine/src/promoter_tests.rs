@@ -136,6 +136,26 @@ fn active_proxies(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, specter_c
     }
 }
 
+/// Registry-derived stand-in for the deleted `Promoter::dynamic_subs()`:
+/// the live `(anchor_resource → SubId)` set for `pid`, reconstructed
+/// from `SubRegistry` truth (now the single source). A live dynamic
+/// Sub's `Profile.resource` *is* the anchor it was promoted at, so this
+/// round-trips exactly the map the Promoter no longer mirrors.
+fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubId> {
+    e.subs
+        .iter()
+        .filter(|(_, s)| s.source_promoter == Some(pid))
+        .map(|(sid, s)| {
+            let anchor = e
+                .profiles
+                .get(s.profile)
+                .expect("a live dynamic Sub's Profile is live")
+                .resource;
+            (anchor, sid)
+        })
+        .collect()
+}
+
 #[test]
 fn attach_immediate_active_at_existing_prefix() {
     let mut e = Engine::new();
@@ -321,15 +341,9 @@ fn enumeration_ok_promotes_final_match() {
         Instant::now(),
     );
 
-    // dynamic_subs contains the matched anchor; bar.txt is absent.
-    let promoted_resources: Vec<ResourceId> = e
-        .promoters
-        .get(pid)
-        .unwrap()
-        .dynamic_subs()
-        .keys()
-        .copied()
-        .collect();
+    // The derived dynamic-Sub set contains the matched anchor; bar.txt
+    // is absent.
+    let promoted_resources: Vec<ResourceId> = dynamic_subs_of(&e, pid).into_keys().collect();
     assert_eq!(promoted_resources.len(), 1);
     let promoted_path = e
         .tree()
@@ -402,9 +416,9 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
     assert_eq!(beta_state.pattern_component_index, 3);
 
     // No promotion: /srv/alpha/site and /srv/beta/site enumerations are
-    // queued, not yet probed. dynamic_subs is empty.
+    // queued, not yet probed. No dynamic Subs minted.
     assert!(
-        e.promoters.get(pid).unwrap().dynamic_subs().is_empty(),
+        dynamic_subs_of(&e, pid).is_empty(),
         "no promotions at intermediate level",
     );
 
@@ -443,12 +457,12 @@ fn try_promote_is_idempotent_on_repeated_match() {
         }),
         Instant::now(),
     );
-    let dynamic_count_after_cycle_1 = e.promoters.get(pid).unwrap().dynamic_subs().len();
+    let dynamic_count_after_cycle_1 = dynamic_subs_of(&e, pid).len();
     assert_eq!(dynamic_count_after_cycle_1, 1);
 
     // Re-trigger enumeration via FsEvent at the proxy. Inject the same
-    // snapshot — same entry, same path. dynamic_subs should still have
-    // exactly one entry (no duplicate Sub minted).
+    // snapshot — same entry, same path. The derived set should still
+    // have exactly one entry (no duplicate Sub minted).
     let _ = e.step(
         Input::FsEvent {
             resource: var_log,
@@ -467,10 +481,219 @@ fn try_promote_is_idempotent_on_repeated_match() {
         Instant::now(),
     );
     assert_eq!(
-        e.promoters.get(pid).unwrap().dynamic_subs().len(),
+        dynamic_subs_of(&e, pid).len(),
         1,
         "dedup gate prevents re-promotion of the same path",
     );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// The derived gate must equal the independently-observed fact: a live
+/// dynamic Sub for `pid` keyed at `anchor` in the registry-reconstructed
+/// set. `dynamic_subs_of` resolves Sub → Profile → resource; the gate
+/// resolves (anchor, config_hash) → Profile → Subs — distinct paths, so
+/// agreement is a real equivalence, not a tautology.
+fn assert_gate_matches_observable(e: &Engine, pid: PromoterId, anchor: ResourceId) {
+    let observed = dynamic_subs_of(e, pid).contains_key(&anchor);
+    assert_eq!(
+        e.promoter_already_promoted(pid, anchor),
+        observed,
+        "derived gate must equal the observable dynamic-Sub fact at {anchor:?}",
+    );
+}
+
+/// Derived-gate equivalence. `promoter_already_promoted` agrees with
+/// the observable "a live dynamic Sub for this Promoter is anchored
+/// here" across promote → anchor-loss-reap → re-promote orderings.
+/// This replaces the deleted `dynamic_subs`-map invariant: with no
+/// mirror, a stale gate is unrepresentable by construction.
+#[test]
+fn derived_gate_equivalence_across_attach_reap_orderings() {
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let out = e.step(
+        Input::AttachPromoter(req_for("logs", "/var/log/*.log")),
+        Instant::now(),
+    );
+    let pid =
+        specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+
+    // State 0 — nothing promoted: gate false, and false at an anchor
+    // (var_log) that carries a proxy but never a Profile.
+    assert!(
+        !e.promoter_already_promoted(pid, var_log),
+        "no promotion yet ⇒ gate false",
+    );
+    assert_gate_matches_observable(&e, pid, var_log);
+
+    // State 1 — promote foo.log.
+    let snap = dir_snap_at(&[("foo.log", EntryKind::File, 1)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+    let anchor = e
+        .tree()
+        .lookup(Some(var_log), "foo.log")
+        .expect("foo.log materialised");
+    assert!(
+        e.promoter_already_promoted(pid, anchor),
+        "promoted ⇒ gate true",
+    );
+    assert!(
+        !e.promoter_already_promoted(pid, var_log),
+        "the proxy slot carries no Profile ⇒ gate false there",
+    );
+    assert_gate_matches_observable(&e, pid, anchor);
+    assert_gate_matches_observable(&e, pid, var_log);
+
+    // State 2 — anchor lost (all-dynamic teardown reaps Profile + Sub):
+    // the gate returns false with no mirror to leave a stale entry.
+    let _ = e.step(
+        Input::FsEvent {
+            resource: anchor,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+    assert!(
+        dynamic_subs_of(&e, pid).is_empty(),
+        "all-dynamic teardown reaped the dynamic Sub",
+    );
+    assert!(
+        !e.promoter_already_promoted(pid, anchor),
+        "post-reap ⇒ gate false (a stale entry is unrepresentable)",
+    );
+    assert_gate_matches_observable(&e, pid, anchor);
+
+    // State 3 — re-promote on reappearance: gate true again, freshly
+    // derived (no resurrected stale state).
+    let _ = e.step(
+        Input::FsEvent {
+            resource: var_log,
+            event: FsEvent::StructureChanged,
+        },
+        Instant::now(),
+    );
+    let corr3 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+    let snap3 = dir_snap_at(&[("foo.log", EntryKind::File, 2)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr3,
+            outcome: ProbeOutcome::SubtreeOk(snap3),
+        }),
+        Instant::now(),
+    );
+    let anchor3 = e
+        .tree()
+        .lookup(Some(var_log), "foo.log")
+        .expect("foo.log re-materialised");
+    assert!(
+        e.promoter_already_promoted(pid, anchor3),
+        "re-promoted ⇒ gate true",
+    );
+    assert_gate_matches_observable(&e, pid, anchor3);
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// Re-enumeration allocation shape. Re-enumerating a stable fan-out
+/// plus one new sibling promotes only the new entry: the read-only
+/// fast-path skips the already-promoted siblings before any
+/// `ensure_child` / `set_kind` / `try_promote`, so exactly one
+/// `PromotionKindObserved` is emitted and the existing dynamic Subs
+/// keep their identity (no churn).
+#[test]
+fn reenumeration_of_stable_fanout_promotes_only_the_new_sibling() {
+    fn promotions_for(out: &specter_core::StepOutput, pid: PromoterId) -> usize {
+        out.diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d,
+                    Diagnostic::PromotionKindObserved { promoter, .. } if *promoter == pid,
+                )
+            })
+            .count()
+    }
+
+    let mut e = Engine::new();
+    let var_log = ensure_dir(&mut e, &["var", "log"]);
+    let out = e.step(
+        Input::AttachPromoter(req_for("logs", "/var/log/*.log")),
+        Instant::now(),
+    );
+    let pid =
+        specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
+    let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+
+    // Initial enumeration: a stable fan-out of three matches.
+    let snap = dir_snap_at(&[
+        ("a.log", EntryKind::File, 1),
+        ("b.log", EntryKind::File, 2),
+        ("c.log", EntryKind::File, 3),
+    ]);
+    let first = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeOk(snap),
+        }),
+        Instant::now(),
+    );
+    assert_eq!(
+        promotions_for(&first, pid),
+        3,
+        "three fresh matches ⇒ three promotions",
+    );
+    let before = dynamic_subs_of(&e, pid);
+    assert_eq!(before.len(), 3, "three dynamic Subs minted");
+
+    // Re-enumerate (parent StructureChanged refire) with the same three
+    // entries plus one new sibling.
+    let _ = e.step(
+        Input::FsEvent {
+            resource: var_log,
+            event: FsEvent::StructureChanged,
+        },
+        Instant::now(),
+    );
+    let corr2 = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
+    let snap2 = dir_snap_at(&[
+        ("a.log", EntryKind::File, 1),
+        ("b.log", EntryKind::File, 2),
+        ("c.log", EntryKind::File, 3),
+        ("d.log", EntryKind::File, 4),
+    ]);
+    let reenum = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr2,
+            outcome: ProbeOutcome::SubtreeOk(snap2),
+        }),
+        Instant::now(),
+    );
+
+    // Only the new sibling pays per-entry work.
+    assert_eq!(
+        promotions_for(&reenum, pid),
+        1,
+        "stable siblings are skipped; only d.log promotes",
+    );
+    let after = dynamic_subs_of(&e, pid);
+    assert_eq!(after.len(), 4, "exactly one net-new dynamic Sub");
+    for (anchor, sid) in &before {
+        assert_eq!(
+            after.get(anchor),
+            Some(sid),
+            "an already-promoted sibling keeps its SubId (no re-mint / churn)",
+        );
+    }
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -1419,9 +1642,9 @@ fn reap_promoter_prefix_pending_releases_prefix() {
 }
 
 #[test]
-fn reap_promoter_drains_dynamic_subs() {
-    // Promoter with one dynamic Sub. `reap_promoter` detaches the
-    // Sub and removes the (path, sub) entry from `dynamic_subs`.
+fn reap_promoter_detaches_dynamic_subs() {
+    // Promoter with one dynamic Sub. `reap_promoter`'s registry scan
+    // (`source_promoter == pid`) detaches the Sub from `SubRegistry`.
     let mut e = Engine::new();
     let _var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
@@ -1442,16 +1665,9 @@ fn reap_promoter_drains_dynamic_subs() {
         }),
         Instant::now(),
     );
-    let dynamic_count_after_promotion = e.promoters.get(pid).unwrap().dynamic_subs().len();
-    assert_eq!(dynamic_count_after_promotion, 1, "dynamic Sub minted");
-    let sub_id = *e
-        .promoters
-        .get(pid)
-        .unwrap()
-        .dynamic_subs()
-        .values()
-        .next()
-        .unwrap();
+    let dynamic_after_promotion = dynamic_subs_of(&e, pid);
+    assert_eq!(dynamic_after_promotion.len(), 1, "dynamic Sub minted");
+    let sub_id = *dynamic_after_promotion.values().next().unwrap();
     assert!(e.subs().get(sub_id).is_some(), "Sub registered");
 
     let _ = e.reap_promoter(pid);
@@ -1571,8 +1787,7 @@ fn promote_one(
         }),
         Instant::now(),
     );
-    let q = e.promoters.get(pid).expect("promoter alive");
-    let sid = *q.dynamic_subs().values().next().expect("Sub minted");
+    let sid = *dynamic_subs_of(e, pid).values().next().expect("Sub minted");
     (pid, sid, anchor_resource)
 }
 
@@ -1585,7 +1800,7 @@ fn anchor_terminal_all_dynamic_reaps_profile_and_notifies_promoter() {
     let mut e = Engine::new();
     let (pid, sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
     assert_eq!(
-        e.promoters.get(pid).unwrap().dynamic_subs().len(),
+        dynamic_subs_of(&e, pid).len(),
         1,
         "exactly one dynamic Sub minted",
     );
@@ -1621,15 +1836,15 @@ fn anchor_terminal_all_dynamic_reaps_profile_and_notifies_promoter() {
         "ProfileReaped emitted for the dynamic-only Profile: {:?}",
         out.diagnostics,
     );
-    // Profile gone, Sub gone, Promoter dynamic_subs entry cleared.
+    // Profile gone, Sub gone, no dynamic Sub left for the Promoter.
     assert!(e.profiles.get(profile_id).is_none(), "Profile reaped");
     assert!(
         e.subs().get(sid).is_none(),
         "dynamic Sub removed from registry"
     );
     assert!(
-        e.promoters.get(pid).unwrap().dynamic_subs().is_empty(),
-        "dynamic_subs entry dropped",
+        dynamic_subs_of(&e, pid).is_empty(),
+        "no dynamic Subs remain for the Promoter",
     );
 }
 
@@ -1688,9 +1903,9 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
         ),
         "anchor_claim cleared by finalize_anchor_lost",
     );
-    // No DynamicSubReaped — the dynamic Sub remains attached (Promoter's
-    // dynamic_subs entry is intact; on path reappearance, try_promote's
-    // contains_check is the dedup gate).
+    // No DynamicSubReaped — the dynamic Sub remains attached; on path
+    // reappearance the derived gate (`promoter_already_promoted`) sees
+    // the still-attached Sub and suppresses a duplicate mint.
     assert!(
         !out.diagnostics.iter().any(|d| matches!(
             d,
@@ -1701,9 +1916,9 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
     );
     assert!(e.subs().get(dyn_sid).is_some(), "dynamic Sub retained");
     assert_eq!(
-        e.promoters.get(pid).unwrap().dynamic_subs().len(),
+        dynamic_subs_of(&e, pid).len(),
         1,
-        "Promoter.dynamic_subs entry retained",
+        "the Promoter's dynamic Sub is retained",
     );
 }
 
