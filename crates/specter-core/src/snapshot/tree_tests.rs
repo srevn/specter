@@ -125,8 +125,7 @@ fn leaf_entry_clone_preserves_leaf_hash() {
 // `Send + Sync` follow trivially from each field being `Send + Sync`;
 // this assertion guards against a future regression that introduces an
 // `Rc`, a `*const`, or a `Cell<...>` field into any of them.
-#[allow(dead_code)]
-const _SEND_SYNC: fn() = || {
+const _: fn() = || {
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
     assert_send::<DirMeta>();

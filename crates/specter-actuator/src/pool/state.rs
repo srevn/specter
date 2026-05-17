@@ -1049,7 +1049,6 @@ impl ActuatorState {
     /// `expect` rather than silently masked — silent masking would
     /// otherwise leak the signaler and leave the child unreachable
     /// from shutdown signaling.
-    #[allow(clippy::too_many_arguments)]
     fn spawn_exec_with_permit(
         &mut self,
         key: &DedupKey,
@@ -1202,7 +1201,6 @@ impl ActuatorState {
     /// (returned by [`Spawner::spawn_pipe`]) means the spawner has
     /// already rolled back any partially-spawned stages — the caller
     /// just returns `SpawnError::Failed`.
-    #[allow(clippy::too_many_arguments)]
     fn spawn_pipe_with_permit(
         &mut self,
         key: &DedupKey,

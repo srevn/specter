@@ -72,8 +72,8 @@
 //!
 //! - `DirSnapshot` and `LeafEntry` are fully immutable post-construction
 //!   — every field is a plain value or an `Arc<...>`, with no interior
-//!   mutability. Both types are `Send + Sync` trivially; compile-time
-//!   pinned via `_SEND_SYNC` in tests.
+//!   mutability. Both types are `Send + Sync` trivially; pinned by a
+//!   compile-time `Send + Sync` assertion in tests.
 //! - Splice and graft build *new* `Arc<DirSnapshot>`s — never
 //!   mutate-through-Arc — so engine and walker can share `Arc<DirSnapshot>`
 //!   handles without locks.

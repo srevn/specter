@@ -230,13 +230,9 @@ pub struct InotifyConfigWatcher {
     wake_fd: Arc<OwnedFd>,
 
     /// Epoll fd watching `(inotify_fd, wake_fd)`. Owned, not Arc'd —
-    /// only `wait` reads from it; wake handles never touch it.
-    ///
-    /// The field is read by no method — it exists purely so its
-    /// `Drop` closes the fd. Without storage in the struct the
-    /// epoll instance would be torn down at the end of `new()`,
-    /// before `wait()` could ever block on it.
-    #[allow(dead_code)]
+    /// only `wait` reads from it (via `epoll_wait`); wake handles
+    /// never touch it. Its `Drop` closes the fd, tearing down the
+    /// epoll instance when the watcher ends.
     epoll_fd: OwnedFd,
 
     /// File-side watch descriptor. Set on successful initial install

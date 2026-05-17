@@ -121,7 +121,6 @@ impl SubAttachRequest {
     /// Subs are built by the engine's `try_promote` via
     /// [`Self::from_parts`] directly.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub const fn for_anchor(
         name: CompactString,
         anchor: SubAttachAnchor,

@@ -311,7 +311,6 @@ fn substitute_argv(
 /// The multi-value arm allocates a fresh slot per emitted entry — the
 /// shared scratch prefix and the per-entry suffix are sized exactly so
 /// no growth pass is needed.
-#[allow(clippy::too_many_arguments)]
 fn substitute_one(
     arg: &ArgTemplate,
     effect: &Effect,

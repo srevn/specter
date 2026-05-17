@@ -64,7 +64,6 @@ pub(super) struct Record<'a> {
     /// Basename portion (NUL padding stripped). Empty for non-name
     /// events. Borrows from the watcher's drain buffer; lifetime
     /// matches the parser's input slice.
-    #[allow(dead_code)]
     pub name: &'a [u8],
 }
 

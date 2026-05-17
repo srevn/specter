@@ -122,7 +122,6 @@ fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
 /// `LeafEntry` for File-anchored Profiles. Consumed directly by
 /// `ProbeOutcome::AnchorOk`; the wrapping `TreeSnapshot::File` lives on
 /// the engine-internal `Profile.current`, not the wire response.
-#[allow(dead_code)]
 fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> LeafEntry {
     LeafEntry::synthetic(kind, size, mtime, FsIdentity::synthetic(inode, 0))
 }

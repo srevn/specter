@@ -2348,7 +2348,6 @@ impl Engine {
     /// Returns the number of Effects appended to `out`. The caller
     /// (`emit_effects`) sums this into the [`EmitOutcome.count`] it returns.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     fn emit_effects_per_stable_file(
         &mut self,
         sub_id: SubId,
