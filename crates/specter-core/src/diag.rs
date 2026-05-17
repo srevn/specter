@@ -479,6 +479,17 @@ pub enum Diagnostic {
     /// schedules carry no per-Promoter annotation that they were
     /// triggered by overflow rather than a normal `FsEvent`.
     PromoterReseededForOverflow { promoter: PromoterId },
+    /// A `PerStableFile` Sub's loss-window reactions were dropped: the
+    /// recovery Seed rebased `baseline := observed`, absorbing the
+    /// delta (the Subtree side re-fires from the survival witness; the
+    /// per-file path keeps none — a v1 limitation). Emitted once per
+    /// recovery Seed-Ok with a live witness, real drift (`current`
+    /// hash ≠ witness; a byte-identical recovery emits nothing), and
+    /// ≥1 `PerStableFile` Sub. Witness-gated: a plain `SensorOverflow`
+    /// reseed of a `Snapshot`-baseline Profile drops the same way but
+    /// is not flagged (a further deferred v1 limitation).
+    /// Informational — the dropped reactions cannot be reconstructed.
+    PerFileDriftDroppedOnRecovery { profile: ProfileId },
     /// A Sub has been registered with the engine and assigned `sub`.
     /// Emitted by `attach_sub_inner` on every successful insert —
     /// static (operator-declared) attaches and dynamic Promoter-spawned

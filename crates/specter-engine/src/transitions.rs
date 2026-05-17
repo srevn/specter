@@ -1624,6 +1624,31 @@ impl Engine {
 
         self.apply_snapshot(profile_id, target, snapshot, out);
 
+        // Loss→recovery honesty signal, evaluated *before* the rebase
+        // below consumes the survival witness. A Seed-Ok that closes an
+        // anchor-loss window rebases `baseline := observed`, absorbing
+        // the whole loss-window delta in one move: the Subtree side
+        // re-fires its drifted Subs from the witness, but a
+        // `PerStableFile` Sub has no per-leaf witness, so its
+        // loss-window reactions vanish without a trace. This is
+        // standalone, not folded into the drift branch below, on
+        // purpose — a PerFile-only Profile never enters that branch
+        // (its Subs never record a fire ⇒ `seed_drift_observed` is
+        // false) yet is exactly the case to flag, so the condition
+        // cannot piggy-back on it. A byte-identical recovery
+        // (`current == witness`) dropped nothing and emits nothing.
+        if let Some(p) = self.profiles.get(profile_id)
+            && let Some(witness) = p.survival_witness()
+            && let Some(current) = p.current()
+            && current.hash() != witness
+            && self.subs.has_per_stable_file_sub(profile_id)
+        {
+            out.diagnostics
+                .push(Diagnostic::PerFileDriftDroppedOnRecovery {
+                    profile: profile_id,
+                });
+        }
+
         // Fire Effects only for the Profile's fired Subs when drift is
         // observed (post-graft current.hash() differs from
         // `settled_hash()` — the active-mode baseline digest or, across
@@ -2605,7 +2630,13 @@ pub(crate) struct EmitOutcome {
 ///   Seed-time drift signal is Subtree-only (per
 ///   [`Engine::seed_drift_observed`]'s documented limitation: a
 ///   post-Seed `current` lacks the per-leaf history needed for a
-///   faithful per-file diff).
+///   faithful per-file diff). On a witness-bearing loss→recovery
+///   Seed this skip drops the `PerStableFile` Sub's loss-window
+///   reactions; that (witness-gated) drop is surfaced via
+///   [`Diagnostic::PerFileDriftDroppedOnRecovery`]. A plain
+///   `Input::SensorOverflow` reseed of a `Snapshot`-baseline
+///   Profile drops them the same way but carries no witness, so it
+///   is a further v1 limitation the diagnostic does not cover.
 ///
 /// **Payload type.** `drifted: &[SubId]` rather than `&[DedupKey]`. By
 /// construction the slice carries only `DedupKey::Subtree { sub, profile }`

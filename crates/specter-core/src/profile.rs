@@ -1413,6 +1413,25 @@ impl<S: AnchorPayload> SettledState<S> {
             Self::Unset | Self::Witness(_) => None,
         }
     }
+
+    /// The retained pre-loss hash — `Some` only across the
+    /// loss→recovery window (`Witness`). An active `Snapshot`
+    /// baseline and `Unset` both yield `None`: neither carries a
+    /// survival witness.
+    ///
+    /// The Witness-only complement of [`Self::snapshot`] (the
+    /// Snapshot-only owned projection) within [`Self::to_hash`]'s
+    /// domain — the three accessors are one lattice over the sum:
+    /// `to_hash` is `Some` iff exactly one of `snapshot` /
+    /// `witness_hash` is, never both (the variants are disjoint), so
+    /// no arm is double-counted and the witness can never be silently
+    /// folded into the active-baseline projection.
+    const fn witness_hash(&self) -> Option<u128> {
+        match self {
+            Self::Witness(h) => Some(*h),
+            Self::Unset | Self::Snapshot(_) => None,
+        }
+    }
 }
 
 /// The anchor's on-disk classification and its settled reference, as
@@ -2187,6 +2206,38 @@ impl Profile {
             AnchorClassification::Unclassified { witness } => *witness,
             AnchorClassification::File { settled, .. } => settled.to_hash(),
             AnchorClassification::Dir { settled, .. } => settled.to_hash(),
+        }
+    }
+
+    /// The loss-window survival witness: `Some(h)` iff the settled
+    /// reference is *currently* a not-yet-consumed `Witness` (the
+    /// pre-loss anchor-rooted hash retained across an anchor-loss
+    /// window), not an active baseline `Snapshot` and not `Unset`.
+    ///
+    /// **Deliberately narrower than [`Self::settled_hash`]; the two
+    /// must not be unified.** `settled_hash` is the *total* drift
+    /// oracle — "what hash does the post-recovery verdict diff
+    /// `current` against" — and so folds `Snapshot`, `Witness`, and
+    /// the pre-classification `Unclassified { witness }` into one
+    /// value. This accessor answers the strictly narrower question
+    /// "is the anchor *right now* sitting on a live loss→recovery
+    /// witness", true solely between the witness lift
+    /// ([`Self::materialize_anchor`] / the `install_*_current`
+    /// `Unclassified { witness } ⇒ classified { Witness }` arms) and
+    /// its consumption ([`Self::rebase_baseline`], `Witness ⇒
+    /// Snapshot`). `settled_hash`'s `Snapshot` arm (an active
+    /// baseline is not a survival witness) and its `Unclassified`
+    /// arm (recovery has not completed) would each mis-answer it.
+    ///
+    /// `Unclassified ⇒ None` is correct on both counts above and, at
+    /// the sole consumer — a Seed-Ok past `apply_snapshot`, which has
+    /// classified the anchor — unreachable.
+    #[must_use]
+    pub const fn survival_witness(&self) -> Option<u128> {
+        match &self.anchor {
+            AnchorClassification::Unclassified { .. } => None,
+            AnchorClassification::File { settled, .. } => settled.witness_hash(),
+            AnchorClassification::Dir { settled, .. } => settled.witness_hash(),
         }
     }
 

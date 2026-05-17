@@ -516,6 +516,28 @@ impl SubRegistry {
             .filter(|sid| self.subs.get(*sid).is_some_and(|s| s.has_fired))
             .collect()
     }
+
+    /// Whether `profile` has at least one attached `PerStableFile`
+    /// Sub — the scope test behind the per-file recovery-drop signal.
+    ///
+    /// **Must not be collapsed into [`crate::Profile::has_per_file_fds`].**
+    /// That predicate is events-mask derived (`CONTENT | METADATA`
+    /// present) and a `SubtreeRoot` Sub watching `CONTENT` sets it
+    /// just as much as a `PerStableFile` Sub does — it is *necessary*
+    /// for per-file FDs but *not sufficient* for "this Profile carries
+    /// a per-file-*scoped* reaction". Swapping this scan for
+    /// `has_per_file_fds` would false-positive the recovery-drop
+    /// diagnostic on Subtree-only Profiles that happen to watch
+    /// content. The `scope` field is the only sound witness; the scan
+    /// stays.
+    #[must_use]
+    pub fn has_per_stable_file_sub(&self, profile: ProfileId) -> bool {
+        self.at(profile).iter().any(|sid| {
+            self.subs
+                .get(*sid)
+                .is_some_and(|s| s.scope == EffectScope::PerStableFile)
+        })
+    }
 }
 
 #[cfg(test)]

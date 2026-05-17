@@ -659,6 +659,21 @@ impl Engine {
     /// Sole call sites: `attach_sub_inner` (immediate-Seed path, where
     /// the anchor exists on disk and so does its parent) and
     /// `descent::dispatch_descent_ok` (anchor materialization).
+    ///
+    /// **Per-file recovery limitation.** This parent-edge channel is
+    /// what makes `rm -rf anchor` survivable: the anchor
+    /// re-materialises via descent and a post-recovery Seed-Ok
+    /// rebases `baseline := observed`. The Subtree side re-fires its
+    /// drifted Subs across the loss window, but a `PerStableFile`
+    /// Sub's reactions to changes that occurred during the loss are
+    /// dropped — v1 keeps no per-leaf survival witness on the
+    /// per-file path. This (witness-bearing) drop is surfaced to
+    /// operators via [`Diagnostic::PerFileDriftDroppedOnRecovery`],
+    /// which is witness-gated: a plain `Input::SensorOverflow` reseed
+    /// of a healthy `Snapshot`-baseline Profile drops per-file
+    /// overflow-window reactions the same way but carries no witness,
+    /// so that subclass is a further v1 limitation the diagnostic
+    /// does not cover (deferred with the per-leaf-witness work).
     pub(crate) fn set_watch_root_parent(
         &mut self,
         profile_id: ProfileId,

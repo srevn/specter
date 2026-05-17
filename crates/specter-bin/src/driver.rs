@@ -909,6 +909,10 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?promoter,
             "promoter reseeded after sensor overflow (descent re-probed or proxies re-enumerated)",
         ),
+        Diagnostic::PerFileDriftDroppedOnRecovery { profile } => tracing::warn!(
+            ?profile,
+            "per-file Sub's loss-window reactions dropped on recovery (no per-leaf survival witness)",
+        ),
         Diagnostic::SubAttached {
             sub,
             name,

@@ -4759,6 +4759,206 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
     );
 }
 
+// ---- PerFileDriftDroppedOnRecovery: loss→recovery honesty signal ----
+
+/// Attach a `PerStableFile` Sub at the same `(anchor, config_hash)` as
+/// `engine_with_attached_sub`'s `SubtreeRoot` Sub so both share one
+/// Profile. Identical `ProfileIdentity` (config / max_settle / events)
+/// ⇒ same `ProfileId`; the scope differs, which is the only axis the
+/// `has_per_stable_file_sub` gate reads.
+fn attach_per_stable_file_sibling(
+    e: &mut Engine,
+    anchor: ResourceId,
+    pid: specter_core::ProfileId,
+    now: Instant,
+) -> specter_core::SubId {
+    let req = SubAttachRequest {
+        anchor: SubAttachAnchor::Resource(anchor),
+        identity: ProfileIdentity {
+            config: ScanConfig::builder().recursive(true).build(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
+        params: SubParams {
+            name: "per-file-sibling".into(),
+            program: empty_program(),
+            scope: EffectScope::PerStableFile,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
+    };
+    let out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("per-file sibling attached");
+    assert_eq!(
+        e.subs.get(sid).unwrap().profile,
+        pid,
+        "per-file sibling shares the original Profile (same anchor + config_hash)",
+    );
+    assert!(
+        e.subs.has_per_stable_file_sub(pid),
+        "precondition: Profile now carries a PerStableFile Sub",
+    );
+    sid
+}
+
+/// (a) Positive: anchor loss → real content drift across the loss
+/// window → recovery Seed-Ok with a `PerStableFile` Sub attached ⇒
+/// exactly one `PerFileDriftDroppedOnRecovery` for the Profile. No
+/// fired Sub is required — the diagnostic is scope+drift gated, not
+/// drift-branch gated (a PerFile-only Profile never records a fire yet
+/// is exactly the case to flag).
+#[test]
+fn per_file_drift_dropped_on_recovery_emits_once_on_real_drift() {
+    let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+    let _ = e.cancel_all_in_flight_probes();
+    attach_per_stable_file_sibling(&mut e, anchor, pid, now);
+    let _ = e.cancel_all_in_flight_probes();
+
+    // Survival mode: pre-loss hash retained as the witness; the
+    // recovery probe lands a `current` whose hash differs ⇒ real drift.
+    let witness_snap = dir_tree_snap(vec![("pre", EntryKind::File, 1)]);
+    let witness_hash = witness_snap.dir_hash();
+    enter_survival_mode(&mut e, pid, witness_snap);
+    let state = active_pre_fire_burst(
+        &mut e,
+        pid,
+        PreFirePhase::Verifying(ProbeSlot::empty()),
+        BurstIntent::Seed,
+        anchor,
+        now,
+    );
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.transition_state(state);
+    }
+
+    let recovered = dir_tree_snap(vec![("post", EntryKind::File, 2)]);
+    assert_ne!(
+        recovered.dir_hash(),
+        witness_hash,
+        "test setup: recovered tree must differ from the pre-loss witness to drift",
+    );
+    let mut out = StepOutput::default();
+    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(recovered), now, &mut out);
+
+    assert_eq!(
+        out.diagnostics
+            .iter()
+            .filter(|d| matches!(
+                d,
+                Diagnostic::PerFileDriftDroppedOnRecovery { profile } if *profile == pid
+            ))
+            .count(),
+        1,
+        "real loss-window drift + PerStableFile Sub ⇒ exactly one \
+         PerFileDriftDroppedOnRecovery for the Profile",
+    );
+}
+
+/// (b) Byte-identical recovery: same loss→recovery shape, but the
+/// recovered tree hash equals the pre-loss witness ⇒ zero
+/// `PerFileDriftDroppedOnRecovery` (a byte-identical recovery dropped
+/// nothing). Pins the `current.hash() != witness` gate.
+#[test]
+fn per_file_drift_dropped_on_recovery_silent_on_byte_identical_recovery() {
+    let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+    let _ = e.cancel_all_in_flight_probes();
+    attach_per_stable_file_sibling(&mut e, anchor, pid, now);
+    let _ = e.cancel_all_in_flight_probes();
+
+    let witness_snap = dir_tree_snap(vec![("same", EntryKind::File, 1)]);
+    let witness_hash = witness_snap.dir_hash();
+    enter_survival_mode(&mut e, pid, witness_snap);
+    let state = active_pre_fire_burst(
+        &mut e,
+        pid,
+        PreFirePhase::Verifying(ProbeSlot::empty()),
+        BurstIntent::Seed,
+        anchor,
+        now,
+    );
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.transition_state(state);
+    }
+
+    // Same shape ⇒ identical dir_hash (synthetic ctors are
+    // deterministic): a byte-identical recovery.
+    let recovered = dir_tree_snap(vec![("same", EntryKind::File, 1)]);
+    assert_eq!(
+        recovered.dir_hash(),
+        witness_hash,
+        "test setup: recovered tree must be byte-identical to the witness",
+    );
+    let mut out = StepOutput::default();
+    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(recovered), now, &mut out);
+
+    assert_eq!(
+        out.diagnostics
+            .iter()
+            .filter(|d| matches!(
+                d,
+                Diagnostic::PerFileDriftDroppedOnRecovery { profile } if *profile == pid
+            ))
+            .count(),
+        0,
+        "byte-identical recovery dropped nothing ⇒ no \
+         PerFileDriftDroppedOnRecovery",
+    );
+}
+
+/// (c) Scope gate: same loss→drift→recovery, but the Profile has only
+/// a `SubtreeRoot` Sub (no `PerStableFile`) ⇒ zero
+/// `PerFileDriftDroppedOnRecovery`. Regression guard against collapsing
+/// the scope scan into `Profile::has_per_file_fds` — that predicate is
+/// events-mask derived and would false-positive a content-watching
+/// Subtree-only Profile.
+#[test]
+fn per_file_drift_dropped_on_recovery_gated_by_per_stable_file_scope() {
+    let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+    let _ = e.cancel_all_in_flight_probes();
+    assert!(
+        !e.subs.has_per_stable_file_sub(pid),
+        "precondition: Profile has only the SubtreeRoot Sub",
+    );
+
+    let witness_snap = dir_tree_snap(vec![("pre", EntryKind::File, 1)]);
+    let witness_hash = witness_snap.dir_hash();
+    enter_survival_mode(&mut e, pid, witness_snap);
+    let state = active_pre_fire_burst(
+        &mut e,
+        pid,
+        PreFirePhase::Verifying(ProbeSlot::empty()),
+        BurstIntent::Seed,
+        anchor,
+        now,
+    );
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.transition_state(state);
+    }
+
+    let recovered = dir_tree_snap(vec![("post", EntryKind::File, 2)]);
+    assert_ne!(
+        recovered.dir_hash(),
+        witness_hash,
+        "test setup: recovered tree must differ from the witness (real drift)",
+    );
+    let mut out = StepOutput::default();
+    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(recovered), now, &mut out);
+
+    assert_eq!(
+        out.diagnostics
+            .iter()
+            .filter(|d| matches!(
+                d,
+                Diagnostic::PerFileDriftDroppedOnRecovery { profile } if *profile == pid
+            ))
+            .count(),
+        0,
+        "real drift but no PerStableFile Sub ⇒ the scope gate suppresses \
+         PerFileDriftDroppedOnRecovery",
+    );
+}
+
 // ---- seed_drift_observed: baseline-or-witness contract ----
 
 /// Fresh Profile reports no drift: `fired_subs` is empty by
