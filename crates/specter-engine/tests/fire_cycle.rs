@@ -811,14 +811,14 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
         ProfileState::Idle
     ));
     assert!(
-        e.profiles().get(pid).unwrap().fired_is_empty(),
-        "fresh Seed leaves fired_subs empty",
+        !e.subs().any_fired(pid),
+        "fresh Seed leaves all Subs unfired",
     );
 }
 
 #[test]
 fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
-    // Drive a complete fire cycle once (populates fired_subs).
+    // Drive a complete fire cycle once (sets the Sub's has_fired).
     // Then trigger an identical Standard burst whose stable verdict has
     // the same hash — emit_effects returns count == 0 → finish_to_idle.
     // Profile must NOT enter Awaiting.
@@ -1475,4 +1475,138 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
     ));
+}
+
+/// PerStableFile contract regression: a `PerStableFile` Sub's Effect
+/// fires iff its file is in the diff, re-fires on a *subsequent real
+/// change* to that file, and is deduped by **nothing but diff
+/// membership** — in particular it is NOT gated by the per-Sub
+/// `Sub.has_fired` flag (which the relocation introduced for the
+/// Subtree B1 path only).
+///
+/// The load-bearing step is Burst 2: `Sub.has_fired` is already `true`
+/// from Burst 1, yet a real `foo.rs` content change must still fire a
+/// fresh PerFile Effect. If a future maintainer re-introduces a
+/// spurious PerFile suppression gate keyed on fire history, Burst 2
+/// emits zero effects and this test fails.
+#[test]
+fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
+    fn dir_snap_one_file(
+        name: &str,
+        kind: EntryKind,
+        inode: u64,
+        size: u64,
+    ) -> std::sync::Arc<DirSnapshot> {
+        let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
+        map.insert(
+            CompactString::new(name),
+            ChildEntry::Leaf(LeafEntry::synthetic(
+                kind,
+                size,
+                UNIX_EPOCH,
+                FsIdentity::synthetic(inode, 0),
+            )),
+        );
+        Arc::new(DirSnapshot::new(
+            DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
+            0,
+            map,
+        ))
+    }
+
+    let mut e = Engine::new();
+    let r = anchor(&mut e, "src");
+    let now = Instant::now();
+
+    // PerStableFile Sub on the anchor; CONTENT events so per-leaf FDs
+    // are issued. Seed baseline empty.
+    let req = SubAttachRequest::for_anchor(
+        "fmt".into(),
+        SubAttachAnchor::Resource(r),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::PerStableFile,
+        ClassSet::CONTENT,
+        false,
+    );
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
+    let pid = pid_of(&e, sid);
+    let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: seed_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        now,
+    );
+
+    // Burst 1 — foo.rs created (inode 42, size 0). Seed → Standard
+    // diff (created foo.rs) drives exactly one PerFile Effect.
+    let v1 = dir_snap_one_file("foo.rs", EntryKind::File, 42, 0);
+    let out1 = drive_to_awaiting(&mut e, pid, r, v1.clone(), now + Duration::from_millis(10));
+    let perfile1: Vec<_> = out1
+        .effects()
+        .iter()
+        .filter(|ef| matches!(ef.key(), DedupKey::PerFile { sub, .. } if sub == sid))
+        .collect();
+    assert_eq!(
+        perfile1.len(),
+        1,
+        "Burst 1: PerFile Effect fires for the created foo.rs",
+    );
+    let key1 = perfile1[0].key();
+
+    // EffectComplete::Ok → Rebasing. Idempotent command: rebase
+    // response leaves foo.rs unchanged (inode 42, size 0). baseline
+    // := current carries foo.rs.
+    let rebase_out = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key: key1,
+            result: EffectOutcome::Ok,
+        },
+        now + Duration::from_millis(20),
+    );
+    let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: rebase_corr,
+            outcome: ProbeOutcome::SubtreeOk(v1),
+        }),
+        now + Duration::from_millis(30),
+    );
+    // A PerStableFile Sub's fire-history flag is NEVER set: `mark_fired`
+    // is called only by the SubtreeRoot emit arm. PerFile has no B1
+    // fire-history suppression — it is diff-membership-gated only, so
+    // there is no flag to set and none to dedup against.
+    assert!(
+        !e.subs().get(sid).unwrap().has_fired,
+        "PerStableFile Sub is never fire-history-marked (mark_fired is SubtreeRoot-only)",
+    );
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state(),
+        ProfileState::Idle
+    ));
+
+    // Burst 2 — a *real* change: foo.rs rewritten in place (same
+    // inode 42, size 0 → 1). The diff carries foo.rs as modified, so
+    // the PerFile Effect MUST re-fire. PerFile emission is gated by
+    // diff membership alone, never by any fire-history suppression.
+    let v2 = dir_snap_one_file("foo.rs", EntryKind::File, 42, 1);
+    let out2 = drive_to_awaiting(&mut e, pid, r, v2, now + Duration::from_millis(40));
+    let perfile2 = out2
+        .effects()
+        .iter()
+        .filter(|ef| matches!(ef.key(), DedupKey::PerFile { sub, .. } if sub == sid))
+        .count();
+    assert_eq!(
+        perfile2, 1,
+        "Burst 2: PerFile Effect RE-FIRES on a real foo.rs change; \
+         PerFile is gated by diff membership alone, never fire history",
+    );
 }

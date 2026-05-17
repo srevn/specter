@@ -32,7 +32,7 @@
 //!   [`specter_core::Tree::vacate`] cleared the map.
 
 use crate::Engine;
-use crate::reconcile::{apply_diff_to_tree, purge_per_file_fired_subs_for_resources};
+use crate::reconcile::apply_diff_to_tree;
 use crate::refcounts::{sub_watch, sub_watch_then_try_reap};
 use specter_core::{
     AnchorClaim, ContribKey, DescentState, Diff, ProbeOwner, ProfileId, ProfileState, StepOutput,
@@ -160,14 +160,6 @@ impl Engine {
     /// sub-walk in this take-and-apply pass already drained — see the
     /// [`crate::refcounts`] module rustdoc).
     ///
-    /// **Per-file dedup hygiene.** The Diff-driven pass reaps covered
-    /// Leaves; their `ResourceId`s may key entries in OTHER Profiles'
-    /// (or this one's) `fired_subs` set. Mirror [`graft`](crate::reconcile::graft)'s
-    /// post-apply purge via the scoped
-    /// [`crate::reconcile::purge_per_file_fired_subs_for_resources`].
-    /// Cross-Profile sharing means the loop iterates every Profile;
-    /// the membership check is scoped to the reaped set.
-    ///
     /// **Sole call sites.** [`Engine::reap_profile`] and the seven
     /// `dispatch_*_vanished/failed` + `finalize_anchor_lost` sites in
     /// `transitions.rs`. Completes the four-claim release symmetry:
@@ -186,7 +178,10 @@ impl Engine {
         };
 
         // File-anchored Profiles hold no descendant claims (a Leaf has
-        // no descendants). The Dir arm is the only contributor.
+        // no descendants); the Dir arm is the only contributor. A File
+        // anchor's loss→recovery survival witness is captured by
+        // `discard_anchor_state` (via `clear_anchor_classification`),
+        // not here — this helper only releases the 1-to-N Dir claims.
         let TreeSnapshot::Dir(arc) = snapshot else {
             return;
         };
@@ -196,23 +191,17 @@ impl Engine {
         // and is `&self` on the Diff side.
         let diff = Diff::all_deleted(&arc);
 
-        // Apply the Diff under a co-existing immutable borrow of the
-        // Profile (for `apply_diff_to_tree`'s `&Profile` arg).
-        // `&mut self.tree` is a disjoint-field borrow.
-        let reaped = {
+        // Apply the Diff under a scoped immutable Profile borrow (for
+        // `apply_diff_to_tree`'s `&Profile` arg); `&mut self.tree` is a
+        // disjoint-field borrow. Purely side-effecting — no reaped-slot
+        // return: per-Sub fire history dies with its Sub, so a reaped
+        // leaf has nothing to purge by `ResourceId`.
+        {
             let Some(profile) = self.profiles.get(pid) else {
                 return;
             };
             let anchor = profile.resource;
-            apply_diff_to_tree(&diff, profile, pid, anchor, &mut self.tree, out)
-        };
-
-        // Cross-Profile dedup hygiene: covered Leaves reaped above may
-        // appear in any Profile's `fired_subs` set keyed at their
-        // `ResourceId`. Scoped to the small reaped set, but iterates
-        // every Profile to handle cross-Profile sharing.
-        if !reaped.is_empty() {
-            purge_per_file_fired_subs_for_resources(&mut self.profiles, &reaped);
+            apply_diff_to_tree(&diff, profile, pid, anchor, &mut self.tree, out);
         }
     }
 
@@ -248,12 +237,15 @@ impl Engine {
     ///   it here would close auto-recovery on anchor reappearance;
     ///   only `reap_profile` and `on_watch_op_rejected`'s parent purge
     ///   clear it.
-    /// - `Profile.fired_subs` — fire history survives anchor loss.
-    ///   The post-recovery Seed-Ok consults
-    ///   [`Engine::seed_drift_observed`] to decide whether to re-fire;
-    ///   the SeedDrift filter narrows to the Subtree subset of
-    ///   `fired_subs`. Clearing here would silently fail to re-fire
-    ///   emitted-once Effects on every recovery.
+    /// - The per-Sub fire history ([`specter_core::Sub::has_fired`]) —
+    ///   not a Profile field at all, so it is outside this helper's
+    ///   reach by construction: it lives on the Subs in the registry,
+    ///   which anchor loss does not touch, so it survives the
+    ///   loss→recovery window for free. The post-recovery Seed-Ok
+    ///   consults [`Engine::seed_drift_observed`] (which reads that
+    ///   per-Sub state) to decide whether to re-fire; were it cleared,
+    ///   emitted-once Effects would silently fail to re-fire on every
+    ///   recovery.
     /// - All other fields (`parent_profile`, `events`,
     ///   `has_per_file_fds`, `config*`, `resource`, `settle*`). The
     ///   prior `reap_pending: bool` field is gone; the deferred-reap

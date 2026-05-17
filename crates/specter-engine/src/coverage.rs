@@ -44,6 +44,13 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
     // of 8 covers typical source-tree depths from a workspace anchor
     // (`src/foo/bar/baz/qux/file.rs` is 6 deep); cap 4 spilled on every
     // such path.
+    //
+    // Termination relies on the `Tree` acyclicity invariant: each
+    // `parent()` step strictly ascends, so the walk reaches `anchor`
+    // or bottoms out at a root (`None`) in at most `depth(target)`
+    // steps. Intentionally not depth-bounded — a defensive cap here
+    // would mask a real `Tree`-construction cycle bug instead of
+    // surfacing it (mirrors `snapshot::tree::ancestor_chain`).
     let mut rev: SmallVec<[&str; 8]> = SmallVec::new();
     let mut cur = target;
     loop {

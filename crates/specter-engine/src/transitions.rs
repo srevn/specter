@@ -27,10 +27,10 @@ use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind, ClassSet,
     DedupKey, DescentRemaining, Diagnostic, Effect, EffectCommon, EffectOutcome, EffectScope,
-    FiredKey, FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState,
-    ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind,
-    TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
+    FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse,
+    ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource,
+    ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure,
+    WatchOp, WatchRegistryDiff,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -663,12 +663,14 @@ impl Engine {
     /// The Profile is resolved from `key` ([`DedupKey::profile`] is O(1));
     /// the Sub registry is consulted only for the unknown-Sub diagnostic.
     ///
-    /// Failed arrivals always remove `key` from `Profile.fired_subs` —
-    /// a failed Effect produced no observable state to deduplicate
-    /// against, so its fire history is wiped and the next stable
-    /// verdict at the same `DedupKey` must fire fresh. This happens
-    /// regardless of phase (Awaiting decrement, late arrival, or
-    /// unknown — the cleared entry is correct in every case).
+    /// A Failed arrival clears the Sub's per-Sub fire history
+    /// ([`specter_core::SubRegistry::clear_fired`]) — only for a
+    /// `Subtree` `key`; `PerFile` carries no fire history. A failed
+    /// Effect produced no observable state to deduplicate against, so
+    /// the next stable verdict for that Sub must fire fresh even on an
+    /// unchanged tree. Phase-independent (Awaiting decrement, late
+    /// arrival, or unknown), and a no-op if the Sub already detached
+    /// (its flag died with the slotmap entry).
     ///
     /// Two passes for borrow shapes (single-threaded `step` ⇒ no change
     /// between them): pass 1 resolves the route (read borrow), pass 2
@@ -697,13 +699,17 @@ impl Engine {
         // `key.profile()` is O(1) and never depends on the Sub registry.
         let profile_id = key.profile();
 
-        // Failed clears the dedup entry regardless of state. The Failed
-        // Effect produced no observation worth deduplicating against, so
-        // the next stable verdict at the same key must fire fresh.
-        if matches!(result, EffectOutcome::Failed(_))
-            && let Some(p) = self.profiles.get_mut(profile_id)
-        {
-            p.forget_fire(FiredKey::from(key));
+        // Failed clears the Sub's fire history regardless of state, so
+        // the next stable verdict for it fires fresh even on an
+        // unchanged tree. Match `key` (not the `sub` param) for the
+        // scope discriminant: only `Subtree` carries fire history.
+        if matches!(result, EffectOutcome::Failed(_)) {
+            match key {
+                DedupKey::Subtree { sub, .. } => self.subs.clear_fired(*sub),
+                // PerFile has no fire history (diff membership is the
+                // dedup) — nothing to clear.
+                DedupKey::PerFile { .. } => {}
+            }
         }
 
         // Pass 1 (read borrow): route only. Capture the `Copy`
@@ -1051,7 +1057,7 @@ impl Engine {
     /// post-probe `dispatch_seed_ok` re-establishes baseline against
     /// disk reality and runs drift detection. Active-mode drift
     /// (`baseline.hash() != current.hash()`) fires once for every
-    /// Subtree-scoped key in `fired_subs`, then rebases.
+    /// SubtreeRoot Sub on the Profile that has fired, then rebases.
     ///
     /// # Per-Profile dispatch
     ///
@@ -1572,17 +1578,16 @@ impl Engine {
     /// Graft the response into `Profile.current` at the burst's
     /// `probe_target` (= anchor for Seeds). Hash-only drift check via
     /// [`Engine::seed_drift_observed`] — `true` ⇒ fire `emit_effects`
-    /// once over the Subtree subset of `fired_subs` and route through
-    /// the same fire-tail as a Standard burst (`emit_effects` count > 0
-    /// ⇒ `transition_to_awaiting`; the eventual rebase probe captures
-    /// the post-command tree). Otherwise rebase directly: `baseline :=
-    /// current` and finish.
+    /// once over the Profile's fired Subs ([`SubRegistry::fired_in`])
+    /// and route through the same fire-tail as a Standard burst
+    /// (`emit_effects` count > 0 ⇒ `transition_to_awaiting`; the
+    /// eventual rebase probe captures the post-command tree). Otherwise
+    /// rebase directly: `baseline := current` and finish.
     ///
-    /// Fresh-attach Seed cannot enter the drift branch — `fired_subs`
-    /// is empty by construction at fresh attach, so
-    /// `seed_drift_observed` returns false. The drift branch fires only
-    /// on recovery / post-Effect rebase paths where the Profile has
-    /// already emitted at least one Effect.
+    /// Fresh-attach Seed cannot enter the drift branch — no Sub on a
+    /// fresh Profile has fired, so `seed_drift_observed` returns false.
+    /// The drift branch fires only on recovery / post-Effect rebase
+    /// paths where the Profile has already emitted at least one Effect.
     fn dispatch_seed_ok(
         &mut self,
         profile_id: ProfileId,
@@ -1619,13 +1624,14 @@ impl Engine {
 
         self.apply_snapshot(profile_id, target, snapshot, out);
 
-        // Fire Effects only for the Subtree subset of `fired_subs` when
-        // drift is observed (post-graft current.hash() differs from
+        // Fire Effects only for the Profile's fired Subs when drift is
+        // observed (post-graft current.hash() differs from
         // `settled_hash()` — the active-mode baseline digest or, across
-        // the loss→recovery window, the survival witness). Every Sub
-        // that has a fire history on this Profile re-fires once,
-        // unconditionally — drift is a per-Profile signal; per-key
-        // narrowing is gone.
+        // the loss→recovery window, the survival witness). Drift is a
+        // per-Profile signal: every Sub that has fired re-fires once,
+        // unconditionally. (Post-collapse only SubtreeRoot Subs ever
+        // record a fire, so the filter is Subtree-only by
+        // construction — no explicit per-key narrowing.)
         //
         // **Why two rebases on the drift branch.** Seed's semantic is
         // `baseline := observed`; the drift detection fires the
@@ -1649,22 +1655,17 @@ impl Engine {
         // Profile's view here keeps the cross-field invariant intact
         // against any future absorb / rebase path that does read it.
         if self.seed_drift_observed(profile_id) {
-            // Project `FiredKey::Subtree(sub)` → `sub`; PerFile is
-            // filtered out. The result is sorted by `SubId` — the set
-            // is a `BTreeSet<FiredKey>` and `FiredKey::Subtree`'s `Ord`
-            // is `sub` alone (`FiredKey` is profile-free by
-            // construction) — which the `&[SubId]` payload then carries
-            // for deterministic emission order.
-            let drifted: SmallVec<[SubId; 2]> = self
-                .profiles
-                .get(profile_id)
-                .map(|p| p.fired_subtree_subs().collect())
-                .unwrap_or_default();
-            // `drifted` may be empty if the Profile has only PerFile
-            // fires (Subtree filter excludes them) or if every Subtree Sub
-            // detached between record and now (a same-step race —
-            // `detach_sub_inner` normally purges fired_subs). Fall
-            // through to the no-drift finish path in either case.
+            // The Profile's fired Subs, straight off the registry's
+            // per-Sub flags. Membership only — the `emit_effects` loop
+            // filters with `drifted.contains`, and the observable
+            // Effect order is fixed globally by
+            // `StepOutput::sort_for_emission`, so the insertion order
+            // `fired_in` yields needs no re-sort.
+            let drifted: SmallVec<[SubId; 2]> = self.subs.fired_in(profile_id);
+            // `drifted` is empty when no attached Sub has fired: PerFile
+            // Subs never record a fire, and a detached Sub's flag died
+            // with its slotmap entry. Fall through to the no-drift
+            // finish path in that case.
             if !drifted.is_empty() {
                 let outcome =
                     self.emit_effects(profile_id, EmitMode::SeedDrift { drifted: &drifted }, out);
@@ -1701,20 +1702,22 @@ impl Engine {
     /// the survival witness are mutually exclusive *in the anchor sum*,
     /// so the survival-mode-authoritative priority is structural — there
     /// is no ordering to maintain here and the witness cannot be
-    /// silently lost on recovery. `None` (fresh attach; `fired_subs`
-    /// empty by construction) preserves "a fresh Seed never fires an
-    /// Effect".
+    /// silently lost on recovery. `None` (a fresh, never-fired
+    /// Profile) preserves "a fresh Seed never fires an Effect".
     ///
     /// The boolean answer is per-Profile; the caller
     /// ([`Engine::dispatch_seed_ok`]) builds the SeedDrift fire filter
-    /// from the Subtree subset of [`Profile::fired_subs`].
+    /// from the Profile's fired Subs ([`SubRegistry::fired_in`]).
     fn seed_drift_observed(&self, profile_id: ProfileId) -> bool {
+        // Never fired ⇒ no prior emission to re-fire on recovery. The
+        // per-Sub flags live on the registry (disjoint field from
+        // `profiles`); `any_fired` short-circuits on the first hit.
+        if !self.subs.any_fired(profile_id) {
+            return false;
+        }
         let Some(p) = self.profiles.get(profile_id) else {
             return false;
         };
-        if p.fired_is_empty() {
-            return false;
-        }
         let Some(current) = p.current() else {
             return false;
         };
@@ -2227,12 +2230,11 @@ impl Engine {
         };
 
         // Per-Profile structural component of B1 dedup. The full Subtree
-        // suppress decision combines `nothing_changed` with a per-Sub
-        // fire-history check (`fired_subs.contains(&fk)`) inside the loop:
+        // suppress decision combines `nothing_changed` with the per-Sub
+        // `Sub.has_fired` flag (read once below, alongside scope /
+        // needs_diff / log_output, in the loop's single `subs.get`):
         // a Sub that has never fired suppresses nothing — it is its own
-        // "first emission" — even when the tree happens to match. Both
-        // reads hit the snapshot's eager `u128` hash field; same cost
-        // class as the per-Sub map value compare it replaces.
+        // "first emission" — even when the tree happens to match.
         let nothing_changed = baseline_snap
             .as_ref()
             .zip(current_snap.as_ref())
@@ -2245,16 +2247,12 @@ impl Engine {
         let sub_ids: Vec<SubId> = self.subs.at(profile_id).to_vec();
         let mut count: u32 = 0;
         for sub_id in sub_ids {
-            let (scope, needs_diff, log_output) = match self.subs.get(sub_id) {
-                Some(s) => (s.scope, s.needs_diff, s.log_output),
+            let (scope, needs_diff, log_output, already_fired) = match self.subs.get(sub_id) {
+                Some(s) => (s.scope, s.needs_diff, s.log_output, s.has_fired),
                 None => continue,
             };
             match scope {
                 EffectScope::SubtreeRoot => {
-                    // Fire-history identity only — the actuator re-derives
-                    // its `DedupKey` from the emitted `Effect`, so no
-                    // profile-carrying key is built here.
-                    let fk = FiredKey::Subtree(sub_id);
                     // SeedDrift narrows to its pre-filtered Sub set; Standard
                     // emits every Sub (modulo the suppress check below).
                     if let EmitMode::SeedDrift { drifted } = mode
@@ -2263,23 +2261,18 @@ impl Engine {
                         continue;
                     }
                     // B1 suppress = "Sub has fired before AND tree state is
-                    // unchanged since the last rebase." `fired_subs.contains`
-                    // is the per-Sub fire-history gate; `nothing_changed` is
+                    // unchanged since the last rebase." `already_fired` is
+                    // the per-Sub fire-history gate; `nothing_changed` is
                     // the per-Profile "no change" structural signal. Both
                     // gates required: a fresh Sub on an unchanged tree must
                     // still fire its first Effect. SeedDrift's `drifted` is
-                    // built from drifted keys by construction (see
+                    // built from drifted Subs by construction (see
                     // `seed_drift_observed` + `dispatch_seed_ok`), so the
                     // SeedDrift arm returns `false` directly — the
                     // unreachability is structural, not analytical.
                     let suppress = match mode {
                         EmitMode::Standard { forced } => {
-                            !forced
-                                && nothing_changed
-                                && self
-                                    .profiles
-                                    .get(profile_id)
-                                    .is_some_and(|p| p.has_fired(fk))
+                            !forced && nothing_changed && already_fired
                         }
                         EmitMode::SeedDrift { .. } => false,
                     };
@@ -2318,15 +2311,16 @@ impl Engine {
                     ));
                     count = count.saturating_add(1);
 
-                    if let Some(p) = self.profiles.get_mut(profile_id) {
-                        p.record_fire(fk);
-                    }
+                    // Record the per-Sub fire (the `sub` borrow above
+                    // ended with `push_effect`; `&mut self.subs` is free).
+                    self.subs.mark_fired(sub_id);
                 }
                 EffectScope::PerStableFile => {
                     // SeedDrift skips PerFile entirely — the drift signal
-                    // is Subtree-only (PerFile keys lack the per-leaf
-                    // history needed for Seed-time drift detection; see
-                    // `seed_drift_observed`'s documented limitation).
+                    // is Subtree-only (PerFile records no fire history, so
+                    // it has no per-leaf basis for Seed-time drift
+                    // detection; see `seed_drift_observed`'s documented
+                    // limitation).
                     if matches!(mode, EmitMode::SeedDrift { .. }) {
                         continue;
                     }
@@ -2432,13 +2426,6 @@ impl Engine {
                 },
             };
 
-            // Fire-history identity only — the actuator re-derives its
-            // `DedupKey` from the emitted `Effect`.
-            let fk = FiredKey::PerFile {
-                sub: sub_id,
-                resource,
-            };
-
             let correlation = self.effect_correlations.next();
             // The Sub may have been removed mid-burst; defensive lookup.
             let Some(sub) = self.subs.get(sub_id) else {
@@ -2464,10 +2451,8 @@ impl Engine {
                 diff.clone(),
             ));
             count = count.saturating_add(1);
-
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.record_fire(fk);
-            }
+            // PerFile records no fire history — the per-file dedup is
+            // diff membership itself, not a recorded key.
         }
         count
     }

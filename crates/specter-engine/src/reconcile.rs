@@ -54,22 +54,20 @@
 //! still contributes) does not prematurely tear down a still-live slot.
 //!
 //! **File materialization vs Watch.** Every covered diff entry gets a
-//! Tree slot — [`ensure_descendant`] runs unconditionally — so
-//! `FiredKey::PerFile { sub, resource }` always carries a real
-//! `ResourceId`. The Watch op (`add_watch`) is gated: covered Dirs
-//! always; covered Leaves only when `Profile.has_per_file_fds == true`.
-//! Per-file Effect dispatch (`EffectScope::PerStableFile`) walks the
-//! same Diff at burst end via `emit_effects_per_stable_file`.
+//! Tree slot — [`ensure_descendant`] runs unconditionally — so a
+//! `PerStableFile` Effect always resolves its diff entry to a real
+//! `ResourceId` (`emit_effects_per_stable_file` walks the same Diff at
+//! burst end). The Watch op (`add_watch`) is gated independently:
+//! covered Dirs always; covered Leaves only when
+//! `Profile.has_per_file_fds == true`.
 
 use crate::coverage::covers;
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
-use smallvec::SmallVec;
 use specter_core::{
     ContribKey, Diagnostic, Diff, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
     ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot,
     diff_dir_pair, splice, subtree_at_dir,
 };
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Walk `rel_path` component-by-component beneath `anchor`, ensuring each
@@ -182,13 +180,18 @@ fn releases_watch(profile: &Profile, r: ResourceId, kind: EntryKind, tree: &Tree
     }
 }
 
-/// Apply a [`Diff`] to the engine's `Tree` for one Profile, returning
-/// the list of `ResourceId`s whose slots were reaped by Phase 1.
+/// Apply a [`Diff`] to the engine's `Tree` for one Profile.
+/// Side-effecting only — no return value.
 ///
 /// The `base` parameter is the Tree node the diff's rel-paths are
 /// relative to. For [`graft`], `base == target` (the probe's target).
 /// For `Engine::release_descendant_claim`, `base == profile.resource`
-/// (the anchor) and the diff is [`Diff::all_deleted`].
+/// (the anchor) and the diff is [`Diff::all_deleted`]. `base` is live
+/// at every call site — graft's `target` is `ancestor_chain`-proven
+/// (or the anchor itself); claims' `base` is the still-attached anchor
+/// (`take_current` ran under a live Profile, so the slot still has
+/// anchors) — which is why [`ensure_descendant`]'s `cur` `.expect`
+/// below is sound (`cur` starts at `base` or a just-minted child).
 ///
 /// **Two phases.**
 ///
@@ -216,12 +219,12 @@ fn releases_watch(profile: &Profile, r: ResourceId, kind: EntryKind, tree: &Tree
 /// kind is unchanged. Per-file Effect dispatch
 /// (`emit_effects_per_stable_file`) consumes them via the same Diff.
 ///
-/// Returns the slots Phase 1 reaped directly. Used by [`graft`] and
-/// `Engine::release_descendant_claim` to drive the scoped
-/// [`purge_per_file_fired_subs_for_resources`]. Cascade-reaped
-/// ancestors (Dirs) are intentionally not collected — Dir slots are
-/// never `FiredKey::PerFile` targets, so they cannot stale a
-/// fire-history entry.
+/// The whole contract is the side effects: Phase 1's watch release /
+/// slot reap (with the `Unsuppress` emission [`Tree::try_reap`] folds
+/// in) and Phase 2's `add_watch`. There is no reaped-slot return — the
+/// fire history is per-Sub ([`specter_core::Sub::has_fired`]) and dies
+/// with the slotmap entry, so a reaped leaf has nothing to purge by
+/// `ResourceId`.
 pub(crate) fn apply_diff_to_tree(
     diff: &Diff,
     profile: &Profile,
@@ -229,8 +232,7 @@ pub(crate) fn apply_diff_to_tree(
     base: ResourceId,
     tree: &mut Tree,
     out: &mut StepOutput,
-) -> SmallVec<[ResourceId; 4]> {
-    let mut reaped: SmallVec<[ResourceId; 4]> = SmallVec::new();
+) {
     let key = ContribKey::ProfileDescendant(profile_id);
 
     // Phase 1 — deletes + renamed.from, reverse iteration.
@@ -274,13 +276,13 @@ pub(crate) fn apply_diff_to_tree(
         let Some(resource) = lookup_descendant(tree, base, entry.segment.as_str()) else {
             continue;
         };
-        let did_reap = if releases_watch(profile, resource, entry.kind, tree) {
-            sub_watch_then_try_reap(tree, resource, key, out)
+        // Side-effecting; the `bool` (did-reap) is no longer consumed
+        // (neither `try_reap` nor `sub_watch_then_try_reap` is
+        // `#[must_use]`, so no `let _` ceremony).
+        if releases_watch(profile, resource, entry.kind, tree) {
+            sub_watch_then_try_reap(tree, resource, key, out);
         } else {
-            tree.try_reap(resource, out)
-        };
-        if did_reap {
-            reaped.push(resource);
+            tree.try_reap(resource, out);
         }
     }
 
@@ -313,8 +315,6 @@ pub(crate) fn apply_diff_to_tree(
             add_watch(tree, resource, key, profile.events(), out);
         }
     }
-
-    reaped
 }
 
 /// Splice a probe response into `Profile.current` at `target`, then
@@ -440,21 +440,16 @@ pub(crate) fn graft(
         }
     };
 
-    // Apply to Tree. Returns the slots Phase 1 reaped directly; cascade-
-    // reaped ancestors (Dirs) are not collected because Dir slots are
-    // never `FiredKey::PerFile` targets.
-    let reaped = {
+    // Apply to Tree under a scoped immutable Profile borrow so the
+    // `install_dir_current` write below can re-borrow `&mut`. Purely
+    // side-effecting (watch release, reap, `Unsuppress`); no
+    // reaped-slot return — fire-history is per-Sub now, so a reaped
+    // leaf has nothing to purge.
+    {
         let Some(profile) = profiles.get(profile_id) else {
             return;
         };
-        apply_diff_to_tree(&diff, profile, profile_id, target, tree, out)
-    };
-
-    // Scoped purge: only when reaping actually occurred. Replaces the
-    // pre-refactor registry-wide `Tree::get(resource).is_some()` scan
-    // with a small-set membership check.
-    if !reaped.is_empty() {
-        purge_per_file_fired_subs_for_resources(profiles, &reaped);
+        apply_diff_to_tree(&diff, profile, profile_id, target, tree, out);
     }
 
     // Classify-and-graft in one move. The anchor sum's discriminant
@@ -463,41 +458,6 @@ pub(crate) fn graft(
     // disagree with the snapshot variant.
     if let Some(p) = profiles.get_mut(profile_id) {
         p.install_dir_current(new_arc);
-    }
-}
-
-/// Drop `fired_subs` entries keyed by any `ResourceId` in `reaped`.
-///
-/// **Why scoped.** Pre-refactor `graft` / `Engine::release_descendant_claim`
-/// ran a registry-wide `tree.get(resource).is_some()` scan over every
-/// Profile's `fired_subs`. Slotmap generation guarantees stale
-/// `ResourceId`s never resolve, so the scan was hygiene — not a
-/// correctness fix — but cost `O(profiles × fired_subs_per_profile)`
-/// **on every graft**, even bursts that didn't reap a single covered
-/// descendant. With Diff-driven reconcile we know which slots reaped;
-/// purge only those.
-///
-/// **Cross-Profile preservation.** One burst's deletes can stale entries
-/// in *any* covering Profile's `fired_subs` map (cross-Profile dedup
-/// sharing under `FiredKey::PerFile`). The loop iterates every Profile;
-/// only the membership check is scoped to the reaped set.
-///
-/// `Subtree`-keyed entries are unaffected — `FiredKey::Subtree(SubId)`
-/// carries no `ResourceId` and is bounded by Profile lifecycle (the
-/// whole set drops at `reap_profile`); only `FiredKey::PerFile` carries
-/// a `ResourceId`.
-pub(crate) fn purge_per_file_fired_subs_for_resources(
-    profiles: &mut ProfileMap,
-    reaped: &[ResourceId],
-) {
-    if reaped.is_empty() {
-        return;
-    }
-    // BTreeSet for O(log k) membership; reaped is typically tiny (k ≤ 4
-    // for the SmallVec inline cap, single-digit in worst-cases).
-    let set: BTreeSet<ResourceId> = reaped.iter().copied().collect();
-    for (_, p) in profiles.iter_mut() {
-        p.forget_fired_per_file_at(&set);
     }
 }
 
@@ -535,9 +495,9 @@ mod tests {
     use compact_str::CompactString;
     use smallvec::smallvec;
     use specter_core::{
-        ChildEntry, ClassSet, Diff, DirChild, DirMeta, DirSnapshot, EntryKind, EntryRef, FiredKey,
+        ChildEntry, ClassSet, Diff, DirChild, DirMeta, DirSnapshot, EntryKind, EntryRef,
         FsIdentity, LeafEntry, Profile, ProfileIdentity, ProfileMap, ResourceId, ResourceKind,
-        ResourceRole, ScanConfig, StepOutput, SubId, Tree, TreeSnapshot, WatchOp,
+        ResourceRole, ScanConfig, StepOutput, Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -889,259 +849,6 @@ mod tests {
             panic!("expected Dir snapshot");
         };
         assert_eq!(arc.dir_hash(), response.dir_hash());
-    }
-
-    // ---------------------------------------------------------------------------
-    // graft — fired_subs lifecycle (PR 3)
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn graft_purges_per_file_dedup_when_descendant_is_reaped() {
-        // Setup: per-file Profile (has_per_file_fds=true) covers root with
-        // a covered descendant `a.rs`. Pre-populate `fired_subs`
-        // with a PerFile entry keyed at `a.rs`'s ResourceId — simulates a
-        // prior PerStableFile Effect having fired against the leaf.
-        // Probe response deletes `a.rs`. graft's `apply_diff_to_tree`
-        // Phase 1 reaps the slot; the scoped purge hook drops the
-        // now-stale PerFile entry.
-        let (mut tree, mut profiles, root, pid) = anchor(true);
-        let a_rs_id = tree
-            .ensure_child(root, "a.rs", ResourceRole::User)
-            .expect("test live parent");
-        tree.set_kind(a_rs_id, ResourceKind::File);
-
-        // Prior current = root with a.rs as covered leaf; baseline matches
-        // so the diff has no ops other than the delete.
-        let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        profiles
-            .get_mut(pid)
-            .unwrap()
-            .install_dir_current(Arc::clone(&prior_current));
-
-        // Pre-populate the dedup map. SubId::default() is fine — the
-        // purge filter doesn't inspect the sub field.
-        let stale_key = FiredKey::PerFile {
-            sub: SubId::default(),
-            resource: a_rs_id,
-        };
-        profiles.get_mut(pid).unwrap().record_fire(stale_key);
-
-        // a.rs needs a watch contribution so `delete_child`'s
-        // `sub_watch` path is reachable; the per-file Profile would
-        // have placed one there at attach via `create_child`.
-        // Simulate that here directly.
-        crate::refcounts::add_watch(
-            &mut tree,
-            a_rs_id,
-            specter_core::ContribKey::ProfileDescendant(pid),
-            ClassSet::CONTENT,
-            &mut StepOutput::default(),
-        );
-
-        // Probe response: a.rs is gone.
-        let response = dir_snap(200, vec![]);
-
-        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
-        let mut out = StepOutput::default();
-        graft(
-            pid,
-            root,
-            prior,
-            Arc::clone(&response),
-            &mut tree,
-            &mut profiles,
-            &mut out,
-        );
-
-        assert!(
-            tree.get(a_rs_id).is_none(),
-            "delete_child must have reaped a.rs slot",
-        );
-        let p = profiles.get(pid).unwrap();
-        assert!(
-            !p.has_fired(stale_key),
-            "stale PerFile entry must be purged after slot reap",
-        );
-    }
-
-    #[test]
-    fn graft_preserves_per_file_dedup_for_live_descendants() {
-        // Complement: slots that survive graft retain their dedup
-        // entries. a.rs's content changes (different leaf hash) but the
-        // slot persists — the entry must NOT be purged.
-        let (mut tree, mut profiles, root, pid) = anchor(true);
-        let a_rs_id = tree
-            .ensure_child(root, "a.rs", ResourceRole::User)
-            .expect("test live parent");
-        tree.set_kind(a_rs_id, ResourceKind::File);
-
-        let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        profiles
-            .get_mut(pid)
-            .unwrap()
-            .install_dir_current(Arc::clone(&prior_current));
-
-        let live_key = FiredKey::PerFile {
-            sub: SubId::default(),
-            resource: a_rs_id,
-        };
-        profiles.get_mut(pid).unwrap().record_fire(live_key);
-
-        // Response: same a.rs name+inode (no delete). Bumped root mtime
-        // forces graft to walk the level rather than equal-hash early-out.
-        let response = dir_snap(200, vec![("a.rs", leaf(EntryKind::File, 1))]);
-
-        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
-        let mut out = StepOutput::default();
-        graft(
-            pid,
-            root,
-            prior,
-            Arc::clone(&response),
-            &mut tree,
-            &mut profiles,
-            &mut out,
-        );
-
-        assert!(
-            tree.get(a_rs_id).is_some(),
-            "a.rs slot still live (no delete in response)",
-        );
-        let p = profiles.get(pid).unwrap();
-        assert!(
-            p.has_fired(live_key),
-            "live PerFile entry must be preserved across graft",
-        );
-    }
-
-    #[test]
-    fn graft_preserves_subtree_dedup_unconditionally() {
-        // Subtree-keyed entries are bounded by Profile lifecycle, not
-        // Resource lifecycle. The purge hook must leave them alone even
-        // when arbitrary descendants get reaped.
-        let (mut tree, mut profiles, root, pid) = anchor(false);
-        let a_rs_id = tree
-            .ensure_child(root, "a.rs", ResourceRole::User)
-            .expect("test live parent");
-        tree.set_kind(a_rs_id, ResourceKind::File);
-
-        let prior_current = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        profiles
-            .get_mut(pid)
-            .unwrap()
-            .install_dir_current(Arc::clone(&prior_current));
-
-        // Subtree key references a *Profile*, not a Resource. The SubId
-        // value is arbitrary for this test.
-        let subtree_key = FiredKey::Subtree(SubId::default());
-        profiles.get_mut(pid).unwrap().record_fire(subtree_key);
-
-        // Probe response deletes a.rs. The reap fires; the purge runs;
-        // the Subtree entry should survive.
-        let response = dir_snap(200, vec![]);
-
-        let prior = profiles.get(pid).and_then(|p| p.current_dir().cloned());
-        let mut out = StepOutput::default();
-        graft(
-            pid,
-            root,
-            prior,
-            Arc::clone(&response),
-            &mut tree,
-            &mut profiles,
-            &mut out,
-        );
-
-        let p = profiles.get(pid).unwrap();
-        assert!(
-            p.has_fired(subtree_key),
-            "Subtree-keyed entries are bounded by Profile lifecycle, \
-             not Resource lifecycle — purge must leave them alone",
-        );
-    }
-
-    #[test]
-    fn graft_purges_per_file_dedup_across_all_profiles() {
-        // Multi-Profile case: a single FsEvent cascade reaps a covered
-        // descendant. Both Profiles' dedup maps may carry PerFile entries
-        // at the reaped slot; the purge runs across every Profile, not
-        // just the one being grafted.
-        let (mut tree, mut profiles, root, pid_a) = anchor(true);
-        // Second User Profile sharing the same anchor at a different
-        // config_hash. `max_settle` is part of `config_hash`, so a
-        // different value forks a distinct Profile.
-        let pid_b = profiles.attach(
-            &mut tree,
-            Profile::new(
-                root,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(true).build(),
-                    max_settle: Duration::from_secs(12),
-                    events: ClassSet::CONTENT,
-                },
-                Duration::from_millis(50),
-                None,
-            ),
-        );
-        let a_rs_id = tree
-            .ensure_child(root, "a.rs", ResourceRole::User)
-            .expect("test live parent");
-        tree.set_kind(a_rs_id, ResourceKind::File);
-
-        // Both Profiles record a PerFile entry against a.rs — mirrors what
-        // `emit_effects_per_stable_file` writes in production.
-        for &pid in &[pid_a, pid_b] {
-            profiles
-                .get_mut(pid)
-                .unwrap()
-                .install_dir_current(dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]));
-            profiles
-                .get_mut(pid)
-                .unwrap()
-                .record_fire(FiredKey::PerFile {
-                    sub: SubId::default(),
-                    resource: a_rs_id,
-                });
-        }
-
-        // Match the per-file Profile's contribution on the slot.
-        crate::refcounts::add_watch(
-            &mut tree,
-            a_rs_id,
-            specter_core::ContribKey::ProfileDescendant(pid_a),
-            ClassSet::CONTENT,
-            &mut StepOutput::default(),
-        );
-
-        let response = dir_snap(200, vec![]);
-
-        let prior = profiles.get(pid_a).and_then(|p| p.current_dir().cloned());
-        let mut out = StepOutput::default();
-        graft(
-            pid_a,
-            root,
-            prior,
-            Arc::clone(&response),
-            &mut tree,
-            &mut profiles,
-            &mut out,
-        );
-
-        assert!(tree.get(a_rs_id).is_none(), "a.rs reaped");
-        // The stale key is profile-free; each Profile owns its own
-        // `fired_subs` container, so we look up the same key per Profile.
-        let stale_key = FiredKey::PerFile {
-            sub: SubId::default(),
-            resource: a_rs_id,
-        };
-        assert!(
-            !profiles.get(pid_a).unwrap().has_fired(stale_key),
-            "Profile A's stale entry must be purged",
-        );
-        assert!(
-            !profiles.get(pid_b).unwrap().has_fired(stale_key),
-            "Profile B's stale entry (cross-Profile) must also be purged",
-        );
     }
 
     // ---------------------------------------------------------------------------

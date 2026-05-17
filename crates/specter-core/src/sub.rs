@@ -292,6 +292,27 @@ pub struct Sub {
     /// a Promoter's `try_promote`. Read at the engine's recovery
     /// fan-out (`on_anchor_terminal_event`); never mutated post-attach.
     pub source_promoter: Option<PromoterId>,
+    /// The per-Sub Effect fire history: `true` once this Sub has
+    /// emitted at least one Effect. Sole load-bearing reader is the B1
+    /// dedup suppress (`!forced && nothing_changed && has_fired` — a
+    /// never-fired Sub is its own first emission); the per-Profile
+    /// SeedDrift filter ([`SubRegistry::fired_in`]) and the
+    /// recovery-drift short-circuit ([`SubRegistry::any_fired`]) read
+    /// it Profile-wide.
+    ///
+    /// Lives here, not on [`crate::Profile`]: a Sub attaches to exactly
+    /// one Profile, so "has this Sub fired?" is per-Sub, not a
+    /// per-Profile join table. Its lifetime *is* the slotmap entry's —
+    /// detach ([`SubRegistry::remove`]) drops it with the Sub, so a
+    /// detached or hot-reload-modified reaction can never re-fire on a
+    /// later drift verdict and a revived Profile's fresh Subs start
+    /// `false` structurally (no purge step to forget). Mutated only
+    /// through [`SubRegistry::mark_fired`] / [`SubRegistry::clear_fired`]
+    /// (the registry holds the sole `&mut Sub`). The invariant is the
+    /// weakest tier in the engine — drift self-corrects on the next
+    /// real change, no refcount/state-machine corruption — so a plain
+    /// `bool` carries it with no edge-method ceremony.
+    pub has_fired: bool,
 }
 
 impl Sub {
@@ -318,6 +339,7 @@ impl Sub {
             needs_diff,
             log_output: params.log_output,
             source_promoter: params.source_promoter,
+            has_fired: false,
         }
     }
 }
@@ -441,6 +463,58 @@ impl SubRegistry {
     #[must_use]
     pub fn find_by_name(&self, name: &str) -> Option<SubId> {
         self.by_name.get(name).copied()
+    }
+
+    /// Record that `sub` emitted an Effect — the B1-dedup / SeedDrift
+    /// fire-history mark, written by `emit_effects`' SubtreeRoot arm on
+    /// a successful push. Idempotent. A stale `SubId` (the Sub detached
+    /// between the emit decision and here) is a silent no-op: the flag
+    /// already died with the slotmap entry.
+    pub fn mark_fired(&mut self, sub: SubId) {
+        if let Some(s) = self.subs.get_mut(sub) {
+            s.has_fired = true;
+        }
+    }
+
+    /// Clear `sub`'s fire history — the `EffectComplete::Failed` clear.
+    /// A failed Effect produced no observation worth deduplicating
+    /// against, so the next stable verdict at this Sub must re-fire
+    /// even on an unchanged tree. No-op on a stale `SubId` (already
+    /// detached ⇒ its history is already gone).
+    pub fn clear_fired(&mut self, sub: SubId) {
+        if let Some(s) = self.subs.get_mut(sub) {
+            s.has_fired = false;
+        }
+    }
+
+    /// Whether any Sub on `profile` has fired — the fast
+    /// `seed_drift_observed` short-circuit ("never fired ⇒ no prior
+    /// emission to re-fire on recovery"). Replaces the prior
+    /// per-Profile `fired_is_empty` negation.
+    #[must_use]
+    pub fn any_fired(&self, profile: ProfileId) -> bool {
+        self.at(profile)
+            .iter()
+            .any(|sid| self.subs.get(*sid).is_some_and(|s| s.has_fired))
+    }
+
+    /// The Subs on `profile` that have fired — the SeedDrift
+    /// conservative-recovery fire-filter basis.
+    ///
+    /// **Order is membership only.** The caller filters with
+    /// `.contains`; the observable Effect order is established globally
+    /// by [`crate::StepOutput::sort_for_emission`] (the load-bearing
+    /// `(SubId, ResourceId)` canonicalisation every step applies before
+    /// returning), so the insertion order `at` yields here is
+    /// sufficient and deterministic — there is no per-call re-sort to
+    /// justify.
+    #[must_use]
+    pub fn fired_in(&self, profile: ProfileId) -> SmallVec<[SubId; 2]> {
+        self.at(profile)
+            .iter()
+            .copied()
+            .filter(|sid| self.subs.get(*sid).is_some_and(|s| s.has_fired))
+            .collect()
     }
 }
 
@@ -570,6 +644,27 @@ mod tests {
             },
         );
         assert!(!sub.needs_diff);
+    }
+
+    /// A freshly built Sub starts with no fire history — the B1-dedup
+    /// / SeedDrift baseline. Relocated from the deleted per-Profile
+    /// `new_profile_initialises_fired_subs_empty`: the history now
+    /// lives per-Sub, so the "starts empty" contract is asserted on
+    /// the Sub, not the Profile.
+    #[test]
+    fn fresh_sub_starts_unfired() {
+        let sub = Sub::from_request(
+            ProfileId::default(),
+            SubParams {
+                name: "build".into(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        );
+        assert!(!sub.has_fired, "fresh Sub: no prior Effect emission");
     }
 
     #[test]

@@ -43,9 +43,8 @@ pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use probe::ProbeSlot;
 pub use profile::{
     ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, DescentRemaining,
-    DescentState, DetachLifecycle, FiredKey, PostFireBurst, PostFirePhase, PreFireBurst,
-    PreFirePhase, Profile, ProfileMap, ProfileState, ProfileStateDiscriminant, ReapTrigger,
-    TimerKind,
+    DescentState, DetachLifecycle, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
+    Profile, ProfileMap, ProfileState, ProfileStateDiscriminant, ReapTrigger, TimerKind,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{

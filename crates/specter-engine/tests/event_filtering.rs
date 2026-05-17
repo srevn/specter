@@ -773,8 +773,9 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
 // ───────────────────────────────────────────────────────────────────────
 // IT-EF-2 dedup — the actuator's `DedupKey::Subtree` carries the Profile
 // id, so two Profiles with different masks get distinct coalescing keys.
-// (The fire-history `FiredKey` is profile-free — there it's the
-// per-Profile container, not the key, that keeps the two apart.)
+// (The fire-history does not need to: it is now per-Sub `Sub.has_fired`,
+// with the owning Profile implicit, so two Profiles' Subs are inherently
+// distinct slots.)
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]

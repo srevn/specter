@@ -468,9 +468,10 @@ impl Engine {
     ///
     /// The deferred-reap detach branch flipped the Active burst's
     /// finish directive to [`BurstFinish::Reap`] and skipped the
-    /// `fired_subs` purge + `recompute_profile_settle` the
-    /// refcount-still-positive detach path performs. This helper
-    /// un-defers the reap and runs the cleanup symmetrically:
+    /// `recompute_profile_settle` the refcount-still-positive detach
+    /// path performs (there is no fire-history purge — it is per-Sub
+    /// and dies with the Sub). This helper un-defers the reap and runs
+    /// the recompute symmetrically:
     /// [`ProfileState::clear_active_reap`] flips
     /// `BurstFinish::Reap → ReturnToIdle` on Active (returning `true`
     /// by construction of the [`ProfileOrigin::ZombieRevival`]
@@ -829,16 +830,14 @@ impl Engine {
         // has been removed.
         let remaining_subs = self.subs.at(profile_id).len();
 
-        // Purge `fired_subs` entries keyed by the detached Sub. The fire
-        // history must drop with the Sub: a future drift verdict on the
-        // Profile must not re-fire an Effect for a Sub the user has
-        // detached. The full reap path below drops the whole set
-        // alongside the Profile, so this targeted purge runs only on the
-        // subs-remaining branch.
+        // No fire-history purge: the detached Sub's `Sub.has_fired`
+        // died with it at `self.subs.remove(sub)` above. The flag is
+        // per-Sub and slotmap-scoped, so a future drift verdict on this
+        // Profile structurally cannot re-fire a detached Sub (and a
+        // hot-reload-modified Sub re-attaches under a fresh `SubId`
+        // starting `false`). The old per-Profile `fired_subs` set
+        // needed a targeted purge here; the per-Sub home dissolves it.
         if remaining_subs > 0 {
-            if let Some(p) = self.profiles.get_mut(profile_id) {
-                p.forget_fired_sub(sub);
-            }
             // Recompute Profile.settle = min(remaining_subs.settles).
             //
             // Every Sub on a Profile shares the same `events` mask
@@ -865,11 +864,12 @@ impl Engine {
                 self.reap_profile(profile_id, ReapTrigger::Immediate, out);
             }
             Some(DetachLifecycle::DeferToBurstEnd) => {
-                // `fired_subs` purge and `recompute_profile_settle` are
-                // deliberately skipped — the Profile is about to drop on
-                // burst end, so the cleanup would be wasted. A revival
-                // via fresh `attach_sub_inner` (zombie-revival branch)
-                // un-defers the reap and runs the cleanup symmetrically.
+                // `recompute_profile_settle` is deliberately skipped —
+                // the Profile is about to drop on burst end, so the
+                // recompute would be wasted. A revival via fresh
+                // `attach_sub_inner` (zombie-revival branch) un-defers
+                // the reap and runs the recompute symmetrically. (No
+                // fire-history purge exists to skip — it is per-Sub.)
                 let marked = self
                     .profiles
                     .get_mut(profile_id)
@@ -1879,11 +1879,12 @@ mod tests {
         //     A is gone, B is the only live Sub),
         //   - emit `Diagnostic::ReapPendingCancelled`.
         //
-        // (`fired_subs` cleanup is deliberately not asserted: the prior
-        // `purge_dead_fired_subs` was functionally inert under v1's
-        // workload — `emit_effects` iterates live SubIds and the dedup
-        // check uses fresh keys, so stale entries never participate in
-        // emission. Bound is O(1) per Profile per revival cycle.)
+        // (No `fired_subs` cleanup is asserted because there is none to
+        // assert: fire history is per-Sub (`Sub.has_fired`) and dies
+        // with the slotmap entry on detach. A revived Profile's
+        // freshly-attached Subs start `has_fired == false`
+        // structurally — there is no per-Profile fire container to
+        // purge.)
         let mut e = Engine::new();
         let r = e
             .tree

@@ -21,9 +21,9 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta,
-    DirSnapshot, EffectScope, EntryKind, FiredKey, FsIdentity, Input, LeafEntry, ProbeCorrelation,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
+    DirSnapshot, EffectScope, EntryKind, FsIdentity, Input, LeafEntry, ProbeCorrelation, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -190,25 +190,24 @@ fn discard_anchor_state_carries_settled_hash_through_loss() {
 
 #[test]
 fn discard_anchor_state_preserves_fired_subs() {
-    // Negative-space contract: the helper does not touch fired_subs.
-    // Fire history must survive anchor loss for post-recovery drift to
-    // re-fire emitted-once Effects.
+    // Negative-space contract: anchor loss does not clear fire
+    // history. The history is now per-Sub (`Sub.has_fired`) and
+    // `discard_anchor_state` operates on the Profile only, so survival
+    // across the loss window is structural — but the property still
+    // matters: post-recovery drift must re-fire emitted-once Effects.
     let (mut e, sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
-    let key = FiredKey::Subtree(sid);
-    if let Some(p) = e.profiles.get_mut(pid) {
-        p.record_fire(key);
-    }
+    e.subs.mark_fired(sid);
     assert!(
-        e.profiles().get(pid).unwrap().has_fired(key),
-        "precondition: key recorded",
+        e.subs.get(sid).is_some_and(|s| s.has_fired),
+        "precondition: fire recorded",
     );
 
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
 
     assert!(
-        e.profiles().get(pid).unwrap().has_fired(key),
-        "fired_subs survives anchor loss",
+        e.subs.get(sid).is_some_and(|s| s.has_fired),
+        "fire history survives anchor loss",
     );
 }
 

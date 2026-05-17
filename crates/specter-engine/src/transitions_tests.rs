@@ -23,8 +23,8 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, BurstIntent,
     ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FiredKey, FsEvent, FsIdentity, Input,
-    LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
+    EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry,
+    OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase, PreFireBurst,
     PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProbeSlot,
     ProfileIdentity, ProfileState, Promoter, PromoterAttachRequest, PromoterRegistryDiff,
     PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
@@ -859,10 +859,7 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
         Some(TreeSnapshot::Dir(arc)) => arc.dir_hash(),
         _ => panic!("post-Seed baseline must be Some(Dir)"),
     };
-    assert!(
-        e.profiles.get(pid).unwrap().fired_is_empty(),
-        "fresh Sub: no fire history",
-    );
+    assert!(!e.subs.any_fired(pid), "fresh Sub: no fire history",);
 
     // Drive a Standard burst whose probe response equals the Seed
     // baseline byte-for-byte — a phantom (noise FsEvent, no actual
@@ -3788,13 +3785,10 @@ fn records_fired_subs_after_subtree_effect() {
 
     // First Effect fires (no prior emission).
     assert_eq!(out.effects().len(), 1, "first Standard-Ok fires Effect");
-    // The Subtree fire is recorded under this Sub's exact key — the
-    // post-emit fire-history entry that gates later B1 suppression.
+    // The Subtree fire is recorded on this Sub — the post-emit
+    // fire-history flag that gates later B1 suppression.
     assert!(
-        e.profiles
-            .get(pid)
-            .unwrap()
-            .has_fired(FiredKey::Subtree(sid)),
+        e.subs.get(sid).is_some_and(|s| s.has_fired),
         "post-emit: Subtree fire recorded for this Sub",
     );
 }
@@ -3833,8 +3827,8 @@ fn clears_fired_subs_on_effect_complete_failed() {
     let now = Instant::now();
     let _ = drive_to_first_effect(&mut e, pid, root, now);
 
-    // Confirm the dedup-hash entry was written.
-    assert!(!e.profiles.get(pid).unwrap().fired_is_empty());
+    // Confirm the fire-history flag was set.
+    assert!(e.subs.any_fired(pid));
 
     // EffectComplete::Failed clears the dedup-hash entry for this DedupKey.
     let dk = DedupKey::Subtree {
@@ -3850,7 +3844,7 @@ fn clears_fired_subs_on_effect_complete_failed() {
         now,
     );
     assert!(
-        e.profiles.get(pid).unwrap().fired_is_empty(),
+        !e.subs.any_fired(pid),
         "Failed Effect clears the suppression entry",
     );
     let _ = e.cancel_all_in_flight_probes();
@@ -4719,12 +4713,11 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
     // `transition_state` clobber below drops that armed state.
     let _ = e.cancel_all_in_flight_probes();
 
-    let dk = FiredKey::Subtree(sid);
-
     // Survival-mode drift setup: a witness snapshot whose hash won't
     // match the post-graft current ⇒ the drift signal triggers;
-    // pre-loss fire history in `fired_subs` narrows the SeedDrift
-    // filter to `dk`.
+    // pre-loss fire history on `sid` narrows the SeedDrift filter to
+    // this Sub. `mark_fired` is idempotent — "sid fired pre-loss"
+    // needs exactly one mark.
     let witness_snap = dir_tree_snap(vec![("pre", EntryKind::File, 1)]);
     let witness_hash = witness_snap.dir_hash();
     enter_survival_mode(&mut e, pid, witness_snap);
@@ -4736,9 +4729,8 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
         anchor,
         now,
     );
+    e.subs.mark_fired(sid);
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.record_fire(dk);
-        p.record_fire(dk);
         p.transition_state(state);
     }
 
@@ -4779,8 +4771,8 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
 #[test]
 fn seed_drift_observed_returns_false_for_fresh_profile() {
     let (mut e, pid, _sid, _anchor, _now) = engine_with_attached_sub();
+    assert!(!e.subs.any_fired(pid), "precondition: no fire history");
     let p = e.profiles.get(pid).expect("Profile lives post-attach");
-    assert!(p.fired_is_empty(), "precondition: no fire history");
     assert!(
         p.settled_hash().is_none(),
         "precondition: no settled reference"
@@ -4817,8 +4809,8 @@ fn seed_drift_observed_returns_true_on_post_recovery_drift() {
     // into the witness; the recovery probe lands a `current` whose hash
     // differs from that witness ⇒ drift.
     enter_survival_mode(&mut e, pid, witness_snap);
+    e.subs.mark_fired(sid);
     if let Some(p) = e.profiles.get_mut(pid) {
-        p.record_fire(FiredKey::Subtree(sid));
         p.install_dir_current(snap);
     }
 
@@ -4850,9 +4842,7 @@ fn seed_drift_observed_returns_true_on_active_mode_drift() {
     );
 
     enter_active_mode(&mut e, pid, baseline_snap, current_snap);
-    if let Some(p) = e.profiles.get_mut(pid) {
-        p.record_fire(FiredKey::Subtree(sid));
-    }
+    e.subs.mark_fired(sid);
 
     assert!(
         e.seed_drift_observed(pid),
@@ -4872,14 +4862,158 @@ fn seed_drift_observed_returns_false_when_active_mode_baseline_matches_current()
     let snap = dir_tree_snap(vec![("file", EntryKind::File, 1)]);
 
     enter_active_mode(&mut e, pid, snap.clone(), snap);
-    if let Some(p) = e.profiles.get_mut(pid) {
-        p.record_fire(FiredKey::Subtree(sid));
-    }
+    e.subs.mark_fired(sid);
 
     assert!(
         !e.seed_drift_observed(pid),
         "active mode, baseline.hash() == current.hash() ⇒ no drift \
          (overflow without disk change)",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+// ---- fire-history relocation invariant (per-Sub `Sub.has_fired`) ----
+
+/// Pins the three load-bearing properties of relocating the Effect
+/// fire-history from a per-Profile container to a per-Sub `bool`:
+///
+///  1. **B1 / SeedDrift read `Sub.has_fired`.** A real burst that
+///     fires sets the emitting Sub's flag; `SubRegistry::any_fired` /
+///     `fired_in` (the B1-suppress and SeedDrift-filter bases) observe
+///     it through the registry, not through any Profile container.
+///  2. **A detached Sub's flag dies with its slotmap entry — no purge
+///     needed.** After the Sub fired, detach it (a sibling Sub keeps
+///     the Profile alive) and drive a survival-mode *drift* Seed-Ok.
+///     It must NOT re-fire: `fired_in(pid)` is empty because the
+///     detached Sub's `has_fired` died with `subs.remove`, and the
+///     surviving sibling never fired. There is no per-Profile fire
+///     container to purge, and none is touched.
+///  3. **A fresh attach starts unfired.** The sibling attached after
+///     the original has `has_fired == false`.
+#[test]
+fn fire_history_is_per_sub_detach_drops_it_no_purge() {
+    let (mut e, pid, sid_a, anchor, now) = engine_with_attached_sub();
+    // Drain the attach-time Seed-Verifying probe before later manual
+    // state manipulation.
+    let _ = e.cancel_all_in_flight_probes();
+
+    // Property 3 (part a): the freshly attached Sub starts unfired.
+    assert!(
+        !e.subs.get(sid_a).unwrap().has_fired,
+        "fresh attach: sid_a starts unfired",
+    );
+    assert!(
+        !e.subs.any_fired(pid),
+        "fresh Profile: no Sub has fired (B1/SeedDrift basis is empty)",
+    );
+
+    // Attach a second Sub at the *same* (anchor, config_hash) so it
+    // shares this Profile — it keeps the Profile alive across sid_a's
+    // detach below. Identical request shape ⇒ same ProfileId.
+    let req_b = SubAttachRequest {
+        anchor: SubAttachAnchor::Resource(anchor),
+        identity: ProfileIdentity {
+            config: ScanConfig::builder().recursive(true).build(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
+        params: SubParams {
+            name: "sibling".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
+    };
+    let out_b = e.step(Input::AttachSub(req_b), now);
+    let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("sibling attached");
+    assert_eq!(
+        e.subs.get(sid_b).unwrap().profile,
+        pid,
+        "sibling shares the original Profile (same anchor + config_hash)",
+    );
+    // Property 3 (part b): the sibling attaches unfired.
+    assert!(
+        !e.subs.get(sid_b).unwrap().has_fired,
+        "fresh attach: sibling starts unfired",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+
+    // Property 1: mark sid_a fired (the post-emit B1 bookkeeping the
+    // SubtreeRoot emit arm performs) and observe it through the
+    // registry — the exact signal `seed_drift_observed` / B1 read.
+    e.subs.mark_fired(sid_a);
+    assert!(
+        e.subs.get(sid_a).unwrap().has_fired,
+        "Property 1: B1/SeedDrift fire-history reads Sub.has_fired",
+    );
+    assert!(
+        e.subs.any_fired(pid),
+        "Property 1: any_fired observes the per-Sub flag (B1 basis)",
+    );
+    assert_eq!(
+        e.subs.fired_in(pid).as_slice(),
+        &[sid_a],
+        "Property 1: fired_in yields exactly the fired Sub (SeedDrift filter)",
+    );
+
+    // Set up a survival-mode *drift* scenario: the survival witness
+    // carries a pre-loss hash; the post-recovery `current` differs
+    // from it ⇒ `seed_drift_observed` is true *while sid_a is fired*.
+    // (The witness must differ from `current` for drift; matches the
+    // working `seed_drift_observed_returns_true_on_post_recovery_drift`
+    // setup.)
+    let witness_snap = dir_tree_snap(vec![("pre", EntryKind::File, 1)]);
+    let current_snap = dir_tree_snap(vec![("post", EntryKind::File, 2)]);
+    assert_ne!(
+        witness_snap.dir_hash(),
+        current_snap.dir_hash(),
+        "test setup: witness and recovery current must differ",
+    );
+    enter_survival_mode(&mut e, pid, witness_snap);
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.install_dir_current(current_snap);
+    }
+    assert!(
+        e.seed_drift_observed(pid),
+        "precondition: survival-mode drift detected while sid_a is fired",
+    );
+
+    // Property 2: detach sid_a. The Profile survives (sibling sid_b
+    // remains). sid_a's `has_fired` died with its slotmap entry — no
+    // per-Profile purge exists or runs.
+    let _ = e.step(Input::DetachSub(sid_a), now);
+    assert!(
+        e.profiles.get(pid).is_some(),
+        "Profile survives sid_a detach (sibling keeps it alive)",
+    );
+    assert!(
+        e.subs.get(sid_a).is_none(),
+        "sid_a's slotmap entry (and its has_fired) is gone",
+    );
+    assert!(
+        !e.subs.any_fired(pid),
+        "Property 2: no live Sub has fired — sid_a's flag died with it, \
+         sibling never fired; no purge was needed",
+    );
+    assert!(
+        e.subs.fired_in(pid).is_empty(),
+        "Property 2: SeedDrift filter is empty post-detach",
+    );
+
+    // A drift Seed-Ok now must NOT re-fire: the drift signal still
+    // trips (witness != current) but `fired_in` is empty, so
+    // dispatch_seed_ok falls through to the no-drift finish path. This
+    // is the behavioural proof that a detached Sub cannot be re-fired
+    // and that no purge is required to achieve it.
+    let regrafted = dir_tree_snap(vec![]);
+    let mut out = StepOutput::default();
+    e.dispatch_seed_ok(pid, TreeSnapshot::Dir(regrafted), now, &mut out);
+    assert!(
+        out.effects().is_empty(),
+        "Property 2: drift Seed-Ok fires nothing — the only Sub that \
+         had fired was detached; its flag died with it, no purge needed",
     );
     let _ = e.cancel_all_in_flight_probes();
 }

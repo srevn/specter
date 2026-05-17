@@ -6,8 +6,7 @@
 //! `Resource.profiles` in lockstep — `attach`/`detach` are the only mutators
 //! of either index.
 
-use crate::effect::DedupKey;
-use crate::ids::{ProbeCorrelation, ProfileId, ResourceId, SubId, TimerId};
+use crate::ids::{ProbeCorrelation, ProfileId, ResourceId, TimerId};
 use crate::probe::ProbeSlot;
 use crate::resource::ResourceKind;
 use crate::scan_config::{ProfileIdentity, ScanConfig};
@@ -1328,41 +1327,6 @@ pub enum AnchorClaim {
     Held,
 }
 
-/// Identity of a past Effect emission *within one Profile's fire
-/// history* (`Profile::fired_subs`).
-///
-/// Profile-free by construction: the owning `Profile` is the
-/// `BTreeSet`'s container, so a `profile` discriminator would be
-/// invariant across every entry — pure redundancy in both storage and
-/// `Ord`. Contrast [`DedupKey`], which *does* carry `profile`: it is
-/// the actuator's coalescing identity and credits the per-Profile
-/// `Awaiting` counter on every `EffectComplete` in O(1) across the
-/// actuator boundary, where no container implies the Profile. The two
-/// identities are distinct concerns; conversion is one-way
-/// ([`From<&DedupKey>`](FiredKey::from)) — the fire-history never needs
-/// to reconstruct a routing key.
-///
-/// `Ord` drives the `BTreeSet`. `Hash` is intentionally not derived,
-/// mirroring [`DedupKey`]: `core` bans `hashbrown`, so the only
-/// container is a `BTreeSet`, never a `HashSet`.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub enum FiredKey {
-    Subtree(SubId),
-    PerFile { sub: SubId, resource: ResourceId },
-}
-
-impl From<&DedupKey> for FiredKey {
-    /// Project the actuator's coalescing identity onto the Profile's
-    /// fire-history identity by dropping the (container-implied)
-    /// `profile`. `DedupKey` is `Copy`, so `*dk` is a cheap read.
-    fn from(dk: &DedupKey) -> Self {
-        match *dk {
-            DedupKey::Subtree { sub, .. } => Self::Subtree(sub),
-            DedupKey::PerFile { sub, resource, .. } => Self::PerFile { sub, resource },
-        }
-    }
-}
-
 /// The settled reference a *classified* anchor compares fresh probes
 /// against, in the one window each variant owns:
 ///
@@ -1587,72 +1551,6 @@ struct ProfileTopology {
     parent_profile: Option<ProfileId>,
 }
 
-/// The Profile's Effect fire history — the [`FiredKey`] set that gates
-/// drift-recovery re-fire and the B1 dedup "has this Sub fired
-/// before?" question. Keys are Profile-free (the owning Profile is the
-/// container).
-///
-/// All set surgery is encapsulated here: the engine asks for the
-/// domain operations it actually performs (`record` an emission,
-/// `forget` one key / a detached Sub / reaped per-file leaves, project
-/// the `subtree_subs` drift basis) and never pattern-matches a
-/// [`FiredKey`] for an ad-hoc `retain`. The variant structure stays a
-/// `FiredSubsHistory` concern.
-#[derive(Debug, Default)]
-struct FiredSubsHistory {
-    fired: BTreeSet<FiredKey>,
-}
-
-impl FiredSubsHistory {
-    /// Record a successful Effect emission ([`Profile::record_fire`]).
-    fn record(&mut self, key: FiredKey) {
-        self.fired.insert(key);
-    }
-
-    /// Drop one key — the `EffectComplete::Failed` clear (a Failed
-    /// Effect produced no observation worth deduplicating against).
-    fn forget(&mut self, key: FiredKey) {
-        self.fired.remove(&key);
-    }
-
-    /// Has this exact key fired? The B1-dedup / SeedDrift gate.
-    fn contains(&self, key: FiredKey) -> bool {
-        self.fired.contains(&key)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.fired.is_empty()
-    }
-
-    /// The `Subtree`-variant Subs — the SeedDrift fire filter basis.
-    /// `BTreeSet` order ⇒ ascending `SubId`, so the caller's emission
-    /// order is deterministic without a re-sort.
-    fn subtree_subs(&self) -> impl Iterator<Item = SubId> + '_ {
-        self.fired.iter().filter_map(|k| match k {
-            FiredKey::Subtree(sub) => Some(*sub),
-            FiredKey::PerFile { .. } => None,
-        })
-    }
-
-    /// Drop every key owned by a detached Sub (both `Subtree` and
-    /// `PerFile`). Detach must not leave a future drift verdict able
-    /// to re-fire an Effect for a Sub the user removed.
-    fn forget_sub(&mut self, sub: SubId) {
-        self.fired.retain(|k| match *k {
-            FiredKey::Subtree(s) | FiredKey::PerFile { sub: s, .. } => s != sub,
-        });
-    }
-
-    /// Drop `PerFile` keys whose covered leaf was reaped. `Subtree`
-    /// keys are anchor-rooted, not per-leaf, and survive.
-    fn forget_per_file_at(&mut self, reaped: &BTreeSet<ResourceId>) {
-        self.fired.retain(|k| match *k {
-            FiredKey::PerFile { resource, .. } => !reaped.contains(&resource),
-            FiredKey::Subtree(_) => true,
-        });
-    }
-}
-
 /// The Profile's deferred-release obligations to the Tree refcount
 /// aggregate. The pure-step `Tree` has no `Drop` reach, so each
 /// obligation is encoded as a cached id/flag here and released
@@ -1706,8 +1604,8 @@ struct TreeContributions {
 /// exclusion), `ProfileStateMachine` (`state` + the I4-floored
 /// dirty-descendant counter), `TreeContributions` (deferred Tree
 /// releases — drift = refcount leak), `ProfileTopology` (soft parent
-/// cache — drift = perf only), `FiredSubsHistory` (the fire-history
-/// key set).
+/// cache — drift = perf only). (Effect fire history is per-Sub —
+/// [`crate::Sub::has_fired`] — not a Profile substructure.)
 #[derive(Debug)]
 pub struct Profile {
     /// The Tree slot this Profile's stability machine anchors at — the
@@ -1761,17 +1659,13 @@ pub struct Profile {
     /// through `stability::write_parent_edge` →
     /// [`Self::set_parent_profile`].
     topology: ProfileTopology,
-    /// Effect fire history. Domain API: [`Self::record_fire`] /
-    /// [`Self::forget_fire`] / [`Self::has_fired`] /
-    /// [`Self::fired_is_empty`] / [`Self::fired_subtree_subs`] /
-    /// [`Self::forget_fired_sub`] / [`Self::forget_fired_per_file_at`].
-    history: FiredSubsHistory,
 }
 
 impl Profile {
     /// Construct a fresh Profile: state `Idle` (no burst-finish
-    /// directive yet), no baseline/current, no watch-root parent, no
-    /// fire history.
+    /// directive yet), no baseline/current, no watch-root parent.
+    /// (Effect fire history is per-Sub — [`crate::Sub::has_fired`] —
+    /// not a Profile concern.)
     ///
     /// `identity` ([`ProfileIdentity`] = `{config, max_settle,
     /// events}`) is the Profile partition key's config half, taken by
@@ -1850,7 +1744,6 @@ impl Profile {
             topology: ProfileTopology {
                 parent_profile: None,
             },
-            history: FiredSubsHistory::default(),
         }
     }
 
@@ -2389,48 +2282,6 @@ impl Profile {
         self.topology.parent_profile = parent;
     }
 
-    /// Record a successful Effect emission in the fire history (the
-    /// `emit_effects` Subtree / PerFile arms).
-    pub fn record_fire(&mut self, key: FiredKey) {
-        self.history.record(key);
-    }
-
-    /// Drop one fire-history key — the `EffectComplete::Failed` clear.
-    pub fn forget_fire(&mut self, key: FiredKey) {
-        self.history.forget(key);
-    }
-
-    /// Has this exact key fired before? The B1-dedup suppress gate.
-    #[must_use]
-    pub fn has_fired(&self, key: FiredKey) -> bool {
-        self.history.contains(key)
-    }
-
-    /// Whether the fire history is empty — the fast `seed_drift_observed`
-    /// and reap-purge guards ("never fired ⇒ nothing to re-fire / purge").
-    #[must_use]
-    pub fn fired_is_empty(&self) -> bool {
-        self.history.is_empty()
-    }
-
-    /// The `Subtree`-variant Subs in fire history, ascending `SubId` —
-    /// the SeedDrift conservative-recovery fire filter basis.
-    pub fn fired_subtree_subs(&self) -> impl Iterator<Item = SubId> + '_ {
-        self.history.subtree_subs()
-    }
-
-    /// Drop every fire-history key owned by `sub` — the `detach_sub`
-    /// purge (a detached Sub must not re-fire on a later drift verdict).
-    pub fn forget_fired_sub(&mut self, sub: SubId) {
-        self.history.forget_sub(sub);
-    }
-
-    /// Drop `PerFile` fire-history keys whose covered leaf was reaped.
-    /// `Subtree` keys (anchor-rooted) survive.
-    pub fn forget_fired_per_file_at(&mut self, reaped: &BTreeSet<ResourceId>) {
-        self.history.forget_per_file_at(reaped);
-    }
-
     /// Take the live `current` snapshot, leaving the arm's `current`
     /// `None` and `settled` untouched — the covered-descendant
     /// claim-release primitive. The returned `Dir` snapshot's entries
@@ -2657,16 +2508,6 @@ mod tests {
             NO_EVENTS,
             None,
         );
-    }
-
-    /// `fired_subs` defaults to an empty map; engine fills it on
-    /// first successful Effect emission.
-    #[test]
-    fn new_profile_initialises_fired_subs_empty() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("anchor", ResourceRole::User);
-        let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        assert!(p.fired_is_empty());
     }
 
     /// `has_per_file_fds` defaults to false when `events` excludes both
