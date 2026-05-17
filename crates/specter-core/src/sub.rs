@@ -198,7 +198,7 @@ pub struct SubRegistryDiff {
     pub modified: Vec<(SubId, SubAttachRequest)>,
 }
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum EffectScope {
     #[default]
     SubtreeRoot,
@@ -224,7 +224,7 @@ pub enum EffectScope {
 /// representation folded into the Profile config hash via
 /// [`ProfileIdentity::config_hash`] (two Subs differing only on classes
 /// fork separate Profiles).
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ClassSet(u8);
 
 impl ClassSet {
@@ -888,19 +888,29 @@ mod class_set_tests {
 
     #[test]
     fn bits_round_trip_through_or() {
-        let cases = [
-            ClassSet::EMPTY,
-            ClassSet::STRUCTURE,
-            ClassSet::CONTENT,
-            ClassSet::METADATA,
-            ClassSet::STRUCTURE | ClassSet::CONTENT,
-            ClassSet::CONTENT | ClassSet::METADATA,
-            ClassSet::STRUCTURE | ClassSet::METADATA,
-            ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA,
+        // Each case pairs a `ClassSet` with an *independently spelled*
+        // bitmask. Asserting the exact `u8` (not popcount) catches a
+        // bit-position swap in the constants or `BitOr` — an
+        // equal-popcount pair such as 0b011 / 0b101 would hide it.
+        let cases: [(ClassSet, u8); 8] = [
+            (ClassSet::EMPTY, 0b000),
+            (ClassSet::STRUCTURE, 0b001),
+            (ClassSet::CONTENT, 0b010),
+            (ClassSet::METADATA, 0b100),
+            (ClassSet::STRUCTURE | ClassSet::CONTENT, 0b011),
+            (ClassSet::CONTENT | ClassSet::METADATA, 0b110),
+            (ClassSet::STRUCTURE | ClassSet::METADATA, 0b101),
+            (
+                ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA,
+                0b111,
+            ),
         ];
-        for c in cases {
-            // bits() faithfully encodes the canonical OR.
-            assert_eq!(c.bits().count_ones(), c.bits().count_ones());
+        for (set, expected) in cases {
+            assert_eq!(
+                set.bits(),
+                expected,
+                "{set:?} must encode as {expected:#05b}"
+            );
         }
     }
 
