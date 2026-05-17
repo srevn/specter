@@ -23,8 +23,11 @@
 //!
 //! `ActiveBurst` splits into `PreFireBurst` / `PostFireBurst` (see
 //! [`specter_core::profile`]); helpers below own a typed view of one or
-//! the other. The fire transition (`Verifying → Awaiting`) is a typed
-//! state-machine move at [`PreFireBurst::into_post_fire`].
+//! the other. Two typed state-machine moves cross the split: the fire
+//! transition (`Verifying → Awaiting`) at
+//! [`PreFireBurst::into_post_fire`], and its inverse — the post-rebase
+//! residual restart (`Rebasing → Batching`) at
+//! [`PostFireBurst::into_pre_fire_residual`].
 //!
 //! - `start_seed_burst` / `start_standard_burst` — Idle →
 //!   `Active(PreFire(_))`.
@@ -45,6 +48,12 @@
 //!   `PostFireBurst`).
 //! - `absorb_event_into_fire_tail` — FsEvent during post-fire (mutates
 //!   `PostFireBurst.force_walk_resources`).
+//! - `restart_burst_from_fire_tail_residual` — `Active(PostFire)` →
+//!   `Active(PreFire(Batching))` typed move at rebase-ok when a Standard
+//!   `ReturnToIdle` burst carries a non-empty residual. No refcount
+//!   edges: the original burst's `+suppress` / `propagate(+1)` stay
+//!   held (it never finishes) until the restarted burst's single
+//!   `finish_burst_to_idle`.
 //! - `finish_burst_to_idle` — Active → Idle, single point of `-suppress` and
 //!   `propagate(-1)`. Discriminates `PreFire` / `PostFire` at the take.
 //!
@@ -1208,6 +1217,126 @@ impl Engine {
                 resource: event_resource,
                 event,
             });
+        }
+    }
+
+    /// Restart a fresh Standard `Batching` burst from the fire-tail
+    /// residual — the consumer for events `absorb_event_into_fire_tail`
+    /// accumulated after the rebase probe was already in flight. Single
+    /// source of the `Active(PostFire)` → `Active(PreFire(Batching))`
+    /// typed move (via [`PostFireBurst::into_pre_fire_residual`]); the
+    /// inverse of `transition_to_awaiting`'s fire move.
+    ///
+    /// **Caller.** `dispatch_rebase_ok` only, after `rebase_baseline`,
+    /// and only once it has established the residual is non-empty, the
+    /// burst is [`BurstFinish::ReturnToIdle`], and the origin is
+    /// [`BurstIntent::Standard`]. The first two are the restart's reason;
+    /// the third is refcount-load-bearing — see
+    /// [`PostFireBurst::into_pre_fire_residual`].
+    ///
+    /// **No refcount edges.** Deliberately neither `+suppress` /
+    /// `propagate(+1)` nor `-suppress` / `propagate(-1)`. The anchor
+    /// `suppress_count` 0→1 and the dirty-descendants `propagate(+1)`
+    /// were taken once at the original `start_standard_burst` and stay
+    /// held: this restart never finishes, so the single balancing
+    /// release runs at the restarted burst's eventual
+    /// `finish_burst_to_idle`. A finish-then-start would flicker both.
+    ///
+    /// **Slot-consumed precondition.** The whole-value swap below
+    /// destructures the post-fire burst; an armed `Rebasing` slot
+    /// reaching that drop trips `ProbeSlot`'s linearity tripwire. The
+    /// sole caller runs only after `on_profile_probe_response` disarmed
+    /// via `take_owner_probe` — the same precondition
+    /// `finish_burst_to_idle` carries on the path this replaces.
+    /// Debug-asserted at entry.
+    ///
+    /// The restart re-enters `Batching` (not an immediate re-probe), so
+    /// it is settle-debounced and burst-deadline-bounded exactly like a
+    /// fresh `start_standard_burst` — it self-heals at the external
+    /// change rate and cannot livelock.
+    pub(crate) fn restart_burst_from_fire_tail_residual(
+        &mut self,
+        profile_id: ProfileId,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        if !self.require_active_post_fire(
+            profile_id,
+            BurstHelper::RestartBurstFromFireTailResidual,
+            out,
+        ) {
+            return;
+        }
+        // Slot-consumed precondition (debug). Borrow-clean: the &self
+        // projection ends before the &mut get below, and a stale id
+        // yields None so the assert holds trivially ahead of the
+        // early-return.
+        debug_assert!(
+            self.pending_probe_for(ProbeOwner::Profile(profile_id))
+                .is_none(),
+            "restart_burst_from_fire_tail_residual: probe slot still armed \
+             — the caller must consume it first (take_owner_probe on the \
+             rebase response path); profile = {profile_id:?}",
+        );
+
+        // Re-borrow for captures under the same shape-checked window
+        // `transition_to_awaiting` uses for its inverse move: the
+        // precondition already proved `Active(PostFire)`; the inner
+        // `matches!` is the borrow discipline for the typed move below,
+        // not a duplicated guard.
+        let Some((resource, settle, max_settle)) = self.profiles.get(profile_id).and_then(|p| {
+            matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _)).then_some((
+                p.resource,
+                p.settle,
+                p.max_settle(),
+            ))
+        }) else {
+            return;
+        };
+
+        // The two engine timers a fresh Standard burst arms
+        // (`start_standard_burst`): the settle debounce and the
+        // burst-deadline force-fire ceiling.
+        let settle_timer = self
+            .timers
+            .schedule(now + settle, profile_id, TimerKind::Settle);
+        let burst_deadline =
+            self.timers
+                .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
+
+        // Typed move PostFire → PreFire via `transition_state` (the
+        // whole-value swap returning the prior state):
+        // `into_pre_fire_residual` consumes the post-fire by value, so it
+        // cannot project through `post_fire_burst_mut`. Bracketing with
+        // the `matches!` above eliminates the transient-Idle window's
+        // observability for production callers; the restore-on-mismatch
+        // arm keeps a future pattern-widening refactor from stranding
+        // the Profile in `Idle` while dropping the owned burst.
+        if let Some(p) = self.profiles.get_mut(profile_id)
+            && matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _))
+        {
+            let prior = p.transition_state(ProfileState::Idle);
+            match prior {
+                ProfileState::Active(ActiveBurst::PostFire(post), finish) => {
+                    // Carry `finish` across the restart. It is
+                    // `ReturnToIdle` by the caller's gate; preserving it
+                    // (rather than hard-writing) keeps a mid-tail
+                    // `mark_active_for_reap` honoured at the restarted
+                    // burst's end.
+                    p.transition_state(ProfileState::Active(
+                        ActiveBurst::PreFire(post.into_pre_fire_residual(
+                            burst_deadline,
+                            settle_timer,
+                            resource,
+                            now,
+                        )),
+                        finish,
+                    ));
+                }
+                other => {
+                    p.transition_state(other);
+                }
+            }
         }
     }
 }

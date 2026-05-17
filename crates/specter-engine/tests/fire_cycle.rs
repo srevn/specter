@@ -32,12 +32,12 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ActiveBurst, ArgPart, ArgTemplate, BurstFinish, ChildEntry, ClassSet, DedupKey,
-    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent,
-    FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, ProbeCorrelation, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, Termination,
-    TimerKind, TreeSnapshot,
+    ActionProgram, ActiveBurst, ArgPart, ArgTemplate, BurstFinish, BurstIntent, ChildEntry,
+    ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope,
+    EntryKind, FsEvent, FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, PreFireBurst,
+    PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
+    SubAttachRequest, SubId, Termination, TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -399,9 +399,13 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
 }
 
 #[test]
-fn fire_cycle_absorbs_event_during_rebasing() {
-    // Drive to Rebasing (via EffectComplete::Ok); inject an FsEvent;
-    // absorb diagnostic; rebase response → Idle.
+fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
+    // Drive a Standard burst to Rebasing; an FsEvent absorbed while the
+    // rebase probe is in flight is the fire-tail residual. The rebase
+    // response then does NOT drop it (the pre-WS2 silent carve-out) —
+    // it restarts a fresh debounced Standard burst seeded from the
+    // residual, and the anchor suppress contribution stays held across
+    // the restart (no finish-then-start flicker).
     //
     // CONTENT events mask: descendants must pass the class filter to
     // reach drive_burst's absorb arm.
@@ -422,7 +426,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         now,
     );
 
-    // Drive to Awaiting.
+    // Drive to Awaiting (a Standard burst — the FsEvent path).
     let stable_out = drive_to_awaiting(
         &mut e,
         pid,
@@ -455,7 +459,7 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         ),
     ));
 
-    // FsEvent during Rebasing → absorbed.
+    // FsEvent during Rebasing → absorbed into the fire-tail residual.
     let absorb_out = e.step(
         Input::FsEvent {
             resource: child,
@@ -472,19 +476,72 @@ fn fire_cycle_absorbs_event_during_rebasing() {
         "FsEvent during Rebasing absorbed",
     );
 
-    // Rebase response → Idle.
-    e.step(
+    // The anchor suppress contribution taken at start_standard_burst is
+    // held through Rebasing.
+    let suppress_before = e.tree().get(r).unwrap().suppress_count();
+    assert_eq!(
+        suppress_before, 1,
+        "anchor suppressed for the in-flight burst",
+    );
+
+    // Rebase response with a non-empty residual → restart, NOT Idle.
+    let t_restart = now + Duration::from_millis(30);
+    let restart_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeOk(snap),
         }),
-        now + Duration::from_millis(30),
+        t_restart,
     );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
+
+    // A fresh debounced Standard burst is armed, carrying the residual
+    // as both the LCA basis and the mtime-skip defeater. ReturnToIdle
+    // is preserved across the typed move.
+    match e.profiles().get(pid).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PreFire(PreFireBurst {
+                phase: PreFirePhase::Batching { .. },
+                intent: BurstIntent::Standard,
+                forced: false,
+                dirty_resources,
+                force_walk_resources,
+                last_event_time,
+                ..
+            }),
+            BurstFinish::ReturnToIdle,
+        ) => {
+            assert!(
+                dirty_resources.contains(&child),
+                "residual seeds the next probe's LCA basis",
+            );
+            assert!(
+                force_walk_resources.contains(&child),
+                "residual seeds the mtime-skip defeater",
+            );
+            assert_eq!(
+                *last_event_time,
+                Some(t_restart),
+                "settle window reckons from the rebase-response instant",
+            );
+        }
+        other => panic!("expected a restarted Batching burst, got {other:?}"),
+    }
+
+    // No immediate re-probe — the restart re-enters the settle debounce,
+    // so it cannot livelock.
+    assert!(
+        first_probe_correlation(&restart_out).is_none(),
+        "restart re-enters Batching, emits no probe",
+    );
+
+    // The suppress contribution did NOT flicker: the in-place move never
+    // finished, so it is still held (not released-then-reacquired).
+    assert_eq!(
+        e.tree().get(r).unwrap().suppress_count(),
+        suppress_before,
+        "anchor suppress held across the restart, no finish-then-start flicker",
+    );
 }
 
 #[test]

@@ -4646,7 +4646,7 @@ fn dispatch_rebase_ok_consumes_survival_witness() {
         "test setup: rebased snapshot must differ from the witness",
     );
     let mut out = StepOutput::default();
-    e.dispatch_rebase_ok(pid, TreeSnapshot::Dir(rebased), &mut out);
+    e.dispatch_rebase_ok(pid, TreeSnapshot::Dir(rebased), now, &mut out);
 
     let p = e.profiles.get(pid).expect("Profile lives");
     assert!(

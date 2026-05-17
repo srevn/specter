@@ -59,6 +59,11 @@ pub enum BurstHelper {
     TransitionToRebasing,
     /// `Engine::absorb_event_into_fire_tail` — post-fire FsEvent absorb.
     AbsorbEventIntoFireTail,
+    /// `Engine::restart_burst_from_fire_tail_residual` — post-rebase
+    /// residual restart (`Active(PostFire)` → `Active(PreFire(Batching))`
+    /// typed move; the suppress / dirty-cascade contributions stay held
+    /// from the original burst start).
+    RestartBurstFromFireTailResidual,
 }
 
 /// Failure mode for an [`Diagnostic::LcaIntegrityViolation`] emission.

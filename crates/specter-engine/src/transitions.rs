@@ -332,10 +332,10 @@ impl Engine {
 
             ProbeRoute::Rebasing => match response.outcome {
                 ProbeOutcome::AnchorOk(leaf) => {
-                    self.dispatch_rebase_ok(profile_id, TreeSnapshot::File(leaf), out);
+                    self.dispatch_rebase_ok(profile_id, TreeSnapshot::File(leaf), now, out);
                 }
                 ProbeOutcome::SubtreeOk(arc) => {
-                    self.dispatch_rebase_ok(profile_id, TreeSnapshot::Dir(arc), out);
+                    self.dispatch_rebase_ok(profile_id, TreeSnapshot::Dir(arc), now, out);
                 }
                 ProbeOutcome::Vanished => self.dispatch_rebase_vanished(profile_id, out),
                 ProbeOutcome::Failed { errno } => {
@@ -1928,9 +1928,21 @@ impl Engine {
 
     /// (Rebase, Ok). Post-fire probe response — graft the post-command
     /// snapshot into `Profile.current`, rebase `baseline := current`,
-    /// finish the burst to Idle. The Rebasing probe always targets the
-    /// anchor (set by `transition_to_rebasing`); no stability verdict
-    /// applies (we just fired, drift is expected).
+    /// then either restart from the fire-tail residual or finish to
+    /// Idle. The Rebasing probe always targets the anchor (set by
+    /// `transition_to_rebasing`); no stability verdict applies (we just
+    /// fired, drift is expected).
+    ///
+    /// **Post-rebase residual.** Events absorbed during `Rebasing` while
+    /// the probe was already in flight have, until this point, no
+    /// consumer. A Standard [`BurstFinish::ReturnToIdle`] burst with a
+    /// non-empty residual restarts a fresh debounced burst over the
+    /// rebased baseline (`restart_burst_from_fire_tail_residual`) so the
+    /// change is not lost. Every other shape finishes to Idle as before:
+    /// an empty residual (idempotent command — the hot path), a zombie
+    /// `Reap` burst (no consumer for a rebased baseline), or a
+    /// Seed-origin burst (its finish must not emit an unbalanced
+    /// `propagate(-1)` — it never took the matching `+1`).
     ///
     /// **No drift check.** Recovery / post-Effect drift detection is
     /// gated on Seed-Ok in v1; Rebasing is a phase of the Standard burst
@@ -1943,6 +1955,7 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         snapshot: TreeSnapshot,
+        now: Instant,
         out: &mut StepOutput,
     ) {
         // Rebasing targets the anchor by construction
@@ -1958,7 +1971,32 @@ impl Engine {
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.rebase_baseline();
         }
-        self.finish_burst_to_idle(profile_id, out);
+
+        // Restart-vs-finish on the post-rebase residual. Resolved under
+        // one read borrow (the bool carries no borrow out); pass 2 takes
+        // `&mut self`. Restart iff the fire-tail residual is non-empty
+        // AND the burst returns to Idle AND the origin is Standard — the
+        // last clause is refcount-load-bearing (a Seed origin never
+        // `propagate(+1)`'d, so a Standard-forced restart's finish would
+        // emit an unbalanced `propagate(-1)`; see
+        // `PostFireBurst::into_pre_fire_residual`).
+        let should_restart = match self
+            .profiles
+            .get(profile_id)
+            .map(specter_core::Profile::state)
+        {
+            Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => {
+                !post.force_walk_resources.is_empty()
+                    && matches!(finish, BurstFinish::ReturnToIdle)
+                    && matches!(post.intent, BurstIntent::Standard)
+            }
+            _ => false,
+        };
+        if should_restart {
+            self.restart_burst_from_fire_tail_residual(profile_id, now, out);
+        } else {
+            self.finish_burst_to_idle(profile_id, out);
+        }
     }
 
     /// (Rebase, Vanished). Anchor disappeared between fire and rebase.

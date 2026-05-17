@@ -240,29 +240,43 @@ pub enum PreFirePhase {
 ///   pre-fire accumulators, drained at `transition_to_verifying`
 ///   entry (the only path to fire).
 ///
-/// `intent: BurstIntent` survives because `dispatch_rebase_*` reads it
-/// for the `ProbeVanished` / `ProbeFailed` diagnostic — Seed-driven
-/// drift rebases and Standard-driven post-fire rebases both reach
-/// PostFire, and the diagnostic distinguishes them.
+/// `intent: BurstIntent` survives for two post-fire readers:
+/// `dispatch_rebase_{vanished,failed}` tag the `ProbeVanished` /
+/// `ProbeFailed` diagnostic with it (Seed-driven drift rebases and
+/// Standard-driven post-fire rebases both reach PostFire, and the
+/// diagnostic distinguishes them), and `dispatch_rebase_ok` gates the
+/// fire-tail residual restart on it — a Standard origin is
+/// refcount-required, a Seed origin never took the matching
+/// `propagate(+1)`.
 ///
 /// `force_walk_resources` is a fresh accumulator distinct from the
 /// pre-fire one. Populated by `absorb_event_into_fire_tail` (FsEvents
-/// arriving during the post-fire tail) and consumed at
-/// `transition_to_rebasing` for the rebase probe's force-walk hint —
-/// closes the POSIX content-edit hole where a descendant content
-/// change during fire-tail doesn't bump the anchor's mtime.
+/// arriving during the post-fire tail). Events absorbed during
+/// `Awaiting` are consumed at `transition_to_rebasing` for the rebase
+/// probe's force-walk hint — closes the POSIX content-edit hole where
+/// a descendant content change during fire-tail doesn't bump the
+/// anchor's mtime. Events absorbed during `Rebasing` (after that probe
+/// is in flight) are the residual the restart consumes — see the field
+/// doc.
 #[derive(Debug)]
 pub struct PostFireBurst {
     pub intent: BurstIntent,
     pub phase: PostFirePhase,
     /// Events absorbed during the post-fire tail
     /// (`Awaiting | Rebasing`). Seeded by `absorb_event_into_fire_tail`
-    /// in `drive_burst`'s post-fire arm; consumed at
-    /// `transition_to_rebasing`. Events absorbed during `Rebasing`
-    /// after the rebase probe is in flight have no consumer — they
-    /// accumulate into the cleared field and drop at
-    /// `finish_burst_to_idle`. The bounded residual window (≈ probe
-    /// round-trip latency) is the v1 carve-out.
+    /// in `drive_burst`'s post-fire arm. Awaiting-tail events are
+    /// consumed at `transition_to_rebasing` (shipped as the rebase
+    /// probe's force-walk hint). Events absorbed during `Rebasing`,
+    /// after that probe is already in flight, are consumed at
+    /// `dispatch_rebase_ok`: a Standard `ReturnToIdle` burst restarts a
+    /// fresh debounced burst seeded from this residual
+    /// (`into_pre_fire_residual`), so the change is not lost. A
+    /// Seed-origin or zombie (`Reap`) burst, or an empty residual,
+    /// instead drops it at `finish_burst_to_idle`. The v1 carve-out is
+    /// thus no longer a silent drop on the Standard path but a bounded
+    /// ≤ one-`settle` extra re-fire latency — the restarted burst's
+    /// settle window reckons from the rebase-response instant, not the
+    /// absorbed events'.
     pub force_walk_resources: BTreeSet<ResourceId>,
 }
 
@@ -438,6 +452,79 @@ impl PostFireBurst {
                 }
             }
             PostFirePhase::Rebasing(_) => AwaitVerdict::NotAwaiting,
+        }
+    }
+
+    /// Typed move from post-fire back to a fresh pre-fire `Batching`
+    /// burst — the symmetric inverse of [`PreFireBurst::into_post_fire`].
+    ///
+    /// Consumes the post-fire burst at the rebase-ok boundary and re-arms
+    /// a Standard debounce burst seeded from the fire-tail residual: the
+    /// `force_walk_resources` that `absorb_event_into_fire_tail`
+    /// accumulated while the rebase probe was already in flight. Without
+    /// this the residual has no consumer — it drops when the post-fire
+    /// burst is torn down, so a descendant change that landed during the
+    /// rebase round-trip is seen only by the next unrelated event.
+    ///
+    /// **In-place move, never finish-then-start.** A Standard burst takes
+    /// two contributions at start and releases each exactly once at
+    /// finish: the anchor `suppress_count` 0→1 and the `propagate(+1)`
+    /// dirty-descendants cascade. A finish-then-start restart would
+    /// release then re-acquire both, opening a window where the anchor is
+    /// briefly unsuppressed (a self-induced fire-tail event could leak
+    /// into the restarted burst) and the ancestor cascade flickers. This
+    /// move never finishes, so both stay held from the original start
+    /// through the restarted burst's single eventual finish.
+    ///
+    /// **Standard origin only.** `propagate(+1)` is a Standard-start-only
+    /// contribution; `finish_burst_to_idle` emits the balancing
+    /// `propagate(-1)` iff the finishing burst is Standard. A Seed-origin
+    /// burst (Seed drift → fire → rebase) never took the `+1`, so forcing
+    /// it to Standard here would let its finish emit a `-1` with no
+    /// matching `+1` — an ancestor `dirty_descendants` underflow. The
+    /// caller gates the restart to a Standard origin; the `debug_assert!`
+    /// is the loud backstop. `intent` is set (not inherited) to
+    /// `Standard`: a restarted debounce burst *is* Standard by
+    /// definition, and under the gate the write is provably its current
+    /// value.
+    ///
+    /// `last_event_time` reckons from `now` — the rebase-response
+    /// instant, not the absorbed events' (those timestamps are discarded
+    /// at absorb). The restarted burst's settle window therefore carries
+    /// a bounded ≤ one-`settle` extra re-fire latency in exchange for
+    /// never losing the residual. `probe_target` is the anchor
+    /// placeholder, overwritten by the next `transition_to_verifying`
+    /// exactly as in a fresh `start_standard_burst`.
+    #[must_use]
+    pub fn into_pre_fire_residual(
+        self,
+        burst_deadline: TimerId,
+        settle_timer: TimerId,
+        anchor: ResourceId,
+        now: Instant,
+    ) -> PreFireBurst {
+        debug_assert!(
+            matches!(self.intent, BurstIntent::Standard),
+            "into_pre_fire_residual: refcount balance requires a Standard \
+             origin — a Seed-origin burst never propagate(+1)'d, so the \
+             restarted burst's finish would propagate(-1) unbalanced",
+        );
+        debug_assert!(
+            !self.force_walk_resources.is_empty(),
+            "into_pre_fire_residual: empty residual — the restart has no \
+             seed; the caller must gate on a non-empty fire-tail residual",
+        );
+        let residual = self.force_walk_resources;
+        PreFireBurst {
+            burst_deadline,
+            phase: PreFirePhase::Batching { settle_timer },
+            intent: BurstIntent::Standard,
+            forced: false,
+            dirty_resources: residual.iter().copied().collect(),
+            force_walk_resources: residual,
+            probe_target: anchor,
+            suppressed_resources: BTreeSet::new(),
+            last_event_time: Some(now),
         }
     }
 }
@@ -1982,9 +2069,11 @@ impl Profile {
 
     /// Sole legitimate post-construction writer of `state`. Returns the
     /// prior state via `mem::replace` so the typed-move callers
-    /// (`transition_to_awaiting`, `finish_burst_to_idle`) can consume the
-    /// prior burst by value for [`PreFireBurst::into_post_fire`] without
-    /// holding a `&mut state` borrow across the move. Shape-agnostic:
+    /// (`transition_to_awaiting` → [`PreFireBurst::into_post_fire`];
+    /// `restart_burst_from_fire_tail_residual` →
+    /// [`PostFireBurst::into_pre_fire_residual`]; `finish_burst_to_idle`)
+    /// can consume the prior burst by value without holding a `&mut
+    /// state` borrow across the move. Shape-agnostic:
     /// transition preconditions are owned by the engine boundary
     /// (`require_idle` / `require_active_pre_fire`), not duplicated here.
     /// Not `#[must_use]` — whole-value-replace callers discard the return;
@@ -3496,6 +3585,87 @@ mod tests {
         ));
         assert_eq!(p.note_effect_completion(), AwaitVerdict::Decremented);
         assert_eq!(p.note_effect_completion(), AwaitVerdict::LastReached);
+    }
+
+    fn rebasing_post(intent: BurstIntent, residual: BTreeSet<ResourceId>) -> PostFireBurst {
+        PostFireBurst {
+            intent,
+            phase: PostFirePhase::Rebasing(ProbeSlot::empty()),
+            force_walk_resources: residual,
+        }
+    }
+
+    /// The residual seeds *both* the LCA basis (`dirty_resources`) and the
+    /// mtime-skip defeater (`force_walk_resources`); the move re-arms a
+    /// fresh `Batching` Standard burst with the engine-minted timers and
+    /// the anchor placeholder.
+    #[test]
+    fn into_pre_fire_residual_seeds_a_fresh_batching_burst() {
+        let mut tree = Tree::new();
+        let anchor = tree.ensure_root("anchor", ResourceRole::User);
+        let c1 = tree
+            .ensure_child(anchor, "c1", ResourceRole::User)
+            .expect("live");
+        let c2 = tree
+            .ensure_child(anchor, "c2", ResourceRole::User)
+            .expect("live");
+        let residual: BTreeSet<ResourceId> = [c1, c2].into_iter().collect();
+        let now = std::time::Instant::now();
+
+        let pre = rebasing_post(BurstIntent::Standard, residual.clone()).into_pre_fire_residual(
+            tid(7),
+            tid(8),
+            anchor,
+            now,
+        );
+
+        assert_eq!(pre.burst_deadline, tid(7));
+        assert!(matches!(
+            pre.phase,
+            PreFirePhase::Batching { settle_timer } if settle_timer == tid(8)
+        ));
+        assert_eq!(pre.intent, BurstIntent::Standard);
+        assert!(!pre.forced);
+        assert_eq!(pre.dirty_resources, residual);
+        assert_eq!(pre.force_walk_resources, residual);
+        assert_eq!(pre.probe_target, anchor);
+        assert!(pre.suppressed_resources.is_empty());
+        assert_eq!(pre.last_event_time, Some(now));
+    }
+
+    /// A Seed-origin burst never took `propagate(+1)`; restarting it as
+    /// Standard would unbalance the finishing `propagate(-1)`. The move
+    /// is gated by the caller; this is the loud dev/CI backstop.
+    #[test]
+    #[should_panic(expected = "refcount balance requires a Standard")]
+    fn into_pre_fire_residual_seed_origin_trips_assert() {
+        let mut tree = Tree::new();
+        let anchor = tree.ensure_root("anchor", ResourceRole::User);
+        let c1 = tree
+            .ensure_child(anchor, "c1", ResourceRole::User)
+            .expect("live");
+        let residual: BTreeSet<ResourceId> = std::iter::once(c1).collect();
+        let _ = rebasing_post(BurstIntent::Seed, residual).into_pre_fire_residual(
+            tid(1),
+            tid(2),
+            anchor,
+            std::time::Instant::now(),
+        );
+    }
+
+    /// An empty residual is a misuse — the restart would have no seed and
+    /// would mask a caller that failed to gate on a non-empty fire-tail.
+    #[test]
+    #[should_panic(expected = "empty residual")]
+    fn into_pre_fire_residual_empty_residual_trips_assert() {
+        let mut tree = Tree::new();
+        let anchor = tree.ensure_root("anchor", ResourceRole::User);
+        let _ = rebasing_post(BurstIntent::Standard, BTreeSet::new()).into_pre_fire_residual(
+            tid(1),
+            tid(2),
+            anchor,
+            std::time::Instant::now(),
+        );
     }
 
     #[test]
