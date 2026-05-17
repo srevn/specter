@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// *injective* key over a step's [`crate::StepOutput::probe_ops`] — the
 /// sort is exact, not merely stable, which the order-sensitive
 /// engine→sensor `submit` / `cancel` drain depends on.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ProbeOwner {
     /// Profile-driven probe. The engine homes this owner's in-flight
     /// `ProbeCorrelation` on a state-resident `ProbeSlot` (descent /

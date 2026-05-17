@@ -132,12 +132,6 @@ impl<Tag: Copy> ProbeSlot<Tag> {
         }
     }
 
-    /// `true` iff a probe is in flight (the slot is armed).
-    #[must_use]
-    pub const fn is_armed(&self) -> bool {
-        self.inner.is_some()
-    }
-
     /// Identity of the in-flight probe, or `None` if idle.
     #[must_use]
     pub const fn correlation(&self) -> Option<ProbeCorrelation> {
@@ -171,6 +165,7 @@ impl<Tag: Copy> ProbeSlot<Tag> {
 
     /// The single consume primitive: take the slot idle and return the
     /// prior correlation (`None` if it was already idle).
+    #[must_use = "the disarmed probe correlation must be routed or explicitly discarded"]
     pub const fn disarm(&mut self) -> Option<ProbeCorrelation> {
         match self.inner.take() {
             Some((c, _)) => Some(c),
@@ -195,7 +190,6 @@ mod tests {
     #[test]
     fn empty_is_idle() {
         let s: ProbeSlot = ProbeSlot::empty();
-        assert!(!s.is_armed());
         assert_eq!(s.correlation(), None);
         assert_eq!(s.tag(), None);
     }
@@ -208,10 +202,9 @@ mod tests {
     #[test]
     fn armed_unit_tag_reports_correlation() {
         let mut s: ProbeSlot = ProbeSlot::armed(corr(7), ());
-        assert!(s.is_armed());
         assert_eq!(s.correlation(), Some(corr(7)));
         assert_eq!(s.tag(), Some(()));
-        s.disarm();
+        let _ = s.disarm();
     }
 
     /// A non-unit `Tag` round-trips verbatim through `tag()`. Disarmed
@@ -220,10 +213,9 @@ mod tests {
     fn armed_carries_non_unit_tag() {
         let target = ResourceId::default();
         let mut s: ProbeSlot<ResourceId> = ProbeSlot::armed(corr(3), target);
-        assert!(s.is_armed());
         assert_eq!(s.correlation(), Some(corr(3)));
         assert_eq!(s.tag(), Some(target));
-        s.disarm();
+        let _ = s.disarm();
     }
 
     /// `arm` on an idle slot makes it armed with the supplied values.
@@ -232,9 +224,8 @@ mod tests {
     fn arm_idle_slot_makes_it_armed() {
         let mut s: ProbeSlot = ProbeSlot::empty();
         s.arm(corr(11), ());
-        assert!(s.is_armed());
         assert_eq!(s.correlation(), Some(corr(11)));
-        s.disarm();
+        let _ = s.disarm();
     }
 
     /// `arm` on an already-armed slot panics unconditionally — a
@@ -252,7 +243,6 @@ mod tests {
     fn disarm_returns_prior_and_idles() {
         let mut s: ProbeSlot = ProbeSlot::armed(corr(9), ());
         assert_eq!(s.disarm(), Some(corr(9)));
-        assert!(!s.is_armed());
         assert_eq!(s.correlation(), None);
         assert_eq!(s.tag(), None);
     }
@@ -262,7 +252,7 @@ mod tests {
     fn disarm_idle_slot_returns_none() {
         let mut s: ProbeSlot = ProbeSlot::empty();
         assert_eq!(s.disarm(), None);
-        assert!(!s.is_armed());
+        assert!(s.correlation().is_none());
     }
 
     /// A slot can be re-armed after a disarm (the consume-then-mint
@@ -274,7 +264,7 @@ mod tests {
         assert_eq!(s.disarm(), Some(corr(1)));
         s.arm(corr(2), ());
         assert_eq!(s.correlation(), Some(corr(2)));
-        s.disarm();
+        let _ = s.disarm();
     }
 
     /// `Default` is `empty()` and does not require `Tag: Default` — a
@@ -283,10 +273,9 @@ mod tests {
     fn default_is_empty() {
         let s: ProbeSlot = ProbeSlot::default();
         assert_eq!(s, ProbeSlot::empty());
-        assert!(!s.is_armed());
 
         let r: ProbeSlot<ResourceId> = ProbeSlot::default();
-        assert!(!r.is_armed());
+        assert!(r.correlation().is_none());
     }
 
     /// Dropping an **armed** slot (not during an unwind) trips the
@@ -324,7 +313,7 @@ mod tests {
     fn drop_when_disarmed_or_empty_is_silent() {
         let quiet = catch_unwind(AssertUnwindSafe(|| {
             let mut s: ProbeSlot = ProbeSlot::armed(corr(8), ());
-            s.disarm();
+            let _ = s.disarm();
             // `s` drops here, idle → silent.
             let _e: ProbeSlot = ProbeSlot::empty();
             // `_e` drops here, never armed → silent.

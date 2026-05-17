@@ -27,8 +27,8 @@
 //! `Active` slot for it.
 //!
 //! Response routing splits by state — [`Engine::on_promoter_probe_response`]
-//! gates staleness on `pending_probe_for`, snapshots the routing class
-//! pre-disarm, disarms the slot once (consume-once), then dispatches:
+//! gates on [`Engine::probe_gate`] (correlation + routing class in one
+//! resolution), disarms the slot once (consume-once), then dispatches:
 //! - `PrefixPending` → descent: routes the outcome to the
 //!   owner-polymorphic [`Engine::dispatch_descent_ok`] /
 //!   [`Engine::dispatch_descent_vanished`] /
@@ -509,26 +509,30 @@ impl Engine {
     }
 
     /// Promoter-side probe response handler. Mirrors the Profile-side
-    /// shape: one staleness gate, snapshot the routing class *before*
-    /// the disarm, consume the slot once, then dispatch.
+    /// shape: one gate yielding correlation + route, consume the slot
+    /// once, then dispatch.
     ///
     /// Both Promoter probe carriers are state-resident — a
     /// `PrefixPending` descent on its `DescentState` slot, an `Active`
-    /// enumeration on `enumerating`. `pending_probe_for(owner)` gates
-    /// staleness uniformly; `take_owner_probe` disarms once
-    /// (consume-once); a mismatch yields
-    /// [`Diagnostic::StaleProbeResponse`] with no state change.
+    /// enumeration on `enumerating`. [`Engine::probe_gate`] resolves
+    /// the owner once for the gated correlation *and* the routing
+    /// class; `take_owner_probe` disarms once (consume-once); an
+    /// absent gate or a `received` mismatch yields
+    /// [`Diagnostic::StaleProbeResponse`] with no state change, and
+    /// (load-bearing) returns *before* the tail drain so a stale
+    /// response never pumps the enumeration queue.
     ///
-    /// `probe_route` is snapshotted pre-disarm: the disarm empties the
-    /// slot but leaves the state variant intact, so the route — and
-    /// the enumeration `target` it carries — stays valid through
-    /// dispatch. `Vanished` / `Failed` enumeration responses carry no
-    /// wire payload; that pre-disarm route snapshot is the sole
-    /// authority for the proxy `ResourceId`.
+    /// The route is captured *with* the gate, before the disarm: the
+    /// disarm empties the slot but leaves the state variant intact, so
+    /// the route — and the enumeration `target` it carries — stays
+    /// valid through dispatch. `Vanished` / `Failed` enumeration
+    /// responses carry no wire payload; that pre-disarm route is the
+    /// sole authority for the proxy `ResourceId`.
     ///
-    /// A matched correlation routing to a Profile class, or to none,
-    /// is unconstructable for a Promoter owner — the loud arm is
-    /// regression detection, not a reachable path.
+    /// A route to a Profile-only class (`Verifying` / `Rebasing`) is
+    /// unconstructable for a Promoter owner — the no-route case folds
+    /// into the stale gate, and the loud arm is regression detection
+    /// for the cross-owner classes, not a reachable path.
     pub(crate) fn on_promoter_probe_response(
         &mut self,
         promoter_id: PromoterId,
@@ -539,19 +543,20 @@ impl Engine {
         let owner = response.owner;
         let received = response.correlation;
 
-        if self.pending_probe_for(owner) != Some(received) {
+        // One resolution yields the gated correlation *and* the routing
+        // class (including the enumeration `target`). Captured with the
+        // gate — before the disarm — so it stays valid through
+        // dispatch. An absent gate or a `received` mismatch is every
+        // stale path; the early `return` is load-bearing — it skips
+        // the tail drain below so a stale response never pumps the
+        // enumeration queue.
+        let Some((_, route)) = self.probe_gate(owner).filter(|&(c, _)| c == received) else {
             out.diagnostics.push(Diagnostic::StaleProbeResponse {
                 owner,
                 correlation: received,
             });
             return;
-        }
-
-        // Snapshot the route before the disarm: `take_owner_probe`
-        // empties the slot but leaves the carrier variant intact, so a
-        // route captured here (including the enumeration `target`)
-        // stays valid through dispatch.
-        let route = self.probe_route(owner);
+        };
         let consumed = self.take_owner_probe(owner);
         debug_assert_eq!(
             consumed,
@@ -563,7 +568,7 @@ impl Engine {
         self.dispatch_ledger.record(owner, received);
 
         match route {
-            Some(ProbeRoute::Descent) => match response.outcome {
+            ProbeRoute::Descent => match response.outcome {
                 ProbeOutcome::SubtreeOk(arc) => self.dispatch_descent_ok(owner, &arc, now, out),
                 ProbeOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
                 ProbeOutcome::Failed { errno } => self.dispatch_descent_failed(owner, errno, out),
@@ -583,7 +588,7 @@ impl Engine {
                 }
             },
 
-            Some(ProbeRoute::Enumerating { target }) => match response.outcome {
+            ProbeRoute::Enumerating { target } => match response.outcome {
                 ProbeOutcome::SubtreeOk(arc) => {
                     self.dispatch_promoter_enumeration_ok(promoter_id, target, &arc, now, out);
                 }
@@ -609,16 +614,18 @@ impl Engine {
                 }
             },
 
-            Some(ProbeRoute::Verifying { .. } | ProbeRoute::Rebasing) | None => {
-                // The gated correlation matched but the route is a
-                // Profile class or none: unconstructable for a Promoter
-                // owner (its correlation lives on exactly one Promoter
-                // carrier). The loud arm replaces the old
-                // channel-vs-state cross-affinity bail.
+            ProbeRoute::Verifying { .. } | ProbeRoute::Rebasing => {
+                // `Verifying` / `Rebasing` are Profile-only routing
+                // classes — unconstructable for a Promoter owner, whose
+                // gated correlation lives on exactly one Promoter
+                // carrier (descent / enumeration). The no-route case
+                // folded into the stale gate above; this stays the
+                // loud regression arm for the cross-owner classes.
                 debug_assert!(
                     false,
-                    "matched correlation but Promoter state is not a Promoter-probe-bearing \
-                     carrier (promoter = {promoter_id:?})",
+                    "Promoter probe response routed to a Profile-only class \
+                     (Verifying/Rebasing) — the gated correlation must live on a \
+                     Promoter carrier (promoter = {promoter_id:?})",
                 );
                 out.diagnostics.push(Diagnostic::StaleProbeResponse {
                     owner,

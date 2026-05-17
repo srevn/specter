@@ -14,14 +14,20 @@
 //!    makes cross-space misuse (minting a
 //!    [`specter_core::CorrelationId`] from it, or vice versa) a compile
 //!    error, and saturation an unconditional panic.
-//! 2. **State-derived projections.** [`Engine::pending_probe_for`] (the
-//!    staleness identity), [`Engine::probe_route`] (the routing class),
-//!    and [`Engine::take_owner_probe`] (the single consume) read or
-//!    disarm the owner's state slot directly. "At most one probe per
-//!    owner" (I5) is structural: one owner is in one state variant,
-//!    which holds exactly one [`specter_core::ProbeSlot`].
-//!    [`Engine::cancel_owner_probe`] is the consume-plus-`Cancel`
-//!    choke every abandon site routes through.
+//! 2. **State-derived projections.** [`Engine::probe_gate`] is the
+//!    response path's sole projection: one `profiles`/`promoters`
+//!    resolution yielding the gated correlation (the staleness
+//!    identity) *and* the routing class together, so a `ProbeResponse`
+//!    resolves the owner's state twice (gate, then the
+//!    [`Engine::take_owner_probe`] disarm) instead of three times.
+//!    [`Engine::pending_probe_for`] stays the standalone *liveness*
+//!    projection every launch guard, double-arm backstop, and
+//!    integration test reads — `probe_gate` is additive, not its
+//!    replacement. "At most one probe per owner" (I5) is structural:
+//!    one owner is in one state variant, which holds exactly one
+//!    [`specter_core::ProbeSlot`]. [`Engine::cancel_owner_probe`] is
+//!    the consume-plus-`Cancel` choke every abandon site routes
+//!    through.
 //! 3. **Request emission.** [`Engine::emit_anchor_probe`] /
 //!    [`Engine::emit_subtree_probe`] / [`Engine::emit_descent_probe`]
 //!    are the sole [`ProbeOp::Probe`] construction sites — stateless
@@ -47,11 +53,11 @@ use std::sync::Arc;
 /// State-derived routing class for a probe response — what the
 /// dispatcher needs that the response wire does not supply.
 ///
-/// Computed by [`Engine::probe_route`] from the owner's *current*
-/// state, so it is the minimal non-derivable read. It is [`Copy`] and
-/// is snapshotted *before* the slot is disarmed: disarm empties the
-/// slot but leaves the carrier's variant intact, so a route captured
-/// first stays valid through dispatch.
+/// Computed by [`Engine::probe_gate`] from the owner's *current* state
+/// alongside the gated correlation, so it is the minimal non-derivable
+/// read. It is [`Copy`] and is captured *before* the slot is disarmed:
+/// disarm empties the slot but leaves the carrier's variant intact, so
+/// a route captured first stays valid through dispatch.
 ///
 /// `Verifying` carries `(intent, forced)` because those drive the
 /// per-intent fan-out and are not recoverable from the state variant
@@ -144,43 +150,72 @@ impl Engine {
         }
     }
 
-    /// The owner's probe routing class derived purely from its current
-    /// state, or `None` if the owner is in no probe-bearing carrier.
+    /// The owner's response-path gate: its in-flight probe correlation
+    /// **and** routing class, from one state resolution.
     ///
-    /// Owner-symmetric with [`Self::pending_probe_for`] /
-    /// [`Self::take_owner_probe`]; it is the routing twin of the
-    /// staleness gate. The caller snapshots this *before*
-    /// [`Self::take_owner_probe`] (the route is [`Copy`], the disarm
-    /// leaves the carrier variant intact), then dispatches on it.
+    /// Folds the staleness identity and the routing class into a single
+    /// `profiles`/`promoters` lookup. The correlation is read through
+    /// the public state surface
+    /// ([`specter_core::ProfileState::probe_correlation`] /
+    /// [`specter_core::PromoterState::probe_correlation`] — the same
+    /// projection [`Self::pending_probe_for`] exposes, so the engine
+    /// never reaches past that surface into a descent's slot), so a
+    /// `ProbeResponse` resolves the owner's state twice (here, then the
+    /// [`Self::take_owner_probe`] disarm) rather than three times. The
+    /// route is [`Copy`]; the caller gates on the correlation, disarms
+    /// once, then dispatches on the route — the disarm leaves the
+    /// carrier variant intact, so the route stays valid through
+    /// dispatch.
     ///
-    /// Total over the state space: a probe-bearing carrier with an
-    /// armed slot yields its route; every other state (including a
-    /// disarmed slot) yields `None`. The `Active` enumeration arm reads
-    /// the proxy `target` off the slot's tag — the wire is path-only,
-    /// so that tag is the route's sole authority for the dispatch key.
-    pub(crate) fn probe_route(&self, owner: ProbeOwner) -> Option<ProbeRoute> {
+    /// `Some((correlation, route))` iff the owner is in a probe-bearing
+    /// carrier with an armed slot; `None` otherwise (⇒ the caller emits
+    /// `StaleProbeResponse`). "Armed slot but no route" is
+    /// unrepresentable: every state whose `probe_correlation` is `Some`
+    /// is, by the same case split, a routable carrier, so the dead
+    /// armed-but-unroutable arm the old open-coded staleness-gate +
+    /// route-snapshot pair carried as a loud regression bail folds
+    /// structurally into this single `None`. The `Active` enumeration
+    /// arm reads the proxy `target` off the slot's tag — the wire is
+    /// path-only, so that tag is the route's sole authority for the
+    /// dispatch key.
+    ///
+    /// Distinct from [`Self::pending_probe_for`], which stays the
+    /// standalone *liveness* projection the launch guards, double-arm
+    /// backstops, and integration tests read; `probe_gate` is the
+    /// response path's additive fold, not a replacement.
+    pub(crate) fn probe_gate(&self, owner: ProbeOwner) -> Option<(ProbeCorrelation, ProbeRoute)> {
         match owner {
-            ProbeOwner::Profile(pid) => match self.profiles.get(pid)?.state() {
-                ProfileState::Pending(_) => Some(ProbeRoute::Descent),
-                ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
-                    PreFirePhase::Verifying(_) => Some(ProbeRoute::Verifying {
-                        intent: pre.intent,
-                        forced: pre.forced,
-                    }),
-                    PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
-                },
-                ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-                    PostFirePhase::Rebasing(_) => Some(ProbeRoute::Rebasing),
-                    PostFirePhase::Awaiting { .. } => None,
-                },
-                ProfileState::Idle => None,
-            },
-            ProbeOwner::Promoter(qid) => match self.promoters.get(qid)?.state() {
-                PromoterState::PrefixPending(_) => Some(ProbeRoute::Descent),
-                PromoterState::Active { enumerating, .. } => enumerating
-                    .tag()
-                    .map(|target| ProbeRoute::Enumerating { target }),
-            },
+            ProbeOwner::Profile(pid) => {
+                let state = self.profiles.get(pid)?.state();
+                let correlation = state.probe_correlation()?;
+                let route = match state {
+                    ProfileState::Pending(_) => Some(ProbeRoute::Descent),
+                    ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
+                        PreFirePhase::Verifying(_) => Some(ProbeRoute::Verifying {
+                            intent: pre.intent,
+                            forced: pre.forced,
+                        }),
+                        PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
+                    },
+                    ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
+                        PostFirePhase::Rebasing(_) => Some(ProbeRoute::Rebasing),
+                        PostFirePhase::Awaiting { .. } => None,
+                    },
+                    ProfileState::Idle => None,
+                }?;
+                Some((correlation, route))
+            }
+            ProbeOwner::Promoter(qid) => {
+                let state = self.promoters.get(qid)?.state();
+                let correlation = state.probe_correlation()?;
+                let route = match state {
+                    PromoterState::PrefixPending(_) => Some(ProbeRoute::Descent),
+                    PromoterState::Active { enumerating, .. } => enumerating
+                        .tag()
+                        .map(|target| ProbeRoute::Enumerating { target }),
+                }?;
+                Some((correlation, route))
+            }
         }
     }
 
