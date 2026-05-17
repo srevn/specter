@@ -1,10 +1,25 @@
 //! Burst lifecycle helpers.
 //!
-//! Each helper is the **single source** of one transition kind — a phase
-//! transition body, a Burst construction, or a return-to-Idle. Centralizing
-//! the timer scheduling, refcount edges, and Burst-struct mutations here
-//! prevents drift between the transition-row handlers and the
-//! post-`EffectComplete` re-probe path.
+//! These helpers are the single source of **category (a):
+//! variant/phase transitions** — a phase body, a Burst construction,
+//! or a return-to-Idle. Centralizing the timer scheduling, refcount
+//! edges, and phase-variant rewrites here prevents drift between the
+//! transition-row handlers and the post-`EffectComplete` re-probe path.
+//!
+//! They are **not** the only writers of `PreFireBurst` /
+//! `PostFireBurst` — by construction, not drift. Two other categories
+//! own their own single source:
+//!
+//! - **(b) Single-field load-bearing-invariant edges**: a typed
+//!   edge-method on the field's owner in `specter-core` (the method
+//!   *is* the floor — total fn, no public setter). `apply_dirty_delta`
+//!   and `note_effect_completion` are these; a phase helper here would
+//!   only enforce them at a distance.
+//! - **(c) The sanctioned cross-crate emission drain**:
+//!   [`Engine::emit_owner_probe`] (in `probe`), sole consumer of
+//!   `force_walk_resources`. Its `pub` burst accessors are
+//!   load-bearing and deliberately *not* sealed (Rust visibility is
+//!   intra-crate; the choke reaches them from another crate).
 //!
 //! `ActiveBurst` splits into `PreFireBurst` / `PostFireBurst` (see
 //! [`specter_core::profile`]); helpers below own a typed view of one or
@@ -194,11 +209,13 @@ impl Engine {
     /// `EffectComplete::Ok` does NOT call this helper; post-Effect rebase
     /// routes through `transition_to_rebasing`.
     ///
-    /// Caller has verified `Profile.state == Idle`. Constructs the Burst,
-    /// schedules `burst_deadline`, mints the probe correlation, emits
-    /// Probe (with `current.subtree_at(anchor)` as `baseline_subtree`
-    /// when post-recovery Seed has one — enables walker mtime-skip on
-    /// idempotent events), and `+suppress` on the anchor.
+    /// Caller has verified `Profile.state == Idle`. Schedules
+    /// `burst_deadline`, `+suppress`, and constructs the `Verifying`
+    /// phase armed with a fresh correlation (`mint → arm →
+    /// emit_owner_probe`). The choke shapes the request — anchor target
+    /// plus `current.subtree_at(anchor)` as `baseline_subtree` when a
+    /// post-recovery Seed has one (walker mtime-skip on idempotent
+    /// events).
     pub(crate) fn start_seed_burst(
         &mut self,
         profile_id: ProfileId,
@@ -786,6 +803,13 @@ impl Engine {
     /// `Profile.current` (set by `dispatch_standard_ok` immediately
     /// before this call), so no `Arc<TreeSnapshot>` is duplicated on the
     /// phase variant.
+    ///
+    /// The sole caller (`dispatch_standard_ok`, stable + dirty>0) is
+    /// reached only from the Verifying probe response (slot disarmed
+    /// before dispatch), so the prior phase is always `Verifying`. The
+    /// unit `Draining` has no `ProbeSlot::Drop` tripwire like its
+    /// slot-bearing peers; the `debug_assert!` is the symmetric
+    /// backstop ([`Self::reschedule_batching`]'s analogue).
     pub(crate) fn transition_to_draining(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToDraining, out) {
             return;
@@ -795,6 +819,10 @@ impl Engine {
             .get_mut(profile_id)
             .and_then(Profile::pre_fire_burst_mut)
         {
+            debug_assert!(
+                matches!(pre.phase, PreFirePhase::Verifying(_)),
+                "transition_to_draining off a non-Verifying phase (profile = {profile_id:?})",
+            );
             pre.phase = PreFirePhase::Draining;
         }
     }
@@ -942,7 +970,7 @@ impl Engine {
     /// next absorb cycle.
     ///
     /// **Non-Active early return.** Both production callers
-    /// (`on_effect_complete`'s `AwaitAction::Rebase` arm and
+    /// (`on_effect_complete`'s last-completion `ReturnToIdle` route and
     /// `handle_gate_deadline`) have already verified `Active(_)` with
     /// phase `Awaiting` before reaching this helper. Defensively
     /// early-returning on non-Active matches `transition_to_verifying`'s

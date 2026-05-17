@@ -300,6 +300,21 @@ pub enum PostFirePhase {
     Rebasing(ProbeSlot),
 }
 
+/// Verdict of one `EffectComplete` against the post-fire counter.
+///
+/// The post-fire analogue of [`Profile::apply_dirty_delta`]'s `bool`
+/// edge — three variants not a `bool` because the route is resolved
+/// from the same call, so "not Awaiting" must be representable.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AwaitVerdict {
+    /// Decremented, still `> 0` — more in flight; stay Awaiting.
+    Decremented,
+    /// Hit zero (pre-decrement `≤ 1`) — last completion; caller routes on.
+    LastReached,
+    /// Not `Active(PostFire(Awaiting))` — a late/untracked completion.
+    NotAwaiting,
+}
+
 impl PreFireBurst {
     /// The `TimerId` armed on this burst for `kind`, or `None` if the
     /// pre-fire shape doesn't carry a slot for `kind`.
@@ -398,6 +413,33 @@ impl PostFireBurst {
             TimerKind::Settle | TimerKind::BurstDeadline => None,
         }
     }
+
+    /// Apply one `EffectComplete`, returning the zero-edge verdict. The
+    /// sole in-life mutator of [`PostFirePhase::Awaiting`]'s
+    /// `outstanding`: floor and decrement live here on the owner, like
+    /// [`Profile::apply_dirty_delta`]. No public setter. `Rebasing` ⇒
+    /// [`AwaitVerdict::NotAwaiting`]. Underflow (more completions than
+    /// emitted Effects) trips a `debug_assert!`, saturates in release.
+    #[must_use]
+    pub fn note_effect_completion(&mut self) -> AwaitVerdict {
+        match &mut self.phase {
+            PostFirePhase::Awaiting { outstanding, .. } => {
+                let prev = *outstanding;
+                debug_assert!(
+                    prev > 0,
+                    "note_effect_completion: outstanding underflow — more \
+                     EffectCompletes than emitted Effects",
+                );
+                *outstanding = prev.saturating_sub(1);
+                if prev <= 1 {
+                    AwaitVerdict::LastReached
+                } else {
+                    AwaitVerdict::Decremented
+                }
+            }
+            PostFirePhase::Rebasing(_) => AwaitVerdict::NotAwaiting,
+        }
+    }
 }
 
 impl ActiveBurst {
@@ -411,6 +453,17 @@ impl ActiveBurst {
         match self {
             Self::PreFire(pre) => pre.timer_token(kind),
             Self::PostFire(post) => post.timer_token(kind),
+        }
+    }
+
+    /// Delegate to the post-fire counter; [`Self::PreFire`] carries no
+    /// fire, folding to [`AwaitVerdict::NotAwaiting`] — same shape-fold
+    /// as [`Self::timer_token`], no wildcard.
+    #[must_use]
+    pub fn note_effect_completion(&mut self) -> AwaitVerdict {
+        match self {
+            Self::PostFire(post) => post.note_effect_completion(),
+            Self::PreFire(_) => AwaitVerdict::NotAwaiting,
         }
     }
 }
@@ -702,6 +755,17 @@ impl ProfileState {
         match self {
             Self::Active(burst, _) => burst.timer_token(kind),
             Self::Idle | Self::Pending(_) => None,
+        }
+    }
+
+    /// Delegate to the active burst's post-fire counter; `Idle` /
+    /// `Pending` own none and fold to [`AwaitVerdict::NotAwaiting`].
+    /// Same layered, wildcard-free delegation as [`Self::timer_token`].
+    #[must_use]
+    pub fn note_effect_completion(&mut self) -> AwaitVerdict {
+        match self {
+            Self::Active(burst, _) => burst.note_effect_completion(),
+            Self::Idle | Self::Pending(_) => AwaitVerdict::NotAwaiting,
         }
     }
 
@@ -2208,6 +2272,16 @@ impl Profile {
         self.machine.apply_dirty_delta(delta)
     }
 
+    /// The single in-life mutator of [`PostFirePhase::Awaiting`]'s
+    /// `outstanding` — pure delegation through the state machine, the
+    /// no-public-setter seam of [`Self::clear_active_reap`] /
+    /// [`Self::apply_dirty_delta`]. The floor is enforced by the owner,
+    /// [`PostFireBurst::note_effect_completion`].
+    #[must_use]
+    pub fn note_effect_completion(&mut self) -> AwaitVerdict {
+        self.machine.state.note_effect_completion()
+    }
+
     /// The cached nearest covering ancestor Profile (the soft parent
     /// edge). `Copy` read — both real readers (`propagate`'s chain
     /// walk, `collect_pointing_at`'s filter) want the id, not a borrow,
@@ -2944,8 +3018,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use super::{
-        ActiveBurst, BurstFinish, BurstIntent, DescentRemaining, DescentState, PostFireBurst,
-        PostFirePhase, PreFireBurst, PreFirePhase, TimerKind,
+        ActiveBurst, AwaitVerdict, BurstFinish, BurstIntent, DescentRemaining, DescentState,
+        PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, TimerKind,
     };
     use crate::ids::{ProbeCorrelation, TimerId};
     use std::collections::BTreeSet;
@@ -3346,6 +3420,82 @@ mod tests {
             }),
             BurstFinish::ReturnToIdle,
         )
+    }
+
+    fn awaiting_post(outstanding: u32) -> PostFireBurst {
+        PostFireBurst {
+            intent: BurstIntent::Standard,
+            phase: PostFirePhase::Awaiting {
+                outstanding,
+                gate_deadline: tid(9),
+            },
+            force_walk_resources: BTreeSet::new(),
+        }
+    }
+
+    /// The zero-edge: 3 → 2 → 1 → 0 reports `Decremented` until the last
+    /// completion, then `LastReached`.
+    #[test]
+    fn note_effect_completion_counts_down_then_last_reached() {
+        let mut post = awaiting_post(3);
+        assert_eq!(post.note_effect_completion(), AwaitVerdict::Decremented);
+        assert_eq!(post.note_effect_completion(), AwaitVerdict::Decremented);
+        assert_eq!(post.note_effect_completion(), AwaitVerdict::LastReached);
+        assert!(matches!(
+            post.phase,
+            PostFirePhase::Awaiting { outstanding: 0, .. }
+        ));
+    }
+
+    /// A single outstanding effect hits zero on its first completion.
+    #[test]
+    fn note_effect_completion_single_is_last_reached() {
+        assert_eq!(
+            awaiting_post(1).note_effect_completion(),
+            AwaitVerdict::LastReached
+        );
+    }
+
+    /// Rebasing carries no counter — a late completion the post-fire
+    /// counter no longer tracks.
+    #[test]
+    fn note_effect_completion_on_rebasing_is_not_awaiting() {
+        let mut post = PostFireBurst {
+            intent: BurstIntent::Standard,
+            phase: PostFirePhase::Rebasing(ProbeSlot::empty()),
+            force_walk_resources: BTreeSet::new(),
+        };
+        assert_eq!(post.note_effect_completion(), AwaitVerdict::NotAwaiting);
+    }
+
+    /// Over-completion (more `EffectComplete`s than emitted Effects) is
+    /// an invariant breach — the dev/CI floor backstop.
+    #[test]
+    #[should_panic(expected = "outstanding underflow")]
+    fn note_effect_completion_underflow_trips_assert() {
+        let _ = awaiting_post(0).note_effect_completion();
+    }
+
+    /// `Profile` delegates through the state machine: `NotAwaiting` for
+    /// every non-Awaiting state, the live verdict on `Active(Awaiting)`.
+    #[test]
+    fn note_effect_completion_delegates_through_profile() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+
+        assert_eq!(p.note_effect_completion(), AwaitVerdict::NotAwaiting);
+        p.transition_state(pending(r));
+        assert_eq!(p.note_effect_completion(), AwaitVerdict::NotAwaiting);
+        p.transition_state(active_prefire(r));
+        assert_eq!(p.note_effect_completion(), AwaitVerdict::NotAwaiting);
+
+        p.transition_state(ProfileState::Active(
+            ActiveBurst::PostFire(awaiting_post(2)),
+            BurstFinish::ReturnToIdle,
+        ));
+        assert_eq!(p.note_effect_completion(), AwaitVerdict::Decremented);
+        assert_eq!(p.note_effect_completion(), AwaitVerdict::LastReached);
     }
 
     #[test]

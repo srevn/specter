@@ -928,9 +928,10 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
 #[test]
 fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     // Drive to Awaiting; detach the only Sub → reap_pending=true, phase
-    // still Awaiting. Inject EffectComplete::Ok → AwaitAction::Reap →
-    // finish_burst_to_idle → reap_profile (deferred). Profile gone from
-    // registry; ProfileReaped(DeferredFromBurst) diagnostic.
+    // still Awaiting. Inject EffectComplete::Ok → last completion
+    // (LastReached) + BurstFinish::Reap → finish_burst_to_idle →
+    // reap_profile (deferred). Profile gone from registry;
+    // ProfileReaped(DeferredFromBurst) diagnostic.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
@@ -949,8 +950,8 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
         "reap_pending set on Active profile detach",
     );
 
-    // EffectComplete::Ok → AwaitAction::Reap → finish_burst_to_idle →
-    // reap_profile.
+    // EffectComplete::Ok → LastReached + BurstFinish::Reap →
+    // finish_burst_to_idle → reap_profile.
     let reap_out = e.step(
         Input::EffectComplete {
             sub: sid,

@@ -25,12 +25,12 @@ use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
-    ActiveBurst, AnchorClaim, BurstFinish, BurstIntent, ClaimKind, ClassSet, DedupKey,
-    DescentRemaining, Diagnostic, Effect, EffectCommon, EffectOutcome, EffectScope, FiredKey,
-    FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse,
-    ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource,
-    ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure,
-    WatchOp, WatchRegistryDiff,
+    ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind, ClassSet,
+    DedupKey, DescentRemaining, Diagnostic, Effect, EffectCommon, EffectOutcome, EffectScope,
+    FiredKey, FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner,
+    ProbeResponse, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState,
+    ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind,
+    TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -670,16 +670,16 @@ impl Engine {
     /// regardless of phase (Awaiting decrement, late arrival, or
     /// unknown — the cleared entry is correct in every case).
     ///
-    /// The phase routing matches the fire-cycle's `Awaiting` counter:
-    /// - `Active(Awaiting { outstanding > 1, .. })` ⇒ decrement.
-    /// - `Active(Awaiting { outstanding ≤ 1, .. })` + `reap_pending`
-    ///   ⇒ finish the burst (the deferred reap inside
-    ///   `finish_burst_to_idle` runs in the same step).
-    /// - `Active(Awaiting { outstanding ≤ 1, .. })` + `!reap_pending`
-    ///   ⇒ `transition_to_rebasing` (post-fire probe at anchor; the
-    ///   eventual response rebases `baseline := current` and finishes).
-    /// - Anything else (Idle, Pending, Active in a non-Awaiting phase,
-    ///   stale Profile) ⇒ `EffectCompleteOutsideAwaiting` Diagnostic.
+    /// Two passes for borrow shapes (single-threaded `step` ⇒ no change
+    /// between them): pass 1 resolves the route (read borrow), pass 2
+    /// applies the completion (`&mut`). The counter owns its decrement
+    /// and zero-edge ([`specter_core::Profile::note_effect_completion`]);
+    /// this only routes the verdict:
+    /// - `LastReached` ⇒ route on [`BurstFinish`]: `ReturnToIdle` →
+    ///   `transition_to_rebasing`, `Reap` → `finish_burst_to_idle`.
+    /// - `Decremented` ⇒ stay Awaiting.
+    /// - else (non-Awaiting, stale, `NotAwaiting`) ⇒ late completion:
+    ///   `EffectCompleteForUnknownSub` / `EffectCompleteOutsideAwaiting`.
     pub(crate) fn on_effect_complete(
         &mut self,
         sub: SubId,
@@ -706,87 +706,66 @@ impl Engine {
             p.forget_fire(FiredKey::from(key));
         }
 
-        // Resolve the action under a short read borrow, then mutate.
-        // The `BurstFinish` payload on the Active variant is the source
-        // of truth for the Reap-vs-Rebase decision — a Sub that detaches
-        // between the prior `outstanding == N` step and this completion
-        // mutates the directive in place via `mark_active_for_reap`,
-        // and the match arm below sees the post-flip value.
-        let phase_action = match self
+        // Pass 1 (read borrow): route only. Capture the `Copy`
+        // `BurstFinish` here — a Sub detaching mid-Awaiting flips it via
+        // `mark_active_for_reap`, so the captured value is post-flip;
+        // capturing keeps pass 2 a single `&mut` borrow.
+        let route = match self
             .profiles
             .get(profile_id)
             .map(specter_core::Profile::state)
         {
             Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => match &post.phase {
-                PostFirePhase::Awaiting { outstanding, .. } => {
-                    if *outstanding <= 1 {
-                        // Exhaustive match on BurstFinish — the
-                        // boolean ternary is gone.
-                        match finish {
-                            BurstFinish::Reap => AwaitAction::Reap,
-                            BurstFinish::ReturnToIdle => AwaitAction::Rebase,
-                        }
-                    } else {
-                        AwaitAction::Decrement
-                    }
-                }
-                PostFirePhase::Rebasing(_) => AwaitAction::Diagnose,
+                PostFirePhase::Awaiting { .. } => CompletionRoute::CountDown(*finish),
+                PostFirePhase::Rebasing(_) => CompletionRoute::Diagnose,
             },
             // PreFire phases (Batching / Verifying / Draining), Idle,
             // Pending, stale Profile (None): not waiting for this
             // completion — a late arrival the engine no longer tracks.
-            _ => AwaitAction::Diagnose,
+            _ => CompletionRoute::Diagnose,
         };
 
-        match phase_action {
-            AwaitAction::Decrement => {
-                if let Some(post) = self
-                    .profiles
-                    .get_mut(profile_id)
-                    .and_then(specter_core::Profile::post_fire_burst_mut)
-                    && let PostFirePhase::Awaiting {
-                        ref mut outstanding,
-                        ..
-                    } = post.phase
-                {
-                    *outstanding = outstanding.saturating_sub(1);
+        // Pass 2 (`&mut` borrow): the counter owns the decrement and the
+        // zero-edge; this dispatcher only routes the verdict.
+        match route {
+            CompletionRoute::CountDown(finish) => match self
+                .profiles
+                .get_mut(profile_id)
+                .map(specter_core::Profile::note_effect_completion)
+            {
+                Some(AwaitVerdict::Decremented) => {}
+                Some(AwaitVerdict::LastReached) => match finish {
+                    BurstFinish::ReturnToIdle => self.transition_to_rebasing(profile_id, out),
+                    // No Subs left to rebase for; finish_burst_to_idle
+                    // runs the burst-end drain then the deferred reap
+                    // (direct reap_profile would leak the anchor
+                    // suppress).
+                    BurstFinish::Reap => self.finish_burst_to_idle(profile_id, out),
+                },
+                // Off Awaiting between passes (unreachable under
+                // single-threaded `step`) or vanished — late completion.
+                Some(AwaitVerdict::NotAwaiting) | None => {
+                    self.diagnose_late_completion(sub, profile_id, out);
                 }
-            }
-            AwaitAction::Rebase => {
-                self.transition_to_rebasing(profile_id, out);
-            }
-            AwaitAction::Reap => {
-                // Last completion AND reap_pending: skip Rebasing — there
-                // are no Subs left to fire for, so re-establishing a
-                // baseline against disk reality has no consumer. Routing
-                // through `finish_burst_to_idle` runs the burst-end
-                // machinery (sub_suppress, propagate(-1) for Standard
-                // bursts) and then dispatches `reap_profile` via the
-                // reap_pending check — calling `reap_profile` directly
-                // would skip those steps and leak the anchor's suppress
-                // contribution.
-                self.finish_burst_to_idle(profile_id, out);
-            }
-            AwaitAction::Diagnose => {
-                // An unknown Sub at the Diagnose arm is the actionable
-                // case: a completion for a Sub the engine never registered
-                // (or one that was already reaped without being in a
-                // burst). Reach for the Sub-keyed diagnostic since it
-                // tells operators the Sub identity. With Sub still in
-                // the registry, fall back to the phase-keyed
-                // `EffectCompleteOutsideAwaiting` — it pairs the
-                // unexpected late delivery with the owning Profile.
-                if self.subs.get(sub).is_none() {
-                    out.diagnostics
-                        .push(Diagnostic::EffectCompleteForUnknownSub { sub });
-                } else {
-                    out.diagnostics
-                        .push(Diagnostic::EffectCompleteOutsideAwaiting {
-                            sub,
-                            profile: profile_id,
-                        });
-                }
-            }
+            },
+            CompletionRoute::Diagnose => self.diagnose_late_completion(sub, profile_id, out),
+        }
+    }
+
+    /// Diagnostic for a completion the engine no longer Awaits. Unknown
+    /// Sub (detached + reaped) → Sub-keyed
+    /// [`Diagnostic::EffectCompleteForUnknownSub`]; still-registered →
+    /// Profile-keyed [`Diagnostic::EffectCompleteOutsideAwaiting`].
+    fn diagnose_late_completion(&self, sub: SubId, profile_id: ProfileId, out: &mut StepOutput) {
+        if self.subs.get(sub).is_none() {
+            out.diagnostics
+                .push(Diagnostic::EffectCompleteForUnknownSub { sub });
+        } else {
+            out.diagnostics
+                .push(Diagnostic::EffectCompleteOutsideAwaiting {
+                    sub,
+                    profile: profile_id,
+                });
         }
     }
 
@@ -2105,6 +2084,9 @@ impl Engine {
     /// `finalize_anchor_lost`), the helper no-ops. The
     /// `is_timer_referenced` gate already filters most non-Awaiting
     /// fires; this guard handles the residual same-step ordering window.
+    ///
+    /// The `Awaiting.outstanding` access below is a diagnostic-only
+    /// *read*; the field's sole writer is `Profile::note_effect_completion`.
     fn handle_gate_deadline(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
@@ -2631,27 +2613,17 @@ impl EmitMode<'_> {
     }
 }
 
-/// Routing classifier for [`Engine::on_effect_complete`]. Computed under
-/// a short read borrow on `self.profiles`, then dispatched under
-/// `&mut self`. The four arms cover every legitimate outcome:
+/// Pass-1 routing class for [`Engine::on_effect_complete`]: which way
+/// to route once [`specter_core::Profile::note_effect_completion`]'s
+/// verdict is known.
 ///
-/// - `Decrement`: Awaiting with `outstanding > 1`. Subtract one and
-///   stay in Awaiting; more completions are still in flight.
-/// - `Rebase`: Awaiting with `outstanding ≤ 1` and `!reap_pending`.
-///   Last completion arrived; transition to Rebasing to capture the
-///   post-command tree as the new baseline.
-/// - `Reap`: Awaiting with `outstanding ≤ 1` and `reap_pending`. Last
-///   completion arrived AND the Profile lost its last Sub mid-burst;
-///   skip Rebasing and finish the burst (the deferred reap runs inside
-///   `finish_burst_to_idle`).
-/// - `Diagnose`: any non-Awaiting state (Idle, Pending, Active in
-///   another phase, stale Profile). Late completion the engine no
-///   longer tracks; emit `EffectCompleteOutsideAwaiting`.
+/// - `CountDown(finish)`: `Active(PostFire(Awaiting))`. Pass 2 applies
+///   the completion; the last one routes by the captured
+///   [`BurstFinish`] (`ReturnToIdle` → Rebasing, `Reap` → finish).
+/// - `Diagnose`: any non-Awaiting state — a late completion.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-enum AwaitAction {
-    Decrement,
-    Rebase,
-    Reap,
+enum CompletionRoute {
+    CountDown(BurstFinish),
     Diagnose,
 }
 
