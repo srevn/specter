@@ -151,7 +151,7 @@ impl Engine {
             Ok(p) => p,
             Err(err) => {
                 out.diagnostics.push(Diagnostic::AttachPathInvalid {
-                    path: prefix_path,
+                    path: Arc::from(prefix_path),
                     hint: err.hint(),
                 });
                 return None;
@@ -969,7 +969,10 @@ impl Engine {
             });
             self.tree
                 .set_kind(anchor_resource, kind_from_entry(child_kind));
-            let promote_path = target_path.map(|p| p.join(name_str)).unwrap_or_default();
+            let promote_path: Arc<Path> = match target_path {
+                Some(p) => Arc::from(p.join(name_str)),
+                None => Arc::from(Path::new("")),
+            };
             self.try_promote(
                 promoter_id,
                 anchor_resource,
@@ -1118,15 +1121,14 @@ impl Engine {
     /// `attach_sub_inner` cannot return `None` — the `.expect` records
     /// that invariant rather than masking a soft early-return.
     ///
-    /// **`promote_path` is diagnostic-only.** The caller's
-    /// `target_path.join(name_str)` flows through as an owned
-    /// `PathBuf` so the [`Diagnostic::PromotionKindObserved`] payload
-    /// can move it (last use, no clone).
+    /// **`promote_path` is diagnostic-only.** The caller builds it as
+    /// an owned `Arc<Path>` so the [`Diagnostic::PromotionKindObserved`]
+    /// payload can move it (last use, no clone).
     pub(crate) fn try_promote(
         &mut self,
         promoter_id: PromoterId,
         anchor_resource: ResourceId,
-        promote_path: PathBuf,
+        promote_path: Arc<Path>,
         observed_kind: EntryKind,
         now: Instant,
         out: &mut StepOutput,
@@ -1315,13 +1317,13 @@ impl Engine {
         &self,
         promoter_id: PromoterId,
         sub_id: SubId,
-        anchor_path: &Path,
+        anchor_path: &Arc<Path>,
         out: &mut StepOutput,
     ) {
         out.diagnostics.push(Diagnostic::DynamicSubReaped {
             promoter: promoter_id,
             sub: sub_id,
-            path: anchor_path.to_path_buf(),
+            path: Arc::clone(anchor_path),
         });
     }
 

@@ -372,7 +372,7 @@ impl Engine {
                     Ok(p) => p,
                     Err(err) => {
                         out.diagnostics.push(Diagnostic::AttachPathInvalid {
-                            path: path.clone(),
+                            path: std::sync::Arc::from(path.as_path()),
                             hint: err.hint(),
                         });
                         return None;
@@ -1669,7 +1669,7 @@ mod tests {
         let saw = out.diagnostics.iter().any(|d| {
             matches!(
                 d,
-                specter_core::Diagnostic::AttachPathInvalid { path, .. } if path == &bad,
+                specter_core::Diagnostic::AttachPathInvalid { path, .. } if &**path == bad.as_path(),
             )
         });
         assert!(saw, "AttachPathInvalid must carry the offending path");
@@ -1711,7 +1711,7 @@ mod tests {
         assert!(out.diagnostics.iter().any(|d| matches!(
             d,
             specter_core::Diagnostic::AttachPathInvalid { path, hint }
-                if path == &bad && hint.contains("absolute"),
+                if &**path == bad.as_path() && hint.contains("absolute"),
         )));
     }
 
@@ -1758,7 +1758,7 @@ mod tests {
         assert!(out.diagnostics.iter().any(|d| matches!(
             d,
             specter_core::Diagnostic::AttachPathInvalid { path: p, hint }
-                if p == &path && hint.contains("non-UTF-8"),
+                if &**p == path.as_path() && hint.contains("non-UTF-8"),
         )));
     }
 

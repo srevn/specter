@@ -10,7 +10,8 @@ use crate::op::{ProbeOwner, WatchFailure};
 use crate::profile::{BurstIntent, ProfileStateDiscriminant};
 use crate::resource::ResourceKind;
 use compact_str::CompactString;
-use std::path::PathBuf;
+use std::path::Path;
+use std::sync::Arc;
 
 /// Which Profile-side claim was the subject of a [`Diagnostic::ProfileClaimPurged`]
 /// emission. Each claim type has a dedicated bookkeeping field on
@@ -356,17 +357,13 @@ pub enum Diagnostic {
         resource: ResourceId,
         failure: WatchFailure,
     },
-    /// A path-based attach request carried a malformed `PathBuf` —
-    /// empty, containing `.` / `..` (caller should canonicalize), or
-    /// carrying a Windows path prefix (unsupported on Unix v1). The
-    /// engine drops the attach. Defense-in-depth: config validation is
-    /// the canonical guard, but the engine surfaces the reason separately
-    /// so a misuse from the bin or hot reload is visible.
-    ///
-    /// `path` carries the offending request so operators submitting
-    /// multi-path attach batches (hot reload `ConfigDiff::added`) can
-    /// identify which entry failed without re-scanning the config.
-    AttachPathInvalid { path: PathBuf, hint: &'static str },
+    /// A path-based attach request carried a malformed path — empty,
+    /// containing `.` / `..`, or a Windows prefix (unsupported on Unix
+    /// v1). The engine drops the attach; no Sub is registered. `path`
+    /// is the offending request and `hint` the rejection reason, so an
+    /// operator submitting a hot-reload batch can identify the bad
+    /// entry without re-scanning the config.
+    AttachPathInvalid { path: Arc<Path>, hint: &'static str },
     /// A resource-anchored attach request named a [`ResourceId`] with no
     /// live Tree slot (reaped, never-existed, or a default sentinel).
     /// The engine drops the attach and surfaces the offending id rather
@@ -375,61 +372,25 @@ pub enum Diagnostic {
     AttachResourceStale { resource: ResourceId },
     /// A probe response's snapshot shape (`File` from `AnchorOk(_)` vs
     /// `Dir` from `SubtreeOk(_)`) disagrees with the Profile's cached
-    /// [`crate::Profile::kind`].
-    ///
-    /// Structurally unreachable in v1: the engine emits a typed
-    /// [`crate::ProbeRequest::AnchorFile`] for `File`-kinded Profiles
-    /// and [`crate::ProbeRequest::Subtree`] for everything else, and
-    /// the walker's `ProbeOutcome` variant matches the request shape
-    /// by construction. The variant exists as a defensive backstop
-    /// against a future walker regression (e.g., a fresh probe shape
-    /// short-circuiting the request's typing). On observation, the
-    /// engine routes through `Engine::finalize_anchor_lost`: the
-    /// prior baseline / current become invalid under the new on-disk
-    /// shape, the anchor watch is released, and the parent watch is
-    /// preserved for descent re-recovery.
-    ///
-    /// Defense-in-depth — preferred over a `debug_assert!` that
-    /// panics in dev / CI but silently misroutes in release, because
-    /// kind mismatch is the kind of routing breach that compounds
-    /// (a Dir snapshot grafted onto a File-kinded Profile leaks watch
-    /// contributions and breaks the cross-field invariant before any
-    /// downstream observation surfaces it).
+    /// [`crate::Profile::kind`]. Structurally unreachable in v1 (the
+    /// engine types each probe request to the Profile's kind and the
+    /// walker's outcome matches by construction), so an emission
+    /// signals a walker regression. The engine recovers by treating
+    /// the anchor as lost and re-deriving from disk.
     AnchorKindMismatch {
         profile: ProfileId,
         prior_kind: ResourceKind,
         response_kind: ResourceKind,
     },
     /// `splice` could not navigate from the prior snapshot's anchor
-    /// down to `target`. `cause` demuxes the three structural failure
-    /// modes (see [`SpliceFailureCause`] for the full description of
-    /// each variant); the short form:
-    /// - [`SpliceFailureCause::TargetOutsideAnchorSubtree`] — `target`
-    ///   is outside the anchor's tree subtree.
-    /// - [`SpliceFailureCause::SlotReapedMidGraft`] — an interior
-    ///   segment's slot was reaped between burst start and graft commit.
-    /// - [`SpliceFailureCause::IntermediateUncovered`] — the path
-    ///   crossed a `DirChild::Uncovered(_)` intermediate (snapshot
-    ///   coverage gap), a missing entry, or a `Leaf` at an interior
-    ///   segment.
-    ///
-    /// Engine contract is "graft only into observed subtrees", so any
-    /// emission indicates a contract violation. The variant exists to
-    /// surface the breach in operator logs; the engine falls back to
-    /// keeping its prior view (no integration of `replacement`) and
-    /// converges on the next probe.
-    ///
-    /// File-anchored Profiles never call `splice` (their Profile.current
-    /// is `TreeSnapshot::File(leaf)`, integrated by an inline write at
-    /// dispatch time, never grafted), so only the Dir-prior triggers
-    /// above apply.
-    ///
-    /// After the walker-race fix, [`SpliceFailureCause::IntermediateUncovered`]
-    /// is the only variant reachable through legitimate filesystem
-    /// state, and only via cross-filesystem boundaries (the walker
-    /// stores a mount slot as `Uncovered` per `cmeta.dev() != root_dev`).
-    /// The other two indicate upstream LCA / Tree lifecycle
-    /// regressions and remain v1-unreachable.
+    /// down to `target`; `cause` demuxes the structural failure mode
+    /// (see [`SpliceFailureCause`]). The engine contract is "graft
+    /// only into observed subtrees", so any emission is a contract
+    /// breach: the engine keeps its prior view and converges on the
+    /// next probe. Only [`SpliceFailureCause::IntermediateUncovered`]
+    /// is reachable through legitimate state (a cross-filesystem
+    /// boundary); the other two signal an upstream LCA / Tree
+    /// lifecycle regression.
     SpliceCrossedUncovered {
         profile: ProfileId,
         target: ResourceId,
@@ -459,18 +420,13 @@ pub enum Diagnostic {
         profile: ProfileId,
         outstanding: u32,
     },
-    /// `Input::SensorOverflow` arrived from the Sensor — the kernel's
-    /// event queue dropped record(s) over `scope` and the watcher
-    /// surfaced the loss-of-trust signal. The engine reseeded every
-    /// in-scope Profile via `start_seed_burst`; the diagnostic surfaces
-    /// the event in operator logs so the underlying load condition
-    /// (`max_queued_events` saturation, slow downstream actuator
-    /// blocking the watcher's drain) can be tuned.
-    ///
-    /// One emission per overflow record. The emitted variant is the
-    /// engine's only signal that "we missed events" — the bursts the
-    /// reseed schedules carry no per-Profile annotation that they were
-    /// triggered by overflow rather than a normal `FsEvent`.
+    /// `Input::SensorOverflow` arrived — the kernel's event queue
+    /// dropped record(s) over `scope` and the watcher surfaced the
+    /// loss-of-trust signal. The engine reseeds every in-scope Profile
+    /// against disk. One emission per overflow record; it is the
+    /// engine's only "we missed events" signal, so an operator seeing
+    /// it should tune the load condition (`max_queued_events`
+    /// saturation, a slow actuator blocking the watcher's drain).
     SensorOverflow { scope: OverflowScope },
     /// `Input::SensorOverflow` arrived from the Sensor; the engine
     /// reseeded `promoter` (alongside any in-scope Profiles surfaced by
@@ -488,16 +444,12 @@ pub enum Diagnostic {
     /// schedules carry no per-Promoter annotation that they were
     /// triggered by overflow rather than a normal `FsEvent`.
     PromoterReseededForOverflow { promoter: PromoterId },
-    /// A `PerStableFile` Sub's loss-window reactions were dropped: the
-    /// recovery Seed rebased `baseline := observed`, absorbing the
-    /// delta (the Subtree side re-fires from the survival witness; the
-    /// per-file path keeps none — a v1 limitation). Emitted once per
-    /// recovery Seed-Ok with a live witness, real drift (`current`
-    /// hash ≠ witness; a byte-identical recovery emits nothing), and
-    /// ≥1 `PerStableFile` Sub. Witness-gated: a plain `SensorOverflow`
-    /// reseed of a `Snapshot`-baseline Profile drops the same way but
-    /// is not flagged (a further deferred v1 limitation).
-    /// Informational — the dropped reactions cannot be reconstructed.
+    /// A `PerStableFile` Sub's loss-window reactions were dropped: a
+    /// recovery reseed absorbed the change into the rebased baseline
+    /// and the per-file path keeps no survival witness (a v1
+    /// limitation). Emitted once per recovery with real drift and ≥1
+    /// `PerStableFile` Sub. Informational — the dropped reactions
+    /// cannot be reconstructed.
     PerFileDriftDroppedOnRecovery { profile: ProfileId },
     /// A Sub has been registered with the engine and assigned `sub`.
     /// Emitted by `attach_sub_inner` on every successful insert —
@@ -549,15 +501,13 @@ pub enum Diagnostic {
         prefix: ResourceId,
         errno: i32,
     },
-    /// Promoter enumeration matched `path` and the engine has minted a
-    /// dynamic Sub for it. `kind` is the kind the snapshot reports for
-    /// the matched entry. The bin uses this for operator-visible
-    /// "promotion observed" logs; the engine's own dedup bookkeeping is
-    /// the derived `SubRegistry` query (`promoter_already_promoted`),
-    /// not a Promoter-side map.
+    /// Promoter enumeration matched `path` and the engine minted a
+    /// dynamic Sub for it; `kind` is the snapshot's kind for the
+    /// matched entry. Operator narration — the bin logs it as
+    /// "promotion observed".
     PromotionKindObserved {
         promoter: PromoterId,
-        path: PathBuf,
+        path: Arc<Path>,
         kind: ResourceKind,
     },
     /// The Promoter's live dynamic-Sub count (derived from
@@ -599,16 +549,13 @@ pub enum Diagnostic {
         proxy: ResourceId,
         errno: i32,
     },
-    /// A dynamic Sub minted by `promoter` at `path` has been reaped
-    /// because its anchor disappeared (the all-dynamic teardown of
-    /// `on_anchor_terminal_event`). Pure operator narration — the Sub
-    /// is removed from `SubRegistry` by the teardown itself; the
-    /// derived dedup gate then re-promotes if/when the path
-    /// re-materialises and a fresh enumeration matches it.
+    /// A dynamic Sub minted by `promoter` at `path` was reaped because
+    /// its anchor disappeared. Operator narration; if the path
+    /// re-materialises a fresh enumeration re-promotes it.
     DynamicSubReaped {
         promoter: PromoterId,
         sub: SubId,
-        path: PathBuf,
+        path: Arc<Path>,
     },
     /// A burst-lifecycle helper was invoked on a Profile whose state
     /// did not match the helper's typed precondition (e.g.,
