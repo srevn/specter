@@ -533,12 +533,6 @@ fn release_descendant_claim_drains_suppress_via_vacate() {
     let purge_out = e.step(
         Input::WatchOpRejected {
             resource: anchor,
-            op: WatchOp::Watch {
-                resource: anchor,
-                path: std::sync::Arc::from(std::path::Path::new("a")),
-                kind: ResourceKind::Dir,
-                events: ClassSet::STRUCTURE,
-            },
             failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),

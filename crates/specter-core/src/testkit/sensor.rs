@@ -113,19 +113,11 @@ impl MockSensor {
     }
 
     /// Mirror of [`fs_event`](Self::fs_event) for FD-pressure recovery —
-    /// wraps the rejected op + typed [`WatchFailure`] into the engine
-    /// input shape.
+    /// wraps the rejected `resource` + typed [`WatchFailure`] into the
+    /// engine input shape.
     #[must_use]
-    pub const fn watch_op_rejected(
-        resource: ResourceId,
-        op: WatchOp,
-        failure: WatchFailure,
-    ) -> Input {
-        Input::WatchOpRejected {
-            resource,
-            op,
-            failure,
-        }
+    pub const fn watch_op_rejected(resource: ResourceId, failure: WatchFailure) -> Input {
+        Input::WatchOpRejected { resource, failure }
     }
 }
 
@@ -345,24 +337,14 @@ mod tests {
 
         let ids = fresh_resource_ids(1);
         let r = ids[0];
-        let op = WatchOp::Watch {
-            resource: r,
-            path: Arc::from(Path::new("/tmp/p")),
-            kind: ResourceKind::Unknown,
-            events: ClassSet::EMPTY,
-        };
         let input =
-            MockSensor::watch_op_rejected(r, op, crate::WatchFailure::Pressure { errno: EMFILE });
+            MockSensor::watch_op_rejected(r, crate::WatchFailure::Pressure { errno: EMFILE });
         match input {
-            Input::WatchOpRejected {
-                resource,
-                op: WatchOp::Watch { .. },
-                failure,
-            } => {
+            Input::WatchOpRejected { resource, failure } => {
                 assert_eq!(resource, r);
                 assert_eq!(failure, crate::WatchFailure::Pressure { errno: EMFILE });
             }
-            _ => panic!("expected WatchOpRejected{{ Watch, Pressure(EMFILE) }}"),
+            _ => panic!("expected WatchOpRejected{{ Pressure(EMFILE) }}"),
         }
     }
 }

@@ -168,12 +168,8 @@ impl Engine {
             Input::EffectComplete { sub, key, result } => {
                 self.on_effect_complete(sub, &key, &result, now, &mut out);
             }
-            Input::WatchOpRejected {
-                resource,
-                op,
-                failure,
-            } => {
-                self.on_watch_op_rejected(resource, op, failure, &mut out);
+            Input::WatchOpRejected { resource, failure } => {
+                self.on_watch_op_rejected(resource, failure, &mut out);
             }
             Input::ConfigDiff(diff) => {
                 self.on_config_diff(diff, now, &mut out);
@@ -1457,13 +1453,9 @@ mod tests {
         // Stale ResourceId or already-Unwatched resource yields a
         // Diagnostic + no other ops.
         let mut e = Engine::new();
-        let op = WatchOp::Unwatch {
-            resource: ResourceId::default(),
-        };
         let out = e.step(
             Input::WatchOpRejected {
                 resource: ResourceId::default(),
-                op,
                 failure: specter_core::WatchFailure::Pressure { errno: 24 },
             },
             Instant::now(),

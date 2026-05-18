@@ -987,7 +987,7 @@ fn on_probe_response_routes_descent_via_state_match() {
 /// `on_watch_op_rejected` purge transitions Pending → Idle.
 #[test]
 fn on_watch_op_rejected_clears_pending_state() {
-    use specter_core::{ClassSet, ProfileState, ResourceKind, WatchOp};
+    use specter_core::ProfileState;
     let (mut e, _sid, pid) = setup_pending_one_level();
     let foo = lookup_foo(&e);
     assert!(matches!(
@@ -998,12 +998,6 @@ fn on_watch_op_rejected_clears_pending_state() {
     let _ = e.step(
         Input::WatchOpRejected {
             resource: foo,
-            op: WatchOp::Watch {
-                resource: foo,
-                path: std::sync::Arc::from(std::path::Path::new("foo")),
-                kind: ResourceKind::Unknown,
-                events: ClassSet::EMPTY,
-            },
             failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -1039,7 +1033,7 @@ fn descent_remaining_from_empty_vec_is_none() {
 /// Profile transitions Pending → Idle in the same step.
 #[test]
 fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
-    use specter_core::{ClassSet, ProfileState, ResourceKind, WatchOp};
+    use specter_core::ProfileState;
     let (mut e, _sid, pid) = setup_pending_one_level();
     let foo = lookup_foo(&e);
     assert!(
@@ -1054,12 +1048,6 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
     let out = e.step(
         Input::WatchOpRejected {
             resource: foo,
-            op: WatchOp::Watch {
-                resource: foo,
-                path: std::sync::Arc::from(std::path::Path::new("foo")),
-                kind: ResourceKind::Unknown,
-                events: ClassSet::EMPTY,
-            },
             failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),

@@ -31,7 +31,7 @@ use specter_core::{
     EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent, PostFirePhase,
     PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, ProfileId, ProfileState,
     PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource, ResourceId, ResourceKind,
-    StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
+    StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchRegistryDiff,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -1039,7 +1039,6 @@ impl Engine {
     pub(crate) fn on_watch_op_rejected(
         &mut self,
         resource: ResourceId,
-        _op: WatchOp,
         failure: WatchFailure,
         out: &mut StepOutput,
     ) {

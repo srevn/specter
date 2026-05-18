@@ -2,7 +2,7 @@
 
 use crate::effect::{DedupKey, EffectOutcome};
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
-use crate::op::{ProbeResponse, WatchFailure, WatchOp};
+use crate::op::{ProbeResponse, WatchFailure};
 use crate::profile::TimerKind;
 use crate::promoter::{PromoterAttachRequest, PromoterRegistryDiff};
 use crate::sub::{SubAttachRequest, SubRegistryDiff};
@@ -86,7 +86,6 @@ pub enum Input {
     },
     WatchOpRejected {
         resource: ResourceId,
-        op: WatchOp,
         failure: WatchFailure,
     },
     ConfigDiff(WatchRegistryDiff),

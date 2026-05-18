@@ -1998,12 +1998,6 @@ fn watch_op_rejected_clamps_watch_demand_to_zero() {
     let result = e.step(
         Input::WatchOpRejected {
             resource: r,
-            op: WatchOp::Watch {
-                resource: r,
-                path: std::sync::Arc::from(std::path::Path::new("")),
-                kind: specter_core::ResourceKind::Unknown,
-                events: specter_core::ClassSet::EMPTY,
-            },
             failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -2032,7 +2026,6 @@ fn watch_op_rejected_already_unwatched_emits_diagnostic_only() {
     let result = e.step(
         Input::WatchOpRejected {
             resource: r,
-            op: WatchOp::Unwatch { resource: r },
             failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -2084,12 +2077,6 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     let result = e.step(
         Input::WatchOpRejected {
             resource: foo,
-            op: WatchOp::Watch {
-                resource: foo,
-                path: std::sync::Arc::from(std::path::Path::new("foo")),
-                kind: specter_core::ResourceKind::Unknown,
-                events: specter_core::ClassSet::EMPTY,
-            },
             failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -2152,12 +2139,6 @@ fn watch_op_rejected_for_anchored_profile_emits_anchor_claim_purged() {
     let result = e.step(
         Input::WatchOpRejected {
             resource: r,
-            op: WatchOp::Watch {
-                resource: r,
-                path: std::sync::Arc::from(std::path::Path::new("")),
-                kind: specter_core::ResourceKind::Unknown,
-                events: specter_core::ClassSet::EMPTY,
-            },
             failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -2233,12 +2214,6 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     let result = e.step(
         Input::WatchOpRejected {
             resource: foo,
-            op: WatchOp::Watch {
-                resource: foo,
-                path: std::sync::Arc::from(std::path::Path::new("foo")),
-                kind: specter_core::ResourceKind::Unknown,
-                events: specter_core::ClassSet::EMPTY,
-            },
             failure: specter_core::WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),

@@ -516,9 +516,10 @@ pub(crate) fn config_watcher_loop<W: ConfigWatcher>(
 /// watcher type for the same testability reason as
 /// [`watcher_loop`].
 ///
-/// Takes `op` by value because the rejection path constructs the
-/// `WatchOpRejected` payload with the same path; on success we do not
-/// need to clone.
+/// Takes `op` by value to move `WatchOp::Watch`'s `path` out for the
+/// borrowing `watcher.watch` call without cloning; the rejection
+/// payload carries only `resource` + `failure` (the engine demuxes on
+/// the typed `failure`, never the rejected op's shape).
 pub(crate) fn apply_watch_op<W: FsWatcher>(
     watcher: &mut W,
     op: WatchOp,
@@ -532,17 +533,7 @@ pub(crate) fn apply_watch_op<W: FsWatcher>(
             events,
         } => {
             if let Err(failure) = watcher.watch(resource, &path, kind, events) {
-                let rejected = WatchOp::Watch {
-                    resource,
-                    path,
-                    kind,
-                    events,
-                };
-                let _ = sensor_in_tx.send(Input::WatchOpRejected {
-                    resource,
-                    op: rejected,
-                    failure,
-                });
+                let _ = sensor_in_tx.send(Input::WatchOpRejected { resource, failure });
             }
         }
         WatchOp::Unwatch { resource } => watcher.unwatch(resource),

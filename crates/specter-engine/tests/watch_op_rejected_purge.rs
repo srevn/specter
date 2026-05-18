@@ -15,11 +15,11 @@ use specter_core::{
     Input, LeafEntry, PatternSpec, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
     ProbeResponse, ProfileId, ProfileIdentity, ProfileState, PromoterAttachRequest,
     PromoterClaimKind, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchFailure, WatchOp,
+    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchFailure,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -124,12 +124,6 @@ fn anchor_claim_purged_then_detach_no_panic() {
     let purge_out = e.step(
         Input::WatchOpRejected {
             resource: root,
-            op: WatchOp::Watch {
-                resource: root,
-                path: Arc::from(Path::new("src")),
-                kind: ResourceKind::Unknown,
-                events: ClassSet::EMPTY,
-            },
             failure: WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -193,12 +187,6 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
     let _ = e.step(
         Input::WatchOpRejected {
             resource: root,
-            op: WatchOp::Watch {
-                resource: root,
-                path: Arc::from(Path::new("src")),
-                kind: ResourceKind::Unknown,
-                events: ClassSet::EMPTY,
-            },
             failure: WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -242,12 +230,6 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
     let purge_out = e.step(
         Input::WatchOpRejected {
             resource: root,
-            op: WatchOp::Watch {
-                resource: root,
-                path: Arc::from(Path::new("src")),
-                kind: ResourceKind::Unknown,
-                events: ClassSet::EMPTY,
-            },
             failure: WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -329,12 +311,6 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
     let purge_out = e.step(
         Input::WatchOpRejected {
             resource: parent,
-            op: WatchOp::Watch {
-                resource: parent,
-                path: Arc::from(Path::new("var")),
-                kind: ResourceKind::Unknown,
-                events: ClassSet::EMPTY,
-            },
             failure: WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -408,12 +384,6 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     let purge_out = e.step(
         Input::WatchOpRejected {
             resource: foo,
-            op: WatchOp::Watch {
-                resource: foo,
-                path: Arc::from(Path::new("foo")),
-                kind: ResourceKind::Unknown,
-                events: ClassSet::EMPTY,
-            },
             failure: WatchFailure::Pressure { errno: 24 },
         },
         Instant::now(),
@@ -492,15 +462,9 @@ fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     r
 }
 
-fn watch_op_rejected_input(resource: ResourceId, path: &str) -> Input {
+fn watch_op_rejected_input(resource: ResourceId) -> Input {
     Input::WatchOpRejected {
         resource,
-        op: WatchOp::Watch {
-            resource,
-            path: Arc::from(Path::new(path)),
-            kind: ResourceKind::Unknown,
-            events: ClassSet::EMPTY,
-        },
         failure: WatchFailure::Pressure { errno: 24 },
     }
 }
@@ -534,7 +498,7 @@ fn watch_op_rejected_purges_promoter_descent_prefix() {
         .expect("descent probe in flight");
 
     // Reject the kernel watch on /a (the descent prefix).
-    let purge_out = e.step(watch_op_rejected_input(a, "/a"), now);
+    let purge_out = e.step(watch_op_rejected_input(a), now);
 
     // Promoter transitioned out of PrefixPending; channel closed.
     assert!(matches!(
@@ -618,7 +582,7 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
     assert!(e.pending_probe_for(ProbeOwner::Promoter(qid)).is_none());
 
     // Reject the kernel watch on /a (the proxy).
-    let purge_out = e.step(watch_op_rejected_input(a, "/a"), now);
+    let purge_out = e.step(watch_op_rejected_input(a), now);
 
     // Proxy unregistered. Counter zeroed by clamp; back-ref cleared.
     match e.promoters().get(qid).unwrap().state() {
@@ -711,7 +675,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
     // Reject the kernel watch at /a — co-claimed by Profile descent
     // (ClaimKind::DescentPrefix) and Promoter active proxy
     // (PromoterClaimKind::ActiveProxy).
-    let purge_out = e.step(watch_op_rejected_input(a, "/a"), now);
+    let purge_out = e.step(watch_op_rejected_input(a), now);
 
     // Counter zeroed; both claims released.
     assert_eq!(

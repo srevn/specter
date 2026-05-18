@@ -198,7 +198,7 @@ pub trait FsWatcher: Send {
     /// errno set (e.g. via [`WatchFailureExt::from_io`]) at the trait
     /// boundary, and the engine demuxes on the variant rather than on
     /// raw errno values. The bin packages a non-`Ok` return as
-    /// `Input::WatchOpRejected { resource, op, failure }` for the engine,
+    /// `Input::WatchOpRejected { resource, failure }` for the engine,
     /// which clamps `watch_demand` to zero and waits for the parent's
     /// next `StructureChanged` to retry.
     ///
