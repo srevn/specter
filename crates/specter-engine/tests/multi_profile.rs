@@ -25,11 +25,12 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ActiveBurst, BurstFinish, ChildEntry, ClassSet, Diff, DirChild, DirMeta,
-    DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry, PostFireBurst,
-    PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachAnchor, SubAttachRequest, WatchOp,
+    ActionProgram, ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, Diff, DirChild,
+    DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry,
+    OverflowScope, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -1324,4 +1325,452 @@ fn diff_unused_signals_reachable() {
     // Reference-only: keep the `Diff` symbol exercised so the import
     // doesn't go stale.
     let _: Option<&Diff> = None;
+}
+
+/// Fixture for the sensor-overflow × Draining-ancestor scenarios. A
+/// recursive parent Profile `A` at `/src` is parked in `Draining`,
+/// gated by its covered child Profile `D` at `/src/child` which is
+/// mid-Standard-burst (its Verify probe still in flight).
+struct DrainingFixture {
+    e: Engine,
+    src: ResourceId,
+    child_dir: ResourceId,
+    pid_parent: ProfileId,
+    pid_child: ProfileId,
+    sid_parent: SubId,
+    sid_child: SubId,
+    /// The fixture clock at the point the parent reached `Draining`;
+    /// subsequent steps reuse it so the scenario stays deterministic.
+    t2: Instant,
+}
+
+/// Build [`DrainingFixture`]. The child Profile is attached *first* so
+/// its `ProfileId` takes the earlier slotmap slot —
+/// `Engine::profiles().iter()` (the very iterator the Global overflow
+/// snapshot consumes) then yields the descendant `D` before the
+/// ancestor `A`. That descendant-before-ancestor order is the one that
+/// exercises the sweep↔reseed-loop seam: `finish_burst_to_idle(D)`'s
+/// Draining sweep flips `A` `Draining→Verifying` *before* a reseed loop
+/// would otherwise reach `A`. The order is asserted, not assumed, so a
+/// future slotmap change cannot silently make the fixture order-lucky.
+fn draining_parent_gated_by_child() -> DrainingFixture {
+    let mut e = Engine::new();
+    let src = e.tree_mut().ensure_root("src", ResourceRole::User);
+    e.tree_mut().set_kind(src, ResourceKind::Dir);
+    let child_dir = e
+        .tree_mut()
+        .ensure_child(src, "child", ResourceRole::User)
+        .expect("test live parent");
+    e.tree_mut().set_kind(child_dir, ResourceKind::Dir);
+
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let now = Instant::now();
+
+    // Child `D` @ /src/child FIRST — earlier slot ⇒ iterates before `A`.
+    let out_c = e.step(
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "child".into(),
+            SubAttachAnchor::Resource(child_dir),
+            cfg.clone(),
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
+        now,
+    );
+    let sid_child =
+        specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
+    let pid_child = e.subs().get(sid_child).unwrap().profile;
+    let child_seed = first_probe_correlation(&out_c).unwrap();
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: child_seed,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        now,
+    );
+
+    // Parent `A` @ /src — recursive, so it covers /src/child.
+    let out_p = e.step(
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "parent".into(),
+            SubAttachAnchor::Resource(src),
+            cfg,
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
+        now,
+    );
+    let sid_parent =
+        specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
+    let pid_parent = e.subs().get(sid_parent).unwrap().profile;
+    let parent_seed = first_probe_correlation(&out_p).unwrap();
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_seed,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        now,
+    );
+
+    // The descendant-before-ancestor premise — asserted, not assumed.
+    let order: Vec<ProfileId> = e.profiles().iter().map(|(id, _)| id).collect();
+    let pos = |target: ProfileId| {
+        order
+            .iter()
+            .position(|&id| id == target)
+            .expect("profile present in iteration")
+    };
+    assert!(
+        pos(pid_child) < pos(pid_parent),
+        "fixture premise: covered child must iterate before its ancestor \
+         (descendant-before-ancestor is the order that drives the \
+         sweep↔reseed-loop seam)",
+    );
+
+    // Child Standard burst from its own anchor `child_dir`; parent
+    // Standard burst from its own anchor `src`. A NO_EVENTS Profile
+    // only bursts from an event at its own anchor, so the two events
+    // stay isolated.
+    let t1 = now + Duration::from_millis(10);
+    e.step(
+        Input::FsEvent {
+            resource: child_dir,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    e.step(
+        Input::FsEvent {
+            resource: src,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+
+    // Drain settle timers → both Profiles reach their Verify probe.
+    let t2 = t1 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(t2) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t2,
+        );
+    }
+
+    // Parent stabilises while the child still gates it → Draining.
+    let parent_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight");
+    assert!(
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "child gates the parent before the parent stabilises",
+    );
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_corr,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        t2,
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid_parent).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Draining,
+                    ..
+                }),
+                BurstFinish::ReturnToIdle
+            ),
+        ),
+        "fixture: parent parked in Draining",
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Profile(pid_child))
+            .is_some(),
+        "fixture: child's Verify probe still in flight (gating descendant)",
+    );
+
+    DrainingFixture {
+        e,
+        src,
+        child_dir,
+        pid_parent,
+        pid_child,
+        sid_parent,
+        sid_child,
+        t2,
+    }
+}
+
+#[test]
+fn global_overflow_excludes_draining_ancestor_keeps_reconfirm() {
+    // F-CRIT-1 / F-HIGH-2 regression. A Global sensor overflow lands
+    // while `A` is `Draining` and its covered child `D` is mid-burst,
+    // with `D` iterating before `A`. The overflow loop processes `D`
+    // first: `finish_burst_to_idle(D)`'s Draining sweep flips `A`
+    // `Draining→Verifying` and arms exactly one reconfirm Probe. Without
+    // the snapshot-time Draining exclusion the loop then reaches `A`
+    // (now `Verifying`, so an iteration-time phase guard never sees
+    // `Draining`), tears it down, and reseeds it — discarding `A`'s
+    // verified-stable `current` and the descendant-driven reconfirm. The
+    // snapshot-time exclusion removes `A` from the loop entirely, so the
+    // sweep's single reconfirm stands.
+    let DrainingFixture {
+        mut e,
+        pid_parent,
+        pid_child,
+        t2,
+        ..
+    } = draining_parent_gated_by_child();
+
+    assert!(
+        e.profiles().get(pid_parent).unwrap().current().is_some(),
+        "fixture: Draining ancestor holds a verified-stable `current`",
+    );
+
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        t2,
+    );
+
+    // At most one probe op for the ancestor, and it is the sweep's
+    // reconfirm Probe — never a second same-owner emit.
+    let owner = ProbeOwner::Profile(pid_parent);
+    let parent_ops: Vec<&ProbeOp> = out
+        .probe_ops()
+        .iter()
+        .filter(|op| op.owner() == owner)
+        .collect();
+    assert_eq!(
+        parent_ops.len(),
+        1,
+        "exactly one probe op for the Draining ancestor (≤1-per-owner)",
+    );
+    assert!(
+        matches!(parent_ops[0], ProbeOp::Probe { .. }),
+        "the single ancestor op is the sweep's reconfirm Probe, not a Cancel",
+    );
+
+    // DISCRIMINATOR. Post-fix `A` stays on the descendant-driven
+    // Standard reconfirm the sweep armed. Pre-fix the reseed loop tears
+    // it down and it returns as `Seed`. `intent == Standard` is the
+    // assertion that fails without the snapshot-time exclusion.
+    assert!(
+        matches!(
+            e.profiles().get(pid_parent).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Verifying(_),
+                    intent: BurstIntent::Standard,
+                    ..
+                }),
+                BurstFinish::ReturnToIdle
+            ),
+        ),
+        "Draining ancestor reconfirms as Standard — NOT reseeded to Seed",
+    );
+
+    // The verified-stable snapshot survived: a reseed would have routed
+    // `A` through `finish_burst_to_idle`, discarding it.
+    assert!(
+        e.profiles().get(pid_parent).unwrap().current().is_some(),
+        "ancestor's verified `current` preserved across overflow",
+    );
+
+    // Surgical: the in-scope, non-Draining descendant IS still reseeded
+    // — the exclusion is Draining-only, not a blanket overflow skip.
+    assert!(
+        matches!(
+            e.profiles().get(pid_child).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    intent: BurstIntent::Seed,
+                    ..
+                }),
+                _
+            ),
+        ),
+        "non-Draining descendant still reseeded (exclusion is Draining-only)",
+    );
+
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+#[test]
+fn resource_overflow_excludes_draining_ancestor_keeps_reconfirm() {
+    // The Resource-scoped arm of the same exclusion. A covered
+    // descendant's anchor is always a strict tree-descendant of its
+    // ancestor's anchor, and `OverflowScope::Resource(r)` selects the
+    // whole subtree rooted at `r` — so a Draining ancestor and its
+    // gating descendant are *necessarily* both in scope when `r` is the
+    // ancestor's anchor; the descendant cannot be scoped out while the
+    // ancestor is scoped in. This pins the `profiles_in_subtree`
+    // snapshot path (distinct from the Global `profiles().iter()` path)
+    // so the exclusion cannot silently regress to a Global-only filter.
+    // The scope-independent properties (≤1-per-owner, `current`
+    // preserved, descendant still reseeded) are proven by the Global
+    // test and deliberately not repeated here.
+    let DrainingFixture {
+        mut e,
+        src,
+        pid_parent,
+        t2,
+        ..
+    } = draining_parent_gated_by_child();
+
+    e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Resource(src),
+        },
+        t2,
+    );
+
+    // The discriminator, reached through the Resource snapshot path:
+    // the in-scope Draining ancestor is excluded from the reseed and
+    // stays on the sweep's Standard reconfirm instead of returning Seed.
+    assert!(
+        matches!(
+            e.profiles().get(pid_parent).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Verifying(_),
+                    intent: BurstIntent::Standard,
+                    ..
+                }),
+                BurstFinish::ReturnToIdle
+            ),
+        ),
+        "in-scope Draining ancestor reconfirms as Standard — NOT reseeded",
+    );
+
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+#[test]
+fn overflow_on_draining_reap_ancestor_defers_reap_to_reconfirm() {
+    // Reap sub-shape. The Draining ancestor's sole Sub is detached
+    // mid-Draining, flipping its burst-finish directive to a deferred
+    // `Reap`. A Global overflow then arrives. Without the snapshot-time
+    // exclusion the reseed loop reaches the ancestor (the sweep already
+    // moved it `Draining→Verifying`), takes its `will_reap` branch, and
+    // `finish_burst_to_idle` honours the directive — the Profile is
+    // reaped *inside the overflow step*, before its descendant-driven
+    // reconfirm could run. With the exclusion the ancestor stays out of
+    // the loop: the sweep arms its lone reconfirm Probe, the `Reap`
+    // directive rides through unchanged, and the reap is correctly
+    // deferred to that reconfirm's resolution (the standard
+    // Draining-exit contract, covered elsewhere).
+    let DrainingFixture {
+        mut e,
+        pid_parent,
+        pid_child,
+        sid_parent,
+        t2,
+        ..
+    } = draining_parent_gated_by_child();
+
+    // Detach the ancestor's sole Sub mid-Draining → deferred Reap.
+    let _ = e.step(Input::DetachSub(sid_parent), t2);
+    assert!(
+        matches!(
+            e.profiles().get(pid_parent).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Draining,
+                    ..
+                }),
+                BurstFinish::Reap
+            ),
+        ),
+        "fixture: ancestor is Draining with a deferred Reap directive",
+    );
+    assert_eq!(
+        e.profiles().get(pid_parent).unwrap().state().burst_finish(),
+        Some(BurstFinish::Reap),
+    );
+
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        t2,
+    );
+
+    // DISCRIMINATOR. Post-fix the ancestor is NOT reaped inside the
+    // overflow step — it survives as the sweep's reconfirm with the
+    // Reap directive intact. Pre-fix the loop's `will_reap` branch
+    // reaps it here, so the Profile would already be gone.
+    assert!(
+        e.profiles().get(pid_parent).is_some(),
+        "Draining+Reap ancestor NOT reaped inside the overflow step",
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid_parent).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Verifying(_),
+                    intent: BurstIntent::Standard,
+                    ..
+                }),
+                BurstFinish::Reap
+            ),
+        ),
+        "ancestor reconfirms as Standard with the Reap directive preserved",
+    );
+
+    let owner = ProbeOwner::Profile(pid_parent);
+    let parent_ops: Vec<&ProbeOp> = out
+        .probe_ops()
+        .iter()
+        .filter(|op| op.owner() == owner)
+        .collect();
+    assert_eq!(parent_ops.len(), 1, "one probe op for the ancestor");
+    assert!(
+        matches!(parent_ops[0], ProbeOp::Probe { .. }),
+        "the single ancestor op is the sweep's reconfirm Probe (not a reap Cancel)",
+    );
+
+    // The deferred reap completes on the reconfirm's resolution: the
+    // child reseed left it non-gating (Seed), so the reconfirm settles
+    // and `finish_burst_to_idle` honours `Reap`.
+    let reconfirm = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("ancestor reconfirm probe in flight");
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: reconfirm,
+            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+        }),
+        t2,
+    );
+    assert!(
+        e.profiles().get(pid_parent).is_none(),
+        "deferred Reap honoured once the reconfirm resolved — ancestor reaped",
+    );
+    let _ = e.profiles().get(pid_child); // child untouched by the reap
+
+    let _ = e.cancel_all_in_flight_probes();
 }

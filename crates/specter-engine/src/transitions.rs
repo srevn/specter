@@ -1289,6 +1289,30 @@ impl Engine {
             OverflowScope::Resource(r) => self.profiles_in_subtree(r),
         };
 
+        // Exclude the snapshot-time `Draining` Profiles. A `Draining`
+        // Profile holds a verified-stable `current` plus a
+        // descendant-driven, deadline-bounded reconfirm; a Seed re-walk
+        // is no fresher (it mtime-skips against that same `current`) and
+        // tearing it down to a Seed discards both the verified snapshot
+        // and the "ancestor fires once after the gating descendant
+        // settles" relationship. The exclusion has to be at snapshot
+        // time, not an iteration-time phase guard on the Active arm: a
+        // prior iteration's `finish_burst_to_idle` Draining sweep can
+        // flip an in-scope Draining ancestor `Draining → Verifying`
+        // before the loop reaches it, so by iteration time it is no
+        // longer Draining and the guard would never fire. Removing it
+        // from the snapshot also means that, once the sweep has armed
+        // the lone reconfirm probe for such an ancestor, the loop never
+        // reaches a second same-owner emission for it.
+        let profiles_to_reseed: smallvec::SmallVec<[ProfileId; 8]> = profiles_to_reseed
+            .into_iter()
+            .filter(|&pid| {
+                self.profiles
+                    .get(pid)
+                    .is_some_and(|p| !p.state().is_draining())
+            })
+            .collect();
+
         for pid in profiles_to_reseed {
             // The Profile may have been reaped between snapshot and
             // this iteration via a prior iteration's
