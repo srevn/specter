@@ -45,7 +45,7 @@ fn empty_dir_snap() -> Arc<DirSnapshot> {
 }
 
 fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })

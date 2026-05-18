@@ -141,7 +141,7 @@ fn descent_one_level_advances_on_created_entry() {
     // Anchor materialized: descent state cleared; Seed burst started.
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
     let probes: Vec<_> = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.owner()),
@@ -298,7 +298,7 @@ fn descent_event_at_prefix_emits_fresh_probe() {
 
     // Fresh descent probe emitted.
     let probe_for_pid = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)));
     assert!(probe_for_pid, "descent probe emitted on prefix event");
@@ -323,7 +323,7 @@ fn descent_event_during_in_flight_probe_drops() {
 
     // No new probe (I5 for descent).
     let descent_probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)))
         .count();
@@ -493,7 +493,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
     );
 
     // The probe op for the descent also carries an absolute prefix path.
-    let probe_path = out.probe_ops.iter().find_map(|op| match op {
+    let probe_path = out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe {
             request:
                 ProbeRequest::Descent {
@@ -619,7 +619,7 @@ fn descent_probe_uses_descent_variant() {
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
 
-    let descent_emitted = out.probe_ops.iter().any(|op| {
+    let descent_emitted = out.probe_ops().iter().any(|op| {
         matches!(
             op,
             ProbeOp::Probe {
@@ -1077,14 +1077,15 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
     ));
     // Exactly one Cancel for the Profile (idempotency check).
     let cancels = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid))
         .count();
     assert_eq!(
-        cancels, 1,
+        cancels,
+        1,
         "exactly one Cancel emitted for the in-flight descent probe; got {:?}",
-        out.probe_ops,
+        out.probe_ops(),
     );
 }
 
@@ -1198,11 +1199,11 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     // descent's path-of(foo) against the request's `target_path`.
     let foo_path = e.tree().path_of(foo).expect("foo path resolves");
     assert!(
-        out.probe_ops.iter().any(|op| matches!(op,
+        out.probe_ops().iter().any(|op| matches!(op,
             ProbeOp::Probe { request: ProbeRequest::Descent { owner: ProbeOwner::Profile(profile), target_path, .. } }
                 if *profile == pid && *target_path == foo_path)),
         "descent probe emitted at the parent prefix; got {:?}",
-        out.probe_ops,
+        out.probe_ops(),
     );
     // ClassSet::STRUCTURE is correct for the descent contribution.
     let _ = ClassSet::STRUCTURE;

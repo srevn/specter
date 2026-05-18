@@ -102,7 +102,7 @@ fn ensure_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
 
 /// Latest outstanding probe target-path in emission order.
 fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf> {
-    out.probe_ops.iter().rev().find_map(|op| match op {
+    out.probe_ops().iter().rev().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.target_path().to_path_buf()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -277,11 +277,11 @@ fn terminus_loss_then_parent_event_recovers_and_remints_with_no_idle_probe() {
     // (event-gated) from a self-triggered idle-probe recovery.
     assert!(
         !loss_out
-            .probe_ops
+            .probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Probe { .. })),
         "no idle recovery probe is emitted on terminus loss; got {:?}",
-        loss_out.probe_ops,
+        loss_out.probe_ops(),
     );
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_none(),

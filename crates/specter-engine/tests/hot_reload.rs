@@ -116,7 +116,7 @@ fn config_diff_add_sub_to_existing_profile() {
         .filter(|op| matches!(op, WatchOp::Watch { .. }))
         .count();
     let new_probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { .. }))
         .count();
@@ -151,7 +151,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),
@@ -220,7 +220,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),
@@ -328,7 +328,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),
@@ -403,7 +403,7 @@ fn config_diff_mid_burst_modify_revives_profile() {
         "ReapPendingCancelled emitted",
     );
     let new_probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { .. }))
         .count();
@@ -440,7 +440,7 @@ fn effect_complete_after_detach_drops_silently() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
     let seed_corr = attach_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),
@@ -487,7 +487,7 @@ fn effect_complete_after_detach_drops_silently() {
     );
     // No Probe re-emitted (no reseed).
     let new_probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { .. }))
         .count();
@@ -526,7 +526,7 @@ fn config_diff_modified_remove_then_add() {
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile;
     let seed_corr = attach_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),

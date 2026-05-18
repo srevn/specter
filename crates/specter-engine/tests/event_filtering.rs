@@ -69,7 +69,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
 }
 
 fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -628,7 +628,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
         "drop happens before drive_burst — Profile stays Idle",
     );
-    assert!(out.probe_ops.is_empty(), "no probe queued");
+    assert!(out.probe_ops().is_empty(), "no probe queued");
     assert!(out.effects().is_empty(), "no effects emitted");
 }
 

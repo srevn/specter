@@ -284,7 +284,7 @@ impl Engine {
     /// Cancel if-and-only-if a probe was outstanding".
     pub(crate) fn cancel_owner_probe(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
         if self.take_owner_probe(owner).is_some() {
-            out.probe_ops.push(ProbeOp::Cancel { owner });
+            out.push_probe_op(ProbeOp::Cancel { owner });
         }
     }
 
@@ -364,7 +364,7 @@ impl Engine {
     /// distinct failure; neither is redundant.
     pub(crate) fn emit_owner_probe(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
         if let Some(request) = self.probe_emission_request(owner) {
-            out.probe_ops.push(ProbeOp::Probe { request });
+            out.push_probe_op(ProbeOp::Probe { request });
         }
     }
 

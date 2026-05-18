@@ -107,7 +107,7 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
 
 /// Pluck the correlation from the Probe (if any) in a `StepOutput`.
 fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })

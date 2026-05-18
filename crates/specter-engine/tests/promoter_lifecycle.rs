@@ -100,7 +100,7 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
 /// step's [`ProbeOp::Probe`] emissions. The wire is path-only; tests
 /// compare via `e.tree().path_of(<id>)`.
 fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf> {
-    out.probe_ops.iter().rev().find_map(|op| match op {
+    out.probe_ops().iter().rev().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.target_path().to_path_buf()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -323,7 +323,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
         .pending_probe_for(ProbeOwner::Profile(dynamic_profile))
         .expect("Seed-burst AnchorFile probe in flight");
     assert!(
-        promote_out.probe_ops.iter().any(|op| matches!(
+        promote_out.probe_ops().iter().any(|op| matches!(
             op,
             ProbeOp::Probe {
                 request: specter_core::ProbeRequest::AnchorFile { .. }
@@ -470,7 +470,7 @@ fn static_attach_emits_sub_attached_with_no_source_promoter() {
 /// flows. Mirrors the local helper in
 /// `crates/specter-engine/tests/watch_op_rejected_purge.rs`.
 fn first_probe_corr(out: &specter_core::StepOutput) -> Option<specter_core::ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -860,7 +860,7 @@ fn sensor_overflow_reseeds_active_promoter() {
         "fresh enumeration probe in flight after overflow reseed",
     );
     let var_log_path = e.tree().path_of(var_log).expect("var_log path resolves");
-    let probe_at_var_log = overflow_out.probe_ops.iter().any(|op| {
+    let probe_at_var_log = overflow_out.probe_ops().iter().any(|op| {
         matches!(
             op,
             ProbeOp::Probe { request } if *request.target_path() == *var_log_path,
@@ -940,7 +940,7 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
         "fresh descent probe in flight after overflow reseed",
     );
     let a_path = e.tree().path_of(a).expect("a path resolves");
-    let probe_at_a = overflow_out.probe_ops.iter().any(|op| {
+    let probe_at_a = overflow_out.probe_ops().iter().any(|op| {
         matches!(
             op,
             ProbeOp::Probe { request } if *request.target_path() == *a_path,
@@ -999,7 +999,7 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
 
     // No fresh probe emitted. Pending-probe correlation unchanged.
     let new_probe_emitted = overflow_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .any(|op| matches!(op, ProbeOp::Probe { .. }));
     assert!(

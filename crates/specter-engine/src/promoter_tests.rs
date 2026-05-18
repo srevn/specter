@@ -112,7 +112,7 @@ fn ensure_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
 /// outstanding descent/subtree probe in emission order). The wire is
 /// path-only; tests compare via `e.tree().path_of(<id>)`.
 fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf> {
-    out.probe_ops.iter().rev().find_map(|op| match op {
+    out.probe_ops().iter().rev().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.target_path().to_path_buf()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -936,7 +936,7 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
         Instant::now(),
     );
 
-    let probe_for_pid = out.probe_ops.iter().any(|op| {
+    let probe_for_pid = out.probe_ops().iter().any(|op| {
         matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Promoter(pid))
     });
     assert!(probe_for_pid, "fresh descent probe minted for Promoter");
@@ -984,7 +984,7 @@ fn prefix_pending_event_during_in_flight_probe_drops() {
     );
 
     let descent_probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Promoter(pid)))
         .count();
@@ -1034,7 +1034,7 @@ fn prefix_pending_terminal_event_at_prefix_emits_fresh_descent_probe() {
         Instant::now(),
     );
 
-    let probe_for_pid = out.probe_ops.iter().any(|op| {
+    let probe_for_pid = out.probe_ops().iter().any(|op| {
         matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Promoter(pid))
     });
     assert!(
@@ -1100,7 +1100,7 @@ fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
         Instant::now(),
     );
 
-    let probe_for_pid = out.probe_ops.iter().any(|op| {
+    let probe_for_pid = out.probe_ops().iter().any(|op| {
         matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Promoter(pid))
     });
     assert!(
@@ -1333,7 +1333,7 @@ fn cancel_owner_probe_clears_promoter_enumeration_slot() {
         "probe slot cleared by cancel_owner_probe",
     );
     assert!(
-        out.probe_ops.iter().any(|op| matches!(
+        out.probe_ops().iter().any(|op| matches!(
             op,
             ProbeOp::Cancel { owner: ProbeOwner::Promoter(p) } if *p == pid,
         )),
@@ -1587,7 +1587,7 @@ fn reap_promoter_active_with_proxy_unregisters_and_removes() {
 
     // In-flight initial enumeration cancelled.
     assert!(
-        out.probe_ops.iter().any(|op| matches!(
+        out.probe_ops().iter().any(|op| matches!(
             op,
             ProbeOp::Cancel { owner: ProbeOwner::Promoter(p) } if *p == pid,
         )),
@@ -1633,7 +1633,7 @@ fn reap_promoter_prefix_pending_releases_prefix() {
     );
     // In-flight descent probe cancelled.
     assert!(
-        out.probe_ops.iter().any(|op| matches!(
+        out.probe_ops().iter().any(|op| matches!(
             op,
             ProbeOp::Cancel { owner: ProbeOwner::Promoter(p) } if *p == pid,
         )),
@@ -1690,7 +1690,7 @@ fn reap_promoter_stale_id_is_silent_noop() {
         "no diagnostic on stale id: {:?}",
         out.diagnostics,
     );
-    assert!(out.probe_ops.is_empty(), "no probe ops on stale id");
+    assert!(out.probe_ops().is_empty(), "no probe ops on stale id");
     assert!(out.watch_ops.is_empty(), "no watch ops on stale id");
 }
 

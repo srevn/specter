@@ -56,7 +56,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
 }
 
 fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -427,7 +427,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     // Cancel + ProfileClaimPurged{DescentPrefix} surface.
     assert!(
         purge_out
-            .probe_ops
+            .probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid)),
         "in-flight descent probe cancelled",
@@ -546,7 +546,7 @@ fn watch_op_rejected_purges_promoter_descent_prefix() {
 
     // Cancel emitted for the in-flight descent probe.
     let cancel_emitted = purge_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .any(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Promoter(q) } if *q == qid));
     assert!(cancel_emitted, "Cancel emitted for in-flight descent probe");

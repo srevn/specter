@@ -1712,7 +1712,7 @@ mod tests {
 
         // Output: one Probe + one Suppress.
         let probes = out
-            .probe_ops
+            .probe_ops()
             .iter()
             .filter(|op| matches!(op, ProbeOp::Probe { .. }))
             .count();
@@ -1752,7 +1752,7 @@ mod tests {
         assert_eq!(e.timers.len(), 2);
 
         // No probe yet (settle_timer fires first).
-        assert!(out.probe_ops.is_empty());
+        assert!(out.probe_ops().is_empty());
         let suppresses = out
             .watch_ops
             .iter()
@@ -1771,7 +1771,7 @@ mod tests {
             Instant::now(),
             &mut out,
         );
-        out.probe_ops.clear();
+        let mut out = StepOutput::default();
 
         e.transition_to_verifying(pid, &mut out);
 
@@ -1786,7 +1786,7 @@ mod tests {
             .expect("Verifying probe in flight on the state slot");
 
         // Output: one Probe whose correlation matches.
-        let probe_correlation = out.probe_ops.iter().find_map(|op| match op {
+        let probe_correlation = out.probe_ops().iter().find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         });
@@ -1838,14 +1838,14 @@ mod tests {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, Instant::now(), &mut out); // Seed → Verifying
-        out.probe_ops.clear();
+        let mut out = StepOutput::default();
         let r = e.profiles.get(pid).unwrap().resource;
 
         e.event_drives_batching(pid, r, Instant::now(), &mut out);
 
         // One Cancel emitted for the in-flight probe.
         let cancel_count = out
-            .probe_ops
+            .probe_ops()
             .iter()
             .filter(|op| matches!(op, ProbeOp::Cancel { .. }))
             .count();
@@ -1871,12 +1871,12 @@ mod tests {
         let mut out = StepOutput::default();
         let r = e.profiles.get(pid).unwrap().resource;
         e.start_standard_burst(pid, r, Instant::now(), &mut out);
-        out.probe_ops.clear();
+        let mut out = StepOutput::default();
 
         e.event_drives_batching(pid, r, Instant::now(), &mut out);
 
         let cancels = out
-            .probe_ops
+            .probe_ops()
             .iter()
             .filter(|op| matches!(op, ProbeOp::Cancel { .. }))
             .count();
@@ -1904,7 +1904,7 @@ mod tests {
         let now = Instant::now();
         e.start_standard_burst(pid, resource, now, &mut out);
         e.transition_to_verifying(pid, &mut out);
-        out.probe_ops.clear();
+        let mut out = StepOutput::default();
         // Production reaches `unstable_response_drives_batching` only
         // from `on_probe_response`, which has already disarmed the
         // Verifying slot via `take_owner_probe`. Mirror that consume.
@@ -1912,7 +1912,7 @@ mod tests {
 
         e.unstable_response_drives_batching(pid, now, &mut out);
 
-        assert!(out.probe_ops.is_empty());
+        assert!(out.probe_ops().is_empty());
         let phase = match e.profiles.get(pid).unwrap().state() {
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => &pre.phase,
             _ => panic!("expected Active(PreFire)"),
@@ -2004,7 +2004,7 @@ mod tests {
         let mut last_event = t0;
         for k in 1..=10 {
             last_event = t0 + Duration::from_millis(50 * k);
-            out.probe_ops.clear();
+            let mut out = StepOutput::default();
             e.event_drives_batching(pid, r, last_event, &mut out);
         }
 
@@ -2140,7 +2140,7 @@ mod tests {
         let mut out = StepOutput::default();
         e.finish_burst_to_idle(pid, &mut out);
         assert!(out.watch_ops.is_empty());
-        assert!(out.probe_ops.is_empty());
+        assert!(out.probe_ops().is_empty());
     }
 
     #[test]
@@ -2207,7 +2207,7 @@ mod tests {
         e.transition_to_verifying(pid, &mut out);
 
         assert!(
-            out.probe_ops.is_empty(),
+            out.probe_ops().is_empty(),
             "helper bails before any probe-side side effects",
         );
         let saw = out.diagnostics.iter().any(|d| {
@@ -2240,14 +2240,12 @@ mod tests {
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, Instant::now(), &mut out);
         // Drop the first burst's emissions; only the second call is under test.
-        out.probe_ops.clear();
-        out.watch_ops.clear();
-        out.diagnostics.clear();
+        let mut out = StepOutput::default();
 
         e.start_seed_burst(pid, Instant::now(), &mut out);
 
         assert!(
-            out.probe_ops.is_empty(),
+            out.probe_ops().is_empty(),
             "second start_seed_burst emits no Probe (precondition bails)",
         );
         let saw = out.diagnostics.iter().any(|d| {
@@ -2749,7 +2747,7 @@ mod tests {
         e.transition_to_verifying(pid, &mut probe_out);
 
         let req = probe_out
-            .probe_ops
+            .probe_ops()
             .iter()
             .find_map(|op| match op {
                 ProbeOp::Probe { request } => Some(request),
@@ -2797,7 +2795,7 @@ mod tests {
         e.transition_to_verifying(pid, &mut probe_out);
 
         let req = probe_out
-            .probe_ops
+            .probe_ops()
             .iter()
             .find_map(|op| match op {
                 ProbeOp::Probe { request } => Some(request),

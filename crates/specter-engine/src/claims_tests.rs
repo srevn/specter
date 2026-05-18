@@ -58,7 +58,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
 }
 
 fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -268,10 +268,10 @@ fn discard_anchor_state_idempotent() {
         "second invocation observes the same Profile state",
     );
     assert!(
-        out2.watch_ops.is_empty() && out2.probe_ops.is_empty(),
+        out2.watch_ops.is_empty() && out2.probe_ops().is_empty(),
         "second invocation emits no ops; got watch_ops={:?} probe_ops={:?}",
         out2.watch_ops,
-        out2.probe_ops,
+        out2.probe_ops(),
     );
 }
 
@@ -330,9 +330,9 @@ fn discard_anchor_state_no_op_on_already_lost_profile() {
         out.watch_ops
     );
     assert!(
-        out.probe_ops.is_empty(),
+        out.probe_ops().is_empty(),
         "no probe ops; got {:?}",
-        out.probe_ops
+        out.probe_ops()
     );
     assert!(
         out.diagnostics.is_empty(),

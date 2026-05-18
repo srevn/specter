@@ -552,7 +552,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
     // No fresh watch/probe/suppress emitted: existing Profile already has
     // them.
     assert!(out.watch_ops.is_empty());
-    assert!(out.probe_ops.is_empty());
+    assert!(out.probe_ops().is_empty());
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -1083,7 +1083,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
             },
             t2,
         );
-        for op in &out.probe_ops {
+        for op in out.probe_ops().iter() {
             if let ProbeOp::Probe { request } = op {
                 probe_request = Some(request.clone());
             }
@@ -1230,7 +1230,7 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
     );
     assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
     let cancels = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Cancel { .. }))
         .count();
@@ -1287,14 +1287,15 @@ fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
         "anchor terminal during Verifying disarms the slot",
     );
     let cancels = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid))
         .count();
     assert_eq!(
-        cancels, 1,
+        cancels,
+        1,
         "exactly one Cancel emitted; got {:?}",
-        out.probe_ops
+        out.probe_ops()
     );
 }
 
@@ -1698,7 +1699,7 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
         ProfileState::Active(_, _) // Verifying
     ));
     let probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { .. }))
         .count();
@@ -1766,7 +1767,7 @@ fn effect_complete_ok_in_idle_diagnoses_outside_awaiting() {
         "EffectComplete::Ok in Idle is a late completion and diagnoses",
     );
     // No probe emitted — the Profile stays Idle.
-    assert!(out.probe_ops.is_empty());
+    assert!(out.probe_ops().is_empty());
     assert!(matches!(
         e.profiles.get(pid).unwrap().state(),
         ProfileState::Idle,
@@ -1802,7 +1803,7 @@ fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
     });
     assert!(has_diag, "Failed in Idle diagnoses as late completion");
     assert!(out.effects().is_empty());
-    assert!(out.probe_ops.is_empty());
+    assert!(out.probe_ops().is_empty());
     assert_eq!(
         e.profiles.get(pid).unwrap().baseline().is_some(),
         pre_baseline,
@@ -1955,7 +1956,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
         },
     };
     let out = e.step(Input::AttachSub(req), Instant::now());
-    let probe_request = out.probe_ops.iter().find_map(|op| match op {
+    let probe_request = out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.clone()),
         _ => None,
     });
@@ -2104,7 +2105,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     // A Cancel for the in-flight probe was emitted.
     assert!(
         result
-            .probe_ops
+            .probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid)),
         "ProbeOp::Cancel emitted for the in-flight descent probe",
@@ -2401,12 +2402,12 @@ fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
     // strictly redundant and is deliberately omitted.
     let owner = ProbeOwner::Profile(pid);
     let probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Probe { .. }))
         .count();
     let cancels = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Cancel { .. }))
         .count();
@@ -2472,12 +2473,12 @@ fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
 
     let owner = ProbeOwner::Profile(pid);
     let probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Probe { .. }))
         .count();
     let cancels = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Cancel { .. }))
         .count();
@@ -2539,12 +2540,12 @@ fn sensor_overflow_armed_verifying_reap_emits_cancel_only() {
     // the wire Cancel spares the worker a doomed walk.
     let owner = ProbeOwner::Profile(pid);
     let probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Probe { .. }))
         .count();
     let cancels = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| op.owner() == owner && matches!(op, ProbeOp::Cancel { .. }))
         .count();
@@ -2977,7 +2978,7 @@ fn config_diff_added_only_attaches_subs() {
             .any(|op| matches!(op, WatchOp::Watch { .. }))
     );
     assert!(
-        out.probe_ops
+        out.probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Probe { .. }))
     );
@@ -3387,7 +3388,7 @@ fn config_diff_promoter_modify_during_prefix_pending() {
     // Descent probe was emitted.
     assert!(
         attach_out
-            .probe_ops
+            .probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Probe { .. })),
         "attach in PrefixPending must emit a descent probe",
@@ -3408,7 +3409,7 @@ fn config_diff_promoter_modify_during_prefix_pending() {
     assert_eq!(e.promoters.len(), 1, "v2 attached");
     // Reap of an in-flight descent emits a Cancel.
     assert!(
-        out.probe_ops
+        out.probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Cancel { .. })),
         "PrefixPending reap must Cancel the in-flight descent probe",
@@ -4132,7 +4133,7 @@ fn drive_to_rebasing(
         now + SETTLE * 3,
     );
     rebase_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),
@@ -4436,7 +4437,7 @@ fn rebasing_ships_awaiting_absorbed_resources_as_force_walk() {
 
     let descendant_path = e.tree.path_of(descendant).expect("path resolves");
     let req = rebase_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request),
@@ -4489,7 +4490,7 @@ fn rebasing_without_absorbed_events_ships_empty_force_walk() {
     );
 
     let req = rebase_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request),
@@ -5284,7 +5285,7 @@ mod props {
                         },
                         *t,
                     );
-                    for c in s.probe_ops.iter().filter_map(|op| match op {
+                    for c in s.probe_ops().iter().filter_map(|op| match op {
                         ProbeOp::Probe { request } => Some(request.correlation()),
                         _ => None,
                     }) {
@@ -5342,7 +5343,7 @@ mod props {
         };
 
         // Update last_correlation from any Probe in the output.
-        for c in out.probe_ops.iter().filter_map(|op| match op {
+        for c in out.probe_ops().iter().filter_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         }) {
@@ -5355,7 +5356,9 @@ mod props {
     fn extend_step_output(dst: &mut StepOutput, src: StepOutput) {
         let (watch_ops, probe_ops, effects, diagnostics) = src.into_parts();
         dst.watch_ops.extend(watch_ops);
-        dst.probe_ops.extend(probe_ops);
+        for op in probe_ops.into_values() {
+            dst.push_probe_op(op);
+        }
         for ef in effects {
             dst.push_effect(ef);
         }
@@ -5391,7 +5394,7 @@ mod props {
         };
         let out = e.step(Input::AttachSub(req), now);
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-        let last_correlation = out.probe_ops.iter().find_map(|op| match op {
+        let last_correlation = out.probe_ops().iter().find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),
             _ => None,
         });
@@ -5428,7 +5431,7 @@ mod props {
 
                 // probe_ops sorted by ProbeOwner.
                 let probe_keys: Vec<_> = out
-                    .probe_ops
+                    .probe_ops()
                     .iter()
                     .map(ProbeOp::owner)
                     .collect();
@@ -5462,12 +5465,12 @@ mod props {
                 // doesn't care about the difference, only that the running
                 // count stays ≤ 1.)
                 let probes_emitted = out
-                    .probe_ops
+                    .probe_ops()
                     .iter()
                     .filter(|op| matches!(op, ProbeOp::Probe { .. }))
                     .count();
                 let cancels_emitted = out
-                    .probe_ops
+                    .probe_ops()
                     .iter()
                     .filter(|op| matches!(op, ProbeOp::Cancel { .. }))
                     .count();

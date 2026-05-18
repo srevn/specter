@@ -145,7 +145,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
 
     // Drive Seed → Idle.
     let corr = attach_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } => Some(request.correlation()),

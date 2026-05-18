@@ -1,26 +1,41 @@
 //! `StepOutput` and its determinism contract.
 //!
-//! `effects` is sealed: the field is private, wrapped in
-//! [`SortedEffects`] whose mutators are module-private. Callers append
-//! via [`StepOutput::push_effect`] and read via [`StepOutput::effects`]
-//! / [`StepOutput::into_parts`], so observing effects in any order
-//! other than the emission sort is unrepresentable. The one residual:
-//! every `StepOutput`-returning entry point must call
-//! [`StepOutput::sort_for_emission`] before returning the value.
+//! Two streams are sealed, by two different mechanisms:
 //!
-//! Not every stream's order carries the same weight. `watch_ops` and
-//! `effects` ordering is replay determinism — a reordering changes the
-//! log, not the outcome. `probe_ops` ordering is *operational
-//! correctness*: the sensor drains it into a shared per-owner
-//! expectation map whose `submit` / `cancel` do not commute, so the
-//! sort being *exact* for that stream — guaranteed by the
-//! at-most-one-`ProbeOp`-per-owner invariant asserted in
-//! [`StepOutput::sort_for_emission`] — is load-bearing, not cosmetic.
+//! - `effects` is a [`SortedEffects`] — a private buffer appended
+//!   unsorted via [`StepOutput::push_effect`], re-sorted by
+//!   [`StepOutput::sort_for_emission`] before the value escapes.
+//! - `probe_ops` is a [`ProbeOps`] — a private per-owner map appended
+//!   via [`StepOutput::push_probe_op`]. Order is intrinsic to the
+//!   [`ProbeOwner`] key and at most one op per owner is *structural*
+//!   (a later op for an owner replaces the earlier), so it needs
+//!   neither a reseal nor an assertion.
+//!
+//! Both are read only through [`StepOutput::effects`] /
+//! [`StepOutput::probe_ops`] / [`StepOutput::into_parts`], so observing
+//! either out of contract is unrepresentable.
+//!
+//! The order weights differ. `watch_ops` and `effects` ordering is
+//! replay determinism — a reordering changes the log, not the outcome.
+//! `probe_ops` feeds the sensor's per-owner `expected` map, a
+//! syscall-saving pre-filter whose `submit` / `cancel` do not commute;
+//! [`ProbeOps`] *is* the producer-side image of that map, so a
+//! superseded op for an owner cannot survive to mis-drive it. Probe
+//! *correctness* is the engine's, not this stream's: a stale or
+//! superseded response folds to `StaleProbeResponse` at the engine's
+//! response gate regardless of op order. A mis-drained pair would only
+//! cost a missed syscall (a stall until re-driven), and the per-owner
+//! shape removes even that.
+//!
+//! Residual discipline: every `StepOutput`-returning entry point calls
+//! [`StepOutput::sort_for_emission`] before returning — it seals
+//! `watch_ops` / `effects`; `probe_ops` is already sealed by shape.
 
 use crate::diag::Diagnostic;
 use crate::effect::Effect;
-use crate::op::{ProbeOp, WatchOp};
+use crate::op::{ProbeOp, ProbeOwner, WatchOp};
 use smallvec::SmallVec;
+use std::collections::BTreeMap;
 
 /// The `effects` stream in emission order.
 ///
@@ -51,12 +66,72 @@ impl std::ops::Deref for SortedEffects {
     }
 }
 
+/// The `probe_ops` stream as a sealed per-owner map.
+///
+/// The sensor's consumer state *is* "the last op per owner":
+/// `WorkerProber.expected` is a `BTreeMap<ProbeOwner, ProbeCorrelation>`
+/// — `submit` inserts, `cancel` removes, both keyed by owner. The
+/// engine mutates one owner per step and emits each op immediately
+/// downstream of its motivating transition, so the temporally last op
+/// for an owner is that owner's final state at step end. Producer and
+/// consumer are therefore the same data structure;
+/// `BTreeMap<ProbeOwner, ProbeOp>` is the type-honest shape, not a
+/// dedup tactic.
+///
+/// Last-writer-wins per owner is the type contract — a later op for an
+/// owner replaces the earlier. So at most one op per owner is
+/// *structural* (not asserted), and emission order is intrinsic to the
+/// [`ProbeOwner`] key (no reseal). Append-only from outside the module
+/// ([`StepOutput::push_probe_op`]); read via [`ProbeOps::iter`] or, at
+/// the terminal drain, [`StepOutput::into_parts`].
+///
+/// An empty map does not allocate (most steps emit no probe), so the
+/// sealed shape is also lighter on the hot `StepOutput` than four
+/// always-resident `large_enum_variant` inline slots were.
+#[derive(Clone, Debug, Default)]
+pub struct ProbeOps(BTreeMap<ProbeOwner, ProbeOp>);
+
+impl ProbeOps {
+    /// Record `op`, replacing any prior op for the same owner.
+    /// Last-writer-wins is the type contract, isomorphic to the
+    /// sensor's `expected: BTreeMap<ProbeOwner, ProbeCorrelation>`
+    /// drain. Module-private: the sole external writer is
+    /// [`StepOutput::push_probe_op`], the analogue of
+    /// [`SortedEffects::push_unsorted`].
+    fn upsert(&mut self, op: ProbeOp) {
+        self.0.insert(op.owner(), op);
+    }
+
+    /// The ops in [`ProbeOwner`] order (`Profile` < `Promoter`, then
+    /// payload id). `DoubleEndedIterator` so a reverse scan is
+    /// available; at most one op per owner makes direction immaterial
+    /// for per-owner lookups, but call sites that read the stream
+    /// tail-first stay expressible.
+    #[must_use]
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ProbeOp> {
+        self.0.values()
+    }
+
+    /// `true` iff no op was recorded this step (the common case).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Number of distinct owners with a recorded op — equivalently,
+    /// the op count, since the map holds at most one per owner.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// The four owned streams yielded by [`StepOutput::into_parts`], in
-/// dispatch order: watch ops, probe ops, effects (emission-sorted),
-/// diagnostics.
+/// dispatch order: watch ops, probe ops (owner-keyed), effects
+/// (emission-sorted), diagnostics.
 pub type StepOutputParts = (
     SmallVec<[WatchOp; 2]>,
-    SmallVec<[ProbeOp; 4]>,
+    BTreeMap<ProbeOwner, ProbeOp>,
     SmallVec<[Effect; 2]>,
     SmallVec<[Diagnostic; 2]>,
 );
@@ -64,7 +139,7 @@ pub type StepOutputParts = (
 #[derive(Debug, Default, Clone)]
 pub struct StepOutput {
     pub watch_ops: SmallVec<[WatchOp; 2]>,
-    pub probe_ops: SmallVec<[ProbeOp; 4]>,
+    probe_ops: ProbeOps,
     effects: SortedEffects,
     pub diagnostics: SmallVec<[Diagnostic; 2]>,
 }
@@ -83,7 +158,21 @@ impl StepOutput {
         &self.effects
     }
 
-    /// Consume into the four owned streams, effects in emission order.
+    /// Record a [`ProbeOp`], replacing any prior op for the same owner
+    /// (last-writer-wins — see [`ProbeOps`]). The `probe_ops` analogue
+    /// of [`Self::push_effect`].
+    pub fn push_probe_op(&mut self, op: ProbeOp) {
+        self.probe_ops.upsert(op);
+    }
+
+    /// The emitted probe ops, owner-keyed with at most one per owner.
+    #[must_use]
+    pub const fn probe_ops(&self) -> &ProbeOps {
+        &self.probe_ops
+    }
+
+    /// Consume into the four owned streams, effects in emission order,
+    /// probe ops owner-keyed.
     ///
     /// Terminal-consumer drain: `self` is owned, so this is only
     /// reachable on a fully built, already-resealed value (every
@@ -93,71 +182,29 @@ impl StepOutput {
     pub fn into_parts(self) -> StepOutputParts {
         (
             self.watch_ops,
-            self.probe_ops,
+            self.probe_ops.0,
             self.effects.0,
             self.diagnostics,
         )
     }
 
-    /// Sort the streams to the engine's determinism contract:
-    /// `watch_ops` by [`WatchOp::resource`]; `probe_ops` by
-    /// [`ProbeOp::owner`]; `effects` by [`Effect::sort_key`].
-    /// `diagnostics` follow insertion order — they are not part of the
-    /// user-visible sort guarantee.
+    /// Seal the order-determined streams: `watch_ops` by
+    /// [`WatchOp::resource`], `effects` by [`Effect::sort_key`].
+    /// `diagnostics` follow insertion order (not part of the
+    /// user-visible guarantee).
     ///
-    /// `watch_ops` / `effects` order is **replay determinism** only —
-    /// reorder them and the same work still happens, just logged in a
-    /// different sequence. `probe_ops` order is **operational
-    /// correctness**: the sensor applies `submit` / `cancel` against a
-    /// shared per-owner expectation map whose insert and remove do not
-    /// commute, so a mis-ordered same-owner pair can drop a live probe.
-    /// The injective-key property that makes the sort exact (not merely
-    /// stable) for that stream is the debug-asserted invariant below.
+    /// `probe_ops` needs no step here: a [`ProbeOps`] is owner-keyed
+    /// with at most one op per owner *by construction*, so it is
+    /// already in emission order — the prior per-owner sort and its
+    /// debug witness dissolved with the shape.
     ///
-    /// Pure: every key is derived from the op/effect's own fields, so
-    /// this method needs no engine state.
+    /// `watch_ops` / `effects` order is **replay determinism** —
+    /// reorder them and the same work still happens, just logged
+    /// differently. Pure: every key derives from the op/effect's own
+    /// fields, so this needs no engine state.
     pub fn sort_for_emission(&mut self) {
         self.watch_ops.sort_by_key(WatchOp::resource);
-        self.probe_ops.sort_by_key(ProbeOp::owner);
         self.effects.reseal();
-        #[cfg(debug_assertions)]
-        self.debug_assert_one_probe_op_per_owner();
-    }
-
-    /// Debug-only structural witness for the probe-protocol invariant:
-    /// **at most one [`ProbeOp`] per owner per `StepOutput`**. This is
-    /// what makes [`ProbeOp::owner`] an *injective* key over a step's
-    /// `probe_ops`: with it, `sort_by_key` vs `sort_unstable_by_key` is
-    /// immaterial, and the engine→sensor `submit` / `cancel` drain —
-    /// which is *not* commutative over the sensor's shared per-owner
-    /// expectation map — cannot reorder a redundant `Cancel` ahead of a
-    /// `Probe` and lose it.
-    ///
-    /// Holds by construction: a `Probe` is preceded by arming the
-    /// owner's `ProbeSlot` (construct-time `ProbeSlot::armed`, or
-    /// `ProbeSlot::arm`'s unconditional arm-once assert); a `Cancel` is
-    /// emitted only by `cancel_owner_probe`, which disarms iff the slot
-    /// was armed, so it fires at most once per owner per step; and no
-    /// step emits both for one owner — the lone structural candidate,
-    /// the overflow-reseed Active arm, is reseed-XOR-reap (disarm-only
-    /// on reseed; `Cancel`-only on reap). The runtime dual of
-    /// `finish_burst_to_idle`'s cancel-first entry precondition. Zero
-    /// release cost.
-    #[cfg(debug_assertions)]
-    fn debug_assert_one_probe_op_per_owner(&self) {
-        // Post-sort ⇒ equal owners are adjacent ⇒ an O(n) adjacent-pair
-        // scan is exhaustive, with no allocation.
-        for w in self.probe_ops.windows(2) {
-            debug_assert_ne!(
-                w[0].owner(),
-                w[1].owner(),
-                ">1 ProbeOp for one owner in a StepOutput — a redundant \
-                 Cancel beside a Probe, or a double emit. The sensor's \
-                 per-owner expectation-map drain is order-sensitive; one \
-                 ProbeOp per owner per step is the contract (ProbeSlot \
-                 linearity + cancel_owner_probe).",
-            );
-        }
     }
 }
 
@@ -257,16 +304,21 @@ mod tests {
         assert_eq!(resources, vec![r1, r2, r3]);
     }
 
+    /// [`ProbeOps`] iterates in [`ProbeOwner`] order *intrinsically* —
+    /// the order is the map key, established at insert, not by a sort.
+    /// Push out of owner order and assert iteration order *before* any
+    /// `sort_for_emission`; the seal call then leaves it unchanged (it
+    /// is a no-op for `probe_ops`).
     #[test]
-    fn sort_for_emission_orders_probe_ops_by_owner() {
+    fn probe_ops_iterate_in_owner_order_without_a_sort() {
         use crate::op::ProbeOwner;
         let p1 = pidn(1);
         let p2 = pidn(2);
         let mut out = StepOutput::default();
-        out.probe_ops.push(ProbeOp::Cancel {
+        out.push_probe_op(ProbeOp::Cancel {
             owner: ProbeOwner::Profile(p2),
         });
-        out.probe_ops.push(ProbeOp::Probe {
+        out.push_probe_op(ProbeOp::Probe {
             request: ProbeRequest::AnchorFile {
                 owner: ProbeOwner::Profile(p1),
                 correlation: ProbeCorrelation::from(7),
@@ -274,55 +326,59 @@ mod tests {
             },
         });
 
+        let owners = |o: &StepOutput| -> Vec<ProbeOwner> {
+            o.probe_ops().iter().map(ProbeOp::owner).collect()
+        };
+        let expected = vec![ProbeOwner::Profile(p1), ProbeOwner::Profile(p2)];
+        // Owner-ordered by construction, before any seal.
+        assert_eq!(owners(&out), expected);
         out.sort_for_emission();
-
-        let owners: Vec<ProbeOwner> = out.probe_ops.iter().map(ProbeOp::owner).collect();
-        assert_eq!(
-            owners,
-            vec![ProbeOwner::Profile(p1), ProbeOwner::Profile(p2)]
-        );
+        // `sort_for_emission` is a no-op for `probe_ops`.
+        assert_eq!(owners(&out), expected);
     }
 
-    /// A `Probe` and a `Cancel` for the *same* owner in one step trips
-    /// the debug-only at-most-one-`ProbeOp`-per-owner witness — the
-    /// sensor's per-owner expectation-map drain is order-sensitive, so
-    /// this pair is the contract violation it guards. `should_panic`
-    /// over a `debug_assert` is sound here: nextest's default debug
-    /// profile keeps `debug_assertions` on.
+    /// Last-writer-wins per owner: a second op for an owner *replaces*
+    /// the first, isomorphic to the sensor's `expected` map. This is
+    /// what makes "at most one op per owner" structural — the shape
+    /// that retired the old debug witness and its `should_panic` test
+    /// (the violation is now unrepresentable, not asserted-against).
     #[test]
-    #[should_panic(expected = ">1 ProbeOp for one owner in a StepOutput")]
-    fn sort_for_emission_panics_on_two_probe_ops_for_one_owner() {
+    fn push_probe_op_replaces_prior_op_for_same_owner() {
         use crate::op::ProbeOwner;
         let p = pidn(1);
         let mut out = StepOutput::default();
-        out.probe_ops.push(ProbeOp::Probe {
+        out.push_probe_op(ProbeOp::Probe {
             request: ProbeRequest::AnchorFile {
                 owner: ProbeOwner::Profile(p),
                 correlation: ProbeCorrelation::from(7),
                 target_path: Arc::from(std::path::Path::new("/y")),
             },
         });
-        out.probe_ops.push(ProbeOp::Cancel {
+        out.push_probe_op(ProbeOp::Cancel {
             owner: ProbeOwner::Profile(p),
         });
 
-        out.sort_for_emission();
+        assert_eq!(out.probe_ops().len(), 1);
+        let only = out.probe_ops().iter().next().expect("one op for p");
+        assert!(
+            matches!(only, ProbeOp::Cancel { owner } if *owner == ProbeOwner::Profile(p)),
+            "the later Cancel must replace the earlier Probe (last-writer-wins)",
+        );
     }
 
-    /// The per-owner witness is owner-keyed, not count-keyed: a `Probe`
-    /// and a `Cancel` for *distinct* owners are the ordinary two-probe
-    /// step and must sort normally (Profile order) without tripping the
-    /// assertion. Guards against the witness being over-eager.
+    /// Distinct owners are independent keys: both survive, in owner
+    /// order. The map is owner-keyed, not a single slot — the per-owner
+    /// replace must not collapse different owners.
     #[test]
-    fn sort_for_emission_allows_two_probe_ops_for_distinct_owners() {
+    fn push_probe_op_keeps_distinct_owners() {
         use crate::op::ProbeOwner;
         let p1 = pidn(1);
         let p2 = pidn(2);
         let mut out = StepOutput::default();
-        out.probe_ops.push(ProbeOp::Cancel {
+        out.push_probe_op(ProbeOp::Cancel {
             owner: ProbeOwner::Profile(p2),
         });
-        out.probe_ops.push(ProbeOp::Probe {
+        out.push_probe_op(ProbeOp::Probe {
             request: ProbeRequest::AnchorFile {
                 owner: ProbeOwner::Profile(p1),
                 correlation: ProbeCorrelation::from(7),
@@ -330,9 +386,8 @@ mod tests {
             },
         });
 
-        out.sort_for_emission();
-
-        let owners: Vec<ProbeOwner> = out.probe_ops.iter().map(ProbeOp::owner).collect();
+        assert_eq!(out.probe_ops().len(), 2);
+        let owners: Vec<ProbeOwner> = out.probe_ops().iter().map(ProbeOp::owner).collect();
         assert_eq!(
             owners,
             vec![ProbeOwner::Profile(p1), ProbeOwner::Profile(p2)]

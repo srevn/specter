@@ -68,21 +68,21 @@ fn file_leaf() -> LeafEntry {
 }
 
 fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
 }
 
 fn first_probe_request(out: &StepOutput) -> Option<&ProbeRequest> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request),
         ProbeOp::Cancel { .. } => None,
     })
 }
 
 fn count_probes(out: &StepOutput) -> usize {
-    out.probe_ops
+    out.probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { .. }))
         .count()
@@ -199,7 +199,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     // pre-fix the cached `Some(File)` would have emitted a
     // `ProbeRequest::AnchorFile`.
     let p_probe = recovery_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_p) => {
@@ -275,7 +275,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     );
 
     let p_probe_count = recovery_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_p)))
         .count();
@@ -342,7 +342,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         Instant::now(),
     );
     let p_probe = recovery_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .find_map(|op| match op {
             ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_p) => {

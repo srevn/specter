@@ -74,7 +74,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
 }
 
 fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -386,7 +386,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
         descendant_event_out.diagnostics,
     );
     assert!(
-        descendant_event_out.probe_ops.is_empty(),
+        descendant_event_out.probe_ops().is_empty(),
         "no probe emitted for absorbed event",
     );
 
@@ -569,11 +569,12 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
             },
             gate_t,
         );
-        for d in s.diagnostics {
+        let (_, probe_ops, _, diagnostics) = s.into_parts();
+        for d in diagnostics {
             combined.diagnostics.push(d);
         }
-        for op in s.probe_ops {
-            combined.probe_ops.push(op);
+        for op in probe_ops.into_values() {
+            combined.push_probe_op(op);
         }
     }
     assert!(
@@ -595,7 +596,7 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
         ),
     ));
     let rebase_emitted = combined
-        .probe_ops
+        .probe_ops()
         .iter()
         .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)));
     assert!(
@@ -694,7 +695,7 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
     );
     // No probe Cancel emitted (Awaiting has no probe in flight).
     let cancels = lost_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Cancel { .. }))
         .count();
@@ -770,7 +771,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     );
     // Probe Cancel emitted (Rebasing's probe in flight).
     let cancels = lost_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid))
         .count();
@@ -1124,14 +1125,15 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
             },
             post_burst_deadline,
         );
-        for op in s.probe_ops {
-            combined.probe_ops.push(op);
+        let (_, probe_ops, _, _) = s.into_parts();
+        for op in probe_ops.into_values() {
+            combined.push_probe_op(op);
         }
     }
     // No probe emitted — BurstDeadline filtered out, gate_deadline not
     // yet expired (4× max_settle vs 2×).
     assert!(
-        combined.probe_ops.is_empty(),
+        combined.probe_ops().is_empty(),
         "stale BurstDeadline in Awaiting does not emit a probe",
     );
     // Phase still Awaiting.

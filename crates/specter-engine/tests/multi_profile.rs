@@ -70,7 +70,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
 }
 
 fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -278,7 +278,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
 
     // Closures: observe the parent's gate purely from the public surface.
     let parent_reconfirmed = |out: &StepOutput| {
-        out.probe_ops.iter().any(|op| {
+        out.probe_ops().iter().any(|op| {
             matches!(op, ProbeOp::Probe { request }
                 if request.owner() == ProbeOwner::Profile(pid_parent))
         })
@@ -614,7 +614,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     ));
     assert!(
         !stable_out
-            .probe_ops
+            .probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_parent)),),
         "parent does NOT reconfirm at child stable — child's Effect still in flight",
@@ -650,7 +650,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     // The rebase probe is on the child; parent still hasn't reconfirmed.
     assert!(
         !rebase_out
-            .probe_ops
+            .probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_parent)),),
         "parent does NOT reconfirm during child Rebasing — burst not yet finished",
@@ -670,7 +670,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
 
     // Parent emitted a reconfirm probe in the same step.
     let reconfirm_emitted = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_parent)));
     assert!(
@@ -859,7 +859,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     let sid_m = specter_core::testkit::first_attached_sub(&out_m).expect("attach_sub succeeded");
     let pid_mid = e.subs().get(sid_m).unwrap().profile;
     assert!(
-        !out_m.probe_ops.iter().any(|op| matches!(
+        !out_m.probe_ops().iter().any(|op| matches!(
             op,
             ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_parent)
         )),
@@ -905,7 +905,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         .pending_probe_for(ProbeOwner::Profile(pid_child))
         .expect("child rebase probe in flight");
     let parent_reconfirmed = |out: &StepOutput| {
-        out.probe_ops.iter().any(|op| {
+        out.probe_ops().iter().any(|op| {
             matches!(op, ProbeOp::Probe { request }
                 if request.owner() == ProbeOwner::Profile(pid_parent))
         })
@@ -1150,7 +1150,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         "B reaped immediately (it was Idle)",
     );
     let a_reconfirmed = |out: &StepOutput| {
-        out.probe_ops.iter().any(|op| {
+        out.probe_ops().iter().any(|op| {
             matches!(op, ProbeOp::Probe { request }
                 if request.owner() == ProbeOwner::Profile(pid_a))
         })

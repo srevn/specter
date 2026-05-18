@@ -38,7 +38,7 @@ pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};
 pub use op::{
     ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, WatchFailure, WatchOp,
 };
-pub use output::{SortedEffects, StepOutput, StepOutputParts};
+pub use output::{ProbeOps, SortedEffects, StepOutput, StepOutputParts};
 pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use probe::ProbeSlot;
 pub use profile::{

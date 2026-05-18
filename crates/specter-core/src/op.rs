@@ -25,14 +25,10 @@ use std::sync::Arc;
 /// can each carry an in-flight probe simultaneously without collision
 /// by construction.
 ///
-/// **Determinism.** Derived `Ord` produces variant-declaration-order
-/// (Profile < Promoter), then per-payload [`ProfileId`] /
-/// [`PromoterId`] order. A [`crate::StepOutput`] carries at most one
-/// [`ProbeOp`] per owner per step (asserted in
-/// [`crate::StepOutput::sort_for_emission`]), so this `Ord` is an
-/// *injective* key over a step's [`crate::StepOutput::probe_ops`] — the
-/// sort is exact, not merely stable, which the order-sensitive
-/// engine→sensor `submit` / `cancel` drain depends on.
+/// **Determinism.** Derived `Ord` (variant order Profile < Promoter,
+/// then payload [`ProfileId`] / [`PromoterId`]) is the
+/// [`crate::StepOutput::probe_ops`] map key — per-owner
+/// last-writer-wins, mirroring the sensor's `expected` map.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ProbeOwner {
     /// Profile-driven probe. The engine homes this owner's in-flight
@@ -56,7 +52,8 @@ pub enum ProbeOwner {
 /// Boxing the heavy `Subtree` variant was considered and rejected: every
 /// non-Descent burst produces one, at most one Probe is in flight per
 /// burst, and `Arc<DirSnapshot>` baselines are already the dominant
-/// payload (the inline allocation is amortised).
+/// payload (the variant width is amortised regardless of how the
+/// enclosing `ProbeOp` is stored).
 /// `#[allow(clippy::large_enum_variant)]`
 /// mirrors the same allowance on `ProbeOp`.
 #[allow(clippy::large_enum_variant)]
@@ -370,11 +367,11 @@ impl WatchFailure {
 }
 
 // `ProbeRequest::Subtree` carries baseline_subtree / force_walk / forced
-// etc. `Probe` is the dominant variant — every burst emits one — and
-// boxing it would add an allocation per probe with no observable benefit
-// since `Cancel` is sparse (per owner reap, not per burst). The size
-// delta rides on `SmallVec` inline slots, which is why we accept it
-// explicitly.
+// etc., so `Probe` dwarfs `Cancel`. Boxing it would add an allocation
+// per probe (every burst emits one `Probe`; `Cancel` is sparse) for no
+// gain: a `ProbeOp` lives in a `StepOutput::probe_ops` BTreeMap node,
+// heap-allocated on insert regardless of variant width — the size never
+// rides an inline slot. Accept the delta explicitly.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProbeOp {

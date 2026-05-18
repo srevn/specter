@@ -64,7 +64,7 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSna
 
 /// Pluck the correlation from the (single) Probe in `out`.
 fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops.iter().find_map(|op| match op {
+    out.probe_ops().iter().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.correlation()),
         ProbeOp::Cancel { .. } => None,
     })
@@ -264,7 +264,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         Instant::now(),
     );
     let probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)))
         .count();
@@ -342,7 +342,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         now,
     );
     let recovery_probe = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)));
     assert!(
@@ -401,13 +401,13 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     );
     // ProbeOp::Cancel emitted for the in-flight descent probe.
     let cancel_present = detach_out
-        .probe_ops
+        .probe_ops()
         .iter()
         .any(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid));
     assert!(
         cancel_present,
         "ProbeOp::Cancel emitted for in-flight descent probe; got {:?}",
-        detach_out.probe_ops,
+        detach_out.probe_ops(),
     );
 }
 
@@ -661,7 +661,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
 
     // A: a fresh descent probe minted (slot was empty after drain).
     let a_probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_a)))
         .count();
@@ -676,7 +676,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
 
     // B: re-entered Pending (recovery descent) and emitted a probe.
     let b_probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_b)))
         .count();
@@ -691,7 +691,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
 
     // C: untouched. No probe; state still Idle.
     let c_probes = out
-        .probe_ops
+        .probe_ops()
         .iter()
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_c)))
         .count();

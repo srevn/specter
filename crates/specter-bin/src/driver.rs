@@ -676,14 +676,16 @@ impl EngineDriver {
     /// `kevent` forever. Wakes coalesce kernel-side via `EVFILT_USER`'s
     /// `EV_CLEAR`, so the per-send cost is one `kevent` syscall (~1µs)
     /// regardless of whether the watcher is awake. `probe_ops` dispatch
-    /// directly to the prober, *in order*: the prober folds `submit` /
-    /// `cancel` into a shared per-owner expectation map whose
-    /// operations do not commute, so this drain relies on `probe_ops`
-    /// carrying at most one op per owner per step (the invariant
-    /// asserted in `StepOutput::sort_for_emission`) — a mis-ordered
-    /// same-owner pair would drop a live probe here. `effects` queue to
-    /// `effects_tx`. `diagnostics` log per variant via
-    /// [`log_diagnostic`].
+    /// directly to the prober per owner — [`StepOutput::into_parts`]
+    /// yields them as an owner-keyed map (at most one op per owner *by
+    /// construction*), the producer-side image of the prober's own
+    /// `expected` map. So the prober's non-commuting `submit` /
+    /// `cancel` never see a superseded same-owner pair: the shape
+    /// collapses it before the wire. Probe *correctness* is the
+    /// engine's — a stale or superseded response folds to
+    /// `StaleProbeResponse` at its response gate, never this drain's.
+    /// `effects` queue to `effects_tx`. `diagnostics` log per variant
+    /// via [`log_diagnostic`].
     ///
     /// `Send` errors on disconnected channels are warn-logged and
     /// dropped — the only path here is a downstream-thread crash mid-
@@ -705,7 +707,7 @@ impl EngineDriver {
             }
         }
 
-        for op in probe_ops {
+        for op in probe_ops.into_values() {
             match op {
                 ProbeOp::Probe { request } => self.prober.submit(request),
                 ProbeOp::Cancel { owner } => self.prober.cancel(owner),
