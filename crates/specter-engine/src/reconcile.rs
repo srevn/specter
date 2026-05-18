@@ -13,8 +13,7 @@
 //! per-Resource [`ContribKey::ProfileDescendant`] contribution via
 //! [`add_watch`] / [`sub_watch`] for covered Dirs (always) and covered
 //! Leaves under `Profile.has_per_file_fds`. The Watch ops appear in
-//! `StepOutput.watch_ops` alongside any suppress edges from the burst
-//! lifecycle.
+//! `StepOutput.watch_ops`, resealed by `ResourceId` at emission.
 //!
 //! **Empty-prior path.** When `Profile.current` is `None` — the Seed
 //! burst's first probe — [`graft`] synthesises the Diff via
@@ -220,8 +219,8 @@ fn releases_watch(profile: &Profile, r: ResourceId, kind: EntryKind, tree: &Tree
 /// (`emit_effects_per_stable_file`) consumes them via the same Diff.
 ///
 /// The whole contract is the side effects: Phase 1's watch release /
-/// slot reap (with the `Unsuppress` emission [`Tree::try_reap`] folds
-/// in) and Phase 2's `add_watch`. There is no reaped-slot return — the
+/// slot reap (with the closing `Unwatch` [`Tree::try_reap`] folds in)
+/// and Phase 2's `add_watch`. There is no reaped-slot return — the
 /// fire history is per-Sub ([`specter_core::Sub::has_fired`]) and dies
 /// with the slotmap entry, so a reaped leaf has nothing to purge by
 /// `ResourceId`.
@@ -263,11 +262,10 @@ pub(crate) fn apply_diff_to_tree(
     //   doesn't leak a never-watched slot.
     //
     // `try_reap` folds in `Tree::vacate` as the closing-emission step,
-    // so the per-slot protocol owed at reap time (the residual
-    // `Unsuppress` for a mid-burst descendant whose `suppress_count`
-    // was bumped `0→1` by `event_drives_batching`) is emitted from
-    // inside the terminus rather than the caller — single source per
-    // protocol-close edge.
+    // so the kernel-watch protocol owed at reap time (the closing
+    // `Unwatch`, if a contribution were ever stranded at the slot) is
+    // emitted from inside the terminus rather than the caller — single
+    // source per protocol-close edge.
     let phase_1 = diff
         .deleted
         .iter()
@@ -442,9 +440,9 @@ pub(crate) fn graft(
 
     // Apply to Tree under a scoped immutable Profile borrow so the
     // `install_dir_current` write below can re-borrow `&mut`. Purely
-    // side-effecting (watch release, reap, `Unsuppress`); no
-    // reaped-slot return — fire-history is per-Sub now, so a reaped
-    // leaf has nothing to purge.
+    // side-effecting (watch release, reap); no reaped-slot return —
+    // fire-history is per-Sub now, so a reaped leaf has nothing to
+    // purge.
     {
         let Some(profile) = profiles.get(profile_id) else {
             return;

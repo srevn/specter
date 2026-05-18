@@ -62,8 +62,8 @@ pub enum BurstHelper {
     AbsorbEventIntoFireTail,
     /// `Engine::restart_burst_from_fire_tail_residual` — post-rebase
     /// residual restart (`Active(PostFire)` → `Active(PreFire(Batching))`
-    /// typed move; the suppress / dirty-cascade contributions stay held
-    /// from the original burst start).
+    /// typed move; the watched anchor is preserved across the move, no
+    /// refcount edge changes).
     RestartBurstFromFireTailResidual,
 }
 

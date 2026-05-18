@@ -1,24 +1,18 @@
-//! Refcount-edge helpers for the per-Resource contributions map and
-//! `Resource.suppress_count`.
+//! Refcount-edge helpers for the per-Resource contributions map.
 //!
-//! Two refcounts, decoupled:
-//! - **Contributions map** (`Resource.contributions`) gates FD lifetime:
-//!   a Resource is Watched iff the map is non-empty. The map is a
-//!   `BTreeMap<ContribKey, ClassSet>`: each key identifies a single
-//!   contributor (Profile anchor / parent / descent / descendant, or
-//!   Promoter prefix / proxy); the value is that contributor's
-//!   `ClassSet` mask. The per-Resource events union is the OR fold over
-//!   the map's values.
-//! - **`suppress_count`** gates event delivery — silenced iff `> 0`.
+//! One refcount: the **contributions map** (`Resource.contributions`)
+//! gates FD lifetime — a Resource is Watched iff the map is non-empty.
+//! The map is a `BTreeMap<ContribKey, ClassSet>`: each key identifies a
+//! single contributor (Profile anchor / parent / descent / descendant,
+//! or Promoter prefix / proxy); the value is that contributor's
+//! `ClassSet` mask. The per-Resource events union is the OR fold over
+//! the map's values.
 //!
 //! Each primitive emits `WatchOp` ops as follows:
 //! - [`add_watch`]: `Watch` on the empty → non-empty edge OR on any
 //!   union change at non-empty.
 //! - [`sub_watch`]: `Unwatch` on the non-empty → empty edge; `Watch`
 //!   on any union change at non-empty.
-//! - [`add_suppress`] / [`sub_suppress`]: `Suppress` / `Unsuppress` on
-//!   the 0↔1 edge only — suppression is binary and orthogonal to the
-//!   events mask.
 //!
 //! **Two release paths.**
 //! - [`sub_watch_then_try_reap`] is the **routine per-key release** —
@@ -26,10 +20,10 @@
 //!   release zeroed `Resource::has_anchors()`. Co-resident
 //!   contributions at other keys keep the slot watched.
 //! - [`crate::Tree::vacate`] is the **protocol terminus** — clear the
-//!   whole contributions map atomically and zero `suppress_count`,
-//!   emitting both closing ops in one step. Used when every
-//!   contribution at the slot is being abandoned at once (kernel-watch
-//!   rejection, or `reconcile::delete_child` on a fully-drained slot).
+//!   whole contributions map atomically, emitting the closing `Unwatch`
+//!   in one step. Used when every contribution at the slot is being
+//!   abandoned at once (kernel-watch rejection, or
+//!   `reconcile::delete_child` on a fully-drained slot).
 //!
 //! **Idempotent absent-key sub.** Calling [`sub_watch`] for a key that
 //! is not in the map is a silent no-op. This makes the helper safe to
@@ -151,36 +145,6 @@ pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &m
     }
 }
 
-/// `+suppress_count` on `r`. Emits `WatchOp::Suppress` on the 0→1 edge.
-///
-/// Suppression is orthogonal to the events mask — it gates kernel event
-/// *delivery* on an existing FD, not registration. The mask is unaffected.
-pub(crate) fn add_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
-    let Some(res) = tree.get_mut(r) else {
-        return;
-    };
-    if res.inc_suppress() {
-        out.watch_ops.push(WatchOp::Suppress { resource: r });
-    }
-}
-
-/// `-suppress_count` on `r`. Emits `WatchOp::Unsuppress` on the 1→0
-/// edge. Safe in any counter state, including `prev == 0` —
-/// [`crate::Tree::vacate`] (the protocol terminus) can legitimately
-/// zero `suppress_count` mid-burst (via either of its two production
-/// callers: `reconcile::delete_child` on a drained slot, or
-/// `on_watch_op_rejected` on kernel-watch failure), so the eventual
-/// symmetric `sub_suppress` from `finish_burst_to_idle`'s drain enters
-/// here on a zero counter and short-circuits without emission.
-pub(crate) fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput) {
-    let Some(res) = tree.get_mut(r) else {
-        return;
-    };
-    if res.dec_suppress() {
-        out.watch_ops.push(WatchOp::Unsuppress { resource: r });
-    }
-}
-
 /// Remove the contribution at `(r, key)` and try-reap the slot.
 /// Returns `true` iff the slot was reaped.
 ///
@@ -211,13 +175,13 @@ pub(crate) fn sub_suppress(tree: &mut Tree, r: ResourceId, out: &mut StepOutput)
 /// slot transparently frees the whole prefix chain it owned.
 ///
 /// **Distinct from [`Tree::vacate`].** Vacate is the protocol
-/// terminus: it clears the entire contribution map AND zeros
-/// `suppress_count` in one atomic step, emitting both closing ops
-/// together. Use vacate when every contribution at the slot is being
-/// abandoned at once (kernel-watch rejection routed through
-/// `on_watch_op_rejected`, or `reconcile::delete_child` on a
-/// fully-drained slot). Use this helper for the **routine per-key
-/// release path** where one contributor releases its single key.
+/// terminus: it clears the entire contribution map in one atomic
+/// step, emitting the closing `Unwatch`. Use vacate when every
+/// contribution at the slot is being abandoned at once (kernel-watch
+/// rejection routed through `on_watch_op_rejected`, or
+/// `reconcile::delete_child` on a fully-drained slot). Use this helper
+/// for the **routine per-key release path** where one contributor
+/// releases its single key.
 ///
 /// Caller discipline:
 /// - Owner-side bookkeeping (state flag, snapshot field, etc.) is
@@ -242,7 +206,7 @@ pub(crate) fn sub_watch_then_try_reap(
 
 #[cfg(test)]
 mod tests {
-    use super::{add_suppress, add_watch, sub_suppress, sub_watch, sub_watch_then_try_reap};
+    use super::{add_watch, sub_watch, sub_watch_then_try_reap};
     use specter_core::{ClassSet, ContribKey, ProfileId, ResourceRole, StepOutput, Tree, WatchOp};
 
     fn fresh() -> (Tree, specter_core::ResourceId) {
@@ -255,7 +219,7 @@ mod tests {
     fn last_watch_events(out: &StepOutput) -> Option<ClassSet> {
         out.watch_ops.iter().rev().find_map(|op| match op {
             WatchOp::Watch { events, .. } => Some(*events),
-            _ => None,
+            WatchOp::Unwatch { .. } => None,
         })
     }
 
@@ -275,7 +239,7 @@ mod tests {
                 assert_eq!(*resource, r);
                 assert_eq!(*events, ClassSet::CONTENT);
             }
-            op => panic!("expected Watch, got {op:?}"),
+            op @ WatchOp::Unwatch { .. } => panic!("expected Watch, got {op:?}"),
         }
     }
 
@@ -446,77 +410,6 @@ mod tests {
             &mut out,
         );
         assert!(out.watch_ops.is_empty());
-    }
-
-    #[test]
-    fn add_suppress_zero_to_one_emits_suppress() {
-        let (mut tree, r) = fresh();
-        let mut out = StepOutput::default();
-        add_suppress(&mut tree, r, &mut out);
-        assert_eq!(tree.get(r).unwrap().suppress_count(), 1);
-        assert_eq!(out.watch_ops.len(), 1);
-        assert!(matches!(
-            out.watch_ops[0],
-            WatchOp::Suppress { resource } if resource == r,
-        ));
-    }
-
-    #[test]
-    fn add_suppress_two_no_extra_emit() {
-        let (mut tree, r) = fresh();
-        let mut out = StepOutput::default();
-        add_suppress(&mut tree, r, &mut out);
-        out.watch_ops.clear();
-        add_suppress(&mut tree, r, &mut out);
-        assert_eq!(tree.get(r).unwrap().suppress_count(), 2);
-        assert!(out.watch_ops.is_empty());
-    }
-
-    #[test]
-    fn sub_suppress_one_to_zero_emits_unsuppress() {
-        let (mut tree, r) = fresh();
-        let mut out = StepOutput::default();
-        add_suppress(&mut tree, r, &mut out);
-        out.watch_ops.clear();
-        sub_suppress(&mut tree, r, &mut out);
-        assert_eq!(tree.get(r).unwrap().suppress_count(), 0);
-        assert_eq!(out.watch_ops.len(), 1);
-        assert!(matches!(
-            out.watch_ops[0],
-            WatchOp::Unsuppress { resource } if resource == r,
-        ));
-    }
-
-    #[test]
-    fn sub_suppress_at_zero_counter_is_silent_noop() {
-        // Symmetric to the watch_demand case — `Tree::vacate` can
-        // legitimately zero `suppress_count` while emitting the
-        // closing `Unsuppress`, and the eventual symmetric drain from
-        // `finish_burst_to_idle` then enters here on `prev == 0`.
-        let (mut tree, r) = fresh();
-        let mut out = StepOutput::default();
-        sub_suppress(&mut tree, r, &mut out);
-        assert!(out.watch_ops.is_empty());
-        assert_eq!(tree.get(r).unwrap().suppress_count(), 0);
-    }
-
-    #[test]
-    fn watch_and_suppress_are_independent() {
-        let (mut tree, r) = fresh();
-        let mut out = StepOutput::default();
-        let key = ContribKey::ProfileAnchor(ProfileId::default());
-        add_watch(&mut tree, r, key, ClassSet::CONTENT, &mut out);
-        add_suppress(&mut tree, r, &mut out);
-        {
-            let res = tree.get(r).unwrap();
-            assert_eq!(res.watch_demand(), 1);
-            assert_eq!(res.suppress_count(), 1);
-        }
-        sub_watch(&mut tree, r, key, &mut out);
-        let res = tree.get(r).unwrap();
-        assert_eq!(res.watch_demand(), 0);
-        // suppress unchanged by the watch decrement.
-        assert_eq!(res.suppress_count(), 1);
     }
 
     #[test]

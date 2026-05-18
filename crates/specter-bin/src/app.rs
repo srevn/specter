@@ -537,8 +537,6 @@ pub(crate) fn apply_watch_op<W: FsWatcher>(
             }
         }
         WatchOp::Unwatch { resource } => watcher.unwatch(resource),
-        WatchOp::Suppress { resource } => watcher.suppress(resource),
-        WatchOp::Unsuppress { resource } => watcher.unsuppress(resource),
     }
 }
 
@@ -583,7 +581,7 @@ mod tests {
 
     /// Mint a fresh non-null `ResourceId`. Required because slotmap's
     /// `SecondaryMap` rejects the null/default key — and `MockFsWatcher`
-    /// stores its installed/suppressed state in `SecondaryMap`s.
+    /// stores its installed-watch state in a `SecondaryMap`.
     fn fresh_resource_id() -> ResourceId {
         let mut map: SlotMap<ResourceId, ()> = SlotMap::with_key();
         map.insert(())
@@ -658,28 +656,6 @@ mod tests {
             &sides.sensor_in_tx,
         );
         assert!(!watcher.installed.contains_key(r));
-    }
-
-    #[test]
-    fn apply_watch_op_suppress_marks_suppressed() {
-        let mut chans = Channels::new();
-        let sides = chans.take_watcher_side();
-        let mut watcher = MockFsWatcher::new();
-        let r = fresh_resource_id();
-        watcher
-            .watch(
-                r,
-                std::path::Path::new("/tmp"),
-                ResourceKind::Unknown,
-                ClassSet::EMPTY,
-            )
-            .unwrap();
-        apply_watch_op(
-            &mut watcher,
-            WatchOp::Suppress { resource: r },
-            &sides.sensor_in_tx,
-        );
-        assert!(watcher.suppressed.contains_key(r));
     }
 
     #[test]

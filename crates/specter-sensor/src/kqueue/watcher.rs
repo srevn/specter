@@ -1,17 +1,16 @@
 //! `KqueueWatcher` — kqueue-backed `FsWatcher` impl.
 //!
 //! Single-threaded: one thread owns the `KqueueWatcher` value and drives
-//! `watch` / `unwatch` / `suppress` / `unsuppress` between `poll_until`
-//! calls. The wake handle ([`KqueueWakeHandle`]) is the only cross-thread
-//! surface — see [`crate::kqueue::wake`] for the lifecycle discipline.
+//! `watch` / `unwatch` between `poll_until` calls. The wake handle
+//! ([`KqueueWakeHandle`]) is the only cross-thread surface — see
+//! [`crate::kqueue::wake`] for the lifecycle discipline.
 //!
 //! # Drop semantics
 //!
 //! Default field-order drop:
 //! - `by_resource` drops every watched fd (kernel removes vnode
 //!   registrations as each fd closes).
-//! - `suppressed`, `kinds`, and `registered_fflags` drop their
-//!   bookkeeping (no fds).
+//! - `kinds` and `registered_fflags` drop their bookkeeping (no fds).
 //! - `kq` (Arc) decrements; if last, the kqueue fd closes, kernel-reaping
 //!   the `EVFILT_USER` ident and any queued events.
 //!
@@ -57,7 +56,6 @@ const EVENT_BATCH: usize = 64;
 #[derive(Debug)]
 pub struct KqueueWatcher {
     by_resource: SecondaryMap<ResourceId, OwnedFd>,
-    suppressed: SecondaryMap<ResourceId, ()>,
     /// Per-resource kind cache: seeded at `watch()` from the engine's
     /// `WatchOp::Watch.kind` (verified against an `fstat` of the freshly
     /// opened fd; the cache stores the verified value). Consumed by
@@ -111,7 +109,6 @@ impl KqueueWatcher {
         ffi::register_user_event(&kq, WAKE_IDENT)?;
         Ok(Self {
             by_resource: SecondaryMap::new(),
-            suppressed: SecondaryMap::new(),
             kinds: SecondaryMap::new(),
             registered_fflags: SecondaryMap::new(),
             kq,
@@ -141,10 +138,7 @@ impl KqueueWatcher {
         // ── Re-watch path ───────────────────────────────────────────
         // FD already held: compute the new fflags from the cached kind
         // + incoming events; diff against the installed mask; re-register
-        // iff different. Suppression lives in userspace (`self.suppressed`
-        // gate at `poll_until`) and is independent of the kernel
-        // registration, so re-register installs the new mask without
-        // threading suppress state through the syscall.
+        // iff different.
         //
         // The engine-supplied `kind` is ignored on the re-watch path:
         // the cached kind (verified against `fstat` at fresh-watch time)
@@ -163,7 +157,6 @@ impl KqueueWatcher {
                 );
                 return Ok(());
             }
-            let suppressed = self.suppressed.contains_key(r);
             {
                 let fd = self
                     .by_resource
@@ -175,7 +168,6 @@ impl KqueueWatcher {
             tracing::debug!(
                 ?r,
                 ?events,
-                suppressed,
                 old_fflags = format_args!("{cached_fflags:#x}"),
                 new_fflags = format_args!("{new_fflags:#x}"),
                 "kqueue re-register (mask changed)"
@@ -187,9 +179,7 @@ impl KqueueWatcher {
         // 1) Open. 2) Stat + verify against engine's expected kind.
         // 3) Translate. 4) Register. 5) Insert. Each step's failure
         // drops anything earlier (the OwnedFd auto-closes) so a
-        // partially-failed `watch` leaves zero state. The kernel
-        // registration is unconditional; userspace silencing happens
-        // via `self.suppressed` at `poll_until` drain time.
+        // partially-failed `watch` leaves zero state.
         let fd = fd::open_for_watch(path)?;
         let observed_kind = fd::stat_kind(&fd)?;
         if !kind.matches_or_unknown(observed_kind) {
@@ -244,31 +234,9 @@ impl FsWatcher for KqueueWatcher {
         // tracks the FD's lifetime exactly: clear it whenever we drop
         // the FD so a subsequent re-watch starts fresh.
         let removed = self.by_resource.remove(r).is_some();
-        self.suppressed.remove(r);
         self.kinds.remove(r);
         self.registered_fflags.remove(r);
         tracing::debug!(?r, removed, "kqueue unwatch");
-    }
-
-    fn suppress(&mut self, r: ResourceId) {
-        if !self.by_resource.contains_key(r) {
-            tracing::warn!(?r, "kqueue suppress on unwatched resource (race; dropped)");
-            return;
-        }
-        self.suppressed.insert(r, ());
-        tracing::debug!(?r, "kqueue suppress");
-    }
-
-    fn unsuppress(&mut self, r: ResourceId) {
-        if !self.by_resource.contains_key(r) {
-            tracing::warn!(
-                ?r,
-                "kqueue unsuppress on unwatched resource (race; dropped)"
-            );
-            return;
-        }
-        self.suppressed.remove(r);
-        tracing::debug!(?r, "kqueue unsuppress");
     }
 
     /// Block until events arrive (or the deadline elapses or a wake
@@ -373,16 +341,6 @@ impl FsWatcher for KqueueWatcher {
                 continue;
             }
             let r = ResourceId::from(KeyData::from_ffi(raw));
-            // User-space suppression filter (mirror of inotify's gate at
-            // its `poll_until`). The kernel registration is always
-            // enabled; suppression lives entirely in `self.suppressed`,
-            // and events for a suppressed resource drop here without
-            // crossing the watcher boundary. Kernel-level disable is
-            // not used because its queue-and-replay semantics deliver a
-            // coalesced phantom on re-enable.
-            if self.suppressed.contains_key(r) {
-                continue;
-            }
             // Kind cache miss is possible if the resource was unwatched
             // between the kernel's queue-add and our drain; default to
             // `Unknown` and let `normalize` apply its defensive map.

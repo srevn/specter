@@ -7,7 +7,7 @@
 //! - `burst.rs` — Idle ↔ Active phase transitions.
 //! - `transitions.rs` — per-input handlers (`on_fs_event`, etc.).
 //! - `reconcile.rs` — newly-discovered descendants.
-//! - `refcounts.rs` — `watch_demand` / `suppress_count` edges.
+//! - `refcounts.rs` — `watch_demand` (contributions-map) edges.
 //!
 //! `step` is the single dispatch point; each `Input` variant routes to the
 //! corresponding `on_*` handler. `attach_sub` is the engine's public
@@ -904,10 +904,10 @@ impl Engine {
         // No Subs remain: classify the reap path via the typed
         // [`ProfileState::detach_lifecycle`] projection — `ReapNow` for
         // Idle / Pending Profiles (no burst to drain), `DeferToBurstEnd`
-        // for Active Profiles (the burst's `sub_suppress` /
-        // Draining-sweep drain must run first). Pending Profiles reap
-        // synchronously alongside Idle: there is no
-        // `finish_burst_to_idle` to resolve a deferred reap.
+        // for Active Profiles (the burst's Draining-sweep reconfirm
+        // must run first). Pending Profiles reap synchronously
+        // alongside Idle: there is no `finish_burst_to_idle` to resolve
+        // a deferred reap.
         let lifecycle = self
             .profiles
             .get(profile_id)
@@ -1131,9 +1131,9 @@ impl Engine {
         // ancestors — the watch-root parent slot whose only remaining
         // claim was *this* Profile's anchor as its sole child is freed
         // in the same step. `try_reap` folds in `Tree::vacate` as its
-        // closing-emission step, so any residual per-slot protocol
-        // (kernel-watch / burst-suppress) is emitted before the slot
-        // leaves the Tree.
+        // closing-emission step, so any residual kernel-watch protocol
+        // (the closing `Unwatch`) is emitted before the slot leaves the
+        // Tree.
         self.tree.try_reap(anchor, out);
 
         out.diagnostics.push(Diagnostic::ProfileReaped {
@@ -1183,8 +1183,8 @@ impl Engine {
     ///
     /// The bin uses this at startup to walk a config's `path` strings into
     /// the Tree before calling `attach_sub`. Use the dedicated refcount
-    /// helpers to modify `watch_demand` / `suppress_count` — direct
-    /// mutation breaks the 0↔1 edge invariant.
+    /// helpers to modify `watch_demand` — direct mutation breaks the
+    /// 0↔non-empty contributions-edge invariant.
     pub const fn tree_mut(&mut self) -> &mut Tree {
         &mut self.tree
     }

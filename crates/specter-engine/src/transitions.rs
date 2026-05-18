@@ -877,9 +877,9 @@ impl Engine {
                 Some(AwaitVerdict::LastReached) => match finish {
                     BurstFinish::ReturnToIdle => self.transition_to_rebasing(profile_id, out),
                     // No Subs left to rebase for; finish_burst_to_idle
-                    // runs the burst-end drain then the deferred reap
-                    // (direct reap_profile would leak the anchor
-                    // suppress).
+                    // runs the burst-end Draining-sweep reconfirm then
+                    // the deferred reap (a direct reap_profile would
+                    // skip the sweep).
                     BurstFinish::Reap => self.finish_burst_to_idle(profile_id, out),
                 },
                 // Off Awaiting between passes (unreachable under
@@ -1009,8 +1009,8 @@ impl Engine {
     /// `ENFILE` on FD exhaustion). Three things must happen:
     ///
     /// 1. [`specter_core::Tree::vacate`] the rejected slot — clear
-    ///    every contribution and zero `suppress_count` atomically, so
-    ///    the engine's view of "is this slot watched?" matches reality.
+    ///    every contribution atomically, so the engine's view of "is
+    ///    this slot watched?" matches reality.
     /// 2. Walk every Profile *and* Promoter that holds a claim on
     ///    `resource` (Profile: anchor / watch-root parent / descent
     ///    prefix; Promoter: descent prefix / `Active` proxy /
@@ -1099,22 +1099,17 @@ impl Engine {
         }
 
         // Atomic terminus for the rejected slot: clear the
-        // contributions map AND zero `suppress_count`, emitting the
-        // closing `Unwatch` / `Unsuppress` pair. The per-claimer loops
-        // below run their owner-bookkeeping and call `sub_watch` /
-        // `sub_suppress`, which short-circuit on the post-vacate state
-        // (absent key / zero counter). One slot, one terminus — and
-        // the suppress balance is preserved by short-circuit, not by
-        // deferring the closing emission.
+        // contributions map, emitting the closing `Unwatch`. The
+        // per-claimer loops below run their owner-bookkeeping and call
+        // `sub_watch`, which short-circuits on the post-vacate state
+        // (absent key). One slot, one terminus.
         self.tree.vacate(resource, out);
 
         // Anchor claimers: synthesise an anchor-loss. `finalize_anchor_lost`
         // cancels any in-flight Active probe, releases the anchor flag
         // (silent no-op on the post-vacate contributions map), and
-        // finishes the burst to Idle. `finish_burst_to_idle` runs
-        // `sub_suppress` against the now-zero counter — silent no-op,
-        // because `vacate` already emitted the closing `Unsuppress`
-        // above. Net Sensor ops match the pre-vacate accounting.
+        // finishes the burst to Idle. Net Sensor ops match the
+        // pre-vacate accounting.
         for pid in anchor_claimers {
             self.finalize_anchor_lost(pid, out);
             out.diagnostics.push(Diagnostic::ProfileClaimPurged {
@@ -1247,9 +1242,9 @@ impl Engine {
     ///   fires-on-drift.
     /// - **`Active(_)`** — abandon the in-flight burst via
     ///   [`Engine::finish_burst_to_idle`] (which cancels any pending
-    ///   probe, decrements the anchor's `suppress_count`, and runs the
-    ///   Draining-sweep reconfirm cascade), then start a fresh seed
-    ///   burst. The Standard burst's accumulated `dirty_resources` are
+    ///   probe and runs the Draining-sweep reconfirm cascade), then
+    ///   start a fresh seed burst. The Standard burst's accumulated
+    ///   `dirty_resources` are
     ///   discarded — the seed re-baselines against the post-overflow
     ///   tree, which strictly dominates whatever the Standard burst was
     ///   tracking. `reap_pending` Profiles reaped inside
@@ -1336,9 +1331,8 @@ impl Engine {
                     // superseding `submit` follows in THIS step:
                     //
                     //  reseed (will_reap == false): finish_burst_to_idle
-                    //    returns the Profile to Idle (the anchor stays
-                    //    suppressed — start_seed_burst re-adds the
-                    //    bracket), then start_seed_burst emits a fresh
+                    //    returns the Profile to Idle, then
+                    //    start_seed_burst emits a fresh
                     //    Probe{P,C2}. The sensor's per-owner expectation
                     //    map is a last-writer-wins upsert keyed by
                     //    owner, so submit(P,C2) alone supersedes C1: a
@@ -1746,9 +1740,10 @@ impl Engine {
     /// source, so the FsEvent path can't deliver a Pending Profile.
     /// `on_watch_op_rejected` calls this directly after iterating the
     /// full registry, where the guard does load-bearing work: a
-    /// Pending Profile carries no anchor contribution and participates
-    /// in no burst-suppress accounting, so `finish_burst_to_idle`'s
-    /// `sub_suppress` would underflow.
+    /// Pending Profile holds no anchor (it is still descending toward
+    /// one) — anchor-loss finalization does not apply to it, and its
+    /// descent-prefix watch rejection is handled separately as a
+    /// descent-prefix claim purge.
     pub(crate) fn finalize_anchor_lost(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
@@ -2367,8 +2362,8 @@ impl Engine {
     /// [`BurstFinish::Reap`] has no consumer for the rebased baseline
     /// — its Profile is dying. Skip the rebase probe entirely and route
     /// straight through `finish_burst_to_idle`, which runs the
-    /// `sub_suppress` / Draining-sweep drain and then dispatches
-    /// `reap_profile`. The diagnostic still fires so operators see the
+    /// Draining-sweep reconfirm and then dispatches `reap_profile`. The
+    /// diagnostic still fires so operators see the
     /// actuator-hang signal; only the wasted rebase round-trip is
     /// elided.
     ///

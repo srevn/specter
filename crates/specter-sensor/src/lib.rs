@@ -94,6 +94,18 @@ pub trait WatchFailureExt: Sized {
     /// Map an `io::Error` (the kqueue / inotify watcher syscall surface)
     /// into the typed variant. Backends call this at the trait boundary —
     /// the kernel error vocabulary stops here.
+    ///
+    /// # Preconditions
+    ///
+    /// Classifies errors from **watch-install and watcher-poll
+    /// syscalls only** (`inotify_add_watch` / `open(O_EVTONLY)` /
+    /// `kevent` / `epoll_wait`). `ENOSPC` is interpreted as inotify
+    /// watch-limit (`max_user_watches`) exhaustion and maps to
+    /// [`WatchFailure::Pressure`]; passing an `io::Error` from a
+    /// data-path syscall (where `ENOSPC` means "disk full") would
+    /// misclassify a real I/O fault as watch-pressure. Every backend
+    /// call site honours this; the precondition is the contract for
+    /// any future caller.
     fn from_io(e: &io::Error) -> Self;
 }
 
@@ -138,9 +150,8 @@ pub enum WatcherEvent {
 /// Single-threaded filesystem watcher.
 ///
 /// One thread blocks in [`poll_until`](FsWatcher::poll_until); the
-/// mutators ([`watch`](FsWatcher::watch) / [`unwatch`](FsWatcher::unwatch)
-/// / [`suppress`](FsWatcher::suppress) /
-/// [`unsuppress`](FsWatcher::unsuppress)) run on the same thread between
+/// mutators ([`watch`](FsWatcher::watch) /
+/// [`unwatch`](FsWatcher::unwatch)) run on the same thread between
 /// `poll_until` calls. Cross-thread coordination — fresh `WatchOp`s
 /// arriving on a channel — is the bin's responsibility: it pushes into
 /// the channel and calls [`WakeHandle::wake`] on a handle captured before
@@ -167,8 +178,6 @@ pub enum WatcherEvent {
 ///                 }
 ///             }
 ///             WatchOp::Unwatch { resource } => watcher.unwatch(resource),
-///             WatchOp::Suppress { resource } => watcher.suppress(resource),
-///             WatchOp::Unsuppress { resource } => watcher.unsuppress(resource),
 ///         }
 ///     }
 ///     // 2. Block until the deadline, an event, or a wake.
@@ -232,26 +241,6 @@ pub trait FsWatcher: Send {
     /// the trait boundary.
     fn unwatch(&mut self, r: ResourceId);
 
-    /// Silence event delivery on a watched resource. Idempotent; no-op
-    /// (with `tracing::warn!`) if `r` is not currently watched.
-    ///
-    /// Events arriving while suppressed are dropped at the watcher
-    /// boundary; the post-unsuppress event stream contains only events
-    /// that occur after [`unsuppress`](Self::unsuppress). Implementations
-    /// realise this as a userspace filter consulted by `poll_until`
-    /// before lifting an event onto the engine's input channel —
-    /// kernel-level disable mechanisms are not used because their
-    /// queue-and-replay semantics would deliver a coalesced phantom
-    /// on re-enable, breaking the engine's "no events for `r` while
-    /// suppressed" expectation. The kernel registration is unchanged
-    /// across suppress/unsuppress; no re-stat happens on either edge.
-    fn suppress(&mut self, r: ResourceId);
-
-    /// Restore event delivery. Idempotent; no-op (with `tracing::warn!`)
-    /// if `r` is not currently suppressed. See [`suppress`](Self::suppress)
-    /// for the drop-at-boundary contract.
-    fn unsuppress(&mut self, r: ResourceId);
-
     /// Block until the next event(s), the deadline, or a wake. Pushes
     /// normalized [`WatcherEvent`]s into `out` and returns the count
     /// pushed *this call*.
@@ -269,12 +258,11 @@ pub trait FsWatcher: Send {
     /// A returned count of zero is normal: either the deadline arrived
     /// or only a wake fired.
     ///
-    /// `EINTR` is retried internally. Syscall errors map to a typed
-    /// [`WatchFailure`] (kqueue: `EMFILE` from a full kernel queue →
-    /// [`Pressure`](WatchFailure::Pressure); everything else →
-    /// [`Invariant`](WatchFailure::Invariant)) — symmetric with
-    /// [`watch`](Self::watch). The bin treats a `poll_until` failure
-    /// as terminal for the watcher thread (no recovery path).
+    /// `EINTR` is retried internally. Syscall errors are classified
+    /// via [`WatchFailureExt::from_io`] into a typed [`WatchFailure`]
+    /// — symmetric with [`watch`](Self::watch). The bin treats a
+    /// `poll_until` failure as terminal for the watcher thread (no
+    /// recovery path).
     fn poll_until(
         &mut self,
         deadline: Option<Instant>,
@@ -315,7 +303,7 @@ impl Clone for Box<dyn WakeHandle> {
 /// Single-threaded watcher for the daemon's own config file.
 ///
 /// Distinct from [`FsWatcher`]: that trait is the engine's per-Resource
-/// surface, with `watch` / `unwatch` / `suppress` mutators and a vector
+/// surface, with `watch` / `unwatch` mutators and a vector
 /// drain. The config watcher has exactly one watch target (the running
 /// process's config path) and no engine vocabulary at the boundary —
 /// just "kernel said something happened" or "wake / deadline arrived."

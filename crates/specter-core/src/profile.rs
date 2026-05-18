@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 /// **Pre-fire** (`Batching | Verifying | Draining`): event-driven
 /// debounce window, in-flight verify or self-stable / descendants-pending
 /// idle. Carries the event-accumulators (`dirty_resources`,
-/// `force_walk_resources`, `suppressed_resources`) and the source of
-/// truth for the settle deadline (`last_event_time`).
+/// `force_walk_resources`) and the source of truth for the settle
+/// deadline (`last_event_time`).
 ///
 /// **Post-fire** (`Awaiting | Rebasing`): effect emitted, gate-timer
 /// armed, then post-fire probe re-establishing the baseline. The
@@ -59,9 +59,9 @@ pub enum ActiveBurst {
 /// - **Burst-scoped invariants** (`intent`, `forced`, `burst_deadline`,
 ///   `probe_target`): survive every pre-fire phase transition.
 /// - **Pre-fire accumulators** (`dirty_resources`,
-///   `force_walk_resources`, `suppressed_resources`,
-///   `last_event_time`): populated by `event_drives_batching`, consumed
-///   at the next `transition_to_verifying`.
+///   `force_walk_resources`, `last_event_time`): populated by
+///   `event_drives_batching`, consumed at the next
+///   `transition_to_verifying`.
 ///
 /// `force_walk_resources` carries the events the next probe must visit
 /// fresh (defeats the walker's coarse-mtime skip on per-event-dirty
@@ -124,27 +124,6 @@ pub struct PreFireBurst {
     /// `lca_target` filters reaped slots and falls back to anchor on
     /// an empty live set.
     pub probe_target: ResourceId,
-    /// Non-anchor resources whose `suppress_count` was bumped 0→1 by
-    /// `event_drives_batching` during this burst's pre-fire phases.
-    /// Taken (via `mem::take`) at `transition_to_verifying` to drive
-    /// the symmetric `sub_suppress` drain, and defensively at
-    /// `finish_burst_to_idle` for abnormal-end paths
-    /// (`finalize_anchor_lost`, reap mid-burst).
-    ///
-    /// **Anchor explicitly excluded.** The anchor's suppress is the
-    /// existing `start_*_burst → finish_burst_to_idle` lifecycle and is
-    /// unrelated to this set. The exclusion is currently expressed as
-    /// `event_resource != anchor` in `event_drives_batching`; a future
-    /// change that adds parent-dir or other identity-floor resources to
-    /// the Profile should widen the exclusion to "any resource in the
-    /// Profile's identity-floor set" rather than continue to spell
-    /// `event_resource != anchor` literally.
-    ///
-    /// `BTreeSet` (not `Vec`) so iteration order is deterministic — the
-    /// `sub_suppress` drain emits `Unsuppress` ops in `ResourceId`
-    /// ascending order, matching `StepOutput.watch_ops`'s sort
-    /// discipline.
-    pub suppressed_resources: BTreeSet<ResourceId>,
     /// Wall-clock instant of the most recent `FsEvent` that drove this
     /// burst. The **source of truth** for the Batching settle deadline:
     /// the live settle timer's heap entry pins to a fixed deadline
@@ -238,9 +217,9 @@ pub enum PreFirePhase {
 ///   post-fire phases. Stored on the pre-fire side; lazy-dropped when
 ///   it expires post-fire.
 /// - No `probe_target`: Rebasing always targets the Profile's anchor.
-/// - No `dirty_resources` / `suppressed_resources` / `last_event_time`:
-///   pre-fire accumulators, drained at `transition_to_verifying`
-///   entry (the only path to fire).
+/// - No `dirty_resources` / `last_event_time`: pre-fire accumulators,
+///   drained at `transition_to_verifying` entry (the only path to
+///   fire).
 ///
 /// `intent: BurstIntent` survives post-fire so
 /// `dispatch_rebase_{vanished,failed}` can tag the `ProbeVanished` /
@@ -380,9 +359,6 @@ impl PreFireBurst {
     ///   fire (`transition_to_verifying`'s `mem::take`); the
     ///   debug_assert below catches a future regression that omits the
     ///   drain.
-    /// - `suppressed_resources` — likewise drained at
-    ///   `transition_to_verifying`; debug_asserted here as
-    ///   defense-in-depth.
     ///
     /// `intent` is preserved (read by `dispatch_rebase_*` for the
     /// diagnostic).
@@ -391,11 +367,6 @@ impl PreFireBurst {
         debug_assert!(
             self.force_walk_resources.is_empty(),
             "PreFireBurst::into_post_fire: force_walk_resources not drained \
-             at Verifying entry — drain must happen at transition_to_verifying",
-        );
-        debug_assert!(
-            self.suppressed_resources.is_empty(),
-            "PreFireBurst::into_post_fire: suppressed_resources not drained \
              at Verifying entry — drain must happen at transition_to_verifying",
         );
         PostFireBurst {
@@ -472,14 +443,12 @@ impl PostFireBurst {
     /// burst is torn down, so a descendant change that landed during the
     /// rebase round-trip is seen only by the next unrelated event.
     ///
-    /// **In-place move, never finish-then-start.** A Standard burst
-    /// takes the anchor `suppress_count` 0→1 once at start and releases
-    /// it once at finish. A finish-then-start restart would release
-    /// then re-acquire it, opening a window where the anchor is briefly
-    /// unsuppressed and a self-induced fire-tail event could leak into
-    /// the restarted burst. This move never finishes, so the suppress
-    /// stays held from the original start through the restarted burst's
-    /// single eventual finish.
+    /// **In-place move, never finish-then-start.** The typed
+    /// `PostFire → PreFire` move preserves the watched anchor: it
+    /// neither installs nor releases a contribution, so the restarted
+    /// burst keeps the original burst's kernel-watch state without a
+    /// finish/start round-trip. The single balancing `Unwatch` (if
+    /// any) still runs at the restarted burst's eventual reap.
     ///
     /// **Origin-agnostic.** `intent` is *set* (not inherited) to
     /// `Standard` because a restarted debounce burst *is* Standard by
@@ -520,7 +489,6 @@ impl PostFireBurst {
             dirty_resources: residual.iter().copied().collect(),
             force_walk_resources: residual,
             probe_target: anchor,
-            suppressed_resources: BTreeSet::new(),
             last_event_time: Some(now),
         }
     }
@@ -572,10 +540,10 @@ impl ActiveBurst {
 /// [`Self::ReturnToIdle`]: the burst completes, the Profile returns to
 /// [`ProfileState::Idle`], and the next `FsEvent` may start a fresh
 /// burst. [`Self::Reap`] flips the directive: the active burst still
-/// runs to completion (so the burst-end drain — `sub_suppress` and the
-/// Draining-sweep reconfirm — runs before the Profile leaves the map),
-/// but `finish_burst_to_idle` then routes through `reap_profile`
-/// instead of returning the Profile to Idle.
+/// runs to completion (so the burst-end Draining-sweep reconfirm runs
+/// before the Profile leaves the map), but `finish_burst_to_idle` then
+/// routes through `reap_profile` instead of returning the Profile to
+/// Idle.
 ///
 /// **Why a payload, not a parallel field on Profile.** The directive
 /// is *only* meaningful inside an Active burst. Encoding it as a `bool`
@@ -629,8 +597,8 @@ pub enum BurstFinish {
 ///   `reap_profile` runs immediately, releasing the descent prefix
 ///   (Pending) or the anchor contribution (Idle / materialized).
 /// - [`Self::DeferToBurstEnd`]: the Profile is [`ProfileState::Active`]
-///   — a burst is in flight whose burst-end drain (`sub_suppress` and
-///   the Draining-sweep reconfirm) must run before reap. The caller flips
+///   — a burst is in flight whose burst-end Draining-sweep reconfirm
+///   must run before reap. The caller flips
 ///   [`BurstFinish::Reap`] (via [`ProfileState::mark_active_for_reap`])
 ///   so `finish_burst_to_idle` routes through `reap_profile` once the
 ///   burst converges.
@@ -2971,7 +2939,6 @@ mod tests {
             dirty_resources: BTreeSet::new(),
             force_walk_resources: BTreeSet::new(),
             probe_target: anchor,
-            suppressed_resources: BTreeSet::new(),
             last_event_time: None,
         }
     }
@@ -2985,7 +2952,6 @@ mod tests {
             dirty_resources: BTreeSet::new(),
             force_walk_resources: BTreeSet::new(),
             probe_target: anchor,
-            suppressed_resources: BTreeSet::new(),
             last_event_time: None,
         }
     }
@@ -3472,7 +3438,6 @@ mod tests {
         assert_eq!(pre.dirty_resources, residual);
         assert_eq!(pre.force_walk_resources, residual);
         assert_eq!(pre.probe_target, anchor);
-        assert!(pre.suppressed_resources.is_empty());
         assert_eq!(pre.last_event_time, Some(now));
     }
 

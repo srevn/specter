@@ -54,13 +54,12 @@
 //! - `restart_burst_from_fire_tail_residual` — `Active(PostFire)` →
 //!   `Active(PreFire(Batching))` typed move at rebase-ok when a
 //!   `ReturnToIdle` burst carries a non-empty residual (origin-agnostic
-//!   — Seed-origin restarts too). No refcount edges: the original
-//!   burst's `+suppress` stays held (it never finishes) until the
-//!   restarted burst's single `finish_burst_to_idle`.
-//! - `finish_burst_to_idle` — Active → Idle, single point of
-//!   `-suppress`; then sweeps the Draining Profiles and reconfirms
-//!   each whose fresh covered-descendant query has gone false.
-//!   Discriminates `PreFire` / `PostFire` at the take.
+//!   — Seed-origin restarts too). No refcount edges: the typed move
+//!   preserves the watched anchor, neither installing nor releasing a
+//!   contribution.
+//! - `finish_burst_to_idle` — Active → Idle; then sweeps the Draining
+//!   Profiles and reconfirms each whose fresh covered-descendant query
+//!   has gone false. Discriminates `PreFire` / `PostFire` at the take.
 //!
 //! The two batching helpers exist as a deliberate split rather than one
 //! helper with a runtime flag: each caller has **static knowledge** of
@@ -87,7 +86,6 @@
 //!   `Vanished` on kind mismatch and the engine recovers via descent.
 
 use crate::Engine;
-use crate::refcounts::{add_suppress, sub_suppress};
 use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, BurstFinish, BurstHelper, BurstIntent, Diagnostic, FsEvent, LcaIntegritySource,
@@ -224,9 +222,9 @@ impl Engine {
     /// routes through `transition_to_rebasing`.
     ///
     /// Caller has verified `Profile.state == Idle`. Schedules
-    /// `burst_deadline`, `+suppress`, and constructs the `Verifying`
-    /// phase armed with a fresh correlation (`mint → arm →
-    /// emit_owner_probe`). The choke shapes the request — anchor target
+    /// `burst_deadline` and constructs the `Verifying` phase armed with
+    /// a fresh correlation (`mint → arm → emit_owner_probe`). The choke
+    /// shapes the request — anchor target
     /// plus `current.subtree_at(anchor)` as `baseline_subtree` when a
     /// post-recovery Seed has one (walker mtime-skip on idempotent
     /// events).
@@ -295,7 +293,6 @@ impl Engine {
                 // re-runs for Seed only on Draining-reconfirm, which Seed
                 // bursts never reach because they skip Batching).
                 probe_target: resource,
-                suppressed_resources: BTreeSet::new(),
                 // Seed bursts skip Batching; the field has no consumer
                 // until a fresh FsEvent during the verify routes through
                 // `event_drives_batching` and repopulates it.
@@ -306,7 +303,6 @@ impl Engine {
             BurstFinish::ReturnToIdle,
         ));
 
-        add_suppress(&mut self.tree, resource, out);
         // The choke reads the correlation back off the Verifying slot
         // just constructed, resolves the anchor target off
         // `pre.probe_target`, and drains the (empty, fresh-Seed)
@@ -314,8 +310,8 @@ impl Engine {
         self.emit_owner_probe(owner, out);
     }
 
-    /// Start a Standard burst: schedule settle + `burst_deadline`,
-    /// `+suppress`. No Probe — that fires on `settle_timer` expiry via
+    /// Start a Standard burst: schedule settle + `burst_deadline`. No
+    /// Probe — that fires on `settle_timer` expiry via
     /// `transition_to_verifying`. No ancestor bookkeeping: the
     /// `Draining → Verifying` reconfirm is a fresh query
     /// ([`crate::coverage::has_active_standard_descendant`]) over the
@@ -369,7 +365,6 @@ impl Engine {
                     // expiry / force-fire; the initial value carries no
                     // observable consequence (no probe has emitted yet).
                     probe_target: resource,
-                    suppressed_resources: BTreeSet::new(),
                     // The burst-start FsEvent IS the first event; seed the
                     // settle-deadline source of truth with `now`. Subsequent
                     // events update this in `event_drives_batching` without
@@ -381,8 +376,6 @@ impl Engine {
                 BurstFinish::ReturnToIdle,
             ));
         }
-
-        add_suppress(&mut self.tree, resource, out);
     }
 
     /// Caller: `drive_burst` Active branch — an `FsEvent` arrived during a
@@ -390,12 +383,8 @@ impl Engine {
     /// `Verifying`), accumulates the event into `dirty_resources` and
     /// `force_walk_resources`, updates `last_event_time`, arms a fresh
     /// settle timer **only when re-entering Batching from Verifying or
-    /// Draining**, emits a per-resource `Suppress` on the first per-burst
-    /// occurrence of a non-anchor resource (recorded in
-    /// `suppressed_resources` for the symmetric drain at
-    /// `transition_to_verifying`), and writes `phase = Batching {
-    /// settle_timer }`. `intent`, `forced`, and the `burst_deadline` are
-    /// preserved.
+    /// Draining**, and writes `phase = Batching { settle_timer }`.
+    /// `intent`, `forced`, and the `burst_deadline` are preserved.
     ///
     /// Why this is one of two batching mutators rather than a single
     /// helper with a flag: the caller has static knowledge that the
@@ -419,16 +408,6 @@ impl Engine {
     /// Re-entries from `Verifying` or `Draining` have no live settle
     /// timer to reuse and therefore schedule a fresh entry. `Batching`
     /// re-entries skip the schedule.
-    ///
-    /// **Per-resource Suppress.** The anchor's suppress is bracketed by
-    /// `start_*_burst` ↔ `finish_burst_to_idle`. Non-anchor resources
-    /// receiving events during the Batching window get their own
-    /// suppress bracket: `add_suppress` here (0→1 edge ⇒ one Suppress
-    /// op) and the symmetric `sub_suppress` at the next
-    /// `transition_to_verifying`. Subsequent events on the same
-    /// resource within one Batching window are dedup'd via the burst's
-    /// `suppressed_resources` set, so the watcher sees at most one
-    /// Suppress / Unsuppress pair per (Burst, non-anchor resource).
     pub(crate) fn event_drives_batching(
         &mut self,
         profile_id: ProfileId,
@@ -452,7 +431,6 @@ impl Engine {
             return;
         };
         let settle = p.settle;
-        let anchor = p.resource;
 
         // Read phase before mutating self via `cancel_owner_probe`. The
         // Cancel emission doesn't touch `burst.phase`, but it does take
@@ -484,39 +462,12 @@ impl Engine {
             None
         };
 
-        // Decide the per-resource Suppress before the mutation block.
-        // The anchor is excluded — its suppress is the existing
-        // `start_*_burst → finish_burst_to_idle` bracket. Duplicates
-        // within one Batching window are excluded via the burst's
-        // tracking set so the symmetric drain at `transition_to_verifying`
-        // pairs each `add_suppress` with exactly one `sub_suppress`.
-        //
-        // The borrow on `self.profiles` ends with the `is_some_and` so
-        // `add_suppress` (which needs `&mut self.tree`) can run before
-        // re-borrowing `self.profiles` mutably below.
-        let needs_suppress = event_resource != anchor
-            && self
-                .profiles
-                .get(profile_id)
-                .is_some_and(|p| match p.state() {
-                    ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
-                        !pre.suppressed_resources.contains(&event_resource)
-                    }
-                    _ => false,
-                });
-        if needs_suppress {
-            add_suppress(&mut self.tree, event_resource, out);
-        }
-
         if let Some(pre) = self
             .profiles
             .get_mut(profile_id)
             .and_then(Profile::pre_fire_burst_mut)
         {
             pre.last_event_time = Some(now);
-            if needs_suppress {
-                pre.suppressed_resources.insert(event_resource);
-            }
             pre.dirty_resources.insert(event_resource);
             pre.force_walk_resources.insert(event_resource);
             if let Some(timer_id) = new_settle_timer {
@@ -731,46 +682,23 @@ impl Engine {
             None => return,
         };
 
-        // Take the per-burst consumables in one mutable-borrow window.
-        // The post-fire phases never reach this helper — production
-        // callers (Settle expiry, BurstDeadline expiry, ancestor
-        // reconfirm from `finish_burst_to_idle`) are gated on pre-fire
-        // phases via `is_timer_referenced` and the Draining sweep's
-        // `is_draining()` filter respectively. The early return guards a stray call
-        // from construct-arming a fresh `Verifying` slot while an
-        // effect wait is still in flight — that would orphan the prior
-        // correlation; the I5 `debug_assert` below is the loud backstop.
+        // No per-burst consumables are drained here. The post-fire
+        // phases never reach this helper — production callers (Settle
+        // expiry, BurstDeadline expiry, ancestor reconfirm from
+        // `finish_burst_to_idle`) are gated on pre-fire phases via
+        // `is_timer_referenced` and the Draining sweep's
+        // `is_draining()` filter respectively. A stray call that
+        // construct-arms a fresh `Verifying` slot while an effect wait
+        // is still in flight would orphan the prior correlation; the
+        // loud arm below (`unreachable!()` on a non-pre-fire state) is
+        // the guard, and the I5 `debug_assert` is its dev/CI backstop.
         //
-        // `suppressed_resources` is a single-use accumulator consumed by
-        // *this transition* — `sub_suppress` below is refcount /
-        // Unsuppress bookkeeping, not probe emission, so it stays here.
         // `force_walk_resources` and `forced` are consumed by
         // `emit_owner_probe` (the single probe-emission choke) off the
         // armed `Verifying` slot it resolves — the transition no longer
         // drains a copy and threads it through a wide constructor.
         // `dirty_resources` is preserved — it carries the LCA basis
         // across the whole burst.
-        let suppressed_drain = match self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::pre_fire_burst_mut)
-        {
-            Some(pre) => std::mem::take(&mut pre.suppressed_resources),
-            None => return,
-        };
-
-        // Drain the per-burst `suppressed_resources` taken above. Each
-        // entry was bumped 0→1 (or N→N+1 in the multi-Profile fan-in
-        // case) by `event_drives_batching`; `sub_suppress` returns it
-        // to 0 (emitting Unsuppress) or to N (no emit). Refcount math
-        // holds across overlapping bursts; `StepOutput` sees one
-        // Suppress / Unsuppress pair per (Burst, non-anchor resource).
-        // BTreeSet iteration is sorted, so emitted Unsuppress ops land
-        // in `ResourceId`-ascending order — coherent with
-        // `StepOutput.watch_ops`'s sort discipline.
-        for r in &suppressed_drain {
-            sub_suppress(&mut self.tree, *r, out);
-        }
 
         // Mint, then write the `Verifying` phase already armed with the
         // correlation. The prior phase is `Batching` / `Draining`
@@ -1039,10 +967,9 @@ impl Engine {
         self.emit_owner_probe(owner, out);
     }
 
-    /// Active → Idle. Single source of `-suppress`. The active burst's
-    /// timers are not explicitly cancelled — lazy invalidation in
-    /// `pop_expired` drops them when they fire. Idempotent: silent
-    /// no-op on already-Idle Profiles.
+    /// Active → Idle. The active burst's timers are not explicitly
+    /// cancelled — lazy invalidation in `pop_expired` drops them when
+    /// they fire. Idempotent: silent no-op on already-Idle Profiles.
     ///
     /// **Cancel-first entry precondition.** No caller may reach here
     /// with `Profile(profile_id)`'s `ProbeSlot` still armed — the
@@ -1118,59 +1045,39 @@ impl Engine {
         let Some(p) = self.profiles.get_mut(profile_id) else {
             return;
         };
-        let resource = p.resource;
 
         // Take the burst-by-value via `transition_state(Idle)` and
-        // discriminate on the typed variant. Only the pre-fire arm
-        // carries `suppressed_resources` to drain; PostFire's is empty
-        // by construction — `transition_to_verifying` drained the set
-        // immediately before the fire, and `into_post_fire`'s
-        // debug_assert catches any future drift. `intent` is no longer
-        // read here: the Draining sweep below is intent-agnostic.
+        // discriminate on the typed variant. `intent` is not read here:
+        // the Draining sweep below is intent-agnostic.
         //
         // After this point `p.state == Idle` for the whole helper
-        // window. The subsequent `sub_suppress` / Draining-sweep
-        // `transition_to_verifying` / reap calls all run against a
-        // focal Profile in Idle — future observers (e.g., a hook firing
-        // on state transitions) would see the transition bracket
-        // cleanly. Idle-first is also load-bearing for the sweep: the
-        // finishing Profile is excluded from its own
-        // `has_active_standard_descendant` query precisely because it
-        // is no longer in an Active Standard burst.
-        //
-        // The defensive `suppressed_resources` drain catches abnormal-
-        // end paths that bypass `transition_to_verifying`
-        // (`finalize_anchor_lost` mid-Batching, `reap_profile` mid-burst,
-        // config-diff reap). `sub_suppress` on a stale `ResourceId`
-        // (slot reaped between event ingestion and burst end via
-        // `discard_anchor_state`'s descendant release) is a no-op —
-        // `refcounts::sub_suppress` short-circuits on a missing slot.
+        // window. The subsequent Draining-sweep `transition_to_verifying`
+        // / reap calls all run against a focal Profile in Idle — future
+        // observers (e.g., a hook firing on state transitions) would see
+        // the transition bracket cleanly. Idle-first is also
+        // load-bearing for the sweep: the finishing Profile is excluded
+        // from its own `has_active_standard_descendant` query precisely
+        // because it is no longer in an Active Standard burst.
         let prior = p.transition_state(ProfileState::Idle);
-        // Capture `(suppressed_drain, finish)` from the consumed prior
-        // state. `finish` is captured here — not re-read from
-        // `profiles.get(profile_id)` after the swap — so the directive
-        // is locked in at burst-end entry; a hypothetical future
-        // mid-helper write to a re-borrowed Profile can't flip the reap
-        // decision under us. The PostFire burst (whose `ProbeSlot` the
-        // cancel-first precondition guarantees disarmed) is dropped at
-        // the arm's end, exactly as before.
-        let (suppressed_drain, finish) = match prior {
-            ProfileState::Active(ActiveBurst::PreFire(pre), finish) => {
-                (pre.suppressed_resources, finish)
+        // Capture `finish` from the consumed prior state. It is captured
+        // here — not re-read from `profiles.get(profile_id)` after the
+        // swap — so the directive is locked in at burst-end entry; a
+        // hypothetical future mid-helper write to a re-borrowed Profile
+        // can't flip the reap decision under us. The PostFire burst
+        // (whose `ProbeSlot` the cancel-first precondition guarantees
+        // disarmed) is dropped at the arm's end, exactly as before. Both
+        // Active arms carry the directive identically; the discriminant
+        // matters only to drop the right burst payload.
+        let finish = match prior {
+            ProfileState::Active(ActiveBurst::PreFire(_) | ActiveBurst::PostFire(_), finish) => {
+                finish
             }
-            ProfileState::Active(ActiveBurst::PostFire(_), finish) => (BTreeSet::new(), finish),
             other => {
                 // Idle / Pending — no burst-end machinery to run. Restore.
                 p.transition_state(other);
                 return;
             }
         };
-
-        for r in &suppressed_drain {
-            sub_suppress(&mut self.tree, *r, out);
-        }
-
-        sub_suppress(&mut self.tree, resource, out);
 
         // Intent-agnostic Draining sweep. The reconfirm condition
         // `has_active_standard_descendant(A)` can only flip false at
@@ -1265,13 +1172,12 @@ impl Engine {
     /// `intent: Standard` because a restarted debounce burst *is*
     /// Standard by definition.
     ///
-    /// **No refcount edges.** Deliberately neither `+suppress` nor
-    /// `-suppress`. The anchor `suppress_count` 0→1 was taken once at
-    /// the original `start_*_burst` and stays held: this restart never
-    /// finishes, so the single balancing release runs at the restarted
-    /// burst's eventual `finish_burst_to_idle`. A finish-then-start
-    /// would flicker it. (There is no ancestor counter to balance — the
-    /// reconfirm is a fresh query.)
+    /// **No refcount edges.** The typed `PostFire → PreFire` move
+    /// preserves the watched anchor: it neither installs nor releases a
+    /// contribution, so the restarted burst keeps the original burst's
+    /// kernel-watch state without a finish/start round-trip. (There is
+    /// no ancestor counter to balance either — the reconfirm is a fresh
+    /// query.)
     ///
     /// **Slot-consumed precondition.** The whole-value swap below
     /// destructures the post-fire burst; an armed `Rebasing` slot
@@ -1664,7 +1570,7 @@ mod tests {
     use specter_core::{
         ActiveBurst, BurstIntent, ClassSet, Input, PreFirePhase, ProbeOp, ProbeOwner, ProbeRequest,
         ProbeSlot, Profile, ProfileIdentity, ProfileState, ResourceKind, ResourceRole, ScanConfig,
-        StepOutput, TimerKind, WatchOp,
+        StepOutput, TimerKind,
     };
     use std::time::{Duration, Instant};
 
@@ -1695,7 +1601,7 @@ mod tests {
     }
 
     #[test]
-    fn start_seed_burst_emits_probe_and_suppress() {
+    fn start_seed_burst_emits_probe() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, Instant::now(), &mut out);
@@ -1710,19 +1616,13 @@ mod tests {
         assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
         assert!(!burst.forced);
 
-        // Output: one Probe + one Suppress.
+        // Output: one Probe.
         let probes = out
             .probe_ops()
             .iter()
             .filter(|op| matches!(op, ProbeOp::Probe { .. }))
             .count();
         assert_eq!(probes, 1);
-        let suppresses = out
-            .watch_ops
-            .iter()
-            .filter(|op| matches!(op, WatchOp::Suppress { .. }))
-            .count();
-        assert_eq!(suppresses, 1);
 
         // Heap: only burst_deadline (Seed has no settle_timer).
         assert_eq!(e.timers.len(), 1);
@@ -1753,12 +1653,6 @@ mod tests {
 
         // No probe yet (settle_timer fires first).
         assert!(out.probe_ops().is_empty());
-        let suppresses = out
-            .watch_ops
-            .iter()
-            .filter(|op| matches!(op, WatchOp::Suppress { .. }))
-            .count();
-        assert_eq!(suppresses, 1);
     }
 
     #[test]
@@ -2110,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_burst_to_idle_emits_unsuppress() {
+    fn finish_burst_to_idle_returns_profile_to_idle() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, Instant::now(), &mut out);
@@ -2126,12 +2020,6 @@ mod tests {
             e.profiles.get(pid).unwrap().state(),
             ProfileState::Idle,
         ));
-        let unsuppresses = out
-            .watch_ops
-            .iter()
-            .filter(|op| matches!(op, WatchOp::Unsuppress { .. }))
-            .count();
-        assert_eq!(unsuppresses, 1);
     }
 
     #[test]
@@ -2514,7 +2402,6 @@ mod tests {
             dirty_resources,
             force_walk_resources: BTreeSet::new(),
             probe_target: specter_core::ResourceId::default(),
-            suppressed_resources: BTreeSet::new(),
             last_event_time: None,
         }
     }
@@ -2850,302 +2737,5 @@ mod tests {
         // (`a` is itself a Dir).
         assert_eq!(burst.probe_target, a);
         let _ = e.cancel_all_in_flight_probes();
-    }
-
-    // ---------------------------------------------------------------------------
-    // Per-resource Suppress reuse during Batching
-    //
-    // `event_drives_batching` emits a Suppress on the first per-burst event
-    // at a non-anchor resource; `transition_to_verifying` drains the set
-    // with one Unsuppress per entry. The anchor's suppress is bracketed by
-    // `start_*_burst` ↔ `finish_burst_to_idle` and never participates in
-    // this set.
-    // ---------------------------------------------------------------------------
-
-    /// Number of `WatchOp::Suppress { resource: r }` ops in `out`.
-    fn suppress_count_for(out: &StepOutput, r: specter_core::ResourceId) -> usize {
-        out.watch_ops
-            .iter()
-            .filter(|op| matches!(op, WatchOp::Suppress { resource } if *resource == r))
-            .count()
-    }
-
-    /// Number of `WatchOp::Unsuppress { resource: r }` ops in `out`.
-    fn unsuppress_count_for(out: &StepOutput, r: specter_core::ResourceId) -> usize {
-        out.watch_ops
-            .iter()
-            .filter(|op| matches!(op, WatchOp::Unsuppress { resource } if *resource == r))
-            .count()
-    }
-
-    #[test]
-    fn event_drives_batching_emits_suppress_on_first_non_anchor_event() {
-        // First per-burst event at a non-anchor resource bumps its
-        // suppress_count 0→1 and emits one `Suppress` op; the resource is
-        // recorded in `Burst.suppressed_resources` so the symmetric drain
-        // at `transition_to_verifying` pairs it with one `Unsuppress`.
-        let (mut e, pid, root, a, _b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let now = Instant::now();
-        e.start_standard_burst(pid, root, now, &mut out);
-        out.watch_ops.clear();
-
-        e.event_drives_batching(pid, a, now, &mut out);
-
-        assert_eq!(
-            suppress_count_for(&out, a),
-            1,
-            "first non-anchor event emits Suppress(a)",
-        );
-        let burst = match e.profiles.get(pid).unwrap().state() {
-            ProfileState::Active(ActiveBurst::PreFire(b), _) => b,
-            _ => panic!("expected Active"),
-        };
-        assert!(
-            burst.suppressed_resources.contains(&a),
-            "burst tracks the suppressed non-anchor resource",
-        );
-        assert_eq!(
-            e.tree.get(a).unwrap().suppress_count(),
-            1,
-            "underlying suppress_count bumped to 1",
-        );
-    }
-
-    #[test]
-    fn event_drives_batching_dedups_suppress_on_repeated_non_anchor_event() {
-        // Subsequent events at the same non-anchor resource within one
-        // Batching window do NOT re-emit Suppress; the burst's per-burst
-        // tracking set is the dedup horizon.
-        let (mut e, pid, root, a, _b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let now = Instant::now();
-        e.start_standard_burst(pid, root, now, &mut out);
-
-        e.event_drives_batching(pid, a, now, &mut out);
-        out.watch_ops.clear();
-
-        e.event_drives_batching(pid, a, now + Duration::from_millis(1), &mut out);
-        e.event_drives_batching(pid, a, now + Duration::from_millis(2), &mut out);
-
-        assert_eq!(
-            suppress_count_for(&out, a),
-            0,
-            "repeat events on the same non-anchor resource emit no extra Suppress",
-        );
-        assert_eq!(
-            e.tree.get(a).unwrap().suppress_count(),
-            1,
-            "underlying suppress_count stays at 1",
-        );
-    }
-
-    #[test]
-    fn event_drives_batching_does_not_suppress_anchor() {
-        // FsEvents at the anchor are excluded from suppress bumping: the
-        // anchor's suppress is the existing `start_*_burst →
-        // finish_burst_to_idle` bracket. `start_standard_burst` already
-        // bumped the anchor to 1; additional anchor-targeted events do not
-        // bump it further.
-        let (mut e, pid, root, _a, _b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let now = Instant::now();
-        e.start_standard_burst(pid, root, now, &mut out);
-        let suppress_after_start = e.tree.get(root).unwrap().suppress_count();
-        out.watch_ops.clear();
-
-        e.event_drives_batching(pid, root, now + Duration::from_millis(1), &mut out);
-        e.event_drives_batching(pid, root, now + Duration::from_millis(2), &mut out);
-
-        assert_eq!(
-            suppress_count_for(&out, root),
-            0,
-            "anchor events emit no per-resource Suppress",
-        );
-        let burst = match e.profiles.get(pid).unwrap().state() {
-            ProfileState::Active(ActiveBurst::PreFire(b), _) => b,
-            _ => panic!("expected Active"),
-        };
-        assert!(
-            !burst.suppressed_resources.contains(&root),
-            "anchor never enters suppressed_resources",
-        );
-        assert_eq!(
-            e.tree.get(root).unwrap().suppress_count(),
-            suppress_after_start,
-            "anchor's suppress_count unchanged across event_drives_batching calls",
-        );
-    }
-
-    #[test]
-    fn transition_to_verifying_drains_suppressed_resources_with_unsuppress() {
-        // Multiple non-anchor events accumulate into `suppressed_resources`;
-        // `transition_to_verifying` drains the set with one Unsuppress per
-        // entry and leaves the set empty.
-        let (mut e, pid, root, a, b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let now = Instant::now();
-        e.start_standard_burst(pid, root, now, &mut out);
-        e.event_drives_batching(pid, a, now + Duration::from_millis(1), &mut out);
-        e.event_drives_batching(pid, b, now + Duration::from_millis(2), &mut out);
-        out.watch_ops.clear();
-
-        e.transition_to_verifying(pid, &mut out);
-
-        assert_eq!(
-            unsuppress_count_for(&out, a),
-            1,
-            "drain emits one Unsuppress(a)",
-        );
-        assert_eq!(
-            unsuppress_count_for(&out, b),
-            1,
-            "drain emits one Unsuppress(b)",
-        );
-        let burst = match e.profiles.get(pid).unwrap().state() {
-            ProfileState::Active(ActiveBurst::PreFire(b), _) => b,
-            _ => panic!("expected Active"),
-        };
-        assert!(
-            burst.suppressed_resources.is_empty(),
-            "drain clears the per-burst tracking set",
-        );
-        assert_eq!(e.tree.get(a).unwrap().suppress_count(), 0);
-        assert_eq!(e.tree.get(b).unwrap().suppress_count(), 0);
-        let _ = e.cancel_all_in_flight_probes();
-    }
-
-    #[test]
-    fn unstable_verify_then_event_re_emits_suppress() {
-        // After `transition_to_verifying` clears `suppressed_resources`,
-        // an unstable response routes back to Batching via
-        // `unstable_response_drives_batching`. The next FsEvent at the
-        // same non-anchor resource sees an empty set and re-emits
-        // Suppress (the symmetric drain at the next
-        // `transition_to_verifying` pairs it).
-        let (mut e, pid, root, a, _b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let now = Instant::now();
-        e.start_standard_burst(pid, root, now, &mut out);
-        e.event_drives_batching(pid, a, now + Duration::from_millis(1), &mut out);
-        e.transition_to_verifying(pid, &mut out);
-        // Unstable response shrinks the burst back to Batching without
-        // emitting Cancel — the verify just responded, so no in-flight
-        // probe to revoke. (`unstable_response_drives_batching` does not
-        // call `cancel_owner_probe`.) Production reaches it from
-        // `on_probe_response`, which has already disarmed the Verifying
-        // slot via `take_owner_probe`; mirror that consume.
-        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
-        e.unstable_response_drives_batching(pid, now + Duration::from_millis(2), &mut out);
-        out.watch_ops.clear();
-
-        e.event_drives_batching(pid, a, now + Duration::from_millis(3), &mut out);
-
-        assert_eq!(
-            suppress_count_for(&out, a),
-            1,
-            "post-unstable-verify event re-emits Suppress(a)",
-        );
-        let burst = match e.profiles.get(pid).unwrap().state() {
-            ProfileState::Active(ActiveBurst::PreFire(b), _) => b,
-            _ => panic!("expected Active"),
-        };
-        assert!(
-            burst.suppressed_resources.contains(&a),
-            "burst tracks the resource for the next drain",
-        );
-    }
-
-    #[test]
-    fn finish_burst_to_idle_drains_suppressed_resources_for_abnormal_end() {
-        // A burst that reaches `finish_burst_to_idle` without passing
-        // through `transition_to_verifying` (abnormal-end path:
-        // `finalize_anchor_lost` / config reap mid-Batching) must
-        // defensively drain `suppressed_resources` so the anchor's suppress
-        // isn't the only release the watcher sees. Symmetric pairing
-        // discipline holds even on the abnormal path.
-        let (mut e, pid, root, a, b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let now = Instant::now();
-        e.start_standard_burst(pid, root, now, &mut out);
-        e.event_drives_batching(pid, a, now + Duration::from_millis(1), &mut out);
-        e.event_drives_batching(pid, b, now + Duration::from_millis(2), &mut out);
-        out.watch_ops.clear();
-
-        e.finish_burst_to_idle(pid, &mut out);
-
-        // Each tracked non-anchor resource gets one Unsuppress; the anchor
-        // also gets one (from the existing start ↔ finish bracket).
-        assert_eq!(unsuppress_count_for(&out, a), 1);
-        assert_eq!(unsuppress_count_for(&out, b), 1);
-        assert_eq!(unsuppress_count_for(&out, root), 1);
-        assert_eq!(e.tree.get(a).unwrap().suppress_count(), 0);
-        assert_eq!(e.tree.get(b).unwrap().suppress_count(), 0);
-        assert_eq!(e.tree.get(root).unwrap().suppress_count(), 0);
-    }
-
-    #[test]
-    fn transition_to_verifying_emits_unsuppress_in_resource_id_order() {
-        // The drain iterates `BTreeSet<ResourceId>` in sorted order, so
-        // emitted Unsuppress ops are in `ResourceId`-ascending order —
-        // coherent with `StepOutput.watch_ops`'s sort discipline.
-        let (mut e, pid, root, a, b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let now = Instant::now();
-        e.start_standard_burst(pid, root, now, &mut out);
-        // Insert b first, then a — drain order should still be ascending.
-        e.event_drives_batching(pid, b, now + Duration::from_millis(1), &mut out);
-        e.event_drives_batching(pid, a, now + Duration::from_millis(2), &mut out);
-        out.watch_ops.clear();
-
-        e.transition_to_verifying(pid, &mut out);
-
-        let unsuppress_resources: Vec<_> = out
-            .watch_ops
-            .iter()
-            .filter_map(|op| match op {
-                WatchOp::Unsuppress { resource } => Some(*resource),
-                _ => None,
-            })
-            .collect();
-        let mut sorted = unsuppress_resources.clone();
-        sorted.sort();
-        assert_eq!(
-            unsuppress_resources, sorted,
-            "drain emits Unsuppress ops in ResourceId-ascending order",
-        );
-        let _ = e.cancel_all_in_flight_probes();
-    }
-
-    #[test]
-    fn finish_burst_to_idle_with_empty_suppressed_resources_no_extra_unsuppress() {
-        // After a normal `transition_to_verifying` drain,
-        // `suppressed_resources` is empty. Reaching
-        // `finish_burst_to_idle` from there (e.g., abnormal anchor loss
-        // post-verify but pre-fire) must not double-Unsuppress the
-        // already-drained resources.
-        let (mut e, pid, root, a, _b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let now = Instant::now();
-        e.start_standard_burst(pid, root, now, &mut out);
-        e.event_drives_batching(pid, a, now + Duration::from_millis(1), &mut out);
-        e.transition_to_verifying(pid, &mut out);
-        // suppressed_resources is now empty; any abnormal end shouldn't
-        // re-emit Unsuppress for `a`.
-        out.watch_ops.clear();
-        // Production reaches `finish_burst_to_idle` from a path that has
-        // already disarmed the in-flight slot via `take_owner_probe`.
-        // Mirror that consume.
-        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
-
-        e.finish_burst_to_idle(pid, &mut out);
-
-        assert_eq!(
-            unsuppress_count_for(&out, a),
-            0,
-            "no double-Unsuppress for resource already drained at verify",
-        );
-        // The anchor's Unsuppress still emits (the existing start↔finish bracket).
-        assert_eq!(unsuppress_count_for(&out, root), 1);
     }
 }

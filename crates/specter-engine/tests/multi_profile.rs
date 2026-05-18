@@ -1,6 +1,6 @@
 //! Multi-Profile composition end-to-end. Two Profiles co-located on one
-//! Resource share `watch_demand`/`suppress_count` via refcount
-//! aggregation. The `Draining → Verifying` reconfirm is exercised
+//! Resource share `watch_demand` via refcount aggregation. The
+//! `Draining → Verifying` reconfirm is exercised
 //! through the burst lifecycle: a parent that stabilises while a
 //! covered descendant is mid-Standard-burst enters `Draining`, and the
 //! `finish_burst_to_idle` sweep re-evaluates the fresh
@@ -1226,10 +1226,15 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
 }
 
 #[test]
-fn co_located_profiles_share_suppress_count() {
-    // Two Profiles at /src; both Standard-burst. Anchor's suppress_count
-    // accumulates across the two bursts; Unsuppress emits only on the
-    // last-finishing burst's burst-end.
+fn co_located_profiles_independently_force_walk_shared_resource() {
+    // Two config_hash-distinct Profiles share one Resource /src. A
+    // single FsEvent on the shared resource fans to *every* covering
+    // Profile (on_fs_event iterates the covering set), and each Profile
+    // records the resource in its *own* dirty / force_walk set. There
+    // is no per-resource global filter that one Profile's in-flight
+    // burst could use to blind another — the property that keeps a
+    // co-resident Profile's probe from mtime-skipping a genuinely
+    // changed directory.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -1274,50 +1279,77 @@ fn co_located_profiles_share_suppress_count() {
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid_b = e.subs().get(sid_b).unwrap().profile;
 
-    // After both attach: suppress_count == 2 (both Profiles in Seed).
-    assert_eq!(e.tree().get(r).unwrap().suppress_count(), 2);
-
-    // Drive both Seeds.
-    let corr_a = e
-        .pending_probe_for(ProbeOwner::Profile(pid_a))
-        .expect("Verifying probe in flight");
-    let corr_b = e
-        .pending_probe_for(ProbeOwner::Profile(pid_b))
-        .expect("Verifying probe in flight");
-
-    // Finish A's Seed first; suppress goes 2→1, no Unsuppress.
-    let out_a = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_a),
-            correlation: corr_a,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
+    assert_ne!(pid_a, pid_b, "distinct config_hash ⇒ distinct Profiles");
+    assert_eq!(
+        e.tree().get(r).unwrap().watch_demand(),
+        2,
+        "both Profiles contribute the shared resource's watch",
     );
-    assert_eq!(e.tree().get(r).unwrap().suppress_count(), 1);
-    let unsuppresses_a = out_a
-        .watch_ops
-        .iter()
-        .filter(|op| matches!(op, WatchOp::Unsuppress { .. }))
-        .count();
-    assert_eq!(unsuppresses_a, 0, "no Unsuppress on 2→1 edge");
 
-    // Finish B's Seed; suppress goes 1→0, Unsuppress emitted.
-    let out_b = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_b),
-            correlation: corr_b,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
+    // Drive both Seeds → Idle with a baseline. Resolving A's Seed does
+    // not touch B's in-flight probe (per-Profile correlation).
+    for pid in [pid_a, pid_b] {
+        let corr = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Seed Verifying probe in flight");
+        e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation: corr,
+                outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            }),
+            now,
+        );
+        assert!(matches!(
+            e.profiles().get(pid).unwrap().state(),
+            ProfileState::Idle,
+        ));
+    }
+
+    // One FsEvent on the shared anchor fans to both Profiles; each
+    // opens its own Standard burst seeded with the resource.
+    let t0 = now + Duration::from_millis(10);
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Modified,
+        },
+        t0,
     );
-    assert_eq!(e.tree().get(r).unwrap().suppress_count(), 0);
-    let unsuppresses_b = out_b
-        .watch_ops
-        .iter()
-        .filter(|op| matches!(op, WatchOp::Unsuppress { .. }))
-        .count();
-    assert_eq!(unsuppresses_b, 1, "Unsuppress on 1→0 edge");
+    for pid in [pid_a, pid_b] {
+        let pre = match e.profiles().get(pid).unwrap().state() {
+            ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
+            other => panic!("expected Active(PreFire) for {pid:?}, got {other:?}"),
+        };
+        assert!(
+            pre.dirty_resources.contains(&r) && pre.force_walk_resources.contains(&r),
+            "{pid:?} independently recorded the shared resource in dirty + force_walk",
+        );
+    }
+
+    // A second external event on the shared resource while both bursts
+    // are in flight: again fanned to each Profile independently. No
+    // Profile's in-flight burst removes the resource from another's
+    // force_walk set.
+    let t1 = t0 + SETTLE / 2;
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    for pid in [pid_a, pid_b] {
+        let pre = match e.profiles().get(pid).unwrap().state() {
+            ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
+            other => panic!("expected Active(PreFire) for {pid:?}, got {other:?}"),
+        };
+        assert!(
+            pre.force_walk_resources.contains(&r),
+            "{pid:?} still force-walks the shared resource after a mid-burst \
+             event — no global filter poisons a co-resident Profile",
+        );
+    }
 }
 
 #[test]

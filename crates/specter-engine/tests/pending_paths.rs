@@ -467,9 +467,9 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     // head guard in `on_fs_event` before any classifier work runs.
     // Earlier this same Profile shape (a degenerate `prefix == anchor`
     // fixture from a relative-path attach against an empty Tree) routed
-    // through `finish_burst_to_idle` → `sub_suppress` and underflowed
-    // `suppress_count`. The FS-root bootstrap rules out that degenerate
-    // shape entirely.
+    // through `finish_burst_to_idle` and underflowed a Resource
+    // refcount. The FS-root bootstrap rules out that degenerate shape
+    // entirely.
     let out = e.step(
         Input::FsEvent {
             resource: anchor,
@@ -487,18 +487,12 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         still_pending,
         "Pending Profile not coerced through anchor-terminal-event path",
     );
-    // No suppress underflow ⇒ no Unsuppress emitted (suppress_count
-    // was never bumped on this Resource).
-    let unsuppress_count = out
-        .watch_ops
-        .iter()
-        .filter(|op| matches!(op, specter_core::WatchOp::Unsuppress { .. }))
-        .count();
-    assert_eq!(unsuppress_count, 0);
-    assert_eq!(
-        e.tree().get(anchor).unwrap().suppress_count(),
-        0,
-        "suppress_count untouched (Pending never bumped it)",
+    // The head guard short-circuits before any classifier work, so it
+    // emits no watch op (no spurious Unwatch/Watch on this path).
+    assert!(
+        out.watch_ops.is_empty(),
+        "EventOnUnwatchedResource head guard emits no watch op; got {:?}",
+        out.watch_ops,
     );
     // The event landed in the no-consumer head guard.
     assert!(

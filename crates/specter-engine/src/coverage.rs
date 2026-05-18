@@ -1042,7 +1042,6 @@ mod tests {
                 dirty_resources: BTreeSet::new(),
                 force_walk_resources: BTreeSet::new(),
                 probe_target: r,
-                suppressed_resources: BTreeSet::new(),
                 last_event_time: None,
             }),
             BurstFinish::ReturnToIdle,

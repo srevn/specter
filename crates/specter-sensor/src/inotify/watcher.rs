@@ -1,8 +1,7 @@
 //! `InotifyWatcher` — inotify-backed `FsWatcher` impl.
 //!
 //! Single-threaded: one thread owns the [`InotifyWatcher`] value and
-//! drives [`FsWatcher::watch`] / [`FsWatcher::unwatch`] /
-//! [`FsWatcher::suppress`] / [`FsWatcher::unsuppress`] between
+//! drives [`FsWatcher::watch`] / [`FsWatcher::unwatch`] between
 //! [`FsWatcher::poll_until`] calls. The wake handle
 //! ([`InotifyWakeHandle`]) is the only cross-thread surface — see
 //! [`crate::inotify::wake`] for the lifecycle discipline.
@@ -104,14 +103,6 @@ pub struct InotifyWatcher {
     /// `IN_MODIFY` on Dir vs File defensive paths.
     kinds: SecondaryMap<ResourceId, ResourceKind>,
 
-    /// Suppressed set. `poll_until` consults this map before lifting an
-    /// event onto the engine's input channel; events for a suppressed
-    /// resource drop at the watcher boundary per the
-    /// [`FsWatcher::suppress`] contract. Mutated by `suppress` /
-    /// `unsuppress`; idempotency is satisfied by `SecondaryMap`'s
-    /// insert/remove semantics.
-    suppressed: SecondaryMap<ResourceId, ()>,
-
     /// `wd`s in the "draining" state: `inotify_rm_watch` has been
     /// called but the kernel's `IN_IGNORED` for that wd has not yet
     /// arrived in our read buffer. Events on draining wds are dropped
@@ -197,7 +188,6 @@ impl InotifyWatcher {
             by_resource: SecondaryMap::new(),
             by_wd: BTreeMap::new(),
             kinds: SecondaryMap::new(),
-            suppressed: SecondaryMap::new(),
             draining_wds: BTreeSet::new(),
             read_buf: vec![0u8; READ_BUF_BYTES],
             drain_window,
@@ -471,7 +461,6 @@ impl InotifyWatcher {
         // re-resolve flow starts from a clean slate.
         self.by_resource.remove(r);
         self.kinds.remove(r);
-        self.suppressed.remove(r);
     }
 }
 
@@ -500,10 +489,10 @@ impl FsWatcher for InotifyWatcher {
     /// `IN_IGNORED` arrives later in the drain stream and reaps the
     /// flag.
     ///
-    /// Idempotent on stale ids — clearing the side maps (`suppressed`,
-    /// `kinds`) before the `by_resource` removal is safe regardless of
-    /// whether `r` was actually held; the kernel-side `rm_watch` only
-    /// runs when `by_resource` had an entry to remove.
+    /// Idempotent on stale ids — clearing the `kinds` side map before
+    /// the `by_resource` removal is safe regardless of whether `r` was
+    /// actually held; the kernel-side `rm_watch` only runs when
+    /// `by_resource` had an entry to remove.
     ///
     /// `EINVAL` from `rm_watch` is benign: the kernel had already
     /// reaped the wd (the inode was deleted out from under us) and
@@ -512,7 +501,6 @@ impl FsWatcher for InotifyWatcher {
     /// events queued before the kernel's reap are dropped, and the
     /// `IN_IGNORED` consumption clears the flag.
     fn unwatch(&mut self, r: ResourceId) {
-        self.suppressed.remove(r);
         self.kinds.remove(r);
         let Some(entry) = self.by_resource.remove(r) else {
             // Stale id — every map keyed by `r` is now empty (or was
@@ -558,42 +546,6 @@ impl FsWatcher for InotifyWatcher {
         }
 
         tracing::debug!(?r, wd, "inotify unwatch");
-    }
-
-    /// Silence event delivery on `r`. Inserts into [`Self::suppressed`];
-    /// `poll_until` consults the map before lifting an event onto the
-    /// engine's input channel, so events for a suppressed resource drop
-    /// at the watcher boundary per the [`FsWatcher::suppress`] contract.
-    ///
-    /// Idempotent on stale ids (the engine emits Suppress only on the
-    /// 0→1 `suppress_count` edge, but the operation is safe under any
-    /// race). Warns on an unwatched id so a `WatchOp::Suppress` that
-    /// races a concurrent `WatchOp::Unwatch` is observable in operator
-    /// logs — mirrored by the kqueue branch.
-    fn suppress(&mut self, r: ResourceId) {
-        if !self.by_resource.contains_key(r) {
-            tracing::warn!(?r, "inotify suppress on unwatched resource (race; dropped)");
-            return;
-        }
-        self.suppressed.insert(r, ());
-        tracing::debug!(?r, "inotify suppress");
-    }
-
-    /// Restore event delivery on `r`. Idempotent; mirror of
-    /// [`Self::suppress`] including the "warn on unwatched" race
-    /// discipline. A watched-but-not-suppressed `r` is silently fine
-    /// — the [`Self::suppressed`] removal is a no-op and event
-    /// delivery resumes (or, more accurately, was already happening).
-    fn unsuppress(&mut self, r: ResourceId) {
-        if !self.by_resource.contains_key(r) {
-            tracing::warn!(
-                ?r,
-                "inotify unsuppress on unwatched resource (race; dropped)"
-            );
-            return;
-        }
-        self.suppressed.remove(r);
-        tracing::debug!(?r, "inotify unsuppress");
     }
 
     /// Block until events arrive (or the deadline elapses or a wake
@@ -656,9 +608,9 @@ impl FsWatcher for InotifyWatcher {
     /// 3. **Stale event on a draining wd** — pre-rm events on a
     ///    wd whose `IN_IGNORED` hasn't arrived yet. Dropped to close
     ///    the wd-reuse race with a subsequent `inotify_add_watch`.
-    /// 4. **Normal event** — resolve `wd → ResourceId`, drop if
-    ///    suppressed, normalize via [`normalize::mask_to_fs_event`],
-    ///    dedupe via `self.seen`, push as [`WatcherEvent::Fs`].
+    /// 4. **Normal event** — resolve `wd → ResourceId`, normalize via
+    ///    [`normalize::mask_to_fs_event`], dedupe via `self.seen`,
+    ///    push as [`WatcherEvent::Fs`].
     ///
     /// **Errors.** Syscall failures classify through
     /// [`WatchFailureExt::from_io`] at the trait boundary. `EINTR` is
@@ -826,7 +778,6 @@ impl InotifyWatcher {
                     // events through a stale `by_wd[wd]` mapping.
                     self.by_resource.remove(r);
                     self.kinds.remove(r);
-                    self.suppressed.remove(r);
                 }
                 continue;
             }
@@ -854,14 +805,6 @@ impl InotifyWatcher {
                 );
                 continue;
             };
-
-            // User-space suppression filter — drop events for resources
-            // the engine has marked suppressed. Symmetric with the
-            // kqueue branch's same gate; satisfies the
-            // [`FsWatcher::suppress`] drop-at-boundary contract.
-            if self.suppressed.contains_key(r) {
-                continue;
-            }
 
             // Cached-kind miss falls back to Unknown — consistent with
             // the kqueue branch's defensive routing for events on a

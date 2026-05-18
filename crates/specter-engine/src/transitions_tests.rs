@@ -150,12 +150,11 @@ fn complete_seed_burst(e: &mut Engine, pid: specter_core::ProfileId) {
 // ---- attach_sub ----
 
 #[test]
-fn attach_sub_fresh_profile_emits_watch_suppress_probe() {
+fn attach_sub_fresh_profile_emits_watch_probe() {
     let (mut e, _pid, _sid, r, _now) = engine_with_attached_sub();
-    // After attach: anchor watch_demand=1, suppress_count=1, Profile is
+    // After attach: anchor watch_demand=1, Profile is
     // Active(Seed Verifying).
     assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
-    assert_eq!(e.tree.get(r).unwrap().suppress_count(), 1);
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -549,8 +548,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
     let sid2 = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     assert_eq!(e.subs.at(pid).len(), pre_count + 1);
     assert_eq!(e.subs.get(sid2).unwrap().profile, pid, "shared Profile");
-    // No fresh watch/probe/suppress emitted: existing Profile already has
-    // them.
+    // No fresh watch/probe emitted: existing Profile already has them.
     assert!(out.watch_ops.is_empty());
     assert!(out.probe_ops().is_empty());
     let _ = e.cancel_all_in_flight_probes();
@@ -605,12 +603,6 @@ fn probe_response_seed_ok_sets_baseline_and_idles_no_effect() {
     assert!(p.baseline().is_some());
     assert!(p.current().is_some());
     assert!(out.effects().is_empty(), "Seed bursts never fire Effects");
-    // Anchor unsuppressed.
-    let unsuppress = out
-        .watch_ops
-        .iter()
-        .any(|op| matches!(op, WatchOp::Unsuppress { .. }));
-    assert!(unsuppress);
 }
 
 #[test]
@@ -1707,6 +1699,157 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// An external `FsEvent` on the burst's own anchor, arriving mid-Batching,
+/// is processed (not silently dropped): it lands in the burst's
+/// `dirty_resources` / `force_walk_resources` and advances
+/// `last_event_time`, so the next settle expiry **reschedules** the
+/// settle timer (debounce) instead of verifying. The two anchor events
+/// plus the reschedule collapse into a single fire — no double-fire.
+/// Deterministic via explicit clock control; no soak.
+#[test]
+fn pre_fire_anchor_event_rearms_settle_and_fires_once() {
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
+    let t0 = Instant::now();
+
+    // First anchor event opens the Standard burst (Idle → Batching).
+    let out_a = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Modified,
+        },
+        t0,
+    );
+    assert!(
+        matches!(
+            e.profiles.get(pid).unwrap().state(),
+            ProfileState::Active(ActiveBurst::PreFire(pre), _)
+                if matches!(pre.phase, PreFirePhase::Batching { .. })
+        ),
+        "first anchor event opens Batching",
+    );
+    assert!(out_a.effects().is_empty(), "no fire at burst open");
+
+    // Second anchor event, still inside the settle window. This is the
+    // event the watcher used to silence; assert it is recorded — it
+    // enters the burst accumulator and advances `last_event_time`.
+    let t1 = t0 + SETTLE / 2;
+    let out_b = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    {
+        let pre = match e.profiles.get(pid).unwrap().state() {
+            ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
+            other => panic!("expected Active(PreFire) mid-burst, got {other:?}"),
+        };
+        assert!(
+            matches!(pre.phase, PreFirePhase::Batching { .. }),
+            "second anchor event keeps Batching (timer reused, not re-minted)",
+        );
+        assert!(
+            pre.dirty_resources.contains(&root) && pre.force_walk_resources.contains(&root),
+            "anchor event tracked in dirty + force_walk — not silently dropped",
+        );
+        assert_eq!(
+            pre.last_event_time,
+            Some(t1),
+            "anchor event advanced last_event_time (debounce basis)",
+        );
+    }
+    assert!(out_b.effects().is_empty(), "no fire on the second event");
+
+    // The original settle timer expires at its deadline (t0 + SETTLE),
+    // but the last event was at t1 (< SETTLE ago) → debounce: stay
+    // Batching, reschedule a fresh settle at last_event_time + SETTLE.
+    let ta = t0 + SETTLE;
+    let entry = e.pop_expired(ta).expect("first settle timer ready");
+    let out_c = e.step(
+        Input::TimerExpired {
+            profile: entry.profile,
+            kind: entry.kind,
+            id: entry.id,
+        },
+        ta,
+    );
+    assert!(
+        matches!(
+            e.profiles.get(pid).unwrap().state(),
+            ProfileState::Active(ActiveBurst::PreFire(pre), _)
+                if matches!(pre.phase, PreFirePhase::Batching { .. })
+        ),
+        "debounce: still Batching after the first settle expiry",
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
+        "debounce did not verify — no probe in flight",
+    );
+    assert!(
+        out_c.probe_ops().is_empty() && out_c.effects().is_empty(),
+        "debounce emitted neither probe nor effect",
+    );
+
+    // Quiet for ≥ SETTLE past the last event: the rescheduled timer
+    // expires and transitions to Verifying with exactly one probe.
+    let tb = t0 + SETTLE * 2;
+    let entry = e
+        .pop_expired(tb)
+        .expect("rescheduled settle timer ready — proves the re-arm");
+    let out_d = e.step(
+        Input::TimerExpired {
+            profile: entry.profile,
+            kind: entry.kind,
+            id: entry.id,
+        },
+        tb,
+    );
+    assert!(
+        e.pop_expired(tb).is_none(),
+        "exactly one settle timer pending after the re-arm",
+    );
+    let probes = out_d
+        .probe_ops()
+        .iter()
+        .filter(|op| matches!(op, ProbeOp::Probe { .. }))
+        .count();
+    assert_eq!(probes, 1, "rescheduled settle transitions to one verify");
+    assert!(
+        out_d.effects().is_empty(),
+        "no fire before the verify responds"
+    );
+
+    // Verify responds stable (baseline == current, empty). The Sub
+    // never fired (Seed does not fire), so B1 does not suppress: the
+    // burst fires exactly once across the whole two-event sequence.
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight");
+    let out_e = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation,
+            outcome: ProbeOutcome::SubtreeOk(dir_tree_snap(vec![])),
+        }),
+        tb + Duration::from_millis(1),
+    );
+    assert_eq!(
+        out_e.effects().len(),
+        1,
+        "two anchor events + a debounce reschedule fire exactly once",
+    );
+    assert!(
+        matches!(
+            e.profiles.get(pid).unwrap().state(),
+            ProfileState::Active(ActiveBurst::PostFire(post), _)
+                if matches!(post.phase, PostFirePhase::Awaiting { outstanding: 1, .. })
+        ),
+        "single fire cycle — one outstanding Effect, no second burst",
+    );
+}
+
 #[test]
 fn timer_expired_stale_id_emits_diagnostic() {
     let mut e = Engine::new();
@@ -1922,8 +2065,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
         }),
         Instant::now(),
     );
-    // 1 Watch op (subdir Dir) + 1 Unsuppress for the anchor. File doesn't
-    // contribute Watch.
+    // 1 Watch op (subdir Dir). File doesn't contribute Watch.
     let watches = out
         .watch_ops
         .iter()
@@ -4533,7 +4675,6 @@ fn active_pre_fire_burst(
             dirty_resources: BTreeSet::new(),
             force_walk_resources: BTreeSet::new(),
             probe_target,
-            suppressed_resources: BTreeSet::new(),
             last_event_time: None,
         }),
         BurstFinish::ReturnToIdle,

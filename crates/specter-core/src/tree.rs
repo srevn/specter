@@ -398,55 +398,41 @@ impl Tree {
         })
     }
 
-    /// Finalise the slot's kernel-watch and sensor-suppress protocols,
-    /// emitting any closing ops the slot still owes, and reset `kind` to
-    /// `Unknown`. The slot is then ready for [`Tree::try_reap`] (no
-    /// back-refs) or for re-entry via [`Tree::ensure_child`] (back-refs
-    /// persist).
+    /// Finalise the slot's kernel-watch protocol, emitting the closing
+    /// `Unwatch` the slot still owes, and reset `kind` to `Unknown`. The
+    /// slot is then ready for [`Tree::try_reap`] (no back-refs) or for
+    /// re-entry via [`Tree::ensure_child`] (back-refs persist).
     ///
     /// `vacate` is the **protocol terminus** for the per-Resource
-    /// contributions map and `suppress_count` counter: each branch
-    /// acts as the symmetric closer for the matching `add_watch` /
-    /// `add_suppress` 0→1 emission. Subsequent `sub_watch` /
-    /// `sub_suppress` calls from co-resident bookkeeping short-circuit
-    /// on the post-clear / post-zero state (absent key / counter 0).
+    /// contributions map: the `Unwatch` branch is the symmetric closer
+    /// for the matching `add_watch` 0→non-empty emission. Subsequent
+    /// `sub_watch` calls from co-resident bookkeeping short-circuit on
+    /// the post-clear state (absent key).
     ///
-    /// **Two production callers, two roles for the defensive branches:**
+    /// **Two production callers, one role for the defensive branch:**
     ///
     /// - [`Tree::try_reap`] folds `vacate` into the slot lifecycle
     ///   terminus, calling it for every slot entering the cascade.
     ///   The reap precondition (`has_anchors() == false`) guarantees
     ///   `contributions` is empty here, so the `Unwatch` branch is
-    ///   dormant; the `Unsuppress` branch fires for slots that still
-    ///   owe burst-suppress accounting (e.g., a descendant whose
-    ///   `suppress_count` was bumped `0→1` by
-    ///   `event_drives_batching` and is being torn down by
-    ///   reconcile's Phase 1).
+    ///   dormant — the closing op was already emitted by the per-key
+    ///   `sub_watch` that drained the slot.
     /// - The engine's kernel-watch rejection path
     ///   (`on_watch_op_rejected`) invokes `vacate` directly to
     ///   atomically tear down every contribution at the rejected slot.
-    ///   Both branches are load-bearing here: the `Unwatch` closes the
-    ///   kernel-watch protocol, and the `Unsuppress` closes the
-    ///   burst-suppress protocol — the per-claimer cleanup loops that
-    ///   follow run `sub_watch` / `sub_suppress`, which short-circuit
-    ///   on the post-vacate state and rely on `vacate` to have emitted
-    ///   both closing ops. This is the only standalone-clamp call
+    ///   The `Unwatch` branch is load-bearing here: it closes the
+    ///   kernel-watch protocol, and the per-claimer cleanup loops that
+    ///   follow run `sub_watch`, which short-circuits on the
+    ///   post-vacate state (absent key) and relies on `vacate` to have
+    ///   emitted the closing op. This is the only standalone-clamp call
     ///   site; every other reap path flows through `try_reap`'s
     ///   folded-in vacate.
     ///
-    /// Emitting both ops unconditionally (rather than asserting on
+    /// Emitting the op unconditionally (rather than asserting on
     /// preconditions) makes any future caller correct by construction:
     /// misuse degrades to "one extra closing op" — the Sensor's
     /// idempotence absorbs the duplicate — rather than to a panic or
     /// a silent kernel-watch leak.
-    ///
-    /// **Op emission order: `Unwatch` then `Unsuppress`.** `Unwatch`
-    /// closes the kernel-watch protocol; `Unsuppress` would re-open
-    /// the event window if it landed first. The relative order
-    /// within a single slot survives
-    /// [`StepOutput::sort_for_emission`]'s stable `ResourceId` sort,
-    /// so the sensor sees the watch torn down before suppression
-    /// lifts.
     ///
     /// **What survives.** Children, profiles, the `proxy_promoters`
     /// back-ref, `role`, `parent`, and `segment` all stay untouched.
@@ -466,9 +452,6 @@ impl Tree {
         if r.clear_contributions() > 0 {
             out.watch_ops.push(WatchOp::Unwatch { resource: id });
         }
-        if r.clear_suppress() > 0 {
-            out.watch_ops.push(WatchOp::Unsuppress { resource: id });
-        }
         r.kind = ResourceKind::Unknown;
     }
 
@@ -482,13 +465,11 @@ impl Tree {
     /// [`Tree::vacate`] as the closing-emission step before unlinking
     /// and removing the slot. The slot is reapable here by definition
     /// (`has_anchors() == false`), so the contributions map is empty by
-    /// invariant — `vacate`'s `Unwatch` branch is dormant. The
-    /// `Unsuppress` branch fires for slots that still owe burst-suppress
-    /// accounting (e.g., a descendant whose `suppress_count` was bumped
-    /// `0→1` by `event_drives_batching` and is being torn down by
-    /// reconcile's Phase 1). Folding `vacate` into the terminus
-    /// guarantees the per-slot protocol owed at reap time is emitted
-    /// before the slot leaves the Tree, regardless of caller.
+    /// invariant — `vacate`'s `Unwatch` branch is dormant (the per-key
+    /// `sub_watch` that drained the slot already emitted it). Folding
+    /// `vacate` into the terminus keeps the kernel-watch protocol
+    /// closed by construction for any future caller that reaches reap
+    /// with a stranded contribution, regardless of caller.
     ///
     /// **Why cascade.** Reaping a slot unlinks it from its parent's
     /// `children` map. If the parent now has no anchors of its own —
@@ -525,8 +506,8 @@ impl Tree {
             // `vacate` is the closing-emission step of the slot
             // lifecycle terminus. `contributions` is empty here
             // (has_anchors's contract), so the `Unwatch` branch is
-            // dormant; the `Unsuppress` branch fires when this slot
-            // still owes a burst-suppress closing op.
+            // dormant; the `kind` reset is harmless on the
+            // about-to-be-removed slot.
             self.vacate(current, out);
 
             // Take ownership of the slot out of the slotmap. `parent`
@@ -1021,25 +1002,23 @@ mod tests {
 
     #[test]
     fn vacate_clears_kind_keeps_children_on_drained_slot() {
-        // Drained slot (no contributions, suppress == 0): vacate's
-        // contract is "reset `kind` to Unknown on a slot whose
-        // refcounts have already been drained". Children, role, and
-        // back-refs survive.
+        // Drained slot (no contributions): vacate's contract is "reset
+        // `kind` to Unknown on a slot whose contributions map has
+        // already been drained". Children, role, and back-refs survive.
         let mut tree = Tree::new();
         let parent = tree.ensure_root("p", ResourceRole::User);
         let _child = tree
             .ensure_child(parent, "c", ResourceRole::User)
             .expect("test live parent");
         tree.set_kind(parent, crate::resource::ResourceKind::Dir);
-        // `contributions` empty and `suppress == 0` by construction
-        // (no refcount edges emitted) — vacate's precondition holds.
+        // `contributions` empty by construction (no refcount edges
+        // emitted) — vacate's precondition holds.
 
         tree.vacate(parent, &mut discard());
 
         let r = tree.get(parent).unwrap();
         assert_eq!(r.kind, crate::resource::ResourceKind::Unknown);
         assert_eq!(r.watch_demand(), 0);
-        assert_eq!(r.suppress_count(), 0);
         assert_eq!(r.children().len(), 1, "children survive vacate");
     }
 
@@ -1073,99 +1052,14 @@ mod tests {
     }
 
     #[test]
-    fn vacate_emits_unsuppress_when_suppress_count_nonzero() {
-        // Load-bearing branch: non-anchor descendants bumped during a
-        // Burst's `Batching` window have an outstanding
-        // `suppress_count` when `release_descendant_claim` reaches
-        // them through `delete_child` mid-anchor-loss. Vacate's
-        // emission pairs the prior `Suppress` with the closing
-        // `Unsuppress` before the slot reaps — keeps the sensor's
-        // per-Resource suppress bookkeeping balanced.
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("x", ResourceRole::User);
-        tree.get_mut(r).unwrap().inc_suppress();
-
-        let mut out = StepOutput::default();
-        tree.vacate(r, &mut out);
-
-        assert_eq!(tree.get(r).unwrap().suppress_count(), 0);
-        assert_eq!(out.watch_ops.len(), 1);
-        assert!(matches!(
-            out.watch_ops[0],
-            WatchOp::Unsuppress { resource } if resource == r,
-        ));
-    }
-
-    /// `Tree::try_reap` folds in `Tree::vacate` as its closing-emission
-    /// step. The reap precondition (`has_anchors() == false`) guarantees
-    /// `contributions` is empty here, so the `Unwatch` branch is
-    /// dormant; the `Unsuppress` branch fires for slots that still owe
-    /// burst-suppress accounting at reap time (e.g., a descendant whose
-    /// `suppress_count` was bumped `0→1` by `event_drives_batching` and
-    /// is being torn down by reconcile's Phase 1). Pin the fire path so
-    /// the folding contract is regression-protected.
-    #[test]
-    fn try_reap_emits_unsuppress_for_drained_slot_with_residual_suppress() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("x", ResourceRole::User);
-        tree.get_mut(r).unwrap().inc_suppress();
-        // Slot is reapable: contributions empty, no children / profiles /
-        // proxies, but suppress_count > 0 ⇒ vacate's Unsuppress branch
-        // fires from inside the terminus.
-
-        let mut out = StepOutput::default();
-        assert!(
-            tree.try_reap(r, &mut out),
-            "drained slot with residual suppress is reapable",
-        );
-        assert!(tree.get(r).is_none(), "slot was reaped");
-        assert_eq!(out.watch_ops.len(), 1);
-        assert!(matches!(
-            out.watch_ops[0],
-            WatchOp::Unsuppress { resource } if resource == r,
-        ));
-    }
-
-    /// Cascade variant of the above: a child slot reaps and orphans its
-    /// parent; the parent then enters the cascade with its own pending
-    /// `suppress_count > 0`. Both slots emit `Unsuppress` from inside
-    /// `try_reap`'s folded-in vacate, in cascade order (leaf first,
-    /// parent second).
-    #[test]
-    fn try_reap_cascade_emits_unsuppress_for_each_drained_slot() {
-        let mut tree = Tree::new();
-        let parent = tree.ensure_root("parent", ResourceRole::DescentScaffold);
-        let child = tree
-            .ensure_child(parent, "child", ResourceRole::User)
-            .expect("test live parent");
-        tree.get_mut(child).unwrap().inc_suppress();
-        tree.get_mut(parent).unwrap().inc_suppress();
-
-        let mut out = StepOutput::default();
-        assert!(tree.try_reap(child, &mut out));
-        assert!(tree.get(child).is_none());
-        assert!(
-            tree.get(parent).is_none(),
-            "cascade reaped the now-orphaned parent",
-        );
-        assert_eq!(out.watch_ops.len(), 2, "one Unsuppress per cascaded slot");
-        assert!(matches!(
-            out.watch_ops[0],
-            WatchOp::Unsuppress { resource } if resource == child,
-        ));
-        assert!(matches!(
-            out.watch_ops[1],
-            WatchOp::Unsuppress { resource } if resource == parent,
-        ));
-    }
-
-    #[test]
-    fn vacate_emits_both_closing_ops_when_both_counters_nonzero() {
-        // Combined branch: both protocols owed at vacate time. Order
-        // is `Unwatch` before `Unsuppress`. `StepOutput::sort_for_emission`
-        // ultimately re-orders by `ResourceId`; the relative order
-        // within a single Resource's ops is preserved by the sort's
-        // stability.
+    fn vacate_emits_one_unwatch_for_multi_contribution_slot() {
+        // The protocol terminus clears the whole contributions map
+        // atomically and emits exactly one closing `Unwatch` on the
+        // non-empty → empty edge, regardless of how many distinct
+        // contribution keys the slot carried. Exercises the
+        // `clear_contributions() > 0` branch with a refcount of 2 —
+        // distinct from the single-key
+        // `vacate_emits_unwatch_when_contributions_nonempty`.
         let mut tree = Tree::new();
         let r = tree.ensure_root("x", ResourceRole::User);
         {
@@ -1179,11 +1073,6 @@ mod tests {
                 crate::resource::ContribKey::ProfileParent(crate::ids::ProfileId::default()),
                 crate::sub::ClassSet::STRUCTURE,
             );
-            // Bump the counter to 3 — three independent suppress edges'
-            // worth of accounting, simulating a slot mid-burst.
-            res.inc_suppress();
-            res.inc_suppress();
-            res.inc_suppress();
         }
 
         let mut out = StepOutput::default();
@@ -1191,15 +1080,10 @@ mod tests {
 
         let res = tree.get(r).unwrap();
         assert_eq!(res.watch_demand(), 0);
-        assert_eq!(res.suppress_count(), 0);
-        assert_eq!(out.watch_ops.len(), 2);
+        assert_eq!(out.watch_ops.len(), 1);
         assert!(matches!(
             out.watch_ops[0],
             WatchOp::Unwatch { resource } if resource == r,
-        ));
-        assert!(matches!(
-            out.watch_ops[1],
-            WatchOp::Unsuppress { resource } if resource == r,
         ));
     }
 

@@ -404,8 +404,9 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
     // rebase probe is in flight is the fire-tail residual. The rebase
     // response then does NOT drop it (the pre-WS2 silent carve-out) —
     // it restarts a fresh debounced Standard burst seeded from the
-    // residual, and the anchor suppress contribution stays held across
-    // the restart (no finish-then-start flicker).
+    // residual via a typed PostFire→PreFire move that preserves the
+    // watched anchor — no refcount edge changes (no Unwatch/re-Watch
+    // flicker).
     //
     // CONTENT events mask: descendants must pass the class filter to
     // reach drive_burst's absorb arm.
@@ -476,13 +477,10 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
         "FsEvent during Rebasing absorbed",
     );
 
-    // The anchor suppress contribution taken at start_standard_burst is
-    // held through Rebasing.
-    let suppress_before = e.tree().get(r).unwrap().suppress_count();
-    assert_eq!(
-        suppress_before, 1,
-        "anchor suppressed for the in-flight burst",
-    );
+    // The anchor's kernel watch taken at start_standard_burst is held
+    // through Rebasing (the surviving refcount).
+    let watch_before = e.tree().get(r).unwrap().watch_demand();
+    assert_eq!(watch_before, 1, "anchor watched for the in-flight burst");
 
     // Rebase response with a non-empty residual → restart, NOT Idle.
     let t_restart = now + Duration::from_millis(30);
@@ -535,12 +533,13 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
         "restart re-enters Batching, emits no probe",
     );
 
-    // The suppress contribution did NOT flicker: the in-place move never
-    // finished, so it is still held (not released-then-reacquired).
+    // The kernel watch did NOT flicker: the typed PostFire→PreFire move
+    // never finished the burst, so the watch is still held (not
+    // released-then-reacquired) — no refcount edge changes.
     assert_eq!(
-        e.tree().get(r).unwrap().suppress_count(),
-        suppress_before,
-        "anchor suppress held across the restart, no finish-then-start flicker",
+        e.tree().get(r).unwrap().watch_demand(),
+        watch_before,
+        "anchor watch held across the restart, no finish-then-start flicker",
     );
 }
 
@@ -1035,10 +1034,11 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
 }
 
 #[test]
-fn fire_cycle_event_at_unsuppressed_descendant_during_awaiting_absorbs() {
-    // Sanity: descendant FDs are NOT suppressed during the burst — the
-    // anchor's add_suppress only silences anchor events. A descendant
-    // event fires, reaches the engine, and absorbs into the fire-tail.
+fn fire_cycle_event_at_descendant_during_awaiting_absorbs() {
+    // A descendant FsEvent during Awaiting reaches the engine and
+    // absorbs into the fire-tail — the post-fire self-induced event
+    // boundary. Nothing is silenced at the watcher; the engine routes
+    // every post-fire event to the absorb arm.
     //
     // CONTENT events mask so the Modified event passes the class filter.
     let mut e = Engine::new();
@@ -1063,13 +1063,6 @@ fn fire_cycle_event_at_unsuppressed_descendant_during_awaiting_absorbs() {
         e.tree().get(child).unwrap().watch_demand() > 0,
         "Seed reconciler watched the descendant Dir",
     );
-    // Confirm the child is NOT suppressed.
-    assert_eq!(
-        e.tree().get(child).unwrap().suppress_count(),
-        0,
-        "descendants are not suppressed during burst",
-    );
-
     let _ = drive_to_awaiting(
         &mut e,
         pid,
@@ -1078,7 +1071,7 @@ fn fire_cycle_event_at_unsuppressed_descendant_during_awaiting_absorbs() {
         now + Duration::from_millis(10),
     );
 
-    // Inject FsEvent on the (unsuppressed) descendant.
+    // Inject FsEvent on the descendant.
     let absorb_out = e.step(
         Input::FsEvent {
             resource: child,
@@ -1092,7 +1085,7 @@ fn fire_cycle_event_at_unsuppressed_descendant_during_awaiting_absorbs() {
             Diagnostic::EventAbsorbedByFireTail { profile, resource, .. }
                 if *profile == pid && *resource == child,
         )),
-        "descendant FsEvent absorbed despite unsuppressed FD",
+        "descendant FsEvent absorbed into the fire-tail",
     );
 }
 

@@ -64,7 +64,7 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
 fn config_diff_add_sub_to_existing_profile() {
     // Engine has Sub A; ConfigDiff adds Sub B at the same anchor with the
     // same config — both share one Profile. The Profile's Sub count goes 1 → 2; no
-    // new Watch/Probe/Suppress.
+    // new Watch/Probe.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);

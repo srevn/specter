@@ -289,7 +289,7 @@ mod tests {
         let r2 = rid(2);
         let r3 = rid(3);
         let mut out = StepOutput::default();
-        out.watch_ops.push(WatchOp::Suppress { resource: r3 });
+        out.watch_ops.push(WatchOp::Unwatch { resource: r3 });
         out.watch_ops.push(WatchOp::Watch {
             resource: r1,
             path: Arc::from(std::path::Path::new("/x")),

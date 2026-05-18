@@ -232,24 +232,18 @@ fn golden_path_full_lifecycle() {
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
 
-    // attach_sub emits Watch + Suppress (anchor) + Probe (Seed). No Effect.
+    // attach_sub emits Watch (anchor) + Probe (Seed). No Effect.
     assert!(
         attach_out
             .watch_ops
             .iter()
             .any(|op| matches!(op, WatchOp::Watch { .. }))
     );
-    assert!(
-        attach_out
-            .watch_ops
-            .iter()
-            .any(|op| matches!(op, WatchOp::Suppress { .. }))
-    );
     let seed_correlation =
         first_probe_correlation(&attach_out).expect("Seed Probe fires immediately");
     assert!(attach_out.effects().is_empty());
 
-    // Seed Ok → baseline = current = empty snapshot; → Idle; Unsuppress.
+    // Seed Ok → baseline = current = empty snapshot; → Idle.
     let snap_seed = dir_snap(vec![]);
     let seed_resp = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -260,14 +254,8 @@ fn golden_path_full_lifecycle() {
         now + Duration::from_millis(1),
     );
     assert!(seed_resp.effects().is_empty(), "Seed never emits Effects");
-    assert!(
-        seed_resp
-            .watch_ops
-            .iter()
-            .any(|op| matches!(op, WatchOp::Unsuppress { .. }))
-    );
 
-    // FsEvent on anchor → Standard Settling. Suppress emitted.
+    // FsEvent on anchor → Standard Settling.
     let t1 = now + Duration::from_millis(10);
     let fs_out = e.step(
         Input::FsEvent {
@@ -275,12 +263,6 @@ fn golden_path_full_lifecycle() {
             event: FsEvent::Modified,
         },
         t1,
-    );
-    assert!(
-        fs_out
-            .watch_ops
-            .iter()
-            .any(|op| matches!(op, WatchOp::Suppress { .. }))
     );
     assert!(fs_out.effects().is_empty());
 
@@ -315,6 +297,134 @@ fn golden_path_full_lifecycle() {
             outcome: ProbeOutcome::SubtreeOk(snap_seed),
         }),
         t1 + SETTLE * 16 + Duration::from_millis(1),
+    );
+}
+
+#[test]
+fn trailing_latched_anchor_event_does_not_double_fire() {
+    // After a fire cycle completes (Profile → Idle, baseline := the
+    // post-command tree), a trailing latched anchor FsEvent — the late
+    // event the watcher now delivers post-burst — opens a spurious
+    // Standard burst. Its verdict is `baseline == current` (the rebase
+    // just set it) and the Sub has already fired, so B1 dedup
+    // suppresses: the burst finishes to Idle with no second Effect.
+    let mut e = Engine::new();
+    let r = e_anchor(&mut e, "src");
+    let now = Instant::now();
+    let req = SubAttachRequest {
+        anchor: SubAttachAnchor::Resource(r),
+        identity: ProfileIdentity {
+            config: cfg_recursive(),
+            max_settle: MAX_SETTLE,
+            events: NO_EVENTS,
+        },
+        params: SubParams {
+            name: "build".into(),
+            program: empty_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+        },
+    };
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
+    let pid = pid_of(&e, sid);
+
+    // Seed → Idle with an empty baseline.
+    let seed_correlation =
+        first_probe_correlation(&attach_out).expect("Seed Probe fires immediately");
+    let snap = dir_snap(vec![]);
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: seed_correlation,
+            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
+        }),
+        now + Duration::from_millis(1),
+    );
+
+    // First fire cycle: FsEvent → Standard → Effect → EffectComplete →
+    // Rebase Ok → Idle. The Sub's has_fired is set by the emission.
+    let t1 = now + Duration::from_millis(10);
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Modified,
+        },
+        t1,
+    );
+    let stable_out = drive_standard_burst_to_stable(&mut e, pid, snap.clone(), t1);
+    assert_eq!(stable_out.effects().len(), 1, "first fire emits one Effect");
+    let post_effect = e.step(
+        Input::EffectComplete {
+            sub: sid,
+            key: stable_out.effects()[0].key(),
+            result: EffectOutcome::Ok,
+        },
+        t1 + SETTLE * 16,
+    );
+    let rebase_correlation =
+        first_probe_correlation(&post_effect).expect("post-Effect rebase probe");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: rebase_correlation,
+            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
+        }),
+        t1 + SETTLE * 16 + Duration::from_millis(1),
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            specter_core::ProfileState::Idle,
+        ),
+        "fire cycle completed to Idle before the trailing event",
+    );
+
+    // Trailing latched anchor event opens a spurious Standard burst.
+    let t2 = t1 + SETTLE * 20;
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Modified,
+        },
+        t2,
+    );
+
+    // Drive the spurious burst: every verify responds with the same
+    // unchanged tree. B1 dedup must suppress — no Effect ever — and the
+    // burst must finish cleanly back to Idle.
+    let mut t = t2;
+    let mut returned_to_idle = false;
+    for _ in 0..8 {
+        t += SETTLE * 4;
+        if let Some(c) = drain_to_probe_correlation(&mut e, t) {
+            let out = e.step(
+                Input::ProbeResponse(ProbeResponse {
+                    owner: ProbeOwner::Profile(pid),
+                    correlation: c,
+                    outcome: ProbeOutcome::SubtreeOk(snap.clone()),
+                }),
+                t,
+            );
+            assert!(
+                out.effects().is_empty(),
+                "trailing latched anchor event must not re-fire (B1 dedup); got {:?}",
+                out.effects(),
+            );
+        }
+        if matches!(
+            e.profiles().get(pid).unwrap().state(),
+            specter_core::ProfileState::Idle,
+        ) {
+            returned_to_idle = true;
+            break;
+        }
+    }
+    assert!(
+        returned_to_idle,
+        "spurious burst from the trailing anchor event finished cleanly to Idle — no double-fire",
     );
 }
 
@@ -583,8 +693,6 @@ fn step_output_is_sorted() {
         .map(|op| match op {
             WatchOp::Watch { resource, .. } => *resource,
             WatchOp::Unwatch { resource } => *resource,
-            WatchOp::Suppress { resource } => *resource,
-            WatchOp::Unsuppress { resource } => *resource,
         })
         .collect();
     let mut sorted = resources.clone();

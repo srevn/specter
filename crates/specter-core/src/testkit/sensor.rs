@@ -5,10 +5,10 @@
 //! is a recorder + injector over the `StepOutput`/`Input` boundary.
 //!
 //! `observe` aggregates every `StepOutput` field; the asserter helpers
-//! (`is_watched`, `is_suppressed`, …) walk the captured op stream and
-//! report the *net* state for a Resource — `Watch + Unwatch` cancels out,
-//! so the helpers reflect what the Sensor would have observed at the
-//! moment of the last edge.
+//! (`is_watched`, …) walk the captured op stream and report the *net*
+//! state for a Resource — `Watch + Unwatch` cancels out, so the helpers
+//! reflect what the Sensor would have observed at the moment of the
+//! last edge.
 
 use crate::{
     Diagnostic, Effect, FsEvent, Input, ProbeOp, ProbeResponse, ResourceId, StepOutput,
@@ -68,32 +68,10 @@ impl MockSensor {
         !self.is_watched(r)
     }
 
-    /// Net-balance predicate for `Suppress`/`Unsuppress` ops: `true` iff
-    /// the **last** suppress-edge op observed for `r` was `Suppress`.
-    #[must_use]
-    pub fn is_suppressed(&self, r: ResourceId) -> bool {
-        matches!(self.last_suppress_edge(r), Some(Edge::Set))
-    }
-
-    /// Complement of [`is_suppressed`](Self::is_suppressed); also covers
-    /// "never observed".
-    #[must_use]
-    pub fn is_unsuppressed(&self, r: ResourceId) -> bool {
-        !self.is_suppressed(r)
-    }
-
     fn last_watch_edge(&self, r: ResourceId) -> Option<Edge> {
         self.watch_ops.iter().rev().find_map(|op| match op {
             WatchOp::Watch { resource, .. } if *resource == r => Some(Edge::Set),
             WatchOp::Unwatch { resource } if *resource == r => Some(Edge::Cleared),
-            _ => None,
-        })
-    }
-
-    fn last_suppress_edge(&self, r: ResourceId) -> Option<Edge> {
-        self.watch_ops.iter().rev().find_map(|op| match op {
-            WatchOp::Suppress { resource } if *resource == r => Some(Edge::Set),
-            WatchOp::Unsuppress { resource } if *resource == r => Some(Edge::Cleared),
             _ => None,
         })
     }
@@ -296,37 +274,6 @@ mod tests {
 
         assert!(!sensor.is_watched(ids[0]));
         assert!(sensor.is_unwatched(ids[0]));
-    }
-
-    #[test]
-    fn is_suppressed_after_suppress() {
-        let ids = fresh_resource_ids(1);
-        let r = ids[0];
-
-        let mut out = StepOutput::default();
-        out.watch_ops.push(WatchOp::Suppress { resource: r });
-
-        let mut sensor = MockSensor::default();
-        sensor.observe(&out);
-
-        assert!(sensor.is_suppressed(r));
-        assert!(!sensor.is_unsuppressed(r));
-    }
-
-    #[test]
-    fn is_suppressed_false_after_suppress_then_unsuppress() {
-        let ids = fresh_resource_ids(1);
-        let r = ids[0];
-
-        let mut out = StepOutput::default();
-        out.watch_ops.push(WatchOp::Suppress { resource: r });
-        out.watch_ops.push(WatchOp::Unsuppress { resource: r });
-
-        let mut sensor = MockSensor::default();
-        sensor.observe(&out);
-
-        assert!(!sensor.is_suppressed(r));
-        assert!(sensor.is_unsuppressed(r));
     }
 
     #[test]

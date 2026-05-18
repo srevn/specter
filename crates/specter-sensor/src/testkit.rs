@@ -29,12 +29,6 @@ pub enum WatcherCall {
     Unwatch {
         resource: ResourceId,
     },
-    Suppress {
-        resource: ResourceId,
-    },
-    Unsuppress {
-        resource: ResourceId,
-    },
 }
 
 /// Live record of an installed watch on the mock. One entry per
@@ -56,8 +50,6 @@ pub struct MockFsWatcher {
     /// Current installed-watch state: `r ∈ installed` ⇔ last `watch(r)`
     /// succeeded and no subsequent `unwatch(r)` cleared it.
     pub installed: SecondaryMap<ResourceId, MockEntry>,
-    /// Current suppress state: present ⇔ last edge was `suppress`.
-    pub suppressed: SecondaryMap<ResourceId, ()>,
     /// Per-resource events queued for delivery on the next `poll_until`
     /// call. Drained into [`WatcherEvent::Fs`] before any queued
     /// overflow scopes (preserves the natural "events first, kernel
@@ -126,11 +118,9 @@ impl MockFsWatcher {
     /// - Returns `None` if the most recent op is `Unwatch` or if `r` has
     ///   no lifecycle ops in the call log.
     ///
-    /// `Suppress` / `Unsuppress` ops do not affect the mask and are
-    /// skipped during the walk. The engine emits a fresh
-    /// `WatchOp::Watch` whenever `Resource.events_union` widens or
-    /// narrows, so the latest `Watch` reflects the engine's current
-    /// per-Resource union.
+    /// The engine emits a fresh `WatchOp::Watch` whenever
+    /// `Resource.events_union` widens or narrows, so the latest `Watch`
+    /// reflects the engine's current per-Resource union.
     #[must_use]
     pub fn registered_events(&self, r: ResourceId) -> Option<ClassSet> {
         for c in self.calls.iter().rev() {
@@ -179,19 +169,6 @@ impl FsWatcher for MockFsWatcher {
     fn unwatch(&mut self, r: ResourceId) {
         self.calls.push(WatcherCall::Unwatch { resource: r });
         self.installed.remove(r);
-        self.suppressed.remove(r);
-    }
-
-    fn suppress(&mut self, r: ResourceId) {
-        self.calls.push(WatcherCall::Suppress { resource: r });
-        if self.installed.contains_key(r) {
-            self.suppressed.insert(r, ());
-        }
-    }
-
-    fn unsuppress(&mut self, r: ResourceId) {
-        self.calls.push(WatcherCall::Unsuppress { resource: r });
-        self.suppressed.remove(r);
     }
 
     fn poll_until(
@@ -366,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn unwatch_clears_installed_and_suppressed() {
+    fn unwatch_clears_installed() {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
@@ -377,12 +354,10 @@ mod tests {
             ClassSet::EMPTY,
         )
         .unwrap();
-        w.suppress(ids[0]);
-        assert!(w.suppressed.contains_key(ids[0]));
+        assert!(w.installed.contains_key(ids[0]));
 
         w.unwatch(ids[0]);
         assert!(!w.installed.contains_key(ids[0]));
-        assert!(!w.suppressed.contains_key(ids[0]));
     }
 
     #[test]
@@ -487,46 +462,6 @@ mod tests {
         assert_eq!(*waker.woken.lock().unwrap(), 3);
     }
 
-    #[test]
-    fn suppress_unsuppress_records_calls() {
-        let ids = fresh_resource_ids(1);
-        let mut w = MockFsWatcher::new();
-
-        w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::Unknown,
-            ClassSet::EMPTY,
-        )
-        .unwrap();
-        w.suppress(ids[0]);
-        w.unsuppress(ids[0]);
-
-        let labels: Vec<&str> = w
-            .calls
-            .iter()
-            .map(|c| match c {
-                WatcherCall::Watch { .. } => "watch",
-                WatcherCall::Unwatch { .. } => "unwatch",
-                WatcherCall::Suppress { .. } => "suppress",
-                WatcherCall::Unsuppress { .. } => "unsuppress",
-            })
-            .collect();
-        assert_eq!(labels, vec!["watch", "suppress", "unsuppress"]);
-        assert!(!w.suppressed.contains_key(ids[0])); // Net: unsuppressed.
-    }
-
-    #[test]
-    fn suppress_on_unwatched_does_not_install_state() {
-        let ids = fresh_resource_ids(1);
-        let mut w = MockFsWatcher::new();
-
-        // No prior `watch(ids[0])`; suppress should be a no-op on state.
-        w.suppress(ids[0]);
-        assert_eq!(w.calls.len(), 1);
-        assert!(!w.suppressed.contains_key(ids[0]));
-    }
-
     // ---------------------------------------------------------------- registered_events
 
     /// `registered_events` reads the events on the latest `Watch` call.
@@ -591,25 +526,6 @@ mod tests {
         .unwrap();
         // ids[1] was never watched; registered_events should return None.
         assert_eq!(w.registered_events(ids[1]), None);
-    }
-
-    #[test]
-    fn registered_events_skips_suppress_unsuppress_ops() {
-        // Suppress / Unsuppress don't change the events mask; the helper
-        // walks past them to find the latest Watch.
-        let ids = fresh_resource_ids(1);
-        let mut w = MockFsWatcher::new();
-
-        w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::File,
-            ClassSet::CONTENT,
-        )
-        .unwrap();
-        w.suppress(ids[0]);
-        w.unsuppress(ids[0]);
-        assert_eq!(w.registered_events(ids[0]), Some(ClassSet::CONTENT));
     }
 
     #[test]

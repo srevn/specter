@@ -17,19 +17,16 @@
 //! choice explicit at every call site. Writes go through
 //! [`crate::Tree::set_kind`].
 //!
-//! `contributions` and `suppress_count` are `pub(crate)` — every
-//! engine-side mutation flows through the typed methods on `Resource`
+//! `contributions` is `pub(crate)` — every engine-side mutation flows
+//! through the typed methods on `Resource`
 //! ([`Resource::insert_contribution`] / [`Resource::remove_contribution`]
-//! / [`Resource::clear_contributions`] for the contributions map;
-//! [`Resource::inc_suppress`] / [`Resource::dec_suppress`] /
-//! [`Resource::clear_suppress`] for the counter). The mutators return
-//! the edge information the refcount helpers need (`bool` for `0 ↔ 1`
-//! edges, `usize` / `u32` for the prior count on `clear_*`), so the
-//! 0↔non-empty / 0↔1 emission decisions sit at the engine helper layer
-//! without leaking the underlying field shape. Read access for the
-//! demand summary goes through [`Resource::contributions`],
-//! [`Resource::watch_demand`], [`Resource::events_union`],
-//! [`Resource::suppress_count`].
+//! / [`Resource::clear_contributions`]). The mutators return the edge
+//! information the refcount helpers need (the prior mask on insert /
+//! remove, the prior count on `clear_*`), so the 0↔non-empty emission
+//! decision sits at the engine helper layer without leaking the
+//! underlying field shape. Read access for the demand summary goes
+//! through [`Resource::contributions`], [`Resource::watch_demand`],
+//! [`Resource::events_union`].
 //!
 //! `proxy_promoters` is `pub(crate)` — a back-ref vector kept in
 //! lockstep with `Promoter.proxies` (the engine's promoter side). A
@@ -37,11 +34,11 @@
 //! so the sole mutators are the typed
 //! [`Resource::insert_proxy_promoter`] /
 //! [`Resource::remove_proxy_promoter`]; each returns the
-//! empty ↔ non-empty retention-edge `bool` (same convention as the
-//! suppression counter) and absorbs the dedup / no-op guard
-//! internally. Read access is via [`Resource::proxy_promoters`]; the
-//! vector is also one of the four structural claimants on
-//! [`Resource::has_anchors`].
+//! empty ↔ non-empty retention-edge `bool` (the same edge-reporting
+//! convention as the contributions mutators) and absorbs the dedup /
+//! no-op guard internally. Read access is via
+//! [`Resource::proxy_promoters`]; the vector is also one of the four
+//! structural claimants on [`Resource::has_anchors`].
 //!
 //! `role` is `pub`; the engine writes it directly. Role is metadata
 //! (no refcount edges), so a typed setter would buy nothing.
@@ -196,14 +193,6 @@ pub struct Resource {
     /// read surface is [`Resource::contributions`] /
     /// [`Resource::watch_demand`] / [`Resource::events_union`].
     pub(crate) contributions: BTreeMap<ContribKey, ClassSet>,
-    /// Suppression refcount. Event delivery is silenced iff `> 0`. The
-    /// 0↔1 edges drive the sensor's `Suppress` / `Unsuppress`
-    /// emissions; intermediate counts are bookkeeping only.
-    ///
-    /// `pub(crate)` — mutated via [`Resource::inc_suppress`] /
-    /// [`Resource::dec_suppress`] / [`Resource::clear_suppress`].
-    /// Read surface is [`Resource::suppress_count`].
-    pub(crate) suppress_count: u32,
     pub role: ResourceRole,
 }
 
@@ -288,7 +277,6 @@ impl Resource {
             proxy_promoters: SmallVec::new(),
             kind: ResourceKind::Unknown,
             contributions: BTreeMap::new(),
-            suppress_count: 0,
             role,
         }
     }
@@ -416,11 +404,10 @@ impl Resource {
     ///
     /// Returns `true` iff this call traversed the empty → non-empty
     /// retention edge (the slot just gained its first proxy back-ref),
-    /// mirroring [`Self::inc_suppress`]'s `0 → 1` convention so an
-    /// edge-driven caller can react without the `SmallVec` shape
+    /// so an edge-driven caller can react without the `SmallVec` shape
     /// leaking. The current caller does not consume the edge; the
-    /// signal is kept symmetric with the suppression / contribution
-    /// mutators rather than special-cased away.
+    /// signal is kept symmetric with the contribution mutators rather
+    /// than special-cased away.
     pub fn insert_proxy_promoter(&mut self, id: PromoterId) -> bool {
         if self.proxy_promoters.contains(&id) {
             return false;
@@ -436,8 +423,9 @@ impl Resource {
     /// on a double release), is a no-op that reports no edge.
     ///
     /// Returns `true` iff this call traversed the non-empty → empty
-    /// retention edge (the slot just lost its last proxy back-ref),
-    /// mirroring [`Self::dec_suppress`]'s `1 → 0` convention.
+    /// retention edge (the slot just lost its last proxy back-ref) —
+    /// the symmetric inverse of [`Self::insert_proxy_promoter`]'s
+    /// empty → non-empty edge.
     pub fn remove_proxy_promoter(&mut self, id: PromoterId) -> bool {
         if self.proxy_promoters.is_empty() {
             return false;
@@ -533,47 +521,6 @@ impl Resource {
         let n = self.contributions.len();
         self.contributions.clear();
         n
-    }
-
-    /// Current suppression refcount. Event delivery is silenced iff
-    /// `> 0`.
-    #[must_use]
-    pub const fn suppress_count(&self) -> u32 {
-        self.suppress_count
-    }
-
-    /// Saturating `+1` on [`Self::suppress_count`]. Returns `true` iff
-    /// this call traversed the `0 → 1` edge — i.e., suppression just
-    /// activated, and the caller (engine's `add_suppress`) should emit
-    /// `WatchOp::Suppress`.
-    pub const fn inc_suppress(&mut self) -> bool {
-        let prev = self.suppress_count;
-        self.suppress_count = prev.saturating_add(1);
-        prev == 0
-    }
-
-    /// `-1` on [`Self::suppress_count`], saturating at 0. Returns
-    /// `true` iff this call traversed the `1 → 0` edge — i.e.,
-    /// suppression just deactivated, and the caller (engine's
-    /// `sub_suppress`) should emit `WatchOp::Unsuppress`. Returns
-    /// `false` on the no-op path (counter was already 0; reachable
-    /// post-[`crate::Tree::vacate`] when symmetric drain enters here
-    /// after the terminus already emitted the closing op).
-    pub const fn dec_suppress(&mut self) -> bool {
-        let prev = self.suppress_count;
-        if prev == 0 {
-            return false;
-        }
-        self.suppress_count = prev - 1;
-        prev == 1
-    }
-
-    /// Atomically zero the suppression refcount. Returns the prior
-    /// count (`> 0` ⇒ caller should emit the closing
-    /// `WatchOp::Unsuppress`; `0` ⇒ no-op already zeroed). Used by
-    /// [`crate::Tree::vacate`]'s protocol terminus.
-    pub const fn clear_suppress(&mut self) -> u32 {
-        std::mem::replace(&mut self.suppress_count, 0)
     }
 }
 
@@ -782,48 +729,6 @@ mod tests {
         );
         assert_eq!(r.clear_contributions(), 2);
         assert!(r.contributions().is_empty());
-    }
-
-    /// `inc_suppress` reports the `0 → 1` edge; intermediate bumps
-    /// return `false`. This is what the engine's `add_suppress` helper
-    /// uses to decide whether to emit `WatchOp::Suppress`.
-    #[test]
-    fn inc_suppress_reports_zero_to_one_edge_once() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        assert!(r.inc_suppress(), "0 → 1 edge");
-        assert_eq!(r.suppress_count(), 1);
-        assert!(!r.inc_suppress(), "1 → 2: intermediate, no edge");
-        assert_eq!(r.suppress_count(), 2);
-        assert!(!r.inc_suppress(), "2 → 3: intermediate, no edge");
-        assert_eq!(r.suppress_count(), 3);
-    }
-
-    /// `dec_suppress` reports the `1 → 0` edge; intermediate
-    /// decrements and the saturating zero-floor path return `false`.
-    #[test]
-    fn dec_suppress_reports_one_to_zero_edge_and_saturates_at_zero() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        assert!(!r.dec_suppress(), "no-op at 0: no edge, no underflow panic");
-        assert_eq!(r.suppress_count(), 0);
-        r.inc_suppress();
-        r.inc_suppress();
-        assert_eq!(r.suppress_count(), 2);
-        assert!(!r.dec_suppress(), "2 → 1: intermediate");
-        assert!(r.dec_suppress(), "1 → 0: edge");
-        assert_eq!(r.suppress_count(), 0);
-    }
-
-    /// `clear_suppress` returns the prior count. Vacate uses `> 0` to
-    /// decide whether to emit `Unsuppress`.
-    #[test]
-    fn clear_suppress_returns_prior_count() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        assert_eq!(r.clear_suppress(), 0, "already zero: no-op");
-        r.inc_suppress();
-        r.inc_suppress();
-        r.inc_suppress();
-        assert_eq!(r.clear_suppress(), 3);
-        assert_eq!(r.suppress_count(), 0);
     }
 
     /// `insert_proxy_promoter` reports the empty → non-empty retention
