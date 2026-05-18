@@ -11,10 +11,19 @@
 //!   Idle (no slot)
 //!         │ attach_promoter
 //!         ▼
-//!   PrefixPending(d) ──── descent ────▶ Active { proxies }
-//!                          ▲
-//!                          │ rewind on Vanished
+//!   PrefixPending(d) ───── descent ─────▶ Active { proxies }
+//!         ▲   ▲                                 │
+//!         │   │ rewind on Vanished              │ terminus rm -rf
+//!         │   └─────────────────────────────────┘ ⇒ proxies: ∅
+//!         │ start_promoter_prefix_recovery (parent's next
+//!         │   StructureChanged on the preserved prefix_parent edge)
 //! ```
+//!
+//! `PrefixPending → Active` ([`Engine::enter_active`]) is bidirectional:
+//! the inverse `Active → PrefixPending`
+//! ([`specter_core::Promoter::reenter_prefix_pending`]) is the
+//! terminus-loss recovery move, the structural mirror of a Profile's
+//! `Pending ↔ Idle` anchor-loss recovery.
 //!
 //! Single-slot probe per Promoter, structural by mutually-exclusive
 //! state: the descent probe lives on the `PrefixPending` descent's own
@@ -47,7 +56,7 @@
 use crate::Engine;
 use crate::descent::{MaterializeResult, kind_from_entry};
 use crate::probe::ProbeRoute;
-use crate::refcounts::{add_watch, sub_watch_then_try_reap};
+use crate::refcounts::{add_watch, sub_watch};
 use compact_str::{CompactString, format_compact};
 use specter_core::{
     ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
@@ -108,7 +117,6 @@ impl Engine {
     pub(crate) fn attach_promoter_inner(
         &mut self,
         req: PromoterAttachRequest,
-        now: Instant,
         out: &mut StepOutput,
     ) -> Option<PromoterId> {
         // Structural post-insert token: carried out of step 5's `match`
@@ -221,7 +229,6 @@ impl Engine {
                     /* prior_prefix_to_release */ None,
                     /* new_proxy_resource */ proxy_resource,
                     /* pattern_component_index */ lpl,
-                    now,
                     out,
                 );
             }
@@ -250,15 +257,21 @@ impl Engine {
         Some(promoter_id)
     }
 
-    /// Single helper for both Promoter materialisation paths:
+    /// Single helper for both Promoter materialisation paths —
+    /// structurally identical to [`Engine::materialize_profile_anchor`]'s
+    /// prefix → parent handoff:
     ///
     /// - **immediate-Materialized** (from `attach_promoter_inner`): no
     ///   prior prefix to release; first proxy installed at the prefix
     ///   slot.
     /// - **`PrefixPending → Active`** (from
     ///   [`Engine::dispatch_descent_ok`]'s last-literal arm for the
-    ///   Promoter owner): prior prefix's STRUCTURE contribution
-    ///   releases; new proxy installed at the freshly-materialised slot.
+    ///   Promoter owner, including the *terminus-loss recovery*
+    ///   re-descent): the prior prefix's
+    ///   [`ContribKey::PromoterPrefix`] contribution is *handed off*
+    ///   (released without `try_reap`) to the preserved parent-edge
+    ///   watch, and the new proxy is installed at the
+    ///   freshly-materialised terminus (a child of that prior prefix).
     ///
     /// Pre-conditions:
     /// - `promoter_id` exists in the registry (caller just inserted it
@@ -272,9 +285,19 @@ impl Engine {
     ///
     /// Post-conditions:
     /// - State is `Active { proxies: { new_proxy_resource → ProxyState{lpl} } }`.
-    /// - `prior_prefix_to_release` (if Some) had its STRUCTURE
-    ///   contribution released (counter -1; recompute walks
-    ///   post-state-flip Promoter contribution).
+    /// - `prior_prefix_to_release` (if `Some`) had its
+    ///   [`ContribKey::PromoterPrefix`] contribution released by a
+    ///   plain `sub_watch` — **no `try_reap`**: the slot is kept alive
+    ///   on purpose as the recovery parent edge (and the new terminus
+    ///   is its live child anyway). The descent-watch role transfers
+    ///   to the parent-edge contribution installed next, exactly as the
+    ///   Profile twin trades `ProfileDescent` for `ProfileParent`.
+    /// - `tree.parent(new_proxy_resource)` carries `+1 STRUCTURE`
+    ///   [`ContribKey::PromoterPrefixParent`] (the preserved recovery
+    ///   edge), cached on `Promoter.prefix_parent` — *unless* the
+    ///   terminus is `/` (no parent), where the channel is neither
+    ///   installable nor needed. Idempotent on the recovery cycle
+    ///   (`set_promoter_prefix_parent`'s `already_set` skip).
     /// - `new_proxy_resource` carries +1 STRUCTURE watch_demand.
     /// - `pending_enumerations` contains `{new_proxy_resource}`.
     /// - `dispatch_next_enumeration` has been called (probe emitted iff
@@ -287,7 +310,6 @@ impl Engine {
         prior_prefix_to_release: Option<ResourceId>,
         new_proxy_resource: ResourceId,
         pattern_component_index: usize,
-        _now: Instant,
         out: &mut StepOutput,
     ) {
         // [S-8] Promoter-fresh slots demote to `User` role for
@@ -312,16 +334,19 @@ impl Engine {
             q.enter_active_empty();
         }
 
-        // 2. Release the prior prefix's STRUCTURE contribution if any.
-        // The contribution map's key was [`ContribKey::PromoterPrefix`]
-        // — the post-state-flip Active{empty} no longer holds this
-        // claim, but the contribution map is the source of truth and
-        // is removed by key here. `try_reap` is idempotent — the slot
-        // survives iff something else still holds it (children,
-        // profiles, co-resident contributions, proxy_promoters
-        // back-refs); role is metadata and never gates retention.
+        // 2. Hand off the prior prefix's STRUCTURE contribution. Plain
+        // `sub_watch` — NOT `sub_watch_then_try_reap`: under the
+        // recovery symmetry the prior prefix *is* the terminus's parent
+        // and must stay watched as the preserved recovery edge (step 3
+        // re-claims it under [`ContribKey::PromoterPrefixParent`]).
+        // Try-reaping here would be wrong; it would also be a no-op in
+        // practice (the freshly-materialised terminus is still its
+        // child), so the explicit `sub_watch` states the intent rather
+        // than relying on a coincidental short-circuit. Mirrors
+        // `materialize_profile_anchor`'s plain `sub_watch` of
+        // `ProfileDescent`.
         if let Some(prior) = prior_prefix_to_release {
-            sub_watch_then_try_reap(
+            sub_watch(
                 &mut self.tree,
                 prior,
                 ContribKey::PromoterPrefix(promoter_id),
@@ -329,7 +354,17 @@ impl Engine {
             );
         }
 
-        // 3. Register the proxy at new_proxy_resource. `register_proxy`
+        // 3. Install the preserved parent-edge recovery contribution —
+        // uniform for BOTH paths (descent: `prior == parent(terminus)`;
+        // immediate-Materialized: `prior == None`, no descent contrib
+        // ever existed — exactly `bootstrap_immediate`'s shape, which
+        // calls `set_watch_root_parent` with no prior descent release).
+        // Idempotent on the terminus-loss recovery cycle: the helper's
+        // `already_set` short-circuit keeps the parent's `watch_demand`
+        // at exactly `+1` across any number of loss → recovery cycles.
+        self.set_promoter_prefix_parent(promoter_id, new_proxy_resource, out);
+
+        // 4. Register the proxy at new_proxy_resource. `register_proxy`
         // inserts into proxies map, queues enumeration (gated on
         // !already_carries per [H-5]), bumps watch_demand, and sets
         // the back-ref.
@@ -340,7 +375,7 @@ impl Engine {
             out,
         );
 
-        // 4. Drain initial enumeration (single-slot: no probe in
+        // 5. Drain initial enumeration (single-slot: no probe in
         // flight here, so this dispatches immediately).
         self.dispatch_next_enumeration(promoter_id, out);
     }
@@ -777,11 +812,15 @@ impl Engine {
         let is_final = next_index == components.len();
 
         // Loop-invariant for the per-entry path join; bind once. `None`
-        // is the defensive target-was-reaped path — the `proxy_state`
-        // lookup above already proved the slot live this step, so it is
-        // unreachable under normal operation; the join degrades to an
-        // empty `PathBuf` (rejected downstream by
-        // `decompose_attach_path`) rather than panicking.
+        // is the target-was-reaped path, unreachable here: the
+        // `proxy_state` lookup above already proved the slot live this
+        // step. If it ever did surface, the empty `PathBuf` is *not*
+        // rejected anywhere — `try_promote` attaches via
+        // `SubAttachAnchor::Resource` (no path decomposition); the path
+        // only feeds the synthesized Sub name and the
+        // `PromotionKindObserved` diagnostic. Degrading rather than
+        // panicking is the deliberate choice; the live-target invariant
+        // makes it moot in practice.
         let target_path = self.tree.path_of(target);
 
         // Forward pass: state-keyed dispatch on the next pattern
@@ -970,6 +1009,19 @@ impl Engine {
     /// `StructureChanged` event when the proxy is removed) reaches
     /// the same end state; observing `Vanished` directly short-circuits
     /// that round-trip.
+    ///
+    /// **Preserve, don't recover here.** When `target` is the terminus
+    /// (the unique proxy-tree root), the downward BFS in
+    /// [`Self::unregister_proxy_subtree`] empties *every* proxy —
+    /// `Active { proxies: ∅ }` — but it is structurally
+    /// downward-only, so it cannot reach the ancestor carrying
+    /// [`ContribKey::PromoterPrefixParent`]: `Promoter.prefix_parent`
+    /// survives untouched. Recovery is **event-gated**, not synchronous:
+    /// no terminus discriminant is read here and no recovery is kicked
+    /// off. The preserved parent edge re-enters descent on the parent's
+    /// *next* `StructureChanged` via `classify_event_carriers` →
+    /// `start_promoter_prefix_recovery` — the structural mirror of a
+    /// Profile's anchor-loss → `watch_root_parent` recovery.
     pub(crate) fn dispatch_promoter_enumeration_vanished(
         &mut self,
         promoter_id: PromoterId,
@@ -1208,7 +1260,6 @@ impl Engine {
         &mut self,
         promoter_id: PromoterId,
         resource: ResourceId,
-        _now: Instant,
         out: &mut StepOutput,
     ) {
         let has_proxy = self
@@ -1328,6 +1379,12 @@ impl Engine {
     ///      `state.proxies.keys()`) clears the back-ref, drops the
     ///      [`specter_core::ContribKey::PromoterProxy`] contribution,
     ///      and try-reaps the slot.
+    ///    - [`Self::release_promoter_prefix_parent_claim`] releases the
+    ///      preserved [`specter_core::ContribKey::PromoterPrefixParent`]
+    ///      recovery edge (idempotent — `None` for a never-materialised
+    ///      or root-prefix Promoter). Placed last, exactly as
+    ///      `reap_profile` runs `release_watch_root_parent_claim` last
+    ///      of its claim quartet before `profiles.detach`.
     /// 4. Remove the Promoter from the registry. Emit
     ///    [`Diagnostic::PromoterReaped`].
     pub(crate) fn reap_promoter_inner(&mut self, promoter_id: PromoterId, out: &mut StepOutput) {
@@ -1409,6 +1466,15 @@ impl Engine {
         for r in proxy_list {
             self.unregister_proxy(promoter_id, r, out);
         }
+
+        // Release the preserved parent-edge recovery contribution.
+        // Idempotent (`take_prefix_parent` ⇒ `None` for a
+        // never-materialised or root-prefix Promoter, no double
+        // release). Placed last among the per-Resource releases,
+        // mirroring `reap_profile`'s `release_watch_root_parent_claim`
+        // before `profiles.detach`. No cancel-first concern — it
+        // neither flips state nor drops a `ProbeSlot`.
+        self.release_promoter_prefix_parent_claim(promoter_id, out);
 
         // 4. Remove the Promoter from the registry and emit the
         // lifecycle diagnostic.

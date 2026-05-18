@@ -397,11 +397,25 @@ impl crate::Engine {
                     );
                 }
                 ProbeOwner::Promoter(pid) => {
-                    let lpl = self
+                    // Loud arm — `on_promoter_probe_response`'s
+                    // `probe_gate` already proved this Promoter live and
+                    // in descent (a vanished Promoter's late response is
+                    // caught there as `StaleProbeResponse`, never
+                    // reaching dispatch). A silent `lpl = 0` fallback
+                    // would feed `enter_active` a bogus cursor and
+                    // install orphan contributions for a dead id;
+                    // matches `advance_descent`'s loud re-projection.
+                    let Some(lpl) = self
                         .promoters
                         .get(pid)
-                        .map_or(0, |q| q.pattern.literal_prefix_len());
-                    self.enter_active(pid, Some(prefix), new_resource, lpl, now, out);
+                        .map(|q| q.pattern.literal_prefix_len())
+                    else {
+                        unreachable!(
+                            "dispatch_descent_ok: Promoter {pid:?} vanished between \
+                             the probe gate and the terminal arm"
+                        );
+                    };
+                    self.enter_active(pid, Some(prefix), new_resource, lpl, out);
                 }
             }
         } else {

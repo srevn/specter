@@ -22,15 +22,16 @@ use crate::engine::is_timer_referenced;
 use crate::path::empty_path;
 use crate::probe::ProbeRoute;
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
+use crate::refcounts::add_watch;
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind, ClassSet,
-    DedupKey, DescentRemaining, Diagnostic, Effect, EffectCommon, EffectOutcome, EffectScope,
-    FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse,
-    ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource,
-    ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure,
-    WatchOp, WatchRegistryDiff,
+    ContribKey, DedupKey, DescentRemaining, DescentState, Diagnostic, Effect, EffectCommon,
+    EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent, PostFirePhase,
+    PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, ProfileId, ProfileState,
+    PromoterClaimKind, PromoterId, PromoterState, ReapTrigger, Resource, ResourceId, ResourceKind,
+    StepOutput, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchOp, WatchRegistryDiff,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -103,25 +104,38 @@ impl Engine {
         let carriers = self.classify_event_carriers(resource);
         let descent_count = carriers.descents.len();
         let recovery_count = carriers.recoveries.len();
+        let promoter_recovery_count = carriers.promoter_recoveries.len();
         for owner in carriers.descents.iter().copied() {
             self.on_descent_event(owner, now, out);
         }
         for pid in carriers.recoveries.iter().copied() {
             self.start_pending_recovery(pid, resource, out);
         }
+        for qid in carriers.promoter_recoveries.iter().copied() {
+            self.start_promoter_prefix_recovery(qid, resource, out);
+        }
 
         // Find covering Profiles (anchor or any covering ancestor). For
         // P4 single-Profile this resolves to 0 or 1; P5 multi-Profile
         // dispatches to each in encounter order.
         let covering = self.covering_profiles(resource);
-        if covering.is_empty() && descent_count == 0 && recovery_count == 0 && proxies.is_empty() {
+        if covering.is_empty()
+            && descent_count == 0
+            && recovery_count == 0
+            && promoter_recovery_count == 0
+            && proxies.is_empty()
+        {
             // No consumer: covered by no Profile, no in-flight descent,
-            // no recovery kicked off, and no proxy back-ref. Emit
-            // `EventNoConsumer` (a benign "watched but no listener"
-            // signal — typically a `WatchRootParent` event for
-            // something we don't track) and drop. Distinct from
-            // `EventOnUnwatchedResource` (the `watch_demand == 0`
-            // race earlier) so log levels can diverge.
+            // no Profile/Promoter recovery kicked off, and no proxy
+            // back-ref. Emit `EventNoConsumer` (a benign "watched but no
+            // listener" signal — typically a `WatchRootParent` /
+            // `PromoterPrefixParent` event for something we don't track)
+            // and drop. Distinct from `EventOnUnwatchedResource` (the
+            // `watch_demand == 0` race earlier) so log levels can
+            // diverge. The `promoter_recovery_count == 0` term keeps a
+            // parent event that *only* triggered a Promoter recovery
+            // from being mis-reported as having no consumer (the
+            // recovery loop above already acted on it).
             out.diagnostics
                 .push(Diagnostic::EventNoConsumer { resource });
             return;
@@ -134,7 +148,7 @@ impl Engine {
         // proxy effects are unaffected by burst ops emitted later in
         // the same step.
         for promoter_id in proxies.iter().copied() {
-            self.on_promoter_proxy_event(promoter_id, resource, now, out);
+            self.on_promoter_proxy_event(promoter_id, resource, out);
         }
 
         // Class-aware routing. Compute the event's class once from the
@@ -222,6 +236,126 @@ impl Engine {
         let remaining = DescentRemaining::from_vec(vec![anchor_name])
             .expect("start_pending_recovery: single-segment remaining is non-empty");
         self.enter_pending_descent(profile_id, parent, remaining, out);
+    }
+
+    /// Re-enter `PrefixPending` descent for an `Active { proxies: ∅ }`
+    /// Promoter whose terminus was lost. The Promoter twin of
+    /// [`Self::start_pending_recovery`]; triggered by an event at the
+    /// Promoter's preserved `prefix_parent` edge.
+    ///
+    /// **Static recovery segment — not `tree.name(terminus)`.** Unlike
+    /// the Profile twin, which reads `tree.name(anchor)` (safe there
+    /// because `Profile.resource`'s back-ref pins the anchor slot so
+    /// `release_anchor_claim` never try-reaps it), the Promoter terminus
+    /// has *no* such pin: `unregister_proxy_subtree` →
+    /// `release_promoter_proxy_claim` `try_reap`s the terminus slot, so
+    /// it may already be gone. The terminus segment is instead the
+    /// *static* `pattern.components()[lpl - 1]` — every component in
+    /// `0..lpl` is a `Literal` by the parse invariant, so this is
+    /// slot-independent and correct even after the terminus slot reaps.
+    /// `lpl >= 1` always (synthetic root), and recovery only classifies
+    /// when `prefix_parent` is set, which requires `lpl >= 2`
+    /// (`lpl == 1` ⇒ `terminus == "/"` ⇒ no parent ⇒ no
+    /// `PromoterPrefixParent` ⇒ this carrier never fires), so
+    /// `components[lpl - 1]` is a real literal segment in bounds
+    /// (`lpl - 1 < lpl < components.len()`).
+    ///
+    /// **Recovery overlap (`+2`).** `parent` already holds `+1
+    /// STRUCTURE` from the preserved
+    /// [`ContribKey::PromoterPrefixParent`] (set at the original
+    /// materialisation, never cleared on terminus loss). This helper
+    /// bumps another `+1` for the [`ContribKey::PromoterPrefix`] descent
+    /// contribution; the refcount sums to `+2`. At re-materialisation
+    /// `enter_active`'s plain `sub_watch` drops the descent contribution
+    /// while the parent edge persists (`set_promoter_prefix_parent`'s
+    /// `already_set` skip) — the exact lifecycle of the Profile
+    /// `enter_pending_descent` recovery overlap.
+    ///
+    /// **Ordering: derive segment → mint → state-flip (construct-armed)
+    /// → add_watch → emit** — mirrors [`Self::enter_pending_descent`].
+    /// Not delegated to that helper: it is Profile-specific (asserts an
+    /// `Idle` Profile, writes `ProfileState`); the Promoter
+    /// precondition (`Active { proxies: ∅ }`) and state type differ, so
+    /// this is an honest parallel rather than a forced abstraction over
+    /// two call sites with no shared body.
+    fn start_promoter_prefix_recovery(
+        &mut self,
+        qid: PromoterId,
+        parent: ResourceId,
+        out: &mut StepOutput,
+    ) {
+        // Static terminus segment from the pattern, never the
+        // possibly-reaped terminus slot. `None` ⇒ Promoter vanished
+        // (benign post-classify race) or the parse invariant was
+        // breached (a `Glob` in the literal prefix — caught loudly in
+        // dev/CI, degrades to "skip recovery" in release exactly as
+        // `render_literal_prefix` handles the same invariant). Either
+        // way, returning leaves the Promoter `Active { proxies: ∅ }`
+        // (the pre-recovery state), never wedged mid-transition.
+        let Some(seg) = self.promoters.get(qid).and_then(|q| {
+            let components = q.pattern.components();
+            let lpl = q.pattern.literal_prefix_len();
+            match &components[lpl - 1] {
+                PatternComponent::Literal(s) => Some(s.clone()),
+                PatternComponent::Glob(_) => {
+                    debug_assert!(
+                        false,
+                        "start_promoter_prefix_recovery: components[lpl - 1] must be \
+                         Literal by the literal-prefix parse invariant \
+                         (promoter = {qid:?}, lpl = {lpl})",
+                    );
+                    None
+                }
+            }
+        }) else {
+            return;
+        };
+
+        // `vec![seg]` is non-empty by construction, so the `from_vec`
+        // discriminant is structurally `Some`. `expect` documents the
+        // contract (mirror of `start_pending_recovery`).
+        let remaining = DescentRemaining::from_vec(vec![seg])
+            .expect("start_promoter_prefix_recovery: single-segment remaining is non-empty");
+
+        // Mint first so the re-entered `PrefixPending` is constructed
+        // with its descent slot already armed — no window where the
+        // phase exists without a correlation (mirror of
+        // `enter_pending_descent` step 1).
+        let correlation = self.mint_probe_correlation();
+
+        // Loud arm — `classify_event_carriers` proved this Promoter
+        // `Active { proxies: ∅ }` this step and nothing between there
+        // and here mutates the registry, so `get_mut` resolving `None`
+        // is a state-machine breach, not a benign race. A silent skip
+        // would leave the slot un-constructed while the emit below
+        // still fires (no probe, no diagnostic — a wedge); mirrors
+        // `enter_pending_descent`'s loud arm.
+        let Some(q) = self.promoters.get_mut(qid) else {
+            unreachable!(
+                "start_promoter_prefix_recovery: Promoter {qid:?} vanished between \
+                 classify_event_carriers and the construct-armed re-entry"
+            );
+        };
+        q.reenter_prefix_pending(DescentState::new(
+            parent,
+            remaining,
+            ProbeSlot::armed(correlation, ()),
+        ));
+
+        // Install the descent contribution on the parent (the `+2`
+        // overlap with the preserved `PromoterPrefixParent`).
+        add_watch(
+            &mut self.tree,
+            parent,
+            ContribKey::PromoterPrefix(qid),
+            ClassSet::STRUCTURE,
+            out,
+        );
+
+        // The choke reads the correlation back off the re-entered
+        // `PrefixPending` descent slot and resolves the parent target
+        // off state.
+        self.emit_owner_probe(ProbeOwner::Promoter(qid), out);
     }
 
     /// Dispatch a [`ProbeResponse`] by routing to the per-owner
@@ -861,10 +995,10 @@ impl Engine {
             if let Some(old) = self.promoters.find_by_name(&req.name) {
                 self.reap_promoter_inner(old, out);
             }
-            let _ = self.attach_promoter_inner(req, now, out);
+            let _ = self.attach_promoter_inner(req, out);
         }
         for req in promoters.added {
-            let _ = self.attach_promoter_inner(req, now, out);
+            let _ = self.attach_promoter_inner(req, out);
         }
         // The single-StepOutput sort happens at `step`'s caller.
     }
@@ -877,24 +1011,31 @@ impl Engine {
     /// 1. [`specter_core::Tree::vacate`] the rejected slot — clear
     ///    every contribution and zero `suppress_count` atomically, so
     ///    the engine's view of "is this slot watched?" matches reality.
-    /// 2. Walk every Profile that holds a per-Profile claim on
-    ///    `resource` (anchor / watch-root parent / descent prefix) and
-    ///    clean up its bookkeeping — otherwise the Profile flag
-    ///    contradicts the post-vacate counter, and any subsequent
-    ///    Profile-driven release path would either see the wrong union
-    ///    on recompute or silently drift further out of sync.
-    /// 3. Emit one `ProfileClaimPurged` Diagnostic per affected
-    ///    (Profile, claim_kind) pair, plus the umbrella
-    ///    `WatchOpRejected` diagnostic.
+    /// 2. Walk every Profile *and* Promoter that holds a claim on
+    ///    `resource` (Profile: anchor / watch-root parent / descent
+    ///    prefix; Promoter: descent prefix / `Active` proxy /
+    ///    prefix-parent recovery edge) and clean up its bookkeeping —
+    ///    otherwise the owner flag contradicts the post-vacate counter,
+    ///    and any subsequent owner-driven release path would either see
+    ///    the wrong union on recompute or silently drift further out of
+    ///    sync.
+    /// 3. Emit one `ProfileClaimPurged` / `PromoterClaimPurged`
+    ///    Diagnostic per affected (owner, claim_kind) pair, plus the
+    ///    umbrella `WatchOpRejected` diagnostic.
     ///
-    /// A single resource may be claimed by multiple Profiles via
-    /// different roles — anchor of P, watch-root parent of Q, descent
-    /// prefix of R — so the fan-out walks all three claim slots
-    /// independently.
+    /// A single resource may be claimed by several owners via different
+    /// roles — anchor of P, watch-root parent of Q, descent prefix of
+    /// R, prefix-parent of Promoter S — so the fan-out walks every
+    /// claim slot independently. The Promoter prefix-parent purge is
+    /// the structural twin of the Profile watch-root-parent purge:
+    /// without it an FD-exhaustion clamp of the parent slot would leave
+    /// `Promoter.prefix_parent` caching a now-unwatched id, leaking the
+    /// stale recovery edge (the release path keys its `sub_watch`
+    /// removal off that cache).
     ///
     /// Stale resources (already Unwatched, queue-race) are a no-op +
     /// `WatchOpRejected` diagnostic; the per-claim walk yields nothing
-    /// because Profile back-references would have been cleared at reap.
+    /// because owner back-references would have been cleared at reap.
     pub(crate) fn on_watch_op_rejected(
         &mut self,
         resource: ResourceId,
@@ -928,14 +1069,20 @@ impl Engine {
             }
         }
 
-        // Promoter-side claimers — disjoint pair: a single Promoter can
-        // claim `resource` either via its literal-prefix descent (5a)
-        // or via an `Active` proxy (5b), never both at once (state is
-        // a sum-type). Two SmallVecs keep the per-claim purge loops
-        // structurally distinct.
+        // Promoter-side claimers. The descent (5a) / `Active` proxy
+        // (5b) pair is state-disjoint — a Promoter holds one XOR the
+        // other for a given `resource` (state is a sum-type). The
+        // prefix-parent edge (5c) is *orthogonal*: it lives on
+        // `Promoter.prefix_parent`, not on `state`, and coexists with
+        // proxies — so it is collected by an independent `if`, exactly
+        // as a Profile's `watch_root_parent` is collected independently
+        // of its descent/anchor state above. Three SmallVecs keep the
+        // per-claim purge loops structurally distinct.
         let mut promoter_descent_claimers: smallvec::SmallVec<[PromoterId; 2]> =
             smallvec::SmallVec::new();
         let mut promoter_proxy_claimers: smallvec::SmallVec<[PromoterId; 2]> =
+            smallvec::SmallVec::new();
+        let mut promoter_prefix_parent_claimers: smallvec::SmallVec<[PromoterId; 2]> =
             smallvec::SmallVec::new();
         for (qid, q) in self.promoters.iter() {
             match q.state() {
@@ -946,6 +1093,9 @@ impl Engine {
                     promoter_proxy_claimers.push(qid);
                 }
                 PromoterState::PrefixPending(_) | PromoterState::Active { .. } => {}
+            }
+            if q.prefix_parent() == Some(resource) {
+                promoter_prefix_parent_claimers.push(qid);
             }
         }
 
@@ -1011,8 +1161,16 @@ impl Engine {
         // loop. Cancel-before-release is unconditional: an in-flight
         // descent probe targets `current_prefix == resource` by
         // construction. Releasing transitions the Promoter to
-        // `Active{empty}`. There is no recovery channel for the
-        // literal prefix in v1; the Promoter is stranded.
+        // `Active{empty}`. This is FD-exhaustion of the *descent prefix
+        // slot* specifically, distinct from terminus loss: a `rm -rf`
+        // of the materialised terminus recovers via the preserved
+        // `prefix_parent` edge (the prefix-parent purge below, and
+        // `start_promoter_prefix_recovery`). FD-clamping the descent
+        // prefix itself has no recovery channel and strands the
+        // Promoter — accepted v1 debt, exactly symmetric with the
+        // Profile descent purge above (equally stranded). A *recovery*
+        // descent FD-clamped above its `prefix_parent` keeps that edge
+        // (different `resource`) and can still re-trigger.
         for qid in promoter_descent_claimers {
             self.cancel_owner_probe(ProbeOwner::Promoter(qid), out);
             self.release_promoter_descent_prefix_claim(qid, out);
@@ -1044,6 +1202,29 @@ impl Engine {
             out.diagnostics.push(Diagnostic::PromoterClaimPurged {
                 promoter: qid,
                 claim: PromoterClaimKind::ActiveProxy,
+                resource,
+                failure,
+            });
+        }
+
+        // Promoter prefix-parent purge — the structural twin of the
+        // Profile watch-root-parent purge above. Clears the preserved
+        // recovery edge so `Promoter.prefix_parent` does not cache a
+        // now-unwatched id (the release path keys its `sub_watch`
+        // removal off that cache; a stale cache would leak the old
+        // parent's `+1` and silently disable terminus recovery while
+        // pretending it is live). No cancel-first:
+        // `release_promoter_prefix_parent_claim` neither flips state nor
+        // drops a `ProbeSlot`, so no probe can be orphaned (exactly as
+        // the Profile `parent_claimers` loop carries no
+        // `cancel_owner_probe`). The Promoter's proxies stay watched
+        // (different `resource`); auto-recovery on terminus recreation
+        // is no longer possible — operator restart required.
+        for qid in promoter_prefix_parent_claimers {
+            self.release_promoter_prefix_parent_claim(qid, out);
+            out.diagnostics.push(Diagnostic::PromoterClaimPurged {
+                promoter: qid,
+                claim: PromoterClaimKind::PrefixParent,
                 resource,
                 failure,
             });
@@ -2546,19 +2727,26 @@ impl Engine {
     ///   the Promoter could be permanently stuck without a way to
     ///   re-trigger descent). Each descent owner gets a fresh probe via
     ///   [`Engine::on_descent_event`].
-    /// - **Recovery** ([`ProfileId`]): `Idle` Profiles whose
+    /// - **Profile recovery** ([`ProfileId`]): `Idle` Profiles whose
     ///   `watch_root_parent == Some(resource)` and whose anchor is
-    ///   currently absent (`current.is_none()`). Profile-only —
-    ///   Promoters have no analogous recovery channel.
+    ///   currently absent (`current.is_none()`).
     ///   [`Engine::start_pending_recovery`] re-enters pending descent.
+    /// - **Promoter recovery** ([`PromoterId`]): `Active` Promoters
+    ///   whose terminus is lost (`proxies.is_empty()`, the exact
+    ///   "terminus gone" discriminant since the terminus is the unique
+    ///   proxy-tree root) and whose `prefix_parent == Some(resource)`
+    ///   (the preserved parent edge). The structural twin of Profile
+    ///   recovery; [`Engine::start_promoter_prefix_recovery`] re-enters
+    ///   `PrefixPending` descent rooted at the parent.
     ///
     /// O(profiles + promoters). A per-resource index keyed by
-    /// `current_prefix` and `watch_root_parent` would convert this to
-    /// O(matched); not in scope for v1.
+    /// `current_prefix`, `watch_root_parent`, and `prefix_parent` would
+    /// convert this to O(matched); not in scope for v1.
     fn classify_event_carriers(&self, resource: ResourceId) -> EventCarriers {
         let mut out = EventCarriers {
             descents: SmallVec::new(),
             recoveries: SmallVec::new(),
+            promoter_recoveries: SmallVec::new(),
         };
         for (pid, p) in self.profiles.iter() {
             match p.state() {
@@ -2574,10 +2762,21 @@ impl Engine {
             }
         }
         for (qid, q) in self.promoters.iter() {
-            if let specter_core::PromoterState::PrefixPending(d) = q.state()
-                && d.current_prefix() == resource
-            {
-                out.descents.push(ProbeOwner::Promoter(qid));
+            match q.state() {
+                PromoterState::PrefixPending(d) if d.current_prefix() == resource => {
+                    out.descents.push(ProbeOwner::Promoter(qid));
+                }
+                // Terminus-loss recovery discriminant: `Active` with an
+                // empty proxy set ⟺ the terminus (the unique proxy-tree
+                // root) is gone, and the preserved parent edge points
+                // here. The structural twin of the `Idle Profile +
+                // watch_root_parent` recovery arm above.
+                PromoterState::Active { proxies, .. }
+                    if proxies.is_empty() && q.prefix_parent() == Some(resource) =>
+                {
+                    out.promoter_recoveries.push(qid);
+                }
+                PromoterState::PrefixPending(_) | PromoterState::Active { .. } => {}
             }
         }
         out
@@ -2585,18 +2784,25 @@ impl Engine {
 }
 
 /// Per-resource dispatch fan-out collected by
-/// [`Engine::classify_event_carriers`]. The two SmallVec inline caps of
-/// 2 cover the typical "shared scaffold" case (two Subs anchored at
+/// [`Engine::classify_event_carriers`]. The three SmallVec inline caps
+/// of 2 cover the typical "shared scaffold" case (two Subs anchored at
 /// sibling children of one parent, or one Profile sharing a prefix with
 /// one Promoter) without a heap allocation.
 ///
 /// `descents` is keyed by [`ProbeOwner`] (Profile or Promoter) — the
 /// dispatcher [`Engine::on_descent_event`] is owner-polymorphic.
-/// `recoveries` is Profile-only — Promoters have no parent-edge
-/// reattach channel.
+/// `recoveries` (Profile, via `watch_root_parent`) and
+/// `promoter_recoveries` (Promoter, via `prefix_parent`) are honest
+/// parallel fields, *not* one `ProbeOwner`-keyed list: the entry
+/// helpers genuinely differ (`start_pending_recovery` asserts an `Idle`
+/// Profile, `start_promoter_prefix_recovery` an `Active { proxies: ∅ }`
+/// Promoter, with no shared body), so a unified owner key would only
+/// force a match-dispatch back into the two distinct helpers — the same
+/// shape as the existing `descents` / `recoveries` split.
 struct EventCarriers {
     descents: SmallVec<[ProbeOwner; 2]>,
     recoveries: SmallVec<[ProfileId; 2]>,
+    promoter_recoveries: SmallVec<[PromoterId; 2]>,
 }
 
 /// Outcome of an [`Engine::emit_effects`] call. `count` is the number of

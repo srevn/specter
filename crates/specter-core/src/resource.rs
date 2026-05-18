@@ -58,11 +58,15 @@ use std::sync::Arc;
 ///
 /// Each `(Resource, ContribKey)` pair holds at most one entry — the
 /// value is the contributor's `ClassSet` mask, which the per-Resource
-/// union OR-folds for the kqueue / inotify fflags. The six variants
+/// union OR-folds for the kqueue / inotify fflags. The seven variants
 /// partition the cross-layer "who claims me" graph by owner role: a
 /// Profile holds at most one claim of each kind per Resource (anchor
-/// / parent / descent / descendant); a Promoter holds at most one
-/// (`PrefixPending` XOR `Active`-proxy) per Resource.
+/// / parent / descent / descendant); a Promoter holds at most one of
+/// each kind per Resource (prefix-descent / proxy / prefix-parent),
+/// with prefix-descent and proxy mutually exclusive
+/// (`PrefixPending` XOR `Active`) while prefix-parent coexists with
+/// proxies — the structural analogue of a Profile's
+/// `ProfileAnchor` ⊕ `ProfileParent`.
 ///
 /// Each variant carries the owner id so the contribution can be
 /// removed by key without re-deriving from owner state — contribution
@@ -102,6 +106,16 @@ pub enum ContribKey {
     /// `STRUCTURE`. Mutually exclusive with [`Self::PromoterPrefix`]
     /// for the same Promoter.
     PromoterProxy(PromoterId),
+    /// Promoter is `Active` with `prefix_parent == Some(resource)`: the
+    /// preserved terminus-parent recovery edge. Mask is `STRUCTURE`
+    /// (parent-edge watch is for terminus-reappearance detection only).
+    /// **Coexists** with [`Self::PromoterProxy`] for the same Promoter
+    /// (the parent slot is distinct from the proxy slots, and the edge
+    /// is preserved across terminus loss when proxies empty) — the
+    /// structural analogue of [`Self::ProfileParent`] ⊕
+    /// [`Self::ProfileAnchor`], in contrast to [`Self::PromoterPrefix`]
+    /// which is mutually exclusive with proxies.
+    PromoterPrefixParent(PromoterId),
 }
 
 #[derive(Debug)]

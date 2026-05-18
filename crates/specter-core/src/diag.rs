@@ -139,10 +139,14 @@ pub enum SpliceFailureCause {
 /// - [`Self::ActiveProxy`] ⇔ `Promoter.state == Active { proxies }` and
 ///   `proxies.contains_key(&resource)` (one of the per-pattern proxy
 ///   watches).
+/// - [`Self::PrefixParent`] ⇔ `Promoter.prefix_parent == Some(resource)`
+///   (the preserved terminus-parent recovery edge — the Promoter twin
+///   of [`ClaimKind::WatchRootParent`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PromoterClaimKind {
     DescentPrefix,
     ActiveProxy,
+    PrefixParent,
 }
 
 /// Engine-emitted diagnostic. Equality is structural so tests can pin the
@@ -341,6 +345,11 @@ pub enum Diagnostic {
     ///   and any in-flight enumeration probe targeting it is cancelled.
     ///   The proxy will not re-register until a fresh enumeration of
     ///   its parent re-discovers the entry.
+    /// - [`PromoterClaimKind::PrefixParent`]: the Promoter loses its
+    ///   terminus-parent recovery edge (the twin of
+    ///   [`ClaimKind::WatchRootParent`]). Proxies stay watched
+    ///   (different `resource`); auto-recovery on terminus recreation
+    ///   is no longer possible — operator restart is required.
     PromoterClaimPurged {
         promoter: PromoterId,
         claim: PromoterClaimKind,

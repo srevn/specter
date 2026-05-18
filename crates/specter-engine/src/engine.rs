@@ -22,7 +22,7 @@ use crate::timer::{TimerEntry, TimerHeap};
 #[cfg(test)]
 use compact_str::CompactString;
 // Identity.
-use specter_core::{ProfileId, ResourceId, SubId, TimerId};
+use specter_core::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
 // Tree + path validation.
 use specter_core::Tree;
 // Profile state machine.
@@ -188,7 +188,7 @@ impl Engine {
                 self.detach_sub_inner(sub, &mut out);
             }
             Input::AttachPromoter(req) => {
-                let _ = self.attach_promoter_inner(req, now, &mut out);
+                let _ = self.attach_promoter_inner(req, &mut out);
             }
         }
         out.sort_for_emission();
@@ -729,6 +729,111 @@ impl Engine {
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.set_watch_root_parent(parent_id);
+        }
+    }
+
+    /// Set up the Promoter's parent-edge recovery contribution — the
+    /// structural twin of [`Self::set_watch_root_parent`] for the
+    /// Promoter side. Installs a `+1 STRUCTURE`
+    /// [`ContribKey::PromoterPrefixParent`] `watch_demand` at
+    /// `terminus`'s parent, so a `rm -rf` of the materialised
+    /// literal-prefix directory is detectable via the surviving parent
+    /// watch and the Promoter can re-descend (the recovery flow in
+    /// `classify_event_carriers` → `start_promoter_prefix_recovery`).
+    /// Caches the parent id on `Promoter.prefix_parent` so reap /
+    /// FD-exhaustion purge can release the contribution without
+    /// re-deriving.
+    ///
+    /// **No parent ⇒ no channel.** A `terminus == "/"` Promoter
+    /// (`literal_prefix_len == 1`) has no parent in the Tree; the early
+    /// return installs nothing. This subsumes an explicit arithmetic
+    /// `lpl >= 2` guard — and `/` never `Vanishes` on Unix, so the
+    /// channel is genuinely never needed there.
+    ///
+    /// **Idempotent on the recovery cycle.** Terminus-loss recovery
+    /// re-enters `enter_active`, which calls this helper again while
+    /// `Promoter.prefix_parent` is *still* set from the original
+    /// materialisation (the rewind machine never clears it). The
+    /// `already_set` short-circuit skips the second `add_watch`, so the
+    /// parent's `watch_demand` does not leak `+1` per recovery. The
+    /// cache-coherence `debug_assert!` pins any drift loudly: Tree slot
+    /// identity is `(parent, segment)` and the terminus's parent does
+    /// not migrate for the Promoter's lifetime, so a mismatched cache
+    /// would mean a routing breach (a prior call against a different
+    /// terminus) and the release path would leak the old parent's `+1`.
+    ///
+    /// Reuses `ResourceRole::WatchRootParent` — the role is metadata
+    /// only (retention runs through the contribution, never the role),
+    /// so the Profile twin's role serves the Promoter edge too without
+    /// proliferating a near-identical role.
+    ///
+    /// Sole call site: [`Self::enter_active`] (both the
+    /// immediate-`Materialized` and `PrefixPending → Active` arms).
+    pub(crate) fn set_promoter_prefix_parent(
+        &mut self,
+        promoter_id: PromoterId,
+        terminus: ResourceId,
+        out: &mut StepOutput,
+    ) {
+        let Some(parent_id) = self.tree.parent(terminus) else {
+            return;
+        };
+
+        // Cache-coherence invariant — mirror of
+        // `set_watch_root_parent`'s. A cached parent that disagrees with
+        // the Tree's current `parent(terminus)` is a routing breach (the
+        // terminus's `(parent, segment)` identity is structurally stable
+        // for the Promoter's lifetime); the release path keys the
+        // contribution removal off the cache, so a stale cache would
+        // leak the old parent's `+1`.
+        debug_assert!(
+            self.promoters
+                .get(promoter_id)
+                .is_none_or(|q| q.prefix_parent().is_none_or(|cached| cached == parent_id)),
+            "set_promoter_prefix_parent: cached prefix_parent must agree with the \
+             materialised terminus's parent (promoter = {promoter_id:?}, cached = {:?}, \
+             tree_parent = {parent_id:?})",
+            self.promoters
+                .get(promoter_id)
+                .and_then(specter_core::Promoter::prefix_parent),
+        );
+
+        // Idempotent: terminus-loss recovery re-enters `enter_active`
+        // with `prefix_parent` still cached from the original
+        // materialisation. Skipping the bump when the cache already
+        // names this parent keeps the parent's `watch_demand`
+        // contribution at exactly `+1` across any number of
+        // loss → recovery cycles.
+        let already_set = self
+            .promoters
+            .get(promoter_id)
+            .is_some_and(|q| q.prefix_parent() == Some(parent_id));
+        if already_set {
+            return;
+        }
+
+        // Promote role: DescentScaffold → WatchRootParent. User and
+        // existing WatchRootParent stay as they are (the helper
+        // preserves non-scaffold roles). Role is metadata; retention
+        // runs through the contribution installed below.
+        self.tree
+            .promote_scaffold(parent_id, specter_core::ResourceRole::WatchRootParent);
+
+        // The parent-edge watch is engine infrastructure (terminus
+        // reappearance detection). Contribution is `STRUCTURE`
+        // regardless of the dynamic Subs' user masks. The bookkeeping
+        // flag is `Promoter.prefix_parent == Some(parent_id)`, written
+        // below.
+        add_watch(
+            &mut self.tree,
+            parent_id,
+            ContribKey::PromoterPrefixParent(promoter_id),
+            ClassSet::STRUCTURE,
+            out,
+        );
+
+        if let Some(q) = self.promoters.get_mut(promoter_id) {
+            q.set_prefix_parent(parent_id);
         }
     }
 

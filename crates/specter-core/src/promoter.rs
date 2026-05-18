@@ -17,9 +17,16 @@
 //!   slot carrying a `+1 STRUCTURE` `watch_demand` contribution; events
 //!   on a proxy queue an enumeration probe.
 //!
-//! The two states are mutually exclusive (Rust sum-type). The transition
-//! `PrefixPending → Active` is single-shot per Promoter lifetime — once
-//! the prefix exists, descent yields to enumeration.
+//! The two states are mutually exclusive (Rust sum-type).
+//! `PrefixPending → Active` materialises the prefix
+//! ([`Promoter::enter_active_empty`]); the inverse
+//! `Active → PrefixPending` ([`Promoter::reenter_prefix_pending`]) is
+//! the terminus-loss recovery move. A Promoter whose terminus is
+//! `rm -rf`d collapses to `Active { proxies: ∅ }`; the preserved
+//! parent-edge watch ([`Promoter::prefix_parent`]) re-enters descent
+//! on the parent's next structural event. The transition is therefore
+//! bidirectional — the structural mirror of `Profile`'s
+//! `Pending ↔ Idle` anchor-loss recovery.
 //!
 //! ## Single-slot probe
 //!
@@ -78,18 +85,23 @@ pub struct PromoterAttachRequest {
 ///
 /// The seven spec fields are `pub`: frozen at [`Self::from_request`],
 /// never written post-construction (the `Sub`-frozen shape — benign
-/// all-`pub`). The three **runtime** fields are module-private; the
+/// all-`pub`). The four **runtime** fields are module-private; the
 /// cross-crate write surface is this type's `pub fn`s, never a field
 /// assignment. Each runtime mutator owns its invariant structurally
 /// (matching `Profile`'s sealed state machine and CLAUDE.md "single
-/// source per transition"): the one-shot `PrefixPending → Active` move
-/// ([`Self::enter_active_empty`]); the in-`state` linear [`ProbeSlot`]
+/// source per transition"): the bidirectional `PrefixPending` ↔
+/// `Active` moves ([`Self::enter_active_empty`] forward,
+/// [`Self::reenter_prefix_pending`] the terminus-loss recovery
+/// inverse); the in-`state` linear [`ProbeSlot`]
 /// (armed only via [`Self::arm_enumeration`], consumed only via
 /// [`Self::take_probe`]); the enumeration queue
 /// ([`Self::enqueue_enumeration`] / [`Self::pop_enumeration`] /
-/// [`Self::unregister_proxy_slot`]); and the one-shot fan-out latch
+/// [`Self::unregister_proxy_slot`]); the one-shot fan-out latch
 /// ([`Self::latch_fanout_warning`], pre-gated by
-/// [`Self::fanout_warned`]). Reads project through [`Self::state`] /
+/// [`Self::fanout_warned`]); and the parent-edge recovery channel
+/// ([`Self::set_prefix_parent`] / [`Self::take_prefix_parent`],
+/// projected by [`Self::prefix_parent`]). Reads project through
+/// [`Self::state`] /
 /// [`Self::pending_enumerations`]. The dynamic Subs this Promoter
 /// synthesises are owned solely by `SubRegistry` (tagged
 /// `source_promoter`) — there is no Promoter-side mirror to keep
@@ -109,7 +121,9 @@ pub struct Promoter {
     /// `state` write would drop an armed slot past its `Drop` tripwire
     /// or bypass [`ProbeSlot::arm`]'s arm-once assert, defeating the
     /// "one probe per Promoter" representability property. Read via
-    /// [`Self::state`]; the only transition is [`Self::enter_active_empty`].
+    /// [`Self::state`]; the transitions are [`Self::enter_active_empty`]
+    /// (`PrefixPending → Active`) and its terminus-loss recovery inverse
+    /// [`Self::reenter_prefix_pending`] (`Active → PrefixPending`).
     state: PromoterState,
 
     /// Deterministic queue of proxies awaiting enumeration. `BTreeSet`
@@ -125,6 +139,19 @@ pub struct Promoter {
     /// projects it read-only so the engine can skip the registry count
     /// scan once latched.
     warned_at_threshold: bool,
+
+    /// Parent-edge recovery channel. `Some(parent)` ⇒ this Promoter
+    /// contributes a [`crate::ContribKey::PromoterPrefixParent`]
+    /// `STRUCTURE` watch at `parent` — the terminus's parent slot,
+    /// installed when the literal prefix materialises and preserved
+    /// across terminus loss (the downward-only proxy unregister cannot
+    /// reach an ancestor). It is the sole recovery channel for an
+    /// `Active { proxies: ∅ }` Promoter and is released only at reap or
+    /// FD-exhaustion purge of the parent slot. The structural mirror of
+    /// `Profile.watch_root_parent`. Private — written only via the
+    /// sealed [`Self::set_prefix_parent`] / [`Self::take_prefix_parent`]
+    /// pair, projected read-only by [`Self::prefix_parent`].
+    prefix_parent: Option<ResourceId>,
 }
 
 impl Promoter {
@@ -150,6 +177,7 @@ impl Promoter {
             state,
             pending_enumerations: BTreeSet::new(),
             warned_at_threshold: false,
+            prefix_parent: None,
         }
     }
 
@@ -163,11 +191,13 @@ impl Promoter {
         &self.state
     }
 
-    /// The single `PrefixPending → Active` transition (once per
-    /// Promoter lifetime — the prefix materialised, or its claim is
-    /// being released). Replaces `state` with
-    /// `Active { proxies: ∅, enumerating: ∅ }`; the prior state is
-    /// dropped here.
+    /// The forward `PrefixPending → Active` transition (the prefix
+    /// materialised, or its claim is being released). Replaces `state`
+    /// with `Active { proxies: ∅, enumerating: ∅ }`; the prior state is
+    /// dropped here. No longer once-per-lifetime: terminus loss can
+    /// drive the inverse [`Self::reenter_prefix_pending`], so a Promoter
+    /// may cycle `PrefixPending → Active → PrefixPending → Active …`
+    /// across recoveries.
     ///
     /// **Cancel-first contract (structural).** The discarded prior
     /// carries this Promoter's probe slot — the descent slot in
@@ -182,6 +212,65 @@ impl Promoter {
             proxies: BTreeMap::new(),
             enumerating: ProbeSlot::empty(),
         };
+    }
+
+    /// The inverse `Active { proxies: ∅, enumerating: ∅ } →
+    /// PrefixPending(descent)` move — the terminus-loss recovery
+    /// transition, dual of [`Self::enter_active_empty`]. Replaces
+    /// `state` with `PrefixPending(descent)`; the prior `Active` is
+    /// dropped here.
+    ///
+    /// **Cancel-first contract (structural).** The discarded `Active`
+    /// carries the `enumerating` [`ProbeSlot`]; an armed slot reaching
+    /// drop trips its `Drop` tripwire (same enforcement as
+    /// [`Self::enter_active_empty`]). It is structurally empty at the
+    /// sole caller (`start_promoter_prefix_recovery`, gated by
+    /// `classify_event_carriers` on `Active && proxies.is_empty()`):
+    /// every path that empties `proxies` while `Active` disarms the
+    /// enumeration slot first — the response's consume-once disarm for
+    /// the `Vanished` / parent-reverse-pass cascade, `cancel_owner_probe`
+    /// for the FD-exhaustion proxy purge — no surviving proxy can
+    /// re-arm, and recovery fires in a *later* step, never synchronously
+    /// with an in-flight enumeration. The discard *is* the enforcement;
+    /// no scattered cancel-first asserts.
+    pub fn reenter_prefix_pending(&mut self, descent: DescentState) {
+        self.state = PromoterState::PrefixPending(descent);
+    }
+
+    /// The cached parent-edge recovery slot, if this Promoter owes a
+    /// [`crate::ContribKey::PromoterPrefixParent`] `STRUCTURE`
+    /// contribution there. `None` for a root-prefix Promoter
+    /// (`terminus == "/"`, no parent) and before the prefix first
+    /// materialises. Read seam over the private field;
+    /// `Engine::set_promoter_prefix_parent` uses it for the
+    /// cache-coherence and idempotence checks,
+    /// `classify_event_carriers` for the recovery discriminant. The
+    /// structural mirror of
+    /// [`Profile::watch_root_parent`](crate::Profile::watch_root_parent).
+    #[must_use]
+    pub const fn prefix_parent(&self) -> Option<ResourceId> {
+        self.prefix_parent
+    }
+
+    /// Cache the parent-edge recovery slot. The single write seam,
+    /// wrapped by `Engine::set_promoter_prefix_parent` (which also
+    /// installs the Tree-side `add_watch` and the cache-coherence
+    /// `debug_assert!`). Plain set — idempotence and coherence are the
+    /// engine wrapper's concern, not duplicated here. Mirror of
+    /// [`Profile::set_watch_root_parent`](crate::Profile::set_watch_root_parent).
+    pub const fn set_prefix_parent(&mut self, parent: ResourceId) {
+        self.prefix_parent = Some(parent);
+    }
+
+    /// Take the cached parent-edge slot, clearing it — the symmetric
+    /// deferred-release primitive (`Engine::release_promoter_prefix_parent_claim`
+    /// keys the `sub_watch` removal off the returned id). Idempotent: a
+    /// second call returns `None`, so a double release cannot
+    /// double-remove the contribution. Mirror of
+    /// [`Profile::take_watch_root_parent`](crate::Profile::take_watch_root_parent).
+    #[must_use]
+    pub const fn take_prefix_parent(&mut self) -> Option<ResourceId> {
+        self.prefix_parent.take()
     }
 
     /// Mutable descent projection — `Some` only in `PrefixPending`
@@ -214,13 +303,24 @@ impl Promoter {
     /// Register a proxy at `resource` in the `Active` proxies map with
     /// enumeration cursor `pattern_component_index`. Overwrites an
     /// existing entry (re-registration is gated idempotent at the
-    /// caller). `unreachable!()` in `PrefixPending` — the sole callers
+    /// caller) — but the cursor is invariant for a proxy's lifetime: it
+    /// indexes a fixed position in the Promoter's `pattern`, so a
+    /// divergent re-insert is a caller bug, caught by the
+    /// `debug_assert_eq!` below rather than silently overwritten.
+    /// `unreachable!()` in `PrefixPending` — the sole callers
     /// (`enter_active`, the enumeration forward pass) guarantee
     /// `Active` by construction; a wrong call surfaces loudly in every
     /// build rather than silently no-op.
     pub fn insert_proxy(&mut self, resource: ResourceId, pattern_component_index: usize) {
         match &mut self.state {
             PromoterState::Active { proxies, .. } => {
+                if let Some(stored) = proxies.get(&resource) {
+                    debug_assert_eq!(
+                        stored.pattern_component_index, pattern_component_index,
+                        "insert_proxy: pattern_component_index must be invariant \
+                         for an existing proxy's lifetime (resource = {resource:?})",
+                    );
+                }
                 proxies.insert(
                     resource,
                     ProxyState {
@@ -800,6 +900,36 @@ mod tests {
             None,
             "still latched, and below threshold anyway"
         );
+    }
+
+    /// `insert_proxy`'s cursor is invariant for a proxy's lifetime — it
+    /// indexes a fixed position in the Promoter's `pattern`. A re-insert
+    /// at a *divergent* `pattern_component_index` is a caller bug,
+    /// caught by the `debug_assert_eq!` (debug builds) rather than
+    /// silently overwritten (F-MED-5).
+    #[test]
+    #[should_panic(expected = "pattern_component_index must be invariant")]
+    fn insert_proxy_divergent_index_trips_debug_assert() {
+        let mut p = build_promoter("logs", "/var/log/*.log");
+        let r = ResourceId::default();
+        p.insert_proxy(r, 3);
+        // Same proxy resource, different cursor — structurally impossible
+        // under the real callers; the assert makes it loud.
+        p.insert_proxy(r, 4);
+    }
+
+    /// Re-inserting at the *same* cursor is the sanctioned idempotent
+    /// path (the [H-5] re-registration gate) — no panic, value stable.
+    #[test]
+    fn insert_proxy_same_index_is_idempotent() {
+        let mut p = build_promoter("logs", "/var/log/*.log");
+        let r = ResourceId::default();
+        p.insert_proxy(r, 3);
+        p.insert_proxy(r, 3);
+        let PromoterState::Active { proxies, .. } = p.state() else {
+            panic!("build_promoter yields Active");
+        };
+        assert_eq!(proxies.get(&r).map(|s| s.pattern_component_index), Some(3));
     }
 
     /// [`Promoter::enter_active_empty`] is the one-shot

@@ -9,13 +9,22 @@
 //! 2. **Active proxy.** `Promoter.state == Active { proxies }` ⇒ the
 //!    Promoter contributes [`ContribKey::PromoterProxy`] with
 //!    `STRUCTURE` at each `proxies.keys()` slot.
+//! 3. **Prefix parent.** `Promoter.prefix_parent == Some(parent)` ⇒ the
+//!    Promoter contributes [`ContribKey::PromoterPrefixParent`] with
+//!    `STRUCTURE` at `parent` (the terminus's parent). The
+//!    terminus-loss recovery edge — the Promoter twin of a Profile's
+//!    watch-root parent.
 //!
-//! The two state arms are mutually exclusive — a Promoter holds the
-//! prefix XOR proxy keys at any instant. The state-flip on
-//! `PrefixPending → Active` is owner-bookkeeping; the contribution
-//! map's source of truth changes via explicit `add_watch` / `sub_watch`
-//! calls keyed by [`ContribKey::PromoterPrefix`] /
-//! [`ContribKey::PromoterProxy`].
+//! Claims 1 and 2 are mutually exclusive — a Promoter holds the prefix
+//! XOR proxy keys at any instant. Claim 3 *coexists* with claim 2 (the
+//! parent slot is distinct from the proxy slots and the edge is
+//! preserved across terminus loss), so it is not gated on the state
+//! arm; it lives on its own `Promoter.prefix_parent` cache. The
+//! state-flip on `PrefixPending → Active` is owner-bookkeeping; the
+//! contribution map's source of truth changes via explicit
+//! `add_watch` / `sub_watch` calls keyed by
+//! [`ContribKey::PromoterPrefix`] / [`ContribKey::PromoterProxy`] /
+//! [`ContribKey::PromoterPrefixParent`].
 //!
 //! This module is the Promoter-side mirror of [`crate::claims`]. Each
 //! helper is:
@@ -30,8 +39,13 @@
 //! - **Cancel-first.** Callers that may have an in-flight probe MUST
 //!   invoke [`Engine::cancel_owner_probe`] first (idempotent — a no-op
 //!   on an already-disarmed slot, so "always cancel before release" is
-//!   the safe default). The two release paths enforce this differently
-//!   because they differ structurally:
+//!   the safe default). `release_promoter_prefix_parent_claim` is the
+//!   exception: it neither flips state nor drops a [`ProbeSlot`] (it
+//!   only `take`s the `prefix_parent` cache + `sub_watch`es the parent
+//!   slot), so no probe can be orphaned by it — exactly as
+//!   `release_watch_root_parent_claim` carries no cancel-first
+//!   contract. The two *state-bearing* release paths enforce
+//!   cancel-first differently because they differ structurally:
 //!   - **Descent prefix.** `release_promoter_descent_prefix_claim`'s
 //!     `PrefixPending → Active{empty}` flip *drops* the prior
 //!     `PrefixPending(DescentState)`. An armed descent slot reaching
@@ -171,6 +185,49 @@ impl Engine {
             &mut self.tree,
             resource,
             ContribKey::PromoterProxy(qid),
+            out,
+        );
+    }
+
+    /// Release the Promoter's parent-edge
+    /// [`ContribKey::PromoterPrefixParent`] contribution if cached.
+    /// Idempotent (`prefix_parent == None` ⇒ no-op); safe in any
+    /// post-vacate state — `sub_watch` silently skips an absent key.
+    /// The exact structural mirror of
+    /// [`Engine::release_watch_root_parent_claim`].
+    ///
+    /// `take_prefix_parent` reads and clears the cache in one move (so
+    /// a double release cannot double-remove), then `try_reap`s the
+    /// parent slot — with this Promoter's `PromoterPrefixParent`
+    /// contribution just removed, the slot reaps unless another claim
+    /// still holds it (a surviving child / proxy, a peer Profile parent,
+    /// a Profile descent at the same level). Carries **no** cancel-first
+    /// contract: it neither flips `PromoterState` nor drops a
+    /// [`specter_core::ProbeSlot`], so no in-flight probe can be
+    /// orphaned (cf. `release_promoter_descent_prefix_claim`, whose
+    /// state-flip discard *is* the enforcement).
+    ///
+    /// Two call sites, exactly mirroring the Profile twin's:
+    /// [`Engine::reap_promoter_inner`] (the Promoter dies) and
+    /// [`Engine::on_watch_op_rejected`]'s prefix-parent purge loop
+    /// (FD-exhaustion clamps the parent watch).
+    pub(crate) fn release_promoter_prefix_parent_claim(
+        &mut self,
+        qid: PromoterId,
+        out: &mut StepOutput,
+    ) {
+        let Some(parent) = self
+            .promoters
+            .get_mut(qid)
+            .and_then(specter_core::Promoter::take_prefix_parent)
+        else {
+            return;
+        };
+
+        sub_watch_then_try_reap(
+            &mut self.tree,
+            parent,
+            ContribKey::PromoterPrefixParent(qid),
             out,
         );
     }
