@@ -1637,12 +1637,23 @@ impl Engine {
     /// dead now; we cannot wait for the burst to complete naturally
     /// against a stale anchor).
     ///
-    /// Idempotent: re-entering on an already-reaped Profile finds
-    /// `subs.at(profile_id)` empty (caller filtered) and never enters
-    /// here. The Sub-removal loop is also idempotent: a stale Sub id
-    /// on the Profile's `by_profile` list is a structural impossibility
-    /// (the registry maintains by_profile in lockstep with subs).
+    /// Idempotent: a guard at entry returns early when `profile_id`
+    /// is no longer in the map (the caller filters empty-Subs, not a
+    /// vanished Profile). The Sub-removal loop is also idempotent: a
+    /// stale Sub id on the Profile's `by_profile` list is a structural
+    /// impossibility (the registry maintains by_profile in lockstep
+    /// with subs).
     fn on_anchor_terminal_all_dynamic(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        // The caller filtered the empty-Subs case but not a Profile
+        // already gone from the map. A vanished Profile would fall
+        // through to `path_of(default-id)` → `None` → a
+        // `debug_assert!` whose message claims a live anchor, the
+        // opposite of the real state. Return early — nothing to tear
+        // down.
+        if self.profiles.get(profile_id).is_none() {
+            return;
+        }
+
         // 1. Disarm + Cancel iff a probe is in flight — Active+Verifying
         // may have one. Idempotent when the slot is already unarmed.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
@@ -1651,11 +1662,11 @@ impl Engine {
         // loop. Every dynamic Sub on this Profile shares the same
         // anchor by the `(resource, config_hash)` find-or-create dedup
         // in `attach_sub_inner`; the path is the operator-facing
-        // diagnostic payload. The anchor slot is alive at this point —
-        // the Profile is not yet reaped (the slot's anchor_claim
-        // contribution is released only by `reap_profile` below) — so
-        // `path_of` returns `Some(_)`. Fallbacks are
-        // defense-in-depth.
+        // diagnostic payload. The Profile is present (guarded at
+        // entry) and not yet reaped, so its anchor_claim still holds
+        // the slot alive and `path_of` resolves. The fallbacks now
+        // guard only a present-Profile / dead-anchor regression —
+        // loud in dev, degrade in release.
         let anchor_resource: ResourceId = self
             .profiles
             .get(profile_id)
@@ -1664,8 +1675,8 @@ impl Engine {
         let anchor_path: Arc<Path> = self.tree.path_of(anchor_resource).unwrap_or_else(|| {
             debug_assert!(
                 false,
-                "on_anchor_terminal_all_dynamic: tree.path_of returned None for live Profile \
-                 anchor (profile = {profile_id:?}, resource = {anchor_resource:?})",
+                "on_anchor_terminal_all_dynamic: present Profile's anchor slot must be live \
+                 until reap_profile (profile = {profile_id:?}, resource = {anchor_resource:?})",
             );
             empty_path()
         });
