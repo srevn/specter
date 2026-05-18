@@ -1103,8 +1103,7 @@ mod tests {
         // Mirror the production path: derive the initial window from the
         // loader's config so reload-driven rotation tests have a real
         // baseline to compare against.
-        let drain_window = DrainWindow::new();
-        drain_window.set(loader.derive_drain_window());
+        let drain_window = DrainWindow::new(loader.derive_drain_window());
         let driver = EngineDriver::new(
             Engine::new(),
             loader,

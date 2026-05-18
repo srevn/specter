@@ -62,7 +62,7 @@ fn massive_event_burst_emits_overflow() {
     }
 
     let tmp = TempDir::new().unwrap();
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = sm.insert(());
 

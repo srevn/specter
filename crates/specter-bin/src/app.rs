@@ -120,11 +120,10 @@ pub fn run(cli: Cli) -> ExitCode {
     // Bookkeeping for the watcher's deferred-drain phase. The bin holds
     // one `DrainWindow` and gives the watcher its own clone so the
     // Atomic store on hot reload reaches both threads without a lock.
-    // Set once before `default_watcher` so the watcher reads the
-    // derived value on its very first `poll_until`.
+    // Constructed with the derived value so the watcher reads it on its
+    // very first `poll_until` — no unconfigured window to forget.
     let loader = Loader::new(initial_config, log_cfg, initial_meta);
-    let drain_window = DrainWindow::new();
-    drain_window.set(loader.derive_drain_window());
+    let drain_window = DrainWindow::new(loader.derive_drain_window());
 
     // Kqueue (or Linux inotify, when that backend lands) + wake handle.
     let watcher = match default_watcher(drain_window.clone()) {

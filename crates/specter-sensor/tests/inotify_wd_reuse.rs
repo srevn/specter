@@ -46,7 +46,7 @@ fn rapid_unwatch_watch_cycle_attributes_to_new_resource() {
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, "x").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
 
     // 100 cycles is plenty to exercise wd reuse on Linux's per-instance
@@ -107,7 +107,7 @@ fn pre_rm_event_on_old_wd_is_dropped_not_misattributed() {
     let path = tmp.path().join("hot.txt");
     std::fs::write(&path, "x").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
 
     let r_old = sm.insert(());

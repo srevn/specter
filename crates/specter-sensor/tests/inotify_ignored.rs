@@ -63,7 +63,7 @@ fn delete_self_then_in_ignored_clears_per_resource_state() {
     let path = tmp.path().join("vanishing.txt");
     std::fs::write(&path, "x").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -127,7 +127,7 @@ fn unwatch_then_redrain_clears_draining_flag() {
     std::fs::write(&p1, "x").unwrap();
     std::fs::write(&p2, "x").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 

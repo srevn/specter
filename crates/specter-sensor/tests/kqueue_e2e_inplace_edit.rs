@@ -74,7 +74,7 @@ fn in_place_edit_fires_modified_on_per_file_fd() {
     let file_path = tmp.path().join("file.txt");
     std::fs::write(&file_path, "v1").unwrap();
 
-    let mut w = KqueueWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
 
     // Engine's typical registration for a subtree-root × default events
@@ -120,7 +120,7 @@ fn in_place_edit_does_not_fire_on_dir_watch_alone() {
     let file_path = tmp.path().join("file.txt");
     std::fs::write(&file_path, "v1").unwrap();
 
-    let mut w = KqueueWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = sm.insert(());
     w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)

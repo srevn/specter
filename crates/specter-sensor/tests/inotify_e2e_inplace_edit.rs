@@ -67,7 +67,7 @@ fn in_place_edit_fires_modified_on_per_file_wd() {
     let file_path = tmp.path().join("file.txt");
     std::fs::write(&file_path, "v1").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
 
     let r_dir = sm.insert(());
@@ -121,7 +121,7 @@ fn in_place_edit_does_not_fire_on_structure_only_dir_watch() {
     let file_path = tmp.path().join("file.txt");
     std::fs::write(&file_path, "v1").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = sm.insert(());
     w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)

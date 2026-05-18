@@ -68,7 +68,7 @@ fn watch_eventually_returns_pressure_under_low_max_user_watches() {
         paths.push(p);
     }
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
 
     let mut pressure_seen = false;

@@ -60,6 +60,15 @@ impl Loader {
 
     /// Derive the watcher's deferred-drain window from `current_config`.
     ///
+    /// **This is the sole inbound-volume lever.** With no watcher-side
+    /// event filter, the deferred-drain window is the *only* mechanism
+    /// dampening an inbound storm before it reaches the engine — the
+    /// `/ 4` divisor below governs batch granularity outright, so its
+    /// calibration against real burst workloads (sustained-write builds,
+    /// chatty SSH sessions) is load-bearing, not a tuning curiosity.
+    /// The soak harness measures exactly this divisor; treat a change
+    /// to it as a behavioural change, not a constant tweak.
+    ///
     /// Formula: `min(settle for every active Sub *and* Promoter) / 4`,
     /// clamped to the `[10ms, 50ms]` band. The floor (`10ms`) is below
     /// scheduler granularity on every supported platform — a

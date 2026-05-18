@@ -31,8 +31,27 @@ pub use specter_core::{OverflowScope, WatchFailure};
 /// watcher thread reads it on every `poll_until` iteration. The
 /// `AtomicU64` is the cross-thread surface — no lock, no channel.
 ///
+/// **Construction is a decision, never a default.** There is no
+/// `Default` and no zero-argument constructor: the only sensible value
+/// is config-derived, so the caller must state it. [`Self::new`] takes
+/// the derived window; [`Self::disabled`] is the *named*, deliberate
+/// opt-out. This makes "constructed but never configured" a compile
+/// error rather than a silent run with deferred drain off — the engine
+/// would then eat every unbatched event, and (with the watcher-side
+/// event filter gone) nothing else dampens an inbound storm: this is
+/// the *sole* surviving inbound-volume lever.
+///
+/// **Production cannot disable drain.** `Loader::derive_drain_window`
+/// always returns at least its floor (the all-disabled / empty-config
+/// case returns the floor *precisely* so drain is never permanently
+/// off). With no `Default` and no implicit constructor, the only path
+/// to a disabled window is an explicit [`Self::disabled`] call, which
+/// only test fixtures take. The disabled state is structurally
+/// unreachable from the production wiring — do not reintroduce
+/// `Default` "for convenience"; it would re-arm exactly that footgun.
+///
 /// **Semantics.**
-/// - A value of `Duration::ZERO` (the initial state) disables deferred
+/// - A value of `Duration::ZERO` ([`Self::disabled`]) disables deferred
 ///   drain entirely. The watcher returns from `poll_until` as soon as
 ///   the first `kevent_drain` / `epoll_wait` returns events.
 /// - A non-zero value arms a second drain pass after the first returns
@@ -50,36 +69,51 @@ pub use specter_core::{OverflowScope, WatchFailure};
 pub struct DrainWindow(Arc<AtomicU64>);
 
 impl DrainWindow {
-    /// Construct a fresh handle in the disabled state (`Duration::ZERO`).
-    /// The bin computes the derived value (typically `min(settle) / 4`
-    /// clamped to the audit's bounds) and calls [`Self::set`] before
-    /// spawning the watcher thread.
+    /// Saturating `Duration → nanos` encoding for the atomic surface.
+    /// Caps at `u64::MAX` nanoseconds (`~584 years`) for pathologically
+    /// large `Duration`s — well past any reasonable settle / window
+    /// derivation. The single home for the encoding so [`Self::new`]
+    /// and [`Self::set`] cannot diverge.
+    fn nanos(d: Duration) -> u64 {
+        u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Construct a handle armed with `initial`. The bin passes the
+    /// config-derived window (`min(settle) / 4` clamped to the
+    /// `[10ms, 50ms]` band via `Loader::derive_drain_window`) so the
+    /// watcher reads the real value on its very first `poll_until` —
+    /// there is no unconfigured window to forget.
     #[must_use]
-    pub fn new() -> Self {
-        Self(Arc::new(AtomicU64::new(0)))
+    pub fn new(initial: Duration) -> Self {
+        Self(Arc::new(AtomicU64::new(Self::nanos(initial))))
+    }
+
+    /// The deliberate, self-documenting disabled state (`Duration::ZERO`
+    /// ⇒ deferred drain off). Production never reaches this — every
+    /// `Loader::derive_drain_window` result is `>= 10ms`; this exists
+    /// for test fixtures that exercise the immediate-return path and
+    /// for a future explicit operator opt-out. Reading
+    /// `DrainWindow::disabled()` at a call site states that intent
+    /// loudly, where the old `default()` hid it.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self::new(Duration::ZERO)
     }
 
     /// Atomically update the window. Subsequent watcher reads observe
     /// the new value; at most one drain uses the prior value across a
-    /// reload. Saturates at `u64::MAX` nanoseconds (`~584 years`) for
-    /// pathologically large `Duration`s — well past any reasonable
-    /// settle / window derivation.
+    /// reload. This is the runtime-tunable surface — the engine driver
+    /// calls it on SIGHUP / config reload when the derived window
+    /// changes. Saturating, via [`Self::nanos`].
     pub fn set(&self, d: Duration) {
-        let nanos = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
-        self.0.store(nanos, Ordering::Relaxed);
+        self.0.store(Self::nanos(d), Ordering::Relaxed);
     }
 
-    /// Read the current window. Returns `Duration::ZERO` when unset
-    /// (the initial / disabled state).
+    /// Read the current window. `Duration::ZERO` iff constructed via
+    /// [`Self::disabled`] (or `set` to zero) — the disabled state.
     #[must_use]
     pub fn get(&self) -> Duration {
         Duration::from_nanos(self.0.load(Ordering::Relaxed))
-    }
-}
-
-impl Default for DrainWindow {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

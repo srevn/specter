@@ -73,7 +73,7 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, "initial").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -138,7 +138,7 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
 #[test]
 fn rewatch_with_narrowed_mask_drops_classes() {
     let tmp = TempDir::new().unwrap();
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -213,7 +213,7 @@ fn rewatch_with_same_mask_preserves_registration() {
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, "x").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -246,7 +246,7 @@ fn unwatch_then_watch_starts_fresh() {
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, "x").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::default()).unwrap();
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
