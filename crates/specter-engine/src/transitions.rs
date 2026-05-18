@@ -2491,35 +2491,12 @@ impl Engine {
                 Some(s) => (s.scope, s.needs_diff, s.log_output, s.has_fired),
                 None => continue,
             };
+            match fire_decision(mode, scope, sub_id, already_fired, nothing_changed) {
+                FireVerdict::SkipScope | FireVerdict::SuppressDedup => continue,
+                FireVerdict::Emit => {}
+            }
             match scope {
                 EffectScope::SubtreeRoot => {
-                    // SeedDrift narrows to its pre-filtered Sub set; Standard
-                    // emits every Sub (modulo the suppress check below).
-                    if let EmitMode::SeedDrift { drifted } = mode
-                        && !drifted.contains(&sub_id)
-                    {
-                        continue;
-                    }
-                    // B1 suppress = "Sub has fired before AND tree state is
-                    // unchanged since the last rebase." `already_fired` is
-                    // the per-Sub fire-history gate; `nothing_changed` is
-                    // the per-Profile "no change" structural signal. Both
-                    // gates required: a fresh Sub on an unchanged tree must
-                    // still fire its first Effect. SeedDrift's `drifted` is
-                    // built from drifted Subs by construction (see
-                    // `seed_drift_observed` + `dispatch_seed_ok`), so the
-                    // SeedDrift arm returns `false` directly — the
-                    // unreachability is structural, not analytical.
-                    let suppress = match mode {
-                        EmitMode::Standard { forced } => {
-                            !forced && nothing_changed && already_fired
-                        }
-                        EmitMode::SeedDrift { .. } => false,
-                    };
-                    if suppress {
-                        continue;
-                    }
-
                     let diff_for_effect = if needs_diff {
                         ensure_diff(&mut diff_arc)
                     } else {
@@ -2556,14 +2533,6 @@ impl Engine {
                     self.subs.mark_fired(sub_id);
                 }
                 EffectScope::PerStableFile => {
-                    // SeedDrift skips PerFile entirely — the drift signal
-                    // is Subtree-only (PerFile records no fire history, so
-                    // it has no per-leaf basis for Seed-time drift
-                    // detection; see `seed_drift_observed`'s documented
-                    // limitation).
-                    if matches!(mode, EmitMode::SeedDrift { .. }) {
-                        continue;
-                    }
                     // PerStableFile implies `needs_diff = true` at
                     // Sub::from_request; diff is always built.
                     let Some(diff) = ensure_diff(&mut diff_arc) else {
@@ -2862,9 +2831,9 @@ pub(crate) struct EmitOutcome {
 /// - **Suppress.** Standard honours dedup-hash suppression unless
 ///   `forced` is set. SeedDrift's `drifted` is built from keys where
 ///   `last_emitted ≠ current` by construction, so suppression is
-///   structurally unreachable on this mode and the `match` returns
-///   `false` directly (no analytical claim, no debug-assert, just a
-///   variant arm).
+///   structurally unreachable on this mode — `fire_decision`'s
+///   SeedDrift arm yields `Emit` directly (no analytical claim, just
+///   a variant arm).
 /// - **PerStableFile.** Standard emits `PerStableFile` Effects per
 ///   matching diff entry. SeedDrift skips PerFile entirely — the
 ///   Seed-time drift signal is Subtree-only (per
@@ -2904,6 +2873,67 @@ impl EmitMode<'_> {
     /// mode. `true` only on `Standard { forced: true }`.
     const fn effect_forced(self) -> bool {
         matches!(self, Self::Standard { forced: true })
+    }
+}
+
+/// One Sub's fire verdict in an [`Engine::emit_effects`] pass — the
+/// total fold of the three gates that used to sit inline in the loop.
+/// Distinguishing `SuppressDedup` from `SkipScope` keeps the *reason*
+/// inspectable (unit table, future per-cause metrics) even though the
+/// loop currently treats both as "don't emit".
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum FireVerdict {
+    /// Emit for this Sub (Subtree: one Effect; PerStableFile: one per
+    /// matching diff entry).
+    Emit,
+    /// B1 dedup suppression — a `SubtreeRoot` Sub that has fired
+    /// before on a tree unchanged since the last rebase, not forced.
+    SuppressDedup,
+    /// This `(scope, mode)` does not fire: a `SubtreeRoot` Sub outside
+    /// SeedDrift's `drifted` set, or any `PerStableFile` Sub under
+    /// SeedDrift (Seed-time drift is Subtree-only).
+    SkipScope,
+}
+
+/// Total, pure fire decision over `(scope, mode)` for one Sub. No
+/// engine state, no `Effect` sink — exhaustively unit-testable.
+/// Folds the three formerly-scattered `continue` gates:
+///
+/// - **SeedDrift Subtree narrowing.** A `SubtreeRoot` Sub fires under
+///   SeedDrift only if it is in the pre-filtered `drifted` set.
+/// - **B1 dedup suppress.** A `SubtreeRoot` Sub under `Standard`
+///   suppresses iff it is not force-fired, the tree is unchanged
+///   since the last rebase (`nothing_changed`), AND it has fired
+///   before (`already_fired`) — a never-fired Sub is its own first
+///   emission even on an unchanged tree. SeedDrift's `drifted` holds
+///   only drifted Subs, so suppression is structurally unreachable on
+///   that mode (its arm yields `Emit`).
+/// - **PerStableFile under SeedDrift.** Skipped entirely — Seed-time
+///   drift is Subtree-only (PerFile keeps no per-leaf fire history).
+fn fire_decision(
+    mode: EmitMode<'_>,
+    scope: EffectScope,
+    sub_id: SubId,
+    already_fired: bool,
+    nothing_changed: bool,
+) -> FireVerdict {
+    match (scope, mode) {
+        (EffectScope::SubtreeRoot, EmitMode::SeedDrift { drifted }) => {
+            if drifted.contains(&sub_id) {
+                FireVerdict::Emit
+            } else {
+                FireVerdict::SkipScope
+            }
+        }
+        (EffectScope::SubtreeRoot, EmitMode::Standard { forced }) => {
+            if !forced && nothing_changed && already_fired {
+                FireVerdict::SuppressDedup
+            } else {
+                FireVerdict::Emit
+            }
+        }
+        (EffectScope::PerStableFile, EmitMode::SeedDrift { .. }) => FireVerdict::SkipScope,
+        (EffectScope::PerStableFile, EmitMode::Standard { .. }) => FireVerdict::Emit,
     }
 }
 
