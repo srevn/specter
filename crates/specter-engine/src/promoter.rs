@@ -601,17 +601,19 @@ impl Engine {
 
         match route {
             ProbeRoute::Descent => match response.outcome {
-                ProbeOutcome::SubtreeOk(arc) => self.dispatch_descent_ok(owner, &arc, now, out),
+                ProbeOutcome::DirEnumerated(arc) => {
+                    self.dispatch_descent_ok(owner, &arc, now, out);
+                }
                 ProbeOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
                 ProbeOutcome::Failed { errno } => self.dispatch_descent_failed(owner, errno, out),
-                ProbeOutcome::AnchorOk(_) => {
+                ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
                     // Descent probes a Dir prefix; the walker returns
-                    // `SubtreeOk` / `Vanished`. `AnchorOk` is a
-                    // walker-side regression.
+                    // `DirEnumerated` / `Vanished`. `AnchorOk` /
+                    // `SubtreeProven` are walker-side regressions.
                     debug_assert!(
                         false,
-                        "walker contract violated: Promoter descent received AnchorOk \
-                         (promoter = {promoter_id:?})",
+                        "walker contract violated: Promoter descent received a \
+                         non-enumeration outcome (promoter = {promoter_id:?})",
                     );
                     out.diagnostics.push(Diagnostic::StaleProbeResponse {
                         owner,
@@ -621,7 +623,7 @@ impl Engine {
             },
 
             ProbeRoute::Enumerating { target } => match response.outcome {
-                ProbeOutcome::SubtreeOk(arc) => {
+                ProbeOutcome::DirEnumerated(arc) => {
                     self.dispatch_promoter_enumeration_ok(promoter_id, target, &arc, now, out);
                 }
                 ProbeOutcome::Vanished => {
@@ -630,14 +632,14 @@ impl Engine {
                 ProbeOutcome::Failed { errno } => {
                     self.dispatch_promoter_enumeration_failed(promoter_id, target, errno, out);
                 }
-                ProbeOutcome::AnchorOk(_) => {
-                    // Enumeration probes a Dir proxy; the walker
-                    // returns `SubtreeOk` / `Vanished`. `AnchorOk` is a
-                    // walker-side regression.
+                ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
+                    // Enumeration probes a Dir proxy; the walker returns
+                    // `DirEnumerated` / `Vanished`. `AnchorOk` /
+                    // `SubtreeProven` are walker-side regressions.
                     debug_assert!(
                         false,
-                        "walker contract violated: Promoter enumeration received AnchorOk \
-                         (promoter = {promoter_id:?})",
+                        "walker contract violated: Promoter enumeration received a \
+                         non-enumeration outcome (promoter = {promoter_id:?})",
                     );
                     out.diagnostics.push(Diagnostic::StaleProbeResponse {
                         owner,
@@ -684,7 +686,7 @@ impl Engine {
     /// constructed armed, never armed-after-emit, so there is no window
     /// where the enumeration is in flight without its correlation on
     /// state. The slot's tag is the sole authority for the proxy
-    /// [`ResourceId`] across every response outcome (`SubtreeOk` /
+    /// [`ResourceId`] across every response outcome (`DirEnumerated` /
     /// `Vanished` / `Failed`); the wire carries only `target_path`.
     /// Consumed once via `take_owner_probe` in
     /// [`Self::on_promoter_probe_response`].

@@ -260,10 +260,14 @@ impl Engine {
     ///   collapsed `Unclassified` arm, substituting for the dropped
     ///   baseline in the next Seed-Ok's drift verdict
     ///   ([`Engine::seed_drift_observed`] reads it via
-    ///   [`specter_core::Profile::settled_hash`]). Both branches of
-    ///   `dispatch_seed_ok` and `dispatch_rebase_ok` call
+    ///   [`specter_core::Profile::settled_hash`]). `dispatch_rebase_ok`
+    ///   and the Seed **pin path** only (`seed_pin_body`, reached from
+    ///   `dispatch_seed_ok`'s `Stable` / `Unstable + forced` arms) call
     ///   [`specter_core::Profile::rebase_baseline`], which consumes it
-    ///   (the `Witness → Snapshot` move). A live baseline and a survival
+    ///   (the `Witness → Snapshot` move); the Seed `Unstable + !forced`
+    ///   and `Undischarged` arms graft (or skip) without rebasing, so
+    ///   the witness outlives an unbounded re-batch loop and is consumed
+    ///   only at the eventual pin. A live baseline and a survival
     ///   witness are mutually exclusive *by construction* in the anchor
     ///   sum — the old `baseline.is_some() ⇒ …is_none()` rule is a type
     ///   property now, not a step-boundary invariant.

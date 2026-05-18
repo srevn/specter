@@ -36,8 +36,8 @@ use specter_core::{
     ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope,
     EntryKind, FsEvent, FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, PreFireBurst,
     PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, Termination, TimerKind, TreeSnapshot,
+    ProfileState, ProofAuthority, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    SubAttachAnchor, SubAttachRequest, SubId, Termination, TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -121,59 +121,180 @@ fn subtree_request_with_content(name: &str, r: ResourceId) -> SubAttachRequest {
     )
 }
 
-/// Drive a fresh attach (with the supplied request) through Seed-Ok →
-/// Idle. Returns the `SubId` and `ProfileId`.
+/// A Seed burst is Batching-first: it pins only after the N=2
+/// settle-spaced quiescence proof. Drive the two settle cycles for the
+/// already-attached Seed Profile `pid` and assert it returns to Idle.
+///
+/// Both probe responses MUST carry hash-equal snapshots (`Arc::clone`
+/// of `seed_snap`): probe 1 is `Unstable` by construction (the prior
+/// `certified` is `None`) and re-batches; probe 2's
+/// hash-equal sample is `Stable` → `seed_pin_body` commits, rebases
+/// the baseline, and finishes to Idle. Two settle cycles sit far
+/// inside `max_settle`, so the verdicts are a clean `Unstable` →
+/// `Stable`, never the `forced` fallback. A fresh, never-fired Seed
+/// pins silently — no Effects.
+///
+/// Returns the instant the Seed completed (`t0 + SETTLE * 2`); callers
+/// anchor any subsequent burst timeline off it so step instants stay
+/// strictly monotonic.
+fn complete_seed_burst(
+    e: &mut Engine,
+    pid: ProfileId,
+    seed_snap: std::sync::Arc<DirSnapshot>,
+    t0: Instant,
+) -> Instant {
+    let mut done = t0;
+    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
+        while let Some(entry) = e.pop_expired(at) {
+            e.step(
+                Input::TimerExpired {
+                    profile: entry.profile,
+                    kind: entry.kind,
+                    id: entry.id,
+                },
+                at,
+            );
+        }
+        let corr = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Seed Verifying probe in flight after settle expiry");
+        e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation: corr,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: std::sync::Arc::clone(&seed_snap),
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            at,
+        );
+        done = at;
+    }
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state(),
+        ProfileState::Idle
+    ));
+    done
+}
+
+/// Drive the post-fire rebase loop to its terminal — the structural
+/// mirror of [`complete_seed_burst`]'s Batching-first Seed N=2 proof.
+///
+/// The caller has driven `EffectComplete::Ok` so the burst is
+/// `Active(PostFire(Rebasing))` with the first rebase probe in flight;
+/// `first_rebase_corr` is that probe's correlation. Both responses
+/// carry `Arc::clone(&snap)` (an idempotent command — the post-command
+/// tree never changes): sample 1 is `Unstable` by construction (the
+/// post-fire `certified` prior is `None`) → `apply_snapshot` +
+/// `RebaseSettling`; the `RebaseSettle` spacing timer expires →
+/// `Rebasing` again; sample 2 hashes equal → `Stable` →
+/// `rebase_baseline` + finish to Idle. The spacing wait is `SETTLE`,
+/// far inside `max_settle`, so the loop closes on a clean
+/// `Unstable → Stable`, never the `RebaseCeiling`.
+///
+/// Asserts the burst returns to Idle (the idempotent contract — an
+/// empty fire-tail residual means no restart). Returns the final
+/// (`Stable`-step) `StepOutput` and the instant it was produced so
+/// callers can assert no double-fire and keep step instants monotonic.
+fn complete_rebase_loop(
+    e: &mut Engine,
+    pid: ProfileId,
+    snap: std::sync::Arc<DirSnapshot>,
+    first_rebase_corr: ProbeCorrelation,
+    t0: Instant,
+) -> (StepOutput, Instant) {
+    // Sample 1: prior `None` ⇒ Unstable ⇒ RebaseSettling.
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: first_rebase_corr,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: std::sync::Arc::clone(&snap),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t0,
+    );
+    let spacing_timer = match e.profiles().get(pid).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::RebaseSettling { spacing_timer },
+                ..
+            }),
+            _,
+        ) => *spacing_timer,
+        other => {
+            panic!("rebase sample 1 must loop to Active(PostFire(RebaseSettling)); got {other:?}")
+        }
+    };
+
+    // The `RebaseSettle` spacing timer expires → re-arm `Rebasing`.
+    let t1 = t0 + SETTLE;
+    let rearm_out = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::RebaseSettle,
+            id: spacing_timer,
+        },
+        t1,
+    );
+    let corr2 = first_probe_correlation(&rearm_out)
+        .expect("RebaseSettle expiry re-arms the Rebasing probe");
+
+    // Sample 2: hash-equal ⇒ Stable ⇒ rebase_baseline + finish.
+    let stable_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: corr2,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: std::sync::Arc::clone(&snap),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t1,
+    );
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "idempotent rebase loop closes Stable → Idle (empty residual ⇒ no restart)",
+    );
+    (stable_out, t1)
+}
+
+/// Drive a fresh attach (with the supplied request) through the
+/// Batching-first Seed N=2 proof → Idle. Asserts the attach
+/// StepOutput emits **no** probe (the Seed probe now fires only on
+/// settle expiry, not at attach). Returns the `SubId`, `ProfileId`,
+/// and the instant the Seed completed.
 fn attach_and_complete_seed_with(
     e: &mut Engine,
     req: SubAttachRequest,
     pid_resource: ResourceId,
     snap: std::sync::Arc<DirSnapshot>,
     now: Instant,
-) -> (SubId, ProfileId) {
+) -> (SubId, ProfileId, Instant) {
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = pid_of(e, sid);
-    let seed_corr = first_probe_correlation(&out).expect("Seed probe");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
-        }),
-        now,
+    assert!(
+        first_probe_correlation(&out).is_none(),
+        "Seed is Batching-first: attach emits no probe",
     );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
+    let done = complete_seed_burst(e, pid, snap, now);
     let _ = pid_resource;
-    (sid, pid)
+    (sid, pid, done)
 }
 
-/// Drive a fresh attach through Seed-Ok → Idle. Returns the Profile id.
+/// Drive a fresh subtree-root attach through the
+/// Batching-first Seed N=2 proof → Idle. Returns the `SubId`,
+/// `ProfileId`, and the instant the Seed completed.
 fn attach_and_complete_seed(
     e: &mut Engine,
     r: ResourceId,
     snap: std::sync::Arc<DirSnapshot>,
     now: Instant,
-) -> (SubId, ProfileId) {
-    let out = e.step(Input::AttachSub(subtree_request("test", r)), now);
-    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = pid_of(e, sid);
-    let seed_corr = first_probe_correlation(&out).expect("Seed probe");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
-        }),
-        now,
-    );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
-    (sid, pid)
+) -> (SubId, ProfileId, Instant) {
+    attach_and_complete_seed_with(e, subtree_request("test", r), r, snap, now)
 }
 
 /// Drain timers and inject probe responses until the Standard burst
@@ -225,7 +346,10 @@ fn drive_to_awaiting(
                 Input::ProbeResponse(ProbeResponse {
                     owner: ProbeOwner::Profile(pid),
                     correlation: c,
-                    outcome: ProbeOutcome::SubtreeOk(snap.clone()),
+                    outcome: ProbeOutcome::SubtreeProven {
+                        snapshot: snap.clone(),
+                        authority: ProofAuthority::Authoritative,
+                    },
                 }),
                 t_drain,
             );
@@ -246,16 +370,16 @@ fn drive_to_awaiting(
 fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     // Subtree-root Sub on /src; baseline = empty. FsEvent → Standard burst
     // → stable verdict (response == seed snap) → Awaiting (one Effect).
-    // EffectComplete::Ok → Rebasing (probe at anchor). ProbeResponse Ok
-    // with the SAME snapshot (idempotent command) → Idle, baseline ==
-    // current. A fresh FsEvent identical to the first must NOT re-fire
-    // — hash dedup catches it because fired_subs matches
-    // the current view.
+    // EffectComplete::Ok → Rebasing. The post-fire N=2 loop closes on
+    // two settle-spaced hash-equal WholeSubtree reads (idempotent
+    // command) → Idle, baseline == current. A fresh FsEvent identical
+    // to the first must NOT re-fire — hash dedup catches it because
+    // fired_subs matches the current view.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let snap = dir_snap(vec![]);
-    let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
+    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
 
     // Standard burst → Awaiting.
     let stable_out = drive_to_awaiting(
@@ -263,7 +387,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         pid,
         r,
         snap.clone(),
-        now + Duration::from_millis(10),
+        seed_done + Duration::from_millis(10),
     );
     assert_eq!(
         stable_out.effects().len(),
@@ -287,7 +411,7 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
             key: effect_key,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe emitted");
     let phase = match e.profiles().get(pid).unwrap().state() {
@@ -296,24 +420,20 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     };
     assert!(matches!(phase, PostFirePhase::Rebasing(_)));
 
-    // ProbeResponse Ok (idempotent — same snap) → Idle, baseline rebased.
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
-        }),
-        now + Duration::from_millis(30),
+    // Post-fire N=2 loop (idempotent — same snap each read) → Idle,
+    // baseline rebased.
+    let _ = complete_rebase_loop(
+        &mut e,
+        pid,
+        snap.clone(),
+        rebase_corr,
+        seed_done + Duration::from_millis(30),
     );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
     assert!(e.profiles().get(pid).unwrap().baseline().is_some());
 
     // Fresh FsEvent identical to the first → Standard burst starts but
     // hash dedup suppresses the Effect (current == fired_subs).
-    let later_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(40));
+    let later_out = drive_to_awaiting(&mut e, pid, r, snap, seed_done + Duration::from_millis(40));
     assert!(
         later_out.effects().is_empty(),
         "hash dedup suppresses idempotent re-fire — fire-cycle terminated cleanly",
@@ -344,7 +464,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap_with_child = dir_snap(vec![("child", EntryKind::Dir, 7)]);
-    let (_sid, pid) = attach_and_complete_seed_with(
+    let (_sid, pid, seed_done) = attach_and_complete_seed_with(
         &mut e,
         subtree_request_with_content("test", r),
         r,
@@ -358,7 +478,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
         pid,
         r,
         snap_with_child,
-        now + Duration::from_millis(10),
+        seed_done + Duration::from_millis(10),
     );
     let phase_before = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => format!("{:?}", post.phase),
@@ -374,7 +494,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
             resource: child,
             event: FsEvent::Modified,
         },
-        now + Duration::from_millis(50),
+        seed_done + Duration::from_millis(50),
     );
     assert!(
         descendant_event_out.diagnostics.iter().any(|d| matches!(
@@ -400,13 +520,16 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
 
 #[test]
 fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
-    // Drive a Standard burst to Rebasing; an FsEvent absorbed while the
-    // rebase probe is in flight is the fire-tail residual. The rebase
-    // response then does NOT drop it (the pre-WS2 silent carve-out) —
-    // it restarts a fresh debounced Standard burst seeded from the
-    // residual via a typed PostFire→PreFire move that preserves the
-    // watched anchor — no refcount edge changes (no Unwatch/re-Watch
-    // flicker).
+    // Drive a Standard burst through the post-fire N=2 loop. An FsEvent
+    // absorbed during the *final* rebase round-trip (after the last
+    // `transition_to_rebasing` re-arm, before the Stable response) is
+    // the genuine final-window residual — `transition_to_rebasing`
+    // clears `dirty_resources` at every loop entry, so only the final
+    // round-trip's absorbs survive to the `Stable` verdict. A non-empty
+    // residual there restarts a fresh debounced Standard burst seeded
+    // from the residual via a typed PostFire→PreFire move that
+    // preserves the watched anchor — no refcount edge changes (no
+    // Unwatch/re-Watch flicker).
     //
     // CONTENT events mask: descendants must pass the class filter to
     // reach drive_burst's absorb arm.
@@ -419,7 +542,7 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap = dir_snap(vec![("child", EntryKind::Dir, 7)]);
-    let (sid, pid) = attach_and_complete_seed_with(
+    let (sid, pid, seed_done) = attach_and_complete_seed_with(
         &mut e,
         subtree_request_with_content("test", r),
         r,
@@ -433,22 +556,23 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
         pid,
         r,
         snap.clone(),
-        now + Duration::from_millis(10),
+        seed_done + Duration::from_millis(10),
     );
     let effect_key = stable_out.effects()[0].key();
 
-    // EffectComplete::Ok → Rebasing.
+    // EffectComplete::Ok → transition_to_rebasing(First): the (empty)
+    // residual is cleared, rebase probe #1 armed.
     e.step(
         Input::EffectComplete {
             sub: sid,
             key: effect_key,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
-    let rebase_corr = e
+    let corr1 = e
         .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("rebase probe correlation");
+        .expect("rebase probe #1 correlation");
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
@@ -460,13 +584,54 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
         ),
     ));
 
-    // FsEvent during Rebasing → absorbed into the fire-tail residual.
+    // Sample 1 (prior `None`) ⇒ Unstable ⇒ RebaseSettling. No absorb
+    // yet — a residual accumulated here would be cleared by the next
+    // `transition_to_rebasing` re-arm, so it must NOT drive the restart.
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: corr1,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: snap.clone(),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        seed_done + Duration::from_millis(22),
+    );
+    let spacing_timer = match e.profiles().get(pid).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::RebaseSettling { spacing_timer },
+                ..
+            }),
+            _,
+        ) => *spacing_timer,
+        other => panic!("sample 1 must loop to Active(PostFire(RebaseSettling)); got {other:?}"),
+    };
+
+    // RebaseSettle expiry → transition_to_rebasing(LoopReArm): clears
+    // `dirty_resources` again and arms rebase probe #2 — the FINAL
+    // round-trip.
+    let rearm_out = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::RebaseSettle,
+            id: spacing_timer,
+        },
+        seed_done + Duration::from_millis(25),
+    );
+    let corr2 =
+        first_probe_correlation(&rearm_out).expect("RebaseSettle expiry re-arms rebase probe #2");
+
+    // FsEvent during the FINAL Rebasing round-trip → absorbed. No
+    // further loop entry follows (sample 2 is Stable), so this residual
+    // survives to the verdict — the genuine final-window race.
     let absorb_out = e.step(
         Input::FsEvent {
             resource: child,
             event: FsEvent::Modified,
         },
-        now + Duration::from_millis(25),
+        seed_done + Duration::from_millis(27),
     );
     assert!(
         absorb_out.diagnostics.iter().any(|d| matches!(
@@ -474,28 +639,33 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
             Diagnostic::EventAbsorbedByFireTail { profile, resource, .. }
                 if *profile == pid && *resource == child,
         )),
-        "FsEvent during Rebasing absorbed",
+        "FsEvent during the final Rebasing round-trip absorbed",
     );
 
     // The anchor's kernel watch taken at start_standard_burst is held
-    // through Rebasing (the surviving refcount).
+    // through the whole loop (the surviving refcount).
     let watch_before = e.tree().get(r).unwrap().watch_demand();
     assert_eq!(watch_before, 1, "anchor watched for the in-flight burst");
 
-    // Rebase response with a non-empty residual → restart, NOT Idle.
-    let t_restart = now + Duration::from_millis(30);
+    // Sample 2 hash-equal ⇒ Stable; non-empty final-window residual ⇒
+    // restart, NOT Idle.
+    let t_restart = seed_done + Duration::from_millis(30);
     let restart_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
-            correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            correlation: corr2,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: snap,
+                authority: ProofAuthority::Authoritative,
+            },
         }),
         t_restart,
     );
 
     // A fresh debounced Standard burst is armed, carrying the residual
-    // as both the LCA basis and the mtime-skip defeater. ReturnToIdle
-    // is preserved across the typed move.
+    // as `dirty_resources` — the LCA basis and the source of the
+    // mtime-skip-defeating obligation. ReturnToIdle is preserved across
+    // the typed move.
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(
             ActiveBurst::PreFire(PreFireBurst {
@@ -503,7 +673,6 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
                 intent: BurstIntent::Standard,
                 forced: false,
                 dirty_resources,
-                force_walk_resources,
                 last_event_time,
                 ..
             }),
@@ -511,11 +680,7 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
         ) => {
             assert!(
                 dirty_resources.contains(&child),
-                "residual seeds the next probe's LCA basis",
-            );
-            assert!(
-                force_walk_resources.contains(&child),
-                "residual seeds the mtime-skip defeater",
+                "residual seeds the next probe's LCA basis and obligation",
             );
             assert_eq!(
                 *last_event_time,
@@ -553,11 +718,12 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let snap = dir_snap(vec![]);
-    let (_sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
-    let _stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
+    let (_sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
+    let _stable_out =
+        drive_to_awaiting(&mut e, pid, r, snap, seed_done + Duration::from_millis(10));
 
     // Advance clock past gate_deadline (4 * MAX_SETTLE).
-    let gate_t = now + Duration::from_millis(10) + MAX_SETTLE * 8;
+    let gate_t = seed_done + Duration::from_millis(10) + MAX_SETTLE * 8;
     let mut combined = StepOutput::default();
     while let Some(entry) = e.pop_expired(gate_t) {
         let s = e.step(
@@ -613,12 +779,12 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let snap = dir_snap(vec![]);
-    let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
-    let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
+    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
+    let stable_out = drive_to_awaiting(&mut e, pid, r, snap, seed_done + Duration::from_millis(10));
     let effect_key = stable_out.effects()[0].key();
 
     // Force gate-deadline.
-    let gate_t = now + Duration::from_millis(10) + MAX_SETTLE * 8;
+    let gate_t = seed_done + Duration::from_millis(10) + MAX_SETTLE * 8;
     while let Some(entry) = e.pop_expired(gate_t) {
         e.step(
             Input::TimerExpired {
@@ -680,8 +846,8 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let snap = dir_snap(vec![]);
-    let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
-    let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
+    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
+    let stable_out = drive_to_awaiting(&mut e, pid, r, snap, seed_done + Duration::from_millis(10));
     let effect_key = stable_out.effects()[0].key();
 
     // Anchor terminal event → finalize_anchor_lost → finish_burst_to_idle.
@@ -690,7 +856,7 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
             resource: r,
             event: FsEvent::Removed,
         },
-        now + Duration::from_millis(15),
+        seed_done + Duration::from_millis(15),
     );
     // No probe Cancel emitted (Awaiting has no probe in flight).
     let cancels = lost_out
@@ -716,7 +882,7 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
             key: effect_key,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     assert!(
         late_out.diagnostics.iter().any(|d| matches!(
@@ -736,8 +902,8 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let snap = dir_snap(vec![]);
-    let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
-    let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
+    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
+    let stable_out = drive_to_awaiting(&mut e, pid, r, snap, seed_done + Duration::from_millis(10));
     let effect_key = stable_out.effects()[0].key();
 
     // EffectComplete::Ok → Rebasing.
@@ -747,7 +913,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
             key: effect_key,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -766,7 +932,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
             resource: r,
             event: FsEvent::Removed,
         },
-        now + Duration::from_millis(25),
+        seed_done + Duration::from_millis(25),
     );
     // Probe Cancel emitted (Rebasing's probe in flight).
     let cancels = lost_out
@@ -783,29 +949,77 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
 
 #[test]
 fn fire_cycle_fresh_seed_skips_awaiting() {
-    // Fresh attach → Seed-Ok → no prior `fired_subs` ⇒
-    // seed_drift_observed returns false ⇒ no emit ⇒ finish_to_idle
-    // directly. Verify no Awaiting state is entered.
+    // Fresh attach → Batching-first Seed N=2 proof → Seed-Ok →
+    // no prior `fired_subs` ⇒ seed_drift_observed returns false ⇒ no
+    // emit ⇒ finish_to_idle directly. Verify no Awaiting state is ever
+    // entered: probe 1 (Unstable) re-batches into PreFire(Batching),
+    // probe 2 (Stable) pins via seed_pin_body straight to Idle.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let out = e.step(Input::AttachSub(subtree_request("test", r)), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
-    let seed_corr = first_probe_correlation(&out).expect("Seed probe");
-
-    let resp_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now + Duration::from_millis(1),
-    );
     assert!(
-        resp_out.effects().is_empty(),
-        "fresh Seed never fires Effects"
+        first_probe_correlation(&out).is_none(),
+        "Seed is Batching-first: attach emits no probe",
     );
+
+    let snap = dir_snap(vec![]);
+    // Drive the N=2 proof one cycle at a time so we can assert the
+    // fresh Seed never fires an Effect on *either* probe response and
+    // never lands in a post-fire Awaiting tail.
+    for (i, at) in [now + SETTLE, now + SETTLE * 2].into_iter().enumerate() {
+        while let Some(entry) = e.pop_expired(at) {
+            e.step(
+                Input::TimerExpired {
+                    profile: entry.profile,
+                    kind: entry.kind,
+                    id: entry.id,
+                },
+                at,
+            );
+        }
+        let corr = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Seed Verifying probe in flight after settle expiry");
+        let resp_out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation: corr,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: Arc::clone(&snap),
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            at,
+        );
+        assert!(
+            resp_out.effects().is_empty(),
+            "fresh Seed never fires Effects (probe {})",
+            i + 1,
+        );
+        let state = e.profiles().get(pid).unwrap().state();
+        if i == 0 {
+            // Probe 1 is Unstable by construction (prior
+            // certified prior is None) → re-batch, NOT a fire.
+            assert!(
+                matches!(
+                    state,
+                    ProfileState::Active(
+                        ActiveBurst::PreFire(PreFireBurst {
+                            phase: PreFirePhase::Batching { .. },
+                            intent: BurstIntent::Seed,
+                            ..
+                        }),
+                        _
+                    )
+                ),
+                "fresh Seed re-batches after the first (Unstable) sample, never enters Awaiting",
+            );
+        }
+    }
+    // Probe 2 (hash-equal) is Stable → seed_pin_body → finish_to_idle.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle
@@ -826,7 +1040,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let snap = dir_snap(vec![]);
-    let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
+    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
 
     // First fire cycle.
     let stable_out = drive_to_awaiting(
@@ -834,7 +1048,7 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
         pid,
         r,
         snap.clone(),
-        now + Duration::from_millis(10),
+        seed_done + Duration::from_millis(10),
     );
     let effect_key = stable_out.effects()[0].key();
     let rebase_out = e.step(
@@ -843,24 +1057,19 @@ fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
             key: effect_key,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
-        }),
-        now + Duration::from_millis(30),
+    let _ = complete_rebase_loop(
+        &mut e,
+        pid,
+        snap.clone(),
+        rebase_corr,
+        seed_done + Duration::from_millis(30),
     );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
 
     // Second burst: identical event/probe; hash matches → no Effect.
-    let later = now + Duration::from_millis(40);
+    let later = seed_done + Duration::from_millis(40);
     let second_out = drive_to_awaiting(&mut e, pid, r, snap, later);
     assert!(
         second_out.effects().is_empty(),
@@ -897,18 +1106,8 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         ClassSet::CONTENT,
         false,
     );
-    let attach_out = e.step(Input::AttachSub(req), now);
-    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = pid_of(&e, sid);
-    let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    let (sid, pid, seed_done) =
+        attach_and_complete_seed_with(&mut e, req, r, dir_snap(vec![]), now);
 
     // Standard burst with two files in the response.
     let snap_with_files = dir_snap(vec![
@@ -920,7 +1119,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         pid,
         r,
         snap_with_files.clone(),
-        now + Duration::from_millis(10),
+        seed_done + Duration::from_millis(10),
     );
     assert_eq!(
         stable_out.effects().len(),
@@ -945,7 +1144,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
             key: key_a,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     let phase = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
@@ -963,7 +1162,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
             key: key_b,
             result: EffectOutcome::Failed(Termination::Exit(1)),
         },
-        now + Duration::from_millis(30),
+        seed_done + Duration::from_millis(30),
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -993,12 +1192,12 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let snap = dir_snap(vec![]);
-    let (sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
-    let stable_out = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
+    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
+    let stable_out = drive_to_awaiting(&mut e, pid, r, snap, seed_done + Duration::from_millis(10));
     let effect_key = stable_out.effects()[0].key();
 
     // Detach the only Sub. Profile is Active(Awaiting) → reap_pending=true.
-    let _detach_out = e.step(Input::DetachSub(sid), Instant::now());
+    let _detach_out = e.step(Input::DetachSub(sid), seed_done + Duration::from_millis(15));
     assert!(
         matches!(
             e.profiles().get(pid).unwrap().state().burst_finish(),
@@ -1015,7 +1214,7 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
             key: effect_key,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     assert!(
         reap_out.diagnostics.iter().any(|d| matches!(
@@ -1050,7 +1249,7 @@ fn fire_cycle_event_at_descendant_during_awaiting_absorbs() {
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap_with_child = dir_snap(vec![("child", EntryKind::Dir, 7)]);
-    let (_sid, pid) = attach_and_complete_seed_with(
+    let (_sid, pid, seed_done) = attach_and_complete_seed_with(
         &mut e,
         subtree_request_with_content("test", r),
         r,
@@ -1068,7 +1267,7 @@ fn fire_cycle_event_at_descendant_during_awaiting_absorbs() {
         pid,
         r,
         snap_with_child,
-        now + Duration::from_millis(10),
+        seed_done + Duration::from_millis(10),
     );
 
     // Inject FsEvent on the descendant.
@@ -1077,7 +1276,7 @@ fn fire_cycle_event_at_descendant_during_awaiting_absorbs() {
             resource: child,
             event: FsEvent::Modified,
         },
-        now + Duration::from_millis(50),
+        seed_done + Duration::from_millis(50),
     );
     assert!(
         absorb_out.diagnostics.iter().any(|d| matches!(
@@ -1101,13 +1300,13 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
     let r = anchor(&mut e, "src");
     let now = Instant::now();
     let snap = dir_snap(vec![]);
-    let (_sid, pid) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
-    let _ = drive_to_awaiting(&mut e, pid, r, snap, now + Duration::from_millis(10));
+    let (_sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, snap.clone(), now);
+    let _ = drive_to_awaiting(&mut e, pid, r, snap, seed_done + Duration::from_millis(10));
     let pending_probe_before = e.pending_probe_for(ProbeOwner::Profile(pid));
 
     // Advance well past max_settle (the BurstDeadline) but stop short
     // of the gate_deadline (4 * max_settle).
-    let post_burst_deadline = now + Duration::from_millis(10) + MAX_SETTLE * 2;
+    let post_burst_deadline = seed_done + Duration::from_millis(10) + MAX_SETTLE * 2;
     let mut combined = StepOutput::default();
     while let Some(entry) = e.pop_expired(post_burst_deadline) {
         let s = e.step(
@@ -1147,9 +1346,10 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
 #[test]
 fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     // Concurrent user edit during Awaiting on a covered descendant:
-    // absorbed into the fire-tail. The Rebasing probe captures the
-    // post-edit state; the user's edit folds into the new baseline; it
-    // does not fire its own Effect (v1 documented loss-of-fidelity).
+    // absorbed into the fire-tail. The post-fire N=2 loop captures the
+    // post-edit state (both settle-spaced WholeSubtree reads observe
+    // it); the user's edit folds into the new baseline; it does not
+    // fire its own Effect (v1 documented loss-of-fidelity).
     //
     // CONTENT events mask so the Modified event passes the class filter.
     let mut e = Engine::new();
@@ -1161,7 +1361,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     e.tree_mut().set_kind(child, ResourceKind::Dir);
     let now = Instant::now();
     let snap_initial = dir_snap(vec![("child", EntryKind::Dir, 7)]);
-    let (sid, pid) = attach_and_complete_seed_with(
+    let (sid, pid, seed_done) = attach_and_complete_seed_with(
         &mut e,
         subtree_request_with_content("test", r),
         r,
@@ -1174,7 +1374,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
         pid,
         r,
         snap_initial.clone(),
-        now + Duration::from_millis(10),
+        seed_done + Duration::from_millis(10),
     );
     let effect_key = stable_out.effects()[0].key();
 
@@ -1184,7 +1384,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
             resource: child,
             event: FsEvent::Modified,
         },
-        now + Duration::from_millis(15),
+        seed_done + Duration::from_millis(15),
     );
     // Effect completes.
     e.step(
@@ -1193,36 +1393,33 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
             key: effect_key,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     let rebase_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("rebase probe");
 
-    // Rebase probe response carries a DIFFERENT snapshot (the user's
-    // edit changed the directory). The post-rebase baseline reflects
-    // the new state.
+    // Both rebase reads carry the post-edit snapshot (the user's edit
+    // changed the directory; the post-command tree is now quiescent at
+    // that state). The N=2 loop settles on it and the post-rebase
+    // baseline reflects the new state.
     let snap_after_edit = dir_snap(vec![
         ("child", EntryKind::Dir, 7),
         ("user_edit.txt", EntryKind::File, 99),
     ]);
-    let final_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap_after_edit),
-        }),
-        now + Duration::from_millis(30),
+    let (final_out, _) = complete_rebase_loop(
+        &mut e,
+        pid,
+        snap_after_edit,
+        rebase_corr,
+        seed_done + Duration::from_millis(30),
     );
-    // No second Effect — the user's edit folded into baseline silently.
+    // No second Effect — the rebase path never emits; the user's edit
+    // folded into baseline silently.
     assert!(
         final_out.effects().is_empty(),
         "v1 loss-of-fidelity: user edit during fire-tail does not fire its own Effect",
     );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
     // baseline reflects the post-edit tree.
     let baseline = e.profiles().get(pid).unwrap().baseline().unwrap();
     match baseline {
@@ -1260,18 +1457,19 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
         "test sanity: pre/post-Effect hashes differ",
     );
 
-    let (sid, pid) = attach_and_complete_seed(&mut e, r, pre_emit.clone(), now);
+    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, pre_emit.clone(), now);
 
-    // Burst 1 — verify response = pre_emit (matches the seed
-    // baseline; stable on first probe). emit_effects fires one Effect
-    // and writes recorded[Subtree] = pre_emit.dir_hash() (the
-    // emit-time defensive write).
+    // Burst 1 — verify response = pre_emit. The N=2 Standard proof
+    // stabilises against the seed baseline (probe 1 Unstable, probe 2
+    // hash-equal → Stable); emit_effects fires one Effect and writes
+    // recorded[Subtree] = pre_emit.dir_hash() (the emit-time defensive
+    // write).
     let stable_out = drive_to_awaiting(
         &mut e,
         pid,
         r,
         pre_emit.clone(),
-        now + Duration::from_millis(10),
+        seed_done + Duration::from_millis(10),
     );
     assert_eq!(stable_out.effects().len(), 1, "burst 1 fires one Effect");
     let effect_key = stable_out.effects()[0].key();
@@ -1283,21 +1481,22 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
             key: effect_key,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     let rebase_corr =
         first_probe_correlation(&rebase_out).expect("rebase probe emitted on EffectComplete::Ok");
 
-    // Rebase response = post_effect (non-idempotent — the command
-    // rewrote the tree). dispatch_rebase_ok grafts, rebases baseline,
-    // then refreshes recorded[Subtree] to post_effect.dir_hash().
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(post_effect.clone()),
-        }),
-        now + Duration::from_millis(30),
+    // Both rebase reads = post_effect (non-idempotent — the command
+    // rewrote the tree, which is now quiescent at the post-Effect
+    // state). The N=2 loop settles Stable: dispatch_rebase_ok grafts,
+    // rebases baseline, then refreshes recorded[Subtree] to
+    // post_effect.dir_hash().
+    let _ = complete_rebase_loop(
+        &mut e,
+        pid,
+        post_effect.clone(),
+        rebase_corr,
+        seed_done + Duration::from_millis(30),
     );
 
     // Post-rebase: baseline := current (= post_effect). The fire
@@ -1316,8 +1515,13 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
     // derives suppress from `baseline.hash() == current.hash()` AND
     // `fired_subs.contains(dk)` — both true here, so the phantom is
     // suppressed.
-    let phantom_out =
-        drive_to_awaiting(&mut e, pid, r, post_effect, now + Duration::from_millis(40));
+    let phantom_out = drive_to_awaiting(
+        &mut e,
+        pid,
+        r,
+        post_effect,
+        seed_done + Duration::from_millis(40),
+    );
     assert!(
         phantom_out.effects().is_empty(),
         "B1 dedup suppresses post-rebase phantom for non-idempotent command",
@@ -1387,18 +1591,8 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         ClassSet::CONTENT,
         false,
     );
-    let attach_out = e.step(Input::AttachSub(req), now);
-    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = pid_of(&e, sid);
-    let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    let (sid, pid, seed_done) =
+        attach_and_complete_seed_with(&mut e, req, r, dir_snap(vec![]), now);
 
     // Burst 1 — verify response = pre_emit (foo.rs at inode 42,
     // size 0). The Seed → Standard diff (created foo.rs) drives one
@@ -1409,7 +1603,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         pid,
         r,
         pre_emit.clone(),
-        now + Duration::from_millis(10),
+        seed_done + Duration::from_millis(10),
     );
     assert_eq!(
         stable_out.effects().len(),
@@ -1429,7 +1623,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
             key: effect_key,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe");
 
@@ -1441,9 +1635,12 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(post_effect.clone()),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: post_effect.clone(),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        now + Duration::from_millis(30),
+        seed_done + Duration::from_millis(30),
     );
 
     // Post-rebase: baseline := current carries the post-Effect leaf
@@ -1460,8 +1657,13 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     // AND `fired_subs.contains(dk)`) holds for the SubtreeRoot key
     // implicitly recorded alongside the PerFile one — so the burst
     // returns to Idle without entering Awaiting.
-    let phantom_out =
-        drive_to_awaiting(&mut e, pid, r, post_effect, now + Duration::from_millis(40));
+    let phantom_out = drive_to_awaiting(
+        &mut e,
+        pid,
+        r,
+        post_effect,
+        seed_done + Duration::from_millis(40),
+    );
     assert!(
         phantom_out.effects().is_empty(),
         "B1 dedup suppresses PerFile phantom for non-idempotent format",
@@ -1526,23 +1728,19 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
         ClassSet::CONTENT,
         false,
     );
-    let attach_out = e.step(Input::AttachSub(req), now);
-    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = pid_of(&e, sid);
-    let seed_corr = first_probe_correlation(&attach_out).expect("Seed probe");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    let (sid, pid, seed_done) =
+        attach_and_complete_seed_with(&mut e, req, r, dir_snap(vec![]), now);
 
     // Burst 1 — foo.rs created (inode 42, size 0). Seed → Standard
     // diff (created foo.rs) drives exactly one PerFile Effect.
     let v1 = dir_snap_one_file("foo.rs", EntryKind::File, 42, 0);
-    let out1 = drive_to_awaiting(&mut e, pid, r, v1.clone(), now + Duration::from_millis(10));
+    let out1 = drive_to_awaiting(
+        &mut e,
+        pid,
+        r,
+        v1.clone(),
+        seed_done + Duration::from_millis(10),
+    );
     let perfile1: Vec<_> = out1
         .effects()
         .iter()
@@ -1564,16 +1762,17 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
             key: key1,
             result: EffectOutcome::Ok,
         },
-        now + Duration::from_millis(20),
+        seed_done + Duration::from_millis(20),
     );
     let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(v1),
-        }),
-        now + Duration::from_millis(30),
+    // Idempotent command: both N=2 reads leave foo.rs unchanged
+    // (inode 42, size 0) → Stable, baseline := current carries foo.rs.
+    let _ = complete_rebase_loop(
+        &mut e,
+        pid,
+        v1,
+        rebase_corr,
+        seed_done + Duration::from_millis(30),
     );
     // A PerStableFile Sub's fire-history flag is NEVER set: `mark_fired`
     // is called only by the SubtreeRoot emit arm. PerFile has no B1
@@ -1583,17 +1782,13 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
         !e.subs().get(sid).unwrap().has_fired,
         "PerStableFile Sub is never fire-history-marked (mark_fired is SubtreeRoot-only)",
     );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
 
     // Burst 2 — a *real* change: foo.rs rewritten in place (same
     // inode 42, size 0 → 1). The diff carries foo.rs as modified, so
     // the PerFile Effect MUST re-fire. PerFile emission is gated by
     // diff membership alone, never by any fire-history suppression.
     let v2 = dir_snap_one_file("foo.rs", EntryKind::File, 42, 1);
-    let out2 = drive_to_awaiting(&mut e, pid, r, v2, now + Duration::from_millis(40));
+    let out2 = drive_to_awaiting(&mut e, pid, r, v2, seed_done + Duration::from_millis(40));
     let perfile2 = out2
         .effects()
         .iter()

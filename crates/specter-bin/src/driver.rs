@@ -903,6 +903,36 @@ pub fn log_diagnostic(d: &Diagnostic) {
             outstanding,
             "await-gate deadline elapsed; force-transitioning to Rebasing (actuator likely hung)",
         ),
+        Diagnostic::QuiescenceCeilingUnreadable {
+            profile,
+            first_unread,
+            intent,
+        } => tracing::warn!(
+            ?profile,
+            ?intent,
+            ?first_unread,
+            "quiescence ceiling unreadable (obligation chain frame mtime-skipped/degraded); \
+             refused to fire/pin, burst finished to Idle (self-recovers if transient)",
+        ),
+        Diagnostic::RebaseCeilingStillChanging { profile, intent } => tracing::warn!(
+            ?profile,
+            ?intent,
+            "post-fire rebase ceiling reached while the post-command tree was still changing; \
+             pinned the freshest observation as baseline and finished the burst (a streaming \
+             command, or settle shorter than its write cadence)",
+        ),
+        Diagnostic::RebaseCeilingUnreadable {
+            profile,
+            first_unread,
+            intent,
+        } => tracing::warn!(
+            ?profile,
+            ?intent,
+            ?first_unread,
+            "post-fire rebase ceiling reached on an unreadable response (obligation chain frame \
+             mtime-skipped/degraded); refused to rebase blind, prior baseline kept, burst \
+             finished to Idle (self-recovers if transient)",
+        ),
         Diagnostic::SensorOverflow { scope } => tracing::warn!(
             ?scope,
             "sensor reported overflow (kernel queue dropped events); reseeding in-scope Profiles",

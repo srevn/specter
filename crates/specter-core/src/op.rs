@@ -43,6 +43,35 @@ pub enum ProbeOwner {
     Promoter(PromoterId),
 }
 
+/// What a [`ProbeRequest::Subtree`] walk must freshly observe for its
+/// response to certify quiescence.
+///
+/// The quiescence verdict is sound only if every entry folding into the
+/// response hash was *observed at this probe* — an mtime-skipped or
+/// degraded frame is a non-observation. This enum is the engine's
+/// statement of which subtrees may not be skipped:
+///
+/// - [`Self::Chains`] — Standard. The dirty root→leaf chains
+///   (resources whose `FsEvent` drove the burst, projected to paths).
+///   The walker refuses mtime-skip at any directory at-or-above a chain
+///   path; off-chain siblings stay skip-eligible.
+/// - [`Self::WholeSubtree`] — Seed / Rebase. No trustworthy prior
+///   exists, so nothing under the anchor may be skipped: the whole
+///   subtree is unproven until freshly read. Seed has never observed
+///   the tree; the post-fire rebase must prove the *post-command* tree
+///   quiescent, and the command just mutated it (an in-place
+///   descendant edit need not bump an ancestor mtime, so a chains-only
+///   skip would re-clone a stale subtree and certify a false quiet).
+///
+/// `Chains` entries are `Arc::clone`s of the engine's slot paths
+/// (shipped without re-allocating); `BTreeSet` for deterministic replay
+/// order.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ProofObligation {
+    Chains(BTreeSet<Arc<Path>>),
+    WholeSubtree,
+}
+
 /// Engine→walker probe request.
 ///
 /// The variant is the contract: the walker dispatches on it; the engine
@@ -80,8 +109,9 @@ pub enum ProbeRequest {
     },
     /// Subtree verify / Seed / Rebase / Standard. Recursive Dir walk
     /// honouring `scan_config`. Walker returns
-    /// `ProbeOutcome::SubtreeOk(Arc<DirSnapshot>)` rooted at
-    /// `target_path` (or `Vanished` / `Failed`).
+    /// `ProbeOutcome::SubtreeProven { snapshot, authority }` rooted at
+    /// `target_path` (or `Vanished` / `Failed`); the `authority`
+    /// certifies whether the response discharged the `obligation`.
     Subtree {
         /// Owner the engine demuxes the response back to. Echoed back
         /// on `ProbeResponse` and used by the Sensor's expectation-map
@@ -116,37 +146,36 @@ pub enum ProbeRequest {
         /// fully immutable post-construction (hashes are eager fields,
         /// not a lazy cache).
         baseline_subtree: Option<Arc<DirSnapshot>>,
-        /// Set of paths the walker MUST enumerate (refusing mtime-skip)
-        /// at any directory whose path equals one of these OR is an
-        /// ancestor of one. Populated from kqueue events that arrived
-        /// since the last probe at this target.
+        /// The proof obligation: which subtrees this probe MUST freshly
+        /// observe (refusing mtime-skip) for the response to certify
+        /// quiescence. Populated from the burst's dirty resources
+        /// ([`ProofObligation::Chains`], Standard) or set to
+        /// [`ProofObligation::WholeSubtree`] when there is no
+        /// trustworthy prior (Seed / Rebase).
         ///
-        /// Walker checks `force_walk.iter().any(|p| p.starts_with(current))`
-        /// — O(N) per directory, N = `|force_walk|` (typically 1–5). The
-        /// set is *minimal* (only the dirty paths); the walker's
-        /// prefix-match covers the "ancestor of forced descendant" case
-        /// without engine-side closure construction.
-        ///
-        /// `BTreeSet` (not `Vec`) so iteration order is deterministic
-        /// for replay. `Arc<Path>` entries are `Arc::clone`s of the
-        /// engine's slot paths — shipped without re-allocating.
-        force_walk: BTreeSet<Arc<Path>>,
+        /// The walker refuses mtime-skip at any directory at-or-above a
+        /// `Chains` path (O(N) prefix-match per directory, N typically
+        /// 1–5) or anywhere within the subtree for `WholeSubtree`, and
+        /// stamps the response's [`ProofAuthority`] `Undischarged` iff a
+        /// skipped / degraded frame lies on an obligation chain.
+        obligation: ProofObligation,
         /// `true` ⇒ walker bypasses mtime-skip at every directory
-        /// regardless of `baseline_subtree` and `force_walk`. Engine sets
-        /// this when `PreFireBurst.forced` is true (max-settle deadline
-        /// elapsed; force-fire).
+        /// regardless of `baseline_subtree` and `obligation`. Engine
+        /// sets this when `PreFireBurst.forced` is true (max-settle
+        /// deadline elapsed; force-fire).
         ///
-        /// Defensive: mtime-skip is correct under normal semantics, but a
-        /// forced probe wants the freshest possible snapshot regardless
-        /// of cost.
+        /// Defensive: mtime-skip is correct under normal semantics, but
+        /// a forced probe wants the freshest possible snapshot
+        /// regardless of cost.
         forced: bool,
     },
     /// Pending-descent prefix probe. Walker enumerates one level of
     /// `target_path` (no recursion, no exclude/pattern, hidden=true) and
-    /// returns `ProbeOutcome::SubtreeOk(arc)` containing the prefix's
-    /// direct children — descent dispatch reads `arc.entries.get(name)`
-    /// and discards the snapshot (it is never spliced into
-    /// `Profile.current`).
+    /// returns `ProbeOutcome::DirEnumerated(arc)` containing the
+    /// prefix's direct children — descent dispatch reads
+    /// `arc.entries.get(name)` and discards the snapshot (it is never
+    /// spliced into `Profile.current`). No `obligation` (a structural
+    /// query is not a quiescence observation).
     Descent {
         /// Owner the engine demuxes the response back to. Echoed back
         /// on `ProbeResponse` and used by the Sensor's expectation-map
@@ -212,26 +241,63 @@ pub struct ProbeResponse {
     pub outcome: ProbeOutcome,
 }
 
+/// Walker-stamped certificate riding a [`ProbeOutcome::SubtreeProven`]
+/// (and engine-injected `Authoritative` for `AnchorOk`).
+///
+/// `Authoritative` ⟺ every entry that folds into the response hash was
+/// freshly observed at this probe — equivalently, no non-observation
+/// (mtime-skip clone or degraded enumeration) lies on an obligation
+/// chain. `Undischarged` is the refuse-to-fire tripwire: the walker
+/// could not discharge the proof obligation at `first_unread`, so the
+/// engine must not derive a quiescence verdict from this response.
+///
+/// Rides **only** the inbound proof outcome — never stamped onto a
+/// stored `DirSnapshot` (`current` / `baseline` stay pure content;
+/// stamping would corrupt `dir_hash` equality and conflate "what the
+/// tree is" with "how well we saw it").
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ProofAuthority {
+    Authoritative,
+    Undischarged { first_unread: Arc<Path> },
+}
+
 /// Walker outcome.
 ///
-/// Four variants, intent-agnostic on Vanished/Failed (the engine routes
-/// those by `Profile.state` discriminator + pre-/post-fire phase, not by
-/// request shape — a vanished anchor is a vanished anchor regardless of
-/// whether the walker was looking at a file or a directory).
+/// Five variants. `Vanished` / `Failed` are intent-agnostic (the engine
+/// routes those by `Profile.state` discriminator + pre-/post-fire
+/// phase, not by request shape — a vanished anchor is a vanished anchor
+/// regardless of whether the walker was looking at a file or a
+/// directory). The two directory outcomes are **type-distinct by query
+/// kind**: a `Subtree` proof carries its [`ProofAuthority`]
+/// certificate; a `Descent` enumeration cannot even name one.
 #[derive(Debug, Clone)]
 pub enum ProbeOutcome {
-    /// `AnchorFile` request returned a leaf observation. Sole producer is
-    /// the walker's `probe_anchor_file`.
+    /// `AnchorFile` request returned a leaf observation. Sole producer
+    /// is the walker's `probe_anchor_file`. A single `lstat` has no
+    /// mtime-skip concept, so an anchor read is definitionally
+    /// authoritative — the engine injects [`ProofAuthority::Authoritative`]
+    /// at dispatch; the wire carries no certificate here.
     AnchorOk(LeafEntry),
-    /// `Subtree` *or* `Descent` request returned a directory observation.
-    /// Descent and Subtree share a wire shape (`Arc<DirSnapshot>`) — what
-    /// differs is the engine-side dispatch state, not the data the walker
-    /// hands back. The snapshot is pure content (`root_meta`,
-    /// `captured_with`, `entries`); engine-side identity stays at the
-    /// dispatch layer (the owner's state-resident `ProbeSlot`).
-    SubtreeOk(Arc<DirSnapshot>),
-    /// Path absent (`ENOENT`) or kind mismatch (file probe found dir, dir
-    /// probe found file). Routed to whichever `dispatch_*_vanished`
+    /// `Subtree` request returned a directory observation **plus** the
+    /// walker-stamped [`ProofAuthority`] certifying whether every entry
+    /// that folds into the response hash was freshly observed at this
+    /// probe. Sole producer is the walker's `probe_subtree`. The
+    /// `authority` rides only this inbound outcome — never stamped onto
+    /// the stored snapshot.
+    SubtreeProven {
+        snapshot: Arc<DirSnapshot>,
+        authority: ProofAuthority,
+    },
+    /// `Descent` request returned one prefix level. Sole producer is the
+    /// walker's `probe_descent`. Descent dispatch reads
+    /// `arc.entries.get(name)` and discards the snapshot (never spliced
+    /// into `Profile.current`), so a descent enumeration carries **no**
+    /// proof — the absence of an `authority` field is the type-level
+    /// statement that structural queries are not quiescence
+    /// observations.
+    DirEnumerated(Arc<DirSnapshot>),
+    /// Path absent (`ENOENT`) or kind mismatch (file probe found dir,
+    /// dir probe found file). Routed to whichever `dispatch_*_vanished`
     /// corresponds to the Profile's state.
     Vanished,
     /// I/O error at the *root* of the probe (root `lstat`, permission,
@@ -334,7 +400,7 @@ impl WatchFailure {
     }
 }
 
-// `ProbeRequest::Subtree` carries baseline_subtree / force_walk / forced
+// `ProbeRequest::Subtree` carries baseline_subtree / obligation / forced
 // etc., so `Probe` dwarfs `Cancel`. Boxing it would add an allocation
 // per probe (every burst emits one `Probe`; `Cancel` is sparse) for no
 // gain: a `ProbeOp` lives in a `StepOutput::probe_ops` BTreeMap node,

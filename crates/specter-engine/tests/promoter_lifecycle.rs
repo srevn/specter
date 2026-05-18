@@ -242,7 +242,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: enum_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap_var_log),
+            outcome: ProbeOutcome::DirEnumerated(snap_var_log),
         }),
         now,
     );
@@ -300,17 +300,26 @@ fn full_lifecycle_attach_promote_seed_reap() {
         promote_out.diagnostics,
     );
 
-    // ---- dynamic Sub's Seed burst (no descent) ----
+    // ---- dynamic Sub's Seed burst (no descent, Batching-first) ----
     //
     // The forward-pass FINAL branch pre-ensured the `foo.log` slot
     // (via `tree.lookup -> tree.ensure_child(.., User)`) and stamped its
     // kind from the enumeration's `EntryKind::File`. Then the dynamic
     // Sub's `SubAttachAnchor::Resource` anchor routes `attach_sub_inner`
-    // through the resource-anchored branch, so the new
-    // Profile lands in `Active(Seed)` directly — no Pending descent.
+    // through the resource-anchored branch, so the new Profile lands in
+    // `Active(PreFire(Batching))` directly — no Pending descent.
     // Profile.kind = File (read from the freshly-stamped slot in
-    // attach_sub_inner) and the Seed burst mints an `AnchorFile`
-    // probe at the leaf.
+    // attach_sub_inner).
+    //
+    // The Seed is Batching-first: `start_seed_burst` emits NO
+    // probe at promote — the first Seed probe fires on the `Settle`
+    // timer expiry. The Seed burst started at the promote step's
+    // `now`, so its two settle windows are `now+SETTLE` and
+    // `now+SETTLE*2`. A File-anchored Profile mints `AnchorFile`
+    // probes; both responses are hash-equal `AnchorOk(leaf)`: the
+    // first sample is `Unstable` (`certified` starts `None`)
+    // and re-batches; the second is hash-equal ⇒ `Stable` ⇒
+    // `seed_pin_body` commits the baseline and finishes to Idle.
     {
         let p = e.profiles().get(dynamic_profile).expect("Profile alive");
         assert_eq!(
@@ -319,47 +328,97 @@ fn full_lifecycle_attach_promote_seed_reap() {
             "anchor classified as File from enumeration-observed kind",
         );
     }
-    let seed_corr = e
-        .pending_probe_for(ProbeOwner::Profile(dynamic_profile))
-        .expect("Seed-burst AnchorFile probe in flight");
     assert!(
-        promote_out.probe_ops().iter().any(|op| matches!(
-            op,
-            ProbeOp::Probe {
-                request: specter_core::ProbeRequest::AnchorFile { .. }
-            }
-        )),
-        "Seed burst on a File-anchored Profile emits AnchorFile, not Subtree",
+        e.pending_probe_for(ProbeOwner::Profile(dynamic_profile))
+            .is_none(),
+        "Batching-first Seed emits no probe at promote (no probe at attach)",
+    );
+    assert!(
+        !promote_out
+            .probe_ops()
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { .. })),
+        "no Seed probe on the promote step — it fires on settle expiry; \
+         got {:?}",
+        promote_out.probe_ops(),
     );
 
-    // ---- Seed-burst baseline establishes; no fire ----
-    //
-    // AnchorOk(LeafEntry) on the AnchorFile probe; the engine
-    // integrates the leaf as `Profile.current` (the baseline) and
-    // finishes the burst to Idle. A *fresh* Seed burst with no
-    // drift fires no Effect — the baseline is the recorded "how
-    // things look right now" against which future Standard bursts
-    // observe drift. This is `dispatch_seed_ok`'s no-drift terminal
-    // arm.
+    // The Seed-burst baseline establishes over the N=2 quiescence and
+    // fires no Effect: a *fresh* Seed with no drift records the
+    // baseline ("how things look right now") that future Standard
+    // bursts observe drift against — `dispatch_seed_ok`'s no-drift
+    // terminal arm. `seed_started` is the promote step's `now`.
     let leaf = LeafEntry::synthetic(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(10, 0));
-    let baseline_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(dynamic_profile),
-            correlation: seed_corr,
-            outcome: ProbeOutcome::AnchorOk(leaf),
-        }),
-        now,
-    );
-    assert!(
-        baseline_out.effects().is_empty(),
-        "fresh Seed verdict establishes baseline without firing; got effects={:?}",
-        baseline_out.effects(),
-    );
+    let seed_started = now;
+    let mut seed_settled = seed_started;
+    for (sample_idx, at) in [seed_started + SETTLE, seed_started + SETTLE * 2]
+        .into_iter()
+        .enumerate()
+    {
+        let mut verify_out: Option<specter_core::StepOutput> = None;
+        while let Some(entry) = e.pop_expired(at) {
+            verify_out = Some(e.step(
+                Input::TimerExpired {
+                    profile: entry.profile,
+                    kind: entry.kind,
+                    id: entry.id,
+                },
+                at,
+            ));
+        }
+        // The settle expiry drives `Batching → Verifying`, whose
+        // emission choke mints the Seed probe. A File-anchored Profile
+        // mints `AnchorFile`, not `Subtree` — re-expressed
+        // from the old "probe-at-attach" shape check (the probe now
+        // surfaces on the settle-expiry step, not on `promote_out`).
+        if sample_idx == 0 {
+            let verify_out = verify_out
+                .as_ref()
+                .expect("settle expiry stepped a TimerExpired");
+            assert!(
+                verify_out.probe_ops().iter().any(|op| matches!(
+                    op,
+                    ProbeOp::Probe {
+                        request: specter_core::ProbeRequest::AnchorFile { .. }
+                    }
+                )),
+                "Seed burst on a File-anchored Profile emits AnchorFile, \
+                 not Subtree; got {:?}",
+                verify_out.probe_ops(),
+            );
+        }
+        let seed_corr = e
+            .pending_probe_for(ProbeOwner::Profile(dynamic_profile))
+            .expect("Seed Verifying probe in flight after settle expiry");
+        // Both responses carry the same leaf (hash-equal) so the
+        // second sample is the `Stable` verdict that pins the baseline.
+        let probe_emit = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(dynamic_profile),
+                correlation: seed_corr,
+                outcome: ProbeOutcome::AnchorOk(leaf.clone()),
+            }),
+            at,
+        );
+        if sample_idx == 0 {
+            assert!(
+                probe_emit.effects().is_empty(),
+                "Seed prime sample (prior == None ⇒ Unstable) must not fire; \
+                 got effects={:?}",
+                probe_emit.effects(),
+            );
+        }
+        seed_settled = at;
+    }
+
+    // The AnchorFile probe shape is observable on the last settle
+    // expiry step (the Verifying transition's emission), not on
+    // `promote_out` — re-expressed from "probe-at-attach".
     {
         let p = e.profiles().get(dynamic_profile).expect("Profile alive");
         assert!(
             matches!(p.state(), specter_core::ProfileState::Idle),
-            "Profile returns to Idle after Seed completes; got {:?}",
+            "Profile returns to Idle after the N=2 Seed quiescence; got {:?}",
             p.state(),
         );
         assert!(
@@ -372,7 +431,9 @@ fn full_lifecycle_attach_promote_seed_reap() {
     //
     // ConfigDiff with the Promoter id under `removed`. The cascade
     // detaches the dynamic Sub (DynamicSubReaped), unwinds the proxy
-    // at /var/log, and drops the Promoter (PromoterReaped).
+    // at /var/log, and drops the Promoter (PromoterReaped). Stepped
+    // strictly after the Seed's two settle windows to keep instants
+    // monotonic.
     let reap_diff = WatchRegistryDiff {
         promoters: PromoterRegistryDiff {
             removed: vec![CompactString::from("logs")],
@@ -380,7 +441,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
         },
         ..Default::default()
     };
-    let reap_out = e.step(Input::ConfigDiff(reap_diff), now);
+    let reap_out = e.step(Input::ConfigDiff(reap_diff), seed_settled);
 
     assert!(
         e.promoters().get(pid).is_none(),
@@ -519,7 +580,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
             correlation: descent_q_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap_a),
+            outcome: ProbeOutcome::DirEnumerated(snap_a),
         }),
         now,
     );
@@ -809,7 +870,7 @@ fn sensor_overflow_reseeds_active_promoter() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
             correlation: initial_enum_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap_with(vec![])),
+            outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![])),
         }),
         now,
     );
@@ -1056,20 +1117,23 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
 
     // Drive the enumeration response containing `foo.log`. The
     // pre-placed leaf makes `attach_sub_inner` go immediate-Materialize,
-    // which calls `start_seed_burst(now)` — scheduling the
-    // `BurstDeadline` we assert against below.
+    // which calls `start_seed_burst(now)`. The Seed is
+    // Batching-first: `start_seed_burst` schedules BOTH a `Settle`
+    // timer at `now + SETTLE` and a `BurstDeadline` at
+    // `now + MAX_SETTLE` (no probe at attach). Both must derive from
+    // the threaded engine `now`, which is the property under test.
     let snap = dir_snap_with(vec![("foo.log", EntryKind::File, 10)]);
     let _promote_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: enum_corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         frozen,
     );
 
-    // The new dynamic Sub registered and its Profile is `Active(Seed)`
-    // with the `BurstDeadline` timer scheduled.
+    // The new dynamic Sub registered and its Profile is
+    // `Active(PreFire(Batching))` with the Seed's two timers scheduled.
     let dynamic_sub_id = {
         let promoted = dynamic_subs_of(&e, pid);
         assert_eq!(promoted.len(), 1, "exactly one dynamic Sub minted");
@@ -1081,10 +1145,33 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
         "dynamic Sub minted, not a sentinel",
     );
 
-    // The only timer in flight is the `BurstDeadline` for the dynamic
-    // Sub's Profile. Its deadline must be exactly `frozen + MAX_SETTLE`;
-    // before the fix it was `Instant::now() + MAX_SETTLE` (near real
-    // time, ~1_000_000 s earlier than the assertion expects).
+    // Two timers are in flight for the dynamic Sub's Profile: the
+    // Batching `Settle` (earliest, `frozen + SETTLE`) and the
+    // `BurstDeadline` (`frozen + MAX_SETTLE`). `next_deadline()`
+    // returns the earliest, so pop the `Settle` first — it is itself
+    // a now-derivation witness (must be exactly `frozen + SETTLE`,
+    // `kind == Settle`) — leaving the `BurstDeadline` as the next
+    // deadline. Before the fix the deadlines were
+    // `Instant::now() + {SETTLE,MAX_SETTLE}` (near real time,
+    // ~1_000_000 s earlier than the assertions expect); the
+    // exact-equality checks catch sub-second skew too. This
+    // re-expresses (and strengthens) the original single-timer
+    // BurstDeadline check — both Seed timers must derive
+    // from the step's `now`.
+    let settle_entry = e
+        .pop_expired(frozen + MAX_SETTLE)
+        .expect("Batching Settle scheduled by start_seed_burst");
+    assert!(
+        matches!(settle_entry.kind, specter_core::TimerKind::Settle),
+        "earliest dynamic-Sub timer is the Batching Settle; got {:?}",
+        settle_entry.kind,
+    );
+    assert_eq!(
+        settle_entry.deadline,
+        frozen + SETTLE,
+        "dynamic Sub's Batching Settle must derive from the step's `now`, \
+         not from the system clock",
+    );
     let next_deadline = e
         .next_deadline()
         .expect("BurstDeadline scheduled by start_seed_burst");

@@ -29,11 +29,12 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ArgPart, ArgTemplate, BurstIntent, ChildEntry, ClassSet, Diagnostic, DirChild,
-    DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity, Input,
-    LeafEntry, Placeholder, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    Profile, ProfileIdentity, ProfileMap, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubAttachAnchor, SubAttachRequest, SubParams, Tree, WatchOp,
+    ActionProgram, ActiveBurst, ArgPart, ArgTemplate, BurstIntent, ChildEntry, ClassSet,
+    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent,
+    FsIdentity, Input, LeafEntry, Placeholder, PostFireBurst, PostFirePhase, ProbeCorrelation,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, Profile, ProfileIdentity, ProfileMap,
+    ProfileState, ProofAuthority, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    SubAttachAnchor, SubAttachRequest, SubParams, TimerKind, Tree, WatchOp,
 };
 use specter_engine::{Engine, covers};
 use std::collections::BTreeMap;
@@ -173,7 +174,10 @@ fn drive_standard_burst_to_stable(
                 Input::ProbeResponse(ProbeResponse {
                     owner: ProbeOwner::Profile(pid),
                     correlation: c,
-                    outcome: ProbeOutcome::SubtreeOk(snap.clone()),
+                    outcome: ProbeOutcome::SubtreeProven {
+                        snapshot: snap.clone(),
+                        authority: ProofAuthority::Authoritative,
+                    },
                 }),
                 t,
             );
@@ -205,6 +209,163 @@ fn drain_to_probe_correlation(e: &mut Engine, t: Instant) -> Option<ProbeCorrela
     last_correlation
 }
 
+/// Expire the Seed burst's first `Settle` window and return the first
+/// Seed probe's correlation. A Seed is Batching-first: no probe
+/// fires at attach; the first probe materializes only after the initial
+/// settle timer (`attach_now + SETTLE`) expires and the burst moves
+/// `Batching → Verifying`. Lighter than [`complete_seed_burst`] — for
+/// scenarios that terminate the Seed on its *first* response (Vanished,
+/// a stale/late reply) and never reach the second N=2 cycle.
+fn first_seed_probe(e: &mut Engine, pid: specter_core::ProfileId, t0: Instant) -> ProbeCorrelation {
+    let at = t0 + SETTLE;
+    while let Some(en) = e.pop_expired(at) {
+        e.step(
+            Input::TimerExpired {
+                profile: en.profile,
+                kind: en.kind,
+                id: en.id,
+            },
+            at,
+        );
+    }
+    e.pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("first Seed probe in flight after the initial settle expiry")
+}
+
+/// Drive a Batching-first Seed burst through its full N=2 quiescence
+/// proof to `Idle`. A Seed runs the same two-settle-spaced
+/// equal-sample proof as a Standard burst:
+///
+/// 1. expire settle #1 (`t0 + SETTLE`) → first Seed probe; respond with
+///    `seed_snap`. Prior `certified` is `None`, so the verdict
+///    is `Unstable` by construction → graft + re-batch.
+/// 2. expire settle #2 (`t0 + SETTLE*2`) → second Seed probe; respond
+///    with the hash-equal `seed_snap` → `Stable` → seed pin + rebase →
+///    `Idle`.
+///
+/// Hash-equal both responses and within `MAX_SETTLE`, so the burst
+/// reaches a clean `Stable` and is never forced. A fresh Seed emits no
+/// Effects.
+fn complete_seed_burst(
+    e: &mut Engine,
+    pid: specter_core::ProfileId,
+    seed_snap: std::sync::Arc<DirSnapshot>,
+    t0: Instant,
+) {
+    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
+        while let Some(en) = e.pop_expired(at) {
+            e.step(
+                Input::TimerExpired {
+                    profile: en.profile,
+                    kind: en.kind,
+                    id: en.id,
+                },
+                at,
+            );
+        }
+        let c = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Seed Verifying probe in flight after settle expiry");
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation: c,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: Arc::clone(&seed_snap),
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            at,
+        );
+        assert!(out.effects().is_empty(), "a fresh Seed never emits Effects");
+    }
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            specter_core::ProfileState::Idle,
+        ),
+        "Seed burst completes its N=2 proof and returns to Idle",
+    );
+}
+
+/// Drive the post-fire rebase loop to Idle — the structural mirror of
+/// [`complete_seed_burst`]'s Batching-first Seed N=2 proof.
+///
+/// The caller has driven `EffectComplete::Ok` so the burst is
+/// `Active(PostFire(Rebasing))` with the first rebase probe in flight;
+/// `first_rebase_corr` is that probe's correlation. Both reads carry
+/// `Arc::clone(&snap)` (an idempotent command): sample 1 is `Unstable`
+/// by construction (the post-fire `certified` prior is `None`) →
+/// `RebaseSettling`; the `RebaseSettle` spacing timer expires →
+/// `Rebasing` again; sample 2 hashes equal → `Stable` →
+/// `rebase_baseline` + finish to Idle. The spacing wait is `SETTLE`,
+/// far inside `max_settle`, so the loop never reaches the
+/// `RebaseCeiling`. Returns the final (`Stable`-step) `StepOutput` and
+/// the instant it was produced.
+fn complete_rebase_loop(
+    e: &mut Engine,
+    pid: specter_core::ProfileId,
+    snap: std::sync::Arc<DirSnapshot>,
+    first_rebase_corr: ProbeCorrelation,
+    t0: Instant,
+) -> (StepOutput, Instant) {
+    // Sample 1: prior `None` ⇒ Unstable ⇒ RebaseSettling.
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: first_rebase_corr,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: Arc::clone(&snap),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t0,
+    );
+    let spacing_timer = match e.profiles().get(pid).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::RebaseSettling { spacing_timer },
+                ..
+            }),
+            _,
+        ) => *spacing_timer,
+        other => {
+            panic!("rebase sample 1 must loop to Active(PostFire(RebaseSettling)); got {other:?}")
+        }
+    };
+
+    // The `RebaseSettle` spacing timer expires → re-arm `Rebasing`.
+    let t1 = t0 + SETTLE;
+    let rearm_out = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::RebaseSettle,
+            id: spacing_timer,
+        },
+        t1,
+    );
+    let corr2 = first_probe_correlation(&rearm_out)
+        .expect("RebaseSettle expiry re-arms the Rebasing probe");
+
+    // Sample 2: hash-equal ⇒ Stable ⇒ rebase_baseline + finish.
+    let stable_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: corr2,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: Arc::clone(&snap),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t1,
+    );
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle,),
+        "idempotent rebase loop closes Stable → Idle",
+    );
+    (stable_out, t1)
+}
+
 #[test]
 fn golden_path_full_lifecycle() {
     // The whole V4 spine: attach_sub → Seed → Idle → FsEvent → Standard →
@@ -229,34 +390,34 @@ fn golden_path_full_lifecycle() {
             source_promoter: None,
         },
     };
-    let attach_out = e.step(Input::AttachSub(req), now);
+    let t0 = now;
+    let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
+    let pid = pid_of(&e, sid);
 
-    // attach_sub emits Watch (anchor) + Probe (Seed). No Effect.
+    // attach_sub emits Watch (anchor) but NO Probe — a Seed is
+    // Batching-first; the first Seed probe fires only on settle expiry.
     assert!(
         attach_out
             .watch_ops
             .iter()
             .any(|op| matches!(op, WatchOp::Watch { .. }))
     );
-    let seed_correlation =
-        first_probe_correlation(&attach_out).expect("Seed Probe fires immediately");
+    assert!(
+        first_probe_correlation(&attach_out).is_none(),
+        "Batching-first Seed emits no probe at attach",
+    );
     assert!(attach_out.effects().is_empty());
 
-    // Seed Ok → baseline = current = empty snapshot; → Idle.
+    // Seed N=2 quiescence proof → baseline = current = empty snapshot;
+    // → Idle. Never emits Effects (fresh Profile).
     let snap_seed = dir_snap(vec![]);
-    let seed_resp = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_of(&e, sid)),
-            correlation: seed_correlation,
-            outcome: ProbeOutcome::SubtreeOk(snap_seed.clone()),
-        }),
-        now + Duration::from_millis(1),
-    );
-    assert!(seed_resp.effects().is_empty(), "Seed never emits Effects");
+    complete_seed_burst(&mut e, pid, snap_seed.clone(), t0);
 
-    // FsEvent on anchor → Standard Settling.
-    let t1 = now + Duration::from_millis(10);
+    // FsEvent on anchor → Standard Settling. The Seed consumed two
+    // settle windows (`t0 + SETTLE*2`); keep instants monotonic by
+    // opening the Standard burst strictly after.
+    let t1 = t0 + SETTLE * 2 + Duration::from_millis(10);
     let fs_out = e.step(
         Input::FsEvent {
             resource: r,
@@ -269,7 +430,6 @@ fn golden_path_full_lifecycle() {
     // Drive the Standard burst to a stable verdict (probing against the
     // empty snapshot; the burst stabilizes when current matches the
     // response). The walker advances time and injects probe responses.
-    let pid = pid_of(&e, sid);
     let stable_out = drive_standard_burst_to_stable(&mut e, pid, snap_seed.clone(), t1);
     assert_eq!(stable_out.effects().len(), 1);
     assert!(!stable_out.effects()[0].forced);
@@ -288,14 +448,13 @@ fn golden_path_full_lifecycle() {
     let rebase_correlation =
         first_probe_correlation(&post_effect).expect("post-Effect rebase probe");
 
-    // Rebase Ok with the same snapshot → Idle; baseline := current
-    // (the post-command tree).
-    let _final_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: rebase_correlation,
-            outcome: ProbeOutcome::SubtreeOk(snap_seed),
-        }),
+    // Post-fire N=2 rebase loop (idempotent — same snapshot) → Idle;
+    // baseline := current (the post-command tree).
+    let (_final_out, _) = complete_rebase_loop(
+        &mut e,
+        pid,
+        snap_seed,
+        rebase_correlation,
         t1 + SETTLE * 16 + Duration::from_millis(1),
     );
 }
@@ -327,26 +486,26 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
             source_promoter: None,
         },
     };
-    let attach_out = e.step(Input::AttachSub(req), now);
+    let t0 = now;
+    let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
 
-    // Seed → Idle with an empty baseline.
-    let seed_correlation =
-        first_probe_correlation(&attach_out).expect("Seed Probe fires immediately");
-    let snap = dir_snap(vec![]);
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: seed_correlation,
-            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
-        }),
-        now + Duration::from_millis(1),
+    // Seed → Idle with an empty baseline. The Seed is
+    // Batching-first (no probe at attach) and runs an N=2 quiescence
+    // proof before pinning the empty baseline.
+    assert!(
+        first_probe_correlation(&attach_out).is_none(),
+        "Batching-first Seed emits no probe at attach",
     );
+    let snap = dir_snap(vec![]);
+    complete_seed_burst(&mut e, pid, snap.clone(), t0);
 
     // First fire cycle: FsEvent → Standard → Effect → EffectComplete →
     // Rebase Ok → Idle. The Sub's has_fired is set by the emission.
-    let t1 = now + Duration::from_millis(10);
+    // Open the Standard burst after the Seed's two settle windows so
+    // instants stay monotonic.
+    let t1 = t0 + SETTLE * 2 + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
             resource: r,
@@ -366,20 +525,15 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
     );
     let rebase_correlation =
         first_probe_correlation(&post_effect).expect("post-Effect rebase probe");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: rebase_correlation,
-            outcome: ProbeOutcome::SubtreeOk(snap.clone()),
-        }),
+    // Post-fire N=2 rebase loop (idempotent) → Idle; baseline := the
+    // post-command tree. The helper asserts the loop closes to Idle
+    // before the trailing event below.
+    let _ = complete_rebase_loop(
+        &mut e,
+        pid,
+        snap.clone(),
+        rebase_correlation,
         t1 + SETTLE * 16 + Duration::from_millis(1),
-    );
-    assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            specter_core::ProfileState::Idle,
-        ),
-        "fire cycle completed to Idle before the trailing event",
     );
 
     // Trailing latched anchor event opens a spurious Standard burst.
@@ -404,7 +558,10 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
                 Input::ProbeResponse(ProbeResponse {
                     owner: ProbeOwner::Profile(pid),
                     correlation: c,
-                    outcome: ProbeOutcome::SubtreeOk(snap.clone()),
+                    outcome: ProbeOutcome::SubtreeProven {
+                        snapshot: snap.clone(),
+                        authority: ProofAuthority::Authoritative,
+                    },
                 }),
                 t,
             );
@@ -449,10 +606,19 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
             source_promoter: None,
         },
     };
-    let out = e.step(Input::AttachSub(req), Instant::now());
+    let t0 = Instant::now();
+    let out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let correlation = first_probe_correlation(&out).expect("Seed probe");
     let pid = pid_of(&e, sid);
+
+    // The Seed is Batching-first; the first Seed probe fires
+    // only after the initial settle expiry. The Vanished arrives on
+    // that first probe — terminal, no second N=2 cycle.
+    assert!(
+        first_probe_correlation(&out).is_none(),
+        "Batching-first Seed emits no probe at attach",
+    );
+    let correlation = first_seed_probe(&mut e, pid, t0);
 
     let resp_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -460,7 +626,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
-        Instant::now(),
+        t0 + SETTLE + Duration::from_millis(1),
     );
     assert!(resp_out.diagnostics.iter().any(|d| matches!(
         d,
@@ -492,19 +658,32 @@ fn pending_event_race_late_probe_response_discarded() {
             source_promoter: None,
         },
     };
-    let attach_out = e.step(Input::AttachSub(req), now);
+    let t0 = now;
+    let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
-    let stale_correlation = first_probe_correlation(&attach_out).expect("Seed probe correlation");
 
-    // Inject FsEvent → transitions to Settling (preserving Seed intent),
-    // emits Cancel.
+    // The Seed is Batching-first (no probe at attach). The
+    // first Seed probe materializes only after the initial settle
+    // expiry; its correlation is the one the intervening FsEvent will
+    // render stale.
+    assert!(
+        first_probe_correlation(&attach_out).is_none(),
+        "Batching-first Seed emits no probe at attach",
+    );
+    let stale_correlation = first_seed_probe(&mut e, pid, t0);
+
+    // Inject FsEvent while the first Seed probe is in flight
+    // (Verifying). `event_drives_batching` Cancels + disarms that
+    // verify and re-arms Batching, preserving Seed intent — the
+    // correlation above is now stale.
+    let evt_t = t0 + SETTLE + Duration::from_millis(1);
     let _evt_out = e.step(
         Input::FsEvent {
             resource: r,
             event: FsEvent::Modified,
         },
-        now,
+        evt_t,
     );
 
     // Late ProbeResponse with the now-stale correlation arrives.
@@ -512,9 +691,12 @@ fn pending_event_race_late_probe_response_discarded() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: stale_correlation,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        now + Duration::from_millis(1),
+        evt_t + Duration::from_millis(1),
     );
     assert!(
         late_resp
@@ -522,7 +704,18 @@ fn pending_event_race_late_probe_response_discarded() {
             .iter()
             .any(|d| matches!(d, Diagnostic::StaleProbeResponse { .. }))
     );
-    // No baseline change; Profile still Active.
+    // No baseline change; Profile still Active (re-batched as Seed).
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            specter_core::ProfileState::Active(..),
+        ),
+        "Profile remains Active after the stale late response is discarded",
+    );
+    assert!(
+        e.profiles().get(pid).unwrap().baseline().is_none(),
+        "stale late response must not commit a baseline",
+    );
 }
 
 #[test]
@@ -545,10 +738,21 @@ fn seed_burst_descendants_watched_via_first_probe() {
             source_promoter: None,
         },
     };
-    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let t0 = Instant::now();
+    let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
-    let correlation = first_probe_correlation(&attach_out).unwrap();
+
+    // The Seed is Batching-first: descendants are watched via
+    // the *first* Seed probe, which materializes only after the initial
+    // settle expiry — not at attach. The first sample's verdict is
+    // Unstable (no prior), but `apply_snapshot` still runs the
+    // reconcile / Watch side effects on that first response.
+    assert!(
+        first_probe_correlation(&attach_out).is_none(),
+        "Batching-first Seed emits no probe at attach",
+    );
+    let correlation = first_seed_probe(&mut e, pid, t0);
 
     let snap = dir_snap(vec![
         ("foo.rs", EntryKind::File, 1),
@@ -558,9 +762,12 @@ fn seed_burst_descendants_watched_via_first_probe() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: snap,
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        Instant::now(),
+        t0 + SETTLE + Duration::from_millis(1),
     );
     let watches = resp_out
         .watch_ops
@@ -594,23 +801,23 @@ fn force_fire_emits_effect_with_forced_true() {
             source_promoter: None,
         },
     };
-    let attach_out = e.step(Input::AttachSub(req), now);
+    let t0 = now;
+    let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
-    let seed_corr = first_probe_correlation(&attach_out).unwrap();
 
-    // Complete the Seed burst with empty baseline.
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: seed_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now + Duration::from_millis(1),
+    // Complete the Seed burst with an empty baseline. The Seed
+    // is Batching-first (no probe at attach) and runs an N=2 quiescence
+    // proof before pinning.
+    assert!(
+        first_probe_correlation(&attach_out).is_none(),
+        "Batching-first Seed emits no probe at attach",
     );
+    complete_seed_burst(&mut e, pid, dir_snap(vec![]), t0);
 
-    // FsEvent → Standard Settling.
-    let t1 = now + Duration::from_millis(10);
+    // FsEvent → Standard Settling. Open it after the Seed's two settle
+    // windows so instants stay monotonic.
+    let t1 = t0 + SETTLE * 2 + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
             resource: r,
@@ -630,7 +837,10 @@ fn force_fire_emits_effect_with_forced_true() {
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(pid),
                 correlation: corr,
-                outcome: ProbeOutcome::SubtreeOk(snap),
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: snap,
+                    authority: ProofAuthority::Authoritative,
+                },
             }),
             deadline_t,
         );
@@ -666,12 +876,22 @@ fn step_output_is_sorted() {
             source_promoter: None,
         },
     };
-    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let t0 = Instant::now();
+    let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = pid_of(&e, sid);
-    let correlation = first_probe_correlation(&attach_out).unwrap();
+
+    // The attach output is probe-less (Batching-first Seed) and
+    // carries no reconciled descendants. The multi-Watch StepOutput is
+    // the *first* Seed probe response (post initial settle expiry),
+    // where descendants reconcile — assert sortedness there.
+    assert!(
+        first_probe_correlation(&attach_out).is_none(),
+        "Batching-first Seed emits no probe at attach",
+    );
+    let correlation = first_seed_probe(&mut e, pid, t0);
     let leaves: Vec<(String, EntryKind, u64)> = (0..5)
-        .map(|i| (format!("file-{i}"), EntryKind::File, 100 + i))
+        .map(|i| (format!("dir-{i}"), EntryKind::Dir, 100 + i))
         .collect();
     let snap = dir_snap(
         leaves
@@ -683,9 +903,12 @@ fn step_output_is_sorted() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: snap,
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        Instant::now(),
+        t0 + SETTLE + Duration::from_millis(1),
     );
     let resources: Vec<ResourceId> = out
         .watch_ops

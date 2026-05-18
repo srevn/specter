@@ -21,9 +21,9 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta,
-    DirSnapshot, EffectScope, EntryKind, FsIdentity, Input, LeafEntry, ProbeCorrelation, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
+    DirSnapshot, EffectScope, EntryKind, FsIdentity, Input, LeafEntry, ProbeOutcome, ProbeOwner,
+    ProbeResponse, ProfileId, ProofAuthority, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -57,11 +57,53 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     ))
 }
 
-fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops().iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.correlation()),
-        ProbeOp::Cancel { .. } => None,
-    })
+/// Drive a fresh-attach Seed burst from `Active(PreFire(Batching))`
+/// through the N=2 quiescence proof to pinned `Idle`, committing `snap`
+/// as `current` + `baseline`.
+///
+/// A Seed burst is Batching-first and pins only on the *second*
+/// settle-spaced equal `Authoritative` sample — `CertifiedPrior::advance`
+/// returns `Unstable` on the first by construction (no prior
+/// `certified`). Each cycle drains the due settle timer
+/// (`Batching → Verifying`, Seed probe emitted) then answers it with
+/// `snap`; the equal second hash is `Stable` ⇒ pin. `t0` is the attach
+/// instant — settle deadlines fall at `t0 + SETTLE` and `t0 + 2·SETTLE`,
+/// both well inside `MAX_SETTLE` (never forced). The setup builds one
+/// Profile, so draining all due timers at each deadline is `pid`-exact.
+fn drive_fresh_seed_to_idle(e: &mut Engine, pid: ProfileId, snap: Arc<DirSnapshot>, t0: Instant) {
+    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
+        while let Some(entry) = e.pop_expired(at) {
+            e.step(
+                Input::TimerExpired {
+                    profile: entry.profile,
+                    kind: entry.kind,
+                    id: entry.id,
+                },
+                at,
+            );
+        }
+        let corr = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Seed Verifying probe in flight after settle expiry");
+        e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation: corr,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: Arc::clone(&snap),
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            at,
+        );
+    }
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            specter_core::ProfileState::Idle
+        ),
+        "two settle-spaced equal Seed samples pin the baseline → Idle",
+    );
 }
 
 /// Build an Engine + a Profile materialised at `root`. Returns the
@@ -91,20 +133,14 @@ fn engine_with_materialised_profile(
         events,
         false,
     );
-    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let t0 = Instant::now();
+    let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
-    // Drive Seed-Ok to materialise current + baseline.
-    let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        Instant::now(),
-    );
+    // Drive the Batching-first Seed through its N=2 proof so `current`
+    // and `baseline` pin to the empty-dir observation.
+    drive_fresh_seed_to_idle(&mut e, pid, dir_snap(vec![]), t0);
 
     (e, sid, pid, anchor, parent)
 }
@@ -386,18 +422,15 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
         ClassSet::EMPTY,
         false,
     );
-    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let t0 = Instant::now();
+    let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
-    let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
-    let snap = dir_snap(vec![("nested", EntryKind::Dir, 1)]);
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
-        }),
-        Instant::now(),
+    drive_fresh_seed_to_idle(
+        &mut e,
+        pid,
+        dir_snap(vec![("nested", EntryKind::Dir, 1)]),
+        t0,
     );
 
     // Confirm the child slot is materialised + watched.
@@ -444,7 +477,7 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
 ///    `Active(PreFire(Batching))`.
 /// 3. `FsEvent` at `/a/b` mid-Batching ⇒ `event_drives_batching`
 ///    tracks `b` in the burst's `dirty_resources` /
-///    `force_walk_resources` accumulator.
+///    `dirty_resources` accumulator.
 /// 4. `WatchOpRejected` on the anchor ⇒ `on_watch_op_rejected` ⇒
 ///    `finalize_anchor_lost(P)` ⇒ `discard_anchor_state(P)` ⇒
 ///    `release_descendant_claim(P)` walks the snapshot ⇒
@@ -473,21 +506,13 @@ fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
         ClassSet::STRUCTURE,
         false,
     );
-    let attach_out = e.step(Input::AttachSub(req), Instant::now());
+    let t0 = Instant::now();
+    let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Seed-Ok response materialises descendant /a/b as a Dir.
-    let corr = first_probe_corr(&attach_out).expect("Seed probe at attach");
-    let snap = dir_snap(vec![("b", EntryKind::Dir, 7)]);
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
-        }),
-        Instant::now(),
-    );
+    drive_fresh_seed_to_idle(&mut e, pid, dir_snap(vec![("b", EntryKind::Dir, 7)]), t0);
     let b_id = e.tree().lookup(Some(anchor), "b").expect("b materialised");
     assert_eq!(
         e.tree().get(b_id).unwrap().watch_demand(),
@@ -526,8 +551,8 @@ fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
             "descendant event keeps the burst Batching",
         );
         assert!(
-            pre.dirty_resources.contains(&b_id) && pre.force_walk_resources.contains(&b_id),
-            "event_drives_batching tracked b in dirty + force_walk",
+            pre.dirty_resources.contains(&b_id),
+            "event_drives_batching tracked b in dirty_resources (the obligation basis)",
         );
     }
 

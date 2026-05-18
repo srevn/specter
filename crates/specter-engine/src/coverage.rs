@@ -982,7 +982,8 @@ mod tests {
     // (co-anchor excluded), Seed never gates, and chain determinism.
 
     use specter_core::{
-        ActiveBurst, BurstFinish, BurstIntent, PreFireBurst, PreFirePhase, ProfileState, TimerId,
+        ActiveBurst, BurstFinish, BurstIntent, CertifiedPrior, PreFireBurst, PreFirePhase,
+        ProfileState, TimerId,
     };
     use std::collections::BTreeSet;
 
@@ -1040,7 +1041,7 @@ mod tests {
                 intent,
                 forced: false,
                 dirty_resources: BTreeSet::new(),
-                force_walk_resources: BTreeSet::new(),
+                certified: CertifiedPrior::new(),
                 probe_target: r,
                 last_event_time: None,
             }),

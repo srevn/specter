@@ -238,7 +238,7 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
             scan_config,
             captured_with,
             baseline_subtree,
-            force_walk,
+            obligation,
             forced,
             ..
         } => probe_subtree(
@@ -246,7 +246,7 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
             scan_config,
             *captured_with,
             baseline_subtree.as_ref(),
-            force_walk,
+            obligation,
             *forced,
         ),
         ProbeRequest::Descent { target_path, .. } => probe_descent(target_path),

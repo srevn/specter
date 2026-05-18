@@ -8,7 +8,7 @@ use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirSnapshot, GlobPattern, Input, ProbeCorrelation, ProbeOutcome,
-    ProbeOwner, ProbeRequest, ProfileId, ScanConfig,
+    ProbeOwner, ProbeRequest, ProfileId, ProofObligation, ScanConfig,
 };
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
@@ -36,15 +36,15 @@ fn segments(
         scan_config: cfg,
         captured_with: 0,
         baseline_subtree: None,
-        force_walk: BTreeSet::new(),
+        obligation: ProofObligation::Chains(BTreeSet::new()),
         forced: false,
     });
     let resp = match rx.recv_timeout(Duration::from_secs(2)).expect("response") {
         Input::ProbeResponse(r) => r,
         other => panic!("unexpected: {other:?}"),
     };
-    let ProbeOutcome::SubtreeOk(arc) = resp.outcome else {
-        panic!("expected SubtreeOk");
+    let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = resp.outcome else {
+        panic!("expected SubtreeProven");
     };
     let mut out = BTreeSet::new();
     collect_paths(&arc, "", &mut out);

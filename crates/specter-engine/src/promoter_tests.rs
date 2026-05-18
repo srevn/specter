@@ -279,14 +279,14 @@ fn descent_advances_one_segment_on_partial_response() {
         "first probe at /var"
     );
 
-    // Inject SubtreeOk: /var contains "log" as a Dir. Descent should
+    // Inject DirEnumerated: /var contains "log" as a Dir. Descent should
     // advance to /var/log; remaining = [].
     let snap = dir_snap_at(&[("log", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -336,7 +336,7 @@ fn enumeration_ok_promotes_final_match() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -392,7 +392,7 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -453,7 +453,7 @@ fn try_promote_is_idempotent_on_repeated_match() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -476,7 +476,7 @@ fn try_promote_is_idempotent_on_repeated_match() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr2,
-            outcome: ProbeOutcome::SubtreeOk(snap2),
+            outcome: ProbeOutcome::DirEnumerated(snap2),
         }),
         Instant::now(),
     );
@@ -533,7 +533,7 @@ fn derived_gate_equivalence_across_attach_reap_orderings() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -586,7 +586,7 @@ fn derived_gate_equivalence_across_attach_reap_orderings() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr3,
-            outcome: ProbeOutcome::SubtreeOk(snap3),
+            outcome: ProbeOutcome::DirEnumerated(snap3),
         }),
         Instant::now(),
     );
@@ -642,7 +642,7 @@ fn reenumeration_of_stable_fanout_promotes_only_the_new_sibling() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -674,7 +674,7 @@ fn reenumeration_of_stable_fanout_promotes_only_the_new_sibling() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr2,
-            outcome: ProbeOutcome::SubtreeOk(snap2),
+            outcome: ProbeOutcome::DirEnumerated(snap2),
         }),
         Instant::now(),
     );
@@ -715,7 +715,7 @@ fn proxy_event_enqueues_and_dispatches() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -910,7 +910,7 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -1019,7 +1019,7 @@ fn prefix_pending_terminal_event_at_prefix_emits_fresh_descent_probe() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -1271,7 +1271,7 @@ fn pending_enumeration_target_clears_on_response() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -1442,7 +1442,7 @@ fn enumeration_vanished_cascades_subproxies() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr1,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -1458,7 +1458,7 @@ fn enumeration_vanished_cascades_subproxies() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr2,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -1661,7 +1661,7 @@ fn reap_promoter_detaches_dynamic_subs() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -1715,7 +1715,7 @@ fn reap_promoter_active_with_subproxies_clears_all() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -1783,7 +1783,7 @@ fn promote_one(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );

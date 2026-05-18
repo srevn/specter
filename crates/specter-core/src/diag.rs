@@ -56,8 +56,14 @@ pub enum BurstHelper {
     /// `Engine::transition_to_awaiting` — fire transition
     /// (PreFire → PostFire).
     TransitionToAwaiting,
-    /// `Engine::transition_to_rebasing` — Awaiting → Rebasing.
+    /// `Engine::transition_to_rebasing` — Awaiting → Rebasing (first
+    /// entry) or RebaseSettling → Rebasing (rebase-loop re-arm).
     TransitionToRebasing,
+    /// `Engine::rebase_unstable_loops_settling` — an unstable / unread
+    /// rebase response loops back through the spacing wait
+    /// (Rebasing → RebaseSettling), the post-fire analogue of
+    /// `unstable_response_drives_batching`.
+    RebaseUnstableLoopsSettling,
     /// `Engine::absorb_event_into_fire_tail` — post-fire FsEvent absorb.
     AbsorbEventIntoFireTail,
     /// `Engine::restart_burst_from_fire_tail_residual` — post-rebase
@@ -371,7 +377,7 @@ pub enum Diagnostic {
     /// resource-arm counterpart to [`Self::AttachPathInvalid`].
     AttachResourceStale { resource: ResourceId },
     /// A probe response's snapshot shape (`File` from `AnchorOk(_)` vs
-    /// `Dir` from `SubtreeOk(_)`) disagrees with the Profile's cached
+    /// `Dir` from `SubtreeProven { .. }`) disagrees with the Profile's cached
     /// [`crate::Profile::kind`]. Structurally unreachable in v1 (the
     /// engine types each probe request to the Profile's kind and the
     /// walker's outcome matches by construction), so an emission
@@ -419,6 +425,78 @@ pub enum Diagnostic {
     AwaitGateDeadlineElapsed {
         profile: ProfileId,
         outstanding: u32,
+    },
+    /// A `forced` (max-settle) verify returned a probe the walker could
+    /// not fully discharge: a non-observation (an mtime-skipped or
+    /// degraded frame) lies on an obligation chain at `first_unread`, so
+    /// the response cannot certify quiescence. The engine refuses to act
+    /// on an unprovable tree — it finishes the burst to Idle **without**
+    /// committing the unread snapshot to `current` (an unread region
+    /// must never become the dedup / Seed baseline) and **without**
+    /// advancing the carrier's certified-sample proof, then releases the
+    /// probe slot. This is a liveness terminal, not a wedge: the next
+    /// `FsEvent` opens a fresh burst, and a transient cause (e.g. an
+    /// `EACCES` later cleared) recovers on its own. The non-forced case
+    /// retries silently within the burst's settle window and never
+    /// reaches here.
+    ///
+    /// `intent` preserves which burst hit the ceiling — "a Seed could
+    /// not establish a baseline" and "a Standard could not reconfirm"
+    /// are distinct operator stories on the same terminal. The engine's
+    /// consequence is identical for both (the single
+    /// `undischarged_consequence` site); the field exists for log
+    /// readability, exactly as on [`Self::ProbeVanished`] /
+    /// [`Self::ProbeFailed`].
+    ///
+    /// First diagnostic to pair a [`ProfileId`] with an `Arc<Path>`:
+    /// `first_unread` is the walker's path-based ledger entry (the
+    /// walker has no `Tree` / [`ResourceId`]), so the path is mandated
+    /// by the wire, not chosen by precedent.
+    QuiescenceCeilingUnreadable {
+        profile: ProfileId,
+        first_unread: Arc<Path>,
+        intent: BurstIntent,
+    },
+    /// The post-fire rebase loop reached its ceiling while the
+    /// post-command tree was still moving: two settle-spaced
+    /// `WholeSubtree` reads kept disagreeing until the bounded
+    /// rebase-ceiling elapsed. The engine pins the freshest observation
+    /// as the new baseline anyway (a bounded terminal, not a wedge) and
+    /// finishes the burst — it cannot loop forever waiting for a
+    /// command whose output never settles.
+    ///
+    /// Deliberately **loud**, unlike the pre-fire forced deadline-fire
+    /// (which is silent): a fired command whose tree never quiesces is a
+    /// distinct operator story (a runaway/streaming command, or a
+    /// `settle` shorter than the command's own write cadence) worth a
+    /// log line, where a pre-fire forced fire is the expected
+    /// max-settle fallback. `intent` distinguishes a Standard post-fire
+    /// rebase from a Seed-drift one, exactly as on [`Self::ProbeVanished`]
+    /// / [`Self::ProbeFailed`].
+    RebaseCeilingStillChanging {
+        profile: ProfileId,
+        intent: BurstIntent,
+    },
+    /// The post-fire rebase loop reached its ceiling and the final
+    /// `WholeSubtree` read could not discharge its obligation: a
+    /// non-observation (an mtime-skipped / degraded frame) lies on an
+    /// obligation chain at `first_unread`, so the response cannot
+    /// certify the post-command tree. The engine refuses to rebase
+    /// `baseline := current` blind — it finishes the burst **without**
+    /// committing the unread snapshot and **without** advancing the
+    /// rebase carrier's proof, leaving the prior baseline in place. Not
+    /// a wedge: the next `FsEvent` opens a fresh burst and a transient
+    /// cause (e.g. an `EACCES` later cleared) recovers on its own.
+    ///
+    /// The post-fire analog of [`Self::QuiescenceCeilingUnreadable`]
+    /// (which is the *pre-fire* verify ceiling); same `Arc<Path>` +
+    /// `intent` shape, distinct terminal so the operator story ("could
+    /// not reconfirm the post-command tree" vs "could not reconfirm /
+    /// establish a pre-fire baseline") survives.
+    RebaseCeilingUnreadable {
+        profile: ProfileId,
+        first_unread: Arc<Path>,
+        intent: BurstIntent,
     },
     /// `Input::SensorOverflow` arrived — the kernel's event queue
     /// dropped record(s) over `scope` and the watcher surfaced the

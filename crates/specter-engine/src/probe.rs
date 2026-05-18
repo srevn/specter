@@ -35,9 +35,15 @@
 //!    choke that resolves the owner's state *once*, reads the
 //!    correlation **back off the armed slot** (so armed-iff-emitted is
 //!    structural — an empty/absent slot emits nothing and no second
-//!    copy of the correlation can diverge), consumes the
-//!    pre-fire/rebase force-walk accumulator, and renders the
-//!    kind-dispatched wire. It reads engine state, so it homes here
+//!    copy of the correlation can diverge), materializes the
+//!    per-carrier proof obligation (the pre-fire Standard burst's
+//!    `dirty_resources` projected to `Chains`; `WholeSubtree` for Seed
+//!    and the post-fire Rebase, neither of which has a trustworthy
+//!    prior to skip against), and renders the kind-dispatched wire.
+//!    Every read is immutable: the choke is a pure `&self` state→wire
+//!    projection (like Descent), with no accumulator drain — the
+//!    fire-tail residual reset is owned by `transition_to_rebasing`,
+//!    not the emission path. It reads engine state, so it homes here
 //!    without the SRP compromise the prior stateless `emit_*`
 //!    constructors carried. Read-back and the launch sites' loud arm
 //!    are **co-required**, not redundant: read-back guarantees no
@@ -55,14 +61,13 @@
 //!    that pins it under fuzzing and property tests.
 
 use crate::Engine;
-use crate::burst::build_force_walk;
+use crate::burst::build_obligation_chains;
 use crate::path::empty_path;
 use specter_core::{
     ActiveBurst, BurstIntent, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOwner,
-    ProbeRequest, Profile, ProfileState, Promoter, PromoterState, ResourceId, ResourceKind,
-    StepOutput, subtree_at_dir,
+    ProbeRequest, Profile, ProfileState, Promoter, PromoterState, ProofObligation, ResourceId,
+    ResourceKind, StepOutput, subtree_at_dir,
 };
-use std::collections::BTreeSet;
 
 /// State-derived routing class for a probe response — what the
 /// dispatcher needs that the response wire does not supply.
@@ -89,13 +94,16 @@ pub(crate) enum ProbeRoute {
     /// Profile pre-fire stability probe. `intent` / `forced` are read
     /// off the `PreFireBurst` for the per-intent dispatch fan-out.
     Verifying { intent: BurstIntent, forced: bool },
-    /// Profile post-fire baseline-capture probe. The outcome routes
-    /// straight through `dispatch_rebase_*`.
+    /// Profile post-fire rebase probe. The outcome routes through the
+    /// shared `certify_probe_response` certifier (kind-check + N=2
+    /// quiescence fold over the post-command tree) and then
+    /// `dispatch_rebase_*`; no payload — the variant is the whole
+    /// routing decision.
     Rebasing,
     /// Promoter proxy enumeration (`Active`). `target` is the proxy the
     /// probe enumerates, read from the enumeration slot's tag — the
     /// wire is path-only, so it is the canonical dispatch key across
-    /// every outcome (`SubtreeOk` / `Vanished` / `Failed`).
+    /// every outcome (`DirEnumerated` / `Vanished` / `Failed`).
     Enumerating { target: ResourceId },
 }
 
@@ -213,7 +221,9 @@ impl Engine {
                     },
                     ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
                         PostFirePhase::Rebasing(_) => Some(ProbeRoute::Rebasing),
-                        PostFirePhase::Awaiting { .. } => None,
+                        PostFirePhase::Awaiting { .. } | PostFirePhase::RebaseSettling { .. } => {
+                            None
+                        }
                     },
                     ProfileState::Idle => None,
                 }?;
@@ -362,7 +372,7 @@ impl Engine {
     /// orphan-stall — it emits no diagnostic at all); without read-back a
     /// missed arm would orphan a threaded correlation. Each kills a
     /// distinct failure; neither is redundant.
-    pub(crate) fn emit_owner_probe(&mut self, owner: ProbeOwner, out: &mut StepOutput) {
+    pub(crate) fn emit_owner_probe(&self, owner: ProbeOwner, out: &mut StepOutput) {
         if let Some(request) = self.probe_emission_request(owner) {
             out.push_probe_op(ProbeOp::Probe { request });
         }
@@ -374,113 +384,119 @@ impl Engine {
     /// disjoint concern. `probe_gate` yields the `Copy` route the
     /// *response* demuxes on; this yields the owned `ProbeRequest` the
     /// *request* carries — heavier (`ScanConfig`, baseline `Arc`, the
-    /// drained force-walk) and `&mut` (it consumes the accumulator), so
-    /// it is deliberately a separate function rather than a `probe_gate`
-    /// caller; emission never depends on the response-shaped
-    /// [`ProbeRoute`].
+    /// proof obligation), so it is deliberately a separate function
+    /// rather than a `probe_gate` caller; emission never depends on the
+    /// response-shaped [`ProbeRoute`].
     ///
-    /// Three phases under **one** `profiles`/`promoters` resolution:
+    /// A pure `&self` state→wire projection — like Descent, no
+    /// accumulator drain. The post-fire fire-tail residual reset is
+    /// owned by `transition_to_rebasing` (the category-(a) phase
+    /// helper), not the emission path, so this choke reaches no
+    /// burst-mut at all.
+    ///
+    /// Two passes under **one** `profiles`/`promoters` resolution:
     ///
     /// 1. **Classify + read back.** Match the owner's state; read the
     ///    correlation *off the armed slot* (`?` ⇒ an empty slot returns
     ///    `None` and nothing is emitted — the structural armed-iff-
-    ///    emitted property). All phase-1 reads are `Copy`, so the
-    ///    immutable state borrow ends here.
-    /// 2. **Consume the force-walk accumulator** (pre-fire / rebase
-    ///    carriers only). The drain is **unconditional for the carrier**
-    ///    — `PreFireBurst::into_post_fire`'s clearing tripwire is
-    ///    kind-agnostic, so a File-anchored Verify must empty it too —
-    ///    even though the drained set is *used* only by the Subtree
-    ///    wire. This is the single consumer of that accumulator (the
-    ///    transition no longer threads a pre-drained copy through a wide
-    ///    constructor).
-    /// 3. **Render the wire** via `&self.tree` (disjoint from the
-    ///    profiles borrow). Descent / enumeration are path-only;
-    ///    Verify / Rebase kind-dispatch — `Some(File)` ⇒ `AnchorFile`,
-    ///    else ⇒ `Subtree` with the Profile's `(config, config_hash)`,
-    ///    `baseline_subtree`, and the drained force-walk. The kind rule
-    ///    lives here exactly once, so the prior positional constructors'
-    ///    nine-argument fan-out dissolves into struct literals.
-    fn probe_emission_request(&mut self, owner: ProbeOwner) -> Option<ProbeRequest> {
-        // `Copy` phase-1 classification: which carrier, and (for the
-        // pre-fire/rebase carriers) the target + `forced` read off
-        // state. The drained set is *not* carried here — it is not
-        // `Copy`; the mutable drain is phase 2, keyed by this.
+    ///    emitted property), and resolve `(target, forced)` from the
+    ///    same match.
+    /// 2. **Render the wire** via `&self.tree`. Descent / enumeration
+    ///    are path-only; Verify / Rebase kind-dispatch — `Some(File)`
+    ///    ⇒ `AnchorFile`, else ⇒ `Subtree` with the Profile's
+    ///    `(config, config_hash)`, `baseline_subtree`, and the
+    ///    per-carrier [`specter_core::ProofObligation`] (Standard ⇒
+    ///    `Chains` off the persisting `dirty_resources`; Seed and
+    ///    Rebase ⇒ `WholeSubtree` — no trustworthy prior — built
+    ///    lazily, never for a File anchor). The kind rule lives here
+    ///    exactly once, so the prior positional constructors' fan-out
+    ///    dissolves into struct literals.
+    fn probe_emission_request(&self, owner: ProbeOwner) -> Option<ProbeRequest> {
+        // `Copy` carrier classification: which carrier, and (for the
+        // pre-fire carrier) the target + `forced` + `intent` read off
+        // state. No obligation source is carried here — the borrowed
+        // `dirty_resources` is not `Copy`; it is read immutably off the
+        // still-borrowed Profile in the render pass, keyed by this.
         #[derive(Clone, Copy)]
         enum Carrier {
             /// Profile `Pending` / Promoter `PrefixPending` /
             /// Promoter `Active` enumeration — all path-only `Descent`
-            /// wires; the target is fully resolved in phase 1.
+            /// wires; the target is fully resolved here. No
+            /// proof obligation (a structural query is not a
+            /// quiescence observation).
             Descent(ResourceId),
-            /// Profile `Verifying` — target is `pre.probe_target`,
-            /// `forced` is `pre.forced`; force-walk drains `PreFire`.
-            PreFire(ResourceId, bool),
+            /// Profile `Verifying`. `target` = `pre.probe_target`,
+            /// `forced` = `pre.forced`. `intent` selects the
+            /// obligation kind: Seed ⇒ `WholeSubtree` (no trustworthy
+            /// prior); Standard ⇒ `Chains` projected off the
+            /// *persisting* `dirty_resources` (read immutably in the
+            /// render pass — the burst outlives this probe across
+            /// re-batching).
+            PreFire {
+                target: ResourceId,
+                forced: bool,
+                intent: BurstIntent,
+            },
             /// Profile `Rebasing` — target is the anchor, `forced` is
-            /// pre-fire-only (⇒ `false`); force-walk drains `PostFire`.
+            /// pre-fire-only (⇒ `false`). Obligation = `WholeSubtree`:
+            /// the command just mutated the tree, so there is no
+            /// trustworthy prior to skip against (exactly as Seed).
+            /// No accumulator drain — the fire-tail residual reset is
+            /// owned by `transition_to_rebasing`.
             Rebase,
         }
 
         match owner {
             ProbeOwner::Profile(pid) => {
-                let p = self.profiles.get_mut(pid)?;
+                let p = self.profiles.get(pid)?;
                 let anchor = p.resource;
 
-                // Phase 1 — read the correlation BACK off the armed slot
-                // via the *same* pub projection `pending_probe_for`
-                // reads (`probe_correlation` is `pub(crate)` to `core`;
-                // the engine never reaches past the state surface into a
-                // carrier's private slot). `?` on an empty slot ⇒ `None`
-                // ⇒ no probe: armed-iff-emitted, structurally. Then
-                // classify the carrier — target / `forced` / which burst
-                // the force-walk drains / kind-dispatch — independently
-                // of the correlation just read. A `Some` correlation
-                // *implies* a probe-bearing carrier (Batching / Draining
-                // / Awaiting / Idle hold no slot), so those arms are
-                // structurally dead when the read-back succeeded; they
-                // fold to `None` exactly as `probe_gate`'s twin arms do.
+                // Read the correlation BACK off the armed slot via the
+                // *same* pub projection `pending_probe_for` reads
+                // (`probe_correlation` is `pub(crate)` to `core`; the
+                // engine never reaches past the state surface into a
+                // carrier's private slot). `?` on an empty slot ⇒
+                // `None` ⇒ no probe: armed-iff-emitted, structurally.
+                // Then classify the carrier — target / `forced` /
+                // `intent` / kind-dispatch — independently of the
+                // correlation just read. A `Some` correlation *implies*
+                // a probe-bearing carrier (Batching / Draining /
+                // Awaiting / RebaseSettling / Idle hold no slot), so
+                // those arms are structurally dead when the read-back
+                // succeeded; they fold to `None` exactly as
+                // `probe_gate`'s twin arms do.
                 let correlation = p.state().probe_correlation()?;
                 let carrier = match p.state() {
                     ProfileState::Pending(d) => Carrier::Descent(d.current_prefix()),
                     ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
-                        PreFirePhase::Verifying(_) => {
-                            Carrier::PreFire(pre.probe_target, pre.forced)
-                        }
+                        PreFirePhase::Verifying(_) => Carrier::PreFire {
+                            target: pre.probe_target,
+                            forced: pre.forced,
+                            intent: pre.intent,
+                        },
                         PreFirePhase::Batching { .. } | PreFirePhase::Draining => return None,
                     },
                     ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
                         PostFirePhase::Rebasing(_) => Carrier::Rebase,
-                        PostFirePhase::Awaiting { .. } => return None,
+                        PostFirePhase::Awaiting { .. } | PostFirePhase::RebaseSettling { .. } => {
+                            return None;
+                        }
                     },
                     ProfileState::Idle => return None,
                 };
 
-                // Phase 2 — consume the force-walk accumulator off the
-                // pre-fire / rebase carrier. Unconditional for the
-                // carrier (the `into_post_fire` clearing tripwire is
-                // kind-agnostic); the immutable phase-1 borrow ended
-                // above, so this `&mut` re-projection of the *same* `p`
-                // is the second access of one resolution, not a second
-                // registry lookup.
-                let (target, forced, force_set) = match carrier {
-                    Carrier::Descent(prefix) => (prefix, false, BTreeSet::new()),
-                    Carrier::PreFire(t, f) => {
-                        let fs = p
-                            .pre_fire_burst_mut()
-                            .map(|pre| std::mem::take(&mut pre.force_walk_resources))
-                            .unwrap_or_default();
-                        (t, f, fs)
-                    }
-                    Carrier::Rebase => {
-                        let fs = p
-                            .post_fire_burst_mut()
-                            .map(|post| std::mem::take(&mut post.force_walk_resources))
-                            .unwrap_or_default();
-                        (anchor, false, fs)
-                    }
+                // The Rebase target is the anchor (`PostFireBurst`
+                // carries no `probe_target`); `forced` is pre-fire-only
+                // so `false`. No mutation here — the Rebase obligation
+                // is `WholeSubtree` (built in the render pass), so this
+                // resolution no longer needs `&mut` to drain anything.
+                let (target, forced) = match carrier {
+                    Carrier::Descent(prefix) => (prefix, false),
+                    Carrier::PreFire { target, forced, .. } => (target, forced),
+                    Carrier::Rebase => (anchor, false),
                 };
 
-                // Phase 3 — render via `&self.tree` (disjoint field from
-                // the `profiles` borrow). Descent is path-only; the
+                // Render via `&self.tree`. Descent is path-only; the
                 // pre-fire / rebase carriers kind-dispatch.
                 let target_path = self.tree.path_of(target).unwrap_or_else(empty_path);
                 Some(match carrier {
@@ -489,7 +505,7 @@ impl Engine {
                         correlation,
                         target_path,
                     },
-                    Carrier::PreFire(..) | Carrier::Rebase => match p.kind() {
+                    Carrier::PreFire { .. } | Carrier::Rebase => match p.kind() {
                         Some(ResourceKind::File) => ProbeRequest::AnchorFile {
                             owner,
                             correlation,
@@ -498,14 +514,65 @@ impl Engine {
                         // Dir or still-unclassified ⇒ the kind-agnostic
                         // Subtree walk; the walker returns `Vanished` on
                         // a kind mismatch and the engine recovers via
-                        // descent.
+                        // descent. The proof obligation is materialized
+                        // here — lazily (never for a File anchor) and
+                        // per carrier.
                         _ => {
                             let scan_config = p.config().clone();
                             let captured_with = p.config_hash();
                             let baseline_subtree = p
                                 .current_dir()
                                 .and_then(|root| subtree_at_dir(root, anchor, target, &self.tree));
-                            let force_walk = build_force_walk(&force_set, target, &self.tree);
+                            let obligation = match carrier {
+                                // Rebase / Seed: no trustworthy prior
+                                // exists, so nothing under the anchor
+                                // may be skipped — the whole subtree is
+                                // unproven until freshly read. Rebase
+                                // because the command just mutated the
+                                // tree (an in-place descendant edit need
+                                // not bump an ancestor mtime, so a
+                                // chains-only skip would certify a false
+                                // quiet); Seed because it has never
+                                // observed the tree.
+                                Carrier::Rebase
+                                | Carrier::PreFire {
+                                    intent: BurstIntent::Seed,
+                                    ..
+                                } => ProofObligation::WholeSubtree,
+                                // Standard: the event-dirty root→leaf
+                                // chains, projected off the *persisting*
+                                // `dirty_resources` (re-read immutably —
+                                // the carrier classified PreFire and the
+                                // stable `&Profile` borrow makes an
+                                // intervening state change unrepresentable).
+                                Carrier::PreFire {
+                                    intent: BurstIntent::Standard,
+                                    ..
+                                } => {
+                                    let ProfileState::Active(ActiveBurst::PreFire(pre), _) =
+                                        p.state()
+                                    else {
+                                        unreachable!(
+                                            "probe_emission_request: Profile {pid:?} left \
+                                             PreFire between carrier classification and the \
+                                             obligation build under one stable &Profile \
+                                             borrow"
+                                        )
+                                    };
+                                    ProofObligation::Chains(build_obligation_chains(
+                                        &pre.dirty_resources,
+                                        target,
+                                        &self.tree,
+                                    ))
+                                }
+                                // Descent emits ProbeRequest::Descent in
+                                // the outer arm and never reaches the
+                                // Subtree obligation builder.
+                                Carrier::Descent(_) => unreachable!(
+                                    "probe_emission_request: Descent carrier in the \
+                                     Subtree obligation builder"
+                                ),
+                            };
                             ProbeRequest::Subtree {
                                 owner,
                                 correlation,
@@ -513,7 +580,7 @@ impl Engine {
                                 scan_config,
                                 captured_with,
                                 baseline_subtree,
-                                force_walk,
+                                obligation,
                                 forced,
                             }
                         }
@@ -521,8 +588,9 @@ impl Engine {
                 })
             }
             ProbeOwner::Promoter(qid) => {
-                // Descent / enumeration are path-only; no force-walk, no
-                // kind dispatch, so an immutable `get` suffices. The
+                // Descent / enumeration are path-only; no proof
+                // obligation, no kind dispatch, so an immutable `get`
+                // suffices. The
                 // enumeration slot's tag is the proxy target the
                 // path-only wire cannot echo back.
                 let q = self.promoters.get(qid)?;

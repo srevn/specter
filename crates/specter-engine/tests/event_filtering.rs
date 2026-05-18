@@ -24,11 +24,11 @@
 use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, ChildEntry, ClassSet, DedupKey,
-    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input,
-    LeafEntry, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
-    SubAttachRequest, WatchOp,
+    ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, ChildEntry,
+    ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind,
+    FsEvent, FsIdentity, Input, LeafEntry, PreFireBurst, PreFirePhase, ProbeOutcome, ProbeOwner,
+    ProbeResponse, ProfileId, ProfileState, ProofAuthority, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use std::collections::BTreeMap;
@@ -68,38 +68,98 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
     ))
 }
 
-fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops().iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.correlation()),
-        ProbeOp::Cancel { .. } => None,
-    })
-}
-
-/// Drive the Profile from fresh attach through Seed-Ok → Idle. After this,
-/// `Profile.current` and `Profile.baseline` are set to `seed_snap`.
-fn complete_seed_burst(
-    e: &mut Engine,
-    pid: ProfileId,
-    attach_out: &StepOutput,
-    seed_snap: std::sync::Arc<DirSnapshot>,
-) {
-    let corr = first_probe_corr(attach_out).expect("Seed probe fires at attach");
-    let _ = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(seed_snap),
-        }),
-        Instant::now(),
-    );
+/// Drive a fresh-attach Seed burst through the N=2 quiescence proof to a
+/// pinned `Idle`, committing `seed_snap`. After this, `Profile.current`
+/// and `Profile.baseline` are both set to `seed_snap`.
+///
+/// A Seed burst is Batching-first: the probe no longer fires at
+/// attach. It pins only on the *second* settle-spaced equal
+/// `Authoritative` sample — `CertifiedPrior::advance` returns `Unstable`
+/// on the first sample by construction (no prior `certified`),
+/// which grafts + re-batches; the second hash-equal sample is `Stable`
+/// and pins. One cycle = expire this Profile's own settle timer
+/// (`Batching → Verifying`, Seed probe emitted) then answer it with a
+/// fixed-shape snapshot. Both responses MUST carry a hash-equal
+/// snapshot, so `seed_snap` is `Arc`-cloned for each.
+///
+/// The settle timer is stepped by the Profile's *own* `Batching`
+/// `settle_timer` id — not a global `pop_expired` drain — so the helper
+/// is `pid`-exact and leaves sibling Profiles untouched. With
+/// `SETTLE` ≪ `MAX_SETTLE`, two settle cycles fall far inside
+/// `burst_deadline`, so the pin is a clean `Stable` (never `forced`).
+fn complete_seed_burst(e: &mut Engine, pid: ProfileId, seed_snap: Arc<DirSnapshot>) {
+    let mut at = Instant::now();
+    for _ in 0..2 {
+        at += SETTLE;
+        let settle_id = match e.profiles().get(pid).unwrap().state() {
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Batching { settle_timer },
+                    ..
+                }),
+                _,
+            ) => *settle_timer,
+            other => panic!("expected Seed Active(PreFire(Batching)), got {other:?}"),
+        };
+        e.step(
+            Input::TimerExpired {
+                profile: pid,
+                kind: TimerKind::Settle,
+                id: settle_id,
+            },
+            at,
+        );
+        let correlation = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Seed Verifying probe in flight after settle expiry");
+        e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: Arc::clone(&seed_snap),
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            at,
+        );
+    }
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
-        "Seed-Ok transitions Profile to Idle",
+        "two settle-spaced equal Seed samples pin the baseline → Idle",
     );
 }
 
-/// Attach a Sub at `resource` with the supplied `events` mask. Returns the
-/// minted SubId, ProfileId, and `attach_out`.
+/// Expire a fresh Seed burst's settle timer so it advances
+/// `Active(PreFire(Batching)) → Verifying` and emits its first Seed
+/// probe (anchor target, `WholeSubtree`). A Seed burst is
+/// Batching-first — the probe no longer fires at attach; it emits one
+/// settle window later. `attach_now` is the instant the burst started;
+/// its settle deadline is `attach_now + SETTLE`. The setups using this
+/// build a single Profile, so draining every timer due at the deadline
+/// is `pid`-exact. For the full N=2 pin use [`complete_seed_burst`];
+/// this is the lighter primitive for tests that only inspect the first
+/// Seed probe / send a single terminal first response (Vanished /
+/// Failed / first-sample graft).
+fn seed_settle_to_verifying(e: &mut Engine, attach_now: Instant) -> Instant {
+    let at = attach_now + SETTLE;
+    while let Some(entry) = e.pop_expired(at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            at,
+        );
+    }
+    at
+}
+
+/// Attach a Sub at `resource` with the supplied `events` mask. Returns
+/// the minted SubId, ProfileId, `attach_out`, and the attach instant
+/// (the burst-start time the Seed `Batching` debounces from —
+/// the lighter [`seed_settle_to_verifying`] primitive needs it).
 fn attach_sub_with_events(
     e: &mut Engine,
     name: &str,
@@ -107,7 +167,7 @@ fn attach_sub_with_events(
     scope: EffectScope,
     events: ClassSet,
     config: ScanConfig,
-) -> (specter_core::SubId, ProfileId, StepOutput) {
+) -> (specter_core::SubId, ProfileId, StepOutput, Instant) {
     let req = SubAttachRequest::for_anchor(
         name.into(),
         SubAttachAnchor::Resource(resource),
@@ -119,10 +179,11 @@ fn attach_sub_with_events(
         events,
         false,
     );
-    let out = e.step(Input::AttachSub(req), Instant::now());
+    let t0 = Instant::now();
+    let out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
-    (sid, pid, out)
+    (sid, pid, out, t0)
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -147,7 +208,7 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
     let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
-    let (_sid, pid, attach_out) = attach_sub_with_events(
+    let (_sid, pid, _attach_out, t0) = attach_sub_with_events(
         &mut e,
         "build",
         root,
@@ -162,18 +223,28 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
         "default subtree-root mask (STRUCTURE|CONTENT) sets has_per_file_fds",
     );
 
-    // Drive the Seed probe with one File child. walk_pair runs against
-    // prior=None ⇒ pure-create path. With has_per_file_fds=true the File
-    // child gets a Watch op.
-    let corr = first_probe_corr(&attach_out).expect("Seed probe");
+    // The Seed probe fires one settle window after attach, not
+    // at attach. Drive the first Seed probe with one File child.
+    // walk_pair runs against prior=None ⇒ pure-create path. The first
+    // sample is `Unstable` by construction (no prior certified hash) so
+    // it does not pin, but `apply_snapshot` still grafts: with
+    // has_per_file_fds=true the File child gets a Watch op on this very
+    // (first) response.
+    let at = seed_settle_to_verifying(&mut e, t0);
+    let corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed probe in flight after settle expiry");
     let snap = dir_snap(vec![("file.txt", EntryKind::File, 1)]);
     let seed_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: snap,
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        Instant::now(),
+        at,
     );
 
     // Resource was materialized.
@@ -202,7 +273,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
     let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
-    let (_sid, pid, attach_out) = attach_sub_with_events(
+    let (_sid, pid, _attach_out, t0) = attach_sub_with_events(
         &mut e,
         "ls-only",
         root,
@@ -216,15 +287,22 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
         "STRUCTURE-only mask leaves has_per_file_fds = false",
     );
 
-    let corr = first_probe_corr(&attach_out).expect("Seed probe");
+    // The first Seed probe fires one settle window after attach.
+    let at = seed_settle_to_verifying(&mut e, t0);
+    let corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed probe in flight after settle expiry");
     let snap = dir_snap(vec![("file.txt", EntryKind::File, 1)]);
     let seed_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: snap,
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        Instant::now(),
+        at,
     );
 
     let file_id = e.tree().lookup(Some(root), "file.txt").expect("file slot");
@@ -255,7 +333,7 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
     let root = e.tree_mut().ensure_root("build", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
-    let (_sid_a, pid_a, _) = attach_sub_with_events(
+    let (_sid_a, pid_a, _, _) = attach_sub_with_events(
         &mut e,
         "make",
         root,
@@ -263,7 +341,7 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
         ClassSet::CONTENT,
         ScanConfig::builder().recursive(true).build(),
     );
-    let (_sid_b, pid_b, _) = attach_sub_with_events(
+    let (_sid_b, pid_b, _, _) = attach_sub_with_events(
         &mut e,
         "audit",
         root,
@@ -312,7 +390,7 @@ fn it_ef_2b_profile_events_invariant_across_sub_attach_detach() {
     let mask = ClassSet::CONTENT | ClassSet::METADATA;
     let cfg = || ScanConfig::builder().recursive(true).build();
 
-    let (sid_a, pid_a, _) =
+    let (sid_a, pid_a, _, _) =
         attach_sub_with_events(&mut e, "a", root, EffectScope::SubtreeRoot, mask, cfg());
     assert_eq!(
         e.profiles().get(pid_a).unwrap().events(),
@@ -321,7 +399,7 @@ fn it_ef_2b_profile_events_invariant_across_sub_attach_detach() {
     );
 
     // A sibling with identical identity joins the SAME Profile.
-    let (sid_b, pid_b, _) =
+    let (sid_b, pid_b, _, _) =
         attach_sub_with_events(&mut e, "b", root, EffectScope::SubtreeRoot, mask, cfg());
     assert_eq!(pid_a, pid_b, "identical identity ⇒ one shared Profile");
     assert_eq!(
@@ -368,7 +446,7 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
     let root = e.tree_mut().ensure_root("build", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
     let cfg = ScanConfig::builder().recursive(true).build();
-    let (_sid_a, pid_a, attach_a) = attach_sub_with_events(
+    let (_sid_a, pid_a, _, _) = attach_sub_with_events(
         &mut e,
         "make",
         root,
@@ -376,7 +454,7 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
         ClassSet::CONTENT,
         cfg.clone(),
     );
-    let (_sid_b, pid_b, attach_b) = attach_sub_with_events(
+    let (_sid_b, pid_b, _, _) = attach_sub_with_events(
         &mut e,
         "audit",
         root,
@@ -386,8 +464,8 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
     );
     // Drive both Seeds → Idle.
     let snap = dir_snap(vec![]);
-    complete_seed_burst(&mut e, pid_a, &attach_a, snap.clone());
-    complete_seed_burst(&mut e, pid_b, &attach_b, snap);
+    complete_seed_burst(&mut e, pid_a, snap.clone());
+    complete_seed_burst(&mut e, pid_b, snap);
 
     // MetadataChanged at the anchor — anchor events bypass class filter
     // for both Profiles. Both should drive bursts.
@@ -506,7 +584,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     // CONTENT-only mask on a Dir anchor — note: CONTENT registers no
     // bits on a Dir, but the class routing still uses Profile.events
     // for filtering.
-    let (_sid, pid, attach_out) = attach_sub_with_events(
+    let (_sid, pid, _, _) = attach_sub_with_events(
         &mut e,
         "watch",
         anchor,
@@ -514,7 +592,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
         ClassSet::CONTENT,
         ScanConfig::builder().recursive(true).build(),
     );
-    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
+    complete_seed_burst(&mut e, pid, dir_snap(vec![]));
 
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim(),
@@ -566,8 +644,8 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
 // IT-EF-6 — `MetadataChanged` on a CONTENT-only Sub does not fire
 //
 // Descendant `MetadataChanged` events on a Sub whose mask excludes
-// METADATA drop with `EventClassDropped` and do NOT extend
-// `dirty_resources` / `force_walk_resources` (the class filter sits
+// METADATA drop with `EventClassDropped` and do NOT extend the
+// pre-fire or post-fire burst's `dirty_resources` (the class filter sits
 // before dirty-set bumps). The Profile remains in its prior state; no
 // Effect emerges.
 // ───────────────────────────────────────────────────────────────────────
@@ -578,7 +656,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
     let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
-    let (_sid, pid, attach_out) = attach_sub_with_events(
+    let (_sid, pid, _, _) = attach_sub_with_events(
         &mut e,
         "build",
         root,
@@ -586,7 +664,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
         ClassSet::CONTENT,
         ScanConfig::builder().recursive(true).build(),
     );
-    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
+    complete_seed_burst(&mut e, pid, dir_snap(vec![]));
 
     // Materialize a covered descendant File. Bump watch_demand so the
     // event passes the EventOnUnwatchedResource head guard.
@@ -640,7 +718,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
     let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
-    let (_sid, pid, attach_out) = attach_sub_with_events(
+    let (_sid, pid, _, _) = attach_sub_with_events(
         &mut e,
         "build",
         root,
@@ -648,7 +726,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
         ClassSet::CONTENT,
         ScanConfig::builder().recursive(true).build(),
     );
-    complete_seed_burst(&mut e, pid, &attach_out, dir_snap(vec![]));
+    complete_seed_burst(&mut e, pid, dir_snap(vec![]));
 
     let child = e
         .tree_mut()
@@ -699,7 +777,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
     let cfg = ScanConfig::builder().recursive(true).build();
 
     // Profile A: events = CONTENT only.
-    let (_sid_a, _pid_a, attach_a) = attach_sub_with_events(
+    let (_sid_a, _pid_a, attach_a, _) = attach_sub_with_events(
         &mut e,
         "A",
         root,
@@ -731,7 +809,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
 
     // Profile B: events = METADATA on the same anchor (different mask
     // ⇒ different config_hash ⇒ separate Profile).
-    let (_sid_b, _pid_b, attach_b) = attach_sub_with_events(
+    let (_sid_b, _pid_b, attach_b, _) = attach_sub_with_events(
         &mut e,
         "B",
         root,
@@ -784,7 +862,7 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
     let root = e.tree_mut().ensure_root("build", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
     let cfg = ScanConfig::builder().recursive(true).build();
-    let (sid_a, pid_a, _) = attach_sub_with_events(
+    let (sid_a, pid_a, _, _) = attach_sub_with_events(
         &mut e,
         "make",
         root,
@@ -792,7 +870,7 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
         ClassSet::CONTENT,
         cfg.clone(),
     );
-    let (sid_b, pid_b, _) = attach_sub_with_events(
+    let (sid_b, pid_b, _, _) = attach_sub_with_events(
         &mut e,
         "audit",
         root,
@@ -837,7 +915,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
-    let (_sid, pid, attach_out) = attach_sub_with_events(
+    let (_sid, pid, _attach_out, t0) = attach_sub_with_events(
         &mut e,
         "watch",
         anchor,
@@ -852,15 +930,20 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
     // Seed Vanished: anchor was found at attach but disappeared before
-    // probe could read.
-    let corr = first_probe_corr(&attach_out).expect("Seed probe");
+    // the (settle-deferred) probe could read. Drive the first
+    // Seed probe out, then answer Vanished — terminal on the first
+    // response (no N=2 needed: the failure helper runs immediately).
+    let at = seed_settle_to_verifying(&mut e, t0);
+    let corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed probe in flight after settle expiry");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::Vanished,
         }),
-        Instant::now(),
+        at,
     );
 
     // Anchor's contribution is released; Profile back to Idle ready for
@@ -902,7 +985,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
         .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
-    let (sid, pid, attach_out) = attach_sub_with_events(
+    let (sid, pid, _attach_out, t0) = attach_sub_with_events(
         &mut e,
         "watch",
         anchor,
@@ -911,15 +994,19 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
         ScanConfig::builder().recursive(true).build(),
     );
 
-    // Step 2: Seed Vanished.
-    let corr = first_probe_corr(&attach_out).expect("Seed probe");
+    // Step 2: Seed Vanished (the probe fires one settle window
+    // after attach; Vanished is terminal on the first response).
+    let at = seed_settle_to_verifying(&mut e, t0);
+    let corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed probe in flight after settle expiry");
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::Vanished,
         }),
-        Instant::now(),
+        at,
     );
 
     // Step 3: StructureChanged at watch_root_parent triggers recovery.
@@ -972,7 +1059,7 @@ fn seed_failed_releases_anchor_claim() {
         .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
-    let (_sid, pid, attach_out) = attach_sub_with_events(
+    let (_sid, pid, _attach_out, t0) = attach_sub_with_events(
         &mut e,
         "watch",
         anchor,
@@ -981,14 +1068,19 @@ fn seed_failed_releases_anchor_claim() {
         ScanConfig::builder().recursive(true).build(),
     );
 
-    let corr = first_probe_corr(&attach_out).expect("Seed probe");
+    // The Seed probe fires one settle window after attach.
+    // Failed is terminal on the first response.
+    let at = seed_settle_to_verifying(&mut e, t0);
+    let corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Seed probe in flight after settle expiry");
     let _out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::Failed { errno: 13 },
         }),
-        Instant::now(),
+        at,
     );
 
     assert_eq!(
@@ -1011,20 +1103,17 @@ fn seed_failed_releases_anchor_claim() {
 
 /// Set up a Profile + a covered Dir child so the anchor cannot reap
 /// when the Profile detaches (the child's existence keeps the slot
-/// alive). Returns (root, child, sid, pid, attach_out).
+/// alive). Returns (root, child, sid, pid). The Seed burst is
+/// driven to a pinned `Idle` via the N=2 quiescence proof
+/// ([`complete_seed_burst`]) — the attach `StepOutput` is no longer
+/// needed (the probe fires on settle expiry, not at attach).
 fn setup_with_surviving_child(
     e: &mut Engine,
-) -> (
-    ResourceId,
-    ResourceId,
-    specter_core::SubId,
-    ProfileId,
-    StepOutput,
-) {
+) -> (ResourceId, ResourceId, specter_core::SubId, ProfileId) {
     let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
-    let (sid, pid, attach_out) = attach_sub_with_events(
+    let (sid, pid, _, _) = attach_sub_with_events(
         e,
         "build",
         root,
@@ -1037,7 +1126,7 @@ fn setup_with_surviving_child(
     // (the dir's `watch_demand` survives until the Profile's release
     // walks `walk_pair`'s delete path, which doesn't run on Vanished).
     let snap = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
-    complete_seed_burst(e, pid, &attach_out, snap);
+    complete_seed_burst(e, pid, snap);
 
     let child = e
         .tree()
@@ -1048,13 +1137,13 @@ fn setup_with_surviving_child(
         "covered Dir child carries watch_demand",
     );
 
-    (root, child, sid, pid, attach_out)
+    (root, child, sid, pid)
 }
 
 #[test]
 fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
     let mut e = Engine::new();
-    let (root, _child, sid, pid, _) = setup_with_surviving_child(&mut e);
+    let (root, _child, sid, pid) = setup_with_surviving_child(&mut e);
 
     // Drive a Standard burst.
     let t1 = Instant::now();
@@ -1118,7 +1207,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
 fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
     // Symmetric regression for dispatch_standard_failed.
     let mut e = Engine::new();
-    let (root, _child, sid, pid, _) = setup_with_surviving_child(&mut e);
+    let (root, _child, sid, pid) = setup_with_surviving_child(&mut e);
 
     let t1 = Instant::now();
     e.step(
@@ -1177,7 +1266,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
 /// mistake on a still-live counter.
 fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceId, ProfileId) {
     let mut e = Engine::new();
-    let (root, _child, sid, pid, _) = setup_with_surviving_child(&mut e);
+    let (root, _child, sid, pid) = setup_with_surviving_child(&mut e);
 
     let t1 = Instant::now();
     e.step(
@@ -1289,7 +1378,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
     let attach_out_p = e.step(Input::AttachSub(attach_p), Instant::now());
     let sid_p =
         specter_core::testkit::first_attached_sub(&attach_out_p).expect("attach_sub succeeded");
-    let attach_out_q = e.step(Input::AttachSub(attach_q), Instant::now());
+    let _ = e.step(Input::AttachSub(attach_q), Instant::now());
     let pid_p = e.subs().get(sid_p).unwrap().profile;
     let pid_q = e
         .profiles()
@@ -1304,9 +1393,9 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
     // Drive both to Idle via a Seed burst so the surviving-child
     // invariant holds.
     let snap_p = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
-    complete_seed_burst(&mut e, pid_p, &attach_out_p, snap_p);
+    complete_seed_burst(&mut e, pid_p, snap_p);
     let snap_q = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
-    complete_seed_burst(&mut e, pid_q, &attach_out_q, snap_q);
+    complete_seed_burst(&mut e, pid_q, snap_q);
 
     // Kick off a Standard burst on P.
     let t1 = Instant::now();
@@ -1417,7 +1506,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_dir() {
     // `Profile.current` and releases `subdir`'s `watch_demand`
     // contribution; the slot reaps. Pre-PR-1 the descendant leaked.
     let mut e = Engine::new();
-    let (_root, child, sid, pid, _) = setup_with_surviving_child(&mut e);
+    let (_root, child, sid, pid) = setup_with_surviving_child(&mut e);
 
     // Pre-conditions: Profile is Idle, child has watch_demand >= 1.
     assert!(matches!(
@@ -1457,7 +1546,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
     let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
 
-    let (sid, pid, attach_out) = attach_sub_with_events(
+    let (sid, pid, _, _) = attach_sub_with_events(
         &mut e,
         "build",
         root,
@@ -1469,7 +1558,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
 
     // Seed with one File leaf — has_per_file_fds=true ⇒ leaf gets FD.
     let snap = dir_snap(vec![("a.rs", EntryKind::File, 1)]);
-    complete_seed_burst(&mut e, pid, &attach_out, snap);
+    complete_seed_burst(&mut e, pid, snap);
     let leaf = e.tree().lookup(Some(root), "a.rs").expect("leaf seeded");
     assert!(e.tree().get(leaf).unwrap().watch_demand() >= 1);
 
@@ -1494,7 +1583,7 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
     // alongside the anchor's. Pre-PR-1 the descendants leaked even
     // though the anchor was correctly released.
     let mut e = Engine::new();
-    let (root, child, sid, pid, _) = setup_with_surviving_child(&mut e);
+    let (root, child, sid, pid) = setup_with_surviving_child(&mut e);
 
     // Drive a Standard burst.
     let t1 = Instant::now();
@@ -1560,7 +1649,7 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
     // per-descendant contributions. Same shape as the dispatch_*_vanished
     // path but driven through `on_anchor_terminal_event`.
     let mut e = Engine::new();
-    let (root, child, _sid, pid, _) = setup_with_surviving_child(&mut e);
+    let (root, child, _sid, pid) = setup_with_surviving_child(&mut e);
 
     let out = e.step(
         Input::FsEvent {
@@ -1606,7 +1695,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     // → dispatch_rebase_vanished. The release_descendant_claim wire-up
     // walks Profile.current and reaps subdir.
     let mut e = Engine::new();
-    let (root, child, sid, pid, _) = setup_with_surviving_child(&mut e);
+    let (root, child, sid, pid) = setup_with_surviving_child(&mut e);
 
     let t1 = Instant::now();
     e.step(
@@ -1632,18 +1721,50 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Verify probe in flight");
 
-    // Stable verdict — same snapshot as seed. dispatch_standard_ok's
-    // pre-graft hash captures the prior, post-graft comparison is stable
-    // and no covered descendant is in an Active Standard burst, so
-    // emit_effects fires one Effect for the SubtreeRoot Sub →
-    // transition_to_awaiting.
-    let stable_out = e.step(
+    // N=2 quiescence — same snapshot twice. The prime sample
+    // (prior == None ⇒ Unstable) re-arms the settle timer; the
+    // hash-equal confirm sample is the Stable verdict. No covered
+    // descendant is in an Active Standard burst, so emit_effects fires
+    // one Effect for the SubtreeRoot Sub → transition_to_awaiting.
+    let primed = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: verify_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![("subdir", EntryKind::Dir, 99)])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![("subdir", EntryKind::Dir, 99)]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
         t2,
+    );
+    assert!(
+        primed.effects().is_empty(),
+        "prime sample (prior == None ⇒ Unstable) must not fire",
+    );
+    let t_confirm = t2 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(t_confirm) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t_confirm,
+        );
+    }
+    let confirm_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verify probe in flight (confirm sample)");
+    let stable_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: confirm_corr,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![("subdir", EntryKind::Dir, 99)]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t_confirm + Duration::from_millis(1),
     );
     let effect = stable_out
         .effects()
@@ -1749,7 +1870,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
     let attach_out_p = e.step(Input::AttachSub(attach_p), Instant::now());
     let sid_p =
         specter_core::testkit::first_attached_sub(&attach_out_p).expect("attach_sub succeeded");
-    let attach_out_q = e.step(Input::AttachSub(attach_q), Instant::now());
+    let _ = e.step(Input::AttachSub(attach_q), Instant::now());
     let pid_p = e.subs().get(sid_p).unwrap().profile;
     let pid_q = e
         .profiles()
@@ -1761,9 +1882,9 @@ fn release_descendant_claim_multi_profile_preserves_others() {
     // Drive both to Idle with a shared seeded Dir descendant. Each
     // Profile's create_child contributed +1 to subdir.watch_demand().
     let snap_p = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
-    complete_seed_burst(&mut e, pid_p, &attach_out_p, snap_p);
+    complete_seed_burst(&mut e, pid_p, snap_p);
     let snap_q = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
-    complete_seed_burst(&mut e, pid_q, &attach_out_q, snap_q);
+    complete_seed_burst(&mut e, pid_q, snap_q);
 
     let subdir = e
         .tree()
@@ -1881,7 +2002,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     let attach_out_p = e.step(Input::AttachSub(attach_p), Instant::now());
     let sid_p =
         specter_core::testkit::first_attached_sub(&attach_out_p).expect("attach_sub succeeded");
-    let attach_out_q = e.step(Input::AttachSub(attach_q), Instant::now());
+    let _ = e.step(Input::AttachSub(attach_q), Instant::now());
     let pid_p = e.subs().get(sid_p).unwrap().profile;
     let pid_q = e
         .profiles()
@@ -1891,9 +2012,9 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         .expect("Q profile minted");
 
     let snap_p = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
-    complete_seed_burst(&mut e, pid_p, &attach_out_p, snap_p);
+    complete_seed_burst(&mut e, pid_p, snap_p);
     let snap_q = dir_snap(vec![("subdir", EntryKind::Dir, 99)]);
-    complete_seed_burst(&mut e, pid_q, &attach_out_q, snap_q);
+    complete_seed_burst(&mut e, pid_q, snap_q);
 
     let subdir = e
         .tree()
@@ -1943,7 +2064,10 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),
             correlation,
-            outcome: ProbeOutcome::SubtreeOk(response),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: response,
+                authority: ProofAuthority::Authoritative,
+            },
         }),
         t2,
     );

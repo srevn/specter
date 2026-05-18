@@ -158,7 +158,7 @@ fn attach_active(e: &mut Engine) -> (PromoterId, ResourceId, ResourceId) {
     (pid, srv, srv_app)
 }
 
-/// Respond the in-flight Promoter probe with `SubtreeOk(children)`.
+/// Respond the in-flight Promoter probe with `DirEnumerated(children)`.
 fn respond_ok(e: &mut Engine, pid: PromoterId, children: &[(&str, EntryKind, u64)]) {
     let corr = e
         .pending_probe_for(ProbeOwner::Promoter(pid))
@@ -167,7 +167,7 @@ fn respond_ok(e: &mut Engine, pid: PromoterId, children: &[(&str, EntryKind, u64
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(children)),
+            outcome: ProbeOutcome::DirEnumerated(dir_snap(children)),
         }),
         Instant::now(),
     );
@@ -558,7 +558,7 @@ fn root_terminus_installs_no_parent_edge_and_never_recovers() {
 
 // ---------------------------------------------------------------------
 // Scenario 7 — repeated loss → recovery cycles do not leak the
-// PromoterPrefixParent refcount (the §3.6 idempotence guard).
+// PromoterPrefixParent refcount (the recovery-idempotence guard).
 // ---------------------------------------------------------------------
 
 #[test]

@@ -46,8 +46,8 @@ fn empty_program() -> Arc<ActionProgram> {
 /// response is a single-level `DirSnapshot`; this helper matches that
 /// shape exactly. Recursive uses are out of scope for the descent test
 /// surface (recursive walks live in burst tests). The typed
-/// `ProbeOutcome::SubtreeOk` variant takes `Arc<DirSnapshot>` directly —
-/// no `TreeSnapshot::Dir` wrap is needed at the wire boundary.
+/// `ProbeOutcome::DirEnumerated` variant takes `Arc<DirSnapshot>`
+/// directly — no `TreeSnapshot::Dir` wrap is needed at the wire boundary.
 fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
@@ -133,25 +133,27 @@ fn descent_one_level_advances_on_created_entry() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
 
-    // Anchor materialized: descent state cleared; Seed burst started.
+    // Anchor materialized: descent state cleared; the Seed burst
+    // started Batching-first — no probe in this step (it emits one
+    // settle window later via transition_to_verifying).
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
-    let probes: Vec<_> = out
-        .probe_ops()
-        .iter()
-        .filter_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.owner()),
-            ProbeOp::Cancel { .. } => None,
-        })
-        .collect();
-    assert_eq!(
-        probes,
-        vec![ProbeOwner::Profile(pid)],
-        "Seed burst probe emitted at anchor"
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            specter_core::ProfileState::Active(_, _)
+        ),
+        "materialization starts the Seed burst (Active, not Idle)",
+    );
+    assert!(
+        !out.probe_ops()
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { .. })),
+        "Batching-first Seed: no probe emitted at materialization",
     );
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -197,7 +199,7 @@ fn descent_two_levels_advances_progressively() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr1,
-            outcome: ProbeOutcome::SubtreeOk(snap1),
+            outcome: ProbeOutcome::DirEnumerated(snap1),
         }),
         Instant::now(),
     );
@@ -226,7 +228,7 @@ fn descent_two_levels_advances_progressively() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr2,
-            outcome: ProbeOutcome::SubtreeOk(snap2),
+            outcome: ProbeOutcome::DirEnumerated(snap2),
         }),
         Instant::now(),
     );
@@ -248,7 +250,7 @@ fn descent_no_progress_keeps_pending() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -280,7 +282,7 @@ fn descent_event_at_prefix_emits_fresh_probe() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -376,7 +378,7 @@ fn descent_anchor_kind_set_from_entry() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -414,7 +416,7 @@ fn descent_materialization_caches_profile_kind() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -649,7 +651,7 @@ fn descent_materialization_sets_anchor_claim_held() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -842,7 +844,7 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -967,7 +969,7 @@ fn on_probe_response_routes_descent_via_state_match() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
         Instant::now(),
     );
@@ -1101,13 +1103,14 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("descent probe in flight");
     let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
+    let t_mat = Instant::now();
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::SubtreeOk(snap),
+            outcome: ProbeOutcome::DirEnumerated(snap),
         }),
-        Instant::now(),
+        t_mat,
     );
     let _bar = e.tree().lookup(Some(foo), "bar").unwrap();
     // Post-materialization: Profile is Active(Seed Verifying); bar carries
@@ -1122,17 +1125,30 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         "foo carries STRUCTURE from watch_root_parent",
     );
 
-    // Settle the Seed burst (Vanished closes it without emitting an Effect).
+    // The materialized Seed burst is Batching-first; expire its settle
+    // timer so a verify probe is in flight, then close it with Vanished
+    // (no Effect — fresh Seed).
+    let t_settle = t_mat + SETTLE;
+    while let Some(entry) = e.pop_expired(t_settle) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t_settle,
+        );
+    }
     let seed_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Seed probe in flight");
+        .expect("Seed verify probe in flight after settle expiry");
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: seed_corr,
             outcome: ProbeOutcome::Vanished,
         }),
-        Instant::now(),
+        t_settle,
     );
     // dispatch_seed_vanished routes to finalize_anchor_lost: anchor
     // contribution released, baseline/current cleared, Profile lands Idle.

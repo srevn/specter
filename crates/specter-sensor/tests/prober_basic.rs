@@ -7,7 +7,7 @@ use crossbeam::channel::unbounded;
 use slotmap::SlotMap;
 use specter_core::{
     EntryKind, Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId,
-    ScanConfig,
+    ProofObligation, ScanConfig,
 };
 use specter_sensor::{Prober, WorkerProber};
 use std::collections::BTreeSet;
@@ -37,7 +37,7 @@ fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -
         scan_config: ScanConfig::builder().recursive(true).build(),
         captured_with: 0,
         baseline_subtree: None,
-        force_walk: BTreeSet::new(),
+        obligation: ProofObligation::Chains(BTreeSet::new()),
         forced: false,
     }
 }
@@ -91,8 +91,8 @@ fn subtree_round_trip_emits_subtree_ok_with_children() {
 
     let resp = recv_response(&rx);
     assert_eq!(resp.correlation, ProbeCorrelation::from(7));
-    let ProbeOutcome::SubtreeOk(arc) = resp.outcome else {
-        panic!("expected SubtreeOk");
+    let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = resp.outcome else {
+        panic!("expected SubtreeProven");
     };
     let names: Vec<&str> = arc
         .entries()

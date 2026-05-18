@@ -1,28 +1,30 @@
 //! `probe_anchor_file`, `probe_subtree`, `probe_descent` — pure-IO walkers.
 //!
-//! All three probes return [`ProbeOutcome`]; on success they emit either
-//! a leaf observation (`AnchorOk(LeafEntry)`) or a recursive
-//! `Arc<DirSnapshot>` tree (`SubtreeOk`). Kind mismatches collapse to
-//! `Vanished` ("a file probe that finds a directory, or vice versa,
-//! returns `Vanished`"). Errors at the *root* anchor map to
-//! `Failed { errno }`; errors mid-walk on a *subtree* skip-and-continue
-//! with `tracing::warn!` — `exclude` is the user-facing surface for
-//! declaring expected-EACCES paths.
+//! Each returns a [`ProbeOutcome`] typed to its query kind:
+//! `probe_anchor_file` → `AnchorOk(LeafEntry)`; `probe_subtree` →
+//! `SubtreeProven { snapshot, authority }` where the [`ProofAuthority`]
+//! certifies whether the response discharged its proof obligation;
+//! `probe_descent` → `DirEnumerated(arc)` — a structural query is not a
+//! quiescence observation and the type carries no certificate. Kind
+//! mismatches and absent paths collapse to `Vanished`; a root-anchor
+//! I/O error is `Failed { errno }`. Mid-walk faults skip-and-continue
+//! and are accounted in the [`ProofLedger`] (`exclude` is the
+//! user-facing surface for declaring expected-EACCES paths).
 //!
-//! Three controls live on the [`ProbeRequest::Subtree`] variant:
-//! - `baseline_subtree`: the engine's last-known view of the target's
-//!   subtree. Equal `(mtime, fs_id)` against the freshly `lstat`-ed
-//!   directory ⇒ return `Arc::clone(prior)` (mtime-skip). The skip
-//!   cascades into recursion via each child's
-//!   `DirChild::Covered(arc)`, looked up by name through
+//! Three controls live on [`ProbeRequest::Subtree`]:
+//! - `baseline_subtree`: the engine's last-known view. Equal
+//!   `root_meta` against the freshly `lstat`-ed directory ⇒ return
+//!   `Arc::clone(prior)` (mtime-skip), cascading into recursion via
+//!   each child's `DirChild::Covered(arc)`, looked up by name through
 //!   [`specter_core::DirSnapshot::lookup_covered_dir`].
-//! - `force_walk`: a `BTreeSet<Arc<Path>>` of paths the walker must
-//!   enumerate regardless of mtime — populated by the engine from
-//!   kqueue-driven `dirty_resources`. The walker tests "is any forced path
-//!   at-or-under this dir?" via `Path::starts_with`.
-//! - `forced`: defensive bypass for max-settle force-fire. When `true`,
-//!   every recursion frame enumerates regardless of `baseline_subtree` or
-//!   `force_walk`.
+//! - `obligation`: the subtrees that MUST be freshly observed for the
+//!   response to certify quiescence. The walker refuses mtime-skip at
+//!   any frame at-or-above a [`ProofObligation::Chains`] path (or
+//!   anywhere, for [`ProofObligation::WholeSubtree`]); [`certify`]
+//!   folds the [`ProofLedger`] against it into the response's
+//!   [`ProofAuthority`].
+//! - `forced`: defensive bypass for max-settle force-fire — every
+//!   frame enumerates regardless of `baseline_subtree` or `obligation`.
 //!
 //! [`ProbeRequest::AnchorFile`] runs a single `lstat` (no controls — a
 //! leaf has no descendants to skip). [`ProbeRequest::Descent`] hardcodes
@@ -43,7 +45,8 @@
 
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ProbeOutcome, ScanConfig,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ProbeOutcome,
+    ProofAuthority, ProofObligation, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -52,11 +55,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Recursion-invariant inputs shared across every frame of one subtree
-/// probe. Built once at probe entry ([`probe_subtree`]) from the
+/// probe. Built once at probe entry ([`walk_root`]) from the
 /// `ProbeRequest::Subtree` payload, then threaded by reference into
 /// [`snapshot_dir`], [`enumerate_dir`], and [`build_dir_child`].
 /// Per-frame inputs (`path`, `baseline`, `depth`, `cmeta`, `name`) stay
-/// as positional arguments to those callees.
+/// as positional arguments to those callees; the non-`Copy`
+/// [`ProofLedger`] threads as a separate `&mut`.
 ///
 /// Separating invariant from per-frame at the type level makes the
 /// distinction structural: a reader at any call site sees `ctx`
@@ -66,28 +70,97 @@ use std::sync::Arc;
 /// `Covered`/`Uncovered(fs_id)` gate at the dirent),
 /// [`try_mtime_skip`](Self::try_mtime_skip) (the no-op-when-unchanged
 /// primitive), and
-/// [`has_forced_at_or_under`](Self::has_forced_at_or_under) (the
-/// `force_walk` override that refuses skip).
+/// [`obligation_at_or_under`](Self::obligation_at_or_under) (the proof
+/// obligation that refuses skip).
 ///
-/// `root_dev` is the *anchor*'s device, captured once in
-/// [`probe_subtree`] from the top-level `lstat`. It is intentionally
-/// distinct from each recursion frame's `root_meta.fs_id.device` — the
-/// cross-filesystem gate refuses to descend whenever a child's device
-/// differs from the anchor's, regardless of whether the recursion has
-/// already crossed a sub-mount earlier.
+/// `root_dev` is the *anchor*'s device, captured once in [`walk_root`]
+/// from the top-level `lstat`. It is intentionally distinct from each
+/// recursion frame's `root_meta.fs_id.device` — the cross-filesystem
+/// gate refuses to descend whenever a child's device differs from the
+/// anchor's, regardless of whether the recursion has already crossed a
+/// sub-mount earlier.
 ///
 /// `Copy + Clone` because the struct is three thin/fat pointers + two
-/// `u64`s + one `bool`. Passing by reference at recursion frequency is
-/// the convention here; the `Copy` derive is for the cheap "snapshot a
-/// `ctx` value into a closure" cases that arise during evolution.
+/// `u64`s + one `bool` (`obligation` is a thin `&ProofObligation`).
+/// Passing by reference at recursion frequency is the convention here;
+/// the `Copy` derive is for the cheap "snapshot a `ctx` value into a
+/// closure" cases that arise during evolution.
 #[derive(Clone, Copy)]
 struct WalkContext<'a> {
     anchor_path: &'a Path,
     config: &'a ScanConfig,
-    force_walk: &'a BTreeSet<Arc<Path>>,
+    obligation: &'a ProofObligation,
     forced: bool,
     captured_with: u64,
     root_dev: u64,
+}
+
+/// Faithfulness of one directory level's own read — the value
+/// [`enumerate_dir`] returns and [`snapshot_dir`] folds into the
+/// [`ProofLedger`]. `enumerate_dir` *reports*; `snapshot_dir`
+/// *accumulates* (separation of concerns: the ledger never enters
+/// `enumerate_dir`'s own writes, only threads through it to recursive
+/// frames).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum Completeness {
+    Complete,
+    Incomplete,
+}
+
+/// Non-observation accounting for one subtree probe — the *total*
+/// record of every way [`snapshot_dir`] can yield a snapshot that is
+/// not a faithful complete read. [`certify`] folds it against the
+/// obligation into a [`ProofAuthority`].
+///
+/// Asymmetric by design: `degraded` is the sole release-mode
+/// correctness input; `skipped` is written **only** in the
+/// skip-predicate-regression case (a skip succeeding at an
+/// obligation-at-or-under frame, which the obligation-aware predicate
+/// refuses in correct operation) — a pure tripwire, zero hot-path
+/// allocation on the common off-chain skip.
+#[derive(Default)]
+struct ProofLedger {
+    skipped: BTreeSet<Arc<Path>>,
+    degraded: BTreeSet<Arc<Path>>,
+}
+
+/// Fold the non-observation ledger against the obligation into the
+/// response's [`ProofAuthority`].
+///
+/// Unidirectional: `Undischarged` iff a skipped/degraded frame `f` lies
+/// at-or-**above** an obligation path `p` (`p.starts_with(f)`) — a hole
+/// on a chain we had to prove. `f` at-or-below `p` is the sound
+/// off-chain skip and must **not** flag. `WholeSubtree` (no trusted
+/// prior) treats any frame anywhere as a hole — the existential is
+/// correct there. `first_unread` is the obligation path whose proof we
+/// could not discharge.
+fn certify(obligation: &ProofObligation, l: &ProofLedger) -> ProofAuthority {
+    match obligation {
+        ProofObligation::Chains(paths) => paths
+            .iter()
+            .find(|p| {
+                l.skipped
+                    .iter()
+                    .chain(&l.degraded)
+                    .any(|f| p.starts_with(f))
+            })
+            .map_or(ProofAuthority::Authoritative, |p| {
+                ProofAuthority::Undischarged {
+                    first_unread: Arc::clone(p),
+                }
+            }),
+        ProofObligation::WholeSubtree => {
+            l.skipped
+                .iter()
+                .chain(&l.degraded)
+                .next()
+                .map_or(ProofAuthority::Authoritative, |f| {
+                    ProofAuthority::Undischarged {
+                        first_unread: Arc::clone(f),
+                    }
+                })
+        }
+    }
 }
 
 impl WalkContext<'_> {
@@ -114,11 +187,14 @@ impl WalkContext<'_> {
             && child_dev == self.root_dev
     }
 
-    /// Returns `Some(Arc::clone(baseline))` when the directory at
-    /// `path` with freshly-`lstat`ed `root_meta` is observationally
-    /// identical to the baseline subtree. Three predicates folded:
+    /// Returns `Some(Arc::clone(baseline))` when the directory with
+    /// freshly-`lstat`ed `root_meta` is observationally identical to
+    /// the baseline subtree. Three predicates folded:
     /// - `!self.forced` (no defensive bypass), AND
-    /// - no path in `self.force_walk` lies at-or-under `path`, AND
+    /// - `!obligation_at_or_under` (this frame is not on a proof
+    ///   obligation — computed once by the caller and threaded in so
+    ///   the predicate stays pure and the obligation set is scanned
+    ///   exactly once per frame), AND
     /// - `baseline.root_meta == *root_meta` (mtime + inode + device).
     ///
     /// On `Some`, the caller short-circuits one whole recursion frame:
@@ -128,11 +204,11 @@ impl WalkContext<'_> {
     #[must_use]
     fn try_mtime_skip(
         &self,
-        path: &Path,
         root_meta: &DirMeta,
         baseline: Option<&Arc<DirSnapshot>>,
+        obligation_at_or_under: bool,
     ) -> Option<Arc<DirSnapshot>> {
-        if self.forced || self.has_forced_at_or_under(path) {
+        if self.forced || obligation_at_or_under {
             return None;
         }
         let prior = baseline?;
@@ -142,11 +218,13 @@ impl WalkContext<'_> {
         Some(Arc::clone(prior))
     }
 
-    /// Returns `true` iff any path in `self.force_walk` is at-or-under
-    /// `path`.
+    /// Returns `true` iff `path` lies at-or-above an obligation path
+    /// (`Chains`) or unconditionally (`WholeSubtree`, no trusted
+    /// prior). When true, [`try_mtime_skip`](Self::try_mtime_skip)
+    /// refuses to skip `path`.
     ///
     /// Why `Path::starts_with` and not `==`: imagine `path = /a` and
-    /// `self.force_walk = {/a/b/c}`. If we skip at `/a`, we never
+    /// the obligation is `{/a/b/c}`. If we skip at `/a`, we never
     /// recurse into `/a/b/c` and miss the kernel's signal. Component-
     /// wise `starts_with` catches this — at `/a`,
     /// `(/a/b/c).starts_with(/a)` is true ⇒ refuse skip ⇒ enumerate
@@ -157,8 +235,11 @@ impl WalkContext<'_> {
     /// Byte-lex via `BTreeSet::range` would erroneously match `/ab`
     /// when probing `/a`; we need component-wise `Path::starts_with`.
     #[must_use]
-    fn has_forced_at_or_under(&self, path: &Path) -> bool {
-        self.force_walk.iter().any(|p| p.starts_with(path))
+    fn obligation_at_or_under(&self, path: &Path) -> bool {
+        match self.obligation {
+            ProofObligation::Chains(paths) => paths.iter().any(|p| p.starts_with(path)),
+            ProofObligation::WholeSubtree => true,
+        }
     }
 }
 
@@ -188,65 +269,102 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
     ProbeOutcome::AnchorOk(leaf)
 }
 
-/// Subtree probe. Recursive DFS walk against `target_path` honoring
-/// `recursive`, `hidden`, `exclude`, `pattern`, and `max_depth`.
+/// Shared root entry for both directory walks: root `lstat`, kind
+/// check, [`WalkContext`] construction, then the recursive
+/// [`snapshot_dir`]. Returns the built subtree, or the early-terminal
+/// [`ProbeOutcome`] (`Vanished` on absent/kind-mismatch, `Failed` on
+/// any other root I/O error) — the caller wraps the `Ok` arm in its
+/// query-kind-specific outcome.
 ///
-/// Each recursion frame may short-circuit via mtime-skip when:
-/// - `forced == false`, AND
-/// - no path in `force_walk` lies at-or-under the current directory, AND
-/// - a baseline subtree is provided whose `root_meta` (mtime + inode +
-///   device) equals the freshly-`lstat`ed directory.
-///
-/// On skip, the frame returns `Arc::clone(baseline)` — zero allocation,
-/// zero readdir, zero leaf `lstat`. Otherwise it enumerates one level,
-/// stamps a fresh `DirSnapshot`, and recurses for covered Dir children
-/// (passing each child's prior subtree from the baseline so the skip
-/// composes recursively).
-///
-/// Errors: root errors propagate (`NotFound → Vanished`, kind mismatch
-/// → `Vanished`, anything else → `Failed { errno }`). Mid-walk
-/// `read_dir` errors on a *subdirectory* (EACCES, EIO, ENOENT after a
-/// raced delete, ENOTDIR after a kind-flip race) skip-and-continue with
-/// `tracing::warn!`; the affected subtree becomes
-/// `DirChild::Covered(empty_or_partial_arc)` — *covered-but-empty*.
-/// The uncovered variant `DirChild::Uncovered(fs_id)` is reserved for
-/// the three statically-knowable gates fronted by
-/// [`WalkContext::should_recurse`] and applied in [`build_dir_child`]:
-/// `!recursive`, `depth + 1 >= max_depth`, or `cmeta.dev() != root_dev`
-/// (cross-filesystem). The walker never mints `Uncovered` for transient
-/// I/O — the redundant per-recursion `lstat` that historically opened
-/// that race surface no longer exists.
-pub(super) fn probe_subtree(
-    target_path: &Path,
-    config: &ScanConfig,
+/// The non-`Copy` [`ProofLedger`] is the caller's: `probe_subtree`
+/// `certify`s it; `probe_descent` discards it. Splitting the wrap from
+/// the walk is what makes `probe_descent` *not* a `probe_subtree`
+/// delegation — a descent can no longer produce a `SubtreeProven`.
+fn walk_root<'a>(
+    target_path: &'a Path,
+    config: &'a ScanConfig,
     captured_with: u64,
     baseline: Option<&Arc<DirSnapshot>>,
-    force_walk: &BTreeSet<Arc<Path>>,
+    obligation: &'a ProofObligation,
     forced: bool,
-) -> ProbeOutcome {
+    ledger: &mut ProofLedger,
+) -> Result<Arc<DirSnapshot>, ProbeOutcome> {
     let root_meta_raw = match std::fs::symlink_metadata(target_path) {
         Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return ProbeOutcome::Vanished,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ProbeOutcome::Vanished),
         Err(e) => {
-            return ProbeOutcome::Failed {
+            return Err(ProbeOutcome::Failed {
                 errno: e.raw_os_error().unwrap_or(libc::EIO),
-            };
+            });
         }
     };
     if !root_meta_raw.is_dir() {
-        return ProbeOutcome::Vanished;
+        return Err(ProbeOutcome::Vanished);
     }
     let root_meta = DirMeta::from_metadata(&root_meta_raw);
     let ctx = WalkContext {
         anchor_path: target_path,
         config,
-        force_walk,
+        obligation,
         forced,
         captured_with,
         root_dev: root_meta.fs_id().device(),
     };
-    let arc = snapshot_dir(&ctx, target_path, root_meta, baseline, 0);
-    ProbeOutcome::SubtreeOk(arc)
+    Ok(snapshot_dir(
+        &ctx,
+        target_path,
+        root_meta,
+        baseline,
+        0,
+        ledger,
+    ))
+}
+
+/// Subtree probe. Recursive DFS walk against `target_path` honoring
+/// `recursive`, `hidden`, `exclude`, `pattern`, and `max_depth`.
+///
+/// Each recursion frame may short-circuit via mtime-skip when
+/// `!forced`, the frame is not at-or-above an `obligation` path, and a
+/// baseline subtree is provided whose `root_meta` (mtime + inode +
+/// device) equals the freshly-`lstat`ed directory — returning
+/// `Arc::clone(baseline)` (zero allocation/readdir/leaf-`lstat`),
+/// composing recursively through each child's `DirChild::Covered(arc)`.
+/// Otherwise it enumerates one level, stamps a fresh `DirSnapshot`, and
+/// recurses for covered Dir children.
+///
+/// Returns `SubtreeProven { snapshot, authority }` where `authority` is
+/// [`certify`]'s fold of the [`ProofLedger`] against `obligation`:
+/// `Authoritative` iff no non-observation (mtime-skip of an obligation
+/// frame, or a degraded enumeration level) lies on an obligation chain.
+/// Root errors propagate as `Vanished` / `Failed`. Mid-walk `read_dir`
+/// / per-child faults skip-and-continue and degrade the affected level
+/// (`DirChild::Covered(empty_or_partial_arc)`); the uncovered variant
+/// `DirChild::Uncovered(fs_id)` stays reserved for the static gates in
+/// [`build_dir_child`] (`!recursive`, beyond `max_depth`, cross-fs).
+pub(super) fn probe_subtree(
+    target_path: &Path,
+    config: &ScanConfig,
+    captured_with: u64,
+    baseline: Option<&Arc<DirSnapshot>>,
+    obligation: &ProofObligation,
+    forced: bool,
+) -> ProbeOutcome {
+    let mut ledger = ProofLedger::default();
+    match walk_root(
+        target_path,
+        config,
+        captured_with,
+        baseline,
+        obligation,
+        forced,
+        &mut ledger,
+    ) {
+        Ok(snapshot) => ProbeOutcome::SubtreeProven {
+            snapshot,
+            authority: certify(obligation, &ledger),
+        },
+        Err(outcome) => outcome,
+    }
 }
 
 /// Descent prefix probe. Single-level enumeration of `target_path` with
@@ -256,6 +374,15 @@ pub(super) fn probe_subtree(
 /// segment descent is searching for; descent dispatch reads
 /// `arc.entries.get(name)` directly and (for Profile descent) discards
 /// the snapshot.
+///
+/// Returns [`ProbeOutcome::DirEnumerated`] — a structural query is not
+/// a quiescence observation, so it carries **no** [`ProofAuthority`].
+/// It still threads the shared recursion core, so its `ProofLedger` is
+/// written-then-discarded: a descent `read_dir` fault can populate
+/// `degraded`, but the *type* (no `authority` field) is the guarantee,
+/// not an empty ledger. `WholeSubtree` is inert here — `recursive=false`
+/// stops at one level and `baseline=None` makes mtime-skip unreachable,
+/// so it never refuses a skip that could matter.
 ///
 /// `captured_with` is stamped as `0` — descent dispatch never reads the
 /// field (the snapshot is consumed by the engine and dropped before any
@@ -267,31 +394,46 @@ pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
         .hidden(true)
         .max_depth(None)
         .build();
-    probe_subtree(target_path, &cfg, 0, None, &BTreeSet::new(), false)
+    let mut sink = ProofLedger::default();
+    match walk_root(
+        target_path,
+        &cfg,
+        0,
+        None,
+        &ProofObligation::WholeSubtree,
+        false,
+        &mut sink,
+    ) {
+        Ok(snapshot) => ProbeOutcome::DirEnumerated(snapshot),
+        Err(outcome) => outcome,
+    }
 }
 
 /// Build one directory's snapshot frame. Shared by two callers:
-/// 1. [`probe_subtree`], after the root `lstat` produces `root_meta`
-///    from the freshly-`lstat`ed anchor.
+/// 1. [`walk_root`], after the root `lstat` produces `root_meta` from
+///    the freshly-`lstat`ed anchor.
 /// 2. [`build_dir_child`], with a `cmeta`-derived `root_meta` for a
 ///    covered subdir dirent.
 ///
-/// The mtime-skip primitive ([`WalkContext::try_mtime_skip`]) is the
-/// same at every recursion depth: equal `root_meta` plus no
-/// `force_walk` override plus `!forced` ⇒ return the baseline
-/// `Arc::clone`. On non-skip, enumerate one level and stamp a fresh
-/// `DirSnapshot`.
+/// **Owns both [`ProofLedger`] chokes** (`enumerate_dir` reports,
+/// `snapshot_dir` accumulates):
+/// - *Skip choke.* The obligation set is scanned **once per frame**
+///   (`obligation_at_or_under`) and threaded into
+///   [`WalkContext::try_mtime_skip`] so the predicate stays pure.
+///   `try_mtime_skip` returns `None` whenever the frame is on an
+///   obligation, so reaching the skip arm with `obligation_at_or_under`
+///   still true is a skip-predicate regression — the sole writer of
+///   `ledger.skipped`. Correct operation never inserts (zero hot-path
+///   alloc on the common off-chain skip).
+/// - *Degrade choke.* An `Incomplete` level (this frame's own read was
+///   not faithful) writes `ledger.degraded`.
 ///
 /// Infallible by construction. Any failure inside the recursive
-/// [`enumerate_dir`] (raced unlink surfacing as `read_dir` `ENOENT`,
-/// kind-flip surfacing as `ENOTDIR`, EACCES on the subdir's
-/// `read_dir`, etc.) routes through the existing `Covered(empty_arc)`
-/// contract — the same semantic pinned by
-/// `probe_subtree_unreadable_subdir_emits_dir_child_some_empty`. As a
-/// consequence, `DirChild::Uncovered(fs_id)` is reserved for the
-/// static-config gates fronted by [`WalkContext::should_recurse`]
-/// (`recursive=false`, `max_depth`, cross-fs) and never minted for
-/// transient I/O.
+/// [`enumerate_dir`] routes through the `Covered(empty_or_partial_arc)`
+/// contract and (for non-benign faults) the degrade choke;
+/// `DirChild::Uncovered(fs_id)` stays reserved for the static-config
+/// gates fronted by [`WalkContext::should_recurse`] (`recursive=false`,
+/// `max_depth`, cross-fs) and is never minted for transient I/O.
 #[must_use]
 fn snapshot_dir(
     ctx: &WalkContext<'_>,
@@ -299,47 +441,68 @@ fn snapshot_dir(
     root_meta: DirMeta,
     baseline: Option<&Arc<DirSnapshot>>,
     depth: u32,
+    ledger: &mut ProofLedger,
 ) -> Arc<DirSnapshot> {
-    if let Some(skipped) = ctx.try_mtime_skip(path, &root_meta, baseline) {
+    let obligation_at_or_under = ctx.obligation_at_or_under(path);
+    if let Some(skipped) = ctx.try_mtime_skip(&root_meta, baseline, obligation_at_or_under) {
+        if obligation_at_or_under {
+            ledger.skipped.insert(Arc::from(path));
+        }
         return skipped;
     }
-    let entries = enumerate_dir(ctx, path, baseline.map(Arc::as_ref), depth);
+    let (entries, completeness) =
+        enumerate_dir(ctx, path, baseline.map(Arc::as_ref), depth, ledger);
+    if completeness == Completeness::Incomplete {
+        ledger.degraded.insert(Arc::from(path));
+    }
     Arc::new(DirSnapshot::new(root_meta, ctx.captured_with, entries))
 }
 
 /// Read one directory level, applying filters and recursing into covered
-/// Dir children. Returns the constructed entries map.
+/// Dir children. Returns the constructed entries map **and** this
+/// level's own [`Completeness`] (`enumerate_dir` reports; the caller
+/// [`snapshot_dir`] folds it into the [`ProofLedger`] — the ledger is
+/// never written here, only threaded through to recursive frames).
 ///
-/// Errors at this level are skip-and-continue. `read_dir` failure on
-/// `path` (EACCES, EIO, ENOENT after a raced delete, ENOTDIR after a
-/// kind-flip race, etc.) returns the already-accumulated `BTreeMap` —
-/// empty when the failure was at the `read_dir` open boundary,
-/// partially-populated if dirent iteration errored mid-walk after some
-/// entries had already been folded in. The caller ([`snapshot_dir`])
-/// wraps the result in `Arc::new(DirSnapshot::new(…))`, so the parent
-/// emits `DirChild::Covered(empty_or_partial_arc)` — covered-but-empty,
-/// distinct from the uncovered variant `DirChild::Uncovered(fs_id)`
-/// reserved for the static-config gates in [`build_dir_child`]
-/// (`recursive=false`, beyond `max_depth`, cross-filesystem boundary).
+/// Errors at this level are skip-and-continue. The level is `Incomplete`
+/// iff its own read was unfaithful: `read_dir` failed (non-NotFound),
+/// or a dirent / non-UTF-8 / `strip_prefix` / per-child `lstat`
+/// (non-NotFound) fault dropped an entry. Two faults stay `Complete`
+/// because they are *observed-absent*, not blindness, and self-correct
+/// (empty/short snapshot hash-differs → `Unstable` → converge):
+/// `read_dir` `NotFound` (raced-empty dir) and a per-child `lstat`
+/// `NotFound` (a child unlinked between `read_dir` and the `lstat` — a
+/// raced delete during `rm -rf` / `rsync --delete` / log-rotate).
+/// Degrading either would wedge that common scenario into permanent
+/// `Undischarged`/never-fire. The partially-populated `BTreeMap`
+/// becomes `DirChild::Covered(empty_or_partial_arc)`; the uncovered
+/// variant stays the static-config gates' (`build_dir_child`).
 fn enumerate_dir(
     ctx: &WalkContext<'_>,
     path: &Path,
     baseline: Option<&DirSnapshot>,
     depth: u32,
-) -> BTreeMap<CompactString, ChildEntry> {
+    ledger: &mut ProofLedger,
+) -> (BTreeMap<CompactString, ChildEntry>, Completeness) {
     let mut entries: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
+    let mut completeness = Completeness::Complete;
 
     let read_dir = match std::fs::read_dir(path) {
         Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return entries,
+        // Observed-absent, self-correcting: a raced-empty dir's empty
+        // snapshot hash-differs from a non-empty prior ⇒ Unstable ⇒
+        // converge. Degrading it would be a liveness regression.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return (entries, Completeness::Complete);
+        }
         Err(e) => {
             tracing::warn!(
                 anchor = ?ctx.anchor_path,
                 ?path,
                 ?e,
-                "probe_subtree readdir failed; skipping subtree"
+                "probe_subtree readdir failed; degrading level"
             );
-            return entries;
+            return (entries, Completeness::Incomplete);
         }
     };
 
@@ -347,28 +510,65 @@ fn enumerate_dir(
         let dirent = match dirent_result {
             Ok(d) => d,
             Err(e) => {
-                tracing::trace!(?path, ?e, "probe_subtree dirent error; skipping");
+                tracing::warn!(
+                    anchor = ?ctx.anchor_path,
+                    ?path,
+                    ?e,
+                    "probe_subtree dirent error; degrading level"
+                );
+                completeness = Completeness::Incomplete;
                 continue;
             }
         };
         let child_path = dirent.path();
         let name_os = dirent.file_name();
         let Some(name_str) = name_os.to_str() else {
-            tracing::trace!(?child_path, "probe_subtree non-UTF-8 filename; skipping");
+            tracing::trace!(
+                ?child_path,
+                "probe_subtree non-UTF-8 filename; degrading level"
+            );
+            completeness = Completeness::Incomplete;
             continue;
         };
         if !ctx.config.hidden && name_str.starts_with('.') {
             continue;
         }
         let Ok(rel) = child_path.strip_prefix(ctx.anchor_path) else {
-            tracing::trace!(?child_path, "probe_subtree strip_prefix failed; skipping");
+            tracing::trace!(
+                ?child_path,
+                "probe_subtree strip_prefix failed; degrading level"
+            );
+            completeness = Completeness::Incomplete;
             continue;
         };
         if ctx.config.exclude.iter().any(|g| g.matches_path(rel)) {
             continue;
         }
-        let Ok(cmeta) = std::fs::symlink_metadata(&child_path) else {
-            continue;
+        let cmeta = match std::fs::symlink_metadata(&child_path) {
+            Ok(m) => m,
+            // A child unlinked between `read_dir` and this `lstat` is
+            // observed-absent — structurally identical to the
+            // `read_dir` NotFound arm. Benign, self-correcting; the
+            // level stays `Complete`.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                tracing::trace!(
+                    ?child_path,
+                    "probe_subtree child vanished before lstat; omitting"
+                );
+                continue;
+            }
+            // A non-NotFound fault (EACCES/EIO/ELOOP) is a true
+            // non-observation: we cannot tell what is there.
+            Err(e) => {
+                tracing::warn!(
+                    anchor = ?ctx.anchor_path,
+                    ?child_path,
+                    ?e,
+                    "probe_subtree child symlink_metadata failed; degrading level"
+                );
+                completeness = Completeness::Incomplete;
+                continue;
+            }
         };
         let is_dir = cmeta.file_type().is_dir();
 
@@ -384,7 +584,7 @@ fn enumerate_dir(
 
         let key = CompactString::new(name_str);
         let child_entry = if is_dir {
-            build_dir_child(ctx, &child_path, baseline, depth, &cmeta, name_str)
+            build_dir_child(ctx, &child_path, baseline, depth, &cmeta, name_str, ledger)
         } else {
             build_leaf_child(&cmeta, name_str, baseline)
         };
@@ -392,7 +592,7 @@ fn enumerate_dir(
         entries.insert(key, child_entry);
     }
 
-    entries
+    (entries, completeness)
 }
 
 /// Build a `ChildEntry::Dir` for one directory dirent. Recurses via
@@ -414,6 +614,7 @@ fn build_dir_child(
     depth: u32,
     cmeta: &std::fs::Metadata,
     name: &str,
+    ledger: &mut ProofLedger,
 ) -> ChildEntry {
     let fs_id = FsIdentity::from_metadata(cmeta);
     if !ctx.should_recurse(depth + 1, cmeta.dev()) {
@@ -431,7 +632,14 @@ fn build_dir_child(
     // native lookup; `lookup_covered_dir` collapses the "Dir entry + covered"
     // gate into one named operation.
     let child_baseline = baseline.and_then(|b| b.lookup_covered_dir(name));
-    let arc = snapshot_dir(ctx, child_path, root_meta, child_baseline, depth + 1);
+    let arc = snapshot_dir(
+        ctx,
+        child_path,
+        root_meta,
+        child_baseline,
+        depth + 1,
+        ledger,
+    );
     ChildEntry::Dir(DirChild::Covered(arc))
 }
 

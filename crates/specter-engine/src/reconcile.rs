@@ -459,33 +459,6 @@ pub(crate) fn graft(
     }
 }
 
-/// Extract the `dir_hash` of `current.subtree_at(target)` or `current` itself
-/// for File-anchored Profiles. Returns `None` when there is no prior
-/// observation at `target` (covered-in-this-probe path; treat as not-stable).
-///
-/// File-anchored Profiles never reach this helper with `target != anchor`:
-/// `emit_owner_probe`'s kind dispatch routes a File anchor through a
-/// `ProbeRequest::AnchorFile` whose response feeds straight into the
-/// leaf's stability comparison without needing this helper at a
-/// non-anchor target.
-pub(crate) fn current_target_hash(
-    profile: &Profile,
-    target: ResourceId,
-    tree: &Tree,
-) -> Option<u128> {
-    // Both arms consume the owned projection: the Dir arm navigates to
-    // `target` via `subtree_at_dir`, the File arm reads the leaf digest.
-    // `current_dir()` would serve only the Dir arm, so the owned
-    // `current()` (Arc bump for Dir, leaf copy for File) is the right
-    // shape here.
-    match profile.current()? {
-        TreeSnapshot::Dir(root) => {
-            subtree_at_dir(&root, profile.resource, target, tree).map(|s| s.dir_hash())
-        }
-        TreeSnapshot::File(leaf) => Some(leaf.leaf_hash()),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
 mod tests {

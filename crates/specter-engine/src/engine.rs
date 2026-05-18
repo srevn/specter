@@ -196,7 +196,9 @@ impl Engine {
     /// existing Profile when `(anchor, config_hash)` matches; otherwise
     /// creates a fresh Profile, emits `WatchOp::Watch` on its anchor,
     /// and starts a Seed burst (`PreFireBurst { intent: Seed, phase:
-    /// Verifying }`) to establish the initial baseline.
+    /// Batching }`); the baseline is established once the settle-spaced
+    /// quiescence proof converges (`seed_pin_body`), not on the first
+    /// probe.
     ///
     /// Three-phase pipeline; sole public entry is
     /// [`Input::AttachSub`] via [`Self::step`]. The inner is
@@ -509,8 +511,9 @@ impl Engine {
     /// 2. Flip [`AnchorClaim::Held`].
     /// 3. Set up the `watch_root_parent` (STRUCTURE contribution at
     ///    the anchor's parent, for anchor-reappearance detection).
-    /// 4. Start the Seed burst (`PreFire(Verifying)`); the post-probe
-    ///    `dispatch_seed_ok` establishes the baseline.
+    /// 4. Start the Seed burst (`PreFire(Batching)`); the baseline is
+    ///    established once the settle-spaced quiescence proof converges
+    ///    (`dispatch_seed_ok`'s pin path), not on the first probe.
     ///
     /// (No parent-edge step: the `Draining → Verifying` reconfirm is a
     /// fresh `coverage` query, so an attach maintains no per-Profile
@@ -2021,14 +2024,22 @@ mod tests {
         let sid_a =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
         let pid = e.subs().get(sid_a).unwrap().profile;
-        let seed_corr = attach_out
-            .probe_ops()
-            .iter()
-            .find_map(|op| match op {
-                specter_core::ProbeOp::Probe { request } => Some(request.correlation()),
-                specter_core::ProbeOp::Cancel { .. } => None,
-            })
-            .expect("attach emitted Probe");
+        // Batching-first Seed: expire the settle timer (settle = 50ms)
+        // so the verify probe is in flight before the revival below.
+        let t_settle = now + Duration::from_millis(50);
+        while let Some(entry) = e.pop_expired(t_settle) {
+            e.step(
+                Input::TimerExpired {
+                    profile: entry.profile,
+                    kind: entry.kind,
+                    id: entry.id,
+                },
+                t_settle,
+            );
+        }
+        let seed_corr = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Seed verify probe in flight after settle expiry");
 
         let _ = e.step(Input::DetachSub(sid_a), Instant::now());
         let attach_out = e.step(

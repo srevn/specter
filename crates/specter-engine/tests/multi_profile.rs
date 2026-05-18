@@ -27,9 +27,9 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, Diff, DirChild,
     DirMeta, DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry,
-    OverflowScope, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    OverflowScope, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, TimerKind,
     WatchOp,
 };
 use specter_engine::Engine;
@@ -70,11 +70,88 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot
     ))
 }
 
-fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops().iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.correlation()),
-        ProbeOp::Cancel { .. } => None,
-    })
+/// Read `pid`'s `Active(PreFire(Batching))` settle-timer id, or panic
+/// with the actual state — the precondition for stepping a Seed
+/// (or any Batching burst) forward by its *own* timer rather than a
+/// blanket `pop_expired` drain. Stepping by id is mandatory in these
+/// multi-Profile setups: a blanket drain would advance unrelated
+/// Profiles' timers and change the scenario's meaning.
+fn batching_settle_id(e: &Engine, pid: ProfileId) -> specter_core::TimerId {
+    match e.profiles().get(pid).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PreFire(PreFireBurst {
+                phase: PreFirePhase::Batching { settle_timer },
+                ..
+            }),
+            _,
+        ) => *settle_timer,
+        other => panic!("expected {pid:?} in Active(PreFire(Batching)), got {other:?}"),
+    }
+}
+
+/// Drive a fresh-attach Seed burst for `pid` from
+/// `Active(PreFire(Batching))` through the N=2 quiescence proof
+/// to pinned `Idle`, committing `snap`. After this, `Profile.current`
+/// and `Profile.baseline` are both set; a fresh Seed never fires, so no
+/// Effects are emitted.
+///
+/// A Seed burst is Batching-first and pins only on the *second*
+/// settle-spaced hash-equal `Authoritative` sample —
+/// `CertifiedPrior::advance` returns `Unstable` on the first sample by
+/// construction (no prior `certified`), grafting into
+/// `current` and re-batching; the second hash-equal sample is `Stable`
+/// and pins. One cycle = step *this Profile's own* Batching settle
+/// timer by id (`Batching → Verifying`, Seed probe emitted) then answer
+/// it with `snap`. Stepping by id (not a blanket `pop_expired`) keeps
+/// the drive scoped to `pid` so sibling Profiles in these multi-Profile
+/// setups are untouched.
+///
+/// `start` is the instant the Seed burst's debounce began; the drive
+/// consumes two settle windows and returns the final instant so the
+/// caller can rebase any later burst timeline strictly monotonically
+/// past it.
+fn complete_seed_n2(
+    e: &mut Engine,
+    pid: ProfileId,
+    snap: &Arc<DirSnapshot>,
+    start: Instant,
+) -> Instant {
+    let mut at = start;
+    for _ in 0..2 {
+        at += SETTLE;
+        let settle_id = batching_settle_id(e, pid);
+        e.step(
+            Input::TimerExpired {
+                profile: pid,
+                kind: TimerKind::Settle,
+                id: settle_id,
+            },
+            at,
+        );
+        let correlation = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Seed Verifying probe in flight after settle expiry");
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: Arc::clone(snap),
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            at,
+        );
+        assert!(
+            out.effects().is_empty(),
+            "a fresh Seed never fires an Effect (N=2 establishment)",
+        );
+    }
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "two settle-spaced hash-equal Seed samples pin the baseline → Idle for {pid:?}",
+    );
+    at
 }
 
 #[test]
@@ -187,15 +264,10 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_p).unwrap().profile;
-    let parent_seed = first_probe_correlation(&out_p).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_parent),
-            correlation: parent_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // The parent's Seed is Batching-first; drive its N=2
+    // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
+    // timer steps so the child Seed below is untouched).
+    let parent_seed_done = complete_seed_n2(&mut e, pid_parent, &dir_snap(vec![]), now);
 
     // Child: recursive @ /src/foo, CONTENT mask so a Modified at
     // /src/foo/bar reaches the post-fire absorb arm.
@@ -215,19 +287,16 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     );
     let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_c).unwrap().profile;
-    let child_seed = first_probe_correlation(&out_c).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_child),
-            correlation: child_seed,
-            outcome: ProbeOutcome::SubtreeOk(child_snap.clone()),
-        }),
-        now,
-    );
+    // Drive the child's Seed N=2, rebased strictly past the parent
+    // Seed's consumed settle windows. The child attached at `now` so
+    // its Batching settle id is read fresh from its still-Batching
+    // state; stepping it at a later instant is quiet-window-clean.
+    let child_seed_done = complete_seed_n2(&mut e, pid_child, &child_snap, parent_seed_done);
 
     // Child Standard burst FIRST (so it gates the parent), then the
-    // parent's own Standard burst.
-    let t1 = now + Duration::from_millis(10);
+    // parent's own Standard burst. The Seed N=2 drives pushed the clock
+    // ~4·SETTLE past `now`; rebase the Standard timeline past them.
+    let t1 = child_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
             resource: foo,
@@ -256,27 +325,6 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         );
     }
 
-    // Parent stabilises while the child is mid-Standard-burst → Draining.
-    let parent_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid_parent))
-        .expect("parent Verifying probe in flight");
-    assert!(
-        e.profiles()
-            .get(pid_child)
-            .unwrap()
-            .state()
-            .in_active_standard_burst(),
-        "child gates the parent before the parent stabilises",
-    );
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_parent),
-            correlation: parent_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        t2,
-    );
-
     // Closures: observe the parent's gate purely from the public surface.
     let parent_reconfirmed = |out: &StepOutput| {
         out.probe_ops().iter().any(|op| {
@@ -296,22 +344,128 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
             ),
         )
     };
+
+    // ── N=2 #1: parent stabilises while the child is mid-Standard-burst
+    // → Draining. Layer B opens a fresh Standard burst with
+    // a fresh `CertifiedPrior`, so the parent's first Verify sample
+    // is `Unstable` by construction (prime ⇒ re-batch); only the
+    // second settle-spaced hash-equal sample is `Stable`. The child is
+    // parked in Verifying with no expirable settle timer, so draining
+    // the parent's re-armed settle does not advance it — it keeps
+    // gating.
+    assert!(
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "child gates the parent before the parent stabilises",
+    );
+    let parent_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight (prime sample)");
+    let primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t2,
+    );
+    assert!(
+        primed.effects().is_empty() && !parent_reconfirmed(&primed),
+        "parent prime sample (prior == None ⇒ Unstable) must not fire",
+    );
+    let parent_parked_at = t2 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(parent_parked_at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            parent_parked_at,
+        );
+    }
+    let parent_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight (confirm sample)");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_corr,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        parent_parked_at,
+    );
     assert!(
         parent_is_draining(&e),
         "parent enters Draining (stable verdict, child still gating)",
     );
 
-    // Child Verifying stable → fires (Awaiting). No finish, no sweep.
+    // ── N=2 #2: child Verifying stable → fires (Awaiting). The child's
+    // burst is also fresh (its carrier opened `None` at the FsEvent),
+    // so it too needs prime → drain → confirm. The parent is parked in
+    // Draining holding only its 6 s BurstDeadline, so draining the
+    // child's re-armed settle does not disturb it.
+    assert!(
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "child still gates the parent before it stabilises",
+    );
+    let child_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .expect("child Verifying probe in flight (prime sample)");
+    let child_primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: child_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: child_snap.clone(),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        parent_parked_at,
+    );
+    assert!(
+        child_primed.effects().is_empty()
+            && !parent_reconfirmed(&child_primed)
+            && parent_is_draining(&e),
+        "child prime sample must not fire and must not disturb the Draining parent",
+    );
+    let child_parked_at = parent_parked_at + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(child_parked_at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            child_parked_at,
+        );
+    }
     let child_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("child Verifying probe in flight");
+        .expect("child Verifying probe in flight (confirm sample)");
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: child_corr,
-            outcome: ProbeOutcome::SubtreeOk(child_snap.clone()),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: child_snap.clone(),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        child_parked_at,
     );
     let child_effect = stable_out
         .effects()
@@ -323,50 +477,108 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         "parent does not reconfirm at the child's stable verdict",
     );
 
-    // EffectComplete → child Rebasing. No finish, no sweep.
+    // EffectComplete → child transition_to_rebasing(First). No finish,
+    // no sweep — the child stays Active(PostFire) for the whole loop.
     let rebase_out = e.step(
         Input::EffectComplete {
             sub: sid_c,
             key: child_effect.key(),
             result: specter_core::EffectOutcome::Ok,
         },
-        t2,
+        child_parked_at,
     );
-    let rebase_corr = e
+    let rebase_corr1 = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("child rebase probe in flight");
+        .expect("child rebase probe #1 in flight");
     assert!(
         !parent_reconfirmed(&rebase_out) && parent_is_draining(&e),
-        "parent does not reconfirm during child Rebasing",
+        "parent does not reconfirm during child Rebasing #1",
     );
 
-    // Descendant edit absorbed while the rebase probe is in flight — the
-    // fire-tail residual.
-    let t3 = t2 + Duration::from_millis(5);
+    // Sample 1 (prior `None`) ⇒ Unstable ⇒ RebaseSettling. An absorb
+    // here would be cleared by the next transition_to_rebasing re-arm,
+    // so the residual that drives the restart must land in the FINAL
+    // round-trip.
+    let s1 = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: rebase_corr1,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: child_snap.clone(),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        child_parked_at,
+    );
+    assert!(
+        !parent_reconfirmed(&s1) && parent_is_draining(&e),
+        "parent does not reconfirm across the child's first rebase sample",
+    );
+    let spacing_timer = match e.profiles().get(pid_child).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::RebaseSettling { spacing_timer },
+                ..
+            }),
+            _,
+        ) => *spacing_timer,
+        other => {
+            panic!(
+                "child rebase sample 1 must loop to Active(PostFire(RebaseSettling)); got {other:?}"
+            )
+        }
+    };
+
+    // RebaseSettle expiry (by id — scoped to the child, parent
+    // untouched) → Rebasing #2, the FINAL round-trip.
+    let t_respace = child_parked_at + SETTLE;
+    let s2 = e.step(
+        Input::TimerExpired {
+            profile: pid_child,
+            kind: TimerKind::RebaseSettle,
+            id: spacing_timer,
+        },
+        t_respace,
+    );
+    let rebase_corr2 = e
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .expect("RebaseSettle re-arms the child's Rebasing probe #2");
+    assert!(
+        !parent_reconfirmed(&s2) && parent_is_draining(&e),
+        "parent does not reconfirm across the child's settle-spaced re-arm",
+    );
+
+    // Descendant edit absorbed during the FINAL Rebasing round-trip —
+    // the genuine final-window residual (no further loop entry clears
+    // it).
+    let t_absorb = t_respace + Duration::from_millis(5);
     let absorb_out = e.step(
         Input::FsEvent {
             resource: bar,
             event: FsEvent::Modified,
         },
-        t3,
+        t_absorb,
     );
     assert!(
         !parent_reconfirmed(&absorb_out) && parent_is_draining(&e),
         "parent does not reconfirm while the residual is absorbed",
     );
 
-    // Rebase response with a non-empty residual → child restarts
-    // in-place. THE key assertion: the child never leaves the Active
-    // Standard burst (no finish-then-start flicker), so the parent must
-    // not reconfirm in this step and stays Draining.
-    let t4 = t3 + Duration::from_millis(5);
+    // Sample 2 hash-equal ⇒ Stable; non-empty final-window residual ⇒
+    // child restarts in-place. THE key assertion: the child never
+    // leaves the Active Standard burst (no finish-then-start flicker),
+    // so the parent must not reconfirm in this step and stays Draining.
+    let t_restart = t_absorb + Duration::from_millis(5);
     let restart_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
-            correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(child_snap.clone()),
+            correlation: rebase_corr2,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: child_snap.clone(),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t4,
+        t_restart,
     );
     assert!(
         matches!(
@@ -394,32 +606,79 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         "parent stays gated across the in-place restart — no flicker",
     );
 
-    // Drive the restarted burst to its single finish: Batching →
-    // Verifying → stable (baseline == current, Sub already fired ⇒ B1
-    // dedup, zero effects) → finish_burst_to_idle. The sweep runs here
-    // for the first time since the parent entered Draining; the child is
-    // now Idle, so the parent's fresh query is false → reconfirm.
-    let t5 = t4 + SETTLE * 2;
-    while let Some(entry) = e.pop_expired(t5) {
+    // ── N=2 #3: drive the restarted burst to its single finish. The
+    // restart is a fresh PreFireBurst (`into_pre_fire_residual` reset
+    // a fresh `CertifiedPrior`), so it too is N=2: Batching →
+    // Verifying → prime (Unstable ⇒ re-batch) → drain → confirm
+    // (Stable; baseline == current, Sub already fired ⇒ B1 dedup, zero
+    // effects) → finish_burst_to_idle. The sweep runs here for the
+    // first time since the parent entered Draining; the child is now
+    // Idle, so the parent's fresh covered-descendant query is false →
+    // reconfirm. The prime sample must NOT finish, sweep, or disturb
+    // the Draining parent.
+    let t_rdrain = t_restart + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(t_rdrain) {
         e.step(
             Input::TimerExpired {
                 profile: entry.profile,
                 kind: entry.kind,
                 id: entry.id,
             },
-            t5,
+            t_rdrain,
+        );
+    }
+    let restart_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .expect("restarted burst's Verifying probe in flight (prime sample)");
+    let restart_primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: restart_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: child_snap.clone(),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t_rdrain,
+    );
+    assert!(
+        restart_primed.effects().is_empty()
+            && !parent_reconfirmed(&restart_primed)
+            && parent_is_draining(&e),
+        "restarted-burst prime must not fire, sweep, or disturb the Draining parent",
+    );
+    assert!(
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "restarted burst still Active after its prime sample re-batches",
+    );
+    let t_rconfirm = t_rdrain + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(t_rconfirm) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t_rconfirm,
         );
     }
     let restart_verify_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("restarted burst's Verifying probe in flight");
+        .expect("restarted burst's Verifying probe in flight (confirm sample)");
     let finish_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: restart_verify_corr,
-            outcome: ProbeOutcome::SubtreeOk(child_snap.clone()),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: child_snap.clone(),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t5,
+        t_rconfirm,
     );
     assert!(
         matches!(
@@ -482,15 +741,10 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_p).unwrap().profile;
-    let parent_seed = first_probe_correlation(&out_p).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_parent),
-            correlation: parent_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // The parent's Seed is Batching-first; drive its N=2
+    // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
+    // timer steps so the child Seed below stays untouched).
+    let parent_seed_done = complete_seed_n2(&mut e, pid_parent, &dir_snap(vec![]), now);
 
     let out_c = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
@@ -508,21 +762,17 @@ fn parent_in_draining_reconfirms_after_child_settles() {
     );
     let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_c).unwrap().profile;
-    let child_seed = first_probe_correlation(&out_c).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_child),
-            correlation: child_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // Drive the child's Seed N=2, rebased strictly past the parent
+    // Seed's consumed settle windows.
+    let child_seed_done = complete_seed_n2(&mut e, pid_child, &dir_snap(vec![]), parent_seed_done);
 
     // Both Profiles Idle. Trigger child's Standard burst FIRST so the
     // child is in an Active Standard burst before parent's Standard
     // starts; ordering matters because we need parent to enter Draining
-    // (stable verdict while a covered descendant still gates it).
-    let t1 = now + Duration::from_millis(10);
+    // (stable verdict while a covered descendant still gates it). The
+    // Seed N=2 drives pushed the clock ~4·SETTLE past `now`; rebase the
+    // Standard timeline past them.
+    let t1 = child_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
             resource: foo,
@@ -552,9 +802,6 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         );
     }
 
-    let parent_probe_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid_parent))
-        .expect("Verifying probe in flight");
     assert!(
         e.profiles()
             .get(pid_child)
@@ -564,14 +811,55 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         "child is mid-Standard-burst — this is what gates the parent into Draining",
     );
 
-    // Inject parent's stable response while dirty>0 → Draining.
+    // ── N=2 #1: parent stabilises while the child gates it → Draining.
+    // Layer B opens the parent's fresh Standard burst with
+    // a fresh `CertifiedPrior`, so its first Verify sample is
+    // `Unstable` by construction (prime ⇒ re-batch); the second
+    // settle-spaced hash-equal sample is `Stable`. The child is parked
+    // in Verifying with no expirable settle timer, so draining the
+    // parent's re-armed settle keeps it gating.
+    let parent_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight (prime sample)");
+    let primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t2,
+    );
+    assert!(
+        primed.effects().is_empty(),
+        "parent prime sample (prior == None ⇒ Unstable) must not fire",
+    );
+    let parent_parked_at = t2 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(parent_parked_at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            parent_parked_at,
+        );
+    }
+    let parent_probe_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight (confirm sample)");
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_parent),
             correlation: parent_probe_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        parent_parked_at,
     );
     assert!(matches!(
         e.profiles().get(pid_parent).unwrap().state(),
@@ -584,23 +872,76 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         ),
     ));
 
-    // Drive child's stable verdict — the post-stable path routes through
-    // Awaiting (effect emitted) → Rebasing (post-fire probe) → Idle. The
-    // sweep only runs at finish_burst_to_idle, i.e. at the end of the
-    // *full* fire-cycle, not at the stable verdict — and the child stays
-    // in an Active Standard burst (post-fire counts) until then. That
-    // keeps the parent from reconfirming while the child's Effect is
-    // still mutating the disk.
+    // ── N=2 #2: drive the child's stable verdict. Its burst is also
+    // fresh (carrier opened `None`), so it needs prime → drain →
+    // confirm; the parent is parked in Draining holding only its 6 s
+    // BurstDeadline, so draining the child's re-armed settle does not
+    // disturb it. The post-stable path then routes Awaiting (effect
+    // emitted) → Rebasing (post-fire probe) → Idle. The sweep only runs
+    // at finish_burst_to_idle — the end of the *full* fire-cycle, not
+    // the stable verdict — and the child stays in an Active Standard
+    // burst (post-fire counts) until then, keeping the parent from
+    // reconfirming while the child's Effect is still mutating the disk.
+    assert!(
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "child still gates the Draining parent before it stabilises",
+    );
+    let child_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .expect("child Verifying probe in flight (prime sample)");
+    let child_primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: child_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        parent_parked_at,
+    );
+    assert!(
+        child_primed.effects().is_empty()
+            && matches!(
+                e.profiles().get(pid_parent).unwrap().state(),
+                ProfileState::Active(
+                    ActiveBurst::PreFire(PreFireBurst {
+                        phase: PreFirePhase::Draining,
+                        ..
+                    }),
+                    BurstFinish::ReturnToIdle
+                ),
+            ),
+        "child prime sample must not fire and must not disturb the Draining parent",
+    );
+    let child_parked_at = parent_parked_at + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(child_parked_at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            child_parked_at,
+        );
+    }
     let child_probe_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("Verifying probe in flight");
+        .expect("child Verifying probe in flight (confirm sample)");
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: child_probe_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        child_parked_at,
     );
     // Stable verdict transitions to Awaiting; no reconfirm yet.
     assert!(matches!(
@@ -643,7 +984,7 @@ fn parent_in_draining_reconfirms_after_child_settles() {
             key: child_effect.key(),
             result: specter_core::EffectOutcome::Ok,
         },
-        t2,
+        child_parked_at,
     );
     let rebase_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
@@ -657,16 +998,98 @@ fn parent_in_draining_reconfirms_after_child_settles() {
         "parent does NOT reconfirm during child Rebasing — burst not yet finished",
     );
 
-    // Inject the rebase probe response → child finish_burst_to_idle →
-    // the Draining sweep finds the parent's covered-descendant query now
-    // false → parent's reconfirm transition_to_verifying.
-    let out = e.step(
+    // Drive the child's post-fire N=2 rebase loop. The child stays in
+    // Active(PostFire) for the WHOLE loop (`in_active_standard_burst`),
+    // so the parent stays gated (Draining, no reconfirm) across every
+    // intermediate step; the sweep runs only at the child's single
+    // `finish_burst_to_idle` (the Stable verdict).
+    let child_gates_draining_parent = |eng: &Engine| {
+        eng.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst()
+            && matches!(
+                eng.profiles().get(pid_parent).unwrap().state(),
+                ProfileState::Active(
+                    ActiveBurst::PreFire(PreFireBurst {
+                        phase: PreFirePhase::Draining,
+                        ..
+                    }),
+                    BurstFinish::ReturnToIdle
+                ),
+            )
+    };
+    let parent_reconfirmed = |out: &StepOutput| {
+        out.probe_ops().iter().any(|op| {
+            matches!(op, ProbeOp::Probe { request }
+                if request.owner() == ProbeOwner::Profile(pid_parent))
+        })
+    };
+
+    // Sample 1 (prior `None`) ⇒ Unstable ⇒ RebaseSettling.
+    let s1 = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        child_parked_at,
+    );
+    assert!(
+        !parent_reconfirmed(&s1) && child_gates_draining_parent(&e),
+        "parent stays gated across the child's first rebase sample (still PostFire)",
+    );
+    let spacing_timer = match e.profiles().get(pid_child).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::RebaseSettling { spacing_timer },
+                ..
+            }),
+            _,
+        ) => *spacing_timer,
+        other => {
+            panic!(
+                "child rebase sample 1 must loop to Active(PostFire(RebaseSettling)); got {other:?}"
+            )
+        }
+    };
+
+    // RebaseSettle expiry (by id — scoped to the child, parent
+    // untouched) → Rebasing #2.
+    let t_respace = child_parked_at + SETTLE;
+    let s2 = e.step(
+        Input::TimerExpired {
+            profile: pid_child,
+            kind: TimerKind::RebaseSettle,
+            id: spacing_timer,
+        },
+        t_respace,
+    );
+    let rebase_corr2 = e
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .expect("RebaseSettle re-arms the child's Rebasing probe");
+    assert!(
+        !parent_reconfirmed(&s2) && child_gates_draining_parent(&e),
+        "parent stays gated across the child's settle-spaced re-arm (still PostFire)",
+    );
+
+    // Sample 2 hash-equal ⇒ Stable → child finish_burst_to_idle → the
+    // Draining sweep finds the parent's covered-descendant query now
+    // false → parent's reconfirm transition_to_verifying, same step.
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: rebase_corr2,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t_respace,
     );
 
     // Parent emitted a reconfirm probe in the same step.
@@ -740,15 +1163,10 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_p).unwrap().profile;
-    let parent_seed = first_probe_correlation(&out_p).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_parent),
-            correlation: parent_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // The parent's Seed is Batching-first; drive its N=2
+    // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
+    // timer steps so the child Seed below stays untouched).
+    let parent_seed_done = complete_seed_n2(&mut e, pid_parent, &dir_snap(vec![]), now);
 
     let out_c = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
@@ -766,18 +1184,14 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     );
     let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_c).unwrap().profile;
-    let child_seed = first_probe_correlation(&out_c).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_child),
-            correlation: child_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // Drive the child's Seed N=2, rebased strictly past the parent
+    // Seed's consumed settle windows.
+    let child_seed_done = complete_seed_n2(&mut e, pid_child, &dir_snap(vec![]), parent_seed_done);
 
     // Child Standard burst FIRST (so it gates the parent), then parent's.
-    let t1 = now + Duration::from_millis(10);
+    // The Seed N=2 drives pushed the clock ~4·SETTLE past `now`; rebase
+    // the Standard timeline past them.
+    let t1 = child_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
             resource: foo,
@@ -805,10 +1219,20 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         );
     }
 
-    // Parent stabilises while the child gates it → Draining.
-    let parent_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid_parent))
-        .expect("parent Verifying probe in flight");
+    let parent_reconfirmed = |out: &StepOutput| {
+        out.probe_ops().iter().any(|op| {
+            matches!(op, ProbeOp::Probe { request }
+                if request.owner() == ProbeOwner::Profile(pid_parent))
+        })
+    };
+
+    // ── N=2 #1: parent stabilises while the child gates it → Draining.
+    // Layer B opens the parent's fresh Standard burst with
+    // a fresh `CertifiedPrior`, so its first Verify sample is
+    // `Unstable` by construction (prime ⇒ re-batch); the second
+    // settle-spaced hash-equal sample is `Stable`. The child is parked
+    // in Verifying with no expirable settle timer, so draining the
+    // parent's re-armed settle keeps it gating.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -817,13 +1241,48 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             .in_active_standard_burst(),
         "child gates the parent before the parent stabilises",
     );
+    let parent_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight (prime sample)");
+    let primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t2,
+    );
+    assert!(
+        primed.effects().is_empty() && !parent_reconfirmed(&primed),
+        "parent prime sample (prior == None ⇒ Unstable) must not fire",
+    );
+    let parent_parked_at = t2 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(parent_parked_at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            parent_parked_at,
+        );
+    }
+    let parent_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight (confirm sample)");
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_parent),
             correlation: parent_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        parent_parked_at,
     );
     assert!(
         matches!(
@@ -855,7 +1314,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             NO_EVENTS,
             false,
         )),
-        t2,
+        parent_parked_at,
     );
     let sid_m = specter_core::testkit::first_attached_sub(&out_m).expect("attach_sub succeeded");
     let pid_mid = e.subs().get(sid_m).unwrap().profile;
@@ -876,18 +1335,62 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             .in_active_standard_burst(),
     );
 
-    // Drive the child through its full fire cycle to completion. No
-    // reconfirm until the child actually finishes.
+    // ── N=2 #2: drive the child through its full fire cycle. Its burst
+    // is also fresh (carrier opened `None`), so it needs prime → drain
+    // → confirm. The parent is parked in Draining holding only its 6 s
+    // BurstDeadline, and the interposed `mid` Profile sits in Seed with
+    // no expirable settle timer, so draining the child's re-armed
+    // settle disturbs neither. No reconfirm until the child finishes.
+    assert!(
+        e.profiles()
+            .get(pid_child)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "child still gates the Draining parent before it stabilises",
+    );
+    let child_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .expect("child Verifying probe in flight (prime sample)");
+    let child_primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: child_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        parent_parked_at,
+    );
+    assert!(
+        child_primed.effects().is_empty() && !parent_reconfirmed(&child_primed),
+        "child prime sample must not fire or reconfirm the parent",
+    );
+    let child_parked_at = parent_parked_at + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(child_parked_at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            child_parked_at,
+        );
+    }
     let child_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("child Verifying probe in flight");
+        .expect("child Verifying probe in flight (confirm sample)");
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: child_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        child_parked_at,
     );
     let child_effect = stable_out
         .effects()
@@ -900,33 +1403,82 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             key: child_effect.key(),
             result: specter_core::EffectOutcome::Ok,
         },
-        t2,
+        child_parked_at,
     );
     let rebase_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
         .expect("child rebase probe in flight");
-    let parent_reconfirmed = |out: &StepOutput| {
-        out.probe_ops().iter().any(|op| {
-            matches!(op, ProbeOp::Probe { request }
-                if request.owner() == ProbeOwner::Profile(pid_parent))
-        })
-    };
     assert!(
         !parent_reconfirmed(&stable_out) && !parent_reconfirmed(&rebase_out),
         "parent does not reconfirm until the child's burst finishes",
     );
 
-    // Child rebase response → child finish_burst_to_idle. The sweep
-    // re-evaluates the parent's fresh query (child now Idle, interposed
-    // Profile only Seed) → false → parent reconfirms. No panic (the old
-    // `dirty_descendants underflow` debug_assert is gone), no strand.
-    let finish_out = e.step(
+    // Child post-fire N=2 rebase loop. The child stays Active(PostFire)
+    // for the whole loop, so the parent does not reconfirm until the
+    // child's single finish_burst_to_idle (the Stable verdict).
+    let s1 = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
             correlation: rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        child_parked_at,
+    );
+    assert!(
+        !parent_reconfirmed(&s1),
+        "parent does not reconfirm across the child's first rebase sample",
+    );
+    let spacing_timer = match e.profiles().get(pid_child).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::RebaseSettling { spacing_timer },
+                ..
+            }),
+            _,
+        ) => *spacing_timer,
+        other => {
+            panic!(
+                "child rebase sample 1 must loop to Active(PostFire(RebaseSettling)); got {other:?}"
+            )
+        }
+    };
+
+    // RebaseSettle expiry (by id — scoped to the child) → Rebasing #2.
+    let t_respace = child_parked_at + SETTLE;
+    let s2 = e.step(
+        Input::TimerExpired {
+            profile: pid_child,
+            kind: TimerKind::RebaseSettle,
+            id: spacing_timer,
+        },
+        t_respace,
+    );
+    let rebase_corr2 = e
+        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .expect("RebaseSettle re-arms the child's Rebasing probe");
+    assert!(
+        !parent_reconfirmed(&s2),
+        "parent does not reconfirm across the child's settle-spaced re-arm",
+    );
+
+    // Sample 2 hash-equal ⇒ Stable → child finish_burst_to_idle. The
+    // sweep re-evaluates the parent's fresh query (child now Idle,
+    // interposed Profile only Seed) → false → parent reconfirms. No
+    // panic (the old `dirty_descendants underflow` debug_assert is
+    // gone), no strand.
+    let finish_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_child),
+            correlation: rebase_corr2,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t_respace,
     );
     assert!(
         parent_reconfirmed(&finish_out),
@@ -950,7 +1502,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
 
 #[test]
 fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
-    // The §3 deeper-layer guard: the Draining-exit trigger is a sweep of
+    // Draining-exit soundness guard: the trigger is a sweep of
     // *every* Draining Profile, not a walk of the finishing Profile's
     // covering chain. `A`(/src, max_depth=1) is gated into Draining by a
     // deep descendant `P`(/src/mid/foo) *via the intermediate broader*
@@ -1005,15 +1557,10 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     );
     let sid_a = specter_core::testkit::first_attached_sub(&out_a).expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile;
-    let a_seed = first_probe_correlation(&out_a).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_a),
-            correlation: a_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // Every Seed is Batching-first; drive A's N=2 quiescence
+    // proof to a pinned `Idle` baseline (per-Profile, by-id timer steps
+    // so the B and P Seeds below stay untouched).
+    let a_seed_done = complete_seed_n2(&mut e, pid_a, &dir_snap(vec![]), now);
 
     // B @ /src/mid (recursive): covers /src/mid/foo, so it sits on P's
     // chain (P → B → A). It never bursts — the only event under it is
@@ -1035,15 +1582,10 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     );
     let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("attach_sub succeeded");
     let pid_b = e.subs().get(sid_b).unwrap().profile;
-    let b_seed = first_probe_correlation(&out_b).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_b),
-            correlation: b_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // Drive B's Seed N=2, rebased strictly past A's consumed settle
+    // windows. B then sits pinned at `Idle` — exactly the state the
+    // later immediate-reap detach requires.
+    let b_seed_done = complete_seed_n2(&mut e, pid_b, &dir_snap(vec![]), a_seed_done);
 
     // P @ /src/mid/foo (recursive).
     let out_pp = e.step(
@@ -1062,19 +1604,15 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_pp).expect("attach_sub succeeded");
     let pid_p = e.subs().get(sid_p).unwrap().profile;
-    let p_seed = first_probe_correlation(&out_pp).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_p),
-            correlation: p_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // Drive P's Seed N=2, rebased strictly past B's consumed settle
+    // windows.
+    let p_seed_done = complete_seed_n2(&mut e, pid_p, &dir_snap(vec![]), b_seed_done);
 
     // P's Standard burst from its own anchor `foo` (drives only P), then
-    // A's own Standard burst from its anchor `src`.
-    let t1 = now + Duration::from_millis(10);
+    // A's own Standard burst from its anchor `src`. The three Seed N=2
+    // drives pushed the clock ~6·SETTLE past `now`; rebase the Standard
+    // timeline past them.
+    let t1 = p_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
             resource: foo,
@@ -1107,11 +1645,20 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         );
     }
 
-    // A stabilises while P gates it through the chain P → B → A → A
-    // enters Draining.
-    let a_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid_a))
-        .expect("A Verifying probe in flight");
+    let a_reconfirmed = |out: &StepOutput| {
+        out.probe_ops().iter().any(|op| {
+            matches!(op, ProbeOp::Probe { request }
+                if request.owner() == ProbeOwner::Profile(pid_a))
+        })
+    };
+
+    // ── N=2 #1: A stabilises while P gates it through the chain
+    // P → B → A → A enters Draining. Layer B opens A's fresh Standard
+    // burst with a fresh `CertifiedPrior`, so its first Verify
+    // sample is `Unstable` by construction (prime ⇒ re-batch); the
+    // second settle-spaced hash-equal sample is `Stable`. P is parked
+    // in Verifying with no expirable settle timer, so draining A's
+    // re-armed settle keeps it gating.
     assert!(
         e.profiles()
             .get(pid_p)
@@ -1120,13 +1667,48 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
             .in_active_standard_burst(),
         "P gates A (via the intermediate B) before A stabilises",
     );
+    let a_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_a))
+        .expect("A Verifying probe in flight (prime sample)");
+    let primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_a),
+            correlation: a_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t2,
+    );
+    assert!(
+        primed.effects().is_empty() && !a_reconfirmed(&primed),
+        "A prime sample (prior == None ⇒ Unstable) must not fire",
+    );
+    let a_parked_at = t2 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(a_parked_at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            a_parked_at,
+        );
+    }
+    let a_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_a))
+        .expect("A Verifying probe in flight (confirm sample)");
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_a),
             correlation: a_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        a_parked_at,
     );
     assert!(
         matches!(
@@ -1145,37 +1727,78 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     // Reap the intermediate B (Idle ⇒ immediate reap). P's live chain
     // collapses to P → (nothing): A does not cover `foo` directly
     // (max_depth=1), so A is OFF the finisher's chain.
-    let detach_out = e.step(Input::DetachSub(sid_b), t2);
+    let detach_out = e.step(Input::DetachSub(sid_b), a_parked_at);
     assert!(
         e.profiles().get(pid_b).is_none(),
         "B reaped immediately (it was Idle)",
     );
-    let a_reconfirmed = |out: &StepOutput| {
-        out.probe_ops().iter().any(|op| {
-            matches!(op, ProbeOp::Probe { request }
-                if request.owner() == ProbeOwner::Profile(pid_a))
-        })
-    };
     assert!(
         !a_reconfirmed(&detach_out) && e.profiles().get(pid_a).unwrap().state().is_draining(),
         "reaping B does not itself reconfirm A — A is still gated by the \
          still-bursting P, just no longer through a chain that reaches it",
     );
 
-    // Drive P through its full fire cycle. At P's single
-    // finish_burst_to_idle the sweep re-checks *every* Draining Profile;
-    // A is found and reconfirmed even though P's chain no longer reaches
-    // it. (A chain-coupled trigger would strand A here forever.)
+    // ── N=2 #2: drive P through its full fire cycle. P's burst is also
+    // fresh (carrier opened `None`), so it needs prime → drain →
+    // confirm. A is parked in Draining holding only its 6 s
+    // BurstDeadline, so draining P's re-armed settle does not disturb
+    // it (and no `finish_burst_to_idle` runs in a drain, so the sweep
+    // cannot fire early). At P's single finish the sweep re-checks
+    // *every* Draining Profile; A is found and reconfirmed even though
+    // P's chain no longer reaches it. (A chain-coupled trigger would
+    // strand A here forever.)
+    assert!(
+        e.profiles()
+            .get(pid_p)
+            .unwrap()
+            .state()
+            .in_active_standard_burst(),
+        "P still gates the Draining A before it stabilises",
+    );
+    let p_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_p))
+        .expect("P Verifying probe in flight (prime sample)");
+    let p_primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_p),
+            correlation: p_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        a_parked_at,
+    );
+    assert!(
+        p_primed.effects().is_empty()
+            && !a_reconfirmed(&p_primed)
+            && e.profiles().get(pid_a).unwrap().state().is_draining(),
+        "P prime sample must not fire or reconfirm/disturb the Draining A",
+    );
+    let p_parked_at = a_parked_at + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(p_parked_at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            p_parked_at,
+        );
+    }
     let p_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_p))
-        .expect("P Verifying probe in flight");
+        .expect("P Verifying probe in flight (confirm sample)");
     let p_stable = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),
             correlation: p_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        p_parked_at,
     );
     let p_effect = p_stable
         .effects()
@@ -1188,7 +1811,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
             key: p_effect.key(),
             result: specter_core::EffectOutcome::Ok,
         },
-        t2,
+        p_parked_at,
     );
     let p_rebase_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_p))
@@ -1197,13 +1820,67 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         !a_reconfirmed(&p_stable) && !a_reconfirmed(&p_rebase_out),
         "A does not reconfirm until P's burst actually finishes",
     );
-    let p_finish = e.step(
+    // P's post-fire N=2 rebase loop. P stays Active(PostFire) for the
+    // whole loop, so A does not reconfirm until P's single
+    // finish_burst_to_idle (the Stable verdict).
+    let p_s1 = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),
             correlation: p_rebase_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        p_parked_at,
+    );
+    assert!(
+        !a_reconfirmed(&p_s1),
+        "A does not reconfirm across P's first rebase sample",
+    );
+    let p_spacing = match e.profiles().get(pid_p).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PostFire(PostFireBurst {
+                phase: PostFirePhase::RebaseSettling { spacing_timer },
+                ..
+            }),
+            _,
+        ) => *spacing_timer,
+        other => {
+            panic!("P rebase sample 1 must loop to Active(PostFire(RebaseSettling)); got {other:?}")
+        }
+    };
+
+    // RebaseSettle expiry (by id — scoped to P) → Rebasing #2.
+    let p_respace = p_parked_at + SETTLE;
+    let p_s2 = e.step(
+        Input::TimerExpired {
+            profile: pid_p,
+            kind: TimerKind::RebaseSettle,
+            id: p_spacing,
+        },
+        p_respace,
+    );
+    let p_rebase_corr2 = e
+        .pending_probe_for(ProbeOwner::Profile(pid_p))
+        .expect("RebaseSettle re-arms P's Rebasing probe");
+    assert!(
+        !a_reconfirmed(&p_s2),
+        "A does not reconfirm across P's settle-spaced re-arm",
+    );
+
+    // Sample 2 hash-equal ⇒ Stable → P finish_burst_to_idle → the
+    // sweep re-checks every Draining Profile.
+    let p_finish = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_p),
+            correlation: p_rebase_corr2,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        p_respace,
     );
     assert!(
         a_reconfirmed(&p_finish),
@@ -1230,11 +1907,11 @@ fn co_located_profiles_independently_force_walk_shared_resource() {
     // Two config_hash-distinct Profiles share one Resource /src. A
     // single FsEvent on the shared resource fans to *every* covering
     // Profile (on_fs_event iterates the covering set), and each Profile
-    // records the resource in its *own* dirty / force_walk set. There
-    // is no per-resource global filter that one Profile's in-flight
-    // burst could use to blind another — the property that keeps a
-    // co-resident Profile's probe from mtime-skipping a genuinely
-    // changed directory.
+    // records the resource in its *own* dirty_resources (the obligation
+    // basis). There is no per-resource global filter that one Profile's
+    // in-flight burst could use to blind another — the property that
+    // keeps a co-resident Profile's probe from mtime-skipping a
+    // genuinely changed directory.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -1286,29 +1963,20 @@ fn co_located_profiles_independently_force_walk_shared_resource() {
         "both Profiles contribute the shared resource's watch",
     );
 
-    // Drive both Seeds → Idle with a baseline. Resolving A's Seed does
-    // not touch B's in-flight probe (per-Profile correlation).
-    for pid in [pid_a, pid_b] {
-        let corr = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("Seed Verifying probe in flight");
-        e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
-                correlation: corr,
-                outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-            }),
-            now,
-        );
-        assert!(matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Idle,
-        ));
-    }
+    // Drive both Seeds → Idle with a baseline. Each Seed is
+    // Batching-first and pins only on its own N=2 proof. Driving A's
+    // full N=2 by *A's own* by-id settle steps does not touch B's
+    // independent Seed (per-Profile correlation + per-Profile timer
+    // id); B is then driven by *B's own* fresh Batching settle id,
+    // rebased strictly past A's consumed windows — `complete_seed_n2`
+    // asserts each `pid` independently reaches `Idle`.
+    let a_seed_done = complete_seed_n2(&mut e, pid_a, &dir_snap(vec![]), now);
+    let b_seed_done = complete_seed_n2(&mut e, pid_b, &dir_snap(vec![]), a_seed_done);
 
     // One FsEvent on the shared anchor fans to both Profiles; each
-    // opens its own Standard burst seeded with the resource.
-    let t0 = now + Duration::from_millis(10);
+    // opens its own Standard burst seeded with the resource. The Seed
+    // N=2 drives pushed the clock ~4·SETTLE past `now`; rebase past them.
+    let t0 = b_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
             resource: r,
@@ -1322,15 +1990,16 @@ fn co_located_profiles_independently_force_walk_shared_resource() {
             other => panic!("expected Active(PreFire) for {pid:?}, got {other:?}"),
         };
         assert!(
-            pre.dirty_resources.contains(&r) && pre.force_walk_resources.contains(&r),
-            "{pid:?} independently recorded the shared resource in dirty + force_walk",
+            pre.dirty_resources.contains(&r),
+            "{pid:?} independently recorded the shared resource in its own \
+             dirty_resources (the obligation basis)",
         );
     }
 
     // A second external event on the shared resource while both bursts
     // are in flight: again fanned to each Profile independently. No
     // Profile's in-flight burst removes the resource from another's
-    // force_walk set.
+    // dirty_resources (obligation basis).
     let t1 = t0 + SETTLE / 2;
     e.step(
         Input::FsEvent {
@@ -1345,9 +2014,10 @@ fn co_located_profiles_independently_force_walk_shared_resource() {
             other => panic!("expected Active(PreFire) for {pid:?}, got {other:?}"),
         };
         assert!(
-            pre.force_walk_resources.contains(&r),
+            pre.dirty_resources.contains(&r),
             "{pid:?} still force-walks the shared resource after a mid-burst \
-             event — no global filter poisons a co-resident Profile",
+             event (its own dirty_resources obligation basis) — no global \
+             filter poisons a co-resident Profile",
         );
     }
 }
@@ -1371,9 +2041,10 @@ struct DrainingFixture {
     pid_child: ProfileId,
     sid_parent: SubId,
     sid_child: SubId,
-    /// The fixture clock at the point the parent reached `Draining`;
-    /// subsequent steps reuse it so the scenario stays deterministic.
-    t2: Instant,
+    /// The fixture clock at the point the parent reached `Draining`
+    /// (after the N=2 quiescence confirm); subsequent steps reuse it so
+    /// the scenario stays deterministic.
+    parked_at: Instant,
 }
 
 /// Build [`DrainingFixture`]. The child Profile is attached *first* so
@@ -1416,15 +2087,10 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     let sid_child =
         specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_child).unwrap().profile;
-    let child_seed = first_probe_correlation(&out_c).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_child),
-            correlation: child_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // The child's Seed is Batching-first; drive its N=2
+    // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
+    // timer steps so the parent Seed below stays untouched).
+    let child_seed_done = complete_seed_n2(&mut e, pid_child, &dir_snap(vec![]), now);
 
     // Parent `A` @ /src — recursive, so it covers /src/child.
     let out_p = e.step(
@@ -1444,15 +2110,9 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     let sid_parent =
         specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_parent).unwrap().profile;
-    let parent_seed = first_probe_correlation(&out_p).unwrap();
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_parent),
-            correlation: parent_seed,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
-        }),
-        now,
-    );
+    // Drive the parent's Seed N=2, rebased strictly past the child
+    // Seed's consumed settle windows.
+    let parent_seed_done = complete_seed_n2(&mut e, pid_parent, &dir_snap(vec![]), child_seed_done);
 
     // The descendant-before-ancestor premise — asserted, not assumed.
     let order: Vec<ProfileId> = e.profiles().iter().map(|(id, _)| id).collect();
@@ -1472,8 +2132,9 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     // Child Standard burst from its own anchor `child_dir`; parent
     // Standard burst from its own anchor `src`. A NO_EVENTS Profile
     // only bursts from an event at its own anchor, so the two events
-    // stay isolated.
-    let t1 = now + Duration::from_millis(10);
+    // stay isolated. The Seed N=2 drives pushed the clock ~4·SETTLE
+    // past `now`; rebase the Standard timeline past them.
+    let t1 = parent_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
             resource: child_dir,
@@ -1503,9 +2164,13 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     }
 
     // Parent stabilises while the child still gates it → Draining.
-    let parent_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid_parent))
-        .expect("parent Verifying probe in flight");
+    // N=2 quiescence: the parent's prime sample (prior == None ⇒
+    // Unstable) re-arms its settle timer. The child is parked in
+    // Verifying with no expirable timer, so draining the parent's
+    // re-armed settle does not advance it — it keeps gating. The
+    // hash-equal confirm sample is the Stable verdict that, with the
+    // child still in an active Standard burst, parks the parent in
+    // Draining.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -1514,13 +2179,48 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
             .in_active_standard_burst(),
         "child gates the parent before the parent stabilises",
     );
+    let parent_prime = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight (prime sample)");
+    let primed = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid_parent),
+            correlation: parent_prime,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t2,
+    );
+    assert!(
+        primed.effects().is_empty(),
+        "parent prime sample (prior == None ⇒ Unstable) must not fire",
+    );
+    let parked_at = t2 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(parked_at) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            parked_at,
+        );
+    }
+    let parent_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .expect("parent Verifying probe in flight (confirm sample)");
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_parent),
             correlation: parent_corr,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        parked_at,
     );
     assert!(
         matches!(
@@ -1549,7 +2249,7 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
         pid_child,
         sid_parent,
         sid_child,
-        t2,
+        parked_at,
     }
 }
 
@@ -1570,7 +2270,7 @@ fn global_overflow_excludes_draining_ancestor_keeps_reconfirm() {
         mut e,
         pid_parent,
         pid_child,
-        t2,
+        parked_at,
         ..
     } = draining_parent_gated_by_child();
 
@@ -1583,7 +2283,7 @@ fn global_overflow_excludes_draining_ancestor_keeps_reconfirm() {
         Input::SensorOverflow {
             scope: OverflowScope::Global,
         },
-        t2,
+        parked_at,
     );
 
     // At most one probe op for the ancestor, and it is the sweep's
@@ -1667,7 +2367,7 @@ fn resource_overflow_excludes_draining_ancestor_keeps_reconfirm() {
         mut e,
         src,
         pid_parent,
-        t2,
+        parked_at,
         ..
     } = draining_parent_gated_by_child();
 
@@ -1675,7 +2375,7 @@ fn resource_overflow_excludes_draining_ancestor_keeps_reconfirm() {
         Input::SensorOverflow {
             scope: OverflowScope::Resource(src),
         },
-        t2,
+        parked_at,
     );
 
     // The discriminator, reached through the Resource snapshot path:
@@ -1718,12 +2418,12 @@ fn overflow_on_draining_reap_ancestor_defers_reap_to_reconfirm() {
         pid_parent,
         pid_child,
         sid_parent,
-        t2,
+        parked_at,
         ..
     } = draining_parent_gated_by_child();
 
     // Detach the ancestor's sole Sub mid-Draining → deferred Reap.
-    let _ = e.step(Input::DetachSub(sid_parent), t2);
+    let _ = e.step(Input::DetachSub(sid_parent), parked_at);
     assert!(
         matches!(
             e.profiles().get(pid_parent).unwrap().state(),
@@ -1746,7 +2446,7 @@ fn overflow_on_draining_reap_ancestor_defers_reap_to_reconfirm() {
         Input::SensorOverflow {
             scope: OverflowScope::Global,
         },
-        t2,
+        parked_at,
     );
 
     // DISCRIMINATOR. Post-fix the ancestor is NOT reaped inside the
@@ -1794,9 +2494,12 @@ fn overflow_on_draining_reap_ancestor_defers_reap_to_reconfirm() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_parent),
             correlation: reconfirm,
-            outcome: ProbeOutcome::SubtreeOk(dir_snap(vec![])),
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
         }),
-        t2,
+        parked_at,
     );
     assert!(
         e.profiles().get(pid_parent).is_none(),

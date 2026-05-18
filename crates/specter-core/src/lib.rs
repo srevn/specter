@@ -36,15 +36,17 @@ pub use fs_id::FsIdentity;
 pub use ids::{CorrelationId, ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
 pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};
 pub use op::{
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, WatchFailure, WatchOp,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProofAuthority,
+    ProofObligation, WatchFailure, WatchOp,
 };
 pub use output::{ProbeOps, SortedEffects, StepOutput, StepOutputParts};
 pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use probe::ProbeSlot;
 pub use profile::{
-    ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, DescentRemaining,
-    DescentState, DetachLifecycle, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
-    Profile, ProfileMap, ProfileState, ProfileStateDiscriminant, ReapTrigger, TimerKind,
+    ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, CertifiedPrior,
+    DescentRemaining, DescentState, DetachLifecycle, PostFireBurst, PostFirePhase, PreFireBurst,
+    PreFirePhase, Profile, ProfileMap, ProfileState, ProfileStateDiscriminant, QuiescenceVerdict,
+    ReapTrigger, TimerKind,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{
