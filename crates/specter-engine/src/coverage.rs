@@ -18,7 +18,9 @@
 //! [`has_active_standard_descendant`].
 
 use smallvec::SmallVec;
-use specter_core::{Profile, ProfileId, ProfileMap, Resource, ResourceId, ResourceKind, Tree};
+use specter_core::{
+    Profile, ProfileId, ProfileMap, ProfileState, Resource, ResourceId, ResourceKind, Tree,
+};
 use std::path::PathBuf;
 
 /// True iff `profile` would scan `target` given its `ScanConfig`.
@@ -177,6 +179,50 @@ pub(crate) fn nearest_covering_ancestor(
         }
     }
     None
+}
+
+/// Walk `resource` and its strict ancestors looking for Profiles whose
+/// [`covers`] predicate accepts `resource`. Returns the matching
+/// Profiles in encounter order. P4 single-Profile resolves to 0 or 1.
+/// `pub(crate)` — the sole caller is `Engine::on_fs_event`; a coverage
+/// derivation co-located with [`covers`] / [`nearest_covering_ancestor`].
+///
+/// **Pending Profiles are filtered at the source.** A Pending Profile
+/// carries no anchor-side `watch_demand` from this Profile — the
+/// descent prefix carries it instead (via
+/// [`specter_core::ContribKey::ProfileDescent`]); the anchor slot
+/// itself only receives the
+/// [`specter_core::ContribKey::ProfileAnchor`] contribution at
+/// descent-completion time. Events at the prefix route via
+/// `classify_event_carriers` / `on_descent_event`; events at the anchor
+/// or its descendants are structurally unreachable in production (the
+/// anchor's `watch_demand` is 0 ⇒ head guard short-circuits). Filtering
+/// here makes the routing contract explicit: covering-Profile dispatch
+/// (Standard burst, anchor terminal event) only sees Profiles with a
+/// materialized anchor.
+#[must_use]
+pub(crate) fn covering_profiles(
+    tree: &Tree,
+    profiles: &ProfileMap,
+    resource: ResourceId,
+) -> SmallVec<[ProfileId; 2]> {
+    let mut out: SmallVec<[ProfileId; 2]> = SmallVec::new();
+    let mut cur = Some(resource);
+    while let Some(rid) = cur {
+        for pid in profiles.at(rid) {
+            let Some(p) = profiles.get(pid) else {
+                continue;
+            };
+            if matches!(p.state(), ProfileState::Pending(_)) {
+                continue;
+            }
+            if covers(p, resource, tree) && !out.contains(&pid) {
+                out.push(pid);
+            }
+        }
+        cur = tree.parent(rid);
+    }
+    out
 }
 
 /// True iff some **strict-descendant** Profile of `ancestor`'s subtree

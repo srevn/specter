@@ -132,7 +132,7 @@ impl Engine {
         // Find covering Profiles (anchor or any covering ancestor). For
         // P4 single-Profile this resolves to 0 or 1; P5 multi-Profile
         // dispatches to each in encounter order.
-        let covering = self.covering_profiles(resource);
+        let covering = crate::coverage::covering_profiles(&self.tree, &self.profiles, resource);
         if covering.is_empty()
             && descent_count == 0
             && recovery_count == 0
@@ -3220,43 +3220,6 @@ impl Engine {
             // diff membership itself, not a recorded key.
         }
         count
-    }
-
-    /// Walk `resource` and its strict ancestors looking for Profiles whose
-    /// `covers` predicate accepts `resource`. Returns the matching
-    /// Profiles in encounter order. P4 single-Profile resolves to 0 or 1.
-    ///
-    /// **Pending Profiles are filtered at the source.** A Pending
-    /// Profile carries no anchor-side `watch_demand` from this Profile
-    /// — the descent prefix carries it instead (via
-    /// [`specter_core::ContribKey::ProfileDescent`]); the anchor slot
-    /// itself only receives the
-    /// [`specter_core::ContribKey::ProfileAnchor`] contribution at
-    /// descent-completion time. Events at the prefix route via
-    /// `classify_event_carriers` / `on_descent_event`; events at the
-    /// anchor or its descendants are structurally unreachable in
-    /// production (the anchor's `watch_demand` is 0 ⇒ head guard
-    /// short-circuits). Filtering here makes the routing contract
-    /// explicit: covering-Profile dispatch (Standard burst, anchor
-    /// terminal event) only sees Profiles with a materialized anchor.
-    fn covering_profiles(&self, resource: ResourceId) -> smallvec::SmallVec<[ProfileId; 2]> {
-        let mut out: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
-        let mut cur = Some(resource);
-        while let Some(rid) = cur {
-            for pid in self.profiles.at(rid) {
-                let Some(p) = self.profiles.get(pid) else {
-                    continue;
-                };
-                if matches!(p.state(), ProfileState::Pending(_)) {
-                    continue;
-                }
-                if crate::coverage::covers(p, resource, &self.tree) && !out.contains(&pid) {
-                    out.push(pid);
-                }
-            }
-            cur = self.tree.parent(rid);
-        }
-        out
     }
 
     /// Single-pass classification of owners that carry a dispatch
