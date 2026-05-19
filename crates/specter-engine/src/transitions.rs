@@ -132,7 +132,12 @@ impl Engine {
         // Find covering Profiles (anchor or any covering ancestor). For
         // P4 single-Profile this resolves to 0 or 1; P5 multi-Profile
         // dispatches to each in encounter order.
-        let covering = crate::coverage::covering_profiles(&self.tree, &self.profiles, resource);
+        let covering = crate::coverage::covering_profiles(
+            &self.tree,
+            &self.profiles,
+            resource,
+            &mut self.coverage_scratch,
+        );
         if covering.is_empty()
             && descent_count == 0
             && recovery_count == 0
@@ -766,6 +771,7 @@ impl Engine {
                     &mut self.tree,
                     &mut self.profiles,
                     out,
+                    &mut self.coverage_scratch,
                 );
             }
             TreeSnapshot::File(leaf) => {

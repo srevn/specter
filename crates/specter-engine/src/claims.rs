@@ -190,16 +190,25 @@ impl Engine {
         let diff = Diff::all_deleted(&arc);
 
         // Apply the Diff under a scoped immutable Profile borrow (for
-        // `apply_diff_to_tree`'s `&Profile` arg); `&mut self.tree` is a
-        // disjoint-field borrow. Purely side-effecting — no reaped-slot
-        // return: per-Sub fire history dies with its Sub, so a reaped
-        // leaf has nothing to purge by `ResourceId`.
+        // `apply_diff_to_tree`'s `&Profile` arg); `&mut self.tree` and
+        // `&mut self.coverage_scratch` are disjoint-field borrows.
+        // Purely side-effecting — no reaped-slot return: per-Sub fire
+        // history dies with its Sub, so a reaped leaf has nothing to
+        // purge by `ResourceId`.
         {
             let Some(profile) = self.profiles.get(pid) else {
                 return;
             };
             let anchor = profile.resource;
-            apply_diff_to_tree(&diff, profile, pid, anchor, &mut self.tree, out);
+            apply_diff_to_tree(
+                &diff,
+                profile,
+                pid,
+                anchor,
+                &mut self.tree,
+                out,
+                &mut self.coverage_scratch,
+            );
         }
     }
 

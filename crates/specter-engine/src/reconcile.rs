@@ -67,6 +67,7 @@ use specter_core::{
     ResourceId, ResourceKind, ResourceRole, SpliceResult, StepOutput, Tree, TreeSnapshot,
     diff_dir_pair, splice, subtree_at_dir,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Walk `rel_path` component-by-component beneath `anchor`, ensuring each
@@ -170,11 +171,17 @@ pub(crate) fn lookup_descendant(
 /// Mirrors the gating used by [`apply_diff_to_tree`]'s Phase 2 `add_watch`
 /// site, so a contribution installed during a prior probe response is
 /// released by the symmetric `sub_watch` on this one.
-fn releases_watch(profile: &Profile, r: ResourceId, kind: EntryKind, tree: &Tree) -> bool {
+fn releases_watch(
+    profile: &Profile,
+    r: ResourceId,
+    kind: EntryKind,
+    tree: &Tree,
+    scratch: &mut PathBuf,
+) -> bool {
     match kind {
-        EntryKind::Dir => covers(profile, r, tree),
+        EntryKind::Dir => covers(profile, r, tree, scratch),
         EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
-            covers(profile, r, tree) && profile.has_per_file_fds()
+            covers(profile, r, tree, scratch) && profile.has_per_file_fds()
         }
     }
 }
@@ -231,6 +238,7 @@ pub(crate) fn apply_diff_to_tree(
     base: ResourceId,
     tree: &mut Tree,
     out: &mut StepOutput,
+    scratch: &mut PathBuf,
 ) {
     let key = ContribKey::ProfileDescendant(profile_id);
 
@@ -277,7 +285,7 @@ pub(crate) fn apply_diff_to_tree(
         // Side-effecting; the `bool` (did-reap) is no longer consumed
         // (neither `try_reap` nor `sub_watch_then_try_reap` is
         // `#[must_use]`, so no `let _` ceremony).
-        if releases_watch(profile, resource, entry.kind, tree) {
+        if releases_watch(profile, resource, entry.kind, tree, scratch) {
             sub_watch_then_try_reap(tree, resource, key, out);
         } else {
             tree.try_reap(resource, out);
@@ -307,7 +315,7 @@ pub(crate) fn apply_diff_to_tree(
         let Some(resource) = ensure_descendant(tree, base, entry.segment.as_str(), res_kind) else {
             continue;
         };
-        let want_watch = covers(profile, resource, tree)
+        let want_watch = covers(profile, resource, tree, scratch)
             && (matches!(entry.kind, EntryKind::Dir) || profile.has_per_file_fds());
         if want_watch {
             add_watch(tree, resource, key, profile.events(), out);
@@ -364,6 +372,7 @@ pub(crate) fn graft(
     tree: &mut Tree,
     profiles: &mut ProfileMap,
     out: &mut StepOutput,
+    scratch: &mut PathBuf,
 ) {
     let anchor = match profiles.get(profile_id) {
         Some(p) => p.resource,
@@ -447,7 +456,7 @@ pub(crate) fn graft(
         let Some(profile) = profiles.get(profile_id) else {
             return;
         };
-        apply_diff_to_tree(&diff, profile, profile_id, target, tree, out);
+        apply_diff_to_tree(&diff, profile, profile_id, target, tree, out, scratch);
     }
 
     // Classify-and-graft in one move. The anchor sum's discriminant

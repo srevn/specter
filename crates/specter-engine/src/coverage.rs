@@ -44,7 +44,7 @@ use std::path::PathBuf;
 /// any node along the chain is stale (its `ResourceId` no longer names
 /// a live slot).
 #[must_use]
-pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
+pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut PathBuf) -> bool {
     let anchor = profile.resource;
 
     if target == anchor {
@@ -92,37 +92,47 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree) -> bool {
         return false;
     }
 
-    if !profile.config().exclude.is_empty() {
-        let mut rel = PathBuf::new();
+    // Unprobed slots collapse to File-shape (the backend-mask
+    // convention shared by `fs_event_to_class`, the kqueue / inotify
+    // translators, and `recompute_events_union`). The prior raw-`kind`
+    // form let Unknown bypass the pattern entirely — a file freshly
+    // touched in the window between create_child's slot materialization
+    // and a follow-up event would slip the user's pattern filter. The
+    // kind lookup stays gated behind `pattern.is_some()` — the closure
+    // runs only on `Some`, matching the prior `if let Some(pat)` cost.
+    let pattern = profile.config().pattern.as_ref().filter(|_| {
+        matches!(
+            tree.get(target)
+                .map_or(ResourceKind::File, Resource::kind_or_file),
+            ResourceKind::File
+        )
+    });
+    let exclude = &profile.config().exclude;
+
+    // One incremental build into the engine-owned `scratch` (capacity
+    // retained across calls; `clear()` per call so the cross-call
+    // residue is never observable). The exclude walk tests every
+    // cumulative prefix, and its terminal state *is* the full relative
+    // path — the pattern matches that directly, so the two prior
+    // `PathBuf::new()` allocations + rebuilds collapse to one cleared
+    // reuse. Skipped wholesale when neither exclude nor pattern applies
+    // (the prior zero-work fast path is preserved). An early `return`
+    // mid-walk leaves `scratch` dirty; the next entry's `clear()` is
+    // the reset — `scratch` is per-call logically, per-step physically.
+    if !exclude.is_empty() || pattern.is_some() {
+        scratch.clear();
         for seg in &rev {
-            rel.push(seg);
-            for excl in &profile.config().exclude {
-                if excl.matches_path(&rel) {
+            scratch.push(seg);
+            for excl in exclude {
+                if excl.matches_path(scratch.as_path()) {
                     return false;
                 }
             }
         }
-    }
-
-    if let Some(pat) = &profile.config().pattern {
-        // Unprobed slots collapse to File-shape (the backend-mask
-        // convention shared by `fs_event_to_class`, the kqueue / inotify
-        // translators, and `recompute_events_union`). The prior raw-`kind`
-        // form let Unknown bypass the pattern entirely — a file freshly
-        // touched in the window between create_child's slot
-        // materialization and a follow-up event would slip the user's
-        // pattern filter.
-        let target_kind = tree
-            .get(target)
-            .map_or(ResourceKind::File, Resource::kind_or_file);
-        if matches!(target_kind, ResourceKind::File) {
-            let mut rel = PathBuf::new();
-            for seg in &rev {
-                rel.push(seg);
-            }
-            if !pat.matches_path(&rel) {
-                return false;
-            }
+        if let Some(pat) = pattern
+            && !pat.matches_path(scratch.as_path())
+        {
+            return false;
         }
     }
 
@@ -164,6 +174,14 @@ pub(crate) fn nearest_covering_ancestor(
     child: ProfileId,
 ) -> Option<ProfileId> {
     let child_resource = profiles.get(child)?.resource;
+    // Cold path (a Draining-phase query, not the per-event hot path):
+    // own a local scratch reused across the ancestor loop's `covers`
+    // calls. The signature stays clean — threading `&mut PathBuf`
+    // through this pure derivation and its `chain_reaches` /
+    // `has_active_standard_descendant` callers would muddy their
+    // "total function of (tree, profiles, child)" contract for an
+    // allocation the cold path does not feel.
+    let mut scratch = PathBuf::new();
     for ancestor in tree.ancestors(child_resource) {
         let nearest = profiles
             .at(ancestor)
@@ -171,7 +189,7 @@ pub(crate) fn nearest_covering_ancestor(
             .filter(|&pid| {
                 profiles
                     .get(pid)
-                    .is_some_and(|p| covers(p, child_resource, tree))
+                    .is_some_and(|p| covers(p, child_resource, tree, &mut scratch))
             })
             .min();
         if nearest.is_some() {
@@ -205,6 +223,7 @@ pub(crate) fn covering_profiles(
     tree: &Tree,
     profiles: &ProfileMap,
     resource: ResourceId,
+    scratch: &mut PathBuf,
 ) -> SmallVec<[ProfileId; 2]> {
     let mut out: SmallVec<[ProfileId; 2]> = SmallVec::new();
     let mut cur = Some(resource);
@@ -216,7 +235,7 @@ pub(crate) fn covering_profiles(
             if matches!(p.state(), ProfileState::Pending(_)) {
                 continue;
             }
-            if covers(p, resource, tree) && !out.contains(&pid) {
+            if covers(p, resource, tree, scratch) && !out.contains(&pid) {
                 out.push(pid);
             }
         }

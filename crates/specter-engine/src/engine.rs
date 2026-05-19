@@ -41,6 +41,7 @@ use specter_core::{ClassSet, ContribKey};
 use specter_core::{CorrelationId, ProbeCorrelation, ProbeOwner};
 // Engine step I/O.
 use specter_core::{Diagnostic, Input, StepOutput};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Per-call stale-drain bound for [`Engine::pop_expired`].
@@ -92,6 +93,17 @@ pub struct Engine {
     /// distinct from the probe-side counter: the two id spaces stay
     /// structurally separate at the type level.
     pub(crate) effect_correlations: MonotonicCounter<CorrelationId>,
+    /// Reusable relative-path buffer for [`crate::coverage::covers`],
+    /// owned at engine scope so its capacity survives across `step`
+    /// calls — under a keeps-up storm the per-event covering walk and
+    /// the per-fire reconcile walk reuse one allocation rather than
+    /// minting two `PathBuf`s per covered-descendant test. Logically
+    /// per-`covers`-call (cleared at the start of each build), so its
+    /// cross-call residue is never observable state; the engine stays a
+    /// pure `Input -> StepOutput` machine. Not thread-local, not
+    /// interior-mutable: an explicit `&mut` threaded only into the two
+    /// hot paths; the cold pure-derivation queries keep a local.
+    pub(crate) coverage_scratch: PathBuf,
     /// Debug-only consume-once tripwire — the cross-step witness that
     /// no [`ProbeCorrelation`] reaches a `dispatch_*` arm twice. The
     /// structural laws (core slot arm-once, [`Engine::take_owner_probe`]
