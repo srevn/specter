@@ -70,7 +70,7 @@ use crossbeam::channel::Select;
 use specter_config::{Config, FileMeta};
 use specter_core::{Diagnostic, Input, ProbeOp, StepOutput};
 use specter_engine::Engine;
-use specter_sensor::{DrainWindow, Prober, WakeHandle};
+use specter_sensor::{Prober, WakeHandle};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -139,12 +139,6 @@ pub struct EngineDriver {
     sides: EngineSide,
     prober: Arc<dyn Prober>,
     wake_handle: Box<dyn WakeHandle>,
-    /// Cross-thread handle for the watcher's deferred-drain window.
-    /// Engine-thread writes (`handle_reload`) are observed by the
-    /// watcher thread on its next `poll_until` iteration via the
-    /// underlying Atomic. Held here so the SIGHUP reload pipeline can
-    /// rotate the value alongside `current_config`.
-    drain_window: DrainWindow,
     /// Auto-reload settle deadline — armed by the config-event drain
     /// (the watcher thread's `try_send` or a test rig's manual
     /// `try_send`), expires after [`CONFIG_SETTLE`] of quiet, at
@@ -186,7 +180,6 @@ impl EngineDriver {
         sides: EngineSide,
         prober: Arc<dyn Prober>,
         wake_handle: Box<dyn WakeHandle>,
-        drain_window: DrainWindow,
     ) -> Self {
         Self {
             engine,
@@ -197,7 +190,6 @@ impl EngineDriver {
             sides,
             prober,
             wake_handle,
-            drain_window,
             config_settle_until: None,
         }
     }
@@ -526,7 +518,6 @@ impl EngineDriver {
         self.loader.current_config = new_config;
         self.loader.current_log = new_log_resolved;
         self.loader.config_meta = new_meta;
-        self.apply_drain_window_rotation();
         tracing::info!(
             added = added_n,
             removed = removed_n,
@@ -599,23 +590,6 @@ impl EngineDriver {
         new_config: &Config,
     ) -> specter_core::WatchRegistryDiff {
         specter_config::diff(&self.loader.current_config, new_config)
-    }
-
-    /// Recompute the watcher's deferred-drain window from the loader's
-    /// (already-rotated) `current_config` and rotate the cross-thread
-    /// handle if the value changed. The watcher thread observes the
-    /// new value on its next `poll_until` iteration.
-    pub(crate) fn apply_drain_window_rotation(&self) {
-        let new_window = self.loader.derive_drain_window();
-        let old_window = self.drain_window.get();
-        if new_window != old_window {
-            self.drain_window.set(new_window);
-            tracing::info!(
-                old_ms = old_window.as_millis(),
-                new_ms = new_window.as_millis(),
-                "drain_window updated",
-            );
-        }
     }
 
     /// Apply a freshly-resolved [`specter_config::LogConfig`] to the
@@ -1130,10 +1104,6 @@ mod tests {
         // subscriber's filter state.
         let obs_handle = crate::observability::ObservabilityHandle::noop();
         let loader = Loader::new(config, log_cfg, dummy_meta());
-        // Mirror the production path: derive the initial window from the
-        // loader's config so reload-driven rotation tests have a real
-        // baseline to compare against.
-        let drain_window = DrainWindow::new(loader.derive_drain_window());
         let driver = EngineDriver::new(
             Engine::new(),
             loader,
@@ -1143,7 +1113,6 @@ mod tests {
             engine_side,
             prober.clone(),
             wake_handle,
-            drain_window,
         );
         TestRig {
             driver,

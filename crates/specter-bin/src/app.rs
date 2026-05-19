@@ -19,7 +19,7 @@
 
 use crate::channels::Channels;
 use crate::driver::EngineDriver;
-use crate::loader::Loader;
+use crate::loader::{Loader, WATCHER_DRAIN_WINDOW};
 use crate::observability;
 use crate::signals::spawn_signal_thread;
 use specter_actuator::{SubprocessActuator, default_spawner};
@@ -117,16 +117,15 @@ pub fn run(cli: Cli) -> ExitCode {
         "specter starting"
     );
 
-    // Bookkeeping for the watcher's deferred-drain phase. The bin holds
-    // one `DrainWindow` and gives the watcher its own clone so the
-    // Atomic store on hot reload reaches both threads without a lock.
-    // Constructed with the derived value so the watcher reads it on its
-    // very first `poll_until` — no unconfigured window to forget.
+    // Fixed trailing-latency window for the watcher's deferred-drain
+    // pass — handed to the watcher and never mutated again. The
+    // inbound-volume lever moved off the watcher (driver same-tick
+    // coalescing + per-event engine cost own it), so there is no
+    // hot-reload rotation and the driver no longer holds a handle.
     let loader = Loader::new(initial_config, log_cfg, initial_meta);
-    let drain_window = DrainWindow::new(loader.derive_drain_window());
 
     // Kqueue (or Linux inotify, when that backend lands) + wake handle.
-    let watcher = match default_watcher(drain_window.clone()) {
+    let watcher = match default_watcher(DrainWindow::new(WATCHER_DRAIN_WINDOW)) {
         Ok(w) => w,
         Err(e) => {
             tracing::error!(?e, "watcher init failed");
@@ -256,7 +255,6 @@ pub fn run(cli: Cli) -> ExitCode {
         chans.take_engine_side(),
         prober.clone(),
         wake_handle.clone(),
-        drain_window,
     );
     drop(chans); // originals release; per-thread clones keep channels alive.
 

@@ -117,12 +117,12 @@ pub struct InotifyWatcher {
     /// and reused across drains — `poll_until` performs no allocation
     /// on the hot path.
     read_buf: Vec<u8>,
-    /// Cross-thread, runtime-tunable drain window. Mirror of
+    /// Cross-thread, fixed drain window. Mirror of
     /// [`crate::kqueue::watcher::KqueueWatcher`]'s field; same
-    /// semantics. The bin updates on `Config` load and SIGHUP via
-    /// [`DrainWindow::set`]; this watcher reads on every `poll_until`
-    /// iteration via [`DrainWindow::get`]. `Duration::ZERO` disables
-    /// the deferred drain phase.
+    /// semantics. The bin constructs it once and hands it over; this
+    /// watcher reads it on every `poll_until` iteration via
+    /// [`DrainWindow::get`]. Never mutated at runtime. `Duration::ZERO`
+    /// disables the deferred drain phase.
     drain_window: DrainWindow,
     /// Recency timestamp for the deferred-drain gate. See the kqueue
     /// twin's docstring; same lifecycle.

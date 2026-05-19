@@ -23,32 +23,38 @@ use std::time::{Duration, Instant};
 // the trait + `WatcherEvent` definitions below need.
 pub use specter_core::{OverflowScope, WatchFailure};
 
-/// Cross-thread, runtime-tunable drain window for the watcher's
-/// deferred-drain phase.
+/// Cross-thread, fixed drain window for the watcher's deferred-drain
+/// phase.
 ///
-/// The bin owns one [`DrainWindow`]; clones are cheap (`Arc` bump). The
-/// engine driver writes the value at startup and on hot reload; the
-/// watcher thread reads it on every `poll_until` iteration. The
-/// `AtomicU64` is the cross-thread surface — no lock, no channel.
+/// The bin constructs one [`DrainWindow`] at startup and hands it to
+/// the watcher; clones are cheap (`Arc` bump). The value is written
+/// once at construction and only ever read afterwards — the watcher
+/// thread reads it on every `poll_until` iteration. There is no
+/// runtime mutation: the `AtomicU64` is the cross-thread surface
+/// (no lock, no channel), not a tunable.
+///
+/// **Not an inbound-volume lever.** Inbound volume is owned by driver
+/// same-tick coalescing (accumulate regime) and per-event engine cost
+/// (keeps-up regime); a single watcher-side scalar provably cannot
+/// serve a per-Profile volume constraint. This window is purely the
+/// trailing-latency budget the watcher trades for batch granularity on
+/// its second drain pass — it does not, and is not meant to, dampen an
+/// inbound storm.
 ///
 /// **Construction is a decision, never a default.** There is no
-/// `Default` and no zero-argument constructor: the only sensible value
-/// is config-derived, so the caller must state it. [`Self::new`] takes
-/// the derived window; [`Self::disabled`] is the *named*, deliberate
-/// opt-out. This makes "constructed but never configured" a compile
-/// error rather than a silent run with deferred drain off — the engine
-/// would then eat every unbatched event, and (with the watcher-side
-/// event filter gone) nothing else dampens an inbound storm: this is
-/// the *sole* surviving inbound-volume lever.
+/// `Default` and no zero-argument constructor. [`Self::new`] takes the
+/// fixed window (the bin's `WATCHER_DRAIN_WINDOW`); [`Self::disabled`]
+/// is the *named*, deliberate opt-out. This makes "constructed but
+/// never configured" a compile error rather than a silent run with
+/// deferred drain off.
 ///
-/// **Production cannot disable drain.** `Loader::derive_drain_window`
-/// always returns at least its floor (the all-disabled / empty-config
-/// case returns the floor *precisely* so drain is never permanently
-/// off). With no `Default` and no implicit constructor, the only path
-/// to a disabled window is an explicit [`Self::disabled`] call, which
-/// only test fixtures take. The disabled state is structurally
-/// unreachable from the production wiring — do not reintroduce
-/// `Default` "for convenience"; it would re-arm exactly that footgun.
+/// **Production cannot disable drain.** Production constructs via
+/// [`Self::new`] with the fixed in-band constant (`>= 10ms`). With no
+/// `Default` and no implicit constructor, the only path to a disabled
+/// window is an explicit [`Self::disabled`] call, which only test
+/// fixtures take. The disabled state is structurally unreachable from
+/// the production wiring — do not reintroduce `Default` "for
+/// convenience"; it would re-arm exactly that footgun.
 ///
 /// **Semantics.**
 /// - A value of `Duration::ZERO` ([`Self::disabled`]) disables deferred
@@ -60,57 +66,50 @@ pub use specter_core::{OverflowScope, WatchFailure};
 ///   quiet periods skip the second drain (zero latency cost) while
 ///   sustained bursts catch it from the second drain onwards.
 ///
-/// **Ordering.** Both `set` and `get` use `Ordering::Relaxed`. Engine
-/// correctness does not depend on which window value the watcher used
-/// for any given drain (settle deadlines are engine-timer driven; the
-/// window only shapes batch granularity), so the cheaper memory order
-/// is correct.
+/// **Ordering.** [`Self::get`] uses `Ordering::Relaxed`. The
+/// construction store happens-before the watcher thread is spawned, so
+/// the watcher always observes the constructed value; engine
+/// correctness does not depend on the window anyway (settle deadlines
+/// are engine-timer driven; the window only shapes batch granularity),
+/// so the cheaper memory order is correct.
 #[derive(Debug, Clone)]
 pub struct DrainWindow(Arc<AtomicU64>);
 
 impl DrainWindow {
     /// Saturating `Duration → nanos` encoding for the atomic surface.
     /// Caps at `u64::MAX` nanoseconds (`~584 years`) for pathologically
-    /// large `Duration`s — well past any reasonable settle / window
-    /// derivation. The single home for the encoding so [`Self::new`]
-    /// and [`Self::set`] cannot diverge.
+    /// large `Duration`s — well past any reasonable window value. The
+    /// single home for the `Duration → u64` encoding, used by
+    /// [`Self::new`].
     fn nanos(d: Duration) -> u64 {
         u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
     }
 
     /// Construct a handle armed with `initial`. The bin passes the
-    /// config-derived window (`min(settle) / 4` clamped to the
-    /// `[10ms, 50ms]` band via `Loader::derive_drain_window`) so the
-    /// watcher reads the real value on its very first `poll_until` —
-    /// there is no unconfigured window to forget.
+    /// fixed trailing-latency window (its `WATCHER_DRAIN_WINDOW`, in
+    /// the `[10ms, 50ms]` band) so the watcher reads the real value on
+    /// its very first `poll_until` — there is no unconfigured window to
+    /// forget, and no later write to race.
     #[must_use]
     pub fn new(initial: Duration) -> Self {
         Self(Arc::new(AtomicU64::new(Self::nanos(initial))))
     }
 
     /// The deliberate, self-documenting disabled state (`Duration::ZERO`
-    /// ⇒ deferred drain off). Production never reaches this — every
-    /// `Loader::derive_drain_window` result is `>= 10ms`; this exists
-    /// for test fixtures that exercise the immediate-return path and
-    /// for a future explicit operator opt-out. Reading
-    /// `DrainWindow::disabled()` at a call site states that intent
-    /// loudly, where the old `default()` hid it.
+    /// ⇒ deferred drain off). Production never reaches this — it
+    /// constructs via [`Self::new`] with the fixed in-band constant
+    /// (`>= 10ms`); this exists for test fixtures that exercise the
+    /// immediate-return path and for a future explicit operator
+    /// opt-out. Reading `DrainWindow::disabled()` at a call site states
+    /// that intent loudly, where the old `default()` hid it.
     #[must_use]
     pub fn disabled() -> Self {
         Self::new(Duration::ZERO)
     }
 
-    /// Atomically update the window. Subsequent watcher reads observe
-    /// the new value; at most one drain uses the prior value across a
-    /// reload. This is the runtime-tunable surface — the engine driver
-    /// calls it on SIGHUP / config reload when the derived window
-    /// changes. Saturating, via [`Self::nanos`].
-    pub fn set(&self, d: Duration) {
-        self.0.store(Self::nanos(d), Ordering::Relaxed);
-    }
-
     /// Read the current window. `Duration::ZERO` iff constructed via
-    /// [`Self::disabled`] (or `set` to zero) — the disabled state.
+    /// [`Self::disabled`] — the disabled state. The watcher's
+    /// hot path; see the type rustdoc for the relaxed-ordering rationale.
     #[must_use]
     pub fn get(&self) -> Duration {
         Duration::from_nanos(self.0.load(Ordering::Relaxed))

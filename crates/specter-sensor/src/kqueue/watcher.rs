@@ -76,11 +76,10 @@ pub struct KqueueWatcher {
     /// borrowing from the watcher; drop of the last clone closes the
     /// kqueue fd.
     kq: Arc<OwnedFd>,
-    /// Cross-thread, runtime-tunable drain window. The bin updates on
-    /// `Config` load and SIGHUP via [`DrainWindow::set`]; this watcher
-    /// reads on every `poll_until` iteration via
-    /// [`DrainWindow::get`]. `Duration::ZERO` disables the deferred
-    /// drain entirely.
+    /// Cross-thread, fixed drain window. The bin constructs it once and
+    /// hands it over; this watcher reads it on every `poll_until`
+    /// iteration via [`DrainWindow::get`]. Never mutated at runtime.
+    /// `Duration::ZERO` disables the deferred drain entirely.
     drain_window: DrainWindow,
     /// Timestamp of the most recent drain that returned at least one
     /// real (non-wake) event. The recency gate for the deferred-drain
