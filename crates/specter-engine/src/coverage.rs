@@ -373,7 +373,7 @@ mod tests {
     fn target_equals_anchor_dir_is_covered() {
         let mut tree = Tree::new();
         let (anchor_id, profile) = anchor(&mut tree, "root", recursive_unbounded());
-        assert!(covers(&profile, anchor_id, &tree));
+        assert!(covers(&profile, anchor_id, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -391,7 +391,7 @@ mod tests {
             SETTLE,
             None,
         );
-        assert!(covers(&p, r, &tree));
+        assert!(covers(&p, r, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -411,7 +411,7 @@ mod tests {
             SETTLE,
             None,
         );
-        assert!(covers(&p, r, &tree));
+        assert!(covers(&p, r, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -420,7 +420,7 @@ mod tests {
         let (_anchor_id, profile) = anchor(&mut tree, "root", recursive_unbounded());
         let sibling = tree.ensure_root("sibling", ResourceRole::User);
         mark(&mut tree, sibling, ResourceKind::Dir);
-        assert!(!covers(&profile, sibling, &tree));
+        assert!(!covers(&profile, sibling, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
             SETTLE,
             None,
         );
-        assert!(!covers(&profile, parent, &tree));
+        assert!(!covers(&profile, parent, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -463,9 +463,9 @@ mod tests {
             .ensure_child(b, "c.rs", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, c, ResourceKind::File);
-        assert!(covers(&profile, a, &tree));
-        assert!(covers(&profile, b, &tree));
-        assert!(covers(&profile, c, &tree));
+        assert!(covers(&profile, a, &tree, &mut PathBuf::new()));
+        assert!(covers(&profile, b, &tree, &mut PathBuf::new()));
+        assert!(covers(&profile, c, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -480,8 +480,8 @@ mod tests {
             .ensure_child(a, "b.rs", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, b, ResourceKind::File);
-        assert!(covers(&profile, a, &tree));
-        assert!(!covers(&profile, b, &tree));
+        assert!(covers(&profile, a, &tree, &mut PathBuf::new()));
+        assert!(!covers(&profile, b, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -500,9 +500,9 @@ mod tests {
         for r in [a, b, c] {
             mark(&mut tree, r, ResourceKind::Dir);
         }
-        assert!(covers(&profile, a, &tree)); // depth 1
-        assert!(covers(&profile, b, &tree)); // depth 2
-        assert!(!covers(&profile, c, &tree)); // depth 3 > max
+        assert!(covers(&profile, a, &tree, &mut PathBuf::new())); // depth 1
+        assert!(covers(&profile, b, &tree, &mut PathBuf::new())); // depth 2
+        assert!(!covers(&profile, c, &tree, &mut PathBuf::new())); // depth 3 > max
     }
 
     #[test]
@@ -522,8 +522,8 @@ mod tests {
             .ensure_child(root, "src", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, other, ResourceKind::Dir);
-        assert!(!covers(&profile, target, &tree));
-        assert!(covers(&profile, other, &tree));
+        assert!(!covers(&profile, target, &tree, &mut PathBuf::new()));
+        assert!(covers(&profile, other, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
             .ensure_child(target, "foo", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, foo, ResourceKind::Dir);
-        assert!(!covers(&profile, foo, &tree));
+        assert!(!covers(&profile, foo, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -562,8 +562,8 @@ mod tests {
             .ensure_child(root, "lib.c", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, c, ResourceKind::File);
-        assert!(covers(&profile, rs, &tree));
-        assert!(!covers(&profile, c, &tree));
+        assert!(covers(&profile, rs, &tree, &mut PathBuf::new()));
+        assert!(!covers(&profile, c, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -580,7 +580,7 @@ mod tests {
             .ensure_child(root, "src", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, src, ResourceKind::Dir);
-        assert!(covers(&profile, src, &tree));
+        assert!(covers(&profile, src, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -603,9 +603,9 @@ mod tests {
             .ensure_child(root, "other.rs", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, other_src, ResourceKind::File);
-        assert!(covers(&profile, lib, &tree));
+        assert!(covers(&profile, lib, &tree, &mut PathBuf::new()));
         // `other.rs` lives directly under root and doesn't match `src/**/*.rs`.
-        assert!(!covers(&profile, other_src, &tree));
+        assert!(!covers(&profile, other_src, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -621,7 +621,7 @@ mod tests {
         // and no profiles attached, role User — so try_reap should succeed.
         assert!(tree.try_reap(temp, &mut specter_core::StepOutput::default()));
         assert!(tree.get(temp).is_none());
-        assert!(!covers(&profile, temp, &tree));
+        assert!(!covers(&profile, temp, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -638,8 +638,8 @@ mod tests {
             .ensure_child(a, "b.rs", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, b, ResourceKind::File);
-        assert!(!covers(&profile, a, &tree));
-        assert!(!covers(&profile, b, &tree));
+        assert!(!covers(&profile, a, &tree, &mut PathBuf::new()));
+        assert!(!covers(&profile, b, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -676,9 +676,9 @@ mod tests {
             .ensure_child(deeper_dir, "deeper.rs", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, deepest, ResourceKind::File);
-        assert!(covers(&profile, lib, &tree));
-        assert!(covers(&profile, deep, &tree));
-        assert!(covers(&profile, deepest, &tree));
+        assert!(covers(&profile, lib, &tree, &mut PathBuf::new()));
+        assert!(covers(&profile, deep, &tree, &mut PathBuf::new()));
+        assert!(covers(&profile, deepest, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -703,7 +703,7 @@ mod tests {
         assert!(tree.get(unprobed).unwrap().kind().is_none());
         // Pattern is `*.rs`; lib.c does not match. Unprobed must still
         // be filtered out.
-        assert!(!covers(&profile, unprobed, &tree));
+        assert!(!covers(&profile, unprobed, &tree, &mut PathBuf::new()));
     }
 
     #[test]
@@ -727,12 +727,12 @@ mod tests {
             .expect("test live parent");
         mark(&mut tree, inside, ResourceKind::Dir);
         assert!(
-            covers(&profile, target, &tree),
+            covers(&profile, target, &tree, &mut PathBuf::new()),
             "`target/**` does not match `target` literally — the directory \
              itself stays covered",
         );
         assert!(
-            !covers(&profile, inside, &tree),
+            !covers(&profile, inside, &tree, &mut PathBuf::new()),
             "`target/foo` matches `target/**` — contents excluded",
         );
     }
@@ -1151,7 +1151,7 @@ mod tests {
         );
 
         assert!(
-            !covers(profiles.get(p_a).unwrap(), deep, &tree),
+            !covers(profiles.get(p_a).unwrap(), deep, &tree, &mut PathBuf::new()),
             "premise: `a` does not directly cover `deep` (depth 2 > max_depth 1)",
         );
         assert!(

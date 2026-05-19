@@ -2833,15 +2833,27 @@ impl Profile {
     /// [`Promoter::is_nonsteady`](crate::Promoter::is_nonsteady)
     /// (`PrefixPending ∨ Active{proxies: ∅}`).
     ///
-    /// Invariant under the `materialize_anchor` `state`-write that
-    /// bypasses [`Self::transition_state`]: it moves `Pending → Idle`
-    /// with the anchor still absent, and both endpoints satisfy this
-    /// predicate, so the bypass is delta-0 and needs no counter hook.
-    /// Every other anchor present↔absent flip happens mid-`Active`
-    /// (`Active` is never counted regardless of the anchor), so the
-    /// post-burst `Active → Idle` `transition_state` reads the settled
-    /// anchor and reconciles the count correctly without a separate
-    /// anchor-write hook.
+    /// This reads two inputs — `state` and anchor presence — moved by
+    /// three write channels; [`ProfileMap`] owns the count and
+    /// reconciles each:
+    /// - **`state`** routes through [`ProfileMap::transition_state`],
+    ///   except the `materialize_anchor` `Pending → Idle` write that
+    ///   bypasses it; that bypass keeps the anchor absent and both
+    ///   endpoints satisfy this predicate, so it is delta-0 and needs
+    ///   no hook.
+    /// - **anchor graft** (`current` `None → Some`,
+    ///   `install_*_current`) happens only mid-`Active`, which is
+    ///   uncounted regardless of the anchor; the burst-end
+    ///   `transition_state(Active → Idle)` reads the grafted anchor
+    ///   and records the edge.
+    /// - **anchor clear** (`current` `Some → None`,
+    ///   `Engine::discard_anchor_state`) on a non-`Active` Profile —
+    ///   a healthy `Idle` anchor lost via `finalize_anchor_lost`
+    ///   (`was_active == false`) — flips `false → true` outside any
+    ///   `state` edge; [`ProfileMap::reconcile_nonsteady`] reconciles
+    ///   it at that coordinator. On an `Active` Profile the same clear
+    ///   is delta-0 (the predicate ignores the anchor while `Active`)
+    ///   and the burst-end transition records it.
     #[must_use]
     pub const fn is_nonsteady(&self) -> bool {
         match &self.state {
@@ -2977,14 +2989,19 @@ pub struct ProfileMap {
     by_resource: SecondaryMap<ResourceId, SmallVec<[(u64, ProfileId); 1]>>,
     /// Live count of Profiles satisfying [`Profile::is_nonsteady`] —
     /// the O(1) carrier gate the engine reads before the O(P)
-    /// `classify_event_carriers` scan. Maintained exactly at the three
-    /// mutation points ([`Self::attach`], [`Self::detach`],
-    /// [`Self::transition_state`]); the `materialize_anchor` `state`
-    /// bypass is delta-0 by [`Profile::is_nonsteady`]'s construction
-    /// and needs no hook. A debug full-scan tripwire in
-    /// `Engine::classify_event_carriers` is the desync net; a missed
-    /// decrement only degrades the gate to the status-quo scan
-    /// (perf, never correctness).
+    /// `classify_event_carriers` scan. `is_nonsteady` reads `state`
+    /// *and* anchor presence, so it is maintained at four points:
+    /// [`Self::attach`] / [`Self::detach`] (the membership edges),
+    /// [`Self::transition_state`] (every `state` edge), and
+    /// [`Self::reconcile_nonsteady`] (the anchor-presence edge cleared
+    /// by `Engine::discard_anchor_state` on a non-`Active` Profile).
+    /// The `materialize_anchor` `state` bypass is delta-0 by
+    /// [`Profile::is_nonsteady`]'s construction and needs no hook. A
+    /// debug full-scan tripwire in `Engine::classify_event_carriers`
+    /// is the desync net: a missed `+` (under-count) would false-skip
+    /// a real carrier and is caught there; a missed `−` (over-count)
+    /// only degrades the gate to the status-quo scan (perf, never
+    /// correctness).
     nonsteady: usize,
 }
 
@@ -3071,13 +3088,29 @@ impl ProfileMap {
         self.nonsteady
     }
 
-    /// The sole counter-reconciling path for a Profile state edge:
+    /// Apply one [`Profile::is_nonsteady`] edge to [`Self::nonsteady`]
+    /// — the single source of the carrier-count arithmetic, shared by
+    /// both reconcile paths: [`Self::transition_state`] (the `state`
+    /// edge) and [`Self::reconcile_nonsteady`] (the anchor-presence
+    /// edge). Saturating on the `−` side so a (debug-tripwired) missed
+    /// `+` upstream degrades the gate to the status-quo scan rather
+    /// than underflowing.
+    const fn apply_nonsteady_edge(&mut self, before: bool, after: bool) {
+        match (before, after) {
+            (false, true) => self.nonsteady += 1,
+            (true, false) => self.nonsteady = self.nonsteady.saturating_sub(1),
+            (false, false) | (true, true) => {}
+        }
+    }
+
+    /// The sole counter-reconciling path for a Profile **state** edge:
     /// delegate to [`Profile::transition_state`] (the core `state`
     /// chokepoint, returning the prior by value for the typed-move
     /// callers) and reconcile [`Self::nonsteady`] across the edge from
-    /// [`Profile::is_nonsteady`] read before and after the swap. The
-    /// anchor does not move here, so both reads see the same anchor;
-    /// only the `state` discriminant changes.
+    /// [`Profile::is_nonsteady`] read before and after the swap. Only
+    /// the `state` discriminant moves here; the anchor-presence half
+    /// of the predicate is reconciled by the sibling
+    /// [`Self::reconcile_nonsteady`].
     ///
     /// Returns `None` for a stale id (the `?` the typed-move callers
     /// already branch on, replacing their prior `get_mut(id)?`). A
@@ -3088,12 +3121,37 @@ impl ProfileMap {
         let before = p.is_nonsteady();
         let prior = p.transition_state(new);
         let after = p.is_nonsteady();
-        match (before, after) {
-            (false, true) => self.nonsteady += 1,
-            (true, false) => self.nonsteady = self.nonsteady.saturating_sub(1),
-            (false, false) | (true, true) => {}
-        }
+        self.apply_nonsteady_edge(before, after);
         Some(prior)
+    }
+
+    /// The counter-reconciling path for a Profile **anchor-presence**
+    /// edge — the structural sibling of [`Self::transition_state`].
+    /// [`Profile::is_nonsteady`] reads `state` *and* anchor presence;
+    /// the `state` half reconciles through `transition_state`, the
+    /// anchor half here.
+    ///
+    /// The sole live-Profile anchor-clear,
+    /// `Engine::discard_anchor_state` (`take_current` +
+    /// `clear_anchor_classification`), runs through raw `get_mut` and
+    /// can flip `is_nonsteady` `false → true` on a **non-`Active`**
+    /// Profile (a healthy `Idle` anchor lost via `finalize_anchor_lost`
+    /// with `was_active == false`); on an `Active` Profile it is
+    /// delta-0 (the predicate ignores the anchor while `Active`) and
+    /// the eventual burst-end `transition_state(Active → Idle)` records
+    /// the edge instead. `before` is [`Profile::is_nonsteady`] sampled
+    /// by the caller *before* that mutation; this reads it after and
+    /// reconciles.
+    ///
+    /// Idempotent for a stale id — the Profile reaped, so [`Self::detach`]
+    /// already reconciled. A missed reconcile is debug-tripwired,
+    /// perf-only in release.
+    pub fn reconcile_nonsteady(&mut self, id: ProfileId, before: bool) {
+        let Some(p) = self.profiles.get(id) else {
+            return;
+        };
+        let after = p.is_nonsteady();
+        self.apply_nonsteady_edge(before, after);
     }
 
     #[must_use]

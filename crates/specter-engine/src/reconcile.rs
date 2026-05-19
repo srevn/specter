@@ -480,6 +480,7 @@ mod tests {
         ResourceRole, ScanConfig, StepOutput, Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -594,6 +595,7 @@ mod tests {
             root,
             &mut tree,
             &mut out,
+            &mut PathBuf::new(),
         );
         assert_eq!(count_watch(&out), 1, "one Watch for the Dir creation");
         assert!(tree.lookup(Some(root), "a.rs").is_some());
@@ -621,6 +623,7 @@ mod tests {
             root,
             &mut tree,
             &mut out,
+            &mut PathBuf::new(),
         );
         assert_eq!(
             count_watch(&out),
@@ -672,6 +675,7 @@ mod tests {
             root,
             &mut tree,
             &mut out,
+            &mut PathBuf::new(),
         );
         assert_eq!(count_unwatch(&out), 1, "Unwatch for the deleted Dir");
     }
@@ -711,6 +715,7 @@ mod tests {
             root,
             &mut tree,
             &mut out,
+            &mut PathBuf::new(),
         );
         assert_eq!(count_unwatch(&out), 1);
     }
@@ -761,6 +766,7 @@ mod tests {
             root,
             &mut tree,
             &mut out,
+            &mut PathBuf::new(),
         );
         assert_eq!(count_unwatch(&out), 1);
         assert_eq!(count_watch(&out), 1);
@@ -794,6 +800,7 @@ mod tests {
             &mut tree,
             &mut profiles,
             &mut out,
+            &mut PathBuf::new(),
         );
         assert_eq!(count_watch(&out), 0);
         // current Arc is unchanged (still pointing at snap_a — the early-out
@@ -821,6 +828,7 @@ mod tests {
             &mut tree,
             &mut profiles,
             &mut out,
+            &mut PathBuf::new(),
         );
         let p = profiles.get(pid).unwrap();
         assert!(p.current().is_some());
@@ -877,6 +885,7 @@ mod tests {
             &mut tree,
             &mut profiles,
             &mut out,
+            &mut PathBuf::new(),
         );
 
         let has_diag = out.diagnostics.iter().any(|d| {
@@ -1002,6 +1011,7 @@ mod tests {
             &mut tree,
             &mut profiles,
             &mut out,
+            &mut PathBuf::new(),
         );
 
         // 1. Old File slot was reaped — its id is stale on a fresh

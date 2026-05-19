@@ -23,6 +23,7 @@ use specter_engine::testkit::{
     rebase_loop_to_idle, seed_settle_to_verifying, seed_to_idle,
 };
 use specter_engine::{Engine, covers};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const SETTLE: Duration = Duration::from_millis(100);
@@ -80,10 +81,16 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
     );
     let profile = profiles.get(p).unwrap();
 
-    assert!(covers(profile, src, &tree), "Dir bypasses pattern");
-    assert!(covers(profile, lib_rs, &tree), "matching File covered");
     assert!(
-        !covers(profile, lib_c, &tree),
+        covers(profile, src, &tree, &mut PathBuf::new()),
+        "Dir bypasses pattern"
+    );
+    assert!(
+        covers(profile, lib_rs, &tree, &mut PathBuf::new()),
+        "matching File covered"
+    );
+    assert!(
+        !covers(profile, lib_c, &tree, &mut PathBuf::new()),
         "non-matching File uncovered"
     );
 }

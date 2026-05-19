@@ -317,6 +317,19 @@ impl Engine {
     /// dies" has no next Seed burst, so resetting the classification
     /// would be wasted on a struct about to drop; see `reap_profile`'s
     /// rustdoc for the asymmetry rationale.
+    ///
+    /// **Carrier-count reconcile.** `Profile::is_nonsteady` (the O(1)
+    /// gate's membership predicate) reads `state` *and* anchor
+    /// presence. This coordinator clears the anchor without a `state`
+    /// edge, so on a non-`Active` Profile — a healthy `Idle` anchor
+    /// lost via `finalize_anchor_lost` (`was_active == false`) — it
+    /// flips `is_nonsteady` `false → true` outside the
+    /// [`specter_core::ProfileMap::transition_state`] chokepoint. The
+    /// predicate is sampled before the clear and reconciled after via
+    /// [`specter_core::ProfileMap::reconcile_nonsteady`], the
+    /// anchor-edge sibling of that wrapper; on an `Active` Profile the
+    /// clear is delta-0 and the caller's later `finish_burst_to_idle`
+    /// records the edge.
     pub(crate) fn discard_anchor_state(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Order:
         //   1. release_descendant_claim runs first — it `take()`s
@@ -333,6 +346,17 @@ impl Engine {
         //      recompute reads them.
         //   3. release_anchor_claim runs last so its recompute walks
         //      a fully-cleared Profile.
+        //
+        // Sample `is_nonsteady` BEFORE step 1: `take_current` flips
+        // the anchor-presence half of the predicate there, so a read
+        // after the body would already see the post-clear value and
+        // miss the edge. Reconciled after step 3 via the anchor-edge
+        // sibling of `transition_state`.
+        let was_nonsteady = self
+            .profiles
+            .get(pid)
+            .map(specter_core::Profile::is_nonsteady);
+
         self.release_descendant_claim(pid, out);
 
         if let Some(p) = self.profiles.get_mut(pid) {
@@ -340,6 +364,10 @@ impl Engine {
         }
 
         self.release_anchor_claim(pid, out);
+
+        if let Some(before) = was_nonsteady {
+            self.profiles.reconcile_nonsteady(pid, before);
+        }
 
         // Coordinator-exit coherence tripwire, symmetric with
         // `Profile::materialize_anchor`'s. The classification collapse
