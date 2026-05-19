@@ -178,10 +178,7 @@ impl Engine {
             .get(resource)
             .map_or(ResourceKind::File, Resource::kind_or_file);
         let event_class = fs_event_to_class(event, resource_kind);
-        let is_terminal = matches!(
-            event,
-            FsEvent::Removed | FsEvent::Renamed | FsEvent::Revoked
-        );
+        let is_identity = event.is_identity();
 
         for profile_id in covering {
             let Some((is_anchor, profile_events)) = self
@@ -206,7 +203,7 @@ impl Engine {
                 continue;
             }
 
-            if is_terminal && is_anchor {
+            if is_identity && is_anchor {
                 self.on_anchor_terminal_event(profile_id, out);
             } else {
                 // Modified/StructureChanged/MetadataChanged anywhere that

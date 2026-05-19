@@ -39,6 +39,29 @@ pub enum FsEvent {
     Revoked,
 }
 
+impl FsEvent {
+    /// Identity (slot-level) events — `Removed` / `Renamed` /
+    /// `Revoked`. They fire on the watched inode itself, are terminal
+    /// when they reach the anchor (`on_anchor_terminal_event`), and
+    /// reconcile a covered descendant through the diff-against-prior
+    /// pass. Each is a distinct lifecycle fact routed structurally —
+    /// never a recency hint, so never eligible for same-tick
+    /// coalescing.
+    #[must_use]
+    pub const fn is_identity(self) -> bool {
+        matches!(self, Self::Removed | Self::Renamed | Self::Revoked)
+    }
+
+    /// Recency-class events — `Modified` / `MetadataChanged` /
+    /// `StructureChanged`. Each is a lossy "this resource changed in
+    /// this class" hint whose sole truth is the next probe; the exact
+    /// complement of [`Self::is_identity`].
+    #[must_use]
+    pub const fn is_recency(self) -> bool {
+        !self.is_identity()
+    }
+}
+
 /// Scope of a sensor overflow signal.
 ///
 /// inotify's `IN_Q_OVERFLOW` is queue-wide ([`Global`]); FSEvents emits
