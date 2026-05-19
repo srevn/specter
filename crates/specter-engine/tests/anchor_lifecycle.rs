@@ -13,66 +13,20 @@
 //! `discard_anchor_state`; the Subtree fallback in the post-loss
 //! window is the new invariant.
 
-#![allow(
-    clippy::items_after_statements,
-    clippy::manual_let_else,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::too_many_lines
-)]
-
-use compact_str::CompactString;
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::{anchor_ok, dir_snap, empty_program, file_leaf};
 use specter_core::{
-    ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta,
-    DirSnapshot, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry, ProbeCorrelation,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProfileState,
-    ProofAuthority, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachAnchor, SubAttachRequest, SubId,
+    AnchorClaim, ClassSet, EffectScope, EntryKind, FsEvent, Input, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
 };
 use specter_engine::Engine;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use specter_engine::testkit::{
+    first_probe_correlation, seed_settle_to_verifying, seed_to_idle, seed_to_idle_with,
+};
+use std::time::{Duration, Instant};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
-}
-
-fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
-    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-    for (name, kind, inode) in children {
-        let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::synthetic(
-                kind,
-                0,
-                UNIX_EPOCH,
-                FsIdentity::synthetic(inode, 0),
-            )),
-        };
-        map.insert(CompactString::new(name), child);
-    }
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
-}
-
-fn file_leaf() -> LeafEntry {
-    LeafEntry::synthetic(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(1, 0))
-}
-
-fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops().iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.correlation()),
-        ProbeOp::Cancel { .. } => None,
-    })
-}
 
 fn first_probe_request(out: &StepOutput) -> Option<&ProbeRequest> {
     out.probe_ops().iter().find_map(|op| match op {
@@ -113,86 +67,6 @@ fn attach_at(
     (sid, pid, out)
 }
 
-/// Expire a Batching-first Seed burst's first `Settle` window and
-/// return the first Seed probe's correlation. A Seed emits no
-/// probe at attach; the first probe materializes only after the initial
-/// settle timer (`t0 + SETTLE`) expires and `Batching → Verifying`.
-/// Lighter than [`complete_seed_burst`] — for scenarios that terminate
-/// the Seed on its *first* response (Vanished / Failed) and never reach
-/// the second N=2 cycle. `t0` is the instant the Seed burst started
-/// (the attach instant for a live `Resource` anchor).
-fn first_seed_probe(e: &mut Engine, pid: ProfileId, t0: Instant) -> (ProbeCorrelation, Instant) {
-    let at = t0 + SETTLE;
-    while let Some(en) = e.pop_expired(at) {
-        e.step(
-            Input::TimerExpired {
-                profile: en.profile,
-                kind: en.kind,
-                id: en.id,
-            },
-            at,
-        );
-    }
-    let c = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("first Seed probe in flight after the initial settle expiry");
-    (c, at)
-}
-
-/// Drive a Batching-first Seed burst through its full N=2 quiescence
-/// proof to `Idle`. A Seed runs the same two-settle-spaced
-/// equal-sample proof as a Standard burst: no probe at burst start; the
-/// first Seed probe materializes only after the initial settle window
-/// (`t0 + SETTLE`) expires.
-///
-/// 1. expire settle #1 (`t0 + SETTLE`) → first Seed probe; respond with
-///    `outcome()`. The carrier's prior `certified` is `None`,
-///    so the verdict is `Unstable` by construction → graft + re-batch.
-/// 2. expire settle #2 (`t0 + SETTLE*2`) → second Seed probe; respond
-///    with the hash-equal `outcome()` → `Stable` → seed pin + rebase →
-///    `Idle`.
-///
-/// `outcome` is re-invoked per probe so the same hash is presented
-/// twice (`AnchorOk(leaf)` for a File anchor, `SubtreeProven` for a
-/// Dir anchor — both fold through `CertifiedPrior::advance` identically).
-/// A fresh Seed emits no Effects. `t0` is the instant the Seed burst
-/// started.
-fn complete_seed_burst(
-    e: &mut Engine,
-    pid: ProfileId,
-    t0: Instant,
-    outcome: impl Fn() -> ProbeOutcome,
-) {
-    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
-        while let Some(en) = e.pop_expired(at) {
-            e.step(
-                Input::TimerExpired {
-                    profile: en.profile,
-                    kind: en.kind,
-                    id: en.id,
-                },
-                at,
-            );
-        }
-        let c = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("Seed Verifying probe in flight after settle expiry");
-        let out = e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
-                correlation: c,
-                outcome: outcome(),
-            }),
-            at,
-        );
-        assert!(out.effects().is_empty(), "a fresh Seed never emits Effects");
-    }
-    assert!(
-        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle,),
-        "Seed burst completes its N=2 proof and returns to Idle",
-    );
-}
-
 #[test]
 fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     // Multi-Profile sharing a File-classified anchor. Profile P loses
@@ -226,10 +100,15 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         t_q,
     );
     assert!(
-        first_probe_corr(&out_q).is_none(),
+        first_probe_correlation(&out_q).is_none(),
         "Batching-first Seed emits no probe at attach",
     );
-    complete_seed_burst(&mut e, pid_q, t_q, || ProbeOutcome::AnchorOk(file_leaf()));
+    let _ = seed_to_idle_with(
+        &mut e,
+        pid_q,
+        || anchor_ok(file_leaf(EntryKind::File, 1)),
+        t_q,
+    );
     assert_eq!(
         e.profiles().get(pid_q).unwrap().kind(),
         Some(ResourceKind::File),
@@ -240,7 +119,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     let t_p = t_q + SETTLE * 3;
     let (_sid_p, pid_p, out_p) = attach_at(&mut e, "P", anchor, ClassSet::EMPTY, MAX_SETTLE, t_p);
     assert!(
-        first_probe_corr(&out_p).is_none(),
+        first_probe_correlation(&out_p).is_none(),
         "Batching-first Seed emits no probe at attach",
     );
     // `Profile.kind` is pinned at construction from the anchor's
@@ -257,7 +136,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     // to Vanished. discard_anchor_state clears P.kind, P.current,
     // P.baseline, P.anchor_claim. Vanished terminates the Seed on its
     // first response — N=2's second cycle is never reached.
-    let (p_corr, p_at) = first_seed_probe(&mut e, pid_p, t_p);
+    let (p_corr, p_at) = seed_settle_to_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),
@@ -367,13 +246,10 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         t_q,
     );
     assert!(
-        first_probe_corr(&out_q).is_none(),
+        first_probe_correlation(&out_q).is_none(),
         "Batching-first Seed emits no probe at attach",
     );
-    complete_seed_burst(&mut e, pid_q, t_q, || ProbeOutcome::SubtreeProven {
-        snapshot: dir_snap(vec![]),
-        authority: ProofAuthority::Authoritative,
-    });
+    let _ = seed_to_idle(&mut e, pid_q, &dir_snap(&[]), t_q);
 
     // P attaches strictly after Q's two settle windows; Batching-first
     // (no probe at attach). `Profile.kind` is pinned at construction
@@ -381,7 +257,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     let t_p = t_q + SETTLE * 3;
     let (_sid_p, pid_p, out_p) = attach_at(&mut e, "P", anchor, ClassSet::EMPTY, MAX_SETTLE, t_p);
     assert!(
-        first_probe_corr(&out_p).is_none(),
+        first_probe_correlation(&out_p).is_none(),
         "Batching-first Seed emits no probe at attach",
     );
     assert_eq!(
@@ -391,7 +267,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
 
     // Expire P's first settle window → first Seed probe; drive it to
     // Vanished (terminates the Seed on its first response).
-    let (p_corr, p_at) = first_seed_probe(&mut e, pid_p, t_p);
+    let (p_corr, p_at) = seed_settle_to_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),
@@ -480,16 +356,21 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         t_q,
     );
     assert!(
-        first_probe_corr(&out_q).is_none(),
+        first_probe_correlation(&out_q).is_none(),
         "Batching-first Seed emits no probe at attach",
     );
-    complete_seed_burst(&mut e, pid_q, t_q, || ProbeOutcome::AnchorOk(file_leaf()));
+    let _ = seed_to_idle_with(
+        &mut e,
+        pid_q,
+        || anchor_ok(file_leaf(EntryKind::File, 1)),
+        t_q,
+    );
 
     // P attaches strictly after Q's two settle windows; Batching-first.
     let t_p = t_q + SETTLE * 3;
     let (_sid_p, pid_p, out_p) = attach_at(&mut e, "P", anchor, ClassSet::EMPTY, MAX_SETTLE, t_p);
     assert!(
-        first_probe_corr(&out_p).is_none(),
+        first_probe_correlation(&out_p).is_none(),
         "Batching-first Seed emits no probe at attach",
     );
 
@@ -497,7 +378,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     // Failed. dispatch_seed_failed clears P.kind and terminates the
     // Seed on its first response (the N=2 second cycle is never
     // reached).
-    let (p_corr, p_at) = first_seed_probe(&mut e, pid_p, t_p);
+    let (p_corr, p_at) = seed_settle_to_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),

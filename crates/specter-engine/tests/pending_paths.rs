@@ -2,132 +2,18 @@
 //! path-based request, walks descent through scaffolds, and confirms
 //! anchor materialization triggers a Seed burst.
 
-#![allow(
-    clippy::items_after_statements,
-    clippy::manual_let_else,
-    clippy::match_wildcard_for_single_variants,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::option_if_let_else,
-    clippy::single_match_else,
-    clippy::too_many_lines
-)]
-
-use compact_str::CompactString;
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
-    ActionProgram, ActiveBurst, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry, ProbeCorrelation, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, ProofAuthority, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest,
+    ActiveBurst, Diagnostic, EffectScope, EntryKind, FsEvent, Input, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig,
+    SubAttachAnchor, SubAttachRequest,
 };
 use specter_engine::Engine;
-use std::collections::BTreeMap;
+use specter_engine::testkit::{
+    MAX_SETTLE, NO_EVENTS, SETTLE, first_probe_correlation, seed_to_idle,
+};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
-
-const SETTLE: Duration = Duration::from_millis(100);
-const MAX_SETTLE: Duration = Duration::from_secs(6);
-const NO_EVENTS: ClassSet = ClassSet::EMPTY;
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
-}
-
-/// V5-native helper: build a `DirSnapshot` with single-component
-/// children. The walker speaks paths; engine identity stays engine-side,
-/// so the snapshot carries pure content. Tests in this file use
-/// leaf-name segments only.
-fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
-    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-    for (name, kind, inode) in children {
-        let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::synthetic(
-                kind,
-                0,
-                UNIX_EPOCH,
-                FsIdentity::synthetic(inode, 0),
-            )),
-        };
-        map.insert(CompactString::new(name), child);
-    }
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
-}
-
-/// Pluck the correlation from the (single) Probe in `out`.
-fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops().iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.correlation()),
-        ProbeOp::Cancel { .. } => None,
-    })
-}
-
-/// Drive a Batching-first Seed burst through its full N=2 quiescence
-/// proof to `Idle`. A Seed runs the same two-settle-spaced
-/// equal-sample proof as a Standard burst: no probe fires at burst
-/// start; the first Seed probe materializes only after the initial
-/// settle window (`t0 + SETTLE`) expires and `Batching → Verifying`.
-///
-/// 1. expire settle #1 (`t0 + SETTLE`) → first Seed probe; respond with
-///    `seed_snap`. The carrier's prior `certified` is `None`,
-///    so the verdict is `Unstable` by construction → graft + re-batch.
-/// 2. expire settle #2 (`t0 + SETTLE*2`) → second Seed probe; respond
-///    with the hash-equal `seed_snap` → `Stable` → seed pin + rebase →
-///    `Idle`.
-///
-/// `t0` is the instant the Seed burst *starts*: for a `Resource` attach
-/// against a live anchor that is the attach instant; for a path attach
-/// that materializes through descent it is the instant of the step that
-/// materialized the anchor (`Pending → Idle → Active(Seed Batching)`),
-/// not the original attach. Both responses are hash-equal and within
-/// `MAX_SETTLE`, so the burst reaches a clean `Stable` and is never
-/// forced; a fresh Seed emits no Effects.
-fn complete_seed_burst(
-    e: &mut Engine,
-    pid: specter_core::ProfileId,
-    seed_snap: Arc<DirSnapshot>,
-    t0: Instant,
-) {
-    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
-        while let Some(en) = e.pop_expired(at) {
-            e.step(
-                Input::TimerExpired {
-                    profile: en.profile,
-                    kind: en.kind,
-                    id: en.id,
-                },
-                at,
-            );
-        }
-        let c = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("Seed Verifying probe in flight after settle expiry");
-        let out = e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
-                correlation: c,
-                outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: Arc::clone(&seed_snap),
-                    authority: ProofAuthority::Authoritative,
-                },
-            }),
-            at,
-        );
-        assert!(out.effects().is_empty(), "a fresh Seed never emits Effects");
-    }
-    assert!(
-        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle,),
-        "Seed burst completes its N=2 proof and returns to Idle",
-    );
-}
+use std::time::Instant;
 
 #[test]
 fn attach_sub_path_pending_then_anchor_appears() {
@@ -173,25 +59,26 @@ fn attach_sub_path_pending_then_anchor_appears() {
         matches!(e.tree().get(myapp).unwrap().role, ResourceRole::User),
         "anchor's role is User even when pending",
     );
-    let var_corr = first_probe_corr(&attach_out).expect("descent probe at /var emitted");
+    let var_corr = first_probe_correlation(&attach_out).expect("descent probe at /var emitted");
 
     // Inject probe response showing `log` appears.
     let log_advance = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: var_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![("log", EntryKind::Dir, 1)])),
+            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("log", EntryKind::Dir, 1)])),
         }),
         now,
     );
-    let log_corr = first_probe_corr(&log_advance).expect("descent probe at /var/log emitted");
+    let log_corr =
+        first_probe_correlation(&log_advance).expect("descent probe at /var/log emitted");
 
     // Inject probe response showing `myapp` appears under /var/log.
     let myapp_materialize = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: log_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![("myapp", EntryKind::Dir, 2)])),
+            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("myapp", EntryKind::Dir, 2)])),
         }),
         now,
     );
@@ -221,14 +108,14 @@ fn attach_sub_path_pending_then_anchor_appears() {
         s => panic!("expected Active(PreFire(Seed)), got {s:?}"),
     }
     assert!(
-        first_probe_corr(&myapp_materialize).is_none(),
+        first_probe_correlation(&myapp_materialize).is_none(),
         "Batching-first Seed emits no probe at materialization",
     );
 
     // Drive the N=2 Seed proof. `t0` is the instant the Seed burst
     // started — the step that materialized the anchor (`now`), not the
     // original attach.
-    complete_seed_burst(&mut e, pid, dir_snap_with(vec![]), now);
+    let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Profile should now be Idle with baseline established.
     let p = e.profiles().get(pid).unwrap();
@@ -259,7 +146,7 @@ fn pending_path_failed_probe_retains_state() {
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
-    let corr = first_probe_corr(&attach_out).expect("descent probe");
+    let corr = first_probe_correlation(&attach_out).expect("descent probe");
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -309,18 +196,14 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
-    let corr = first_probe_corr(&attach_out).expect("descent probe");
+    let corr = first_probe_correlation(&attach_out).expect("descent probe");
 
     // No-progress response — descent stays pending.
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![(
-                "other",
-                EntryKind::File,
-                99,
-            )])),
+            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("other", EntryKind::File, 99)])),
         }),
         Instant::now(),
     );
@@ -375,11 +258,11 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     let pid = e.subs().get(sid).unwrap().profile;
     // The immediate Seed is Batching-first: no probe at attach.
     assert!(
-        first_probe_corr(&attach_out).is_none(),
+        first_probe_correlation(&attach_out).is_none(),
         "Batching-first Seed emits no probe at attach",
     );
     // Drive the N=2 Seed proof → Idle (`t0` is the attach instant).
-    complete_seed_burst(&mut e, pid, dir_snap_with(vec![]), now);
+    let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
@@ -388,7 +271,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
 
     // The Seed proof consumed two settle windows; keep instants
     // monotonic for the recovery sequence that follows.
-    let after_seed = now + SETTLE * 3;
+    let after_seed = seed_done + SETTLE;
 
     // Anchor gone (Removed event at /src).
     e.step(
@@ -450,7 +333,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let pid = e.subs().get(sid).unwrap().profile;
 
     // Profile is Pending with an in-flight descent probe.
-    let initial_corr = first_probe_corr(&attach_out).expect("descent probe at attach");
+    let initial_corr = first_probe_correlation(&attach_out).expect("descent probe at attach");
     let is_pending = matches!(
         e.profiles().get(pid).expect("Profile attached").state(),
         ProfileState::Pending(_)
@@ -621,12 +504,12 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_a_out).expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile;
-    let a_corr = first_probe_corr(&attach_a_out).expect("descent probe at attach");
+    let a_corr = first_probe_correlation(&attach_a_out).expect("descent probe at attach");
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_a),
             correlation: a_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![("bar", EntryKind::Dir, 1)])),
+            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("bar", EntryKind::Dir, 1)])),
         }),
         now,
     );
@@ -656,20 +539,20 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         specter_core::testkit::first_attached_sub(&attach_b_out).expect("attach_sub succeeded");
     let pid_b = e.subs().get(sid_b).unwrap().profile;
     assert!(
-        first_probe_corr(&attach_b_out).is_none(),
+        first_probe_correlation(&attach_b_out).is_none(),
         "Batching-first Seed emits no probe at attach",
     );
     // Drive B's N=2 Seed proof → Idle (`t0` is B's attach instant). A
     // is Pending with an empty descent slot (no settle timer), so its
     // timers do not interfere with B's settle drain.
-    complete_seed_burst(&mut e, pid_b, dir_snap_with(vec![]), now);
+    let b_seed_done = seed_to_idle(&mut e, pid_b, &dir_snap(&[]), now);
     assert_eq!(
         e.profiles().get(pid_b).unwrap().watch_root_parent(),
         Some(root_dir),
         "B watches its parent /root for anchor recovery",
     );
     // B's Seed consumed two settle windows; keep instants monotonic.
-    let after_b_seed = now + SETTLE * 3;
+    let after_b_seed = b_seed_done + SETTLE;
     e.step(
         Input::FsEvent {
             resource: bar,
@@ -701,11 +584,11 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         specter_core::testkit::first_attached_sub(&attach_c_out).expect("attach_sub succeeded");
     let pid_c = e.subs().get(sid_c).unwrap().profile;
     assert!(
-        first_probe_corr(&attach_c_out).is_none(),
+        first_probe_correlation(&attach_c_out).is_none(),
         "Batching-first Seed emits no probe at attach",
     );
     // Drive C's N=2 Seed proof → Idle (`t0` is C's attach instant).
-    complete_seed_burst(&mut e, pid_c, dir_snap_with(vec![]), c_attach);
+    let c_seed_done = seed_to_idle(&mut e, pid_c, &dir_snap(&[]), c_attach);
     assert!(matches!(
         e.profiles().get(pid_c).unwrap().state(),
         ProfileState::Idle,
@@ -718,7 +601,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     // - C is anchored at /elsewhere ⇒ untouched.
     // Strictly after both Seed proofs (B and C each consumed two settle
     // windows since `now`).
-    let trigger = c_attach + SETTLE * 3;
+    let trigger = c_seed_done + SETTLE;
     let out = e.step(
         Input::FsEvent {
             resource: root_dir,

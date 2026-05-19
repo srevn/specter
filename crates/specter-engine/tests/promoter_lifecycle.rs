@@ -20,131 +20,24 @@
 //! integration test would re-test the well-pinned Standard-burst
 //! arms; cross-cutting value is in the Promoter-specific glue.
 
-#![allow(
-    clippy::items_after_statements,
-    clippy::manual_let_else,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::option_if_let_else,
-    clippy::similar_names,
-    clippy::single_match_else,
-    clippy::too_many_lines
-)]
-
 use compact_str::CompactString;
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::{anchor_ok, dir_snap, empty_program, file_leaf};
 use specter_core::{
-    ActionProgram, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope,
-    EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, ProfileState, PromoterAttachRequest,
-    PromoterId, PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, WatchOp, WatchRegistryDiff,
+    ClassSet, Diagnostic, EffectScope, EntryKind, FS_ROOT_SEGMENT, Input, OverflowScope, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, PromoterRegistryDiff, PromoterState,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, WatchOp,
+    WatchRegistryDiff,
 };
 use specter_engine::Engine;
-use std::collections::BTreeMap;
+use specter_engine::testkit::{
+    attach_promoter, attach_promoter_returning, descent_advance, dynamic_subs_of,
+    first_probe_correlation, last_probe_path, pre_place_dir,
+};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
-}
-
-fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
-    PromoterAttachRequest {
-        name: name.into(),
-        pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::EMPTY,
-        },
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        log_output: false,
-    }
-}
-
-/// Build a `DirSnapshot` with the given children — used by tests that
-/// need a synthetic enumeration response. The walker speaks paths;
-/// engine identity stays engine-side, so the snapshot carries pure
-/// content.
-fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
-    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-    for (name, kind, inode) in children {
-        let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::synthetic(
-                kind,
-                0,
-                UNIX_EPOCH,
-                FsIdentity::synthetic(inode, 0),
-            )),
-        };
-        map.insert(CompactString::new(name), child);
-    }
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
-}
-
-/// Helper: pick the most recent outstanding probe target-path from a
-/// step's [`ProbeOp::Probe`] emissions. The wire is path-only; tests
-/// compare via `e.tree().path_of(<id>)`.
-fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf> {
-    out.probe_ops().iter().rev().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.target_path().to_path_buf()),
-        ProbeOp::Cancel { .. } => None,
-    })
-}
-
-/// Registry-derived stand-in for the deleted `Promoter::dynamic_subs()`,
-/// over the public `Engine` surface: the live `(anchor → SubId)` set
-/// for `pid`, reconstructed from `SubRegistry` truth (now the single
-/// source). A live dynamic Sub's `Profile.resource` *is* the anchor it
-/// was promoted at.
-fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubId> {
-    e.subs()
-        .iter()
-        .filter(|(_, s)| s.source_promoter == Some(pid))
-        .map(|(sid, s)| {
-            let anchor = e
-                .profiles()
-                .get(s.profile)
-                .expect("a live dynamic Sub's Profile is live")
-                .resource;
-            (anchor, sid)
-        })
-        .collect()
-}
-
-/// Pre-place a path on the `Engine`'s Tree as a User-roled chain
-/// (FS-root through every supplied segment). Returns the leaf id
-/// — the deepest segment that's now materialised. Used so a
-/// pattern's literal prefix exists from step 1, putting the
-/// Promoter into immediate-Active mode and letting the test focus
-/// on the per-Promoter phases (enumeration, promotion, fire,
-/// reap) rather than the descent advance the inline tests already
-/// pin in detail.
-fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
-    let mut comps = Vec::with_capacity(segments.len() + 1);
-    comps.push(FS_ROOT_SEGMENT);
-    comps.extend_from_slice(segments);
-    let r = e
-        .tree_mut()
-        .ensure_path(&comps, ResourceRole::User)
-        .expect("non-empty fixture");
-    e.tree_mut().set_kind(r, ResourceKind::Dir);
-    r
-}
 
 /// Pre-place a File leaf at `dir_segments / file_name`. The leaf is
 /// `ResourceKind::File`-typed; intermediate segments materialise as
@@ -194,12 +87,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
     let var_log = pre_place_dir(&mut e, &["var", "log"]);
 
     let now = Instant::now();
-    let attach_out = e.step(
-        Input::AttachPromoter(promoter_req("logs", "/var/log/*.log")),
-        now,
-    );
-    let pid = specter_core::testkit::first_attached_promoter(&attach_out)
-        .expect("attach_promoter succeeded");
+    let (pid, attach_out) = attach_promoter_returning(&mut e, "logs", "/var/log/*.log", now);
 
     // ---- PromoterAttached + initial enumeration probe ----
     assert!(
@@ -225,27 +113,17 @@ fn full_lifecycle_attach_promote_seed_reap() {
         e.tree().path_of(var_log).as_deref(),
         "enumeration probe targets /var/log",
     );
-    let enum_corr = e
-        .pending_probe_for(ProbeOwner::Promoter(pid))
-        .expect("enumeration probe in flight");
 
     // ---- enumeration response → promotion ----
     //
     // Inject a directory listing with one *.log match (foo.log) and
     // one non-matching entry (bar.txt). The match promotes; the
     // non-match doesn't.
-    let snap_var_log = dir_snap_with(vec![
+    let snap_var_log = dir_snap(&[
         ("foo.log", EntryKind::File, 10),
         ("bar.txt", EntryKind::File, 11),
     ]);
-    let promote_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Promoter(pid),
-            correlation: enum_corr,
-            outcome: ProbeOutcome::DirEnumerated(snap_var_log),
-        }),
-        now,
-    );
+    let promote_out = descent_advance(&mut e, ProbeOwner::Promoter(pid), &snap_var_log, now);
 
     // Exactly one promotion (derived from SubRegistry), at foo.log.
     let dynamic_sub_id = {
@@ -348,7 +226,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
     // baseline ("how things look right now") that future Standard
     // bursts observe drift against — `dispatch_seed_ok`'s no-drift
     // terminal arm. `seed_started` is the promote step's `now`.
-    let leaf = LeafEntry::synthetic(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(10, 0));
+    let leaf = file_leaf(EntryKind::File, 10);
     let seed_started = now;
     let mut seed_settled = seed_started;
     for (sample_idx, at) in [seed_started + SETTLE, seed_started + SETTLE * 2]
@@ -396,7 +274,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(dynamic_profile),
                 correlation: seed_corr,
-                outcome: ProbeOutcome::AnchorOk(leaf.clone()),
+                outcome: anchor_ok(leaf.clone()),
             }),
             at,
         );
@@ -526,17 +404,6 @@ fn static_attach_emits_sub_attached_with_no_source_promoter() {
 // Cross-actor: descent vanish preserves co-resident Promoter proxy
 // ───────────────────────────────────────────────────────────────────────
 
-/// First emitted probe correlation for a step's `StepOutput` —
-/// utility for capturing the live channel correlation from `attach_*`
-/// flows. Mirrors the local helper in
-/// `crates/specter-engine/tests/watch_op_rejected_purge.rs`.
-fn first_probe_corr(out: &specter_core::StepOutput) -> Option<specter_core::ProbeCorrelation> {
-    out.probe_ops().iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.correlation()),
-        ProbeOp::Cancel { .. } => None,
-    })
-}
-
 /// Cross-owner shared-prefix vanish (T1-1): a Profile in `Pending`
 /// descent at `/a/b` shares the slot with a Promoter `Active` proxy
 /// at `/a/b`. Pre-fix, `dispatch_descent_vanished`'s rewind branch
@@ -546,6 +413,10 @@ fn first_probe_corr(out: &specter_core::StepOutput) -> Option<specter_core::Prob
 /// (counter 2 → 1) and the Promoter's claim survives. The matching
 /// `Unwatch` only fires on the genuine 1 → 0 edge — when the
 /// Promoter's enumeration probe later returns `Vanished`.
+// Codebase-standard PromoterId/ProfileId/SubId names; the Promoter-q ↔
+// Profile-p shared-prefix parallelism is this test's subject, not
+// accidental similarity.
+#[allow(clippy::similar_names)]
 #[test]
 fn descent_vanish_preserves_co_resident_promoter_proxy() {
     let mut e = Engine::new();
@@ -557,33 +428,19 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     // the literal segments are `["a", "b"]`). Promoter starts in
     // `PrefixPending(/a, ["b"])` because /a/b doesn't yet exist.
     let a = pre_place_dir(&mut e, &["a"]);
-    let attach_q_out = e.step(
-        Input::AttachPromoter(promoter_req("logs", "/a/b/*.txt")),
-        now,
-    );
-    let qid = specter_core::testkit::first_attached_promoter(&attach_q_out)
-        .expect("attach_promoter succeeded");
+    let qid = attach_promoter(&mut e, "logs", "/a/b/*.txt", now);
     assert!(matches!(
         e.promoters().get(qid).unwrap().state(),
         PromoterState::PrefixPending(_),
     ));
-    let descent_q_corr =
-        first_probe_corr(&attach_q_out).expect("Promoter descent probe at /a in flight");
 
     // Drive the Promoter's descent into Active by completing the
     // `/a` probe with a "b" Dir entry. The dispatcher's terminal arm
     // calls `enter_active`, which materialises /a/b as the first proxy
     // (User-roled, +1 STRUCTURE) and queues an enumeration probe at
     // /a/b.
-    let snap_a = dir_snap_with(vec![("b", EntryKind::Dir, 1)]);
-    let _ = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Promoter(qid),
-            correlation: descent_q_corr,
-            outcome: ProbeOutcome::DirEnumerated(snap_a),
-        }),
-        now,
-    );
+    let snap_a = dir_snap(&[("b", EntryKind::Dir, 1)]);
+    let _ = descent_advance(&mut e, ProbeOwner::Promoter(qid), &snap_a, now);
 
     let a_b = e
         .tree()
@@ -626,7 +483,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         ProfileState::Pending(_),
     ));
     let descent_p_corr =
-        first_probe_corr(&attach_p_out).expect("Profile descent probe at /a/b in flight");
+        first_probe_correlation(&attach_p_out).expect("Profile descent probe at /a/b in flight");
 
     // Pre-vanish state: /a/b carries two STRUCTURE contributions.
     assert_eq!(e.tree().get(a_b).unwrap().watch_demand(), 2);
@@ -716,6 +573,10 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
 /// path was not the bug surface (the bug was Profile-side `vacate`),
 /// but the test pins the multi-Promoter symmetry that's load-bearing
 /// for the post-fix correctness story.
+// Codebase-standard q1/q2 parallel PromoterId names; the two-Promoter
+// shared-proxy symmetry is this test's subject, not accidental
+// similarity.
+#[allow(clippy::similar_names)]
 #[test]
 fn two_promoters_sharing_proxy_unwind_independently() {
     let mut e = Engine::new();
@@ -726,18 +587,8 @@ fn two_promoters_sharing_proxy_unwind_independently() {
     // literal prefix and a single glob component matching anything;
     // the first proxy at `enter_active` is /shared with index = lpl.
     let shared = pre_place_dir(&mut e, &["shared"]);
-    let attach_q1 = e.step(
-        Input::AttachPromoter(promoter_req("q1", "/shared/*.log")),
-        now,
-    );
-    let q1 = specter_core::testkit::first_attached_promoter(&attach_q1)
-        .expect("attach_promoter succeeded");
-    let attach_q2 = e.step(
-        Input::AttachPromoter(promoter_req("q2", "/shared/*.txt")),
-        now,
-    );
-    let q2 = specter_core::testkit::first_attached_promoter(&attach_q2)
-        .expect("attach_promoter succeeded");
+    let q1 = attach_promoter(&mut e, "q1", "/shared/*.log", now);
+    let q2 = attach_promoter(&mut e, "q2", "/shared/*.txt", now);
 
     // Both Promoters should be Active with a proxy at /shared.
     for qid in [q1, q2] {
@@ -850,14 +701,7 @@ fn sensor_overflow_reseeds_active_promoter() {
     // drain the initial enumeration so the Promoter has multiple
     // proxies (one per matched Dir entry).
     let var_log = pre_place_dir(&mut e, &["var", "log"]);
-    let attach_out = e.step(
-        Input::AttachPromoter(promoter_req("logs", "/var/log/*")),
-        now,
-    );
-    let qid = specter_core::testkit::first_attached_promoter(&attach_out)
-        .expect("attach_promoter succeeded");
-    let initial_enum_corr =
-        first_probe_corr(&attach_out).expect("initial enumeration probe in flight");
+    let qid = attach_promoter(&mut e, "logs", "/var/log/*", now);
 
     // Inject a multi-Dir snapshot so the enumeration registers two
     // sub-proxies. The Promoter pattern's final component is `*`
@@ -866,14 +710,7 @@ fn sensor_overflow_reseeds_active_promoter() {
     // pattern, so each match calls `try_promote` (mints dynamic
     // Subs). To get sub-proxies we'd need a multi-component pattern
     // with a non-final glob. Use `/var/log/*/access.log` instead.
-    let _ = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Promoter(qid),
-            correlation: initial_enum_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![])),
-        }),
-        now,
-    );
+    let _ = descent_advance(&mut e, ProbeOwner::Promoter(qid), &dir_snap(&[]), now);
 
     // For this test we only need at least one proxy to demonstrate
     // the reseed path. The Active{empty proxies} case is also valid
@@ -943,13 +780,8 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
     // Promoter's literal prefix is /a/b which doesn't yet exist;
     // `materialize_path_or_pending` returns Pending(/a, [b]).
     let a = pre_place_dir(&mut e, &["a"]);
-    let attach_out = e.step(
-        Input::AttachPromoter(promoter_req("logs", "/a/b/*.log")),
-        now,
-    );
-    let qid = specter_core::testkit::first_attached_promoter(&attach_out)
-        .expect("attach_promoter succeeded");
-    let descent_corr = first_probe_corr(&attach_out).expect("descent probe in flight");
+    let (qid, attach_out) = attach_promoter_returning(&mut e, "logs", "/a/b/*.log", now);
+    let descent_corr = first_probe_correlation(&attach_out).expect("descent probe in flight");
     assert!(matches!(
         e.promoters().get(qid).unwrap().state(),
         PromoterState::PrefixPending(_),
@@ -1024,12 +856,7 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
     // Same setup as the prefix-pending test, but leave the descent
     // probe IN FLIGHT (no response).
     let _a = pre_place_dir(&mut e, &["a"]);
-    let attach_out = e.step(
-        Input::AttachPromoter(promoter_req("logs", "/a/b/*.log")),
-        now,
-    );
-    let qid = specter_core::testkit::first_attached_promoter(&attach_out)
-        .expect("attach_promoter succeeded");
+    let qid = attach_promoter(&mut e, "logs", "/a/b/*.log", now);
     let in_flight_corr = e
         .pending_probe_for(ProbeOwner::Promoter(qid))
         .expect("descent probe in flight");
@@ -1105,15 +932,7 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     // magnitude.
     let frozen = Instant::now() + Duration::from_secs(1_000_000);
 
-    let attach_out = e.step(
-        Input::AttachPromoter(promoter_req("logs", "/var/log/*.log")),
-        frozen,
-    );
-    let pid = specter_core::testkit::first_attached_promoter(&attach_out)
-        .expect("attach_promoter succeeded");
-    let enum_corr = e
-        .pending_probe_for(ProbeOwner::Promoter(pid))
-        .expect("enumeration probe in flight");
+    let pid = attach_promoter(&mut e, "logs", "/var/log/*.log", frozen);
 
     // Drive the enumeration response containing `foo.log`. The
     // pre-placed leaf makes `attach_sub_inner` go immediate-Materialize,
@@ -1122,15 +941,8 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     // timer at `now + SETTLE` and a `BurstDeadline` at
     // `now + MAX_SETTLE` (no probe at attach). Both must derive from
     // the threaded engine `now`, which is the property under test.
-    let snap = dir_snap_with(vec![("foo.log", EntryKind::File, 10)]);
-    let _promote_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Promoter(pid),
-            correlation: enum_corr,
-            outcome: ProbeOutcome::DirEnumerated(snap),
-        }),
-        frozen,
-    );
+    let snap = dir_snap(&[("foo.log", EntryKind::File, 10)]);
+    let _ = descent_advance(&mut e, ProbeOwner::Promoter(pid), &snap, frozen);
 
     // The new dynamic Sub registered and its Profile is
     // `Active(PreFire(Batching))` with the Seed's two timers scheduled.

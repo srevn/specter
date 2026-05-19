@@ -1,7 +1,7 @@
 //! Fresh-attach Seed-with-activity fire contract.
 //!
 //! A fresh-attach **Seed** burst that witnessed filesystem activity (its
-//! `PreFireBurst.dirty_resources`, populated by `event_drives_batching`,
+//! `PreFireBurst.dirty` provenance, populated by `event_drives_batching`,
 //! is non-empty) fires its Sub's command on the stable verdict, routing
 //! through the same Standard stable consequence — including the Draining
 //! gate when a covered Standard descendant is mid-burst. For a
@@ -13,30 +13,20 @@
 //! restart over a static tree must not re-fire); a recovery Seed
 //! drift-fires.
 
-#![allow(
-    clippy::items_after_statements,
-    clippy::manual_let_else,
-    clippy::match_wildcard_for_single_variants,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::option_if_let_else,
-    clippy::redundant_clone,
-    clippy::single_match_else,
-    clippy::too_many_lines,
-    dead_code
-)]
-
 use compact_str::CompactString;
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
-    ActionProgram, ActiveBurst, ArgPart, ArgTemplate, BurstFinish, BurstIntent, ChildEntry,
-    ClassSet, DedupKey, DirChild, DirMeta, DirSnapshot, EffectOutcome, EffectScope, EntryKind,
-    FsEvent, FsIdentity, Input, LeafEntry, PostFireBurst, PostFirePhase, PreFireBurst,
-    PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileState, ProofAuthority, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachAnchor, SubAttachRequest, SubId, TimerKind,
+    ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DedupKey, DirMeta, DirSnapshot,
+    EntryKind, FsEvent, FsIdentity, Input, LeafEntry, PreFireBurst, PreFirePhase, ProbeCorrelation,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubId,
+    TimerKind,
 };
 use specter_engine::Engine;
+use specter_engine::testkit::{
+    anchor_dir, attach_returning, batching_settle_id, complete_effect_to_rebasing,
+    first_probe_correlation, rebase_loop_to_idle,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -44,33 +34,6 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
-}
-
-/// Flat single-component `DirSnapshot`. Mirrors the `dir_snap` helper
-/// shared by `fire_cycle.rs` / `multi_profile.rs`.
-fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
-    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-    for (name, kind, inode) in children {
-        let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::synthetic(
-                kind,
-                0,
-                UNIX_EPOCH,
-                FsIdentity::synthetic(inode, 0),
-            )),
-        };
-        map.insert(CompactString::new(name), child);
-    }
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
-}
 
 /// Like [`dir_snap`] but the lone file carries an explicit `size`, so
 /// two snapshots of the same shape but different sizes hash distinctly
@@ -93,57 +56,9 @@ fn dir_snap_sized_file(name: &str, inode: u64, size: u64) -> Arc<DirSnapshot> {
     ))
 }
 
-fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops().iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.correlation()),
-        ProbeOp::Cancel { .. } => None,
-    })
-}
-
-fn anchor(e: &mut Engine, name: &str) -> ResourceId {
-    let r = e.tree_mut().ensure_root(name, ResourceRole::User);
-    e.tree_mut().set_kind(r, ResourceKind::Dir);
-    r
-}
-
-fn pid_of(e: &Engine, sid: SubId) -> ProfileId {
-    e.subs().get(sid).expect("sub exists").profile
-}
-
-/// Subtree-root attach request (recursive Sub, `/bin/true`).
-fn subtree_request(name: &str, r: ResourceId, events: ClassSet) -> SubAttachRequest {
-    SubAttachRequest::for_anchor(
-        name.into(),
-        SubAttachAnchor::Resource(r),
-        ScanConfig::builder().recursive(true).build(),
-        MAX_SETTLE,
-        SETTLE,
-        empty_program(),
-        EffectScope::SubtreeRoot,
-        events,
-        false,
-    )
-}
-
-/// Read `pid`'s `Active(PreFire(Batching))` settle-timer id, or panic
-/// with the actual state. Stepping by id keeps a drive scoped to one
-/// Profile (a blanket `pop_expired` would advance siblings).
-fn batching_settle_id(e: &Engine, pid: ProfileId) -> specter_core::TimerId {
-    match e.profiles().get(pid).unwrap().state() {
-        ProfileState::Active(
-            ActiveBurst::PreFire(PreFireBurst {
-                phase: PreFirePhase::Batching { settle_timer },
-                ..
-            }),
-            _,
-        ) => *settle_timer,
-        other => panic!("expected {pid:?} in Active(PreFire(Batching)), got {other:?}"),
-    }
-}
-
 /// `pid`'s pre-fire `burst_deadline` (`BurstDeadline`) timer id, or
 /// panic with the actual state. Used to fire the max-settle ceiling
-/// deterministically for the §4 forced-terminal setup (test c).
+/// deterministically for the forced-terminal setup (test c).
 fn burst_deadline_id(e: &Engine, pid: ProfileId) -> specter_core::TimerId {
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.burst_deadline,
@@ -171,79 +86,10 @@ fn seed_cycle(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Insta
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: Arc::clone(snap),
-                authority: ProofAuthority::Authoritative,
-            },
+            outcome: proven(Arc::clone(snap)),
         }),
         at,
     )
-}
-
-/// Drive the post-fire rebase loop to its terminal (idempotent
-/// command). Mirror of `fire_cycle.rs::complete_rebase_loop`: sample 1
-/// (`prior == None`) ⇒ Unstable ⇒ RebaseSettling; spacing-timer expiry
-/// ⇒ Rebasing; sample 2 hash-equal ⇒ Stable ⇒ rebase + finish to Idle.
-///
-/// Returns the terminal (`Stable`-step) `StepOutput`. That step calls
-/// `finish_burst_to_idle`, whose Draining sweep reconfirms any covering
-/// Profile parked in `Draining` in the *same* step — test (d) reads the
-/// parent's reconfirm probe back off this output.
-fn complete_rebase_loop(
-    e: &mut Engine,
-    pid: ProfileId,
-    snap: &Arc<DirSnapshot>,
-    first_rebase_corr: ProbeCorrelation,
-    t0: Instant,
-) -> StepOutput {
-    e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: first_rebase_corr,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: Arc::clone(snap),
-                authority: ProofAuthority::Authoritative,
-            },
-        }),
-        t0,
-    );
-    let spacing_timer = match e.profiles().get(pid).unwrap().state() {
-        ProfileState::Active(
-            ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::RebaseSettling { spacing_timer },
-                ..
-            }),
-            _,
-        ) => *spacing_timer,
-        other => panic!("rebase sample 1 must loop to RebaseSettling; got {other:?}"),
-    };
-    let t1 = t0 + SETTLE;
-    let rearm_out = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::RebaseSettle,
-            id: spacing_timer,
-        },
-        t1,
-    );
-    let corr2 =
-        first_probe_correlation(&rearm_out).expect("RebaseSettle expiry re-arms Rebasing probe");
-    let stable_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: corr2,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: Arc::clone(snap),
-                authority: ProofAuthority::Authoritative,
-            },
-        }),
-        t1,
-    );
-    assert!(
-        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
-        "idempotent rebase loop closes Stable → Idle",
-    );
-    stable_out
 }
 
 /// Drive a settled, idle Profile through one full Standard fire→rebase
@@ -293,10 +139,7 @@ fn drive_standard_fire_once(
                 Input::ProbeResponse(ProbeResponse {
                     owner: ProbeOwner::Profile(pid),
                     correlation: c,
-                    outcome: ProbeOutcome::SubtreeProven {
-                        snapshot: Arc::clone(snap_new),
-                        authority: ProofAuthority::Authoritative,
-                    },
+                    outcome: proven(Arc::clone(snap_new)),
                 }),
                 t,
             );
@@ -313,34 +156,35 @@ fn drive_standard_fire_once(
         "post-baseline Standard burst fires exactly one Effect (now behaves as Standard)",
     );
     let key = stable_out.effects()[0].key();
-    let rebase_out = e.step(
-        Input::EffectComplete {
-            sub: sid,
-            key,
-            result: EffectOutcome::Ok,
-        },
-        t + Duration::from_millis(1),
+    let (_co, _cc) = complete_effect_to_rebasing(e, sid, key, t + Duration::from_millis(1));
+    let _r = rebase_loop_to_idle(e, pid, snap_new, t + Duration::from_millis(2));
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "idempotent rebase loop closes Stable → Idle",
     );
-    let rebase_corr =
-        first_probe_correlation(&rebase_out).expect("rebase probe emitted on EffectComplete::Ok");
-    complete_rebase_loop(e, pid, snap_new, rebase_corr, t + Duration::from_millis(2));
 }
 
-/// Shared body for tests (a) and (b): fresh attach (SubtreeRoot,
+/// Shared body for test (a): fresh attach (SubtreeRoot,
 /// NO_EVENTS), an anchor `FsEvent::Modified` injected during the Seed
 /// Batching window (anchor events bypass the class filter, so NO_EVENTS
-/// still records the event into `dirty_resources`), then the N=2 proof
+/// still records the event into `dirty`), then the N=2 proof
 /// driven to `Stable` with the two supplied reads. Asserts exactly one
 /// Effect fired at the stable verdict, then completes the fire cycle and
 /// asserts the Profile established a baseline + fired + now behaves as a
 /// Standard burst.
 fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirSnapshot>) {
     let mut e = Engine::new();
-    let r = anchor(&mut e, "src");
+    let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
-    let out = e.step(Input::AttachSub(subtree_request("test", r, NO_EVENTS)), now);
-    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = pid_of(&e, sid);
+    let (sid, pid, out) = attach_returning(
+        &mut e,
+        "test",
+        SubAttachAnchor::Resource(r),
+        ScanConfig::builder().recursive(true).build(),
+        NO_EVENTS,
+        MAX_SETTLE,
+        now,
+    );
     assert!(
         first_probe_correlation(&out).is_none(),
         "Seed is Batching-first: attach emits no probe",
@@ -352,7 +196,7 @@ fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirS
 
     // Witness real activity: an anchor Modified during Batching. Anchor
     // events bypass the class filter, so the NO_EVENTS mask still routes
-    // it through `event_drives_batching`, populating `dirty_resources`.
+    // it through `event_drives_batching`, populating `dirty`.
     let act_out = e.step(
         Input::FsEvent {
             resource: r,
@@ -389,8 +233,9 @@ fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirS
     let stable_out = seed_cycle(&mut e, pid, read2, t2);
 
     // A fresh Seed that witnessed activity fires exactly one Effect at
-    // the stable verdict: `dispatch_seed_ok` consults `dirty_resources`
-    // and a non-empty witness routes through the Standard fire path.
+    // the stable verdict: `seed_owes_first_fire` consults `dirty`
+    // and routes the fresh-with-activity Seed through the Standard
+    // fire path (`FreshSeedFire`).
     assert_eq!(
         stable_out.effects().len(),
         1,
@@ -405,22 +250,11 @@ fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirS
     // Complete the fire cycle and prove the post-fire baseline is now
     // established and the Profile behaves as Standard thereafter.
     let key = eff.key();
-    let rebase_out = e.step(
-        Input::EffectComplete {
-            sub: sid,
-            key,
-            result: EffectOutcome::Ok,
-        },
-        t2 + Duration::from_millis(1),
-    );
-    let rebase_corr = first_probe_correlation(&rebase_out)
-        .expect("EffectComplete::Ok drives the burst to Rebasing with a probe");
-    complete_rebase_loop(
-        &mut e,
-        pid,
-        read2,
-        rebase_corr,
-        t2 + Duration::from_millis(2),
+    let (_co, _cc) = complete_effect_to_rebasing(&mut e, sid, key, t2 + Duration::from_millis(1));
+    let _r = rebase_loop_to_idle(&mut e, pid, read2, t2 + Duration::from_millis(2));
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "idempotent rebase loop closes Stable → Idle",
     );
 
     assert!(
@@ -434,14 +268,14 @@ fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirS
 
     // A subsequent FsEvent + settle now drives a *Standard* fire (a
     // second Effect), proving the Profile is no longer fresh.
-    let snap_changed = dir_snap(vec![("late.rs", EntryKind::File, 77)]);
+    let snap_changed = dir_snap(&[("late.rs", EntryKind::File, 77)]);
     drive_standard_fire_once(&mut e, pid, sid, r, &snap_changed, t2 + SETTLE * 4);
 }
 
 /// (a) Core repro: fresh attach + anchor activity, equal N=2 reads.
 #[test]
 fn fresh_seed_with_activity_fires_exactly_one_effect() {
-    let snap = dir_snap(vec![("a.rs", EntryKind::File, 11)]);
+    let snap = dir_snap(&[("a.rs", EntryKind::File, 11)]);
     fresh_seed_with_activity_fires_one(&snap, &snap);
 }
 
@@ -454,13 +288,19 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
 #[test]
 fn fresh_seed_with_activity_growing_leaf_fires_one() {
     let mut e = Engine::new();
-    let r = anchor(&mut e, "src");
+    let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
-    let out = e.step(Input::AttachSub(subtree_request("scp", r, NO_EVENTS)), now);
-    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = pid_of(&e, sid);
+    let (sid, pid, _) = attach_returning(
+        &mut e,
+        "scp",
+        SubAttachAnchor::Resource(r),
+        ScanConfig::builder().recursive(true).build(),
+        NO_EVENTS,
+        MAX_SETTLE,
+        now,
+    );
 
-    // Anchor activity during Batching populates `dirty_resources`.
+    // Anchor activity during Batching populates `dirty`.
     e.step(
         Input::FsEvent {
             resource: r,
@@ -504,7 +344,7 @@ fn fresh_seed_with_activity_growing_leaf_fires_one() {
     );
 }
 
-/// (c) §4 post-ceiling single-event. Drive a fresh Seed to the
+/// (c) post-ceiling single-event. Drive a fresh Seed to the
 /// `Undischarged + forced` ceiling terminal so the Profile ends Idle
 /// with NO baseline (no FsEvents, expire the BurstDeadline so
 /// `forced=true`, answer the verify with an `Undischarged` authority —
@@ -518,11 +358,17 @@ fn fresh_seed_with_activity_growing_leaf_fires_one() {
 #[test]
 fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     let mut e = Engine::new();
-    let r = anchor(&mut e, "src");
+    let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
-    let out = e.step(Input::AttachSub(subtree_request("ceil", r, NO_EVENTS)), now);
-    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = pid_of(&e, sid);
+    let (sid, pid, _) = attach_returning(
+        &mut e,
+        "ceil",
+        SubAttachAnchor::Resource(r),
+        ScanConfig::builder().recursive(true).build(),
+        NO_EVENTS,
+        MAX_SETTLE,
+        now,
+    );
 
     // No FsEvents. Expire the settle window → Verifying (Seed probe in
     // flight, not yet forced).
@@ -560,7 +406,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: ProbeOutcome::SubtreeProven {
-                snapshot: dir_snap(vec![]),
+                snapshot: dir_snap(&[]),
                 authority: ProofAuthority::Undischarged {
                     first_unread: Arc::clone(&unread),
                 },
@@ -582,7 +428,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     );
 
     // A single FsEvent: Idle + !baseline ⇒ `start_seed_burst` (a fresh
-    // Seed). The trigger is recorded in `dirty_resources`, so this
+    // Seed). The trigger is recorded in `dirty`, so this
     // fresh-with-activity Seed fires one Effect at its stable verdict.
     let trigger_at = now + MAX_SETTLE + Duration::from_millis(3);
     let trig_out = e.step(
@@ -612,7 +458,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     );
 
     // Clean N=2 (no further events) → Stable.
-    let snap = dir_snap(vec![("post.rs", EntryKind::File, 31)]);
+    let snap = dir_snap(&[("post.rs", EntryKind::File, 31)]);
     let c1 = trigger_at + SETTLE;
     let _ = seed_cycle(&mut e, pid, &snap, c1);
     let c2 = c1 + SETTLE;
@@ -639,8 +485,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
 #[test]
 fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     let mut e = Engine::new();
-    let src = e.tree_mut().ensure_root("src", ResourceRole::User);
-    e.tree_mut().set_kind(src, ResourceKind::Dir);
+    let src = anchor_dir(&mut e, "src");
     let foo = e
         .tree_mut()
         .ensure_child(src, "foo", ResourceRole::User)
@@ -650,24 +495,30 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     let now = Instant::now();
     // The parent's view of /src carries `foo` so the engine covers it as
     // a descendant Profile.
-    let parent_snap = dir_snap(vec![("foo", EntryKind::Dir, 7)]);
-    let child_snap = dir_snap(vec![]);
+    let parent_snap = dir_snap(&[("foo", EntryKind::Dir, 7)]);
+    let child_snap = dir_snap(&[]);
 
     // Parent: recursive @ /src, NO_EVENTS. Covers /src/foo.
-    let out_p = e.step(
-        Input::AttachSub(subtree_request("parent", src, NO_EVENTS)),
+    let (sid_p, pid_parent, _) = attach_returning(
+        &mut e,
+        "parent",
+        SubAttachAnchor::Resource(src),
+        ScanConfig::builder().recursive(true).build(),
+        NO_EVENTS,
+        MAX_SETTLE,
         now,
     );
-    let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
-    let pid_parent = pid_of(&e, sid_p);
 
     // Child: recursive @ /src/foo, NO_EVENTS.
-    let out_c = e.step(
-        Input::AttachSub(subtree_request("child", foo, NO_EVENTS)),
+    let (sid_c, pid_child, _) = attach_returning(
+        &mut e,
+        "child",
+        SubAttachAnchor::Resource(foo),
+        ScanConfig::builder().recursive(true).build(),
+        NO_EVENTS,
+        MAX_SETTLE,
         now,
     );
-    let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
-    let pid_child = pid_of(&e, sid_c);
 
     // Drive the child's Seed N=2 to a pinned Idle baseline (scoped by
     // its own settle timer so the parent's Seed is untouched).
@@ -761,8 +612,8 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     // The child is genuinely a covered, Active-Standard descendant of
     // the parent at this instant — the exact topology
     // `has_active_standard_descendant` detects. This confirms the gate
-    // input is valid: `dispatch_seed_ok` consults it for the parent's
-    // fresh-with-activity Seed.
+    // input is valid: `gated_fire` consults it for the parent's
+    // fresh-with-activity Seed (`FreshSeedFire`).
     assert!(
         e.profiles()
             .get(pid_child)
@@ -809,9 +660,9 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
 
         // ── Drive the child's Standard burst to a genuine Idle. ──
         //
-        // The child Sub is `subtree_request("child", foo, NO_EVENTS)`
-        // and its Seed pinned **silently** over an empty tree (a
-        // no-activity Seed never fires ⇒ `has_fired == false`). B1
+        // The child Sub (recursive @ /src/foo, NO_EVENTS) had its Seed
+        // pinned **silently** over an empty tree (a no-activity Seed
+        // never fires ⇒ `has_fired == false`). B1
         // `SuppressDedup` requires `!forced && nothing_changed &&
         // already_fired` (`fire_decision`); the child's never-fired, so
         // even though its Standard confirm is hash-equal to its
@@ -842,10 +693,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(pid_child),
                 correlation: child_prime,
-                outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: child_snap.clone(),
-                    authority: ProofAuthority::Authoritative,
-                },
+                outcome: proven(child_snap.clone()),
             }),
             p2,
         );
@@ -875,10 +723,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(pid_child),
                 correlation: child_confirm,
-                outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: child_snap.clone(),
-                    authority: ProofAuthority::Authoritative,
-                },
+                outcome: proven(child_snap.clone()),
             }),
             p2 + SETTLE,
         );
@@ -898,32 +743,35 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         );
 
         // Child EffectComplete::Ok → Rebasing (idempotent `/bin/true`).
-        let child_rebase_out = e.step(
-            Input::EffectComplete {
-                sub: sid_c,
-                key: child_effect_key,
-                result: EffectOutcome::Ok,
-            },
+        let (child_rebase_out, _cc) = complete_effect_to_rebasing(
+            &mut e,
+            sid_c,
+            child_effect_key,
             p2 + SETTLE + Duration::from_millis(1),
         );
         assert!(
             !parent_reconfirmed(&child_rebase_out),
             "parent does not reconfirm while the child is still Rebasing (gate held)",
         );
-        let child_rebase_corr = first_probe_correlation(&child_rebase_out)
-            .expect("child EffectComplete::Ok drives Rebasing with a probe");
 
         // Post-fire N=2 rebase loop → child Idle. The terminal `Stable`
         // step calls `finish_burst_to_idle`, whose Draining sweep
         // re-evaluates the parent's now-false covered-descendant query
         // and transitions the parent Draining → Verifying *in the same
         // step* — the reconfirm probe is read back off this output.
-        let child_terminal_out = complete_rebase_loop(
+        let child_terminal_out = rebase_loop_to_idle(
             &mut e,
             pid_child,
             &child_snap,
-            child_rebase_corr,
             p2 + SETTLE + Duration::from_millis(2),
+        )
+        .finish;
+        assert!(
+            matches!(
+                e.profiles().get(pid_child).unwrap().state(),
+                ProfileState::Idle
+            ),
+            "idempotent rebase loop closes Stable → Idle",
         );
         assert!(
             matches!(
@@ -969,17 +817,14 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         // (the rebase loop's terminal step); the parent's reconfirm
         // probe was emitted there. Answer it at `p2 + SETTLE * 3`
         // (strictly later than that instant, so the timeline stays
-        // monotonic). With the gate lifted and `dirty_resources` still
+        // monotonic). With the gate lifted and `dirty` still
         // carrying the witnessed `/src` event, the reconfirm's stable
         // verdict must fire exactly one Effect.
         let reconfirm_out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(pid_parent),
                 correlation: parent_reconfirm_corr,
-                outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: parent_snap.clone(),
-                    authority: ProofAuthority::Authoritative,
-                },
+                outcome: proven(parent_snap.clone()),
             }),
             p2 + SETTLE * 3,
         );
@@ -1027,10 +872,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
                         Input::ProbeResponse(ProbeResponse {
                             owner: ProbeOwner::Profile(pid_parent),
                             correlation: c,
-                            outcome: ProbeOutcome::SubtreeProven {
-                                snapshot: parent_snap.clone(),
-                                authority: ProofAuthority::Authoritative,
-                            },
+                            outcome: proven(parent_snap.clone()),
                         }),
                         t,
                     );

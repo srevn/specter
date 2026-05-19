@@ -15,115 +15,21 @@
 //! (`literal_prefix_len == 3`), terminus `/srv/app`, recovery parent
 //! edge at `/srv`.
 
-#![allow(
-    clippy::items_after_statements,
-    clippy::manual_let_else,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::option_if_let_else,
-    clippy::similar_names,
-    clippy::single_match_else,
-    clippy::too_many_lines
-)]
-
 use compact_str::CompactString;
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
-    ActionProgram, ChildEntry, ClassSet, ContribKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, PatternSpec,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, PromoterAttachRequest,
-    PromoterId, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
-    SubAttachRequest, SubId, SubParams,
+    ClassSet, ContribKey, Diagnostic, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, PromoterId, PromoterState,
+    ResourceId, ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
 };
 use specter_engine::Engine;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use specter_engine::testkit::{
+    attach_promoter, descent_advance, dynamic_subs_of, last_probe_path, pre_place_dir, promoter_req,
+};
+use std::time::{Duration, Instant};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
-}
-
-fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
-    PromoterAttachRequest {
-        name: name.into(),
-        pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::EMPTY,
-        },
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        log_output: false,
-    }
-}
-
-/// Build an `Arc<DirSnapshot>` with the supplied children.
-fn dir_snap(children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
-    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-    for (name, kind, inode) in children.iter().copied() {
-        let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::synthetic(
-                kind,
-                0,
-                UNIX_EPOCH,
-                FsIdentity::synthetic(inode, 0),
-            )),
-        };
-        map.insert(CompactString::new(name), child);
-    }
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
-}
-
-/// Pre-place a `User`-roled Dir chain (FS-root through the segments).
-fn ensure_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
-    let mut comps = Vec::with_capacity(segments.len() + 1);
-    comps.push(FS_ROOT_SEGMENT);
-    comps.extend_from_slice(segments);
-    let r = e
-        .tree_mut()
-        .ensure_path(&comps, ResourceRole::User)
-        .expect("non-empty fixture");
-    e.tree_mut().set_kind(r, ResourceKind::Dir);
-    r
-}
-
-/// Latest outstanding probe target-path in emission order.
-fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf> {
-    out.probe_ops().iter().rev().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.target_path().to_path_buf()),
-        ProbeOp::Cancel { .. } => None,
-    })
-}
-
-/// The live `(anchor → SubId)` set for `pid`, reconstructed from
-/// `SubRegistry` truth (the single source post-`dynamic_subs` deletion).
-fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubId> {
-    e.subs()
-        .iter()
-        .filter(|(_, s)| s.source_promoter == Some(pid))
-        .map(|(sid, s)| {
-            let anchor = e
-                .profiles()
-                .get(s.profile)
-                .expect("a live dynamic Sub's Profile is live")
-                .resource;
-            (anchor, sid)
-        })
-        .collect()
-}
 
 /// `true` iff the Promoter is `Active { proxies: ∅ }` — the exact
 /// terminus-lost discriminant Design W keys recovery on.
@@ -137,38 +43,29 @@ fn active_empty(e: &Engine, pid: PromoterId) -> bool {
 /// The proxy resource ids of an `Active` Promoter (panics if
 /// `PrefixPending` — the caller asserts `Active` shape first).
 fn proxy_ids(e: &Engine, pid: PromoterId) -> Vec<ResourceId> {
-    match e.promoters().get(pid).map(specter_core::Promoter::state) {
-        Some(PromoterState::Active { proxies, .. }) => proxies.keys().copied().collect(),
-        other => panic!("expected Active, got {other:?}"),
-    }
+    let other = e.promoters().get(pid).map(specter_core::Promoter::state);
+    let Some(PromoterState::Active { proxies, .. }) = other else {
+        panic!("expected Active, got {other:?}");
+    };
+    proxies.keys().copied().collect()
 }
 
 /// Attach `/srv/app/*` with `/srv/app` pre-placed ⇒ immediate `Active`
 /// with the proxy at the materialised terminus. Returns
 /// `(pid, srv, srv_app)`.
 fn attach_active(e: &mut Engine) -> (PromoterId, ResourceId, ResourceId) {
-    let srv = ensure_dir(e, &["srv"]);
-    let srv_app = ensure_dir(e, &["srv", "app"]);
-    let out = e.step(
-        Input::AttachPromoter(promoter_req("recover", "/srv/app/*")),
-        Instant::now(),
-    );
-    let pid =
-        specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
+    let srv = pre_place_dir(e, &["srv"]);
+    let srv_app = pre_place_dir(e, &["srv", "app"]);
+    let pid = attach_promoter(e, "recover", "/srv/app/*", Instant::now());
     (pid, srv, srv_app)
 }
 
 /// Respond the in-flight Promoter probe with `DirEnumerated(children)`.
 fn respond_ok(e: &mut Engine, pid: PromoterId, children: &[(&str, EntryKind, u64)]) {
-    let corr = e
-        .pending_probe_for(ProbeOwner::Promoter(pid))
-        .expect("Promoter probe in flight");
-    let _ = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Promoter(pid),
-            correlation: corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap(children)),
-        }),
+    let _ = descent_advance(
+        e,
+        ProbeOwner::Promoter(pid),
+        &dir_snap(children),
         Instant::now(),
     );
 }

@@ -8,22 +8,10 @@
 //! the derived count tracks the live set exactly — no drift, since
 //! there is no second counter to drift from.
 
-use specter_core::testkit::{first_attached_sub, single_exec_program};
-use specter_core::{
-    ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, Input, ResourceRole, ScanConfig,
-    SubAttachAnchor, SubAttachRequest, SubId,
-};
+use specter_core::{Input, ResourceRole, ScanConfig, SubAttachAnchor, SubId};
 use specter_engine::Engine;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-const SETTLE: Duration = Duration::from_millis(100);
-const MAX_SETTLE: Duration = Duration::from_secs(6);
-const NO_EVENTS: ClassSet = ClassSet::EMPTY;
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
-}
+use specter_engine::testkit::{self, NO_EVENTS};
+use std::time::Instant;
 
 #[test]
 fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
@@ -36,21 +24,16 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
     let now = Instant::now();
 
     let attach = |e: &mut Engine, name: &str| -> SubId {
-        let out = e.step(
-            Input::AttachSub(SubAttachRequest::for_anchor(
-                name.into(),
-                SubAttachAnchor::Resource(r),
-                cfg.clone(),
-                MAX_SETTLE,
-                SETTLE,
-                empty_program(),
-                EffectScope::SubtreeRoot,
-                NO_EVENTS,
-                false,
-            )),
+        testkit::attach(
+            e,
+            name,
+            SubAttachAnchor::Resource(r),
+            cfg.clone(),
+            NO_EVENTS,
+            testkit::MAX_SETTLE,
             now,
-        );
-        first_attached_sub(&out).expect("attach_sub succeeded")
+        )
+        .0
     };
 
     let s1 = attach(&mut e, "A");

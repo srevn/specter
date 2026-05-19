@@ -8,107 +8,18 @@
 //! current contract is "every event re-arms `now + settle`," so the
 //! burst converges naturally once the storm stops.
 
-#![allow(
-    clippy::manual_let_else,
-    clippy::match_wildcard_for_single_variants,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::too_many_lines
-)]
-
 use compact_str::CompactString;
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
-    ActionProgram, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope,
-    FsEvent, FsIdentity, Input, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    ProfileIdentity, ProofAuthority, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachAnchor, SubAttachRequest, SubParams,
+    ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope, FsEvent, FsIdentity, Input,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, ProofAuthority, ResourceKind,
+    ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
 };
 use specter_engine::Engine;
+use specter_engine::testkit::{MAX_SETTLE, SETTLE, first_probe_correlation, seed_to_idle};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
-
-const SETTLE: Duration = Duration::from_millis(100);
-const MAX_SETTLE: Duration = Duration::from_secs(6);
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
-}
-
-fn empty_dir_snap() -> Arc<DirSnapshot> {
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        BTreeMap::<CompactString, ChildEntry>::new(),
-    ))
-}
-
-fn first_probe_correlation(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops().iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.correlation()),
-        ProbeOp::Cancel { .. } => None,
-    })
-}
-
-/// Drive `e`'s Batching-first Seed burst to Idle and return the
-/// instant the Seed settled at (callers rebase later timelines past
-/// it to keep instants strictly monotonic).
-///
-/// A Seed runs the same N=2 settle-spaced quiescence proof as
-/// a Standard burst: `start_seed_burst` lands in
-/// `Active(PreFire(Batching))` and emits **no** probe at attach. Each
-/// of the two settle windows (`t0+SETTLE`, `t0+SETTLE*2`) expires the
-/// `Settle` timer (`Batching → Verifying`), emits one Seed probe, and
-/// is answered hash-equal: the first sample is `Unstable` by
-/// construction (`certified` starts `None`) and re-batches;
-/// the second is hash-equal ⇒ `Stable` ⇒ `seed_pin_body` commits,
-/// rebases the baseline, and finishes the burst to `Idle`. Both
-/// responses share `snap`, so the proof converges cleanly within
-/// `max_settle` (never forced).
-fn complete_seed_burst(
-    e: &mut Engine,
-    pid: specter_core::ProfileId,
-    snap: Arc<DirSnapshot>,
-    t0: Instant,
-) -> Instant {
-    let mut settled_at = t0;
-    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
-        while let Some(entry) = e.pop_expired(at) {
-            let _ = e.step(
-                Input::TimerExpired {
-                    profile: entry.profile,
-                    kind: entry.kind,
-                    id: entry.id,
-                },
-                at,
-            );
-        }
-        let c = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("Seed Verifying probe after settle expiry");
-        let _ = e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
-                correlation: c,
-                outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: Arc::clone(&snap),
-                    authority: ProofAuthority::Authoritative,
-                },
-            }),
-            at,
-        );
-        settled_at = at;
-    }
-    assert!(
-        matches!(
-            e.profiles().get(pid).expect("Profile alive").state(),
-            specter_core::ProfileState::Idle
-        ),
-        "Seed burst returns to Idle after the N=2 quiescence proof",
-    );
-    settled_at
-}
 
 #[test]
 fn dense_event_storm_converges_naturally_below_burst_deadline() {
@@ -140,11 +51,11 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         first_probe_correlation(&attach_out).is_none(),
         "Batching-first Seed emits no probe at attach (no probe at attach)",
     );
-    let snap = empty_dir_snap();
+    let snap = dir_snap(&[]);
     // Drive the N=2 Batching-first Seed burst to Idle; the Standard
     // burst under test starts strictly after the Seed's two settle
     // windows (`now + SETTLE*2`) to keep instants monotonic.
-    let seed_settled = complete_seed_burst(&mut e, pid, snap.clone(), now);
+    let seed_settled = seed_to_idle(&mut e, pid, &snap, now);
 
     // Storm: 8 modify events at 100 ms intervals, rebased past the
     // Seed-establishment window so the Profile is Idle when it begins.
@@ -168,12 +79,11 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     // `last_event + SETTLE` (well below `burst_deadline = now + MAX_SETTLE`).
     let probe_emit = last_event + SETTLE;
     let probe_correlation = loop {
-        let entry = match e.pop_expired(probe_emit) {
-            Some(entry) => entry,
-            None => panic!(
+        let Some(entry) = e.pop_expired(probe_emit) else {
+            panic!(
                 "settle timer did not fire within `last_event + settle`; \
                  the conflation regressed: events should re-arm the debounce."
-            ),
+            )
         };
         let out = e.step(
             Input::TimerExpired {
@@ -214,12 +124,11 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     // exponential-backoff regression or the forced burst_deadline.
     let confirm_emit = prime_t + SETTLE;
     let confirm_correlation = loop {
-        let entry = match e.pop_expired(confirm_emit) {
-            Some(entry) => entry,
-            None => panic!(
+        let Some(entry) = e.pop_expired(confirm_emit) else {
+            panic!(
                 "re-armed settle timer did not fire within `prime + settle`; \
                  the N=2 quiescence re-batch regressed."
-            ),
+            )
         };
         let out = e.step(
             Input::TimerExpired {
@@ -316,7 +225,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
     // Drive the N=2 Batching-first Seed burst to Idle; the Standard
     // burst under test starts strictly after the Seed's two settle
     // windows to keep instants monotonic.
-    let seed_settled = complete_seed_burst(&mut e, pid, empty_dir_snap(), now);
+    let seed_settled = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Kick off a Standard burst with one event, rebased past the
     // Seed-establishment window.

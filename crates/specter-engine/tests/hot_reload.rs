@@ -2,118 +2,17 @@
 //! `removed → modified → added`; reap-pending mid-burst handling;
 //! in-flight Effect race after detach.
 
-#![allow(
-    clippy::items_after_statements,
-    clippy::manual_let_else,
-    clippy::match_wildcard_for_single_variants,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::option_if_let_else,
-    clippy::single_match_else,
-    clippy::too_many_lines
-)]
-
 use compact_str::CompactString;
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
-    ActionProgram, BurstFinish, ChildEntry, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta,
-    DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProofAuthority, ResourceKind, ResourceRole,
-    ScanConfig, SubAttachAnchor, SubAttachRequest, SubRegistryDiff, WatchOp, WatchRegistryDiff,
+    BurstFinish, DedupKey, Diagnostic, EffectOutcome, EffectScope, FsEvent, Input, ProbeOp,
+    ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubRegistryDiff,
+    WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
-use std::collections::BTreeMap;
+use specter_engine::testkit::{MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, seed_to_idle, verify_n2};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
-
-const SETTLE: Duration = Duration::from_millis(100);
-const MAX_SETTLE: Duration = Duration::from_secs(6);
-const NO_EVENTS: ClassSet = ClassSet::EMPTY;
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
-}
-
-/// Drive a freshly-attached Profile through the Seed burst to
-/// `Idle`. Seed is Batching-first + N=2 quiescence: no probe at attach.
-///
-/// 1. Expire the Batching `Settle` timer → `Batching → Verifying`,
-///    first Seed probe. Respond hash-equal `seed_snap` → `advance`
-///    returns `Unstable` (no prior sample) → graft `current` +
-///    re-batch.
-/// 2. Expire the second `Settle` timer → `Verifying`, second probe.
-///    Respond hash-equal again → `Stable` → `seed_pin_body` →
-///    commit + rebase + finish → `Idle` (no Effects, fresh Seed).
-///
-/// `t0` is the attach instant; the two settle windows land at
-/// `t0+SETTLE` and `t0+SETTLE*2` (both well within `MAX_SETTLE`, so the
-/// proof is the clean `Stable` path, never the forced fallback).
-fn complete_seed_burst(
-    e: &mut Engine,
-    pid: specter_core::ProfileId,
-    seed_snap: Arc<DirSnapshot>,
-    t0: Instant,
-) {
-    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
-        while let Some(entry) = e.pop_expired(at) {
-            e.step(
-                Input::TimerExpired {
-                    profile: entry.profile,
-                    kind: entry.kind,
-                    id: entry.id,
-                },
-                at,
-            );
-        }
-        let corr = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("Seed Verifying probe after settle");
-        e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
-                correlation: corr,
-                outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: Arc::clone(&seed_snap),
-                    authority: ProofAuthority::Authoritative,
-                },
-            }),
-            at,
-        );
-    }
-    assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            specter_core::ProfileState::Idle
-        ),
-        "Seed burst settled to Idle",
-    );
-}
-
-/// V5-native helper: build a `TreeSnapshot::Dir` with single-component
-/// children. Tests in this file use leaf-name segments only (no `/`).
-fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
-    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-    for (name, kind, inode) in children {
-        let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::synthetic(
-                kind,
-                0,
-                UNIX_EPOCH,
-                FsIdentity::synthetic(inode, 0),
-            )),
-        };
-        map.insert(CompactString::new(name), child);
-    }
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
-}
+use std::time::Instant;
 
 #[test]
 fn config_diff_add_sub_to_existing_profile() {
@@ -205,10 +104,10 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
-    complete_seed_burst(&mut e, pid, dir_snap(vec![]), now);
+    let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Profile is Idle. Remove via ConfigDiff (by operator watch name).
-    let post_seed = now + SETTLE * 3;
+    let post_seed = seed_done + SETTLE;
     let mut diff = SubRegistryDiff::default();
     diff.removed.push(CompactString::from("A"));
     let out = e.step(
@@ -260,10 +159,10 @@ fn config_diff_mid_burst_remove_defers_reap() {
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
-    complete_seed_burst(&mut e, pid, dir_snap(vec![]), now);
+    let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Drive a Standard burst (after the Seed's two settle windows).
-    let t1 = now + SETTLE * 3;
+    let t1 = seed_done + SETTLE;
     e.step(
         Input::FsEvent {
             resource: r,
@@ -292,64 +191,18 @@ fn config_diff_mid_burst_remove_defers_reap() {
 
     // Drain settle to enter Probing.
     let t2 = t1 + SETTLE * 2;
-    while let Some(entry) = e.pop_expired(t2) {
-        e.step(
-            Input::TimerExpired {
-                profile: entry.profile,
-                kind: entry.kind,
-                id: entry.id,
-            },
-            t2,
-        );
-    }
-    let std_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Verifying probe in flight");
+    drain_due(&mut e, t2);
 
     // N=2 quiescence: the prime sample (prior == None ⇒ Unstable) is
     // re-batched even though the burst is reap-pending (reap deferred);
     // the hash-equal confirm sample is the Stable verdict at which
     // reap-pending suppresses the Effect and finishes by reaping.
-    let primed = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: std_corr,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: dir_snap(vec![]),
-                authority: ProofAuthority::Authoritative,
-            },
-        }),
-        t2,
-    );
+    let n2 = verify_n2(&mut e, pid, &dir_snap(&[]), t2);
     assert!(
-        primed.effects().is_empty(),
+        n2.primed.effects().is_empty(),
         "prime sample (prior == None ⇒ Unstable) must not fire",
     );
-    let t3 = t2 + SETTLE * 2;
-    while let Some(entry) = e.pop_expired(t3) {
-        e.step(
-            Input::TimerExpired {
-                profile: entry.profile,
-                kind: entry.kind,
-                id: entry.id,
-            },
-            t3,
-        );
-    }
-    let confirm_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Verifying probe in flight (confirm sample)");
-    let out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: confirm_corr,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: dir_snap(vec![]),
-                authority: ProofAuthority::Authoritative,
-            },
-        }),
-        t3 + Duration::from_millis(1),
-    );
+    let out = n2.confirmed;
     assert!(out.effects().is_empty(), "reap_pending suppresses Effect");
     assert!(
         e.profiles().get(pid).is_none(),
@@ -388,10 +241,10 @@ fn config_diff_mid_burst_modify_revives_profile() {
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_a).unwrap().profile;
-    complete_seed_burst(&mut e, pid, dir_snap(vec![]), now);
+    let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Drive a Standard burst (after the Seed's two settle windows).
-    let t1 = now + SETTLE * 3;
+    let t1 = seed_done + SETTLE;
     e.step(
         Input::FsEvent {
             resource: r,
@@ -485,10 +338,10 @@ fn effect_complete_after_detach_drops_silently() {
     );
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
-    complete_seed_burst(&mut e, pid, dir_snap(vec![]), now);
+    let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Detach via ConfigDiff (by operator watch name).
-    let post_seed = now + SETTLE * 3;
+    let post_seed = seed_done + SETTLE;
     let mut diff = SubRegistryDiff::default();
     diff.removed.push(CompactString::from("A"));
     e.step(
@@ -557,12 +410,12 @@ fn config_diff_modified_remove_then_add() {
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile;
-    complete_seed_burst(&mut e, pid_a, dir_snap(vec![]), now);
+    let seed_done = seed_to_idle(&mut e, pid_a, &dir_snap(&[]), now);
 
     // Modified entry: same watch name "A"; new request with a
     // different config_hash. Path-based to handle anchor
     // re-materialization safely.
-    let post_seed = now + SETTLE * 3;
+    let post_seed = seed_done + SETTLE;
     let mut diff = SubRegistryDiff::default();
     diff.modified.push(SubAttachRequest::for_anchor(
         "A".into(),

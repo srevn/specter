@@ -1,128 +1,20 @@
-#![allow(
-    clippy::items_after_statements,
-    clippy::manual_let_else,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::similar_names,
-    clippy::too_many_lines
-)]
-
-use compact_str::CompactString;
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
-    ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClaimKind, ClassSet,
-    Diagnostic, DirChild, DirMeta, DirSnapshot, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent,
-    FsIdentity, Input, LeafEntry, PatternSpec, PreFirePhase, ProbeCorrelation, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileIdentity, ProfileState,
-    PromoterAttachRequest, PromoterClaimKind, PromoterState, ProofAuthority, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
-    TimerKind, WatchFailure,
+    AnchorClaim, ClaimKind, ClassSet, Diagnostic, EffectScope, FS_ROOT_SEGMENT, FsEvent, Input,
+    PatternSpec, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileIdentity,
+    ProfileState, PromoterAttachRequest, PromoterClaimKind, PromoterState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, WatchFailure,
 };
 use specter_engine::Engine;
-use std::collections::BTreeMap;
+use specter_engine::testkit::{SETTLE, first_probe_correlation, seed_to_idle};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 
 // ───────────────────────────────────────────────────────────────────────
 // Fixtures
 // ───────────────────────────────────────────────────────────────────────
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])])
-}
-
-fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> std::sync::Arc<DirSnapshot> {
-    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-    for (name, kind, inode) in children {
-        let child = match kind {
-            EntryKind::Dir => ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0))),
-            _ => ChildEntry::Leaf(LeafEntry::synthetic(
-                kind,
-                0,
-                UNIX_EPOCH,
-                FsIdentity::synthetic(inode, 0),
-            )),
-        };
-        map.insert(CompactString::new(name), child);
-    }
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
-}
-
-fn first_probe_corr(out: &StepOutput) -> Option<ProbeCorrelation> {
-    out.probe_ops().iter().find_map(|op| match op {
-        ProbeOp::Probe { request } => Some(request.correlation()),
-        ProbeOp::Cancel { .. } => None,
-    })
-}
-
-/// This Profile's own in-flight `PreFirePhase::Batching { settle_timer }`
-/// id, or `None` if it isn't currently batching. Used to step exactly
-/// the target Profile's settle timer in multi-Profile setups, never a
-/// blanket `pop_expired` that would also fire a co-resident Profile's.
-fn profile_batching_settle(e: &Engine, pid: ProfileId) -> Option<specter_core::TimerId> {
-    match e.profiles().get(pid)?.state() {
-        ProfileState::Active(ActiveBurst::PreFire(pre), _) => match pre.phase {
-            PreFirePhase::Batching { settle_timer } => Some(settle_timer),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Drive a fresh Profile from `Active(PreFire(Batching))` (Batching-first
-/// Seed: no probe at attach) through the N=2 settle-spaced quiescence
-/// proof to `Idle`. `t0` is the attach instant; settle expiries at
-/// `t0+SETTLE` then `t0+SETTLE*2`. Both Seed probes are answered with
-/// the same `seed_snap` (hash-equal): the first sample is `Unstable`
-/// (no prior) and re-batches; the second is `Stable` and pins
-/// (`current` + `baseline` set, no Effects). Steps only this Profile's
-/// own Batching settle timer so a co-resident Profile's burst is left
-/// untouched.
-fn complete_seed_burst(
-    e: &mut Engine,
-    pid: ProfileId,
-    seed_snap: std::sync::Arc<DirSnapshot>,
-    t0: Instant,
-) {
-    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
-        let settle_timer = profile_batching_settle(e, pid)
-            .expect("Seed Profile is Batching before each settle expiry");
-        e.step(
-            Input::TimerExpired {
-                profile: pid,
-                kind: TimerKind::Settle,
-                id: settle_timer,
-            },
-            at,
-        );
-        let corr = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("Seed Verifying probe after settle");
-        e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
-                correlation: corr,
-                outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: Arc::clone(&seed_snap),
-                    authority: ProofAuthority::Authoritative,
-                },
-            }),
-            at,
-        );
-    }
-    assert!(
-        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
-        "Seed N=2 quiescence proof transitions Profile to Idle",
-    );
-}
 
 fn attach_subtree_root(
     e: &mut Engine,
@@ -160,7 +52,7 @@ fn anchor_claim_purged_then_detach_no_panic() {
 
     let t0 = Instant::now();
     let (sid, pid) = attach_subtree_root(&mut e, "build", root, MAX_SETTLE, t0);
-    complete_seed_burst(&mut e, pid, dir_snap(vec![]), t0);
+    let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), t0);
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::Held,
@@ -223,8 +115,8 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
     // Each Seed burst is driven on its own settle timer (the helper
     // steps only the named Profile's Batching id), so P and Q never
     // cross-fire despite sharing the anchor.
-    complete_seed_burst(&mut e, pid_p, dir_snap(vec![]), t_p);
-    complete_seed_burst(&mut e, pid_q, dir_snap(vec![]), t_q);
+    let _ = seed_to_idle(&mut e, pid_p, &dir_snap(&[]), t_p);
+    let _ = seed_to_idle(&mut e, pid_q, &dir_snap(&[]), t_q);
 
     // Pre-condition: both Profiles cache the anchor's kind.
     assert_eq!(
@@ -278,8 +170,8 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
         attach_subtree_root(&mut e, "Q", root, MAX_SETTLE + Duration::from_secs(1), t_q);
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 2);
     // Per-Profile settle stepping keeps P and Q from cross-firing.
-    complete_seed_burst(&mut e, pid_p, dir_snap(vec![]), t_p);
-    complete_seed_burst(&mut e, pid_q, dir_snap(vec![]), t_q);
+    let _ = seed_to_idle(&mut e, pid_p, &dir_snap(&[]), t_p);
+    let _ = seed_to_idle(&mut e, pid_q, &dir_snap(&[]), t_q);
 
     // Reject the kernel watch.
     let purge_out = e.step(
@@ -354,7 +246,7 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
 
     let t0 = Instant::now();
     let (sid, pid) = attach_subtree_root(&mut e, "watch", anchor, MAX_SETTLE, t0);
-    complete_seed_burst(&mut e, pid, dir_snap(vec![]), t0);
+    let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), t0);
     // `set_watch_root_parent` ran at attach; parent has +1 STRUCTURE.
     assert_eq!(
         e.profiles().get(pid).unwrap().watch_root_parent(),
@@ -430,7 +322,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile;
-    let initial_corr = first_probe_corr(&attach_out).expect("descent probe");
+    let initial_corr = first_probe_correlation(&attach_out).expect("descent probe");
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
@@ -518,7 +410,7 @@ fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     r
 }
 
-fn watch_op_rejected_input(resource: ResourceId) -> Input {
+const fn watch_op_rejected_input(resource: ResourceId) -> Input {
     Input::WatchOpRejected {
         resource,
         failure: WatchFailure::Pressure { errno: 24 },
@@ -631,7 +523,7 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
             correlation: enum_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap(vec![])),
+            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[])),
         }),
         now,
     );
@@ -684,8 +576,8 @@ fn watch_op_rejected_purges_co_claimed_resource() {
     // Pre-place /a so the Promoter goes immediate-Active with a proxy
     // at /a. The proxy contributes +1 STRUCTURE.
     let a = pre_place_dir(&mut e, &["a"]);
-    let attach_q_out = e.step(Input::AttachPromoter(promoter_req("logs", "/a/*.log")), now);
-    let qid = specter_core::testkit::first_attached_promoter(&attach_q_out)
+    let promoter_attach_out = e.step(Input::AttachPromoter(promoter_req("logs", "/a/*.log")), now);
+    let qid = specter_core::testkit::first_attached_promoter(&promoter_attach_out)
         .expect("attach_promoter succeeded");
     match e.promoters().get(qid).unwrap().state() {
         PromoterState::Active { proxies, .. } => assert!(proxies.contains_key(&a)),
@@ -699,7 +591,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
             correlation: enum_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap(vec![])),
+            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[])),
         }),
         now,
     );
@@ -718,9 +610,9 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         ClassSet::EMPTY,
         false,
     );
-    let attach_p_out = e.step(Input::AttachSub(req), now);
+    let sub_attach_out = e.step(Input::AttachSub(req), now);
     let sid_p =
-        specter_core::testkit::first_attached_sub(&attach_p_out).expect("attach_sub succeeded");
+        specter_core::testkit::first_attached_sub(&sub_attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid_p).unwrap().profile;
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),

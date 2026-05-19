@@ -14,36 +14,18 @@
 //! together — and the diagnostic-stream contract that the bin
 //! depends on.
 
-#![allow(
-    clippy::items_after_statements,
-    clippy::manual_let_else,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::option_if_let_else,
-    clippy::similar_names,
-    clippy::single_match_else,
-    clippy::too_many_lines
-)]
-
 use compact_str::CompactString;
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::empty_program;
 use specter_core::{
-    ActionProgram, ClassSet, Diagnostic, EffectScope, Input, PatternSpec, ProfileIdentity,
-    PromoterAttachRequest, PromoterRegistryDiff, ResourceKind, ResourceRole, ScanConfig,
-    SubAttachAnchor, SubAttachRequest, SubParams, SubRegistryDiff, WatchRegistryDiff,
+    ClassSet, Diagnostic, EffectScope, Input, PromoterRegistryDiff, ResourceKind, ResourceRole,
+    ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams, SubRegistryDiff, WatchRegistryDiff,
 };
 use specter_engine::Engine;
-use std::sync::Arc;
+use specter_engine::testkit::{attach_promoter, promoter_req};
 use std::time::{Duration, Instant};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
-}
 
 fn sub_req_at_root(name: &str, e: &mut Engine) -> SubAttachRequest {
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
@@ -59,22 +41,6 @@ fn sub_req_at_root(name: &str, e: &mut Engine) -> SubAttachRequest {
         ClassSet::EMPTY,
         false,
     )
-}
-
-fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
-    PromoterAttachRequest {
-        name: name.into(),
-        pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::EMPTY,
-        },
-        settle: SETTLE,
-        program: empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        log_output: false,
-    }
 }
 
 /// `subs.added` + `promoters.added` in the same diff: both attach
@@ -144,6 +110,9 @@ fn mixed_add_diff_emits_both_lifecycle_diagnostics() {
 /// surfaces as one `*Reaped` for the old + one `*Attached` for
 /// the new, in that order; the bin's name-keyed map overwrite
 /// produces the correct end state.
+// Codebase-standard SubId/PromoterId names; the old↔new × Sub↔Promoter
+// parallelism is this test's subject, not accidental similarity.
+#[allow(clippy::similar_names)]
 #[test]
 fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
     let mut e = Engine::new();
@@ -154,12 +123,7 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
     let attach_out_a = e.step(Input::AttachSub(sub_req.clone()), now);
     let old_sid =
         specter_core::testkit::first_attached_sub(&attach_out_a).expect("attach_sub succeeded");
-    let attach_out_b = e.step(
-        Input::AttachPromoter(promoter_req("logs", "/var/log/*.log")),
-        now,
-    );
-    let old_pid = specter_core::testkit::first_attached_promoter(&attach_out_b)
-        .expect("attach_promoter succeeded");
+    let old_pid = attach_promoter(&mut e, "logs", "/var/log/*.log", now);
 
     // Build a modify-diff: same names; both entries with a
     // structurally-distinct request. The static Sub keeps its
@@ -253,12 +217,7 @@ fn mixed_remove_diff_emits_promoter_reaped_only() {
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(sub_req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let attach_out = e.step(
-        Input::AttachPromoter(promoter_req("logs", "/var/log/*.log")),
-        now,
-    );
-    let pid = specter_core::testkit::first_attached_promoter(&attach_out)
-        .expect("attach_promoter succeeded");
+    let pid = attach_promoter(&mut e, "logs", "/var/log/*.log", now);
 
     let diff = WatchRegistryDiff {
         subs: SubRegistryDiff {
@@ -349,12 +308,7 @@ fn static_to_dynamic_migration_diff_swaps_via_diagnostic_stream() {
 fn dynamic_to_static_migration_diff_swaps_via_diagnostic_stream() {
     let mut e = Engine::new();
     let now = Instant::now();
-    let attach_out = e.step(
-        Input::AttachPromoter(promoter_req("foo", "/var/log/*.log")),
-        now,
-    );
-    let pid = specter_core::testkit::first_attached_promoter(&attach_out)
-        .expect("attach_promoter succeeded");
+    let pid = attach_promoter(&mut e, "foo", "/var/log/*.log", now);
     let static_req = sub_req_at_root("foo", &mut e);
 
     let diff = WatchRegistryDiff {

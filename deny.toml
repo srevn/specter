@@ -1,5 +1,6 @@
 [graph]
 all-features = true
+exclude-dev  = true
 
 [bans]
 multiple-versions = "warn"
@@ -13,17 +14,14 @@ deny = [
   { name = "smol" },
   { name = "futures-util" },
   { name = "libc", wrappers = [
-    "specter-sensor",
     "specter-actuator",
+    "specter-sensor",
     "errno",
-    "getrandom",
     "nix",
-    "rustix",
     "signal-hook",
     "signal-hook-registry",
-    "wait-timeout",
   ] },
-  { name = "nix", wrappers = ["specter-sensor", "specter-actuator", "specter-bin"] },
+  { name = "nix", wrappers = ["specter-sensor", "specter-actuator"] },
   { name = "specter-engine",   wrappers = ["specter-bin"] },
   { name = "specter-sensor",   wrappers = ["specter-bin"] },
   { name = "specter-actuator", wrappers = ["specter-bin"] },

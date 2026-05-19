@@ -3,104 +3,14 @@
 //! rename/delete of the anchor itself; the contribution is released on
 //! `detach_sub` reap.
 
-#![allow(
-    clippy::items_after_statements,
-    clippy::manual_let_else,
-    clippy::match_wildcard_for_single_variants,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_value,
-    clippy::option_if_let_else,
-    clippy::single_match_else,
-    clippy::too_many_lines
-)]
-
-use specter_core::testkit::single_exec_program;
+use specter_core::testkit::dir_snap;
 use specter_core::{
-    ActionProgram, ActiveBurst, ClassSet, DirMeta, DirSnapshot, EffectScope, FsIdentity, Input,
-    PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority,
-    ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, TimerId, TimerKind,
+    EffectScope, Input, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest,
     WatchOp,
 };
 use specter_engine::Engine;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
-
-const SETTLE: Duration = Duration::from_millis(100);
-const MAX_SETTLE: Duration = Duration::from_secs(6);
-const NO_EVENTS: ClassSet = ClassSet::EMPTY;
-
-fn empty_program() -> Arc<ActionProgram> {
-    single_exec_program([specter_core::ArgTemplate::new([
-        specter_core::ArgPart::literal("/bin/true"),
-    ])])
-}
-
-/// Empty `TreeSnapshot::Dir`.
-fn dir_snap() -> std::sync::Arc<DirSnapshot> {
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        BTreeMap::new(),
-    ))
-}
-
-/// This Profile's own in-flight `PreFirePhase::Batching { settle_timer }`
-/// id, or `None` if it isn't currently batching.
-fn profile_batching_settle(e: &Engine, pid: ProfileId) -> Option<TimerId> {
-    match e.profiles().get(pid)?.state() {
-        ProfileState::Active(ActiveBurst::PreFire(pre), _) => match pre.phase {
-            PreFirePhase::Batching { settle_timer } => Some(settle_timer),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Drive a fresh Profile from `Active(PreFire(Batching))` (Batching-first
-/// Seed: no probe at attach) through the N=2 settle-spaced quiescence
-/// proof to `Idle`. `t0` is the attach instant; settle expiries fire
-/// at `t0+SETTLE` then `t0+SETTLE*2`. Both Seed probes are answered
-/// with the same `seed_snap` (hash-equal): the first sample is
-/// `Unstable` (no prior) and re-batches; the second is `Stable` and
-/// pins (`current` + `baseline` set, no Effects).
-fn complete_seed_burst(
-    e: &mut Engine,
-    pid: ProfileId,
-    seed_snap: std::sync::Arc<DirSnapshot>,
-    t0: Instant,
-) {
-    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
-        let settle_timer = profile_batching_settle(e, pid)
-            .expect("Seed Profile is Batching before each settle expiry");
-        e.step(
-            Input::TimerExpired {
-                profile: pid,
-                kind: TimerKind::Settle,
-                id: settle_timer,
-            },
-            at,
-        );
-        let corr = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("Seed Verifying probe after settle");
-        e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
-                correlation: corr,
-                outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: Arc::clone(&seed_snap),
-                    authority: ProofAuthority::Authoritative,
-                },
-            }),
-            at,
-        );
-    }
-    assert!(
-        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
-        "Seed N=2 quiescence proof transitions Profile to Idle",
-    );
-}
+use specter_engine::testkit::{MAX_SETTLE, NO_EVENTS, SETTLE, seed_to_idle};
+use std::time::Instant;
 
 #[test]
 fn attach_sub_creates_watch_root_parent_contribution() {
@@ -122,7 +32,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
-        empty_program(),
+        specter_core::testkit::empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -162,7 +72,7 @@ fn root_anchor_has_no_watch_root_parent() {
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
-        empty_program(),
+        specter_core::testkit::empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -192,7 +102,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
-        empty_program(),
+        specter_core::testkit::empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
         false,
@@ -204,7 +114,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     // Drive Seed → Idle. The Seed is Batching-first with an
     // N=2 settle-spaced quiescence proof (no probe at attach); the
     // helper runs both settle-spaced equal samples to Idle.
-    complete_seed_burst(&mut e, pid, dir_snap(), now);
+    let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
 
     // Detach. The detach releases the anchor's contribution and the
@@ -251,7 +161,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
-            empty_program(),
+            specter_core::testkit::empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -265,7 +175,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
-            empty_program(),
+            specter_core::testkit::empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -303,7 +213,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             ScanConfig::builder().recursive(false).build(),
             MAX_SETTLE,
             SETTLE,
-            empty_program(),
+            specter_core::testkit::empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,
@@ -323,7 +233,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
-            empty_program(),
+            specter_core::testkit::empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
             false,

@@ -5,6 +5,9 @@ edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
 
+[features]
+testkit = ["specter-core/testkit"]
+
 [dependencies]
 specter-core = { path = "../specter-core" }
 compact_str.workspace = true
@@ -12,7 +15,8 @@ slotmap.workspace     = true
 smallvec.workspace    = true
 
 [dev-dependencies]
-specter-core = { path = "../specter-core", features = ["testkit"] }
+specter-core   = { path = "../specter-core", features = ["testkit"] }
+specter-engine = { path = ".", features = ["testkit"] }
 proptest.workspace = true
 
 [lints]

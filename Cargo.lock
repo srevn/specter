@@ -845,6 +845,7 @@ dependencies = [
  "slotmap",
  "smallvec",
  "specter-core",
+ "specter-engine",
 ]
 
 [[package]]

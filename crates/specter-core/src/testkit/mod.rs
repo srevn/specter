@@ -4,10 +4,15 @@
 //! release builds. Inherits `unsafe_code = forbid` from `specter-core`
 //! — the fixtures here are pure too.
 
+pub mod builders;
 pub mod diagnostics;
 pub mod program;
 pub mod sensor;
 
+pub use builders::{
+    anchor_ok, dir_snap, empty_program, enumerated, file_leaf, fresh_profile_id, fresh_profile_ids,
+    proven,
+};
 pub use diagnostics::{first_attached_promoter, first_attached_sub};
 pub use program::{predicate_then_program, single_exec_program};
 pub use sensor::MockSensor;
