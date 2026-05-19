@@ -272,18 +272,25 @@ impl crate::Engine {
         // state-machine breach, not a benign race; a silent skip would
         // leave the slot un-constructed while the emit below still fires
         // (no probe, no diagnostic — a wedge).
-        let Some(p) = self.profiles.get_mut(profile_id) else {
+        if self.profiles.get(profile_id).is_none() {
             unreachable!(
                 "enter_pending_descent: Profile {profile_id:?} vanished \
                  between the Idle precondition and the construct-armed \
                  Pending transition"
             );
-        };
-        p.transition_state(ProfileState::Pending(DescentState::new(
-            prefix,
-            remaining,
-            ProbeSlot::armed(correlation, ()),
-        )));
+        }
+        // Liveness is proven above, so the wrapper's internal `get_mut`
+        // resolves `Some` (synchronous, no intervening mutation) — the
+        // construct-armed `ProbeSlot` is only built for a live Profile,
+        // never stranded into a `None`-path drop.
+        self.profiles.transition_state(
+            profile_id,
+            ProfileState::Pending(DescentState::new(
+                prefix,
+                remaining,
+                ProbeSlot::armed(correlation, ()),
+            )),
+        );
 
         // Step 3: install the prefix's STRUCTURE contribution.
         add_watch(

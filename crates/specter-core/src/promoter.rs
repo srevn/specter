@@ -191,6 +191,27 @@ impl Promoter {
         &self.state
     }
 
+    /// Whether this Promoter can possibly *carry* an `FsEvent` dispatch
+    /// responsibility — the membership predicate of
+    /// [`PromoterRegistry`]'s `nonsteady` carrier count, the structural
+    /// twin of [`Profile::is_nonsteady`](crate::Profile::is_nonsteady).
+    ///
+    /// A carrier is either a `PrefixPending` descent (`current_prefix
+    /// == R`) or a terminus-loss-recovery `Active { proxies: ∅ }`
+    /// (`prefix_parent == Some(R)`). This is the tight state-shape set:
+    /// a healthy `Active { proxies: ≠∅ }` Promoter — prefix
+    /// materialised, terminus live — is **excluded**, so it never pins
+    /// the count above zero during a storm. The proxy-emptiness edge is
+    /// the one multi-field surface; it is reconciled at every mutator
+    /// through [`PromoterRegistry::mutate`].
+    #[must_use]
+    pub fn is_nonsteady(&self) -> bool {
+        match &self.state {
+            PromoterState::PrefixPending(_) => true,
+            PromoterState::Active { proxies, .. } => proxies.is_empty(),
+        }
+    }
+
     /// The forward `PrefixPending → Active` transition (the prefix
     /// materialised, or its claim is being released). Replaces `state`
     /// with `Active { proxies: ∅, enumerating: ∅ }`; the prior state is
@@ -557,6 +578,14 @@ pub struct ProxyState {
 pub struct PromoterRegistry {
     promoters: SlotMap<PromoterId, Promoter>,
     by_name: BTreeMap<CompactString, PromoterId>,
+    /// Live count of Promoters satisfying [`Promoter::is_nonsteady`] —
+    /// the promoter half of the engine's O(1) carrier gate. The
+    /// Promoter has no single state chokepoint (state and proxy
+    /// emptiness are distinct mutators), so unlike
+    /// [`ProfileMap::transition_state`] every membership-changing edge
+    /// routes through one generic reconcile point,
+    /// [`Self::mutate`], plus [`Self::insert`] / [`Self::remove`].
+    nonsteady: usize,
 }
 
 impl PromoterRegistry {
@@ -576,7 +605,16 @@ impl PromoterRegistry {
     /// the id-checked [`Self::remove`].
     pub fn insert(&mut self, promoter: Promoter) -> PromoterId {
         let name = promoter.name.clone();
+        // Derived from the actual birth state: a fresh Promoter is
+        // born `PrefixPending` (glob prefix absent) or `Active {
+        // proxies: ∅ }` (prefix present, no proxies yet) — both
+        // nonsteady — but reading the predicate keeps the count exact
+        // regardless of the construction path.
+        let born_nonsteady = promoter.is_nonsteady();
         let id = self.promoters.insert(promoter);
+        if born_nonsteady {
+            self.nonsteady += 1;
+        }
         debug_assert!(
             !self.by_name.contains_key(&name),
             "duplicate Promoter name escaped config validation: {name:?}",
@@ -592,10 +630,53 @@ impl PromoterRegistry {
     /// mapping. Returns `None` for a stale id.
     pub fn remove(&mut self, id: PromoterId) -> Option<Promoter> {
         let p = self.promoters.remove(id)?;
+        if p.is_nonsteady() {
+            self.nonsteady = self.nonsteady.saturating_sub(1);
+        }
         if self.by_name.get(&p.name) == Some(&id) {
             self.by_name.remove(&p.name);
         }
         Some(p)
+    }
+
+    /// Live carrier-eligibility count — the promoter half of the O(1)
+    /// gate `Engine::classify_event_carriers` consults before its O(Q)
+    /// scan. `0` ⟺ every Promoter is a healthy `Active { proxies: ≠∅ }`
+    /// (prefix materialised, terminus live), so no Promoter descent /
+    /// recovery carrier exists.
+    #[must_use]
+    pub fn nonsteady(&self) -> usize {
+        self.nonsteady
+    }
+
+    /// The sole counter-reconciling path for a Promoter mutation:
+    /// resolve the id, read [`Promoter::is_nonsteady`] before and
+    /// after `f`, and reconcile [`Self::nonsteady`] across the edge.
+    /// `f` is the specific state / proxy mutation
+    /// ([`Promoter::enter_active_empty`],
+    /// [`Promoter::reenter_prefix_pending`],
+    /// [`Promoter::insert_proxy`], [`Promoter::unregister_proxy_slot`],
+    /// or any composite that also touches membership-invariant fields
+    /// like the enumeration queue). Membership-invariant `&mut`
+    /// accesses (probe arming, descent advance, `prefix_parent`)
+    /// legitimately keep using [`Self::get_mut`]; the debug full-scan
+    /// tripwire in `Engine::classify_event_carriers` is the net for a
+    /// missed route.
+    ///
+    /// Returns `None` for a stale id without invoking `f` — so a
+    /// construct-armed `f` (a fresh [`crate::ProbeSlot`]) is never
+    /// built for a vanished Promoter.
+    pub fn mutate<R>(&mut self, id: PromoterId, f: impl FnOnce(&mut Promoter) -> R) -> Option<R> {
+        let q = self.promoters.get_mut(id)?;
+        let before = q.is_nonsteady();
+        let r = f(q);
+        let after = q.is_nonsteady();
+        match (before, after) {
+            (false, true) => self.nonsteady += 1,
+            (true, false) => self.nonsteady = self.nonsteady.saturating_sub(1),
+            (false, false) | (true, true) => {}
+        }
+        Some(r)
     }
 
     #[must_use]

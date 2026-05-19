@@ -315,8 +315,9 @@ impl Engine {
             dirty.note(trigger, trigger_path);
         }
 
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.transition_state(ProfileState::Active(
+        self.profiles.transition_state(
+            profile_id,
+            ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
                     burst_deadline,
                     phase: PreFirePhase::Batching { settle_timer },
@@ -353,8 +354,8 @@ impl Engine {
                 // Fresh burst — directive starts at `ReturnToIdle`. Flips
                 // to `Reap` only on mid-burst `mark_active_for_reap`.
                 BurstFinish::ReturnToIdle,
-            ));
-        }
+            ),
+        );
     }
 
     /// Start a Standard burst: schedule settle + `burst_deadline`. No
@@ -402,8 +403,9 @@ impl Engine {
         let mut dirty = DirtyProvenance::new();
         dirty.note(event_resource, Arc::clone(event_path));
 
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.transition_state(ProfileState::Active(
+        self.profiles.transition_state(
+            profile_id,
+            ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
                     burst_deadline,
                     phase: PreFirePhase::Batching { settle_timer },
@@ -426,8 +428,8 @@ impl Engine {
                 // Fresh burst — directive starts at `ReturnToIdle`. Flips
                 // to `Reap` only on mid-burst `mark_active_for_reap`.
                 BurstFinish::ReturnToIdle,
-            ));
-        }
+            ),
+        );
     }
 
     /// Caller: `drive_burst` Active branch — an `FsEvent` arrived during a
@@ -918,10 +920,14 @@ impl Engine {
         // Idle window's observability for production callers (a stray
         // observer in dev/CI that races inside the helper would never
         // reach this point on a non-PreFire Profile).
-        if let Some(p) = self.profiles.get_mut(profile_id)
-            && matches!(p.state(), ProfileState::Active(ActiveBurst::PreFire(_), _))
+        if self
+            .profiles
+            .get(profile_id)
+            .is_some_and(|p| matches!(p.state(), ProfileState::Active(ActiveBurst::PreFire(_), _)))
+            && let Some(prior) = self
+                .profiles
+                .transition_state(profile_id, ProfileState::Idle)
         {
-            let prior = p.transition_state(ProfileState::Idle);
             // Destructure with restore-on-mismatch. The matches! above
             // guarantees the PreFire arm; the fallback exists so a
             // future refactor widening the matches! pattern doesn't
@@ -933,13 +939,16 @@ impl Engine {
                     // PostFire share the post-burst directive — a Reap set
                     // mid-batching survives the fire and is honoured by
                     // `finish_burst_to_idle` at PostFire end.
-                    p.transition_state(ProfileState::Active(
-                        ActiveBurst::PostFire(pre.into_post_fire(outstanding, gate_deadline)),
-                        finish,
-                    ));
+                    self.profiles.transition_state(
+                        profile_id,
+                        ProfileState::Active(
+                            ActiveBurst::PostFire(pre.into_post_fire(outstanding, gate_deadline)),
+                            finish,
+                        ),
+                    );
                 }
                 other => {
-                    p.transition_state(other);
+                    self.profiles.transition_state(profile_id, other);
                 }
             }
         }
@@ -1228,10 +1237,6 @@ impl Engine {
              overflow-reap path; take_owner_probe on the response or \
              overflow-reseed path); profile = {profile_id:?}",
         );
-        let Some(p) = self.profiles.get_mut(profile_id) else {
-            return;
-        };
-
         // Take the burst-by-value via `transition_state(Idle)` and
         // discriminate on the typed variant. `intent` is not read here:
         // the Draining sweep below is intent-agnostic.
@@ -1244,7 +1249,12 @@ impl Engine {
         // load-bearing for the sweep: the finishing Profile is excluded
         // from its own `has_active_standard_descendant` query precisely
         // because it is no longer in an Active Standard burst.
-        let prior = p.transition_state(ProfileState::Idle);
+        let Some(prior) = self
+            .profiles
+            .transition_state(profile_id, ProfileState::Idle)
+        else {
+            return;
+        };
         // Capture `finish` from the consumed prior state. It is captured
         // here — not re-read from `profiles.get(profile_id)` after the
         // swap — so the directive is locked in at burst-end entry; a
@@ -1260,7 +1270,7 @@ impl Engine {
             }
             other => {
                 // Idle / Pending — no burst-end machinery to run. Restore.
-                p.transition_state(other);
+                self.profiles.transition_state(profile_id, other);
                 return;
             }
         };
@@ -1445,10 +1455,14 @@ impl Engine {
         // observability for production callers; the restore-on-mismatch
         // arm keeps a future pattern-widening refactor from stranding
         // the Profile in `Idle` while dropping the owned burst.
-        if let Some(p) = self.profiles.get_mut(profile_id)
-            && matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _))
+        if self
+            .profiles
+            .get(profile_id)
+            .is_some_and(|p| matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _)))
+            && let Some(prior) = self
+                .profiles
+                .transition_state(profile_id, ProfileState::Idle)
         {
-            let prior = p.transition_state(ProfileState::Idle);
             match prior {
                 ProfileState::Active(ActiveBurst::PostFire(post), finish) => {
                     // Carry `finish` across the restart. It is
@@ -1456,18 +1470,21 @@ impl Engine {
                     // (rather than hard-writing) keeps a mid-tail
                     // `mark_active_for_reap` honoured at the restarted
                     // burst's end.
-                    p.transition_state(ProfileState::Active(
-                        ActiveBurst::PreFire(post.into_pre_fire_residual(
-                            burst_deadline,
-                            settle_timer,
-                            resource,
-                            now,
-                        )),
-                        finish,
-                    ));
+                    self.profiles.transition_state(
+                        profile_id,
+                        ProfileState::Active(
+                            ActiveBurst::PreFire(post.into_pre_fire_residual(
+                                burst_deadline,
+                                settle_timer,
+                                resource,
+                                now,
+                            )),
+                            finish,
+                        ),
+                    );
                 }
                 other => {
-                    p.transition_state(other);
+                    self.profiles.transition_state(profile_id, other);
                 }
             }
         }

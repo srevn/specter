@@ -125,12 +125,10 @@ impl Engine {
             return;
         };
 
-        if let Some(p) = self.profiles.get_mut(pid) {
-            // The cancel-first contract is enforced here: this discard
-            // drops the prior `Pending(DescentState)`; an armed descent
-            // slot trips `ProbeSlot`'s Drop tripwire.
-            p.transition_state(ProfileState::Idle);
-        }
+        // The cancel-first contract is enforced here: discarding the
+        // returned prior drops the `Pending(DescentState)`; an armed
+        // descent slot trips `ProbeSlot`'s Drop tripwire.
+        self.profiles.transition_state(pid, ProfileState::Idle);
 
         sub_watch_then_try_reap(&mut self.tree, prefix, ContribKey::ProfileDescent(pid), out);
     }

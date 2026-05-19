@@ -341,17 +341,22 @@ impl Engine {
         // would leave the slot un-constructed while the emit below
         // still fires (no probe, no diagnostic — a wedge); mirrors
         // `enter_pending_descent`'s loud arm.
-        let Some(q) = self.promoters.get_mut(qid) else {
+        if self.promoters.get(qid).is_none() {
             unreachable!(
                 "start_promoter_prefix_recovery: Promoter {qid:?} vanished between \
                  classify_event_carriers and the construct-armed re-entry"
             );
-        };
-        q.reenter_prefix_pending(DescentState::new(
-            parent,
-            remaining,
-            ProbeSlot::armed(correlation, ()),
-        ));
+        }
+        // Liveness proven above; `mutate` invokes the closure only for
+        // a live Promoter, so the construct-armed `ProbeSlot` is never
+        // built for a vanished one.
+        self.promoters.mutate(qid, |q| {
+            q.reenter_prefix_pending(DescentState::new(
+                parent,
+                remaining,
+                ProbeSlot::armed(correlation, ()),
+            ));
+        });
 
         // Install the descent contribution on the parent (the `+2`
         // overlap with the preserved `PromoterPrefixParent`).
@@ -3282,15 +3287,57 @@ impl Engine {
     ///   recovery; [`Engine::start_promoter_prefix_recovery`] re-enters
     ///   `PrefixPending` descent rooted at the parent.
     ///
-    /// O(profiles + promoters). A per-resource index keyed by
-    /// `current_prefix`, `watch_root_parent`, and `prefix_parent` would
-    /// convert this to O(matched); not in scope for v1.
+    /// **O(1) carrier gate.** The scan body is O(profiles + promoters),
+    /// but under a sustained storm every Profile is in a steady
+    /// `Active` burst and every Promoter a healthy `Active { proxies:
+    /// ≠∅ }`, so it iterates the full registries only to return empty.
+    /// Both registries maintain a `nonsteady` count of the
+    /// carrier-*eligible* owners ([`Profile::is_nonsteady`] /
+    /// [`Promoter::is_nonsteady`]); when both are zero no carrier of any
+    /// class can exist, so the scan is provably empty and skipped in
+    /// O(1) — the keeps-up-storm win an operator feels as the daemon no
+    /// longer pegging a core during a build.
+    ///
+    /// The count is over a pure state(+anchor) bucket, deliberately
+    /// *not* the per-resource index a naïve reading invites. The
+    /// recovery predicates couple multiple fields (Profile `state` +
+    /// `watch_root_parent` + anchor presence; Promoter `state` +
+    /// `proxies`), and [`Profile::materialize_anchor`] writes `state`
+    /// outside the [`ProfileMap::transition_state`] chokepoint — a
+    /// state-keyed index silently desyncs at that bypass. The bucket
+    /// instead over-approximates to a single-field-ish predicate that
+    /// is invariant under the bypass by construction (`Pending` and
+    /// anchorless `Idle` are the same counted bucket) and sound (every
+    /// true carrier is counted), so a zero gate is never a false skip;
+    /// it is also *tight* — a healthy anchored `Idle` Profile is
+    /// excluded, so a quiet watcher coexisting with a storm does not
+    /// defeat the gate. A `#[cfg(debug_assertions)]` full recount
+    /// tripwire below pins each maintained count every call; release
+    /// pays only the O(1) compare.
     fn classify_event_carriers(&self, resource: ResourceId) -> EventCarriers {
-        let mut out = EventCarriers {
-            descents: SmallVec::new(),
-            recoveries: SmallVec::new(),
-            promoter_recoveries: SmallVec::new(),
-        };
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_eq!(
+                self.profiles.nonsteady(),
+                self.profiles
+                    .iter()
+                    .filter(|(_, p)| p.is_nonsteady())
+                    .count(),
+                "ProfileMap.nonsteady desynced from a full carrier recount",
+            );
+            debug_assert_eq!(
+                self.promoters.nonsteady(),
+                self.promoters
+                    .iter()
+                    .filter(|(_, q)| q.is_nonsteady())
+                    .count(),
+                "PromoterRegistry.nonsteady desynced from a full carrier recount",
+            );
+        }
+        if self.profiles.nonsteady() == 0 && self.promoters.nonsteady() == 0 {
+            return EventCarriers::empty();
+        }
+        let mut out = EventCarriers::empty();
         for (pid, p) in self.profiles.iter() {
             match p.state() {
                 ProfileState::Pending(d) if d.current_prefix() == resource => {
@@ -3346,6 +3393,19 @@ struct EventCarriers {
     descents: SmallVec<[ProbeOwner; 2]>,
     recoveries: SmallVec<[ProfileId; 2]>,
     promoter_recoveries: SmallVec<[PromoterId; 2]>,
+}
+
+impl EventCarriers {
+    /// The no-carrier value: the O(1) carrier-gate return and the seed
+    /// the scan pushes into. All three `SmallVec`s start inline-empty,
+    /// no allocation.
+    fn empty() -> Self {
+        Self {
+            descents: SmallVec::new(),
+            recoveries: SmallVec::new(),
+            promoter_recoveries: SmallVec::new(),
+        }
+    }
 }
 
 /// Outcome of an [`Engine::emit_effects`] call. `count` is the number of

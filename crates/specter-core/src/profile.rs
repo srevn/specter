@@ -2816,6 +2816,41 @@ impl Profile {
         )
     }
 
+    /// Whether this Profile can possibly *carry* an `FsEvent` dispatch
+    /// responsibility — the membership predicate of [`ProfileMap`]'s
+    /// `nonsteady` carrier count, and the single source both that
+    /// counter's delta and its debug full-scan tripwire read.
+    ///
+    /// A carrier is either a `Pending` descent (`current_prefix == R`)
+    /// or an anchor-recovery `Idle` Profile (`watch_root_parent ==
+    /// Some(R)` ∧ anchor absent). This is the **state+anchor**
+    /// over-approximation of that set: every true carrier satisfies it
+    /// (soundness — the count-gate never under-counts), and it is
+    /// *tight* in the dimension that matters — a healthy `Idle` Profile
+    /// (anchor grafted, `current_is_some()`) is **excluded**, so a
+    /// quiet watcher coexisting with a storm does not pin the count
+    /// above zero. The structural twin of
+    /// [`Promoter::is_nonsteady`](crate::Promoter::is_nonsteady)
+    /// (`PrefixPending ∨ Active{proxies: ∅}`).
+    ///
+    /// Invariant under the `materialize_anchor` `state`-write that
+    /// bypasses [`Self::transition_state`]: it moves `Pending → Idle`
+    /// with the anchor still absent, and both endpoints satisfy this
+    /// predicate, so the bypass is delta-0 and needs no counter hook.
+    /// Every other anchor present↔absent flip happens mid-`Active`
+    /// (`Active` is never counted regardless of the anchor), so the
+    /// post-burst `Active → Idle` `transition_state` reads the settled
+    /// anchor and reconciles the count correctly without a separate
+    /// anchor-write hook.
+    #[must_use]
+    pub const fn is_nonsteady(&self) -> bool {
+        match &self.state {
+            ProfileState::Active(_, _) => false,
+            ProfileState::Pending(_) => true,
+            ProfileState::Idle => !self.current_is_some(),
+        }
+    }
+
     /// Whether a settled baseline `Snapshot` is present, without
     /// minting (or `Arc`-bumping) one — the zero-cost presence
     /// complement of [`Self::baseline`], exactly as
@@ -2940,6 +2975,17 @@ impl Profile {
 pub struct ProfileMap {
     profiles: SlotMap<ProfileId, Profile>,
     by_resource: SecondaryMap<ResourceId, SmallVec<[(u64, ProfileId); 1]>>,
+    /// Live count of Profiles satisfying [`Profile::is_nonsteady`] —
+    /// the O(1) carrier gate the engine reads before the O(P)
+    /// `classify_event_carriers` scan. Maintained exactly at the three
+    /// mutation points ([`Self::attach`], [`Self::detach`],
+    /// [`Self::transition_state`]); the `materialize_anchor` `state`
+    /// bypass is delta-0 by [`Profile::is_nonsteady`]'s construction
+    /// and needs no hook. A debug full-scan tripwire in
+    /// `Engine::classify_event_carriers` is the desync net; a missed
+    /// decrement only degrades the gate to the status-quo scan
+    /// (perf, never correctness).
+    nonsteady: usize,
 }
 
 impl ProfileMap {
@@ -2969,11 +3015,19 @@ impl ProfileMap {
     pub fn attach(&mut self, tree: &mut Tree, profile: Profile) -> ProfileId {
         let resource = profile.resource;
         let hash = profile.config_hash();
+        // Derived from the actual birth state, not assumed: a fresh
+        // `Profile::new` is `Idle` with the anchor absent (nonsteady),
+        // but reading the predicate keeps `nonsteady` exact even if a
+        // future construction path births a different state.
+        let born_nonsteady = profile.is_nonsteady();
         debug_assert!(
             self.find(resource, hash).is_none(),
             "ProfileMap::attach called twice for the same (resource, config_hash) — caller must `find` first",
         );
         let id = self.profiles.insert(profile);
+        if born_nonsteady {
+            self.nonsteady += 1;
+        }
         // SecondaryMap::entry returns None only if the key has been removed
         // from a primary-tracked SlotMap with a generation that no longer
         // matches. For a freshly-minted ResourceId, we expect `Some`.
@@ -2994,6 +3048,9 @@ impl ProfileMap {
     /// once it confirms no other anchors remain.
     pub fn detach(&mut self, tree: &mut Tree, id: ProfileId) -> Option<Profile> {
         let p = self.profiles.remove(id)?;
+        if p.is_nonsteady() {
+            self.nonsteady = self.nonsteady.saturating_sub(1);
+        }
         if let Some(v) = self.by_resource.get_mut(p.resource) {
             v.retain(|(h, pid)| !(*pid == id && *h == p.config_hash()));
         }
@@ -3002,6 +3059,41 @@ impl ProfileMap {
                 .retain(|(h, pid)| !(*pid == id && *h == p.config_hash()));
         }
         Some(p)
+    }
+
+    /// Live carrier-eligibility count — the O(1) value
+    /// `Engine::classify_event_carriers` consults before its O(P)
+    /// scan. `0` ⟺ no Profile can carry an `FsEvent` dispatch
+    /// (every Profile is in a steady `Active` burst or a healthy
+    /// anchored `Idle`), so the scan is provably empty and skipped.
+    #[must_use]
+    pub fn nonsteady(&self) -> usize {
+        self.nonsteady
+    }
+
+    /// The sole counter-reconciling path for a Profile state edge:
+    /// delegate to [`Profile::transition_state`] (the core `state`
+    /// chokepoint, returning the prior by value for the typed-move
+    /// callers) and reconcile [`Self::nonsteady`] across the edge from
+    /// [`Profile::is_nonsteady`] read before and after the swap. The
+    /// anchor does not move here, so both reads see the same anchor;
+    /// only the `state` discriminant changes.
+    ///
+    /// Returns `None` for a stale id (the `?` the typed-move callers
+    /// already branch on, replacing their prior `get_mut(id)?`). A
+    /// missed reconcile is perf-only — the debug full-scan tripwire in
+    /// `Engine::classify_event_carriers` surfaces a desync in CI.
+    pub fn transition_state(&mut self, id: ProfileId, new: ProfileState) -> Option<ProfileState> {
+        let p = self.profiles.get_mut(id)?;
+        let before = p.is_nonsteady();
+        let prior = p.transition_state(new);
+        let after = p.is_nonsteady();
+        match (before, after) {
+            (false, true) => self.nonsteady += 1,
+            (true, false) => self.nonsteady = self.nonsteady.saturating_sub(1),
+            (false, false) | (true, true) => {}
+        }
+        Some(prior)
     }
 
     #[must_use]

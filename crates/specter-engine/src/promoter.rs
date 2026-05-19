@@ -330,9 +330,8 @@ impl Engine {
         // [`ContribKey::PromoterPrefix`] and is removed by explicit
         // key below; the state-flip aligns
         // [`PromoterState`] readers with the post-release shape.
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
-            q.enter_active_empty();
-        }
+        self.promoters
+            .mutate(promoter_id, |q| q.enter_active_empty());
 
         // 2. Hand off the prior prefix's STRUCTURE contribution. Plain
         // `sub_watch` — NOT `sub_watch_then_try_reap`: under the
@@ -412,7 +411,7 @@ impl Engine {
                 ),
             });
 
-        if let Some(q) = self.promoters.get_mut(promoter_id) {
+        self.promoters.mutate(promoter_id, |q| {
             q.insert_proxy(resource, pattern_component_index);
             // Only enqueue when NEWLY registered. Re-registration is
             // structurally idempotent — both on the contribution map
@@ -421,7 +420,7 @@ impl Engine {
             if !already_carries {
                 q.enqueue_enumeration(resource);
             }
-        }
+        });
 
         // Back-ref: keep `Resource.proxy_promoters` in lockstep with
         // `Promoter.proxies`. `insert_proxy_promoter` absorbs the

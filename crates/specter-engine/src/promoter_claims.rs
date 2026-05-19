@@ -104,9 +104,7 @@ impl Engine {
         // drops the prior `PrefixPending(DescentState)`; an armed
         // descent slot trips `ProbeSlot`'s Drop tripwire — the
         // cancel-first contract is structural at that one transition.
-        if let Some(q) = self.promoters.get_mut(qid) {
-            q.enter_active_empty();
-        }
+        self.promoters.mutate(qid, |q| q.enter_active_empty());
 
         sub_watch_then_try_reap(&mut self.tree, prefix, ContribKey::PromoterPrefix(qid), out);
     }
@@ -161,9 +159,8 @@ impl Engine {
         // 1. Clear map + queue entry. Owner-bookkeeping only; the
         // contribution map's [`ContribKey::PromoterProxy`] key is the
         // refcount source of truth and is removed below.
-        if let Some(q) = self.promoters.get_mut(qid) {
-            q.unregister_proxy_slot(resource);
-        }
+        self.promoters
+            .mutate(qid, |q| q.unregister_proxy_slot(resource));
 
         // 2. Clear back-ref before the release+reap helper so the
         // helper's `try_reap` sees `has_anchors() == false` for
