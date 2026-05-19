@@ -538,13 +538,12 @@ impl Engine {
         }
     }
 
-    /// Callers (both intents): `dispatch_standard_ok` and
-    /// `dispatch_seed_ok` on `Unstable + !forced`, and the shared
-    /// `undischarged_consequence` on `Undischarged + !forced` — a
-    /// verify just responded without a fire/pin verdict. The verify
-    /// slot was already disarmed at the top of `on_probe_response`; no
-    /// Cancel needed. Arms a fresh settle timer and writes
-    /// `phase = Batching { settle_timer }`.
+    /// Callers: `dispatch_quiescence_ok` on `Unstable + !forced` (Seed
+    /// and Standard alike) and the shared `undischarged_consequence` on
+    /// `Undischarged + !forced` — a verify just responded without a
+    /// fire/pin verdict. The verify slot was already disarmed at the
+    /// top of `on_probe_response`; no Cancel needed. Arms a fresh
+    /// settle timer and writes `phase = Batching { settle_timer }`.
     ///
     /// **`dirty` + `certified` preserved; no
     /// re-commit.** The next verify re-targets and re-obligates per the
@@ -814,11 +813,11 @@ impl Engine {
     /// covered descendant remains in an Active Standard burst).
     ///
     /// `Draining` is a unit variant: the stable snapshot lives on
-    /// `Profile.current` (set by `dispatch_standard_ok` immediately
-    /// before this call), so no `Arc<TreeSnapshot>` is duplicated on the
-    /// phase variant.
+    /// `Profile.current` (committed by `fire_or_seal`'s `apply_snapshot`
+    /// immediately before classification), so no `Arc<TreeSnapshot>` is
+    /// duplicated on the phase variant.
     ///
-    /// The sole caller (`dispatch_standard_ok`, stable + dirty>0) is
+    /// The sole caller (`gated_fire`, on the deferred fire branch) is
     /// reached only from the Verifying probe response (slot disarmed
     /// before dispatch), so the prior phase is always `Verifying`. The
     /// unit `Draining` has no `ProbeSlot::Drop` tripwire like its
@@ -842,12 +841,11 @@ impl Engine {
     }
 
     /// Phase: `Verifying` → `Awaiting`. The single source of the post-fire
-    /// transition: `dispatch_standard_ok`'s stable-fire and forced-fire
-    /// branches and `seed_pin_body`'s drift branch (reached from
-    /// `dispatch_seed_ok`'s `Stable` / `Unstable + forced` arms) call
-    /// this immediately after `emit_effects` returns a non-zero
-    /// `EmitOutcome.count`. The match is structural (count > 0) —
-    /// callers know they pushed Effects.
+    /// transition: `fire_and_settle` calls this immediately after
+    /// `emit_effects` returns a non-zero `EmitOutcome.count` — every
+    /// fireable Seed/Standard consequence funnels through that one
+    /// helper. The match is structural (count > 0) — callers know they
+    /// pushed Effects.
     ///
     /// `outstanding` is the count of in-flight Effects this Profile owns
     /// (the `EmitOutcome.count` from the just-completed
@@ -1279,9 +1277,10 @@ impl Engine {
         // rare, tiny phase (typically 0–1 Profiles). Pass 2 takes
         // `&mut self` for the unchanged downstream reconfirm:
         // `transition_to_verifying` mints a fresh correlation and emits
-        // Probe; the response routes through `dispatch_standard_ok` as
-        // a normal Standard burst, comparing against the Profile's
-        // `current` (set when it entered Draining).
+        // Probe; the response routes via the burst's preserved `intent`
+        // (Seed or Standard) through `dispatch_quiescence_ok`, comparing
+        // against the Profile's `current` (set when it entered
+        // Draining).
         let reconfirm: SmallVec<[ProfileId; 4]> = self
             .profiles
             .iter()

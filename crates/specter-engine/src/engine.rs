@@ -197,8 +197,8 @@ impl Engine {
     /// creates a fresh Profile, emits `WatchOp::Watch` on its anchor,
     /// and starts a Seed burst (`PreFireBurst { intent: Seed, phase:
     /// Batching }`); the baseline is established once the settle-spaced
-    /// quiescence proof converges (`seed_pin_body`), not on the first
-    /// probe.
+    /// quiescence proof converges (the Seed-Ok pin in `fire_or_seal`),
+    /// not on the first probe.
     ///
     /// Three-phase pipeline; sole public entry is
     /// [`Input::AttachSub`] via [`Self::step`]. The inner is
@@ -513,7 +513,7 @@ impl Engine {
     ///    the anchor's parent, for anchor-reappearance detection).
     /// 4. Start the Seed burst (`PreFire(Batching)`); the baseline is
     ///    established once the settle-spaced quiescence proof converges
-    ///    (`dispatch_seed_ok`'s pin path), not on the first probe.
+    ///    (the Seed-Ok pin in `fire_or_seal`), not on the first probe.
     ///
     /// (No parent-edge step: the `Draining → Verifying` reconfirm is a
     /// fresh `coverage` query, so an attach maintains no per-Profile
@@ -2143,7 +2143,7 @@ mod tests {
 
         // Install a Dir snapshot on Profile.current so the descendant
         // release has a snapshot to take. Mirrors what
-        // `dispatch_seed_ok` would write at probe completion. One
+        // `dispatch_quiescence_ok` would write at probe completion. One
         // child leaf gives `release_descendant_claim` a non-trivial
         // diff to apply.
         let child_id = e

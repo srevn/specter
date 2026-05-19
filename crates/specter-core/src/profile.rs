@@ -376,8 +376,8 @@ pub enum PreFirePhase {
     /// ```
     Verifying(ProbeSlot),
     /// Self-stable; descendants pending. The stable snapshot lives on
-    /// `Profile.current` — `dispatch_standard_ok` updates `current` to
-    /// the stable response immediately before transitioning here, so the
+    /// `Profile.current` — `fire_or_seal` commits `current` to the
+    /// stable response immediately before classification, so the
     /// tree-reconcile / Watch side keeps a faithful baseline. The
     /// reconfirm probe (Draining → Verifying, fired by the
     /// `finish_burst_to_idle` sweep once no covered descendant is still
@@ -2379,8 +2379,10 @@ impl Profile {
     /// - `dispatch_rebase_ok` on `Stable` (two settle-spaced equal
     ///   post-command samples) or `Unstable + ceiling Reached` (the
     ///   bounded rebase-loop terminal — pin the freshest observation).
-    /// - the Seed **pin path** `seed_pin_body`, reached from
-    ///   `dispatch_seed_ok`'s `Stable` and `Unstable + forced` arms.
+    /// - the Seed-Ok recovery pin — the `EmitMode::SeedDrift` seal in
+    ///   the engine's `fire_and_settle`, and the silent `RecoverySeal`
+    ///   pin — reached from the `Stable` / `Unstable + forced` Seed
+    ///   verdicts.
     ///
     /// The rebase-loop `Unstable`/`Undischarged` arms (not yet at the
     /// ceiling) and the Seed `Unstable + !forced` / `Undischarged` arms

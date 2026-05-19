@@ -676,11 +676,11 @@ impl Engine {
     /// spine (shared with the Rebase arm); this routine owns only the
     /// pre-fire consequence.
     ///
-    /// `Proceed` ⇒ the *same* verdict feeds identically-shaped
-    /// `dispatch_{seed,standard}_ok(_, snap, verdict, forced, _, _)`
-    /// routers — the certified-sample machinery is intent-agnostic, so
-    /// there is no Seed special case to fork. `Vanished` / `Failed` ⇒
-    /// the per-intent failure helper (the split lives here, not in the
+    /// `Proceed` ⇒ the verdict feeds the single intent-agnostic
+    /// [`Self::dispatch_quiescence_ok`] router (`intent` only selects
+    /// the consequence split, not a forked path — the certified-sample
+    /// machinery is intent-agnostic). `Vanished` / `Failed` ⇒ the
+    /// per-intent failure helper (the split lives here, not in the
     /// certifier: a vanished anchor's cleanup is route-specific, and the
     /// Rebase arm maps the same two variants to its own helpers).
     /// `Regressed` ⇒ nothing — the certifier already emitted the
@@ -696,14 +696,11 @@ impl Engine {
         out: &mut StepOutput,
     ) {
         match self.certify_probe_response(profile_id, outcome, correlation, out) {
-            CertifiedResponse::Proceed { snapshot, verdict } => match intent {
-                BurstIntent::Seed => {
-                    self.dispatch_seed_ok(profile_id, snapshot, verdict, forced, now, out);
-                }
-                BurstIntent::Standard => {
-                    self.dispatch_standard_ok(profile_id, snapshot, verdict, forced, now, out);
-                }
-            },
+            CertifiedResponse::Proceed { snapshot, verdict } => {
+                self.dispatch_quiescence_ok(
+                    profile_id, snapshot, verdict, forced, intent, now, out,
+                );
+            }
             CertifiedResponse::Vanished => match intent {
                 BurstIntent::Seed => self.dispatch_seed_vanished(profile_id, out),
                 BurstIntent::Standard => self.dispatch_standard_vanished(profile_id, out),
@@ -1387,10 +1384,11 @@ impl Engine {
 
     /// Sensor reports it dropped events at the kernel level (inotify's
     /// `IN_Q_OVERFLOW`). Reseed every Profile in scope so the engine's
-    /// post-probe `dispatch_seed_ok` re-establishes baseline against
-    /// disk reality and runs drift detection. Active-mode drift
-    /// (`baseline.hash() != current.hash()`) fires once for every
-    /// SubtreeRoot Sub on the Profile that has fired, then rebases.
+    /// post-probe Seed-Ok (`dispatch_quiescence_ok`) re-establishes
+    /// baseline against disk reality and runs drift detection.
+    /// Active-mode drift (`baseline.hash() != current.hash()`) fires
+    /// once for every SubtreeRoot Sub on the Profile that has fired,
+    /// then rebases.
     ///
     /// # Per-Profile dispatch
     ///
@@ -1398,8 +1396,8 @@ impl Engine {
     ///
     /// - **`Idle`** — direct [`Engine::start_seed_burst`]. The Profile's
     ///   `current` is preserved as the seed probe's `baseline_subtree`
-    ///   for mtime-skip; the response `dispatch_seed_ok` rebases or
-    ///   fires-on-drift.
+    ///   for mtime-skip; the response (`dispatch_quiescence_ok`)
+    ///   rebases or fires-on-drift.
     /// - **`Active(_)`** — abandon the in-flight burst via
     ///   [`Engine::finish_burst_to_idle`] (which cancels any pending
     ///   probe and runs the Draining-sweep reconfirm cascade), then
@@ -1981,10 +1979,9 @@ impl Engine {
     }
 
     /// The shared `Undischarged` consequence — the **single source** of
-    /// the liveness terminal, byte-identical between `dispatch_seed_ok`
-    /// and `dispatch_standard_ok` (the structural-identity thesis
-    /// applied to the terminal: one audit site, not two divergent
-    /// copies of a locked, load-bearing path).
+    /// the liveness terminal for every `dispatch_quiescence_ok` intent
+    /// (one audit site, not divergent per-intent copies of a locked,
+    /// load-bearing path).
     ///
     /// A non-observation lies on an obligation chain at `first_unread`,
     /// so this response cannot certify quiescence. **Never commit** it
@@ -2030,55 +2027,26 @@ impl Engine {
         }
     }
 
-    /// The Seed **pin** — commit the observed tree as the new baseline,
-    /// firing recovery Effects if it drifted. This is the Seed analog
-    /// of `dispatch_standard_ok`'s fire consequence: Standard fires
-    /// Effects on a stable verdict, Seed *pins* — reached only for a
-    /// fresh Profile that witnessed **no** activity (a static-tree
-    /// daemon restart: restart-safe silent pin) or a recovery Profile
-    /// (re-fires its drifted Subs). A fresh Profile that *did* witness
-    /// activity never reaches here — `dispatch_seed_ok` diverts it to
-    /// the Standard stable consequence via `seed_owes_first_fire`.
-    /// Invoked identically from `dispatch_seed_ok`'s `Stable` and
-    /// `Unstable + forced` arms — `Stable` is two settle-spaced equal
-    /// samples; `Unstable + forced` is the bounded max-settle fallback
-    /// over a still-moving tree. Both pin; neither pushes an extra
-    /// diagnostic (the forced fallback is silent, symmetric with
-    /// Standard's silent forced deadline-fire).
+    /// Emit [`Diagnostic::PerFileDriftDroppedOnRecovery`] iff a live
+    /// survival witness exists, the post-graft `current` drifted from
+    /// it, and the Profile carries a `PerStableFile` Sub. A Seed-Ok
+    /// that closes an anchor-loss window rebases `baseline := observed`,
+    /// absorbing the whole loss-window delta in one move: the Subtree
+    /// side re-fires its drifted Subs from the witness, but a
+    /// `PerStableFile` Sub has no per-leaf witness, so its loss-window
+    /// reactions vanish without a trace — exactly the case to flag.
     ///
-    /// `target` is the Seed probe target (the anchor), computed by the
-    /// caller; `snapshot` is the verified observation. The
-    /// `apply_snapshot`→drift-check→`rebase_baseline` order is
-    /// load-bearing: `rebase_baseline` *consumes* the survival witness,
-    /// so the loss→recovery honesty signal and the drift verdict must
-    /// both read `settled_hash()` / `survival_witness()` *before* it
-    /// runs.
-    fn seed_pin_body(
-        &mut self,
-        profile_id: ProfileId,
-        snapshot: TreeSnapshot,
-        target: ResourceId,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
-        // Kind agreement is verified upstream at the
-        // `dispatch_burst_outcome` choke (hoisted, once for Seed +
-        // Standard, before this dispatch).
-        self.apply_snapshot(profile_id, target, snapshot, out);
-
-        // Loss→recovery honesty signal, evaluated *before* the rebase
-        // below consumes the survival witness. A Seed-Ok that closes an
-        // anchor-loss window rebases `baseline := observed`, absorbing
-        // the whole loss-window delta in one move: the Subtree side
-        // re-fires its drifted Subs from the witness, but a
-        // `PerStableFile` Sub has no per-leaf witness, so its
-        // loss-window reactions vanish without a trace. This is
-        // standalone, not folded into the drift branch below, on
-        // purpose — a PerFile-only Profile never enters that branch
-        // (its Subs never record a fire ⇒ `seed_drift_observed` is
-        // false) yet is exactly the case to flag, so the condition
-        // cannot piggy-back on it. A byte-identical recovery
-        // (`current == witness`) dropped nothing and emits nothing.
+    /// Standalone witness-drift predicate, **not** folded into the
+    /// drift fork: a PerFile-only recovery never records a fire (so it
+    /// classifies [`Consequence::RecoverySeal`], never
+    /// [`Consequence::RecoveryFire`]) yet is precisely this signal's
+    /// target, so the condition cannot piggy-back on the fork. Invoked
+    /// while the witness is still live — at the recovery fire
+    /// (post-gate, once) and on the seal-only terminal, each *before*
+    /// [`specter_core::Profile::rebase_baseline`] consumes it. A
+    /// byte-identical recovery (`current == witness`) dropped nothing
+    /// and emits nothing.
+    fn warn_perfile_dropped_on_recovery(&self, profile_id: ProfileId, out: &mut StepOutput) {
         if let Some(p) = self.profiles.get(profile_id)
             && let Some(witness) = p.survival_witness()
             && let Some(current) = p.current()
@@ -2090,188 +2058,250 @@ impl Engine {
                     profile: profile_id,
                 });
         }
+    }
 
-        // Fire Effects only for the Profile's fired Subs when drift is
-        // observed (post-graft current.hash() differs from
-        // `settled_hash()` — the active-mode baseline digest or, across
-        // the loss→recovery window, the survival witness). Drift is a
-        // per-Profile signal: every Sub that has fired re-fires once,
-        // unconditionally. (Post-collapse only SubtreeRoot Subs ever
-        // record a fire, so the filter is Subtree-only by
-        // construction — no explicit per-key narrowing.)
-        //
-        // **Why two rebases on the drift branch.** Seed's semantic is
-        // `baseline := observed`; the drift detection fires the
-        // recovery Effects FIRST, then completes that semantic by
-        // calling `rebase_baseline` before `transition_to_awaiting`.
-        // The post-Rebasing rebase (in `dispatch_rebase_ok`) sits on
-        // top — it's the Standard-style post-command refresh, capturing
-        // the disk state AFTER the recovery commands ran. The two
-        // rebases serve different roles, not duplicate ones: this one
-        // seals the Seed observation; the post-Rebasing one seals the
-        // post-Effect view. Standard bursts skip this pre-Awaiting
-        // rebase because their baseline was already authoritative at
-        // burst start; only Seed completes a `baseline := observed`
-        // semantic mid-cycle.
-        //
-        // The pre-Awaiting rebase here is also forward-defensive: no
-        // current code path reads `Profile.baseline` during Awaiting /
-        // Rebasing (the absorb arm touches only
-        // `PostFireBurst.dirty`; `transition_to_rebasing`
-        // ships `Profile.current`, not `baseline`), but pinning the
-        // Profile's view here keeps the cross-field invariant intact
-        // against any future absorb / rebase path that does read it.
-        if self.seed_drift_observed(profile_id) {
-            // The Profile's fired Subs, straight off the registry's
-            // per-Sub flags. Membership only — the `emit_effects` loop
-            // filters with `drifted.contains`, and the observable
-            // Effect order is fixed globally by
-            // `StepOutput::sort_for_emission`, so the insertion order
-            // `fired_in` yields needs no re-sort.
-            let drifted: SmallVec<[SubId; 2]> = self.subs.fired_in(profile_id);
-            // `drifted` is empty when no attached Sub has fired: PerFile
-            // Subs never record a fire, and a detached Sub's flag died
-            // with its slotmap entry. Fall through to the no-drift
-            // finish path in that case.
-            if !drifted.is_empty() {
-                let outcome =
-                    self.emit_effects(profile_id, EmitMode::SeedDrift { drifted: &drifted }, out);
-                if outcome.count > 0 {
-                    if let Some(p) = self.profiles.get_mut(profile_id) {
-                        p.rebase_baseline();
+    /// Map a fireable verdict to its [`Consequence`] for a burst of
+    /// known [`specter_core::BurstIntent`] — the single home of the
+    /// [`Engine::seed_owes_first_fire`] / [`Engine::seed_drift_observed`]
+    /// fork. Pure `&self`; reads the post-graft state the caller
+    /// ([`Engine::fire_or_seal`]) committed immediately before.
+    ///
+    /// A Standard burst always fires the Standard consequence. A Seed
+    /// burst splits three disjoint ways: a fresh Profile that witnessed
+    /// activity owes a *first* fire (the Standard consequence — no
+    /// baseline yet, the post-command rebase establishes it); a
+    /// recovery whose tree drifted re-fires its previously-fired Subs
+    /// and seals the witness; everything else (fresh-static restart,
+    /// no-drift or empty-fired recovery) is a silent witness-sealing
+    /// pin. `seed_owes_first_fire` and `seed_drift_observed` stay the
+    /// disjoint building blocks, **not** flattened: a Seed-Ok that owes
+    /// a first fire and one that re-fires a recovery are different
+    /// consequences reached through different settled-reference
+    /// reasoning, and the per-Sub vs per-Profile split is load-bearing
+    /// for B1 dedup.
+    fn classify_consequence(&self, profile_id: ProfileId, intent: BurstIntent) -> Consequence {
+        match intent {
+            BurstIntent::Standard => Consequence::StandardFire,
+            BurstIntent::Seed => {
+                if self.seed_owes_first_fire(profile_id) {
+                    Consequence::FreshSeedFire
+                } else if self.seed_drift_observed(profile_id) {
+                    // `seed_drift_observed` implies `any_fired`, which
+                    // within this single `&self` resolution implies a
+                    // non-empty fired set — so the empty arm is a
+                    // registry-timing defensive (a detached Sub's flag
+                    // died with its slotmap entry). It falls to the
+                    // silent seal, exactly as the prior pin's
+                    // `!drifted.is_empty()` guard did.
+                    let drifted = self.subs.fired_in(profile_id);
+                    if drifted.is_empty() {
+                        Consequence::RecoverySeal
+                    } else {
+                        Consequence::RecoveryFire(drifted)
                     }
-                    self.transition_to_awaiting(profile_id, outcome.count, now, out);
-                    return;
+                } else {
+                    Consequence::RecoverySeal
                 }
             }
         }
-
-        // Non-drift Seed (fresh attach, no-drift recovery, or
-        // dedup-hash-suppressed drift): rebase and finish. No Effect
-        // fires, no Awaiting tail.
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.rebase_baseline();
-        }
-        self.finish_burst_to_idle(profile_id, out);
     }
 
-    /// (Seed, Ok) — map the quiescence `verdict` to its consequence.
+    /// Commit the observed tree, then route the verdict's
+    /// [`Consequence`]. The shared `Stable` / `Unstable + forced`
+    /// consequence for **both** intents — the certified-sample
+    /// machinery is intent-agnostic, so there is no Seed special case
+    /// to fork at this layer.
     ///
-    /// The verdict is the carrier's fold over two settle-spaced
-    /// certified samples ([`specter_core::CertifiedPrior::advance`],
-    /// invoked at the `dispatch_burst_outcome` choke) — the *same*
-    /// intent-agnostic machinery a Standard burst uses. This routine is
-    /// the Seed twin of [`Engine::dispatch_standard_ok`]; the
-    /// divergence is the `Stable` / `Unstable + forced` consequence and
-    /// it is **conditional**, split on three disjoint Seed sub-cases
-    /// (see [`Engine::seed_owes_first_fire`]). `Undischarged` and
-    /// `Unstable + !forced` are byte-identical to the Standard router.
+    /// `apply_snapshot` runs *before* `classify_consequence`: the drift
+    /// read needs the post-graft `current`, and `seed_owes_first_fire`'s
+    /// inputs (`any_fired`, the pre-fire `dirty` accumulator) are
+    /// invariant under the graft, so the classification is
+    /// order-stable.
     ///
-    /// - [`QuiescenceVerdict::Stable`] / [`QuiescenceVerdict::Unstable`]
-    ///   `+ forced`:
-    ///   - **fresh + witnessed activity** (`seed_owes_first_fire`):
-    ///     Specter's contract owes a first fire — the *Standard*
-    ///     consequence ([`Engine::stable_consequence`] /
-    ///     [`Engine::fire_and_settle`]). A fresh Profile has no
-    ///     baseline, so the fire's diff is `None` and the post-command
-    ///     [`Engine::dispatch_rebase_ok`] establishes
-    ///     `baseline := current`; every later burst is then Standard.
-    ///   - **fresh + no activity** (static-tree daemon restart) or
-    ///     **recovery** (`any_fired`): [`Engine::seed_pin_body`] —
-    ///     restart-safe silent pin, or drift-fire of the recovered
-    ///     Subs. (Specter persists no baseline, so a restart over an
-    ///     unchanged tree must not re-fire.)
+    /// [`Consequence::RecoverySeal`] is the only non-firing arm: it has
+    /// no Effect to defer, so it never consults the Draining gate. It
+    /// flags the per-file drop *while the witness is still live*, seals
+    /// `baseline := observed` (consuming the witness — the structural
+    /// end of the loss→recovery window), and finishes. The three firing
+    /// consequences cross the single gate in [`Engine::gated_fire`].
+    fn fire_or_seal(
+        &mut self,
+        profile_id: ProfileId,
+        snapshot: TreeSnapshot,
+        target: ResourceId,
+        forced: bool,
+        intent: BurstIntent,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        // Kind agreement is verified upstream at the
+        // `dispatch_burst_outcome` choke (hoisted, once for Seed +
+        // Standard, before this dispatch).
+        self.apply_snapshot(profile_id, target, snapshot, out);
+        match self.classify_consequence(profile_id, intent) {
+            Consequence::StandardFire => {
+                self.gated_fire(
+                    profile_id,
+                    EmitMode::Standard { forced },
+                    forced,
+                    false,
+                    now,
+                    out,
+                );
+            }
+            Consequence::FreshSeedFire => {
+                self.gated_fire(
+                    profile_id,
+                    EmitMode::Standard { forced },
+                    forced,
+                    true,
+                    now,
+                    out,
+                );
+            }
+            Consequence::RecoveryFire(drifted) => {
+                self.gated_fire(
+                    profile_id,
+                    EmitMode::SeedDrift { drifted: &drifted },
+                    forced,
+                    false,
+                    now,
+                    out,
+                );
+            }
+            Consequence::RecoverySeal => {
+                // Witness-drift honesty BEFORE the rebase consumes the
+                // witness; the predicate self-gates to a live witness +
+                // a `PerStableFile` Sub.
+                self.warn_perfile_dropped_on_recovery(profile_id, out);
+                if let Some(p) = self.profiles.get_mut(profile_id) {
+                    p.rebase_baseline();
+                }
+                self.finish_burst_to_idle(profile_id, out);
+            }
+        }
+    }
+
+    /// The single Draining-gate site. Fire iff `forced` (the
+    /// `max_settle` ceiling expired — out of time, fire regardless of a
+    /// churning covered descendant) **or** no covered strict-descendant
+    /// Profile is in an Active Standard burst; otherwise defer via
+    /// [`Engine::transition_to_draining`] (don't fire an ancestor's
+    /// "tree settled" command while a nested watched subtree churns —
+    /// the `finish_burst_to_idle` sweep reconfirms once the descendant
+    /// settles). The descendant query is evaluated fresh here, never
+    /// cached; `forced` short-circuits it, so a deadline-fire neither
+    /// pays for nor consults the gate. `forced` covers the `Stable`
+    /// deadline case as well as `Unstable + forced` — a hard ceiling
+    /// fires through, never defers.
+    ///
+    /// On the fire branch, post-gate and exactly once: the fresh-Seed
+    /// per-file-skip narration (`fresh_seed`), then — for the recovery
+    /// consequence (`EmitMode::SeedDrift`) — the per-file-drop honesty,
+    /// while the witness is still live ([`Engine::fire_and_settle`]
+    /// seals after the emit). The defer emits neither; both re-derive
+    /// at the reconfirm terminal, so each surfaces exactly once.
+    fn gated_fire(
+        &mut self,
+        profile_id: ProfileId,
+        mode: EmitMode<'_>,
+        forced: bool,
+        fresh_seed: bool,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        if forced
+            || !crate::coverage::has_active_standard_descendant(
+                &self.tree,
+                &self.profiles,
+                profile_id,
+            )
+        {
+            if fresh_seed {
+                self.warn_perfile_skipped_on_fresh_seed(profile_id, out);
+            }
+            if matches!(mode, EmitMode::SeedDrift { .. }) {
+                self.warn_perfile_dropped_on_recovery(profile_id, out);
+            }
+            self.fire_and_settle(profile_id, mode, now, out);
+        } else {
+            self.transition_to_draining(profile_id, out);
+        }
+    }
+
+    /// (Seed | Standard, Ok) — map the quiescence `verdict` to its
+    /// consequence. One router for both intents: the verdict is the
+    /// carrier's intent-agnostic fold over two settle-spaced certified
+    /// samples ([`specter_core::CertifiedPrior::advance`], invoked at
+    /// the `dispatch_burst_outcome` choke), so `intent` only selects
+    /// the [`Consequence`] split in [`Engine::classify_consequence`]
+    /// and threads onto the [`Engine::undischarged_consequence`]
+    /// diagnostic — there is no forked path.
+    ///
+    /// - [`QuiescenceVerdict::Stable`], or [`QuiescenceVerdict::Unstable`]
+    ///   `+ forced` — the fireable verdict: [`Engine::fire_or_seal`]
+    ///   (commit, classify, then the gated fire or the silent
+    ///   witness-sealing pin). `Unstable + forced` is the bounded
+    ///   `max_settle` fallback over a still-moving tree; it fires
+    ///   through the Draining gate by the `forced` disjunct, symmetric
+    ///   with the `Stable` deadline case.
     /// - [`QuiescenceVerdict::Unstable`] + `!forced` — still moving (or
     ///   sample 1): `apply_snapshot` for the reconcile / Watch side
     ///   effects only (new descendants get FDs), **no `rebase_baseline`**
     ///   (the witness must survive an unbounded re-batch loop), then
-    ///   re-batch. Byte-identical to the Standard router.
+    ///   re-batch.
     /// - [`QuiescenceVerdict::Undischarged`] — the shared
     ///   [`Engine::undischarged_consequence`] terminal (never commit,
     ///   never advance; `!forced` re-batch / `forced` ceiling
-    ///   diagnostic + finish), `intent: Seed` preserved.
-    fn dispatch_seed_ok(
+    ///   diagnostic + finish), `intent` preserved on the diagnostic.
+    fn dispatch_quiescence_ok(
         &mut self,
         profile_id: ProfileId,
         snapshot: TreeSnapshot,
         verdict: QuiescenceVerdict,
         forced: bool,
+        intent: BurstIntent,
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // Target + the covered-descendant fire-gate, the shared
-        // up-front read — structurally identical to
-        // `dispatch_standard_ok`'s (the intent-agnostic twin). Seed
-        // only reaches here from `Active(PreFire(Verifying))`; the
-        // `p.resource` fallback on the non-PreFire arm matches the
-        // prior `unwrap_or(anchor)`. `dirty_zero` is consulted only on
-        // the fresh-with-activity fire (the Draining gate); computing
-        // it unconditionally keeps the two routers' heads identical.
-        let Some((target, dirty_zero)) = self.pre_fire_target_and_drain_gate(profile_id) else {
+        // Profile-presence guard + the snapshot-commit target (the
+        // latest emitted probe target; the `p.resource` fallback on the
+        // structurally-unreachable non-PreFire arm matches the prior
+        // `unwrap_or(anchor)`). `None` ⇒ the Profile is gone and every
+        // arm returns. The covered-descendant fire-gate is no longer
+        // computed here: it lives at the single gate site
+        // (`gated_fire`), reached only when a fire actually arrives and
+        // short-circuited by `forced`.
+        let Some(target) = self.pre_fire_target(profile_id) else {
             return;
         };
 
         match verdict {
             QuiescenceVerdict::Undischarged { first_unread } => {
-                self.undischarged_consequence(
-                    profile_id,
-                    first_unread,
-                    forced,
-                    BurstIntent::Seed,
-                    now,
-                    out,
-                );
+                self.undischarged_consequence(profile_id, first_unread, forced, intent, now, out);
             }
 
             QuiescenceVerdict::Stable => {
-                if self.seed_owes_first_fire(profile_id) {
-                    // Case 1 — fresh + witnessed activity. Specter's
-                    // contract owes a first fire; the consequence *is*
-                    // the Standard stable consequence (no baseline yet
-                    // ⇒ diff `None`; `dispatch_rebase_ok` establishes
-                    // `baseline := current` post-command, so every
-                    // later burst is Standard). `fresh_seed = true`
-                    // gates the per-file-skip narration.
-                    self.stable_consequence(
-                        profile_id, snapshot, target, dirty_zero, true, forced, now, out,
-                    );
-                } else {
-                    // Case 2 (fresh, static — restart-safe silent pin)
-                    // or case 3 (recovery — drift-fire). Both pin via
-                    // `seed_pin_body`.
-                    self.seed_pin_body(profile_id, snapshot, target, now, out);
-                }
+                self.fire_or_seal(profile_id, snapshot, target, forced, intent, now, out);
+            }
+
+            QuiescenceVerdict::Unstable if forced => {
+                // Bounded `max_settle` deadline-fire over a still-moving
+                // tree — the same consequence as `Stable`, fired
+                // through the Draining gate by the `forced` disjunct in
+                // `gated_fire`.
+                self.fire_or_seal(profile_id, snapshot, target, forced, intent, now, out);
             }
 
             QuiescenceVerdict::Unstable => {
-                if forced && self.seed_owes_first_fire(profile_id) {
-                    // Fresh + activity at the bounded max-settle
-                    // deadline: deadline-fire exactly as Standard's
-                    // `Unstable + forced` (bypasses the Draining gate —
-                    // out of time, fire regardless of a churning
-                    // descendant).
-                    self.apply_snapshot(profile_id, target, snapshot, out);
-                    self.warn_perfile_skipped_on_fresh_seed(profile_id, out);
-                    self.fire_and_settle(profile_id, EmitMode::Standard { forced: true }, now, out);
-                } else if forced {
-                    // Bounded max-settle fallback for a static fresh
-                    // Seed (restart-safe) or a recovery Seed: pin the
-                    // freshest forced observation anyway. Silent —
-                    // symmetric with Standard's silent forced
-                    // deadline-fire.
-                    self.seed_pin_body(profile_id, snapshot, target, now, out);
-                } else {
-                    // Still moving (or sample 1). Graft for the
-                    // reconcile / Watch side effects only (new
-                    // descendants get FDs); do NOT `rebase_baseline`
-                    // (the witness must survive the re-batch loop) and
-                    // do NOT advance the carrier (already done by
-                    // `advance`; the preserved prior sample is what the
-                    // next settle-spaced verify compares against).
-                    // Byte-identical to `dispatch_standard_ok`.
-                    self.apply_snapshot(profile_id, target, snapshot, out);
-                    self.unstable_response_drives_batching(profile_id, now, out);
-                }
+                // Still moving (or sample 1). Graft for the reconcile /
+                // Watch side effects only (new descendants get FDs); do
+                // NOT `rebase_baseline` (the witness must survive the
+                // re-batch loop) and do NOT advance the carrier (the
+                // preserved prior sample is what the next settle-spaced
+                // verify compares against).
+                self.apply_snapshot(profile_id, target, snapshot, out);
+                self.unstable_response_drives_batching(profile_id, now, out);
             }
         }
     }
@@ -2297,8 +2327,8 @@ impl Engine {
     /// and never reaches this predicate.
     ///
     /// The boolean answer is per-Profile; the caller
-    /// ([`Engine::dispatch_seed_ok`]) builds the SeedDrift fire filter
-    /// from the Profile's fired Subs ([`SubRegistry::fired_in`]).
+    /// ([`Engine::classify_consequence`]) builds the SeedDrift fire
+    /// filter from the Profile's fired Subs ([`SubRegistry::fired_in`]).
     fn seed_drift_observed(&self, profile_id: ProfileId) -> bool {
         // Never fired ⇒ no prior emission to re-fire on recovery. The
         // per-Sub flags live on the registry (disjoint field from
@@ -2327,17 +2357,17 @@ impl Engine {
     ///
     /// 1. `!any_fired && !dirty.is_empty()` ⇒ **true** — a fresh Seed
     ///    that saw events. Specter's contract ("fire when the tree
-    ///    settles") owes a fire; the consequence is the *Standard*
-    ///    stable consequence (no baseline yet ⇒ the fire's diff is
-    ///    `None`, and the post-command rebase establishes the
-    ///    baseline). Diverted by [`Self::dispatch_seed_ok`] before
-    ///    `seed_pin_body` is reached.
+    ///    settles") owes a fire; the consequence is
+    ///    [`Consequence::FreshSeedFire`] (no baseline yet ⇒ the fire's
+    ///    diff is `None`, and the post-command rebase establishes the
+    ///    baseline).
     /// 2. `!any_fired && dirty.is_empty()` ⇒ false — a fresh Seed over
     ///    a static tree (a daemon restart; Specter persists no
-    ///    baseline). Restart-safe silent pin via `seed_pin_body`.
-    /// 3. `any_fired` ⇒ false — a recovery Seed. `seed_pin_body` /
-    ///    [`Self::seed_drift_observed`] re-fire the drifted Subs from
-    ///    the survival witness.
+    ///    baseline). Restart-safe silent [`Consequence::RecoverySeal`].
+    /// 3. `any_fired` ⇒ false — a recovery Seed:
+    ///    [`Consequence::RecoveryFire`] ([`Self::seed_drift_observed`]
+    ///    re-fires the drifted Subs from the survival witness) or, with
+    ///    no drift, the silent [`Consequence::RecoverySeal`].
     ///
     /// Mutually exclusive with [`Self::seed_drift_observed`] by
     /// construction (that predicate is `false` whenever `!any_fired`),
@@ -2352,41 +2382,52 @@ impl Engine {
             .is_some_and(|pre| !pre.dirty.is_empty())
     }
 
-    /// The pre-fire probe target + the covered-descendant fire-gate —
-    /// the shared up-front read for [`Self::dispatch_standard_ok`] and
-    /// [`Self::dispatch_seed_ok`] (collapsing the duplicated inline
-    /// `match p.state()`). `target` is the latest emitted probe target
-    /// ([`specter_core::PreFireBurst::probe_target`]; the `p.resource`
+    /// The pre-fire snapshot-commit target + Profile-presence guard —
+    /// the shared up-front read for [`Engine::dispatch_quiescence_ok`].
+    /// `target` is the latest emitted probe target
+    /// ([`specter_core::PreFireBurst::probe_target`]); the `p.resource`
     /// fallback on the structurally-unreachable non-PreFire arm matches
-    /// the prior `unwrap_or(anchor)`). `dirty_zero` is `true` iff **no**
-    /// covered strict-descendant Profile is in an Active Standard burst
-    /// — the derived, never-cached replacement for the deleted
-    /// `dirty_descendants` refcount, evaluated fresh from the live
-    /// tree. `None` iff the Profile is gone (caller returns). Borrow-safe:
-    /// the `&Profile` read ends before the `&self.tree`/`&self.profiles`
-    /// coverage walk, and `target` is `Copy`.
-    fn pre_fire_target_and_drain_gate(&self, profile_id: ProfileId) -> Option<(ResourceId, bool)> {
+    /// the prior `unwrap_or(anchor)`. `None` iff the Profile is gone
+    /// (every caller arm returns).
+    ///
+    /// The covered-descendant fire-gate is **not** read here. It is a
+    /// fire-only concern, so it lives at the single gate site
+    /// ([`Engine::gated_fire`]) — evaluated fresh from the live tree
+    /// only when a fire reaches it, and short-circuited entirely on a
+    /// `forced` deadline-fire. Computing it here would re-introduce the
+    /// "derived then discarded on the non-fire arms" shape this
+    /// unification dissolves.
+    fn pre_fire_target(&self, profile_id: ProfileId) -> Option<ResourceId> {
         let p = self.profiles.get(profile_id)?;
-        let target = match p.pre_fire_burst() {
+        Some(match p.pre_fire_burst() {
             Some(pre) => pre.probe_target,
             None => p.resource,
-        };
-        let dirty_zero = !crate::coverage::has_active_standard_descendant(
-            &self.tree,
-            &self.profiles,
-            profile_id,
-        );
-        Some((target, dirty_zero))
+        })
     }
 
-    /// Emit Effects for `mode`, then settle the burst: `Awaiting` when
-    /// ≥1 Effect was pushed, else finish to Idle. The single home for
-    /// the `emit_effects → count>0 ? awaiting : finish` triple shared
-    /// by [`Self::dispatch_standard_ok`]'s stable / forced-deadline
-    /// arms and the fresh-Seed first-fire consequence. (`seed_pin_body`'s
-    /// drift branch keeps its own copy: it interposes a pre-`Awaiting`
-    /// `rebase_baseline` sealing the `baseline := observed` Seed
-    /// semantic — a real difference this helper must not absorb.)
+    /// Emit Effects for `mode`, seal the survival witness for the
+    /// recovery consequence, then settle the burst: `Awaiting` when ≥1
+    /// Effect was pushed, else finish to Idle. The single home for the
+    /// shared `emit_effects → count>0 ? awaiting : finish` triple — the
+    /// one funnel every fireable Seed/Standard consequence reaches.
+    ///
+    /// **The seal is keyed on `EmitMode::SeedDrift`, not a separate
+    /// discriminant.** Only a recovery drift-fire emits `SeedDrift`, so
+    /// the mode *is* the witness-consumption signal:
+    /// [`specter_core::Profile::rebase_baseline`] (`Witness → Snapshot`)
+    /// runs before the `Awaiting`/finish split, regardless of `count`.
+    /// This binds witness consumption to the certified-recovery
+    /// decision — the two settle-spaced equal Seed-Ok reads — rather
+    /// than deferring it into the post-fire phase machinery. It is
+    /// load-bearing, not defensive: the post-fire rebase loop's "keep
+    /// the prior baseline" terminals (a ceiling hit on an unreadable
+    /// region; the Vanished / Failed cleanup) then need no per-intent
+    /// witness reasoning, because by then the prior baseline is always
+    /// a legitimate recovered `Snapshot`. Without the seal a recovery
+    /// that hit such a terminal would finish in the loss window and
+    /// re-fire on the next event. Sealing even when `count == 0` (every
+    /// recovery Sub dedup-suppressed, or detached) is intentional and
+    /// matches the prior pin exactly.
     fn fire_and_settle(
         &mut self,
         profile_id: ProfileId,
@@ -2395,6 +2436,11 @@ impl Engine {
         out: &mut StepOutput,
     ) {
         let outcome = self.emit_effects(profile_id, mode, out);
+        if matches!(mode, EmitMode::SeedDrift { .. })
+            && let Some(p) = self.profiles.get_mut(profile_id)
+        {
+            p.rebase_baseline();
+        }
         if outcome.count > 0 {
             self.transition_to_awaiting(profile_id, outcome.count, now, out);
         } else {
@@ -2417,42 +2463,6 @@ impl Engine {
                 .push(Diagnostic::PerFileFireSkippedOnFreshSeed {
                     profile: profile_id,
                 });
-        }
-    }
-
-    /// The `Stable`-verdict fire consequence shared by
-    /// [`Self::dispatch_standard_ok`] and the fresh-with-activity arm
-    /// of [`Self::dispatch_seed_ok`]: commit the observed tree, then
-    /// either fire (`dirty_zero` — no covered Standard descendant is
-    /// still bursting) or [`Self::transition_to_draining`] (one is —
-    /// don't fire the ancestor's "tree settled" command while a nested
-    /// watched subtree churns; the reconfirm fires it once the
-    /// descendant settles). `fresh_seed` gates the
-    /// [`Diagnostic::PerFileFireSkippedOnFreshSeed`] narration to the
-    /// genuine fire branch only. baseline is **not** pinned here — it
-    /// rebases when the Rebasing probe lands (`dispatch_rebase_ok`):
-    /// Standard's baseline was authoritative at burst start and a fresh
-    /// Seed's is established post-command, so neither needs a
-    /// pre-`Awaiting` pin (only `seed_pin_body`'s recovery-drift does).
-    fn stable_consequence(
-        &mut self,
-        profile_id: ProfileId,
-        snapshot: TreeSnapshot,
-        target: ResourceId,
-        dirty_zero: bool,
-        fresh_seed: bool,
-        forced: bool,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
-        self.apply_snapshot(profile_id, target, snapshot, out);
-        if dirty_zero {
-            if fresh_seed {
-                self.warn_perfile_skipped_on_fresh_seed(profile_id, out);
-            }
-            self.fire_and_settle(profile_id, EmitMode::Standard { forced }, now, out);
-        } else {
-            self.transition_to_draining(profile_id, out);
         }
     }
 
@@ -2505,109 +2515,6 @@ impl Engine {
         });
         self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
-    }
-
-    /// (Standard, Ok) — map the quiescence `verdict` to its
-    /// consequence.
-    ///
-    /// The verdict is the carrier's fold over two settle-spaced
-    /// certified samples ([`specter_core::CertifiedPrior::advance`],
-    /// invoked at the `dispatch_burst_outcome` choke); this routine
-    /// turns it into fire / drain / re-batch for a Standard burst via
-    /// the shared [`Engine::stable_consequence`] /
-    /// [`Engine::fire_and_settle`] helpers, which `dispatch_seed_ok`'s
-    /// fresh-with-activity arm reuses — a fresh Seed that witnessed
-    /// activity *is* a Standard burst at the consequence level. The
-    /// pre-graft `current` comparison is gone —
-    /// the verdict no longer derives from `current`, so `apply_snapshot`
-    /// carries no ordering constraint here: it commits the observed
-    /// tree for its reconcile / Watch side effects, never as the
-    /// verdict's input.
-    ///
-    /// - [`QuiescenceVerdict::Stable`] — two equal `Authoritative`
-    ///   samples: commit, then fire (`dirty_zero`: no covered
-    ///   descendant is still bursting) or
-    ///   [`Engine::transition_to_draining`].
-    /// - [`QuiescenceVerdict::Unstable`] — the tree is still moving (or
-    ///   this is the first sample): commit for the reconcile / Watch
-    ///   side effects, then re-batch (`!forced`) or, at the max-settle
-    ///   deadline (`forced`), fire anyway.
-    /// - [`QuiescenceVerdict::Undischarged`] — a non-observation lies
-    ///   on an obligation chain: **never commit** (an unread region
-    ///   must not poison `current` for later dedup / Seed compares) and
-    ///   **never advance the carrier** (already withheld by `advance`).
-    ///   `!forced` ⇒ retry via a fresh settle window; `forced`
-    ///   (max-settle) ⇒ the liveness terminal: finish to Idle +
-    ///   [`Diagnostic::QuiescenceCeilingUnreadable`], probe slot
-    ///   released, the next `FsEvent` opens a fresh burst.
-    fn dispatch_standard_ok(
-        &mut self,
-        profile_id: ProfileId,
-        snapshot: TreeSnapshot,
-        verdict: QuiescenceVerdict,
-        forced: bool,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
-        // Target (for the snapshot commit) + the covered-descendant
-        // fire-gate — the shared up-front read (`dispatch_seed_ok`'s
-        // fresh-with-activity arm computes the same pair; the two
-        // routers' heads are structurally identical). Kind agreement
-        // and the verdict fold are already done upstream at the
-        // `dispatch_burst_outcome` choke.
-        let Some((target, dirty_zero)) = self.pre_fire_target_and_drain_gate(profile_id) else {
-            return;
-        };
-
-        match verdict {
-            QuiescenceVerdict::Undischarged { first_unread } => {
-                self.undischarged_consequence(
-                    profile_id,
-                    first_unread,
-                    forced,
-                    BurstIntent::Standard,
-                    now,
-                    out,
-                );
-            }
-
-            QuiescenceVerdict::Stable => {
-                // Commit, then fire (no covered Standard descendant
-                // still bursting) or Drain. `fresh_seed = false`: a
-                // Standard burst's baseline was authoritative at burst
-                // start, so the per-file-skip narration never applies.
-                self.stable_consequence(
-                    profile_id, snapshot, target, dirty_zero, false, forced, now, out,
-                );
-            }
-
-            QuiescenceVerdict::Unstable => {
-                // The tree is still moving (or this is sample 1). The
-                // graft is preserved — but only for its reconcile /
-                // Watch side effects (new descendants get FDs); the
-                // verdict no longer derives from `current`, so it is no
-                // longer the stability input it used to be.
-                self.apply_snapshot(profile_id, target, snapshot, out);
-                if forced {
-                    // Not-stable + forced → deadline-fire with
-                    // forced=true. `forced` overrides dedup-hash
-                    // suppression inside `emit_effects`; a Profile with
-                    // no matching Subs still finishes to Idle
-                    // (count == 0). The deadline-fire bypasses the
-                    // Draining gate (out of time), so it does not route
-                    // through `stable_consequence`.
-                    self.fire_and_settle(profile_id, EmitMode::Standard { forced: true }, now, out);
-                } else {
-                    // Not-stable + !forced → re-arm debounce in
-                    // `Batching`. By construction no probe is in flight
-                    // (we're inside the response handler), so no Cancel
-                    // is emitted. The carrier's prior certified sample
-                    // is preserved across the re-batch (the next
-                    // settle-spaced equal `Authoritative` sample fires).
-                    self.unstable_response_drives_batching(profile_id, now, out);
-                }
-            }
-        }
     }
 
     /// (Standard, Vanished).
@@ -2792,7 +2699,14 @@ impl Engine {
             QuiescenceVerdict::Undischarged { first_unread } if reached => {
                 // Ceiling reached on an unread response: refuse to
                 // rebase blind. No commit, no rebase — the prior
-                // baseline stays in place.
+                // baseline stays in place. Safe to keep it on a
+                // recovery: the certified-recovery decision already
+                // sealed `Witness → Snapshot` (the `EmitMode::SeedDrift`
+                // seal in `fire_and_settle`), so by here the prior
+                // baseline is a legitimate recovered `Snapshot`, not a
+                // loss-window witness — this terminal needs no
+                // per-intent witness reasoning, and the next event
+                // routes Standard rather than re-firing the recovery.
                 let intent = self.rebase_burst_intent(profile_id);
                 out.diagnostics.push(Diagnostic::RebaseCeilingUnreadable {
                     profile: profile_id,
@@ -3085,8 +2999,8 @@ impl Engine {
         // doesn't behave as a directory, the Effect surfaces
         // `EffectOutcome::Failed`. Reaching `None` here implies a fresh
         // resource-based attach whose Seed probe hasn't returned —
-        // `dispatch_seed_ok`'s fallback writes the field on the next
-        // Seed-Ok.
+        // `dispatch_quiescence_ok`'s fallback writes the field on the
+        // next Seed-Ok.
         let anchor_kind = p.kind().unwrap_or(ResourceKind::Dir);
         // Substitution-side projection of `ScanConfig.exclude`. The
         // resolver iterates source strings; the sensor consults compiled
@@ -3514,6 +3428,54 @@ impl EmitMode<'_> {
     const fn effect_forced(self) -> bool {
         matches!(self, Self::Standard { forced: true })
     }
+}
+
+/// The consequence of a fireable quiescence verdict
+/// ([`QuiescenceVerdict::Stable`], or [`QuiescenceVerdict::Unstable`] +
+/// `forced`) for a burst whose [`specter_core::BurstIntent`] is known —
+/// computed once by [`Engine::classify_consequence`] *after* the
+/// observed tree is committed, so the drift read sees the post-graft
+/// `current`.
+///
+/// **Owned payload by design.** [`Self::RecoveryFire`] carries the
+/// drifted Sub set so the classifier stays a total `&self` function;
+/// the `&[SubId]` borrow [`EmitMode::SeedDrift`] needs is taken at the
+/// `emit_effects` boundary, never stored on the classification (the
+/// classify and the emit are different stack frames — a stored borrow
+/// would outlive the local it points at).
+///
+/// Each variant's emission mode, Draining-gate participation, witness
+/// seal, and honesty narration are a total function of the variant. No
+/// derived `bool` or `Seal` discriminant is threaded alongside: the
+/// seal and the per-file-drop narration are read off
+/// `EmitMode::SeedDrift` at the single fire site, and the fresh-Seed
+/// skip narration — the one fact `EmitMode` cannot carry, since
+/// [`Self::StandardFire`] and [`Self::FreshSeedFire`] share
+/// `EmitMode::Standard` — is the only bit passed on.
+#[derive(Debug)]
+#[must_use]
+enum Consequence {
+    /// Standard burst. `EmitMode::Standard`; Draining-gated; no seal;
+    /// no honesty narration.
+    StandardFire,
+    /// Fresh Profile that witnessed activity
+    /// ([`Engine::seed_owes_first_fire`]). `EmitMode::Standard`;
+    /// Draining-gated; no seal;
+    /// [`Diagnostic::PerFileFireSkippedOnFreshSeed`] post-gate.
+    FreshSeedFire,
+    /// Recovery whose post-graft tree drifted from the settled
+    /// reference, with a non-empty fired set. `EmitMode::SeedDrift`;
+    /// Draining-gated; **seals the survival witness at this
+    /// certified-recovery decision** (pre-`Awaiting`);
+    /// [`Diagnostic::PerFileDriftDroppedOnRecovery`] post-gate.
+    RecoveryFire(SmallVec<[SubId; 2]>),
+    /// Fresh-static daemon restart, a no-drift recovery, or a recovery
+    /// whose fired set is empty (PerFile-only, or all Subs detached).
+    /// No emission; rebases the baseline (consuming a live witness if
+    /// any) and finishes; **never Draining-gated** — no Effect to
+    /// defer. [`Diagnostic::PerFileDriftDroppedOnRecovery`]
+    /// (self-gating predicate) before the rebase.
+    RecoverySeal,
 }
 
 /// One Sub's fire verdict in an [`Engine::emit_effects`] pass — the

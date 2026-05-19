@@ -12,7 +12,7 @@
 //!
 //! Effect-firing per se is **not** validated here — a fresh
 //! Profile's Seed burst establishes baseline and finishes without
-//! firing (`dispatch_seed_ok`'s no-drift terminal arm); subsequent
+//! firing (`fire_or_seal`'s `RecoverySeal` arm); subsequent
 //! Standard bursts on FsEvents are what fire. The Standard-burst
 //! mechanics are exhaustively pinned by `transitions_tests.rs`,
 //! `fire_cycle.rs`, and `burst_pacing.rs`. Composing the
@@ -197,7 +197,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
     // probes; both responses are hash-equal `AnchorOk(leaf)`: the
     // first sample is `Unstable` (`certified` starts `None`)
     // and re-batches; the second is hash-equal ⇒ `Stable` ⇒
-    // `seed_pin_body` commits the baseline and finishes to Idle.
+    // `RecoverySeal` commits the baseline and finishes to Idle.
     {
         let p = e.profiles().get(dynamic_profile).expect("Profile alive");
         assert_eq!(
@@ -224,8 +224,8 @@ fn full_lifecycle_attach_promote_seed_reap() {
     // The Seed-burst baseline establishes over the N=2 quiescence and
     // fires no Effect: a *fresh* Seed with no drift records the
     // baseline ("how things look right now") that future Standard
-    // bursts observe drift against — `dispatch_seed_ok`'s no-drift
-    // terminal arm. `seed_started` is the promote step's `now`.
+    // bursts observe drift against — `fire_or_seal`'s `RecoverySeal`
+    // arm. `seed_started` is the promote step's `now`.
     let leaf = file_leaf(EntryKind::File, 10);
     let seed_started = now;
     let mut seed_settled = seed_started;

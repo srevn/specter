@@ -254,7 +254,7 @@ fn attach_sub_caches_anchor_kind_for_classified_resource() {
 
 /// Resource-based attach against an `Unknown` slot leaves `Profile.kind
 /// = None` until the first probe response classifies the anchor. The
-/// `dispatch_seed_ok` fallback writes the field from the response shape
+/// `dispatch_quiescence_ok` fallback writes the field from the response shape
 /// — the rare unprobed-attach path's only signal of the anchor's
 /// classification.
 #[test]
@@ -527,7 +527,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     ignore = "debug_assert! is compiled out in release"
 )]
 #[should_panic(expected = "walker contract violated")]
-fn dispatch_standard_ok_with_kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
+fn kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
     // Set up a File-kinded Profile in Active(Verifying) and inject a
     // SubtreeProven (Dir) response.
     let mut e = Engine::new();
@@ -5710,7 +5710,7 @@ fn dispatch_rebase_ok_consumes_survival_witness() {
 }
 
 #[test]
-fn dispatch_seed_ok_no_drift_branch_consumes_survival_witness() {
+fn seed_recovery_seal_consumes_survival_witness() {
     let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
     // Drain the attach-time Seed-Verifying probe before the manual
     // `transition_state` clobber below drops that armed state.
@@ -5741,11 +5741,12 @@ fn dispatch_seed_ok_no_drift_branch_consumes_survival_witness() {
         "test setup: rebased snapshot must differ from the witness",
     );
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(
+    e.dispatch_quiescence_ok(
         pid,
         TreeSnapshot::Dir(rebased),
         QuiescenceVerdict::Stable,
         false,
+        BurstIntent::Seed,
         now,
         &mut out,
     );
@@ -5764,9 +5765,10 @@ fn dispatch_seed_ok_no_drift_branch_consumes_survival_witness() {
 }
 
 #[test]
-fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
+fn seed_recovery_fire_consumes_survival_witness_eagerly() {
     // Sub fired pre-loss; anchor lost; recovery Seed-Ok with drift.
-    // The eager consume on the drift branch (before
+    // The eager consume on the recovery-drift fire (the
+    // `EmitMode::SeedDrift` seal in `fire_and_settle`, before
     // transition_to_awaiting) keeps the baseline ⊕ witness exclusivity
     // holding at every step boundary, not just at later consume sites.
     let (mut e, pid, sid, anchor, now) = engine_with_attached_sub();
@@ -5802,17 +5804,22 @@ fn dispatch_seed_ok_drift_branch_consumes_survival_witness_eagerly() {
         "test setup: post-graft current must differ from the witness to drift",
     );
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(
+    e.dispatch_quiescence_ok(
         pid,
         TreeSnapshot::Dir(regrafted),
         QuiescenceVerdict::Stable,
         false,
+        BurstIntent::Seed,
         now,
         &mut out,
     );
 
-    // Drift branch must have fired one Effect.
-    assert_eq!(out.effects().len(), 1, "drift branch emitted one Effect");
+    // The recovery-drift fire must have emitted one Effect.
+    assert_eq!(
+        out.effects().len(),
+        1,
+        "recovery-drift fire emitted one Effect"
+    );
 
     let p = e.profiles.get(pid).unwrap();
     assert!(
@@ -5907,11 +5914,12 @@ fn per_file_drift_dropped_on_recovery_emits_once_on_real_drift() {
         "test setup: recovered tree must differ from the pre-loss witness to drift",
     );
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(
+    e.dispatch_quiescence_ok(
         pid,
         TreeSnapshot::Dir(recovered),
         QuiescenceVerdict::Stable,
         false,
+        BurstIntent::Seed,
         now,
         &mut out,
     );
@@ -5965,11 +5973,12 @@ fn per_file_drift_dropped_on_recovery_silent_on_byte_identical_recovery() {
         "test setup: recovered tree must be byte-identical to the witness",
     );
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(
+    e.dispatch_quiescence_ok(
         pid,
         TreeSnapshot::Dir(recovered),
         QuiescenceVerdict::Stable,
         false,
+        BurstIntent::Seed,
         now,
         &mut out,
     );
@@ -6025,11 +6034,12 @@ fn per_file_drift_dropped_on_recovery_gated_by_per_stable_file_scope() {
         "test setup: recovered tree must differ from the witness (real drift)",
     );
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(
+    e.dispatch_quiescence_ok(
         pid,
         TreeSnapshot::Dir(recovered),
         QuiescenceVerdict::Stable,
         false,
+        BurstIntent::Seed,
         now,
         &mut out,
     );
@@ -6291,18 +6301,20 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
         "Property 2: SeedDrift filter is empty post-detach",
     );
 
-    // A drift Seed-Ok now must NOT re-fire: the drift signal still
-    // trips (witness != current) but `fired_in` is empty, so
-    // dispatch_seed_ok falls through to the no-drift finish path. This
-    // is the behavioural proof that a detached Sub cannot be re-fired
-    // and that no purge is required to achieve it.
+    // A recovery Seed-Ok now must NOT re-fire: the tree still differs
+    // from the witness, but `any_fired` is false post-detach (sid_a's
+    // flag died with it; sid_b never fired), so `classify_consequence`
+    // yields `RecoverySeal` — seal-and-finish, no fire. This is the
+    // behavioural proof that a detached Sub cannot be re-fired and that
+    // no purge is required to achieve it.
     let regrafted = dir_tree_snap(vec![]);
     let mut out = StepOutput::default();
-    e.dispatch_seed_ok(
+    e.dispatch_quiescence_ok(
         pid,
         TreeSnapshot::Dir(regrafted),
         QuiescenceVerdict::Stable,
         false,
+        BurstIntent::Seed,
         now,
         &mut out,
     );
@@ -6660,10 +6672,9 @@ mod props {
         /// `prop_single_profile_never_has_active_standard_descendant` —
         /// the derived replacement for the deleted `dirty_descendants`
         /// I4 floor. A single-Profile engine has no covered descendant,
-        /// so the fresh reconfirm query that now gates
-        /// `dispatch_standard_ok`'s fire
-        /// (`coverage::has_active_standard_descendant`) must stay false
-        /// after *any* input sequence. This also pins the query's
+        /// so the fresh reconfirm query that now gates `gated_fire`'s
+        /// fire (`coverage::has_active_standard_descendant`) must stay
+        /// false after *any* input sequence. This also pins the query's
         /// self-exclusion: the lone Profile is the ancestor under test
         /// and must never count itself, through every burst phase the
         /// random actions drive it into.

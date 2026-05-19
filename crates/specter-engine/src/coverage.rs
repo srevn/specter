@@ -191,8 +191,8 @@ pub(crate) fn nearest_covering_ancestor(
 /// is not transitive: an intermediate broader Profile keeps a deeper
 /// one on `ancestor`'s chain even where `ancestor`'s own
 /// `max_depth`/`pattern` would exclude it). Evaluated fresh at each of
-/// its two consult points — the `dispatch_standard_ok` fire gate and
-/// the `finish_burst_to_idle` Draining sweep — never accumulated, so
+/// its two consult points — the `gated_fire` Draining gate and the
+/// `finish_burst_to_idle` Draining sweep — never accumulated, so
 /// no mid-burst topology move can desynchronise it.
 ///
 /// Iterative DFS over the **strict** Tree descendants of

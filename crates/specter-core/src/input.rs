@@ -93,12 +93,13 @@ pub enum Input {
     /// state is intact but the event stream is no longer trustworthy
     /// over `scope`. The engine response is to reseed every Profile in
     /// scope (`Engine::on_sensor_overflow`): cancel any in-flight burst
-    /// and start a fresh Seed burst whose post-probe `dispatch_seed_ok`
-    /// re-establishes baseline against disk reality and runs the
-    /// drift detection. Active-mode drift (overflow path: `baseline`
-    /// persists across the reseed) compares `baseline.hash()` against
-    /// the post-graft `current.hash()`; survival-mode drift (anchor-
-    /// loss recovery path) compares `last_settled_hash_at_loss` against
+    /// and start a fresh Seed burst whose post-probe Seed-Ok
+    /// (`dispatch_quiescence_ok`) re-establishes baseline against disk
+    /// reality and runs the drift detection. Active-mode drift
+    /// (overflow path: `baseline` persists across the reseed) compares
+    /// `baseline.hash()` against the post-graft `current.hash()`;
+    /// survival-mode drift (anchor-loss recovery path) compares
+    /// `last_settled_hash_at_loss` against
     /// `current.hash()`. On drift, fires once for every SubtreeRoot Sub
     /// on the Profile that has fired ([`crate::Sub::has_fired`]), then
     /// rebases.

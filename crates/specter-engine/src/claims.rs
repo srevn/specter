@@ -261,8 +261,10 @@ impl Engine {
     ///   baseline in the next Seed-Ok's drift verdict
     ///   ([`Engine::seed_drift_observed`] reads it via
     ///   [`specter_core::Profile::settled_hash`]). `dispatch_rebase_ok`
-    ///   and the Seed **pin path** only (`seed_pin_body`, reached from
-    ///   `dispatch_seed_ok`'s `Stable` / `Unstable + forced` arms) call
+    ///   and the Seed-Ok recovery pin only (the `EmitMode::SeedDrift`
+    ///   seal in `fire_and_settle`, or the silent `RecoverySeal` arm of
+    ///   `fire_or_seal`, reached from the `Stable` / `Unstable + forced`
+    ///   Seed verdicts) call
     ///   [`specter_core::Profile::rebase_baseline`], which consumes it
     ///   (the `Witness → Snapshot` move); the Seed `Unstable + !forced`
     ///   and `Undischarged` arms graft (or skip) without rebasing, so
