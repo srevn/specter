@@ -1943,6 +1943,81 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
     assert!(p.current().is_none());
 }
 
+#[test]
+fn count_gate_zero_iff_no_carrier_and_anchor_loss_while_idle_balances_nonsteady() {
+    // Oracle (b): the O(1) carrier gate is sound. `nonsteady() == 0`
+    // ⇒ `classify_event_carriers` empty ∀ r — a healthy *anchored*
+    // Idle Profile is excluded by the tight predicate, so a quiet
+    // watcher never pins the gate. And the count stays balanced
+    // across the anchor-loss-while-Idle reconcile
+    // (`discard_anchor_state` → `ProfileMap::reconcile_nonsteady`),
+    // the loss direction of the plan's subtlest count point. The
+    // debug count-vs-full-scan tripwire inside
+    // `classify_event_carriers` runs on every covering scan here
+    // (and across the whole suite), so a desync panics in debug
+    // regardless of the explicit asserts below — this test pins the
+    // *implication* and the loss/recovery balance the tripwire alone
+    // does not state.
+    let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
+
+    // A carrier is empty iff all three carrier classes are empty.
+    let empty = |e: &Engine, r: ResourceId| {
+        let c = e.classify_event_carriers(r);
+        c.descents.is_empty() && c.recoveries.is_empty() && c.promoter_recoveries.is_empty()
+    };
+
+    // Healthy anchored Idle ⇒ carrier-free steady state.
+    {
+        let p = e.profiles().get(pid).unwrap();
+        assert!(p.current().is_some() && matches!(p.state(), ProfileState::Idle));
+    }
+    assert_eq!(
+        e.profiles().nonsteady(),
+        0,
+        "a healthy anchored Idle Profile is excluded from the carrier count",
+    );
+    assert!(empty(&e, root), "gate zero ⇒ no carrier at the anchor");
+    if let Some(par) = e.tree.parent(root) {
+        assert!(empty(&e, par), "gate zero ⇒ no carrier at the parent");
+    }
+
+    // Anchor lost while Idle: `Removed @ anchor` ⇒ finalize_anchor_lost
+    // with `was_active == false` ⇒ `discard_anchor_state` clears the
+    // anchor with no state edge. The reconcile must move the count
+    // 0 → 1 (pre-fix this desynced — the Profile is now an
+    // Idle-anchorless recovery carrier the gate would have hidden).
+    e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Removed,
+        },
+        Instant::now(),
+    );
+
+    {
+        let p = e.profiles().get(pid).unwrap();
+        assert!(matches!(p.state(), ProfileState::Idle) && p.current().is_none());
+    }
+    assert_eq!(
+        e.profiles().nonsteady(),
+        1,
+        "anchor-loss-while-Idle reconciled the carrier count via reconcile_nonsteady \
+         (pre-fix this desynced to 0 — a false-skip of the recovery scan)",
+    );
+    // Sound over-approximation: the predicate is `Idle ∧ ¬current`
+    // (state + anchor), *not* the precise recovery predicate (which
+    // also needs `watch_root_parent`). This root-anchor harness has
+    // no parent recovery channel, so the scan finds no carrier here
+    // even though the count is 1 — the gate over-counts harmlessly
+    // (the scan runs and returns empty) but, critically, *never
+    // under-counts* (it would never have wrongly skipped the scan).
+    assert!(
+        empty(&e, root),
+        "over-approx: count gated the scan ON; no precise carrier in this harness",
+    );
+}
+
 // ---- TimerExpired dispatch ----
 
 #[test]
