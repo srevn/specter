@@ -37,7 +37,7 @@
 //!    structural — an empty/absent slot emits nothing and no second
 //!    copy of the correlation can diverge), materializes the
 //!    per-carrier proof obligation (the pre-fire Standard burst's
-//!    `dirty_resources` projected to `Chains`; `WholeSubtree` for Seed
+//!    `dirty` captured paths as `Chains`; `WholeSubtree` for Seed
 //!    and the post-fire Rebase, neither of which has a trustworthy
 //!    prior to skip against), and renders the kind-dispatched wire.
 //!    Every read is immutable: the choke is a pure `&self` state→wire
@@ -61,7 +61,6 @@
 //!    that pins it under fuzzing and property tests.
 
 use crate::Engine;
-use crate::burst::build_obligation_chains;
 use crate::path::empty_path;
 use specter_core::{
     ActiveBurst, BurstIntent, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOwner,
@@ -406,7 +405,8 @@ impl Engine {
     ///    ⇒ `AnchorFile`, else ⇒ `Subtree` with the Profile's
     ///    `(config, config_hash)`, `baseline_subtree`, and the
     ///    per-carrier [`specter_core::ProofObligation`] (Standard ⇒
-    ///    `Chains` off the persisting `dirty_resources`; Seed and
+    ///    `Chains` from the persisting `dirty`'s captured paths, or
+    ///    `WholeSubtree` under a `debug_assert` if empty; Seed and
     ///    Rebase ⇒ `WholeSubtree` — no trustworthy prior — built
     ///    lazily, never for a File anchor). The kind rule lives here
     ///    exactly once, so the prior positional constructors' fan-out
@@ -415,7 +415,7 @@ impl Engine {
         // `Copy` carrier classification: which carrier, and (for the
         // pre-fire carrier) the target + `forced` + `intent` read off
         // state. No obligation source is carried here — the borrowed
-        // `dirty_resources` is not `Copy`; it is read immutably off the
+        // `dirty` provenance is not `Copy`; it is read immutably off the
         // still-borrowed Profile in the render pass, keyed by this.
         #[derive(Clone, Copy)]
         enum Carrier {
@@ -425,12 +425,13 @@ impl Engine {
             /// proof obligation (a structural query is not a
             /// quiescence observation).
             Descent(ResourceId),
-            /// Profile `Verifying`. `target` = `pre.probe_target`,
-            /// `forced` = `pre.forced`. `intent` selects the
-            /// obligation kind: Seed ⇒ `WholeSubtree` (no trustworthy
-            /// prior); Standard ⇒ `Chains` projected off the
-            /// *persisting* `dirty_resources` (read immutably in the
-            /// render pass — the burst outlives this probe across
+            /// Profile `Verifying`. `target` = `pre.probe_target`
+            /// (the live id `pre_fire_target` resolved from the
+            /// captured paths' LCA), `forced` = `pre.forced`. `intent`
+            /// selects the obligation kind: Seed ⇒ `WholeSubtree` (no
+            /// trustworthy prior); Standard ⇒ `Chains` from the
+            /// *persisting* `dirty`'s captured paths (read immutably in
+            /// the render pass — the burst outlives this probe across
             /// re-batching).
             PreFire {
                 target: ResourceId,
@@ -540,11 +541,23 @@ impl Engine {
                                     ..
                                 } => ProofObligation::WholeSubtree,
                                 // Standard: the event-dirty root→leaf
-                                // chains, projected off the *persisting*
-                                // `dirty_resources` (re-read immutably —
-                                // the carrier classified PreFire and the
-                                // stable `&Profile` borrow makes an
-                                // intervening state change unrepresentable).
+                                // chains, the captured paths off the
+                                // *persisting* `dirty` (re-read
+                                // immutably — the carrier classified
+                                // PreFire and the stable `&Profile`
+                                // borrow makes an intervening state
+                                // change unrepresentable). Every captured
+                                // path is at-or-under `target` by
+                                // construction (`pre_fire_target`
+                                // resolved the captured paths' LCA), so
+                                // no subtree filter is needed. An empty
+                                // `dirty` is a should-never (a Standard
+                                // burst notes its trigger); degrade to
+                                // `WholeSubtree` so the response proves
+                                // the whole subtree rather than
+                                // silently skipping it, with the
+                                // `debug_assert` as the dev/CI tripwire
+                                // for an ingest path that forgot to note.
                                 Carrier::PreFire {
                                     intent: BurstIntent::Standard,
                                     ..
@@ -559,11 +572,16 @@ impl Engine {
                                              borrow"
                                         )
                                     };
-                                    ProofObligation::Chains(build_obligation_chains(
-                                        &pre.dirty_resources,
-                                        target,
-                                        &self.tree,
-                                    ))
+                                    if pre.dirty.is_empty() {
+                                        debug_assert!(
+                                            false,
+                                            "Standard obligation empty: every ingest site \
+                                             must note(id, path) (profile {pid:?})"
+                                        );
+                                        ProofObligation::WholeSubtree
+                                    } else {
+                                        ProofObligation::Chains(pre.dirty.chains())
+                                    }
                                 }
                                 // Descent emits ProbeRequest::Descent in
                                 // the outer arm and never reaches the

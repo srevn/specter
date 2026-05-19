@@ -476,8 +476,7 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
 /// 2. `FsEvent` at `/a` ⇒ `start_standard_burst` ⇒
 ///    `Active(PreFire(Batching))`.
 /// 3. `FsEvent` at `/a/b` mid-Batching ⇒ `event_drives_batching`
-///    tracks `b` in the burst's `dirty_resources` /
-///    `dirty_resources` accumulator.
+///    tracks `b`'s path in the burst's `dirty` provenance.
 /// 4. `WatchOpRejected` on the anchor ⇒ `on_watch_op_rejected` ⇒
 ///    `finalize_anchor_lost(P)` ⇒ `discard_anchor_state(P)` ⇒
 ///    `release_descendant_claim(P)` walks the snapshot ⇒
@@ -550,9 +549,10 @@ fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
             matches!(pre.phase, specter_core::PreFirePhase::Batching { .. }),
             "descendant event keeps the burst Batching",
         );
+        let b_path = e.tree().path_of(b_id).expect("b path resolves");
         assert!(
-            pre.dirty_resources.contains(&b_id),
-            "event_drives_batching tracked b in dirty_resources (the obligation basis)",
+            pre.dirty.chains().contains(&b_path),
+            "event_drives_batching tracked b's path in dirty (the obligation basis)",
         );
     }
 

@@ -7,12 +7,14 @@
 
 use crate::testkit::single_exec_program;
 use crate::{
-    ActionProgram, ArgPart, ArgTemplate, ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind,
-    FsIdentity, LeafEntry, ProbeOutcome, ProfileId, ProofAuthority,
+    ActionProgram, ArgPart, ArgTemplate, ChildEntry, DirChild, DirMeta, DirSnapshot,
+    DirtyProvenance, EntryKind, FsIdentity, LeafEntry, ProbeOutcome, ProfileId, ProofAuthority,
+    ResourceId,
 };
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -65,6 +67,32 @@ pub fn dir_snap(children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
 #[must_use]
 pub fn file_leaf(kind: EntryKind, inode: u64) -> LeafEntry {
     LeafEntry::synthetic(kind, 0, UNIX_EPOCH, FsIdentity::synthetic(inode, 0))
+}
+
+/// Build a [`DirtyProvenance`] from `(slot, absolute-path)` pairs — the
+/// canonical fixture for the Standard pre-fire obligation / scope
+/// projection (`chains`, `lca_path`) and `pre_fire_target`.
+///
+/// Mirrors the production ingest contract exactly: each pair is one
+/// [`DirtyProvenance::note`] in slice order, so a repeated `ResourceId`
+/// is last-writer-wins just as a repeat `FsEvent` for one slot would be.
+/// Paths must be **absolute** — production captures a root-materialised
+/// `Arc<Path>`, and the component-LCA relies on every value sharing at
+/// least the root; a relative path is a fixture bug, caught loudly in
+/// dev/CI and inert in release (the same discipline as [`dir_snap`]'s
+/// single-component-name check).
+#[must_use]
+pub fn dirty_provenance(entries: &[(ResourceId, &str)]) -> DirtyProvenance {
+    let mut dirty = DirtyProvenance::new();
+    for &(id, path) in entries {
+        debug_assert!(
+            path.starts_with('/'),
+            "dirty_provenance: '{path}' must be an absolute path \
+             (production captures a root-materialised Arc<Path>)",
+        );
+        dirty.note(id, Arc::from(Path::new(path)));
+    }
+    dirty
 }
 
 /// A `Subtree` outcome whose walk discharged its obligation.

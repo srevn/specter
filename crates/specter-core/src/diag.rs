@@ -73,37 +73,10 @@ pub enum BurstHelper {
     RestartBurstFromFireTailResidual,
 }
 
-/// Failure mode for an [`Diagnostic::LcaIntegrityViolation`] emission.
-///
-/// The engine's LCA reduction (`burst::lca_target` →  `burst::lca_pair`)
-/// walks each `dirty_resources` entry up the Tree to its joint
-/// ancestor; the variants below distinguish the two ways that walk can
-/// abort.
-///
-/// In production each is structurally unreachable — the upstream
-/// `live` filter drops stale ids before `lca_pair` runs, and ancestry
-/// walks bottom out at the FS-root scaffold — but instrumenting both
-/// keeps the failure surface visible if a future refactor breaks
-/// either invariant.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LcaIntegritySource {
-    /// `tree.get(id)` returned `None` at `lca_pair`'s entry — an upstream
-    /// caller bypassed the `live` filter and handed a stale id through.
-    /// Fresh class of bug; the silent live-filter at `lca_target` should
-    /// have caught this.
-    StaleId,
-    /// `tree.parent(id)` returned `None` mid-walk — the candidate's
-    /// ancestor chain ran out before two candidates aligned. Indicates a
-    /// structural break in the Tree (a node whose `parent` pointer
-    /// dangles) or a depth-equalisation error.
-    BrokenAncestry,
-}
-
 /// Structural cause behind a [`Diagnostic::SpliceCrossedUncovered`]
 /// emission.
 ///
-/// Mirrors the cause-tag precedent set by [`LcaIntegritySource`] —
-/// both demux otherwise-defensive diagnostics into operator-actionable
+/// Demuxes an otherwise-defensive diagnostic into operator-actionable
 /// classes without the operator having to re-trace the failure site.
 /// One variant per structural failure mode inside `splice_dir_prior` /
 /// `splice_dir`:
@@ -405,7 +378,7 @@ pub enum Diagnostic {
     /// `FsEvent` arrived while the Profile was in
     /// [`crate::PostFirePhase::Awaiting`] or [`crate::PostFirePhase::Rebasing`]
     /// — the post-fire tail of a burst. The engine absorbs the event:
-    /// no fresh burst, no settle re-arm, no `dirty_resources` extension.
+    /// no fresh burst, no settle re-arm, no `dirty` extension.
     /// The Rebasing probe captures the disk state (including whatever
     /// triggered this event) into the new baseline, so the change is
     /// folded into the fire-cycle's terminal rebase rather than driving
@@ -667,21 +640,5 @@ pub enum Diagnostic {
         profile: ProfileId,
         helper: BurstHelper,
         observed: ProfileStateDiscriminant,
-    },
-    /// The engine's LCA reduction over a burst's `dirty_resources`
-    /// failed an internal integrity check. `source` distinguishes the
-    /// two failure modes; the caller (`lca_target`) recovers by
-    /// folding the joint candidate to anchor so the burst still has a
-    /// probe target — the diagnostic surfaces the breach without
-    /// stalling the lifecycle.
-    ///
-    /// See [`LcaIntegritySource`] for the two failure modes. Both are
-    /// structurally unreachable in v1 (the upstream `live` filter
-    /// catches stale ids; Tree ancestry walks always bottom out at the
-    /// FS-root scaffold), so an emission here is a regression signal,
-    /// not noise.
-    LcaIntegrityViolation {
-        profile: ProfileId,
-        source: LcaIntegritySource,
     },
 }

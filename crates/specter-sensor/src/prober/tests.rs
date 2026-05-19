@@ -49,11 +49,11 @@ fn req_anchor(profile: ProfileId, correlation: u64) -> ProbeRequest {
     }
 }
 
-/// A `ProofObligation::Chains` over `set`. `Chains` has the skip
-/// semantics the pre-split `force_walk: BTreeSet<Arc<Path>>` arg
-/// carried — empty ⇒ mtime-skip allowed, populated ⇒ refuse the skip at
-/// any frame at-or-above a member. These walker-mechanics tests never
-/// want `WholeSubtree` ("never skip"), so the bridge is total.
+/// A `ProofObligation::Chains` over `set` — the dirty root→leaf chains
+/// the walker must not mtime-skip past: empty ⇒ mtime-skip allowed,
+/// populated ⇒ refuse the skip at any frame at-or-above a member. These
+/// walker-mechanics tests never want `WholeSubtree` ("never skip"), so
+/// the bridge is total.
 fn chains(set: BTreeSet<Arc<Path>>) -> ProofObligation {
     ProofObligation::Chains(set)
 }
@@ -699,10 +699,10 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
     assert!(Arc::ptr_eq(&prior_sub_arc, &new_sub_arc));
 }
 
-// ---------------------------------------------------------------- walk: force_walk
+// ---------------------------------------------------------------- walk: obligation chains
 
 #[test]
-fn force_walk_with_path_in_set_refuses_skip() {
+fn chains_with_path_in_set_refuses_skip() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
@@ -713,21 +713,28 @@ fn force_walk_with_path_in_set_refuses_skip() {
     else {
         panic!("first probe failed");
     };
-    // force_walk = {target_path} — refuse the skip even though mtime matches.
-    let mut force = BTreeSet::new();
-    force.insert(Arc::from(tmp.path()));
-    let second = probe_subtree(tmp.path(), &cfg, 0, Some(&baseline), &chains(force), false);
+    // Chains = {target_path} — refuse the skip even though mtime matches.
+    let mut obligation = BTreeSet::new();
+    obligation.insert(Arc::from(tmp.path()));
+    let second = probe_subtree(
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&baseline),
+        &chains(obligation),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc2, .. } = second else {
         panic!("re-probe failed");
     };
     assert!(
         !Arc::ptr_eq(&baseline, &arc2),
-        "force_walk on the target path should defeat mtime-skip"
+        "an obligation chain on the target path should defeat mtime-skip"
     );
 }
 
 #[test]
-fn force_walk_with_descendant_in_set_refuses_skip_at_target() {
+fn chains_with_descendant_in_set_refuses_skip_at_target() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
@@ -739,11 +746,18 @@ fn force_walk_with_descendant_in_set_refuses_skip_at_target() {
     else {
         panic!("first probe failed");
     };
-    // force_walk = {tmp/sub/file.c}: descendant; root must enumerate so we
+    // Chains = {tmp/sub/file.c}: descendant; root must enumerate so we
     // can recurse into `sub`.
-    let mut force = BTreeSet::new();
-    force.insert(Arc::from(tmp.path().join("sub").join("file.c")));
-    let second = probe_subtree(tmp.path(), &cfg, 0, Some(&baseline), &chains(force), false);
+    let mut obligation = BTreeSet::new();
+    obligation.insert(Arc::from(tmp.path().join("sub").join("file.c")));
+    let second = probe_subtree(
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&baseline),
+        &chains(obligation),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc2, .. } = second else {
         panic!("re-probe failed");
     };
@@ -751,7 +765,7 @@ fn force_walk_with_descendant_in_set_refuses_skip_at_target() {
 }
 
 #[test]
-fn force_walk_with_unrelated_path_does_not_affect_skip() {
+fn chains_with_unrelated_path_does_not_affect_skip() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
@@ -763,9 +777,16 @@ fn force_walk_with_unrelated_path_does_not_affect_skip() {
         panic!("first probe failed");
     };
     // Path outside target's subtree — skip applies normally.
-    let mut force = BTreeSet::new();
-    force.insert(Arc::from(Path::new("/totally/unrelated/path")));
-    let second = probe_subtree(tmp.path(), &cfg, 0, Some(&baseline), &chains(force), false);
+    let mut obligation = BTreeSet::new();
+    obligation.insert(Arc::from(Path::new("/totally/unrelated/path")));
+    let second = probe_subtree(
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&baseline),
+        &chains(obligation),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc2, .. } = second else {
         panic!("re-probe failed");
     };
@@ -773,10 +794,10 @@ fn force_walk_with_unrelated_path_does_not_affect_skip() {
 }
 
 #[test]
-fn force_walk_propagates_through_recursion_to_descendant() {
-    // force_walk = {target/dir_a/dir_b}: target enumerates → dir_a
+fn chains_propagate_through_recursion_to_descendant() {
+    // Chains = {target/dir_a/dir_b}: target enumerates → dir_a
     // enumerates → dir_b enumerates. sibling dir_c (mtime-stable) is
-    // mtime-skipped during the recursion, since no force path is at-or-
+    // mtime-skipped during the recursion, since no chain path is at-or-
     // under dir_c.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("dir_a/dir_b")).unwrap();
@@ -791,22 +812,29 @@ fn force_walk_propagates_through_recursion_to_descendant() {
         panic!("first probe failed");
     };
     let prior_dir_c_arc = Arc::clone(baseline.lookup_covered_dir("dir_c").unwrap());
-    let mut force = BTreeSet::new();
-    force.insert(Arc::from(tmp.path().join("dir_a").join("dir_b")));
-    let second = probe_subtree(tmp.path(), &cfg, 0, Some(&baseline), &chains(force), false);
+    let mut obligation = BTreeSet::new();
+    obligation.insert(Arc::from(tmp.path().join("dir_a").join("dir_b")));
+    let second = probe_subtree(
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&baseline),
+        &chains(obligation),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: top, .. } = second else {
         panic!("re-probe failed");
     };
-    // dir_c was untouched and not under a forced path; the recursion
+    // dir_c was untouched and not under a chain path; the recursion
     // should mtime-skip and reuse the baseline Arc.
     let new_dir_c_arc = Arc::clone(top.lookup_covered_dir("dir_c").unwrap());
     assert!(Arc::ptr_eq(&prior_dir_c_arc, &new_dir_c_arc));
 }
 
 #[test]
-fn force_walk_empty_set_behaves_like_v4() {
-    // No force paths — pure mtime-skip semantics. Equivalent to the
-    // `mtime_skip_returns_arc_clone` test.
+fn chains_empty_set_allows_mtime_skip() {
+    // No obligation chains — pure mtime-skip semantics. Equivalent to
+    // the `mtime_skip_returns_arc_clone` test.
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
@@ -882,7 +910,7 @@ fn forced_true_bypasses_mtime_skip_in_recursion() {
 
 #[test]
 fn forced_false_default_path_unaffected() {
-    // Control: forced=false + mtime match + empty force_walk → skip.
+    // Control: forced=false + mtime match + empty obligation chains → skip.
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();

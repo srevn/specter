@@ -73,18 +73,29 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // Idempotence: an FsEvent for a Resource with `watch_demand == 0`
-        // is a race between Unwatch and the Sensor's drain.
-        let watch_demand = self
-            .tree
-            .get(resource)
-            .map_or(0, specter_core::Resource::watch_demand);
-        if watch_demand == 0 {
+        // Idempotence + the single pre-dispatch resource resolution.
+        // One `tree.get`: a stale id or `watch_demand == 0` is a race
+        // between Unwatch and the Sensor's drain (drop with
+        // `EventOnUnwatchedResource`). A live, watched slot yields the
+        // proxy back-ref snapshot AND the event path, both captured
+        // here — pre-dispatch, off the proven-live `&Resource`. The
+        // path is the staleness-immune historical fact the burst
+        // accumulators need: a later promoter / covering dispatch can
+        // reap the slot, so a post-dispatch `path_of` would be
+        // fallible exactly where the obligation must not lose an entry.
+        let Some(r) = self.tree.get(resource) else {
+            out.diagnostics
+                .push(Diagnostic::EventOnUnwatchedResource { resource });
+            return;
+        };
+        if r.watch_demand() == 0 {
             out.diagnostics
                 .push(Diagnostic::EventOnUnwatchedResource { resource });
             return;
         }
-
+        // `Arc::clone` of the slot's materialised path — an O(1)
+        // refcount bump, total by construction (the slot is live).
+        let event_path = Arc::clone(r.path());
         // Snapshot the proxy back-ref BEFORE any dispatch — each
         // `on_promoter_proxy_event` mutates Promoter state, and the
         // enumeration-vanished cascade
@@ -94,11 +105,8 @@ impl Engine {
         // mid-loop. The snapshot keeps the dispatch list stable across
         // the iteration. SmallVec inline cap of 1 covers the typical
         // case (one proxy back-ref) without allocation.
-        let proxies: SmallVec<[specter_core::PromoterId; 1]> = self
-            .tree
-            .get(resource)
-            .map(|r| r.proxy_promoters().iter().copied().collect())
-            .unwrap_or_default();
+        let proxies: SmallVec<[specter_core::PromoterId; 1]> =
+            r.proxy_promoters().iter().copied().collect();
 
         // Single-pass classification of the event's carriers: Profiles
         // that "carry" a dispatch responsibility for this resource.
@@ -188,7 +196,7 @@ impl Engine {
             // (lifecycle: anchor disappearance recovery, anchor reappearance
             // detection, etc.). Descendant events whose class is not in
             // the Profile's `events` drop here, before `drive_burst`
-            // extends the pre-fire or post-fire burst's `dirty_resources`.
+            // notes into the pre-fire or post-fire burst's `dirty`.
             if !is_anchor && !profile_events.intersects(event_class) {
                 out.diagnostics.push(Diagnostic::EventClassDropped {
                     resource,
@@ -206,7 +214,7 @@ impl Engine {
                 // whose class matches: drive the burst forward. Descendant
                 // terminal events drive the burst; the next probe response
                 // reconciles the slot via the diff-against-prior pass.
-                self.drive_burst(profile_id, resource, event, now, out);
+                self.drive_burst(profile_id, resource, &event_path, event, now, out);
             }
         }
     }
@@ -1396,7 +1404,7 @@ impl Engine {
     ///   [`Engine::finish_burst_to_idle`] (which cancels any pending
     ///   probe and runs the Draining-sweep reconfirm cascade), then
     ///   start a fresh seed burst. The Standard burst's accumulated
-    ///   `dirty_resources` are
+    ///   `dirty` provenance is
     ///   discarded — the seed re-baselines against the post-overflow
     ///   tree, which strictly dominates whatever the Standard burst was
     ///   tracking. `reap_pending` Profiles reaped inside
@@ -1673,15 +1681,16 @@ impl Engine {
 
     /// Start a new burst (Seed if no baseline yet, Standard if baseline
     /// established); pre-fire `Active` → fold the event through
-    /// `event_drives_batching` (accumulates `dirty_resources`, emits a
+    /// `event_drives_batching` (notes into `dirty`, emits a
     /// Cancel iff a probe was in flight, arms a fresh settle timer);
     /// post-fire `Active` (`Awaiting` / `Rebasing`) → defer it via
     /// `absorb_event_into_fire_tail`.
     ///
-    /// Pre-fire, `dirty_resources` is the single accumulator — it both
-    /// derives the probe target (its LCA) and is projected to the
-    /// `Chains` proof obligation at the emission choke. The post-fire
-    /// absorb appends `event_resource` to the post-fire `dirty_resources`
+    /// Pre-fire, `dirty` is the single accumulator — its captured paths
+    /// both derive the probe scope (their component-LCA, resolved to a
+    /// live id) and are projected to the `Chains` proof obligation at
+    /// the emission choke. The post-fire absorb notes
+    /// `(event_resource, event_path)` into the post-fire `dirty`
     /// (the fire-tail residual): the next `WholeSubtree` rebase read
     /// re-observes it by construction (that obligation never
     /// mtime-skips), and a non-empty residual restarts a fresh Standard
@@ -1697,6 +1706,7 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         event_resource: ResourceId,
+        event_path: &Arc<Path>,
         event: FsEvent,
         now: Instant,
         out: &mut StepOutput,
@@ -1723,27 +1733,38 @@ impl Engine {
                 // anchor absent ⇒ loss-recovery candidate?" — and
                 // correctly stays `current_is_some()`.)
                 if p.baseline_is_some() {
-                    self.start_standard_burst(profile_id, event_resource, now, out);
+                    self.start_standard_burst(profile_id, event_resource, event_path, now, out);
                 } else {
-                    // §4: thread the triggering FsEvent into the Seed's
-                    // `dirty_resources` so an isolated post-recovery
-                    // change (Idle+!baseline reached via the
+                    // Thread the triggering FsEvent into the Seed's
+                    // provenance so an isolated post-recovery change
+                    // (Idle+!baseline reached via the
                     // `undischarged_consequence` ceiling terminal) is
                     // witnessed — symmetric with `start_standard_burst`.
-                    self.start_seed_burst(profile_id, Some(event_resource), now, out);
+                    self.start_seed_burst(
+                        profile_id,
+                        Some((event_resource, Arc::clone(event_path))),
+                        now,
+                        out,
+                    );
                 }
             }
             // The post-fire absorb arm is *the* typed-disjoint path from
-            // the pre-fire `event_drives_batching` arm: mutating
-            // `dirty_resources` and emitting `EventAbsorbedByFireTail`
-            // belongs to `PostFireBurst` alone, and the helper owns the
-            // mutation in `burst.rs` so `transitions.rs` never reaches
-            // for burst internals.
+            // the pre-fire `event_drives_batching` arm: noting into
+            // `dirty` and emitting `EventAbsorbedByFireTail` belongs to
+            // `PostFireBurst` alone, and the helper owns the mutation in
+            // `burst.rs` so `transitions.rs` never reaches for burst
+            // internals.
             ProfileState::Active(ActiveBurst::PostFire(_), _) => {
-                self.absorb_event_into_fire_tail(profile_id, event_resource, event, out);
+                self.absorb_event_into_fire_tail(
+                    profile_id,
+                    event_resource,
+                    event_path,
+                    event,
+                    out,
+                );
             }
             ProfileState::Active(ActiveBurst::PreFire(_), _) => {
-                self.event_drives_batching(profile_id, event_resource, now, out);
+                self.event_drives_batching(profile_id, event_resource, event_path, now, out);
             }
             // Pending Profiles never reach here — `covering_profiles`
             // filters them at the source. Defensive no-op.
@@ -2096,7 +2117,7 @@ impl Engine {
         // The pre-Awaiting rebase here is also forward-defensive: no
         // current code path reads `Profile.baseline` during Awaiting /
         // Rebasing (the absorb arm touches only
-        // `PostFireBurst.dirty_resources`; `transition_to_rebasing`
+        // `PostFireBurst.dirty`; `transition_to_rebasing`
         // ships `Profile.current`, not `baseline`), but pinning the
         // Profile's view here keeps the cross-field invariant intact
         // against any future absorb / rebase path that does read it.
@@ -2300,7 +2321,7 @@ impl Engine {
 
     /// Whether this Seed-Ok must fire a *first* time: a fresh,
     /// never-fired Profile that **witnessed activity** during the Seed
-    /// window (`!dirty_resources.is_empty()`). The discriminant for the
+    /// window (`!dirty.is_empty()`). The discriminant for the
     /// three disjoint Seed-Ok consequences, split on the `any_fired`
     /// axis (and, for `!any_fired`, the witnessed-activity axis):
     ///
@@ -2328,7 +2349,7 @@ impl Engine {
         self.profiles
             .get(profile_id)
             .and_then(specter_core::Profile::pre_fire_burst)
-            .is_some_and(|pre| !pre.dirty_resources.is_empty())
+            .is_some_and(|pre| !pre.dirty.is_empty())
     }
 
     /// The pre-fire probe target + the covered-descendant fire-gate —
@@ -2731,8 +2752,7 @@ impl Engine {
                     .map(specter_core::Profile::state)
                 {
                     Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => {
-                        !post.dirty_resources.is_empty()
-                            && matches!(finish, BurstFinish::ReturnToIdle)
+                        !post.dirty.is_empty() && matches!(finish, BurstFinish::ReturnToIdle)
                     }
                     _ => false,
                 };

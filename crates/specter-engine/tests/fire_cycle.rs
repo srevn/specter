@@ -351,7 +351,7 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
     // absorbed during the *final* rebase round-trip (after the last
     // `transition_to_rebasing` re-arm, before the Stable response) is
     // the genuine final-window residual — `transition_to_rebasing`
-    // clears `dirty_resources` at every loop entry, so only the final
+    // clears `dirty` at every loop entry, so only the final
     // round-trip's absorbs survive to the `Stable` verdict. A non-empty
     // residual there restarts a fresh debounced Standard burst seeded
     // from the residual via a typed PostFire→PreFire move that
@@ -424,7 +424,7 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
     };
 
     // RebaseSettle expiry → transition_to_rebasing(LoopReArm): clears
-    // `dirty_resources` again and arms rebase probe #2 — the FINAL
+    // `dirty` again and arms rebase probe #2 — the FINAL
     // round-trip.
     let rearm_out = e.step(
         Input::TimerExpired {
@@ -474,24 +474,30 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
     );
 
     // A fresh debounced Standard burst is armed, carrying the residual
-    // as `dirty_resources` — the LCA basis and the source of the
+    // as `dirty` provenance — the LCA basis and the source of the
     // mtime-skip-defeating obligation. ReturnToIdle is preserved across
     // the typed move.
+    let child_path = Arc::clone(e.tree().get(child).unwrap().path());
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(
             ActiveBurst::PreFire(PreFireBurst {
                 phase: PreFirePhase::Batching { .. },
                 intent: BurstIntent::Standard,
                 forced: false,
-                dirty_resources,
+                dirty,
                 last_event_time,
                 ..
             }),
             BurstFinish::ReturnToIdle,
         ) => {
             assert!(
-                dirty_resources.contains(&child),
-                "residual seeds the next probe's LCA basis and obligation",
+                dirty.chains().contains(&child_path),
+                "residual seeds the next probe's obligation chains",
+            );
+            assert_eq!(
+                dirty.lca_path(),
+                Some(child_path),
+                "the lone residual resource is the component-LCA basis",
             );
             assert_eq!(
                 *last_event_time,
@@ -764,7 +770,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
 #[test]
 fn fire_cycle_fresh_seed_skips_awaiting() {
     // Covers the **no-activity** fresh Seed: a fresh attach with NO
-    // FsEvents injected. With an empty `dirty_resources`,
+    // FsEvents injected. With an empty `dirty` provenance,
     // `seed_owes_first_fire` is false and `seed_drift_observed` is
     // false (never-fired) ⇒ `classify_consequence` yields the silent
     // `RecoverySeal` ⇒ finish_to_idle directly, no Awaiting tail.

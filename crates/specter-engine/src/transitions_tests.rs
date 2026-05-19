@@ -23,16 +23,16 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, BurstIntent,
     CertifiedPrior, ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta,
-    DirSnapshot, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity,
-    Input, LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst, PostFirePhase,
-    PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse,
-    ProbeSlot, ProfileIdentity, ProfileState, Promoter, PromoterAttachRequest,
+    DirSnapshot, DirtyProvenance, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent,
+    FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst,
+    PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest,
+    ProbeResponse, ProbeSlot, ProfileIdentity, ProfileState, Promoter, PromoterAttachRequest,
     PromoterRegistryDiff, PromoterState, ProofAuthority, ProofObligation, QuiescenceVerdict,
     ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
     SubAttachRequest, SubId, SubParams, Termination, TimerKind, TreeSnapshot, WatchOp,
     WatchRegistryDiff,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1983,7 +1983,7 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
 
 /// An external `FsEvent` on the burst's own anchor, arriving mid-Batching,
 /// is processed (not silently dropped): it lands in the pre-fire burst's
-/// `dirty_resources` and advances
+/// `dirty` and advances
 /// `last_event_time`, so the next settle expiry **reschedules** the
 /// settle timer (debounce) instead of verifying. The two anchor events
 /// plus the reschedule collapse into a single fire — no double-fire.
@@ -2032,9 +2032,10 @@ fn pre_fire_anchor_event_rearms_settle_and_fires_once() {
             matches!(pre.phase, PreFirePhase::Batching { .. }),
             "second anchor event keeps Batching (timer reused, not re-minted)",
         );
+        let root_path = e.tree.path_of(root).expect("anchor path resolves");
         assert!(
-            pre.dirty_resources.contains(&root),
-            "anchor event tracked in dirty_resources (the obligation basis) — \
+            pre.dirty.chains().contains(&root_path),
+            "anchor event's path tracked in dirty (the obligation basis) — \
              not silently dropped",
         );
         assert_eq!(
@@ -2756,7 +2757,7 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
     assert_eq!(burst.intent, BurstIntent::Seed);
     assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
     assert!(
-        burst.dirty_resources.is_empty() && burst.certified == CertifiedPrior::new(),
+        burst.dirty.is_empty() && burst.certified == CertifiedPrior::new(),
         "reseed starts a fresh Seed quiescence sequence (Batching-first)",
     );
     assert!(
@@ -2779,8 +2780,8 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
 fn sensor_overflow_active_standard_transitions_to_active_seed() {
     // Active(Standard) Profile: an overflow `finish_burst_to_idle` +
     // `start_seed_burst` round-trip transitions the burst to
-    // `Active(Seed)`. The Standard burst's `dirty_resources` /
-    // `dirty_resources` are discarded — the seed re-baselines.
+    // `Active(Seed)`. The Standard burst's `dirty` provenance and
+    // quiescence prior are discarded — the seed re-baselines.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     let now = Instant::now();
@@ -2816,7 +2817,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
         "overflow abandoned the Standard burst and re-seeded",
     );
     assert!(
-        burst.dirty_resources.is_empty() && burst.certified == CertifiedPrior::new(),
+        burst.dirty.is_empty() && burst.certified == CertifiedPrior::new(),
         "seed burst starts with an empty dirty set and a fresh quiescence \
          sequence — Standard's accumulators discarded",
     );
@@ -2899,7 +2900,7 @@ fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
     assert_eq!(burst.intent, BurstIntent::Seed);
     assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
     assert!(
-        burst.dirty_resources.is_empty() && burst.certified == CertifiedPrior::new(),
+        burst.dirty.is_empty() && burst.certified == CertifiedPrior::new(),
         "reseed starts a fresh Seed quiescence sequence",
     );
 }
@@ -2971,7 +2972,7 @@ fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
     assert_eq!(burst.intent, BurstIntent::Seed);
     assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
     assert!(
-        burst.dirty_resources.is_empty() && burst.certified == CertifiedPrior::new(),
+        burst.dirty.is_empty() && burst.certified == CertifiedPrior::new(),
         "reseed starts a fresh Seed quiescence sequence",
     );
 }
@@ -4406,7 +4407,7 @@ fn clears_fired_subs_on_effect_complete_failed() {
 #[test]
 fn fresh_seed_without_activity_does_not_fire() {
     // Fresh attach, **no FsEvents witnessed** → full N=2 Seed pin. With
-    // an empty `dirty_resources`, `seed_owes_first_fire` is false and
+    // an empty `dirty`, `seed_owes_first_fire` is false and
     // `seed_drift_observed` is false (never-fired), so the Seed pins
     // *silently* (restart-safe: Specter persists no baseline, so a
     // daemon restart over an unchanged tree must not re-fire). This is
@@ -4886,12 +4887,12 @@ fn finalize_anchor_lost_was_active_pre_helper_ordering() {
 // ---------- rebase probes the whole subtree; residual is reset ----------
 
 /// The rebase probe's obligation is unconditionally `WholeSubtree`,
-/// even when an Awaiting absorb populated `dirty_resources`: the
-/// command just mutated the tree, so there is no trustworthy prior to
-/// scope a `Chains` walk against — an in-place descendant edit need not
-/// bump an ancestor mtime, so a chains/mtime skip would re-clone a
-/// stale subtree and certify a false quiet. `dirty_resources` is no
-/// longer an obligation source; `transition_to_rebasing` clears it at
+/// even when an Awaiting absorb populated `dirty`: the command just
+/// mutated the tree, so there is no trustworthy prior to scope a
+/// `Chains` walk against — an in-place descendant edit need not bump
+/// an ancestor mtime, so a chains/mtime skip would re-clone a stale
+/// subtree and certify a false quiet. `dirty` is no longer a
+/// post-fire obligation source; `transition_to_rebasing` clears it at
 /// the loop entry, so an Awaiting-absorbed event is folded into the
 /// `WholeSubtree` read itself rather than carried as a restart seed.
 ///
@@ -4965,15 +4966,19 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
         )),
         "Awaiting absorb must emit EventAbsorbedByFireTail",
     );
+    let descendant_path = e
+        .tree
+        .path_of(descendant)
+        .expect("descendant path resolves");
     let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
         _ => panic!("expected Active(Awaiting)"),
     };
     assert!(
-        burst.dirty_resources.contains(&descendant),
-        "Awaiting absorb must accumulate event_resource into \
-         dirty_resources for the next Rebasing probe; got {:?}",
-        burst.dirty_resources,
+        burst.dirty.chains().contains(&descendant_path),
+        "Awaiting absorb must accumulate the event's path into \
+         dirty for the next Rebasing probe; got {:?}",
+        burst.dirty.chains(),
     );
 
     // EffectComplete::Ok → transition_to_rebasing.
@@ -5016,7 +5021,7 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
     };
     assert!(matches!(burst.phase, PostFirePhase::Rebasing(_)));
     assert!(
-        burst.dirty_resources.is_empty(),
+        burst.dirty.is_empty(),
         "transition_to_rebasing resets the fire-tail residual at the \
          loop entry — the Awaiting-absorbed event is folded into the \
          WholeSubtree read, not carried as a restart seed",
@@ -5580,7 +5585,7 @@ fn active_pre_fire_burst(
             phase,
             intent,
             forced: false,
-            dirty_resources: BTreeSet::new(),
+            dirty: DirtyProvenance::new(),
             certified: CertifiedPrior::new(),
             probe_target,
             last_event_time: None,
@@ -5601,7 +5606,7 @@ fn active_post_fire_burst(
     _now: Instant,
 ) -> ProfileState {
     ProfileState::Active(
-        ActiveBurst::PostFire(PostFireBurst::new(intent, phase, BTreeSet::new())),
+        ActiveBurst::PostFire(PostFireBurst::new(intent, phase, DirtyProvenance::new())),
         BurstFinish::ReturnToIdle,
     )
 }
@@ -6613,7 +6618,7 @@ mod props {
         /// strictly the no-activity path: with no events injected and
         /// the only response being the first probe, `CertifiedPrior`'s
         /// prior is `None` ⇒ the verdict is Unstable ⇒ the burst
-        /// re-batches and never reaches `Stable` (and `dirty_resources`
+        /// re-batches and never reaches `Stable` (and `dirty`
         /// is empty regardless). It does NOT assert anything about a
         /// fresh Seed that *witnessed* activity — that case fires and is
         /// covered by the `fresh_seed_fires::*` reproduction tests.

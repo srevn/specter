@@ -18,11 +18,14 @@
 //!   deleted with the `dirty_descendants` refcount — the
 //!   `Draining → Verifying` reconfirm is now a fresh query, not a
 //!   maintained count.)
-//! - **(c) The sanctioned cross-crate emission drain**:
-//!   [`Engine::emit_owner_probe`] (in `probe`), sole consumer of
-//!   `dirty_resources`. Its `pub` burst accessors are
-//!   load-bearing and deliberately *not* sealed (Rust visibility is
-//!   intra-crate; the choke reaches them from another crate).
+//! - **(c) The sanctioned cross-crate emission reader**:
+//!   [`Engine::emit_owner_probe`] (in `probe`) reads the pre-fire
+//!   Standard burst's `dirty` to project its captured paths to the
+//!   `Chains` obligation. A pure `&self` state→wire projection, not a
+//!   writer and not a drain — `dirty` persists across re-batching. Its
+//!   `pub` burst accessors are load-bearing and deliberately *not*
+//!   sealed (Rust visibility is intra-crate; the choke reaches them
+//!   from another crate).
 //!
 //! `ActiveBurst` splits into `PreFireBurst` / `PostFireBurst` (see
 //! [`specter_core::profile`]); helpers below own a typed view of one or
@@ -49,8 +52,8 @@
 //!   `PreFireBurst::into_post_fire`).
 //! - `transition_to_rebasing` — `Awaiting → Rebasing` (mutates
 //!   `PostFireBurst`).
-//! - `absorb_event_into_fire_tail` — FsEvent during post-fire (mutates
-//!   `PostFireBurst.dirty_resources`).
+//! - `absorb_event_into_fire_tail` — FsEvent during post-fire (notes
+//!   into `PostFireBurst.dirty`).
 //! - `restart_burst_from_fire_tail_residual` — `Active(PostFire)` →
 //!   `Active(PreFire(Batching))` typed move at rebase-ok when a
 //!   `ReturnToIdle` burst carries a non-empty residual (origin-agnostic
@@ -70,11 +73,13 @@
 //!
 //! Probe emission flows through two structural primitives:
 //!
-//! - [`pre_fire_target`] — pure function returning the `ResourceId` the
-//!   next pre-fire probe should target. Centralizes the
+//! - [`pre_fire_target`] — returns the live `ResourceId` the next
+//!   pre-fire probe walks (and the response grafts at). Centralizes the
 //!   `(anchor_kind, intent)` rule (File anchor → anchor; Seed → anchor;
-//!   Standard → LCA of `dirty_resources`). Post-fire rebases target the
-//!   anchor unconditionally and bypass this helper.
+//!   Standard → the live slot at the component-LCA of `dirty`'s
+//!   captured paths, a File leaf promoted to its parent Dir, anchor on
+//!   any resolution miss). Post-fire rebases target the anchor
+//!   unconditionally and bypass this helper.
 //!   `transition_to_verifying` resolves the target through it and writes
 //!   it onto `pre.probe_target` for the choke to read back.
 //! - [`Engine::emit_owner_probe`] (in `probe`) — the single
@@ -83,7 +88,7 @@
 //!   the owner's state once, reads the correlation back off the armed
 //!   slot, kind-dispatches, and materializes the per-carrier proof
 //!   obligation as a pure `&self` read (the pre-fire Standard burst's
-//!   `dirty_resources` projected to `Chains`; `WholeSubtree` for Seed
+//!   `dirty` captured paths as `Chains`; `WholeSubtree` for Seed
 //!   and the post-fire Rebase — no accumulator drain, the fire-tail
 //!   residual reset is owned by `transition_to_rebasing`). Unclassified
 //!   anchors take the Subtree arm — the walker returns `Vanished` on
@@ -92,12 +97,11 @@
 use crate::Engine;
 use smallvec::SmallVec;
 use specter_core::{
-    ActiveBurst, BurstFinish, BurstHelper, BurstIntent, CertifiedPrior, Diagnostic, FsEvent,
-    LcaIntegritySource, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOwner, ProbeSlot, Profile,
-    ProfileId, ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind,
-    Tree, TreeSnapshot,
+    ActiveBurst, BurstFinish, BurstHelper, BurstIntent, CertifiedPrior, Diagnostic,
+    DirtyProvenance, FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOwner, ProbeSlot,
+    Profile, ProfileId, ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId,
+    TimerKind, Tree, TreeSnapshot,
 };
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -283,7 +287,7 @@ impl Engine {
     pub(crate) fn start_seed_burst(
         &mut self,
         profile_id: ProfileId,
-        trigger: Option<ResourceId>,
+        trigger: Option<(ResourceId, Arc<Path>)>,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -306,9 +310,9 @@ impl Engine {
             self.timers
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
-        let mut dirty = BTreeSet::new();
-        if let Some(trigger) = trigger {
-            dirty.insert(trigger);
+        let mut dirty = DirtyProvenance::new();
+        if let Some((trigger, trigger_path)) = trigger {
+            dirty.note(trigger, trigger_path);
         }
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
@@ -318,16 +322,16 @@ impl Engine {
                     phase: PreFirePhase::Batching { settle_timer },
                     intent: BurstIntent::Seed,
                     forced: false,
-                    // Seeded `{ trigger }` when this Seed has a
+                    // Seeded with the trigger when this Seed has a
                     // triggering `FsEvent` (the `drive_burst`
                     // Idle+!baseline re-Seed), empty otherwise —
                     // symmetric with `start_standard_burst`.
-                    // `event_drives_batching` accumulates every later
-                    // FsEvent here for both intents; for a Seed the
-                    // set's non-emptiness is the first-fire witness
+                    // `event_drives_batching` notes every later FsEvent
+                    // here for both intents; for a Seed the
+                    // non-emptiness is the first-fire witness
                     // (`seed_owes_first_fire`), not a probe-target /
                     // obligation source (Seed = anchor + WholeSubtree).
-                    dirty_resources: dirty,
+                    dirty,
                     // Initial target = anchor, the value `pre_fire_target`
                     // returns for every Seed verify. `transition_to_verifying`
                     // overwrites it with the same anchor on settle expiry;
@@ -360,15 +364,19 @@ impl Engine {
     /// ([`crate::coverage::has_active_standard_descendant`]) over the
     /// live tree, so a burst start contributes nothing to maintain.
     ///
-    /// `event_resource` is the `FsEvent`'s source. It seeds
-    /// `dirty_resources`, which is both the basis for the next probe's
-    /// LCA target and the source of its `ProofObligation::Chains` (the
-    /// chains the walker must freshly observe — refusing mtime-skip — so
-    /// the response can certify quiescence).
+    /// `event_resource` + `event_path` are the `FsEvent`'s source slot
+    /// and its path captured pre-dispatch. They seed `dirty`, whose
+    /// captured paths are both the basis for the next probe's scope
+    /// (their component-LCA, resolved to a live id) and the source of
+    /// its `ProofObligation::Chains` (the chains the walker must freshly
+    /// observe — refusing mtime-skip — so the response can certify
+    /// quiescence). Sourcing both from the path makes a reaped trigger
+    /// unable to collapse the obligation.
     pub(crate) fn start_standard_burst(
         &mut self,
         profile_id: ProfileId,
         event_resource: ResourceId,
+        event_path: &Arc<Path>,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -391,8 +399,8 @@ impl Engine {
             self.timers
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
-        let mut dirty = BTreeSet::new();
-        dirty.insert(event_resource);
+        let mut dirty = DirtyProvenance::new();
+        dirty.note(event_resource, Arc::clone(event_path));
 
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.transition_state(ProfileState::Active(
@@ -401,11 +409,12 @@ impl Engine {
                     phase: PreFirePhase::Batching { settle_timer },
                     intent: BurstIntent::Standard,
                     forced: false,
-                    dirty_resources: dirty,
+                    dirty,
                     // Initial target = anchor. `transition_to_verifying`
-                    // overwrites with the LCA of `dirty_resources` on settle
-                    // expiry / force-fire; the initial value carries no
-                    // observable consequence (no probe has emitted yet).
+                    // overwrites it with the live id at the captured
+                    // paths' component-LCA on settle expiry / force-fire;
+                    // the initial value carries no observable consequence
+                    // (no probe has emitted yet).
                     probe_target: resource,
                     // The burst-start FsEvent IS the first event; seed the
                     // settle-deadline source of truth with `now`. Subsequent
@@ -423,9 +432,10 @@ impl Engine {
 
     /// Caller: `drive_burst` Active branch — an `FsEvent` arrived during a
     /// burst. Cancels any in-flight verify (iff the prior phase was
-    /// `Verifying`), accumulates the event into `dirty_resources` (the
-    /// LCA basis and the next verify's `ProofObligation::Chains`
-    /// source), updates `last_event_time`, arms a fresh settle timer
+    /// `Verifying`), notes `(event_resource, event_path)` into `dirty`
+    /// (the captured-path basis for the next verify's probe scope and
+    /// its `ProofObligation::Chains`), updates `last_event_time`, arms a
+    /// fresh settle timer
     /// **only when re-entering Batching from Verifying or Draining**,
     /// and writes `phase = Batching { settle_timer }`. `intent`,
     /// `forced`, `burst_deadline`, and `certified` (the preserved prior
@@ -458,6 +468,7 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         event_resource: ResourceId,
+        event_path: &Arc<Path>,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -514,7 +525,7 @@ impl Engine {
             .and_then(Profile::pre_fire_burst_mut)
         {
             pre.last_event_time = Some(now);
-            pre.dirty_resources.insert(event_resource);
+            pre.dirty.note(event_resource, Arc::clone(event_path));
             if let Some(timer_id) = new_settle_timer {
                 pre.phase = PreFirePhase::Batching {
                     settle_timer: timer_id,
@@ -535,12 +546,12 @@ impl Engine {
     /// Cancel needed. Arms a fresh settle timer and writes
     /// `phase = Batching { settle_timer }`.
     ///
-    /// **`dirty_resources` + `certified` preserved; no
+    /// **`dirty` + `certified` preserved; no
     /// re-commit.** The next verify re-targets and re-obligates per the
-    /// carrier's own rule — a Standard burst the LCA of the preserved
-    /// `dirty_resources` + `ProofObligation::Chains` over them (the
-    /// walker must freshly re-observe the dirty chains, refusing
-    /// mtime-skip); a Seed burst the anchor + `ProofObligation::WholeSubtree`
+    /// carrier's own rule — a Standard burst the component-LCA of the
+    /// preserved `dirty` captured paths + `ProofObligation::Chains` over
+    /// those paths (the walker must freshly re-observe the dirty chains,
+    /// refusing mtime-skip); a Seed burst the anchor + `ProofObligation::WholeSubtree`
     /// (every frame re-read, no skip). Either way this path does **not**
     /// `apply_snapshot` (an unstable/undischarged response never re-commits
     /// here — the Seed `Unstable + !forced` graft is done by its caller,
@@ -697,22 +708,24 @@ impl Engine {
     ///
     /// **Target.** Resolved via [`pre_fire_target`] — File anchors
     /// target the anchor unconditionally; Seed bursts target the
-    /// anchor (regardless of phase); Standard bursts target the LCA of
-    /// `dirty_resources`. The same rule covers the Draining → Verifying
-    /// reconfirm: `dirty_resources` is preserved across the burst's
-    /// pre-fire lifetime (only `insert` mutations in production), so
-    /// `LCA(dirty)` on the reconfirm matches the LCA computed at the
-    /// original Verifying entry up to slot reaping.
+    /// anchor (regardless of phase); Standard bursts target the live
+    /// slot at the component-LCA of `dirty`'s captured paths. The same
+    /// rule covers the Draining → Verifying reconfirm: `dirty` is
+    /// preserved across the burst's pre-fire lifetime (only `note`d
+    /// into), so the component-LCA on the reconfirm matches the one at
+    /// the original Verifying entry; a slot reaped in between only
+    /// changes the live-id resolution (anchor fallback).
     ///
     /// **Emission.** This helper writes the `Verifying` phase + armed
     /// slot + `probe_target`, then calls [`Engine::emit_owner_probe`] —
     /// the single choke that reads the correlation back off the slot,
     /// materializes the proof obligation off the persisting burst
-    /// (`ProofObligation::Chains` from `dirty_resources` for Standard,
-    /// `WholeSubtree` for Seed — read immutably, **not** drained: the
-    /// burst outlives this probe across re-batching), and reads `forced`
+    /// (`ProofObligation::Chains` from `dirty`'s captured paths for
+    /// Standard, `WholeSubtree` for Seed — read immutably, **not**
+    /// drained: the burst outlives this probe across re-batching), and
+    /// reads `forced`
     /// (so the walker bypasses mtime-skip on a force-fire). New events
-    /// arriving during `Verifying` accumulate into `dirty_resources`
+    /// arriving during `Verifying` are noted into `dirty`
     /// (via `event_drives_batching`) and reshape the obligation on the
     /// next emission.
     pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
@@ -722,16 +735,14 @@ impl Engine {
         // Compute target under one immutable borrow window. `&self.tree`
         // and `&self.profiles.get(_)` are disjoint Engine-field borrows;
         // the call returns a `ResourceId` (`Copy`), so neither borrow
-        // outlives this block.
-        //
-        // `pre_fire_target` may emit `LcaIntegrityViolation` via
-        // `lca_pair` if the Standard burst's `dirty_resources` walk
-        // breaks ancestry; the helper still returns a usable
-        // `ResourceId` (folded back to anchor), so the burst proceeds.
+        // outlives this block. `pre_fire_target` is pure path math plus
+        // a bounded anchor-rooted Tree descent — it cannot fail, only
+        // fall back to the (always-live) anchor, so it threads no
+        // diagnostic.
         let target = match self.profiles.get(profile_id) {
             Some(p) => match p.state() {
                 ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
-                    pre_fire_target(p, pre, &self.tree, profile_id, out)
+                    pre_fire_target(p, pre, &self.tree)
                 }
                 _ => return,
             },
@@ -750,13 +761,13 @@ impl Engine {
         // the guard, and the I5 `debug_assert` is its dev/CI backstop.
         //
         // The proof obligation (`ProofObligation::Chains` from
-        // `dirty_resources`, or `WholeSubtree` for Seed) and `forced`
-        // are materialized by `emit_owner_probe` (the single
+        // `dirty`'s captured paths, or `WholeSubtree` for Seed) and
+        // `forced` are materialized by `emit_owner_probe` (the single
         // probe-emission choke) off the armed `Verifying` slot it
-        // resolves — the transition threads nothing. `dirty_resources`
-        // is preserved and read immutably by the choke (never drained):
-        // it carries both the LCA basis and the proof-obligation chains
-        // across the whole burst.
+        // resolves — the transition threads nothing. `dirty` is
+        // preserved and read immutably by the choke (never drained):
+        // its captured paths carry both the probe-scope basis and the
+        // proof-obligation chains across the whole burst.
 
         // Mint, then write the `Verifying` phase already armed with the
         // correlation. The prior phase is `Batching` / `Draining`
@@ -987,8 +998,8 @@ impl Engine {
     /// armed is a mislabeled call site, and the method owns the
     /// `NotStarted → Armed` invariant regardless.
     ///
-    /// **Fire-tail residual reset, every entry.** `dirty_resources`
-    /// (the events `absorb_event_into_fire_tail` accumulated) is cleared
+    /// **Fire-tail residual reset, every entry.** `dirty`
+    /// (the events `absorb_event_into_fire_tail` captured) is cleared
     /// at *every* entry. Under `WholeSubtree` it is no longer an
     /// obligation source — the walk observes the tree regardless — only
     /// the final-window restart seed: clearing per entry means a
@@ -1075,7 +1086,7 @@ impl Engine {
         // terminal from spuriously restarting on every tree-touching
         // command. Earlier-round absorbs are not lost — the
         // `WholeSubtree` walk observes them regardless.
-        post.dirty_resources.clear();
+        post.dirty.clear();
         post.phase = PostFirePhase::Rebasing(ProbeSlot::armed(correlation, ()));
 
         // The choke reads the correlation back off the `Rebasing` slot,
@@ -1305,14 +1316,14 @@ impl Engine {
     /// not start a fresh burst: the command the burst just fired writes
     /// to the watched tree, and every such write would otherwise drive
     /// its own burst (the self-trigger loop). The event is deferred into
-    /// `PostFireBurst.dirty_resources` instead.
+    /// `PostFireBurst.dirty` instead.
     ///
     /// The rebase loop's soundness does **not** depend on this set: the
     /// rebase probe walks `WholeSubtree`, so every absorbed event is
     /// re-observed by the next sample and folded into the quiescence
     /// verdict whether or not it is recorded here — the loop exits
     /// `Stable` only once two settle-spaced full reads agree (the
-    /// command's own output included). `dirty_resources` survives only
+    /// command's own output included). `dirty` survives only
     /// as the final-window restart seed (reset at every `Rebasing`
     /// entry by `transition_to_rebasing`); it is the POSIX content-edit
     /// hole's closure for the *restart* decision, not the walk.
@@ -1323,6 +1334,7 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         event_resource: ResourceId,
+        event_path: &Arc<Path>,
         event: FsEvent,
         out: &mut StepOutput,
     ) {
@@ -1334,7 +1346,7 @@ impl Engine {
             .get_mut(profile_id)
             .and_then(Profile::post_fire_burst_mut)
         {
-            post.dirty_resources.insert(event_resource);
+            post.dirty.note(event_resource, Arc::clone(event_path));
             out.diagnostics.push(Diagnostic::EventAbsorbedByFireTail {
                 profile: profile_id,
                 resource: event_resource,
@@ -1470,182 +1482,54 @@ const _: fn() = || {
     let _ = std::mem::size_of::<TreeSnapshot>();
 };
 
-/// "Lowest covering ancestor of all event-dirty Resources" for a
-/// Dir-anchored Profile. The single probe target per Standard burst.
+/// Resolve a path to the live engine slot that should root the Standard
+/// pre-fire probe — and, read back, the response graft — at it.
+/// Descends the live `Tree` from the always-live `anchor` by `path`'s
+/// anchor-relative components (`Tree::lookup` per segment).
 ///
-/// **Caller contract.** This helper is intended for Dir-anchored Profiles
-/// only. File-anchored Profiles probe the anchor itself unconditionally
-/// (kqueue per-file FDs surface events at the file directly):
-/// [`pre_fire_target`] returns the anchor for a File kind and
-/// [`Engine::emit_owner_probe`]'s kind dispatch routes it to a
-/// `ProbeRequest::AnchorFile` without consulting this helper, so a
-/// File-anchored Profile never reaches `lca_target` in production.
-/// The `live.contains(&anchor)` short-circuit below remains
-/// valid for the Dir-anchor case where the anchor itself is the event
-/// source (e.g., an in-place mtime bump on the anchor directory).
-///
-/// **Invariants.**
-/// - Returns a live `ResourceId` (always — defaults to `anchor`).
-/// - Result is `ResourceKind::Dir`: descendant LCAs that resolve to a
-///   Leaf (or unprobed slot) are promoted to their parent Dir — probes
-///   target Dirs because Files are observed as child entries of their
-///   parent in the descendant-observation model.
-/// - Result is at-or-above every live entry in `dirty`. Reaped entries
-///   are filtered first — a stale `ResourceId` whose slot was vacated
-///   mid-burst yields `None` on `tree.parent` and would skew the
-///   reduction otherwise.
-/// - When `dirty` is empty, returns `anchor`: falls back to a full-walk
-///   gracefully.
-///
-/// **Complexity.** O(depth × n_dirty) — pairwise reduction with
-/// depth-equalisation + lockstep ancestor walk per pair. No per-pair
-/// `BTreeSet` allocation.
-pub(crate) fn lca_target(
-    anchor: ResourceId,
-    dirty: &BTreeSet<ResourceId>,
-    tree: &Tree,
-    profile: ProfileId,
-    out: &mut StepOutput,
-) -> ResourceId {
-    // 1. Filter stale ResourceIds. A `dirty_resources` entry whose slot
-    // was reaped between FsEvent ingestion and probe emission
-    // (delete-recreate-different-inode race) is dropped here. This is
-    // benign — the slot's prior events are no longer routable. No
-    // diagnostic: per-event noise would flood logs during normal
-    // delete-recreate churn.
-    let live: SmallVec<[ResourceId; 4]> = dirty
-        .iter()
-        .copied()
-        .filter(|&r| tree.get(r).is_some())
-        .collect();
-
-    if live.is_empty() {
+/// Any miss — `path` not under the anchor, a non-UTF-8 component, or a
+/// reaped-not-recreated intermediate — falls back to the anchor. The
+/// fallback is a strictly *wider* root that can never clip a chain:
+/// `coverage::covers` routes events only at-or-under the anchor, so the
+/// anchor is an ancestor-or-equal of every captured path. The result is
+/// always a live `ResourceId` (the anchor at minimum); the caller
+/// promotes a non-Dir result to its parent Dir.
+fn resolve_under_anchor(anchor: ResourceId, path: &Path, tree: &Tree) -> ResourceId {
+    let Some(anchor_path) = tree.get(anchor).map(|r| Arc::clone(r.path())) else {
         return anchor;
-    }
-    // Anchor in the dirty set ⇒ can't go higher than anchor; trivially LCA.
-    if live.contains(&anchor) {
-        return promote_to_dir(anchor, anchor, tree);
-    }
-
-    // 2. Pairwise LCA reduction. For each new entry, walk both candidates
-    // up to a common depth, then up in lockstep until they match. A
-    // `None` from `lca_pair` indicates the integrity violation has
-    // already been reported via `Diagnostic::LcaIntegrityViolation`;
-    // we just fold to anchor and move on.
-    let mut acc = live[0];
-    for &r in &live[1..] {
-        match lca_pair(acc, r, tree, profile, out) {
-            Some(joint) => acc = joint,
+    };
+    let Ok(rel) = path.strip_prefix(&anchor_path) else {
+        return anchor;
+    };
+    let mut cur = anchor;
+    for comp in rel.components() {
+        let Some(seg) = comp.as_os_str().to_str() else {
+            return anchor;
+        };
+        match tree.lookup(Some(cur), seg) {
+            Some(next) => cur = next,
             None => return anchor,
         }
     }
-    promote_to_dir(acc, anchor, tree)
+    cur
 }
 
-/// LCA of two resources via depth-equalisation + lockstep ancestor walk.
-/// O(max(depth_a, depth_b)). Returns `None` only when an input slot is
-/// stale (`LcaIntegritySource::StaleId`) or a parent walk runs out of
-/// ancestors before the candidates align (`LcaIntegritySource::BrokenAncestry`).
-/// In either case the helper emits
-/// [`Diagnostic::LcaIntegrityViolation`] tagged with the source before
-/// returning; the caller folds to anchor so the burst still has a
-/// probe target.
+/// Promote a non-Dir resolved slot to its parent Dir; the
+/// descendant-observation model probes Dirs (a File is a child entry of
+/// its parent). Walks `start → parent` until a `Dir`, falling back to
+/// `anchor` if the chain crosses a reaped slot or runs out of ancestors.
+/// Unprobed slots (`kind() == None`) walk up like File-shape — we don't
+/// know what they are, the parent is the safer probe target.
 ///
-/// Source-tagging rationale: stale-id ingress at this helper is a
-/// fresh class of bug — `lca_target`'s upstream `live` filter is the
-/// canonical drop point for reaped slots, and a stale id reaching
-/// `lca_pair` means the filter was bypassed (e.g., a future caller
-/// constructing the pair from a non-filtered source). Broken ancestry
-/// is the parent walk running out before alignment, which indicates
-/// the Tree's parent chain is structurally inconsistent.
-pub(crate) fn lca_pair(
-    a: ResourceId,
-    b: ResourceId,
-    tree: &Tree,
-    profile: ProfileId,
-    out: &mut StepOutput,
-) -> Option<ResourceId> {
-    if a == b {
-        return Some(a);
-    }
-    // Defense-in-depth: upstream `lca_target` filters stale ids, but a
-    // future caller bypassing that filter would otherwise manifest as
-    // `BrokenAncestry` on the first parent walk. Surfacing it as
-    // `StaleId` keeps the operational signal accurate.
-    if tree.get(a).is_none() || tree.get(b).is_none() {
-        out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
-            profile,
-            source: LcaIntegritySource::StaleId,
-        });
-        return None;
-    }
-    let depth_a = tree.ancestors(a).count();
-    let depth_b = tree.ancestors(b).count();
-    let mut a = a;
-    let mut b = b;
-    // Walk the deeper one up to the same depth as the shallower. A
-    // `None` here means the parent chain dangled; emit BrokenAncestry
-    // and bail.
-    for _ in 0..depth_a.saturating_sub(depth_b) {
-        a = match tree.parent(a) {
-            Some(p) => p,
-            None => {
-                out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
-                    profile,
-                    source: LcaIntegritySource::BrokenAncestry,
-                });
-                return None;
-            }
-        };
-    }
-    for _ in 0..depth_b.saturating_sub(depth_a) {
-        b = match tree.parent(b) {
-            Some(p) => p,
-            None => {
-                out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
-                    profile,
-                    source: LcaIntegritySource::BrokenAncestry,
-                });
-                return None;
-            }
-        };
-    }
-    // Walk both up in lockstep until they match.
-    while a != b {
-        a = match tree.parent(a) {
-            Some(p) => p,
-            None => {
-                out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
-                    profile,
-                    source: LcaIntegritySource::BrokenAncestry,
-                });
-                return None;
-            }
-        };
-        b = match tree.parent(b) {
-            Some(p) => p,
-            None => {
-                out.diagnostics.push(Diagnostic::LcaIntegrityViolation {
-                    profile,
-                    source: LcaIntegritySource::BrokenAncestry,
-                });
-                return None;
-            }
-        };
-    }
-    Some(a)
-}
-
-/// Promote a non-Dir candidate to its parent Dir; descendant-observation
-/// probes target Dirs. Falls back to `anchor` if the chain crosses a
-/// reaped slot or runs out of ancestors. Unprobed slots
-/// (`kind() == None`) walk up like File-shape — we don't know what they
-/// are, the parent is the safer probe target.
+/// Pairs with [`resolve_under_anchor`]: the component-LCA of ≥2 distinct
+/// captured paths is structurally a Dir (it has descendants among the
+/// captured set) and is returned as-is; only a lone-location File scope
+/// promotes one level to its containing Dir, mirroring the pre-path-LCA
+/// behaviour exactly.
 ///
-/// **Pre-condition.** The caller has filtered out File-anchored Profiles;
-/// this helper assumes a Dir anchor and may walk past a non-Dir start to
-/// reach the Profile's anchor when `start == anchor` is itself a File
-/// (which wouldn't happen for a Dir-anchored Profile).
+/// **Pre-condition.** The caller has filtered out File-anchored Profiles
+/// (`pre_fire_target` returns the anchor for a File kind), so a Dir
+/// anchor is assumed and the walk always terminates at-or-above it.
 fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> ResourceId {
     let mut current = start;
     loop {
@@ -1662,11 +1546,11 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
     }
 }
 
-/// Pre-fire probe target for the next emission.
+/// Pre-fire probe target for the next emission — the live engine slot
+/// the probe walks and the response grafts at.
 ///
-/// Centralizes the `(anchor_kind, intent)` rule that drives every
-/// pre-fire probe target choice. The three production scenarios
-/// (settle-expired Standard burst, force-fire under
+/// Centralizes the `(anchor_kind, intent)` rule. The three production
+/// scenarios (settle-expired Standard burst, force-fire under
 /// [`PreFirePhase::Batching`] or [`PreFirePhase::Draining`], the
 /// Draining-sweep reconfirm) all resolve here:
 ///
@@ -1678,67 +1562,37 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 /// - Seed intent (Dir / unclassified anchor) → the anchor. Seed bursts
 ///   compare against fire history rather than against a stable subtree
 ///   verdict, so they probe at the anchor unconditionally.
-/// - Standard intent (Dir / unclassified anchor) → `lca_target` of the
-///   burst's `dirty_resources`. The LCA is the deepest shared ancestor
-///   of every Resource where an `FsEvent` actually arrived; probing
-///   there contains the walk to where events occurred.
+/// - Standard intent (Dir / unclassified anchor) → the live slot at the
+///   component-LCA of `dirty`'s captured paths
+///   ([`resolve_under_anchor`]), a File leaf promoted to its parent Dir
+///   ([`promote_to_dir`]). The LCA is computed over *captured paths*
+///   (history), not surviving slot ids, so a slot reaped mid-burst
+///   cannot collapse the scope below where an event landed; only the
+///   live-id *resolution* may fall back to the anchor (strictly wider,
+///   never chain-clipping). An empty `dirty` yields the anchor — a
+///   should-never (a Standard burst always notes its trigger); the
+///   emission choke pairs that anchor with a `WholeSubtree` obligation
+///   under its own `debug_assert`, so the degrade proves the whole
+///   subtree rather than silently skipping it.
 ///
 /// **Draining-reconfirm coverage.** The Draining → Verifying reconfirm
-/// path previously special-cased `prior_target` reuse. That arm now
-/// folds into the Standard case because `dirty_resources` is preserved
-/// across the burst's whole pre-fire lifetime (only `insert` mutations
-/// in production), so `LCA(dirty)` on the reconfirm equals the LCA
-/// computed for the initial Verifying entry. Slot reaping during
-/// Draining makes the new probe **strictly narrower** — reaped paths
-/// no longer need reconfirmation — and the stale-`ResourceId` failure
-/// mode of the old prior-target reuse is gone (`lca_target` filters
-/// reaped slots and falls back to anchor when the live set is empty).
-pub(crate) fn pre_fire_target(
-    p: &Profile,
-    pre: &PreFireBurst,
-    tree: &Tree,
-    profile: ProfileId,
-    out: &mut StepOutput,
-) -> ResourceId {
+/// folds into the Standard case because `dirty` is preserved across the
+/// burst's whole pre-fire lifetime (only `note`d into), so the
+/// component-LCA on the reconfirm equals the one at the initial
+/// Verifying entry. A slot reaped during Draining changes only the
+/// live-id resolution (anchor fallback), never the captured-path basis.
+pub(crate) fn pre_fire_target(p: &Profile, pre: &PreFireBurst, tree: &Tree) -> ResourceId {
     match (p.kind(), pre.intent) {
         (Some(ResourceKind::File), _) | (_, BurstIntent::Seed) => p.resource,
-        _ => lca_target(p.resource, &pre.dirty_resources, tree, profile, out),
+        _ => match pre.dirty.lca_path() {
+            Some(lca) => promote_to_dir(
+                resolve_under_anchor(p.resource, &lca, tree),
+                p.resource,
+                tree,
+            ),
+            None => p.resource,
+        },
     }
-}
-
-/// Project a dirty-`ResourceId` set to the path chains of a
-/// [`specter_core::ProofObligation::Chains`]: the engine-side closure of
-/// `set ∩ subtree(target)` rendered to the walker's path-keyed contract.
-///
-/// The walker refuses mtime-skip at any directory at-or-above a chain
-/// path (`paths.iter().any(|p| p.starts_with(current))` per recursion
-/// level); pre-filtering by ancestry of `target` keeps the set minimal —
-/// entries outside `target`'s subtree cannot lie on a chain the walk
-/// reaches and would only inflate its per-directory scan.
-pub(crate) fn build_obligation_chains(
-    set: &BTreeSet<ResourceId>,
-    target: ResourceId,
-    tree: &Tree,
-) -> BTreeSet<Arc<Path>> {
-    set.iter()
-        .copied()
-        .filter(|&r| r_is_at_or_under(r, target, tree))
-        .filter_map(|r| tree.path_of(r))
-        .collect()
-}
-
-/// Returns true iff `r` is `target` or a descendant of `target` (i.e., `r`
-/// lies in `target`'s subtree). The walk goes `r → parent(r) → ...` until
-/// it hits `target` (true) or runs out of ancestors (false).
-fn r_is_at_or_under(r: ResourceId, target: ResourceId, tree: &Tree) -> bool {
-    let mut cur = Some(r);
-    while let Some(c) = cur {
-        if c == target {
-            return true;
-        }
-        cur = tree.parent(c);
-    }
-    false
 }
 
 #[cfg(test)]
@@ -1768,7 +1622,7 @@ mod tests {
     /// Engine + the `ProfileId`.
     fn engine_with_profile() -> (Engine, specter_core::ProfileId) {
         let mut e = Engine::new();
-        let r = e.tree.ensure_root("anchor", ResourceRole::User);
+        let r = e.tree.ensure_root("/anchor", ResourceRole::User);
         e.tree.set_kind(r, ResourceKind::Dir);
         let pid = e.profiles.attach(
             &mut e.tree,
@@ -1784,6 +1638,13 @@ mod tests {
             ),
         );
         (e, pid)
+    }
+
+    /// The live resource's materialised path — what the sensor reports as
+    /// an `FsEvent`'s `event_path` and what anchor-rooted resolution
+    /// re-descends. Panics on a stale id (a fixture bug).
+    fn rpath(e: &Engine, id: ResourceId) -> Arc<Path> {
+        Arc::clone(e.tree.get(id).expect("live resource").path())
     }
 
     #[test]
@@ -1814,12 +1675,9 @@ mod tests {
     fn start_standard_burst_schedules_two_timers_no_probe() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_standard_burst(
-            pid,
-            e.profiles.get(pid).unwrap().resource,
-            Instant::now(),
-            &mut out,
-        );
+        let r = e.profiles.get(pid).unwrap().resource;
+        let rp = rpath(&e, r);
+        e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
 
         let p = e.profiles.get(pid).unwrap();
         let burst = match p.state() {
@@ -1840,12 +1698,9 @@ mod tests {
     fn transition_to_verifying_mints_correlation_and_emits_probe() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_standard_burst(
-            pid,
-            e.profiles.get(pid).unwrap().resource,
-            Instant::now(),
-            &mut out,
-        );
+        let r = e.profiles.get(pid).unwrap().resource;
+        let rp = rpath(&e, r);
+        e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         let mut out = StepOutput::default();
 
         e.transition_to_verifying(pid, &mut out);
@@ -1877,12 +1732,9 @@ mod tests {
     fn verify_probe_correlation_is_state_resident() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_standard_burst(
-            pid,
-            e.profiles.get(pid).unwrap().resource,
-            Instant::now(),
-            &mut out,
-        );
+        let r = e.profiles.get(pid).unwrap().resource;
+        let rp = rpath(&e, r);
+        e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         e.transition_to_verifying(pid, &mut out);
 
         let owner = ProbeOwner::Profile(pid);
@@ -1919,8 +1771,9 @@ mod tests {
         e.transition_to_verifying(pid, &mut out);
         let mut out = StepOutput::default();
         let r = e.profiles.get(pid).unwrap().resource;
+        let rp = rpath(&e, r);
 
-        e.event_drives_batching(pid, r, Instant::now(), &mut out);
+        e.event_drives_batching(pid, r, &rp, Instant::now(), &mut out);
 
         // One Cancel emitted for the in-flight probe.
         let cancel_count = out
@@ -1949,10 +1802,11 @@ mod tests {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         let r = e.profiles.get(pid).unwrap().resource;
-        e.start_standard_burst(pid, r, Instant::now(), &mut out);
+        let rp = rpath(&e, r);
+        e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         let mut out = StepOutput::default();
 
-        e.event_drives_batching(pid, r, Instant::now(), &mut out);
+        e.event_drives_batching(pid, r, &rp, Instant::now(), &mut out);
 
         let cancels = out
             .probe_ops()
@@ -1980,8 +1834,9 @@ mod tests {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         let resource = e.profiles.get(pid).unwrap().resource;
+        let rp = rpath(&e, resource);
         let now = Instant::now();
-        e.start_standard_burst(pid, resource, now, &mut out);
+        e.start_standard_burst(pid, resource, &rp, now, &mut out);
         e.transition_to_verifying(pid, &mut out);
         let mut out = StepOutput::default();
         // Production reaches `unstable_response_drives_batching` only
@@ -2012,12 +1867,9 @@ mod tests {
     fn finish_burst_to_idle_armed_slot_trips_debug_assert() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_standard_burst(
-            pid,
-            e.profiles.get(pid).unwrap().resource,
-            Instant::now(),
-            &mut out,
-        );
+        let r = e.profiles.get(pid).unwrap().resource;
+        let rp = rpath(&e, r);
+        e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         e.transition_to_verifying(pid, &mut out);
         // Genuinely armed: NO `take_owner_probe` pre-consume. This is
         // the whole point — the slot reaches finish_burst_to_idle armed.
@@ -2042,12 +1894,9 @@ mod tests {
     fn finish_burst_to_idle_after_disarm_returns_to_idle() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_standard_burst(
-            pid,
-            e.profiles.get(pid).unwrap().resource,
-            Instant::now(),
-            &mut out,
-        );
+        let r = e.profiles.get(pid).unwrap().resource;
+        let rp = rpath(&e, r);
+        e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         e.transition_to_verifying(pid, &mut out);
         // Mirror the real response path: the Verifying slot is disarmed
         // via `take_owner_probe` before burst-end.
@@ -2076,15 +1925,16 @@ mod tests {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         let r = e.profiles.get(pid).unwrap().resource;
+        let rp = rpath(&e, r);
         let t0 = Instant::now();
-        e.start_standard_burst(pid, r, t0, &mut out);
+        e.start_standard_burst(pid, r, &rp, t0, &mut out);
 
         // Fire ten FsEvents at 50 ms intervals during the Standard burst.
         let mut last_event = t0;
         for k in 1..=10 {
             last_event = t0 + Duration::from_millis(50 * k);
             let mut out = StepOutput::default();
-            e.event_drives_batching(pid, r, last_event, &mut out);
+            e.event_drives_batching(pid, r, &rp, last_event, &mut out);
         }
 
         // ── Invariant 1: last_event_time is the source of truth. The
@@ -2226,8 +2076,9 @@ mod tests {
             _ => panic!("expected Active(PreFire)"),
         };
         let r = e.profiles.get(pid).unwrap().resource;
+        let rp = rpath(&e, r);
 
-        e.event_drives_batching(pid, r, Instant::now(), &mut out);
+        e.event_drives_batching(pid, r, &rp, Instant::now(), &mut out);
         let burst_deadline_after = match e.profiles.get(pid).unwrap().state() {
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.burst_deadline,
             _ => panic!("expected Active(PreFire)"),
@@ -2362,12 +2213,20 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // LCA + obligation chains + transition_to_verifying
+    // pre_fire_target — the (anchor_kind, intent) probe-target rule.
+    //
+    // Standard target = the live slot at the component-LCA of `dirty`'s
+    // captured *paths* (history, not surviving slot ids), descended from
+    // the always-live anchor, a File leaf promoted to its parent Dir,
+    // anchor fallback on any resolution miss. Locks the contract
+    // independent of `transition_to_verifying`'s body.
     // ---------------------------------------------------------------------------
 
-    use crate::burst::{build_obligation_chains, lca_pair, lca_target, pre_fire_target};
-    use specter_core::{CertifiedPrior, PreFireBurst, TimerId};
-    use std::collections::BTreeSet;
+    use crate::burst::pre_fire_target;
+    use specter_core::testkit::dirty_provenance;
+    use specter_core::{CertifiedPrior, DirtyProvenance, PreFireBurst, ResourceId, TimerId};
+    use std::path::Path;
+    use std::sync::Arc;
 
     /// Build a tree-shaped Engine: anchor `/root`, two children `a` and `b`.
     fn engine_with_two_children() -> (
@@ -2378,7 +2237,7 @@ mod tests {
         specter_core::ResourceId,
     ) {
         let mut e = Engine::new();
-        let root = e.tree.ensure_root("root", ResourceRole::User);
+        let root = e.tree.ensure_root("/root", ResourceRole::User);
         e.tree.set_kind(root, ResourceKind::Dir);
         let a = e
             .tree
@@ -2406,342 +2265,120 @@ mod tests {
         (e, pid, root, a, b)
     }
 
-    #[test]
-    fn lca_empty_dirty_returns_anchor() {
-        let (e, pid, root, _a, _b) = engine_with_two_children();
-        let dirty = BTreeSet::new();
-        let mut out = StepOutput::default();
-        let target = lca_target(
-            e.profiles.get(pid).unwrap().resource,
-            &dirty,
-            &e.tree,
-            pid,
-            &mut out,
-        );
-        assert_eq!(target, root);
-        assert!(out.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn lca_two_siblings_returns_parent() {
-        let (e, pid, root, a, b) = engine_with_two_children();
-        let dirty: BTreeSet<_> = [a, b].iter().copied().collect();
-        let mut out = StepOutput::default();
-        let target = lca_target(
-            e.profiles.get(pid).unwrap().resource,
-            &dirty,
-            &e.tree,
-            pid,
-            &mut out,
-        );
-        assert_eq!(target, root);
-        assert!(out.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn lca_single_dirty_at_anchor_returns_anchor() {
-        let (e, pid, root, _a, _b) = engine_with_two_children();
-        let dirty: BTreeSet<_> = std::iter::once(root).collect();
-        let mut out = StepOutput::default();
-        let target = lca_target(
-            e.profiles.get(pid).unwrap().resource,
-            &dirty,
-            &e.tree,
-            pid,
-            &mut out,
-        );
-        assert_eq!(target, root);
-        assert!(out.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn lca_single_dirty_deep_returns_self() {
-        let (e, pid, _root, a, _b) = engine_with_two_children();
-        let dirty: BTreeSet<_> = std::iter::once(a).collect();
-        let mut out = StepOutput::default();
-        let target = lca_target(
-            e.profiles.get(pid).unwrap().resource,
-            &dirty,
-            &e.tree,
-            pid,
-            &mut out,
-        );
-        assert_eq!(target, a);
-        assert!(out.diagnostics.is_empty());
-    }
-
-    // ---------------------------------------------------------------------------
-    // LCA integrity diagnostics — F-MED-4
-    //
-    // `lca_pair` emits `LcaIntegrityViolation` source-tagged on either
-    // failure mode. The lca_target-level `live` filter stays silent
-    // (benign delete-recreate race).
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn lca_pair_on_disjoint_roots_emits_broken_ancestry() {
-        // Construct a forest: `a` and `b` both have `parent = None`. The
-        // depth-equalisation loops don't run (both depth 0). The
-        // lockstep loop attempts `tree.parent(a)?` which returns None,
-        // so the helper emits `BrokenAncestry` and bails. This is
-        // structurally unreachable from `lca_target` in production (the
-        // engine maintains a single FS-root scaffold every attach
-        // descends from), but the diagnostic surfaces the invariant
-        // break if a future refactor ever produces multi-root Trees.
-        let mut e = Engine::new();
-        let a = e.tree.ensure_root("alpha", ResourceRole::User);
-        let b = e.tree.ensure_root("beta", ResourceRole::User);
-        let pid = specter_core::ProfileId::default();
-        let mut out = StepOutput::default();
-
-        let res = lca_pair(a, b, &e.tree, pid, &mut out);
-
-        assert_eq!(res, None);
-        let saw = out.diagnostics.iter().any(|d| {
-            matches!(
-                d,
-                specter_core::Diagnostic::LcaIntegrityViolation {
-                    source: specter_core::LcaIntegritySource::BrokenAncestry,
-                    ..
-                },
-            )
-        });
-        assert!(
-            saw,
-            "expected LcaIntegrityViolation(BrokenAncestry); got {:?}",
-            out.diagnostics,
-        );
-    }
-
-    #[test]
-    fn lca_pair_on_stale_id_emits_stale_id() {
-        // A stale ResourceId reaching `lca_pair` directly bypasses
-        // `lca_target`'s upstream `live` filter — a fresh class of bug
-        // the diagnostic surfaces. We construct a live Tree, reap one
-        // entry, then call `lca_pair` directly.
-        let (mut e, pid, _root, a, _b) = engine_with_two_children();
-        let mut reap_out = StepOutput::default();
-        e.tree.try_reap(a, &mut reap_out);
-        let mut out = StepOutput::default();
-        let live_id = e.profiles.get(pid).unwrap().resource;
-
-        let res = lca_pair(a, live_id, &e.tree, pid, &mut out);
-
-        assert_eq!(res, None);
-        let saw = out.diagnostics.iter().any(|d| {
-            matches!(
-                d,
-                specter_core::Diagnostic::LcaIntegrityViolation {
-                    profile,
-                    source: specter_core::LcaIntegritySource::StaleId,
-                } if *profile == pid,
-            )
-        });
-        assert!(
-            saw,
-            "expected LcaIntegrityViolation(StaleId); got {:?}",
-            out.diagnostics,
-        );
-    }
-
-    #[test]
-    fn lca_filters_stale_resource_ids() {
-        let (mut e, pid, root, a, _b) = engine_with_two_children();
-        // Reap `a` to make its id stale.
-        e.tree.try_reap(a, &mut StepOutput::default());
-        // Stale id in the set; LCA must filter and return anchor (since the
-        // remaining live entry is empty after the filter). The stale-id
-        // drop happens at the `live` filter — no diagnostic; per-event
-        // noise during delete-recreate churn would flood logs.
-        let dirty: BTreeSet<_> = std::iter::once(a).collect();
-        let mut out = StepOutput::default();
-        let target = lca_target(
-            e.profiles.get(pid).unwrap().resource,
-            &dirty,
-            &e.tree,
-            pid,
-            &mut out,
-        );
-        assert_eq!(target, root);
-        assert!(
-            out.diagnostics.is_empty(),
-            "live-filter drop is silent (benign delete-recreate race)",
-        );
-    }
-
-    // ---------------------------------------------------------------------------
-    // pre_fire_target — centralizes the (anchor_kind, intent) target rule.
-    // Locks the contract independent of `transition_to_verifying`'s body so a
-    // refactor of the call site can't silently change the rule.
-    // ---------------------------------------------------------------------------
-
     /// Build a `PreFireBurst` shell for direct `pre_fire_target` calls.
-    /// `dirty_resources` is the only field the helper reads (besides
-    /// `intent`); the rest are stub values that the helper never inspects.
-    fn pre_fire_burst_for_test(
-        intent: BurstIntent,
-        dirty_resources: BTreeSet<specter_core::ResourceId>,
-    ) -> PreFireBurst {
+    /// `dirty` is the only field the helper reads (besides `intent`); the
+    /// rest are stub values the helper never inspects.
+    fn pre_fire_burst_for_test(intent: BurstIntent, dirty: DirtyProvenance) -> PreFireBurst {
         PreFireBurst {
             burst_deadline: TimerId::default(),
             phase: PreFirePhase::Verifying(ProbeSlot::empty()),
             intent,
             forced: false,
-            dirty_resources,
+            dirty,
             certified: CertifiedPrior::new(),
-            probe_target: specter_core::ResourceId::default(),
+            probe_target: ResourceId::default(),
             last_event_time: None,
         }
     }
 
-    #[test]
-    fn pre_fire_target_file_anchor_returns_anchor() {
-        // File-anchored Profile + any intent + any dirty set: target is the
-        // anchor itself. kqueue per-file FDs surface events at the file
-        // directly; promoting past the anchor would route the probe outside
-        // the Profile's coverage.
-        let (mut e, pid, _parent, file_anchor) = engine_with_file_anchor();
-        let mut out = StepOutput::default();
-        let pre = pre_fire_burst_for_test(
-            BurstIntent::Standard,
-            std::iter::once(file_anchor).collect(),
-        );
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree, pid, &mut out);
-        assert_eq!(target, file_anchor);
-
-        // Same conclusion even if dirty is empty.
-        let pre_empty = pre_fire_burst_for_test(BurstIntent::Standard, BTreeSet::new());
-        let target_empty = pre_fire_target(
-            e.profiles.get(pid).unwrap(),
-            &pre_empty,
-            &e.tree,
-            pid,
-            &mut out,
-        );
-        assert_eq!(target_empty, file_anchor);
-
-        // And under Seed intent.
-        let pre_seed = pre_fire_burst_for_test(BurstIntent::Seed, BTreeSet::new());
-        let target_seed = pre_fire_target(
-            e.profiles.get(pid).unwrap(),
-            &pre_seed,
-            &e.tree,
-            pid,
-            &mut out,
-        );
-        assert_eq!(target_seed, file_anchor);
-
-        // Silence unused-mut on `e` when no further mutation runs.
-        let _ = &mut e;
-    }
-
-    #[test]
-    fn pre_fire_target_seed_intent_returns_anchor() {
-        // Seed intent on a Dir-anchored Profile: target is the anchor,
-        // regardless of dirty contents. Seed bursts compare against fire
-        // history rather than a stable subtree verdict, so they probe at
-        // the anchor unconditionally.
-        let (e, pid, root, a, _b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let pre = pre_fire_burst_for_test(BurstIntent::Seed, std::iter::once(a).collect());
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree, pid, &mut out);
-        assert_eq!(target, root);
-
-        // Same with empty dirty.
-        let pre_empty = pre_fire_burst_for_test(BurstIntent::Seed, BTreeSet::new());
-        let target_empty = pre_fire_target(
-            e.profiles.get(pid).unwrap(),
-            &pre_empty,
-            &e.tree,
-            pid,
-            &mut out,
-        );
-        assert_eq!(target_empty, root);
-    }
-
-    #[test]
-    fn pre_fire_target_standard_uses_lca_of_dirty() {
-        // Standard intent on a Dir-anchored Profile: target is
-        // `lca_target(anchor, dirty)`. Two sibling dirty entries reduce to
-        // their parent (the anchor here).
-        let (e, pid, root, a, b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let dirty: BTreeSet<_> = [a, b].iter().copied().collect();
-        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty);
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree, pid, &mut out);
-        assert_eq!(target, root);
-
-        // Single dirty entry reduces to that entry itself (already a Dir).
-        let pre_single =
-            pre_fire_burst_for_test(BurstIntent::Standard, std::iter::once(a).collect());
-        let target_single = pre_fire_target(
-            e.profiles.get(pid).unwrap(),
-            &pre_single,
-            &e.tree,
-            pid,
-            &mut out,
-        );
-        assert_eq!(target_single, a);
+    /// `dirty` carrying each resource id paired with its *real* tree path,
+    /// so anchor-rooted resolution genuinely re-descends. The path strings
+    /// match `engine_with_two_children`'s absolute `/root` scaffold.
+    fn dirty_at(entries: &[(ResourceId, &str)]) -> DirtyProvenance {
+        dirty_provenance(entries)
     }
 
     #[test]
     fn pre_fire_target_standard_empty_dirty_falls_back_to_anchor() {
-        // Standard intent on a Dir-anchored Profile with empty dirty:
-        // `lca_target` falls back to anchor (full-walk reconfirm). This
-        // covers the Draining-reconfirm hypothetical where every
-        // dirty-Resource was reaped between the original verify and the
-        // reconfirm.
+        // Standard intent, no captured paths: the should-never degrade
+        // resolves to the anchor (the emission choke pairs it with a
+        // WholeSubtree obligation under its own debug_assert). Also
+        // covers the Draining-reconfirm hypothetical where every dirty
+        // Resource was reaped between verify and reconfirm.
         let (e, pid, root, _a, _b) = engine_with_two_children();
-        let mut out = StepOutput::default();
-        let pre = pre_fire_burst_for_test(BurstIntent::Standard, BTreeSet::new());
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree, pid, &mut out);
+        let pre = pre_fire_burst_for_test(BurstIntent::Standard, DirtyProvenance::new());
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
         assert_eq!(target, root);
     }
 
-    /// Build an Engine with a File-anchored Profile under a parent dir.
-    /// `parent/main.rs` (file) is the anchor; the parent dir exists but is
-    /// outside the Profile's coverage. Mirrors the production
-    /// `attach_sub` flow's anchor-classification step by stamping
-    /// `Profile.kind = Some(File)` post-attach — without it the typed
-    /// dispatch in `transition_to_verifying` defaults to Subtree.
-    fn engine_with_file_anchor() -> (
-        Engine,
-        specter_core::ProfileId,
-        specter_core::ResourceId,
-        specter_core::ResourceId,
-    ) {
+    #[test]
+    fn pre_fire_target_standard_single_dirty_at_anchor_returns_anchor() {
+        // One captured path equal to the anchor: the lone-path LCA is the
+        // anchor itself, resolves back to the anchor slot.
+        let (e, pid, root, _a, _b) = engine_with_two_children();
+        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(root, "/root")]));
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        assert_eq!(target, root);
+    }
+
+    #[test]
+    fn pre_fire_target_standard_single_dirty_deep_returns_self() {
+        // One captured path at a deeper Dir: the lone-path LCA is that
+        // path; it resolves to that live slot (a Dir, no promotion).
+        let (e, pid, _root, a, _b) = engine_with_two_children();
+        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(a, "/root/a")]));
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        assert_eq!(target, a);
+    }
+
+    #[test]
+    fn pre_fire_target_standard_lone_file_promotes_to_parent_dir() {
+        // The dominant single-file-edit case: the lone captured path is
+        // a File leaf. Its component-LCA is the file itself; resolution
+        // finds the live File slot, which promotes one level to its
+        // parent Dir. The descendant-observation model probes Dirs — a
+        // File-target probe is misread downstream as anchor removal, so
+        // the promotion is load-bearing, not cosmetic.
         let mut e = Engine::new();
-        let parent = e.tree.ensure_root("parentdir", ResourceRole::User);
-        e.tree.set_kind(parent, ResourceKind::Dir);
-        let file_anchor = e
+        let root = e.tree.ensure_root("/root", ResourceRole::User);
+        e.tree.set_kind(root, ResourceKind::Dir);
+        let f = e
             .tree
-            .ensure_child(parent, "main.rs", ResourceRole::User)
+            .ensure_child(root, "f", ResourceRole::User)
             .expect("test live parent");
-        e.tree.set_kind(file_anchor, ResourceKind::File);
+        e.tree.set_kind(f, ResourceKind::File);
         let pid = e.profiles.attach(
             &mut e.tree,
             Profile::new(
-                file_anchor,
+                root,
                 ProfileIdentity {
-                    config: ScanConfig::builder().recursive(false).build(),
+                    config: ScanConfig::builder().recursive(true).build(),
                     max_settle: MAX_SETTLE,
                     events: NO_EVENTS,
                 },
                 SETTLE,
-                Some(ResourceKind::File),
+                None,
             ),
         );
-        (e, pid, parent, file_anchor)
+        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(f, "/root/f")]));
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        assert_eq!(
+            target, root,
+            "a lone File leaf promotes to its parent Dir, not the File slot",
+        );
     }
 
     #[test]
-    fn lca_pairwise_reduction_resolves_to_shared_intermediate_ancestor() {
-        // Witness for the pairwise LCA reduction. Two leaves under
-        // disjoint mid-3 branches share a depth-2 ancestor (`l2`); the
-        // reduction must resolve to that ancestor, not collapse to the
-        // anchor and not return either leaf.
+    fn pre_fire_target_standard_two_siblings_resolve_to_parent() {
+        // Two captured sibling paths: their component-LCA is the parent
+        // (`/root` here), which resolves back to the anchor slot.
+        let (e, pid, root, a, b) = engine_with_two_children();
+        let pre = pre_fire_burst_for_test(
+            BurstIntent::Standard,
+            dirty_at(&[(a, "/root/a"), (b, "/root/b")]),
+        );
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        assert_eq!(target, root);
+    }
+
+    #[test]
+    fn pre_fire_target_standard_resolves_to_shared_intermediate_ancestor() {
+        // Two leaves under disjoint mid-3 branches share a depth-2
+        // ancestor (`l2`). The component-LCA of their captured paths is
+        // `/l0/l1/l2`; it resolves to that live slot — not collapsing to
+        // the anchor and not returning either leaf.
         let mut e = Engine::new();
-        let l0 = e.tree.ensure_root("l0", ResourceRole::User);
+        let l0 = e.tree.ensure_root("/l0", ResourceRole::User);
         e.tree.set_kind(l0, ResourceKind::Dir);
         let l1 = e
             .tree
@@ -2787,36 +2424,137 @@ mod tests {
             ),
         );
 
-        let dirty: BTreeSet<_> = [leaf_a, leaf_b].iter().copied().collect();
-        let mut out = StepOutput::default();
-        let target = lca_target(
-            e.profiles.get(pid).unwrap().resource,
-            &dirty,
-            &e.tree,
-            pid,
-            &mut out,
+        let pre = pre_fire_burst_for_test(
+            BurstIntent::Standard,
+            dirty_at(&[(leaf_a, "/l0/l1/l2/a/x"), (leaf_b, "/l0/l1/l2/b/y")]),
         );
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
         assert_eq!(
             target, l2,
-            "LCA of leaves under l3a and l3b is l2 (their shared depth-2 ancestor)",
+            "component-LCA of leaves under l3a and l3b is l2",
         );
-        assert!(out.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn pre_fire_target_standard_reaped_slot_falls_back_to_anchor() {
+        // The captured path of a since-reaped slot can't resolve a live
+        // id under the anchor, so resolution falls back to the anchor —
+        // strictly wider, never chain-clipping — and silently (no
+        // diagnostic; delete-recreate churn would flood logs).
+        let (mut e, pid, root, a, _b) = engine_with_two_children();
+        let dirty = dirty_at(&[(a, "/root/a")]);
+        e.tree.try_reap(a, &mut StepOutput::default());
+        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty);
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        assert_eq!(
+            target, root,
+            "a reaped dirty slot widens to the anchor, not below the event",
+        );
+    }
+
+    #[test]
+    fn pre_fire_target_file_anchor_returns_anchor() {
+        // File-anchored Profile + any intent + any dirty set: target is the
+        // anchor itself. kqueue per-file FDs surface events at the file
+        // directly; promoting past the anchor would route the probe outside
+        // the Profile's coverage.
+        let (e, pid, _parent, file_anchor) = engine_with_file_anchor();
+
+        let pre = pre_fire_burst_for_test(
+            BurstIntent::Standard,
+            dirty_at(&[(file_anchor, "/parentdir/main.rs")]),
+        );
+        assert_eq!(
+            pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree),
+            file_anchor,
+        );
+
+        // Same conclusion even if dirty is empty.
+        let pre_empty = pre_fire_burst_for_test(BurstIntent::Standard, DirtyProvenance::new());
+        assert_eq!(
+            pre_fire_target(e.profiles.get(pid).unwrap(), &pre_empty, &e.tree),
+            file_anchor,
+        );
+
+        // And under Seed intent.
+        let pre_seed = pre_fire_burst_for_test(BurstIntent::Seed, DirtyProvenance::new());
+        assert_eq!(
+            pre_fire_target(e.profiles.get(pid).unwrap(), &pre_seed, &e.tree),
+            file_anchor,
+        );
+    }
+
+    #[test]
+    fn pre_fire_target_seed_intent_returns_anchor() {
+        // Seed intent on a Dir-anchored Profile: target is the anchor,
+        // regardless of dirty contents. Seed bursts compare against fire
+        // history rather than a stable subtree verdict, so they probe at
+        // the anchor unconditionally.
+        let (e, pid, root, a, _b) = engine_with_two_children();
+
+        let pre = pre_fire_burst_for_test(BurstIntent::Seed, dirty_at(&[(a, "/root/a")]));
+        assert_eq!(
+            pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree),
+            root,
+        );
+
+        // Same with empty dirty.
+        let pre_empty = pre_fire_burst_for_test(BurstIntent::Seed, DirtyProvenance::new());
+        assert_eq!(
+            pre_fire_target(e.profiles.get(pid).unwrap(), &pre_empty, &e.tree),
+            root,
+        );
+    }
+
+    /// Build an Engine with a File-anchored Profile under a parent dir.
+    /// `parent/main.rs` (file) is the anchor; the parent dir exists but is
+    /// outside the Profile's coverage. Mirrors the production
+    /// `attach_sub` flow's anchor-classification step by stamping
+    /// `Profile.kind = Some(File)` post-attach — without it the typed
+    /// dispatch in `transition_to_verifying` defaults to Subtree.
+    fn engine_with_file_anchor() -> (
+        Engine,
+        specter_core::ProfileId,
+        specter_core::ResourceId,
+        specter_core::ResourceId,
+    ) {
+        let mut e = Engine::new();
+        let parent = e.tree.ensure_root("/parentdir", ResourceRole::User);
+        e.tree.set_kind(parent, ResourceKind::Dir);
+        let file_anchor = e
+            .tree
+            .ensure_child(parent, "main.rs", ResourceRole::User)
+            .expect("test live parent");
+        e.tree.set_kind(file_anchor, ResourceKind::File);
+        let pid = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(
+                file_anchor,
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(false).build(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                Some(ResourceKind::File),
+            ),
+        );
+        (e, pid, parent, file_anchor)
     }
 
     #[test]
     fn transition_to_verifying_on_file_anchor_targets_anchor() {
         // File-anchored Profile: a Standard burst's probe target must be
-        // the anchor itself, not the parent dir. The kind dispatch lives
-        // at `transition_to_verifying`'s call site (rather than inside
-        // `lca_target`) so the LCA helper has a single, narrow contract:
-        // "lowest covering ancestor for a Dir-anchored Profile." This
-        // test pins the call-site dispatch — promoting past the anchor
-        // would route the probe outside the Profile's coverage and
-        // (downstream) wholesale-replace `Profile.current` with a Dir
-        // snapshot at the parent.
+        // the anchor itself, not the parent dir. `pre_fire_target`
+        // short-circuits a File-kind anchor before any path-LCA
+        // resolution. This test pins that through the emission path —
+        // promoting past the anchor would route the probe outside the
+        // Profile's coverage and (downstream) wholesale-replace
+        // `Profile.current` with a Dir snapshot at the parent.
         let (mut e, pid, _parent, file_anchor) = engine_with_file_anchor();
         let mut start_out = StepOutput::default();
-        e.start_standard_burst(pid, file_anchor, Instant::now(), &mut start_out);
+        let fp = rpath(&e, file_anchor);
+        e.start_standard_burst(pid, file_anchor, &fp, Instant::now(), &mut start_out);
 
         let mut probe_out = StepOutput::default();
         e.transition_to_verifying(pid, &mut probe_out);
@@ -2842,29 +2580,21 @@ mod tests {
     }
 
     #[test]
-    fn build_obligation_chains_filters_to_subtree_of_target() {
-        let (e, _pid, root, a, b) = engine_with_two_children();
-        // target = a; only `a` itself qualifies (b is a sibling).
-        let set: BTreeSet<_> = [root, a, b].iter().copied().collect();
-        let paths = build_obligation_chains(&set, a, &e.tree);
-        let path_a = e.tree.path_of(a).unwrap();
-        assert!(paths.contains(&path_a));
-        assert!(!paths.contains(&e.tree.path_of(b).unwrap()));
-        // root is an ancestor of a (not a descendant), so it's filtered out.
-        assert!(!paths.contains(&e.tree.path_of(root).unwrap()));
-    }
-
-    #[test]
-    fn transition_to_verifying_standard_uses_lca() {
-        let (mut e, pid, _root, a, b) = engine_with_two_children();
-        let mut out = StepOutput::default();
+    fn standard_obligation_chains_carry_every_captured_dirty_path() {
+        // The emission choke materializes ProofObligation::Chains from
+        // *every* captured dirty path, with no subtree-of-target filter
+        // (the target is an ancestor-or-equal of every value by
+        // construction, so the old filter was a tautology). A captured
+        // ancestor path (`/root`) and a sibling (`/root/b`) both survive
+        // alongside `/root/a` — none is dropped.
+        let (mut e, pid, root, a, b) = engine_with_two_children();
+        let (rp, ap, bp) = (rpath(&e, root), rpath(&e, a), rpath(&e, b));
         let now = Instant::now();
-        // Standard burst with two dirty siblings → LCA = root (the anchor).
-        e.start_standard_burst(pid, a, now, &mut out);
-        // Inject a second dirty resource so LCA computes the sibling parent.
-        if let Some(pre) = e.profiles.get_mut(pid).unwrap().pre_fire_burst_mut() {
-            pre.dirty_resources.insert(b);
-        }
+        let mut out = StepOutput::default();
+        e.start_standard_burst(pid, a, &ap, now, &mut out);
+        e.event_drives_batching(pid, root, &rp, now, &mut out);
+        e.event_drives_batching(pid, b, &bp, now, &mut out);
+
         let mut probe_out = StepOutput::default();
         e.transition_to_verifying(pid, &mut probe_out);
 
@@ -2876,20 +2606,59 @@ mod tests {
                 ProbeOp::Cancel { .. } => None,
             })
             .expect("Standard probe emitted");
-        // a + b's LCA is root (the anchor) because they're siblings under root.
+        match req {
+            ProbeRequest::Subtree { obligation, .. } => match obligation {
+                ProofObligation::Chains(paths) => {
+                    assert!(paths.contains(&ap), "the trigger path is a chain");
+                    assert!(paths.contains(&bp), "a sibling chain is not filtered");
+                    assert!(
+                        paths.contains(&rp),
+                        "a captured ancestor path is not filtered out",
+                    );
+                    assert_eq!(paths.len(), 3, "exactly the captured paths, no more");
+                }
+                other => panic!("Standard burst obligation must be Chains; got {other:?}"),
+            },
+            other => panic!("Standard burst must emit ProbeRequest::Subtree; got {other:?}"),
+        }
+        let _ = e.cancel_all_in_flight_probes();
+    }
+
+    #[test]
+    fn transition_to_verifying_standard_uses_lca() {
+        let (mut e, pid, root, a, b) = engine_with_two_children();
+        let (ap, bp) = (rpath(&e, a), rpath(&e, b));
+        let now = Instant::now();
+        // Standard burst with two dirty siblings → component-LCA of
+        // `/root/a` + `/root/b` is `/root`, resolving to the anchor.
+        let mut out = StepOutput::default();
+        e.start_standard_burst(pid, a, &ap, now, &mut out);
+        e.event_drives_batching(pid, b, &bp, now, &mut out);
+
+        let mut probe_out = StepOutput::default();
+        e.transition_to_verifying(pid, &mut probe_out);
+
+        let req = probe_out
+            .probe_ops()
+            .iter()
+            .find_map(|op| match op {
+                ProbeOp::Probe { request } => Some(request),
+                ProbeOp::Cancel { .. } => None,
+            })
+            .expect("Standard probe emitted");
         // Subtree variant carries `target_path` and the proof `obligation`;
         // a Standard burst on a Dir-anchored Profile produces `Chains`.
-        let anchor_path = e
-            .tree
-            .path_of(e.profiles.get(pid).unwrap().resource)
-            .expect("anchor path resolves");
+        let anchor_path = e.tree.path_of(root).expect("anchor path resolves");
         match req {
             ProbeRequest::Subtree {
                 target_path,
                 obligation,
                 ..
             } => {
-                assert_eq!(*target_path, anchor_path);
+                assert_eq!(
+                    *target_path, anchor_path,
+                    "sibling component-LCA resolves to the anchor",
+                );
                 match obligation {
                     ProofObligation::Chains(paths) => assert_eq!(paths.len(), 2),
                     other => panic!("Standard burst obligation must be Chains; got {other:?}"),

@@ -1047,11 +1047,6 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?observed,
             "burst lifecycle helper precondition failed (state-machine routing breach)",
         ),
-        Diagnostic::LcaIntegrityViolation { profile, source } => tracing::warn!(
-            ?profile,
-            ?source,
-            "LCA integrity violation in burst's dirty_resources reduction (fell back to anchor)",
-        ),
     }
 }
 

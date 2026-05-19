@@ -982,10 +982,9 @@ mod tests {
     // (co-anchor excluded), Seed never gates, and chain determinism.
 
     use specter_core::{
-        ActiveBurst, BurstFinish, BurstIntent, CertifiedPrior, PreFireBurst, PreFirePhase,
-        ProfileState, TimerId,
+        ActiveBurst, BurstFinish, BurstIntent, CertifiedPrior, DirtyProvenance, PreFireBurst,
+        PreFirePhase, ProfileState, TimerId,
     };
-    use std::collections::BTreeSet;
 
     /// A Profile at `r` with `builder`'s config, left `Idle`.
     fn attach_idle(
@@ -1040,7 +1039,7 @@ mod tests {
                 },
                 intent,
                 forced: false,
-                dirty_resources: BTreeSet::new(),
+                dirty: DirtyProvenance::new(),
                 certified: CertifiedPrior::new(),
                 probe_target: r,
                 last_event_time: None,

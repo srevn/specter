@@ -996,8 +996,8 @@ fn co_located_profiles_independently_record_shared_resource_obligation() {
     // Two config_hash-distinct Profiles share one Resource /src. A
     // single FsEvent on the shared resource fans to *every* covering
     // Profile (on_fs_event iterates the covering set), and each Profile
-    // records the resource in its *own* dirty_resources (the obligation
-    // basis). There is no per-resource global filter that one Profile's
+    // records the resource's path in its *own* dirty provenance (the
+    // obligation basis). There is no per-resource global filter that one Profile's
     // in-flight burst could use to blind another — the property that
     // keeps a co-resident Profile's probe from mtime-skipping a
     // genuinely changed directory.
@@ -1073,22 +1073,28 @@ fn co_located_profiles_independently_record_shared_resource_obligation() {
         },
         t0,
     );
+    let r_path = e.tree().get(r).unwrap().path().clone();
     for pid in [pid_a, pid_b] {
         let pre = match e.profiles().get(pid).unwrap().state() {
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
             other => panic!("expected Active(PreFire) for {pid:?}, got {other:?}"),
         };
         assert!(
-            pre.dirty_resources.contains(&r),
-            "{pid:?} independently recorded the shared resource in its own \
-             dirty_resources (the obligation basis)",
+            pre.dirty.chains().contains(&r_path),
+            "{pid:?} independently recorded the shared resource's path in \
+             its own provenance (the obligation basis)",
+        );
+        assert_eq!(
+            pre.dirty.lca_path().as_ref(),
+            Some(&r_path),
+            "{pid:?}: the lone recorded path is the component-LCA",
         );
     }
 
     // A second external event on the shared resource while both bursts
     // are in flight: again fanned to each Profile independently. No
-    // Profile's in-flight burst removes the resource from another's
-    // dirty_resources (obligation basis).
+    // Profile's in-flight burst removes the resource's path from
+    // another's provenance (obligation basis).
     let t1 = t0 + SETTLE / 2;
     e.step(
         Input::FsEvent {
@@ -1103,9 +1109,9 @@ fn co_located_profiles_independently_record_shared_resource_obligation() {
             other => panic!("expected Active(PreFire) for {pid:?}, got {other:?}"),
         };
         assert!(
-            pre.dirty_resources.contains(&r),
-            "{pid:?} still records the shared resource in its own \
-             dirty_resources after a mid-burst event (its own \
+            pre.dirty.chains().contains(&r_path),
+            "{pid:?} still records the shared resource's path in its own \
+             provenance after a mid-burst event (its own \
              ProofObligation::Chains basis) — no global filter poisons a \
              co-resident Profile",
         );

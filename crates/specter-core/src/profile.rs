@@ -17,7 +17,7 @@ use crate::tree::Tree;
 use compact_str::CompactString;
 use slotmap::{SecondaryMap, SlotMap};
 use smallvec::SmallVec;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 ///
 /// **Pre-fire** (`Batching | Verifying | Draining`): event-driven
 /// debounce window, in-flight verify or self-stable / descendants-pending
-/// idle. Carries the event-accumulator (`dirty_resources`), the
+/// idle. Carries the event-provenance accumulator (`dirty`), the
 /// settle-deadline source of truth (`last_event_time`), and the
 /// quiescence proof (`certified`).
 ///
@@ -55,7 +55,7 @@ use std::time::{Duration, Instant};
 /// mutated — and the rebase probe walks `WholeSubtree` (the
 /// post-command tree has no trustworthy prior to skip against, exactly
 /// as Seed). Its one fresh accumulator is the post-fire
-/// `dirty_resources`, which `absorb_event_into_fire_tail` feeds; it is
+/// `dirty`, which `absorb_event_into_fire_tail` feeds; it is
 /// no longer a proof-obligation source (the `WholeSubtree` walk
 /// observes everything regardless), only the fire-tail residual restart
 /// seed, reset at every `Rebasing` re-entry so a `Stable` terminal
@@ -66,15 +66,140 @@ pub enum ActiveBurst {
     PostFire(PostFireBurst),
 }
 
+/// Event provenance accumulated across a burst's pre-fire life (and,
+/// for the post-fire fire-tail, the residual restart seed).
+///
+/// Key = the live engine slot the event named. Value = that slot's
+/// path, `Arc::clone`d at ingest from the already-resolved live
+/// `&Resource` (the `watch_demand > 0` gate proved the slot live).
+/// Where an event landed is a *historical fact* — immutable from the
+/// instant of ingest and immune to the slot later being reaped
+/// (delete-recreate at the same path). A reaped key never invalidates
+/// its captured path.
+///
+/// The Standard pre-fire proof obligation derives from the **values**,
+/// never the keys: [`Self::chains`] is the dirty root→leaf chains the
+/// walker must freshly observe, and [`Self::lca_path`] is their
+/// component-wise lowest common ancestor — the tightest directory the
+/// probe can root at without excluding a chain. Sourcing both from the
+/// captured paths is what makes an empty `Chains` over a fully
+/// reaped-id set unconstructable: liveness never filters the
+/// projection.
+///
+/// The map is keyed by the slot, not reduced to a bare path set,
+/// for two reasons: per-slot **last-writer-wins** dedup (a slot
+/// firing N events contributes one entry, not N — see
+/// [`Self::note`]), and retaining the live-slot id as the cheap
+/// basis for any future caller needing *current* liveness rather
+/// than history (today none on the Standard pre-fire path — the
+/// projection reads only the values). No public setter —
+/// [`Self::note`] is the sole accumulator edge.
+#[derive(Debug, Default)]
+pub struct DirtyProvenance(BTreeMap<ResourceId, Arc<Path>>);
+
+impl DirtyProvenance {
+    /// An empty accumulator. `const` for the `burst.rs` constructors
+    /// and the typed post-fire move.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    /// Record that an `FsEvent` named `id` at `path`. The sole
+    /// accumulator edge. `path` is an `Arc::clone` of the live
+    /// `&Resource`'s materialised path captured at the ingest site —
+    /// total by construction (the `watch_demand > 0` gate proved the
+    /// slot live), so no fallible `path_of`, no `Option`. Last-writer
+    /// -wins per id; ids are stable, so a repeat event for one slot
+    /// re-stores the identical path.
+    pub fn note(&mut self, id: ResourceId, path: Arc<Path>) {
+        self.0.insert(id, path);
+    }
+
+    /// No event recorded yet. The Seed first-fire witness
+    /// (`seed_owes_first_fire`) and the fire-tail residual restart gate
+    /// read this; a Standard pre-fire burst is non-empty by
+    /// construction (its constructor notes the trigger).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Drop every recorded event — the per-`Rebasing`-entry fire-tail
+    /// residual reset. Behaviour-preserving swap-in for the prior
+    /// `BTreeSet::clear`.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// The dirty root→leaf chains for [`crate::ProofObligation::Chains`]:
+    /// every captured path, `BTreeSet`-ordered for deterministic replay.
+    /// Every captured path is at-or-under the burst's probe target by
+    /// construction (the target is the live id at [`Self::lca_path`], or
+    /// the anchor fallback — both ancestors-or-equal of every value), so
+    /// the prior "intersect with the target subtree" filter is a
+    /// tautology and is gone. Never empty for a Standard pre-fire burst.
+    #[must_use]
+    pub fn chains(&self) -> BTreeSet<Arc<Path>> {
+        self.0.values().map(Arc::clone).collect()
+    }
+
+    /// The component-wise lowest common ancestor of every captured path
+    /// — the tightest directory the walker can root at without
+    /// excluding a chain. `None` iff empty.
+    ///
+    /// Component-wise (not byte-prefix) is load-bearing: `/a` must not
+    /// match `/ab`. Sound because v1 forbids symlinks / cross-filesystem,
+    /// so a shared component prefix is genuine Tree ancestry. A lone
+    /// captured path (the dominant single-file-edit case) returns itself
+    /// with no allocation; the engine resolves the result to a live id
+    /// and promotes a File leaf to its parent Dir.
+    #[must_use]
+    pub fn lca_path(&self) -> Option<Arc<Path>> {
+        let mut values = self.0.values();
+        let first = values.next()?;
+        let mut lca: &Path = first;
+        for p in values {
+            lca = common_prefix(lca, p);
+        }
+        if lca == first.as_ref() {
+            Some(Arc::clone(first))
+        } else {
+            Some(Arc::from(lca))
+        }
+    }
+}
+
+/// Longest shared **component** prefix of two paths, borrowed from `a`.
+/// Walks `Path::components` in lockstep, then strips `a`'s trailing
+/// components past the divergence via `Path::parent` (each step a
+/// sub-slice of `a`, so the result keeps `a`'s lifetime). Component
+/// -wise, so `/a` is never a prefix of `/ab`. Both inputs are absolute
+/// (materialised from the root chain) and share at least the root, so
+/// the result is never empty.
+fn common_prefix<'a>(a: &'a Path, b: &Path) -> &'a Path {
+    let shared = a
+        .components()
+        .zip(b.components())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let total = a.components().count();
+    let mut prefix = a;
+    for _ in shared..total {
+        prefix = prefix.parent().unwrap_or(prefix);
+    }
+    prefix
+}
+
 /// Pre-fire lifecycle — every phase before the fire transition.
 ///
 /// Fields are split across three roles:
 /// - **Burst-scoped invariants** (`intent`, `forced`, `burst_deadline`,
 ///   `probe_target`): survive every pre-fire phase transition.
-/// - **Pre-fire event state** (`dirty_resources`, `last_event_time`):
-///   populated by `event_drives_batching` on every `FsEvent`, for
-///   both intents (both burst constructors are Batching-first).
-///   `dirty_resources` is the LCA basis recomputed at each
+/// - **Pre-fire event state** (`dirty`, `last_event_time`): populated
+///   by `event_drives_batching` on every `FsEvent`, for both intents
+///   (both burst constructors are Batching-first). `dirty`'s captured
+///   paths are the obligation + scope basis re-projected at each
 ///   `transition_to_verifying` for a Standard burst, and live-but-inert
 ///   for a Seed (anchor target + `WholeSubtree`); `last_event_time` is
 ///   the settle deadline's source of truth for both.
@@ -82,10 +207,10 @@ pub enum ActiveBurst {
 ///   the prior certified sample of the N=2 stability sequence, never an
 ///   event-accumulator.
 ///
-/// `dirty_resources` is preserved across the burst's pre-fire lifetime
-/// because the LCA target is recomputed from it at every reconfirm
-/// (`Draining → Verifying`) — the *target* mutates, the *basis*
-/// doesn't.
+/// `dirty` is preserved across the burst's pre-fire lifetime because
+/// the obligation + scope are re-projected from it at every reconfirm
+/// (`Draining → Verifying`) — the *projection* mutates, the captured
+/// -path *basis* doesn't.
 ///
 /// `certified` is preserved verbatim across every pre-fire phase swap
 /// (`event_drives_batching`, `transition_to_draining`,
@@ -119,46 +244,49 @@ pub struct PreFireBurst {
     pub phase: PreFirePhase,
     pub intent: BurstIntent,
     pub forced: bool,
-    /// Resources whose `FsEvent` drove (or is driving) this burst.
-    /// Constructed `{ trigger }` by *both* `start_standard_burst`
-    /// (always — its trigger is mandatory) and `start_seed_burst` (iff
-    /// the Seed has a triggering `FsEvent`; empty otherwise), then
-    /// `event_drives_batching` inserts each later FsEvent during the
-    /// pre-fire phases (`Batching | Verifying | Draining`), for *both*
-    /// intents. The two constructors seed the trigger symmetrically, so
-    /// this set faithfully tracks witnessed events regardless of intent.
+    /// Event provenance — every `FsEvent` that drove (or is driving)
+    /// this burst, captured `(slot, path)` at ingest. Constructed with
+    /// the trigger by *both* `start_standard_burst` (always — its
+    /// trigger is mandatory) and `start_seed_burst` (iff the Seed has a
+    /// triggering `FsEvent`; empty otherwise), then `event_drives_batching`
+    /// notes each later FsEvent during the pre-fire phases
+    /// (`Batching | Verifying | Draining`), for *both* intents.
     ///
     /// **Two intent-specific consumers.**
-    /// - *Standard* projects this set to the LCA probe target and the
-    ///   `ProofObligation::Chains` at every `transition_to_verifying`.
+    /// - *Standard* projects the captured **paths** to the
+    ///   `ProofObligation::Chains` and their component-LCA (resolved to
+    ///   a live id by `pre_fire_target`) to the probe target — both
+    ///   immune to slot reaping because they read history, not current
+    ///   liveness.
     /// - *Seed* targets the anchor and carries
-    ///   `ProofObligation::WholeSubtree` unconditionally, so this set is
+    ///   `ProofObligation::WholeSubtree` unconditionally, so this is
     ///   **not** its probe-target / obligation source; instead its
     ///   *non-emptiness is the first-fire witness*. A fresh, never-fired
     ///   Seed fires its `SubtreeRoot` Subs iff it observed activity
-    ///   (`!dirty_resources.is_empty()`, the engine's
-    ///   `seed_owes_first_fire` gate); empty ⇔ no activity ⇔
-    ///   restart-safe silent pin (a daemon restart over a static tree
-    ///   must not re-fire — Specter persists no baseline, so every
-    ///   restart is a fresh Seed). A recovery Seed (`any_fired`) ignores
-    ///   this set and uses the drift oracle instead.
-    pub dirty_resources: BTreeSet<ResourceId>,
+    ///   (`!dirty.is_empty()`, the engine's `seed_owes_first_fire`
+    ///   gate); empty ⇔ no activity ⇔ restart-safe silent pin (a daemon
+    ///   restart over a static tree must not re-fire — Specter persists
+    ///   no baseline, so every restart is a fresh Seed). A recovery Seed
+    ///   (`any_fired`) ignores this and uses the drift oracle instead.
+    pub dirty: DirtyProvenance,
     /// Latest probe target. Initialised to the Profile's anchor at
     /// burst start. Overwritten by `transition_to_verifying` to the
     /// `pre_fire_target` result (File anchor → anchor; Seed → anchor;
-    /// Standard → LCA of `dirty_resources`). `transition_to_rebasing`
-    /// targets the anchor unconditionally but does not write this
-    /// field (the post-fire phases live on `PostFireBurst`, which has
-    /// no `probe_target` — Rebasing's target is structurally fixed).
+    /// Standard → the live id at the component-LCA of `dirty`'s captured
+    /// paths, a File leaf promoted to its parent Dir, anchor on any
+    /// resolution miss). `transition_to_rebasing` targets the anchor
+    /// unconditionally but does not write this field (the post-fire
+    /// phases live on `PostFireBurst`, which has no `probe_target` —
+    /// Rebasing's target is structurally fixed).
     ///
     /// **Draining → Verifying reconfirm.** Recomputed via the same
-    /// `pre_fire_target` rule because `dirty_resources` is preserved
-    /// across the burst's pre-fire lifetime: production code mutates
-    /// it only by `insert`, so the LCA basis is identical at the
-    /// reconfirm to what it was at the original Verifying entry.
-    /// Slot reaping during Draining only narrows the result —
-    /// `lca_target` filters reaped slots and falls back to anchor on
-    /// an empty live set.
+    /// `pre_fire_target` rule because `dirty` is preserved across the
+    /// burst's pre-fire lifetime: production code only ever *notes* into
+    /// it, so the captured-path basis is identical at the reconfirm.
+    /// The probe target and obligation derive from the captured paths
+    /// (history), so a slot reaped during Draining cannot collapse
+    /// either — only the live-id *resolution* may fall back to the
+    /// anchor, which is strictly wider and never clips a chain.
     pub probe_target: ResourceId,
     /// Wall-clock instant of the most recent `FsEvent` that drove this
     /// burst. The **source of truth** for the Batching settle deadline:
@@ -278,9 +406,9 @@ pub enum PreFirePhase {
 /// - No `probe_target`: Rebasing always targets the Profile's anchor.
 /// - No `last_event_time`: the pre-fire settle-deadline source.
 ///
-/// The pre-fire `dirty_resources` (the LCA basis) also does not cross;
-/// the post-fire `dirty_resources` is a *distinct, freshly-empty*
-/// accumulator (the fire-tail residual), not the pre-fire set carried
+/// The pre-fire `dirty` (the captured-path basis) also does not cross;
+/// the post-fire `dirty` is a *distinct, freshly-empty* provenance
+/// accumulator (the fire-tail residual), not the pre-fire one carried
 /// over.
 ///
 /// `intent: BurstIntent` survives post-fire so
@@ -308,15 +436,15 @@ pub struct PostFireBurst {
     pub intent: BurstIntent,
     pub phase: PostFirePhase,
     /// Events absorbed during the post-fire tail
-    /// (`Awaiting | Rebasing | RebaseSettling`). Seeded by
-    /// `absorb_event_into_fire_tail` in `drive_burst`'s post-fire arm.
+    /// (`Awaiting | Rebasing | RebaseSettling`), captured `(slot, path)`
+    /// by `absorb_event_into_fire_tail` in `drive_burst`'s post-fire arm.
     ///
     /// **Not a proof-obligation source.** The rebase probe walks
     /// `WholeSubtree` (the post-command tree has no trustworthy prior),
     /// so it re-observes the whole anchor subtree regardless of this
-    /// set — every absorbed event is folded into the rebase verdict by
-    /// the next `WholeSubtree` read whether or not it is recorded here.
-    /// The set is reset at *every* `Rebasing` entry
+    /// accumulator — every absorbed event is folded into the rebase
+    /// verdict by the next `WholeSubtree` read whether or not it is
+    /// recorded here. It is reset at *every* `Rebasing` entry
     /// (`transition_to_rebasing`, the first `Awaiting → Rebasing` edge
     /// and each `RebaseSettling → Rebasing` re-arm), so when the rebase
     /// loop terminates it holds only the events that landed during the
@@ -327,15 +455,17 @@ pub struct PostFireBurst {
     /// **Sole consumer: the final-window restart seed.** At
     /// `dispatch_rebase_ok`'s `Stable` terminal a non-empty residual on
     /// a `ReturnToIdle` burst restarts a fresh debounced burst seeded
-    /// from it (`into_pre_fire_residual`), so that final-window change
-    /// is not lost. A zombie (`Reap`) burst, an empty residual, or a
-    /// ceiling terminal (no restart) drops it at `finish_burst_to_idle`.
-    /// Without the per-entry reset, any tree-touching command would
-    /// leave a non-empty residual and spuriously restart; with it the
-    /// restart fires only for the real race. The restarted burst's
-    /// settle window reckons from the rebase-response instant, not the
-    /// absorbed events', a bounded ≤ one-`settle` extra re-fire latency.
-    pub dirty_resources: BTreeSet<ResourceId>,
+    /// from it (`into_pre_fire_residual` moves the whole provenance, so
+    /// the restarted Standard burst's first verify has its captured
+    /// paths intact), so that final-window change is not lost. A zombie
+    /// (`Reap`) burst, an empty residual, or a ceiling terminal (no
+    /// restart) drops it at `finish_burst_to_idle`. Without the
+    /// per-entry reset, any tree-touching command would leave a
+    /// non-empty residual and spuriously restart; with it the restart
+    /// fires only for the real race. The restarted burst's settle
+    /// window reckons from the rebase-response instant, not the absorbed
+    /// events', a bounded ≤ one-`settle` extra re-fire latency.
+    pub dirty: DirtyProvenance,
     /// The post-fire rebase loop's N=2 quiescence proof — the prior
     /// `Authoritative` sample of the *post-command* tree. Born fresh
     /// ([`CertifiedPrior::new`]) at [`Self::new`]; advanced only via
@@ -595,9 +725,9 @@ impl PreFireBurst {
     ///   post-fire; the post-fire loop has its own ceiling.
     /// - `forced` — no fire decision left in the post-fire lifecycle.
     /// - `probe_target` — Rebasing always targets the anchor.
-    /// - `last_event_time` / `dirty_resources` — pre-fire-only event
-    ///   state. Post-fire opens a *fresh, empty* `dirty_resources`
-    ///   (the fire-tail residual), not the pre-fire LCA basis.
+    /// - `last_event_time` / `dirty` — pre-fire-only event state.
+    ///   Post-fire opens a *fresh, empty* `dirty` (the fire-tail
+    ///   residual), not the pre-fire captured-path provenance.
     /// - `certified` — the pre-fire proof is **not** carried across:
     ///   the post-command tree the rebase loop must prove quiescent is
     ///   a different tree than the one the pre-fire carrier proved, so
@@ -615,7 +745,7 @@ impl PreFireBurst {
                 outstanding,
                 gate_deadline,
             },
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         )
     }
 }
@@ -675,15 +805,11 @@ impl PostFireBurst {
     /// only cross-crate construction path (fixtures included) — there is
     /// exactly one place a `PostFireBurst` is born.
     #[must_use]
-    pub const fn new(
-        intent: BurstIntent,
-        phase: PostFirePhase,
-        dirty_resources: BTreeSet<ResourceId>,
-    ) -> Self {
+    pub const fn new(intent: BurstIntent, phase: PostFirePhase, dirty: DirtyProvenance) -> Self {
         Self {
             intent,
             phase,
-            dirty_resources,
+            dirty,
             certified: CertifiedPrior::new(),
             rebase_ceiling: RebaseCeilingState::NotStarted,
         }
@@ -781,12 +907,14 @@ impl PostFireBurst {
     /// burst — the symmetric inverse of [`PreFireBurst::into_post_fire`].
     ///
     /// Consumes the post-fire burst at the rebase-ok boundary and re-arms
-    /// a Standard debounce burst seeded from the fire-tail residual: the
-    /// `dirty_resources` that `absorb_event_into_fire_tail`
-    /// accumulated while the rebase probe was already in flight. Without
+    /// a Standard debounce burst, moving the fire-tail residual `dirty`
+    /// provenance over whole: the events `absorb_event_into_fire_tail`
+    /// captured while the rebase probe was already in flight. Without
     /// this the residual has no consumer — it drops when the post-fire
     /// burst is torn down, so a descendant change that landed during the
-    /// rebase round-trip is seen only by the next unrelated event.
+    /// rebase round-trip is seen only by the next unrelated event. The
+    /// move keeps the captured paths intact, so the restarted Standard
+    /// burst's first verify obligates over them.
     ///
     /// **In-place move, never finish-then-start.** The typed
     /// `PostFire → PreFire` move preserves the watched anchor: it
@@ -826,17 +954,17 @@ impl PostFireBurst {
         now: Instant,
     ) -> PreFireBurst {
         debug_assert!(
-            !self.dirty_resources.is_empty(),
+            !self.dirty.is_empty(),
             "into_pre_fire_residual: empty residual — the restart has no \
              seed; the caller must gate on a non-empty fire-tail residual",
         );
-        let residual = self.dirty_resources;
+        let residual = self.dirty;
         PreFireBurst {
             burst_deadline,
             phase: PreFirePhase::Batching { settle_timer },
             intent: BurstIntent::Standard,
             forced: false,
-            dirty_resources: residual,
+            dirty: residual,
             probe_target: anchor,
             last_event_time: Some(now),
             certified: CertifiedPrior::new(),
@@ -2453,8 +2581,8 @@ impl Profile {
     /// `state == Active(PreFire(_), _)` — the `&self` mirror of
     /// [`Self::pre_fire_burst_mut`]. A read of the state's structural
     /// shape, never a transition; the engine's pre-fire dispatch reads
-    /// (`probe_target`, the Seed first-fire witness `dirty_resources`)
-    /// route through this instead of re-matching `state()` inline.
+    /// (`probe_target`, the Seed first-fire witness `dirty`) route
+    /// through this instead of re-matching `state()` inline.
     #[must_use]
     pub const fn pre_fire_burst(&self) -> Option<&PreFireBurst> {
         match &self.state {
@@ -3451,15 +3579,105 @@ mod tests {
 
     use super::{
         ActiveBurst, AwaitVerdict, BurstFinish, BurstIntent, CertifiedPrior, DescentRemaining,
-        DescentState, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, QuiescenceVerdict,
-        TimerKind,
+        DescentState, DirtyProvenance, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
+        QuiescenceVerdict, TimerKind,
     };
     use crate::ids::{ProbeCorrelation, TimerId};
     use crate::op::ProofAuthority;
     use std::collections::BTreeSet;
+    use std::path::Path;
 
     fn tid(n: u64) -> TimerId {
         TimerId::from(n)
+    }
+
+    /// Inline twin of `testkit::dirty_provenance` — the `testkit`
+    /// feature is off for `cargo nextest run -p specter-core`, so the
+    /// canonical fixture is unreachable from this module's build. Mirrors
+    /// the production ingest contract exactly: each pair is one
+    /// [`DirtyProvenance::note`] in slice order (a repeated `ResourceId`
+    /// is last-writer-wins), paths must be absolute (the component-LCA
+    /// relies on every value sharing the root) — a relative path is a
+    /// fixture bug, caught loudly in dev/CI and inert in release.
+    fn dirty_prov(entries: &[(ResourceId, &str)]) -> DirtyProvenance {
+        let mut dirty = DirtyProvenance::new();
+        for &(id, path) in entries {
+            debug_assert!(
+                path.starts_with('/'),
+                "dirty_prov: '{path}' must be an absolute path",
+            );
+            dirty.note(id, Arc::from(Path::new(path)));
+        }
+        dirty
+    }
+
+    /// The captured-path set a [`DirtyProvenance`] built from `entries`
+    /// projects to (`DirtyProvenance::chains`) — the observable the
+    /// migrated residual / mutation tests assert against now that the
+    /// provenance has no `PartialEq` and no field peek.
+    fn expected_chains(entries: &[&str]) -> BTreeSet<Arc<Path>> {
+        entries.iter().map(|p| Arc::from(Path::new(*p))).collect()
+    }
+
+    /// `n` distinct `ResourceId`s from a throwaway slotmap — core has no
+    /// `Tree`, and these tests only need the keys to differ.
+    fn rids(n: usize) -> Vec<ResourceId> {
+        let mut sm = slotmap::SlotMap::<ResourceId, ()>::with_key();
+        (0..n).map(|_| sm.insert(())).collect()
+    }
+
+    // `DirtyProvenance`'s own contract. The engine's `pre_fire_target`
+    // / emission tests exercise it transitively; these pin the type
+    // directly — above all the component-wise LCA the path-LCA scope
+    // rests on.
+
+    #[test]
+    fn dirty_provenance_lca_path_is_component_wise_not_byte_prefix() {
+        // `/w/a` is NOT a prefix of `/w/ab`: a byte-prefix LCA would
+        // wrongly root the probe at `/w/a` and clip `/w/ab`.
+        // Component-wise, the only shared ancestor is `/w`.
+        let r = rids(2);
+        let dp = dirty_prov(&[(r[0], "/w/a"), (r[1], "/w/ab")]);
+        assert_eq!(dp.lca_path().as_deref(), Some(Path::new("/w")));
+
+        // A genuinely divergent pair reduces to its real ancestor.
+        let dp = dirty_prov(&[(r[0], "/w/x/a"), (r[1], "/w/y/b")]);
+        assert_eq!(dp.lca_path().as_deref(), Some(Path::new("/w")));
+    }
+
+    #[test]
+    fn dirty_provenance_lca_path_single_entry_is_identity_empty_is_none() {
+        // The dominant single-file-edit case: a lone captured path is
+        // its own LCA, returned without reallocating (the
+        // `Arc::clone(first)` fast path) — pinned via pointer identity.
+        let r = rids(1);
+        let only: Arc<Path> = Arc::from(Path::new("/w/deep/file.rs"));
+        let mut dp = DirtyProvenance::new();
+        dp.note(r[0], Arc::clone(&only));
+        let lca = dp.lca_path().expect("non-empty");
+        assert!(
+            Arc::ptr_eq(&lca, &only),
+            "a lone path is returned, not reallocated",
+        );
+
+        assert!(DirtyProvenance::new().lca_path().is_none(), "empty ⇒ None");
+    }
+
+    #[test]
+    fn dirty_provenance_notes_key_by_slot_last_writer_wins() {
+        // `note` is keyed by slot: a repeat event for one slot
+        // overwrites (last-writer-wins, one chain); distinct slots each
+        // contribute one chain; `chains()` is exactly the captured set.
+        let r = rids(2);
+        let mut dp = DirtyProvenance::new();
+        assert!(dp.is_empty());
+        dp.note(r[0], Arc::from(Path::new("/w/a")));
+        dp.note(r[0], Arc::from(Path::new("/w/a2"))); // same slot, later event
+        dp.note(r[1], Arc::from(Path::new("/w/b")));
+        assert!(!dp.is_empty());
+        assert_eq!(dp.chains(), expected_chains(&["/w/a2", "/w/b"]));
+        dp.clear();
+        assert!(dp.is_empty() && dp.lca_path().is_none());
     }
 
     fn batching_burst(settle: TimerId, deadline: TimerId, anchor: ResourceId) -> PreFireBurst {
@@ -3470,7 +3688,7 @@ mod tests {
             },
             intent: BurstIntent::Standard,
             forced: false,
-            dirty_resources: BTreeSet::new(),
+            dirty: DirtyProvenance::new(),
             certified: CertifiedPrior::new(),
             probe_target: anchor,
             last_event_time: None,
@@ -3483,7 +3701,7 @@ mod tests {
             phase,
             intent: BurstIntent::Standard,
             forced: false,
-            dirty_resources: BTreeSet::new(),
+            dirty: DirtyProvenance::new(),
             certified: CertifiedPrior::new(),
             probe_target: anchor,
             last_event_time: None,
@@ -3550,7 +3768,7 @@ mod tests {
                 outstanding: 1,
                 gate_deadline: tid(55),
             },
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         );
         assert_eq!(
             post.timer_token(TimerKind::AwaitGateDeadline),
@@ -3565,7 +3783,7 @@ mod tests {
         let post = PostFireBurst::new(
             BurstIntent::Standard,
             PostFirePhase::Rebasing(ProbeSlot::empty()),
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         );
         assert!(post.timer_token(TimerKind::AwaitGateDeadline).is_none());
     }
@@ -3584,7 +3802,7 @@ mod tests {
                 spacing_timer: tid(77),
             },
         ] {
-            let post = PostFireBurst::new(BurstIntent::Standard, phase, BTreeSet::new());
+            let post = PostFireBurst::new(BurstIntent::Standard, phase, DirtyProvenance::new());
             assert!(post.timer_token(TimerKind::Settle).is_none());
             assert!(post.timer_token(TimerKind::BurstDeadline).is_none());
         }
@@ -3599,7 +3817,7 @@ mod tests {
             PostFirePhase::RebaseSettling {
                 spacing_timer: tid(31),
             },
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         );
         assert_eq!(settling.timer_token(TimerKind::RebaseSettle), Some(tid(31)));
 
@@ -3610,7 +3828,7 @@ mod tests {
             },
             PostFirePhase::Rebasing(ProbeSlot::empty()),
         ] {
-            let post = PostFireBurst::new(BurstIntent::Standard, phase, BTreeSet::new());
+            let post = PostFireBurst::new(BurstIntent::Standard, phase, DirtyProvenance::new());
             assert!(post.timer_token(TimerKind::RebaseSettle).is_none());
         }
     }
@@ -3625,7 +3843,7 @@ mod tests {
         let mut post = PostFireBurst::new(
             BurstIntent::Standard,
             PostFirePhase::Rebasing(ProbeSlot::empty()),
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         );
 
         // Born NotStarted: no timer, not reached.
@@ -3660,7 +3878,7 @@ mod tests {
         let mut fresh = PostFireBurst::new(
             BurstIntent::Standard,
             PostFirePhase::Rebasing(ProbeSlot::empty()),
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         );
         assert!(!fresh.mark_rebase_ceiling_reached());
         assert!(!fresh.rebase_ceiling_reached());
@@ -3676,7 +3894,7 @@ mod tests {
         let mut burst = ActiveBurst::PostFire(PostFireBurst::new(
             BurstIntent::Standard,
             PostFirePhase::Rebasing(ProbeSlot::empty()),
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         ));
 
         // First Authoritative sample: no prior ⇒ Unstable (`Some`, not
@@ -3696,7 +3914,7 @@ mod tests {
         let mut fresh = ActiveBurst::PostFire(PostFireBurst::new(
             BurstIntent::Standard,
             PostFirePhase::Rebasing(ProbeSlot::empty()),
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         ));
         assert_eq!(
             fresh.advance_quiescence(ProofAuthority::Authoritative, h),
@@ -3715,7 +3933,7 @@ mod tests {
             ActiveBurst::PostFire(PostFireBurst::new(
                 BurstIntent::Standard,
                 PostFirePhase::Rebasing(ProbeSlot::empty()),
-                BTreeSet::new(),
+                DirtyProvenance::new(),
             )),
             BurstFinish::ReturnToIdle,
         );
@@ -3821,7 +4039,7 @@ mod tests {
                 outstanding: 1,
                 gate_deadline: tid(9),
             },
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         ));
         assert_eq!(post.timer_token(TimerKind::AwaitGateDeadline), Some(tid(9)));
         assert!(post.timer_token(TimerKind::Settle).is_none());
@@ -3924,7 +4142,7 @@ mod tests {
                         outstanding: 1,
                         gate_deadline: tid(3),
                     },
-                    BTreeSet::new(),
+                    DirtyProvenance::new(),
                 )),
                 BurstFinish::ReturnToIdle,
             ),
@@ -3932,7 +4150,7 @@ mod tests {
                 ActiveBurst::PostFire(PostFireBurst::new(
                     BurstIntent::Standard,
                     PostFirePhase::Rebasing(ProbeSlot::empty()),
-                    BTreeSet::new(),
+                    DirtyProvenance::new(),
                 )),
                 BurstFinish::ReturnToIdle,
             ),
@@ -3942,7 +4160,7 @@ mod tests {
                     PostFirePhase::RebaseSettling {
                         spacing_timer: tid(4),
                     },
-                    BTreeSet::new(),
+                    DirtyProvenance::new(),
                 )),
                 BurstFinish::ReturnToIdle,
             ),
@@ -4076,7 +4294,7 @@ mod tests {
             ActiveBurst::PostFire(PostFireBurst::new(
                 BurstIntent::Standard,
                 PostFirePhase::Rebasing(ProbeSlot::empty()),
-                BTreeSet::new(),
+                DirtyProvenance::new(),
             )),
             BurstFinish::ReturnToIdle,
         )
@@ -4089,7 +4307,7 @@ mod tests {
                 outstanding,
                 gate_deadline: tid(9),
             },
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         )
     }
 
@@ -4123,7 +4341,7 @@ mod tests {
         let mut post = PostFireBurst::new(
             BurstIntent::Standard,
             PostFirePhase::Rebasing(ProbeSlot::empty()),
-            BTreeSet::new(),
+            DirtyProvenance::new(),
         );
         assert_eq!(post.note_effect_completion(), AwaitVerdict::NotAwaiting);
     }
@@ -4158,7 +4376,7 @@ mod tests {
         assert_eq!(p.note_effect_completion(), AwaitVerdict::LastReached);
     }
 
-    fn rebasing_post(intent: BurstIntent, residual: BTreeSet<ResourceId>) -> PostFireBurst {
+    fn rebasing_post(intent: BurstIntent, residual: DirtyProvenance) -> PostFireBurst {
         PostFireBurst::new(
             intent,
             PostFirePhase::Rebasing(ProbeSlot::empty()),
@@ -4166,10 +4384,12 @@ mod tests {
         )
     }
 
-    /// The residual seeds the LCA basis (`dirty_resources`); the move
-    /// re-arms a fresh `Batching` Standard burst with the engine-minted
-    /// timers and the anchor placeholder, opening a fresh quiescence
-    /// sequence (`certified` resets to a fresh [`CertifiedPrior`]).
+    /// The residual provenance seeds the restart: the typed move re-arms
+    /// a fresh `Batching` Standard burst with the engine-minted timers
+    /// and the anchor placeholder, carries the captured paths over
+    /// whole (so the restarted burst's first verify obligates over
+    /// them), and opens a fresh quiescence sequence (`certified` resets
+    /// to a fresh [`CertifiedPrior`]).
     #[test]
     fn into_pre_fire_residual_seeds_a_fresh_batching_burst() {
         let mut tree = Tree::new();
@@ -4180,10 +4400,10 @@ mod tests {
         let c2 = tree
             .ensure_child(anchor, "c2", ResourceRole::User)
             .expect("live");
-        let residual: BTreeSet<ResourceId> = [c1, c2].into_iter().collect();
+        let residual = dirty_prov(&[(c1, "/w/c1"), (c2, "/w/c2")]);
         let now = std::time::Instant::now();
 
-        let pre = rebasing_post(BurstIntent::Standard, residual.clone()).into_pre_fire_residual(
+        let pre = rebasing_post(BurstIntent::Standard, residual).into_pre_fire_residual(
             tid(7),
             tid(8),
             anchor,
@@ -4197,7 +4417,11 @@ mod tests {
         ));
         assert_eq!(pre.intent, BurstIntent::Standard);
         assert!(!pre.forced);
-        assert_eq!(pre.dirty_resources, residual);
+        assert_eq!(
+            pre.dirty.chains(),
+            expected_chains(&["/w/c1", "/w/c2"]),
+            "the move preserves the residual's captured paths",
+        );
         assert_eq!(pre.probe_target, anchor);
         assert_eq!(pre.last_event_time, Some(now));
         assert_eq!(
@@ -4222,8 +4446,8 @@ mod tests {
         let c1 = tree
             .ensure_child(anchor, "c1", ResourceRole::User)
             .expect("live");
-        let residual: BTreeSet<ResourceId> = std::iter::once(c1).collect();
-        let pre = rebasing_post(BurstIntent::Seed, residual.clone()).into_pre_fire_residual(
+        let residual = dirty_prov(&[(c1, "/w/c1")]);
+        let pre = rebasing_post(BurstIntent::Seed, residual).into_pre_fire_residual(
             tid(1),
             tid(2),
             anchor,
@@ -4239,7 +4463,11 @@ mod tests {
             PreFirePhase::Batching { settle_timer } if settle_timer == tid(2)
         ));
         assert_eq!(pre.burst_deadline, tid(1));
-        assert_eq!(pre.dirty_resources, residual);
+        assert_eq!(
+            pre.dirty.chains(),
+            expected_chains(&["/w/c1"]),
+            "the move preserves the residual's captured path across origins",
+        );
         assert_eq!(
             pre.certified,
             CertifiedPrior::new(),
@@ -4254,12 +4482,8 @@ mod tests {
     fn into_pre_fire_residual_empty_residual_trips_assert() {
         let mut tree = Tree::new();
         let anchor = tree.ensure_root("anchor", ResourceRole::User);
-        let _ = rebasing_post(BurstIntent::Standard, BTreeSet::new()).into_pre_fire_residual(
-            tid(1),
-            tid(2),
-            anchor,
-            std::time::Instant::now(),
-        );
+        let _ = rebasing_post(BurstIntent::Standard, DirtyProvenance::new())
+            .into_pre_fire_residual(tid(1), tid(2), anchor, std::time::Instant::now());
     }
 
     #[test]
@@ -4548,12 +4772,13 @@ mod tests {
         let post = p
             .post_fire_burst_mut()
             .expect("PostFire carries the payload");
-        post.dirty_resources.insert(r);
+        post.dirty.note(r, Arc::from(Path::new("/w/anchor")));
         assert!(
             p.post_fire_burst_mut()
                 .expect("still PostFire")
-                .dirty_resources
-                .contains(&r),
+                .dirty
+                .chains()
+                .contains(Path::new("/w/anchor")),
             "mutation through the projection persists",
         );
     }

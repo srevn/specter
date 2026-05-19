@@ -27,9 +27,7 @@ mod snapshot;
 mod sub;
 mod tree;
 
-pub use diag::{
-    BurstHelper, ClaimKind, Diagnostic, LcaIntegritySource, PromoterClaimKind, SpliceFailureCause,
-};
+pub use diag::{BurstHelper, ClaimKind, Diagnostic, PromoterClaimKind, SpliceFailureCause};
 pub use diff::{Diff, EntryRef, Rename};
 pub use effect::{DedupKey, Effect, EffectCommon, EffectOutcome, EffectTarget, Termination};
 pub use fs_id::FsIdentity;
@@ -44,9 +42,9 @@ pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use probe::ProbeSlot;
 pub use profile::{
     ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, CertifiedPrior,
-    DescentRemaining, DescentState, DetachLifecycle, PostFireBurst, PostFirePhase, PreFireBurst,
-    PreFirePhase, Profile, ProfileMap, ProfileState, ProfileStateDiscriminant, QuiescenceVerdict,
-    ReapTrigger, TimerKind,
+    DescentRemaining, DescentState, DetachLifecycle, DirtyProvenance, PostFireBurst, PostFirePhase,
+    PreFireBurst, PreFirePhase, Profile, ProfileMap, ProfileState, ProfileStateDiscriminant,
+    QuiescenceVerdict, ReapTrigger, TimerKind,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{
