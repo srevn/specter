@@ -592,7 +592,7 @@ impl crate::Engine {
         );
 
         self.set_watch_root_parent(profile_id, new_resource, out);
-        self.start_seed_burst(profile_id, now, out);
+        self.start_seed_burst(profile_id, None, now, out);
     }
 
     /// **Rewind chain depth.** A `Vanished` response on a rewound prefix

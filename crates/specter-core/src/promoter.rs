@@ -424,7 +424,7 @@ pub enum PromoterState {
     /// both the correlation the response must echo and the proxy
     /// `ResourceId` the probe targets. The wire is path-only, so this
     /// tag is the sole authority for the dispatch key on every outcome
-    /// (`SubtreeOk` / `Vanished` / `Failed`). Empty while the Promoter
+    /// (`DirEnumerated` / `Vanished` / `Failed`). Empty while the Promoter
     /// operates with no enumeration in flight.
     Active {
         proxies: BTreeMap<ResourceId, ProxyState>,

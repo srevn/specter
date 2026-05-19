@@ -869,7 +869,7 @@ pub enum SpliceResult {
 /// `Profile.current` is `TreeSnapshot::File(leaf)`, integrated by an
 /// inline write at the relevant `dispatch_*_ok`. The typed
 /// [`crate::ProbeRequest`] contract guarantees File-anchored Profiles
-/// emit `AnchorFile` requests whose `SubtreeOk` payloads never reach
+/// emit `AnchorFile` requests whose `AnchorOk(LeafEntry)` payloads never reach
 /// `graft` / `splice`; the Dir-only signature here is the engine-side
 /// half of that contract.
 ///

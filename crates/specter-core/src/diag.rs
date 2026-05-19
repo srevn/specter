@@ -529,6 +529,17 @@ pub enum Diagnostic {
     /// `PerStableFile` Sub. Informational — the dropped reactions
     /// cannot be reconstructed.
     PerFileDriftDroppedOnRecovery { profile: ProfileId },
+    /// A `PerStableFile` Sub did not fire on a fresh Profile's
+    /// first-ever fire: the Seed witnessed activity (so the Profile's
+    /// `SubtreeRoot` Subs fired), but a fresh Profile has no baseline,
+    /// so `emit_effects` builds no per-leaf diff and the per-file
+    /// reactions have nothing to enumerate. Emitted once per
+    /// fresh-with-activity Seed fire that carries ≥1 `PerStableFile`
+    /// Sub. Informational — running the per-file command for every
+    /// file in the initial tree is never the intent; per-file
+    /// reactions begin from the post-command baseline the fire
+    /// establishes.
+    PerFileFireSkippedOnFreshSeed { profile: ProfileId },
     /// A Sub has been registered with the engine and assigned `sub`.
     /// Emitted by `attach_sub_inner` on every successful insert —
     /// static (operator-declared) attaches and dynamic Promoter-spawned

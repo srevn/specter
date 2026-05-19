@@ -244,8 +244,8 @@ impl Engine {
     /// anchor for a Seed and the emission choke stamps
     /// `ProofObligation::WholeSubtree` (no trusted prior, so the whole
     /// subtree is unproven until freshly read). Batching-first, the
-    /// exact shape of [`Self::start_standard_burst`] minus the
-    /// dirty-resource seed and with `intent: Seed`.
+    /// exact shape of [`Self::start_standard_burst`] but with `intent:
+    /// Seed` and an *optional* trigger (Standard's is mandatory).
     ///
     /// **Why Batching-first (not the old immediate probe).** A Seed now
     /// runs the same N=2 settle-spaced quiescence proof as a Standard
@@ -261,8 +261,13 @@ impl Engine {
     /// `WholeSubtree`, no trusted prior) or a Standard (event-resource,
     /// LCA, `Chains`) burst; a merged constructor behind a runtime
     /// `intent` flag re-introduces exactly the dispatch flag the
-    /// burst-helper doctrine rejects. The bodies differ only in the
-    /// `dirty_resources` seed and `intent`.
+    /// burst-helper doctrine rejects. The bodies differ only in
+    /// `intent` and trigger arity — Standard's `event_resource` is
+    /// mandatory; a Seed's is an `Option<ResourceId>` (the fresh-attach
+    /// / descent / overflow re-seeds carry none, so a static-tree
+    /// restart pins silently; the `drive_burst` Idle+!baseline re-Seed
+    /// carries its `FsEvent`, so an isolated post-recovery change is
+    /// not lost).
     ///
     /// **Callers** (post-`Awaiting`/`Rebasing` lifecycle):
     /// - `attach_sub_inner` immediate-Seed path (fresh attach, anchor
@@ -278,6 +283,7 @@ impl Engine {
     pub(crate) fn start_seed_burst(
         &mut self,
         profile_id: ProfileId,
+        trigger: Option<ResourceId>,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -300,6 +306,11 @@ impl Engine {
             self.timers
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
+        let mut dirty = BTreeSet::new();
+        if let Some(trigger) = trigger {
+            dirty.insert(trigger);
+        }
+
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.transition_state(ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
@@ -307,11 +318,16 @@ impl Engine {
                     phase: PreFirePhase::Batching { settle_timer },
                     intent: BurstIntent::Seed,
                     forced: false,
-                    // Empty: a Seed targets the anchor and carries
-                    // `WholeSubtree`, so this set has no Seed consumer.
-                    // `event_drives_batching` still accumulates into it
-                    // on a Seed (no special-case), but it stays inert.
-                    dirty_resources: BTreeSet::new(),
+                    // Seeded `{ trigger }` when this Seed has a
+                    // triggering `FsEvent` (the `drive_burst`
+                    // Idle+!baseline re-Seed), empty otherwise —
+                    // symmetric with `start_standard_burst`.
+                    // `event_drives_batching` accumulates every later
+                    // FsEvent here for both intents; for a Seed the
+                    // set's non-emptiness is the first-fire witness
+                    // (`seed_owes_first_fire`), not a probe-target /
+                    // obligation source (Seed = anchor + WholeSubtree).
+                    dirty_resources: dirty,
                     // Initial target = anchor, the value `pre_fire_target`
                     // returns for every Seed verify. `transition_to_verifying`
                     // overwrites it with the same anchor on settle expiry;
@@ -1774,7 +1790,7 @@ mod tests {
     fn start_seed_burst_schedules_two_timers_no_probe() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_seed_burst(pid, Instant::now(), &mut out);
+        e.start_seed_burst(pid, None, Instant::now(), &mut out);
 
         // Batching-first (identical shape to start_standard_burst minus
         // the dirty-seed): Profile in Active(Seed Batching), no probe.
@@ -1896,7 +1912,7 @@ mod tests {
         // with a fresh settle_timer; intent preserved.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_seed_burst(pid, Instant::now(), &mut out); // Seed → Batching
+        e.start_seed_burst(pid, None, Instant::now(), &mut out); // Seed → Batching
         // Batching-first: drive Batching → Verifying so a probe is in
         // flight for the event to Cancel.
         let mut out = StepOutput::default();
@@ -2176,7 +2192,7 @@ mod tests {
     fn finish_burst_to_idle_returns_profile_to_idle() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_seed_burst(pid, Instant::now(), &mut out);
+        e.start_seed_burst(pid, None, Instant::now(), &mut out);
         out.watch_ops.clear();
         // Production reaches `finish_burst_to_idle` from a probe-response
         // / effect-complete path that has already disarmed the in-flight
@@ -2204,7 +2220,7 @@ mod tests {
     fn burst_deadline_unchanged_across_phase_transitions() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_seed_burst(pid, Instant::now(), &mut out);
+        e.start_seed_burst(pid, None, Instant::now(), &mut out);
         let burst_deadline_initial = match e.profiles.get(pid).unwrap().state() {
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.burst_deadline,
             _ => panic!("expected Active(PreFire)"),
@@ -2226,7 +2242,7 @@ mod tests {
     fn transition_to_draining_swaps_phase_only() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_seed_burst(pid, Instant::now(), &mut out);
+        e.start_seed_burst(pid, None, Instant::now(), &mut out);
         // Batching-first: drive Batching → Verifying. Production reaches
         // `transition_to_draining` only from a Verifying probe response.
         e.transition_to_verifying(pid, &mut out);
@@ -2298,11 +2314,11 @@ mod tests {
         // misrouted in release.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        e.start_seed_burst(pid, Instant::now(), &mut out);
+        e.start_seed_burst(pid, None, Instant::now(), &mut out);
         // Drop the first burst's emissions; only the second call is under test.
         let mut out = StepOutput::default();
 
-        e.start_seed_burst(pid, Instant::now(), &mut out);
+        e.start_seed_burst(pid, None, Instant::now(), &mut out);
 
         assert!(
             out.probe_ops().is_empty(),

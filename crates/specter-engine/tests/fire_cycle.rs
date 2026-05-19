@@ -949,11 +949,17 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
 
 #[test]
 fn fire_cycle_fresh_seed_skips_awaiting() {
-    // Fresh attach → Batching-first Seed N=2 proof → Seed-Ok →
-    // no prior `fired_subs` ⇒ seed_drift_observed returns false ⇒ no
-    // emit ⇒ finish_to_idle directly. Verify no Awaiting state is ever
-    // entered: probe 1 (Unstable) re-batches into PreFire(Batching),
-    // probe 2 (Stable) pins via seed_pin_body straight to Idle.
+    // Covers the **no-activity** fresh Seed: a fresh attach with NO
+    // FsEvents injected. With an empty `dirty_resources`,
+    // `seed_owes_first_fire` is false and `seed_drift_observed` is
+    // false (never-fired) ⇒ `seed_pin_body` pins *silently* ⇒
+    // finish_to_idle directly, no Awaiting tail. Probe 1 (Unstable,
+    // prior None) re-batches into PreFire(Batching); probe 2 (Stable,
+    // hash-equal) pins straight to Idle. The witnessed-activity case
+    // (a fresh Seed that *did* see events fires one Effect and *does*
+    // enter Awaiting) is covered by the `fresh_seed_fires::*`
+    // reproduction tests — this test deliberately exercises only the
+    // silent-pin path.
     let mut e = Engine::new();
     let r = anchor(&mut e, "src");
     let now = Instant::now();

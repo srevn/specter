@@ -120,19 +120,28 @@ pub struct PreFireBurst {
     pub intent: BurstIntent,
     pub forced: bool,
     /// Resources whose `FsEvent` drove (or is driving) this burst.
-    /// Constructed `{ event_resource }` by `start_standard_burst` and
-    /// empty by `start_seed_burst`; `event_drives_batching` inserts each
-    /// FsEvent during the pre-fire phases (`Batching | Verifying |
-    /// Draining`), for *both* intents.
+    /// Constructed `{ trigger }` by *both* `start_standard_burst`
+    /// (always — its trigger is mandatory) and `start_seed_burst` (iff
+    /// the Seed has a triggering `FsEvent`; empty otherwise), then
+    /// `event_drives_batching` inserts each later FsEvent during the
+    /// pre-fire phases (`Batching | Verifying | Draining`), for *both*
+    /// intents. The two constructors seed the trigger symmetrically, so
+    /// this set faithfully tracks witnessed events regardless of intent.
     ///
-    /// **Consumed only by Standard.** A Standard burst projects this set
-    /// to the LCA target and the `ProofObligation::Chains` at every
-    /// `transition_to_verifying`. A Seed burst targets the anchor and
-    /// carries `ProofObligation::WholeSubtree` unconditionally
-    /// (`pre_fire_target` / the emission choke key off `intent`, not
-    /// this set), so a Seed's accumulated `dirty_resources` is
-    /// live-but-inert — it is *not* suppressed (suppression would be a
-    /// Seed special-case); it simply has no Seed consumer.
+    /// **Two intent-specific consumers.**
+    /// - *Standard* projects this set to the LCA probe target and the
+    ///   `ProofObligation::Chains` at every `transition_to_verifying`.
+    /// - *Seed* targets the anchor and carries
+    ///   `ProofObligation::WholeSubtree` unconditionally, so this set is
+    ///   **not** its probe-target / obligation source; instead its
+    ///   *non-emptiness is the first-fire witness*. A fresh, never-fired
+    ///   Seed fires its `SubtreeRoot` Subs iff it observed activity
+    ///   (`!dirty_resources.is_empty()`, the engine's
+    ///   `seed_owes_first_fire` gate); empty ⇔ no activity ⇔
+    ///   restart-safe silent pin (a daemon restart over a static tree
+    ///   must not re-fire — Specter persists no baseline, so every
+    ///   restart is a fresh Seed). A recovery Seed (`any_fired`) ignores
+    ///   this set and uses the drift oracle instead.
     pub dirty_resources: BTreeSet<ResourceId>,
     /// Latest probe target. Initialised to the Profile's anchor at
     /// burst start. Overwritten by `transition_to_verifying` to the
@@ -2438,6 +2447,20 @@ impl Profile {
     /// second call returns `None`.
     pub const fn take_watch_root_parent(&mut self) -> Option<ResourceId> {
         self.contributions.watch_root_parent.take()
+    }
+
+    /// Borrow the pre-fire burst payload iff
+    /// `state == Active(PreFire(_), _)` — the `&self` mirror of
+    /// [`Self::pre_fire_burst_mut`]. A read of the state's structural
+    /// shape, never a transition; the engine's pre-fire dispatch reads
+    /// (`probe_target`, the Seed first-fire witness `dirty_resources`)
+    /// route through this instead of re-matching `state()` inline.
+    #[must_use]
+    pub const fn pre_fire_burst(&self) -> Option<&PreFireBurst> {
+        match &self.state {
+            ProfileState::Active(ActiveBurst::PreFire(pre), _) => Some(pre),
+            _ => None,
+        }
     }
 
     /// Borrow the pre-fire burst payload iff

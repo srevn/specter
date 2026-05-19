@@ -4404,16 +4404,22 @@ fn clears_fired_subs_on_effect_complete_failed() {
 }
 
 #[test]
-fn recovery_seed_no_prior_emit_does_not_fire() {
-    // Fresh attach → full N=2 Seed pin → no prior `fired_subs` ⇒
-    // seed_drift_observed is false ⇒ no Effect (preserves "fresh Seed
-    // never fires Effect"). `complete_seed_burst` returns the pinning
-    // (second) response's StepOutput.
+fn fresh_seed_without_activity_does_not_fire() {
+    // Fresh attach, **no FsEvents witnessed** → full N=2 Seed pin. With
+    // an empty `dirty_resources`, `seed_owes_first_fire` is false and
+    // `seed_drift_observed` is false (never-fired), so the Seed pins
+    // *silently* (restart-safe: Specter persists no baseline, so a
+    // daemon restart over an unchanged tree must not re-fire). This is
+    // strictly the no-activity path; the witnessed-activity case (a
+    // fresh Seed that *did* see events fires exactly one Effect) is
+    // covered by the `fresh_seed_fires::*` reproduction tests.
+    // `complete_seed_burst` returns the pinning (second) response's
+    // StepOutput.
     let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
     let out = complete_seed_burst(&mut e, pid);
     assert!(
         out.effects().is_empty(),
-        "fresh-Profile Seed fires no Effect"
+        "fresh Seed that witnessed no activity fires no Effect"
     );
 }
 
@@ -6601,11 +6607,18 @@ mod props {
             let _ = e.cancel_all_in_flight_probes();
         }
 
-        /// `prop_seed_burst_emits_no_effects`: from a fresh attach, the
-        /// Seed-burst's eventual ProbeResponse path never produces an
-        /// Effect (fresh Seed bursts never emit Effects).
+        /// `prop_seed_burst_without_activity_emits_no_effects`: from a
+        /// fresh attach with **no FsEvents witnessed**, the Seed-burst's
+        /// eventual ProbeResponse path never produces an Effect. This is
+        /// strictly the no-activity path: with no events injected and
+        /// the only response being the first probe, `CertifiedPrior`'s
+        /// prior is `None` ⇒ the verdict is Unstable ⇒ the burst
+        /// re-batches and never reaches `Stable` (and `dirty_resources`
+        /// is empty regardless). It does NOT assert anything about a
+        /// fresh Seed that *witnessed* activity — that case fires and is
+        /// covered by the `fresh_seed_fires::*` reproduction tests.
         #[test]
-        fn prop_seed_burst_emits_no_effects(
+        fn prop_seed_burst_without_activity_emits_no_effects(
             seed_outcome in prop_oneof![
                 Just(0),  // Ok
                 Just(1),  // Vanished
@@ -6633,7 +6646,10 @@ mod props {
                 }),
                 now + SETTLE,
             );
-            prop_assert!(out.effects().is_empty(), "Seed bursts never emit Effects");
+            prop_assert!(
+                out.effects().is_empty(),
+                "a fresh Seed that witnessed no activity emits no Effects"
+            );
         }
 
         /// `prop_single_profile_never_has_active_standard_descendant` —

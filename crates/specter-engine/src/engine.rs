@@ -549,7 +549,7 @@ impl Engine {
         }
         self.set_watch_root_parent(profile_id, anchor, out);
 
-        self.start_seed_burst(profile_id, now, out);
+        self.start_seed_burst(profile_id, None, now, out);
     }
 
     /// Phase 3 of `attach_sub_inner` — fresh-Profile, pending-descent

@@ -91,9 +91,10 @@ pub enum ProbeRequest {
     /// File-anchor verify / Seed / Rebase. The walker runs a single
     /// `lstat` and returns `ProbeOutcome::AnchorOk(LeafEntry)` (or
     /// `Vanished` on absent / kind-mismatch / `Failed { errno }` on I/O).
-    /// No baseline (a leaf has no descendants to skip), no `force_walk`
-    /// (the path is one syscall), no `forced` (mtime-skip is not a
-    /// concept for `lstat`).
+    /// No baseline (a leaf has no descendants to skip), no `obligation`
+    /// (a single `lstat` is definitionally authoritative — no subtree to
+    /// discharge a proof over), no `forced` (mtime-skip is not a concept
+    /// for `lstat`).
     AnchorFile {
         /// Owner the engine demuxes the response back to. Echoed back
         /// on `ProbeResponse` and used by the Sensor's expectation-map

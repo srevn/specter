@@ -945,6 +945,11 @@ pub fn log_diagnostic(d: &Diagnostic) {
             ?profile,
             "per-file Sub's loss-window reactions dropped on recovery (no per-leaf survival witness)",
         ),
+        Diagnostic::PerFileFireSkippedOnFreshSeed { profile } => tracing::info!(
+            ?profile,
+            "per-file Sub skipped on first-ever fire (fresh Profile has no baseline diff); \
+             per-file reactions begin from the post-command baseline",
+        ),
         Diagnostic::SubAttached {
             sub,
             name,
