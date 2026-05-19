@@ -44,7 +44,9 @@
 
 use super::{EngineDriver, TickOutcome};
 use crossbeam::channel::Select;
-use specter_core::Input;
+use specter_core::{FsEvent, Input, ResourceId};
+use std::collections::BTreeSet;
+use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
 /// `1 day` — the fallback timeout when the engine has no armed timers.
@@ -83,18 +85,11 @@ impl EngineDriver {
     pub fn tick(&mut self) -> TickOutcome {
         let now = Instant::now();
 
-        // Drain sensor inputs (FsEvent + ProbeResponse + WatchOpRejected).
-        loop {
-            match self.sides.sensor_in_rx.try_recv() {
-                Ok(input) => {
-                    let out = self.engine.step(input, now);
-                    self.forward(out);
-                }
-                Err(crossbeam::channel::TryRecvError::Empty) => break,
-                Err(crossbeam::channel::TryRecvError::Disconnected) => {
-                    return self.begin_shutdown();
-                }
-            }
+        // Drain sensor inputs, collapsing same-tick redundant recency
+        // hints. `Break` ⇒ `sensor_in` disconnected and the
+        // cancel-first probe drain already ran inside `drain_sensor`.
+        if let ControlFlow::Break(outcome) = self.drain_sensor(now) {
+            return outcome;
         }
 
         // Drain expired timers. The engine hands back a `TimerEntry`
@@ -176,6 +171,87 @@ impl EngineDriver {
             self.begin_shutdown()
         } else {
             TickOutcome::Continue
+        }
+    }
+
+    /// Drain queued sensor inputs, collapsing same-tick redundant
+    /// recency hints into a single `engine.step`.
+    ///
+    /// `sensor_in_rx` carries exactly four shapes: the watcher
+    /// thread's [`Input::FsEvent`] and [`Input::SensorOverflow`],
+    /// `apply_watch_op`'s [`Input::WatchOpRejected`], and the prober
+    /// pool's [`Input::ProbeResponse`]. A *recency-class*
+    /// [`Input::FsEvent`] ([`FsEvent::is_recency`] —
+    /// `Modified` / `MetadataChanged` / `StructureChanged`) is a lossy
+    /// "this resource changed in this class" hint whose sole truth is
+    /// the next probe. [`Self::tick`] samples `now` once and threads
+    /// it through the whole drain, so the engine's settle deadline
+    /// (`last_event_time`) is byte-identical whether a second
+    /// same-`(resource, event)` hint *within this tick* is delivered
+    /// or dropped — same-tick is therefore the maximal lossless
+    /// collapse boundary (collapsing across ticks would move the
+    /// deadline). The first occurrence drives the engine; later
+    /// duplicates are dropped before `step` (hence before `forward`,
+    /// so no redundant watch-op send or `wake`).
+    ///
+    /// Every other input is a **barrier**: an identity
+    /// [`Input::FsEvent`] (`Removed` / `Renamed` / `Revoked` —
+    /// terminal lifecycle facts), a [`Input::ProbeResponse`] (can
+    /// move a Profile `Verifying → PostFire`), a
+    /// [`Input::SensorOverflow`] (reseeds in-scope Profiles), a
+    /// [`Input::WatchOpRejected`] (can purge a claim). Each can
+    /// change how a later same-`(resource, event)` hint dispatches,
+    /// so the dedup horizon is cleared and the input stepped
+    /// verbatim, preserving drain order. The recency/barrier split is
+    /// *total*, so any future `Input` reaching this channel defaults
+    /// to the safe (barrier) side.
+    ///
+    /// Soundness rests on the engine's lossy-hint contract, not a
+    /// fragile bit-for-bit `StepOutput` identity. A dropped same-tick
+    /// duplicate, had it been delivered, would have either no-op'd an
+    /// idempotent dispatch guard (a `Batching` burst re-notes the
+    /// same `(id, path)` at the same `now`; a descent or
+    /// anchor-recovery hits its in-flight-probe guard) or elided only
+    /// re-work the next probe re-establishes regardless (a
+    /// trace-level fire-tail diagnostic; one redundant — and
+    /// idempotent — promoter enumeration). It can never change a
+    /// fire/no-fire verdict, probe target, timer deadline, or
+    /// baseline. The horizon is a per-tick local bounded by the
+    /// distinct dirty resources between barriers and freed at every
+    /// barrier — never a second unbounded buffer behind the unbounded
+    /// `sensor_in` channel.
+    ///
+    /// [`ControlFlow::Break`] ⇒ every `sensor_in` sender is gone; the
+    /// cancel-first probe drain ([`Self::begin_shutdown`]) has
+    /// already run and the carried [`TickOutcome::Shutdown`] must be
+    /// returned by [`Self::tick`].
+    fn drain_sensor(&mut self, now: Instant) -> ControlFlow<TickOutcome> {
+        let mut seen: BTreeSet<(ResourceId, FsEvent)> = BTreeSet::new();
+        loop {
+            match self.sides.sensor_in_rx.try_recv() {
+                Ok(Input::FsEvent { resource, event }) if event.is_recency() => {
+                    // First occurrence this tick drives the engine; a
+                    // later same-`(resource, event)` recency hint is
+                    // provably redundant — dropped before step/forward.
+                    if seen.insert((resource, event)) {
+                        let out = self.engine.step(Input::FsEvent { resource, event }, now);
+                        self.forward(out);
+                    }
+                }
+                Ok(other) => {
+                    // Barrier: identity FsEvent or any non-FsEvent
+                    // input. Drop the horizon, step verbatim, in order.
+                    seen.clear();
+                    let out = self.engine.step(other, now);
+                    self.forward(out);
+                }
+                Err(crossbeam::channel::TryRecvError::Empty) => {
+                    return ControlFlow::Continue(());
+                }
+                Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                    return ControlFlow::Break(self.begin_shutdown());
+                }
+            }
         }
     }
 }
