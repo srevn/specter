@@ -104,7 +104,8 @@ impl Engine {
         // drops the prior `PrefixPending(DescentState)`; an armed
         // descent slot trips `ProbeSlot`'s Drop tripwire — the
         // cancel-first contract is structural at that one transition.
-        self.promoters.mutate(qid, |q| q.enter_active_empty());
+        self.promoters
+            .mutate(qid, specter_core::Promoter::enter_active_empty);
 
         sub_watch_then_try_reap(&mut self.tree, prefix, ContribKey::PromoterPrefix(qid), out);
     }

@@ -645,7 +645,7 @@ impl PromoterRegistry {
     /// (prefix materialised, terminus live), so no Promoter descent /
     /// recovery carrier exists.
     #[must_use]
-    pub fn nonsteady(&self) -> usize {
+    pub const fn nonsteady(&self) -> usize {
         self.nonsteady
     }
 

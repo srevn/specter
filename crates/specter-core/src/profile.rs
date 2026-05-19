@@ -3067,7 +3067,7 @@ impl ProfileMap {
     /// (every Profile is in a steady `Active` burst or a healthy
     /// anchored `Idle`), so the scan is provably empty and skipped.
     #[must_use]
-    pub fn nonsteady(&self) -> usize {
+    pub const fn nonsteady(&self) -> usize {
         self.nonsteady
     }
 

@@ -331,7 +331,7 @@ impl Engine {
         // key below; the state-flip aligns
         // [`PromoterState`] readers with the post-release shape.
         self.promoters
-            .mutate(promoter_id, |q| q.enter_active_empty());
+            .mutate(promoter_id, specter_core::Promoter::enter_active_empty);
 
         // 2. Hand off the prior prefix's STRUCTURE contribution. Plain
         // `sub_watch` — NOT `sub_watch_then_try_reap`: under the
