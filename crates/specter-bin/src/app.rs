@@ -30,6 +30,7 @@ use specter_sensor::{
     ConfigWatcher, DrainWindow, FsWatcher, WakeHandle, WatcherEvent, WorkerProber,
     default_config_watcher, default_watcher,
 };
+use std::ops::ControlFlow;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -384,7 +385,11 @@ pub(crate) fn watcher_loop<W: FsWatcher>(
         // Apply pending watch ops first.
         loop {
             match sides.watch_ops_rx.try_recv() {
-                Ok(op) => apply_watch_op(watcher, op, &sides.sensor_in_tx),
+                Ok(op) => {
+                    if apply_watch_op(watcher, op, &sides.sensor_in_tx).is_break() {
+                        return;
+                    }
+                }
                 Err(crossbeam::channel::TryRecvError::Empty) => break,
                 Err(crossbeam::channel::TryRecvError::Disconnected) => return,
             }
@@ -400,7 +405,19 @@ pub(crate) fn watcher_loop<W: FsWatcher>(
                 for ev in events.drain(..) {
                     match ev {
                         WatcherEvent::Fs { resource, event } => {
-                            let _ = sides.sensor_in_tx.send(Input::FsEvent { resource, event });
+                            // Engine inbound gone ⇒ stop the watcher rather
+                            // than spin forever sending into the void. The
+                            // same discipline the `watch_ops_rx`
+                            // `Disconnected` arm applies; `sensor_in` is
+                            // unbounded, so a send error is unambiguously
+                            // "engine dead", never back-pressure.
+                            if sides
+                                .sensor_in_tx
+                                .send(Input::FsEvent { resource, event })
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                         WatcherEvent::Overflow { scope } => {
                             // inotify's `IN_Q_OVERFLOW` lifts here on
@@ -409,8 +426,15 @@ pub(crate) fn watcher_loop<W: FsWatcher>(
                             // silently drops). The engine's
                             // `on_sensor_overflow` handler reseeds every
                             // in-scope Profile and emits
-                            // `Diagnostic::SensorOverflow`.
-                            let _ = sides.sensor_in_tx.send(Input::SensorOverflow { scope });
+                            // `Diagnostic::SensorOverflow`. Engine-gone ⇒
+                            // stop, as in the `Fs` arm above.
+                            if sides
+                                .sensor_in_tx
+                                .send(Input::SensorOverflow { scope })
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
                 }
@@ -517,11 +541,19 @@ pub(crate) fn config_watcher_loop<W: ConfigWatcher>(
 /// borrowing `watcher.watch` call without cloning; the rejection
 /// payload carries only `resource` + `failure` (the engine demuxes on
 /// the typed `failure`, never the rejected op's shape).
+///
+/// Returns [`ControlFlow::Break`] iff the rejection send observed the
+/// engine inbound channel disconnected (the sole `sensor_in_rx` holder
+/// gone). `sensor_in` is unbounded, so a send error is unambiguously
+/// "engine dead" — the caller must stop the watcher rather than spin,
+/// the same discipline the `watch_ops_rx` `Disconnected` arm applies.
+/// (`ControlFlow` is itself `#[must_use]` — the caller cannot drop it
+/// silently.)
 pub(crate) fn apply_watch_op<W: FsWatcher>(
     watcher: &mut W,
     op: WatchOp,
     sensor_in_tx: &crossbeam::channel::Sender<Input>,
-) {
+) -> ControlFlow<()> {
     match op {
         WatchOp::Watch {
             resource,
@@ -530,11 +562,15 @@ pub(crate) fn apply_watch_op<W: FsWatcher>(
             events,
         } => {
             if let Err(failure) = watcher.watch(resource, &path, kind, events) {
-                let _ = sensor_in_tx.send(Input::WatchOpRejected { resource, failure });
+                return match sensor_in_tx.send(Input::WatchOpRejected { resource, failure }) {
+                    Ok(()) => ControlFlow::Continue(()),
+                    Err(_) => ControlFlow::Break(()),
+                };
             }
         }
         WatchOp::Unwatch { resource } => watcher.unwatch(resource),
     }
+    ControlFlow::Continue(())
 }
 
 /// Spawn the actuator thread. Constructs [`SubprocessActuator`] with
@@ -590,7 +626,9 @@ mod tests {
         let sides = chans.take_watcher_side();
         let mut watcher = MockFsWatcher::new();
         let r = fresh_resource_id();
-        apply_watch_op(
+        // Connected channel: the return is Continue; these tests assert
+        // the watcher-side effect, not the disconnect signal.
+        let _ = apply_watch_op(
             &mut watcher,
             WatchOp::Watch {
                 resource: r,
@@ -612,7 +650,9 @@ mod tests {
         // EMFILE = 24 on macOS / FreeBSD / Linux. Hard-coded so the
         // bin's tests don't pull `libc` as a direct dev-dep.
         watcher.fail_next_watch(WatchFailure::Pressure { errno: 24 });
-        apply_watch_op(
+        // Connected channel: the return is Continue; these tests assert
+        // the watcher-side effect, not the disconnect signal.
+        let _ = apply_watch_op(
             &mut watcher,
             WatchOp::Watch {
                 resource: r,
@@ -647,7 +687,9 @@ mod tests {
                 ClassSet::EMPTY,
             )
             .unwrap();
-        apply_watch_op(
+        // Connected channel: the return is Continue; these tests assert
+        // the watcher-side effect, not the disconnect signal.
+        let _ = apply_watch_op(
             &mut watcher,
             WatchOp::Unwatch { resource: r },
             &sides.sensor_in_tx,
