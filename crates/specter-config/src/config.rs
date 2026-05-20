@@ -83,35 +83,61 @@ impl LogConfig {
         if let Some(p) = path {
             self.path = Some(p);
         }
-        let mut errors: Vec<ValidationIssue> = Vec::new();
-        match (self.destination, self.path.as_deref()) {
-            (LogDestination::Stderr, _) => {
-                self.path = None;
+        match validate_log_path(
+            self.destination,
+            self.path.as_deref(),
+            " (provide --log-path or `[log] path` in the config)",
+        ) {
+            Ok(p) => {
+                self.path = p;
+                Ok(self)
             }
-            (LogDestination::File, None) => errors.push(ValidationIssue::new(
-                None,
-                "log.path",
-                IssueKind::Empty,
-                "log.path is required when destination = \"file\" \
-                 (provide --log-path or `[log] path` in the config)"
-                    .to_owned(),
-            )),
-            (LogDestination::File, Some(p)) => {
-                if !p.is_absolute() {
-                    errors.push(ValidationIssue::new(
-                        None,
-                        "log.path",
-                        IssueKind::NonAbsolute,
-                        format!("log.path `{}` must be absolute", p.display()),
-                    ));
-                }
-            }
+            Err(issue) => Err(ConfigError::Validate {
+                path: None,
+                errors: vec![issue],
+            }),
         }
-        if errors.is_empty() {
-            Ok(self)
-        } else {
-            Err(ConfigError::Validate { path: None, errors })
-        }
+    }
+}
+
+/// Resolve the `(destination, path)` pair against the
+/// [`LogDestination::File`]-implies-absolute-path rule. Returns
+/// `Ok(Some(p))` when File is paired with an absolute path,
+/// `Ok(None)` when [`LogDestination::Stderr`] (path is dropped — File
+/// is the only destination that carries a path) and `Err(issue)`
+/// otherwise. Single-issue by construction: one input pair, one
+/// possible failure mode.
+///
+/// Shared by [`LogConfig::merge_cli`] (the CLI-overrides flow, applied
+/// post-config-load by `specter-bin`) and [`validate_log`] (the
+/// config-load flow). The structural rule lives here once; callers
+/// don't recheck it.
+///
+/// `empty_hint` is appended to the [`IssueKind::Empty`] detail when
+/// File is paired with no path. The CLI flow passes
+/// `" (provide --log-path or `[log] path` in the config)"` so the
+/// operator sees both override sites; the config-load flow passes the
+/// empty string for the bare structural rule.
+fn validate_log_path(
+    destination: LogDestination,
+    path: Option<&Path>,
+    empty_hint: &str,
+) -> Result<Option<PathBuf>, ValidationIssue> {
+    match (destination, path) {
+        (LogDestination::Stderr, _) => Ok(None),
+        (LogDestination::File, None) => Err(ValidationIssue::new(
+            None,
+            "log.path",
+            IssueKind::Empty,
+            format!("log.path is required when destination = \"file\"{empty_hint}"),
+        )),
+        (LogDestination::File, Some(p)) if p.is_absolute() => Ok(Some(p.to_path_buf())),
+        (LogDestination::File, Some(p)) => Err(ValidationIssue::new(
+            None,
+            "log.path",
+            IssueKind::NonAbsolute,
+            format!("log.path `{}` must be absolute", p.display()),
+        )),
     }
 }
 
@@ -406,7 +432,7 @@ fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError>
     // Log errors land first in the output (operator-facing ordering).
     // On the failure path the default `LogConfig` is irrelevant —
     // `errors.is_empty()` below short-circuits to `Err`.
-    let log = match validate_log(raw.log.as_ref()) {
+    let log = match validate_log(&raw.log) {
         Ok(log) => log,
         Err(mut errs) => {
             errors.append(&mut errs);
@@ -464,13 +490,12 @@ fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError>
 /// field-level failure (level / destination / path can each
 /// independently fail, so multi-issue is the right shape).
 ///
-/// Field omission (no `[log]` table) resolves to `Ok(LogConfig::default())` —
-/// the documented "use defaults" path, distinct from a parse failure.
-fn validate_log(raw: Option<&RawLogConfig>) -> Result<LogConfig, Vec<ValidationIssue>> {
-    let Some(raw) = raw else {
-        return Ok(LogConfig::default());
-    };
-
+/// `raw` is materialised by serde from either a present `[log]` table
+/// or the implicit `default()` for an absent one (see
+/// [`RawConfig::log`](crate::raw::RawConfig::log)); both shapes unfold
+/// into the documented defaults here (`LogLevel::Info`,
+/// `LogDestination::Stderr`, `path = None`).
+fn validate_log(raw: &RawLogConfig) -> Result<LogConfig, Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
 
     let level = match raw.level.as_deref() {
@@ -504,30 +529,11 @@ fn validate_log(raw: Option<&RawLogConfig>) -> Result<LogConfig, Vec<ValidationI
         }
     };
 
-    let path = match (destination, raw.path.as_deref()) {
-        (LogDestination::Stderr, _) => None,
-        (LogDestination::File, None) => {
-            errors.push(ValidationIssue::new(
-                None,
-                "log.path",
-                IssueKind::Empty,
-                "log.path is required when destination = \"file\"".to_owned(),
-            ));
+    let path = match validate_log_path(destination, raw.path.as_deref().map(Path::new), "") {
+        Ok(p) => p,
+        Err(issue) => {
+            errors.push(issue);
             None
-        }
-        (LogDestination::File, Some(p)) => {
-            let pb = PathBuf::from(p);
-            if pb.is_absolute() {
-                Some(pb)
-            } else {
-                errors.push(ValidationIssue::new(
-                    None,
-                    "log.path",
-                    IssueKind::NonAbsolute,
-                    format!("log.path `{p}` must be absolute"),
-                ));
-                None
-            }
         }
     };
 
@@ -1089,8 +1095,8 @@ fn validate_scan(idx: usize, raw: &RawWatch) -> Result<ScanConfig, Vec<Validatio
     }
 
     let mut sb = ScanConfig::builder()
-        .recursive(raw.recursive.unwrap_or(true))
-        .hidden(raw.hidden.unwrap_or(false))
+        .recursive(raw.recursive)
+        .hidden(raw.hidden)
         .max_depth(raw.max_depth);
 
     if let Some(p) = raw.pattern.as_deref() {
@@ -1179,8 +1185,8 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
             max_settle,
             scan,
             events,
-            log_output: raw.log_output.unwrap_or(false),
-            enabled: raw.enabled.unwrap_or(true),
+            log_output: raw.log_output,
+            enabled: raw.enabled,
         }),
         (name_r, path_r, program_r, scope_r, settle_r, scan_r, events_r) => {
             let mut errors: Vec<ValidationIssue> = Vec::new();
@@ -1255,8 +1261,8 @@ fn validate_dynamic_watch(
             max_settle,
             scan,
             events,
-            log_output: raw.log_output.unwrap_or(false),
-            enabled: raw.enabled.unwrap_or(true),
+            log_output: raw.log_output,
+            enabled: raw.enabled,
         }),
         (name_r, pattern_r, program_r, scope_r, settle_r, scan_r, events_r) => {
             let mut errors: Vec<ValidationIssue> = Vec::new();

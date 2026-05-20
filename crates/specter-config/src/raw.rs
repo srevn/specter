@@ -8,8 +8,16 @@ pub(crate) struct RawConfig {
     /// destination, file path. v1 splits the schema cleanly: the top-level
     /// `log_level` of older configs no longer parses (alpha break, no
     /// migration). Use `[log]\nlevel = "debug"`.
+    ///
+    /// `#[serde(default)]` collapses "no `[log]` table" and "empty
+    /// `[log]` table" into the same `RawLogConfig::default()` state
+    /// (every field `None`). Both surface identically through
+    /// `validate_log`, which unfolds the Nones to the
+    /// [`crate::LogConfig`] defaults. The previous `Option<_>` shape
+    /// duplicated that defaulting on the validator side without buying
+    /// any extra distinction.
     #[serde(default)]
-    pub log: Option<RawLogConfig>,
+    pub log: RawLogConfig,
     #[serde(default, rename = "watch")]
     pub watches: Vec<RawWatch>,
 }
@@ -32,10 +40,23 @@ pub(crate) struct RawWatch {
     /// entry; the actuator runs the steps sequentially with
     /// stop-on-failure.
     pub actions: Vec<RawAction>,
-    pub recursive: Option<bool>,
+    /// Walk descendants of the anchor recursively. Default `true` —
+    /// the recursive case is the dominant operator intent (a watch on
+    /// `/srv/build` almost always wants files anywhere underneath).
+    /// `false` confines the watch to the anchor's immediate children.
+    /// `Option<bool>` collapsed to `bool`: the validator never cared
+    /// about "absent vs. explicit `false`", both flowed through the
+    /// same `unwrap_or(true)` path.
+    #[serde(default = "default_true")]
+    pub recursive: bool,
     pub pattern: Option<String>,
     pub exclude: Option<Vec<String>>,
-    pub hidden: Option<bool>,
+    /// Include dot-prefixed entries. Default `false` — dotfiles are
+    /// editor swap files, VCS metadata, OS caches, almost never the
+    /// signal the operator is watching. Set `hidden = true` for cases
+    /// like `/home/$USER/.config` where the dotfiles ARE the payload.
+    #[serde(default)]
+    pub hidden: bool,
     /// Debounce window after the last event. TOML accepts humantime
     /// strings (`"200ms"`, `"1s"`, `"1m 30s"`); omitted ⇒
     /// [`crate::config::DEFAULT_SETTLE`].
@@ -49,8 +70,25 @@ pub(crate) struct RawWatch {
     pub scope: Option<String>,
     pub max_depth: Option<u32>,
     pub events: Option<Vec<String>>,
-    pub log_output: Option<bool>,
-    pub enabled: Option<bool>,
+    /// Forward subprocess stdout/stderr to Specter's own stdio.
+    /// Default `false` — the engine threads `Stdio::null()` so a
+    /// chatty hook doesn't flood the operator's console; setting this
+    /// to `true` routes child output through the supervisor's log
+    /// facility (systemd journal, launchd `StandardOutPath`).
+    #[serde(default)]
+    pub log_output: bool,
+    /// Suppress this entry without removing it from the TOML. Default
+    /// `true` — present entries are effective by default; `false` is
+    /// structurally equivalent to "absent from the config" (filtered
+    /// by [`crate::Config::active_watches`] /
+    /// [`crate::Config::active_promoters`] before the engine sees
+    /// anything).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// One entry in `actions = [...]`. Variants light up additively as
