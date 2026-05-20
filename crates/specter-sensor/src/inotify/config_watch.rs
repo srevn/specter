@@ -134,7 +134,7 @@ use crate::inotify::{ffi, record};
 use libc::c_int;
 use std::ffi::OsString;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -337,9 +337,7 @@ impl InotifyConfigWatcher {
         // immediate reload pulse if the on-disk state diverged.
         let file_wd = match ffi::open_o_path(&canonical) {
             Ok(fd) => {
-                let proc_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
-                let proc_path_ref = Path::new(&proc_path);
-                let wd = ffi::inotify_add_watch(&inotify_fd, proc_path_ref, FILE_MASK)?;
+                let wd = ffi::inotify_add_watch_fd(&inotify_fd, &fd, FILE_MASK)?;
                 // `fd` drops at end of scope; the kernel watches the
                 // inode the fd resolved to at `add_watch` time,
                 // independent of fd lifetime (per `inotify(7)`).
@@ -382,9 +380,7 @@ impl InotifyConfigWatcher {
         let path = self.parent_path.join(&self.config_basename);
         match ffi::open_o_path(&path) {
             Ok(fd) => {
-                let proc_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
-                let proc_path_ref = Path::new(&proc_path);
-                match ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, FILE_MASK) {
+                match ffi::inotify_add_watch_fd(&self.inotify_fd, &fd, FILE_MASK) {
                     Ok(wd) => {
                         tracing::debug!(
                             path = %path.display(),
@@ -514,7 +510,27 @@ impl ConfigWatcher for InotifyConfigWatcher {
         // (Copy `Option<i32>`) inline; `self.try_reopen()` is a
         // `&mut self` method call that would conflict — it runs
         // post-loop, after the borrow ends.
+        //
+        // Per-record dispatch parallels the engine watcher
+        // (`super::watcher::InotifyWatcher::poll_once`):
+        // control-records first (`IN_Q_OVERFLOW`, `IN_IGNORED`),
+        // then per-wd routing.
         for rec in record::parse(&self.read_buf[..n_bytes]) {
+            // 1. IN_Q_OVERFLOW: kernel-emitted overflow signal. The
+            //    config watcher's per-instance queue is normally not
+            //    at risk (a handful of events per editor save), but
+            //    paranoia is cheap. Surface as a generic pulse so the
+            //    driver's lstat filter takes the hit on uncertain
+            //    state. wd is `-1` per `inotify(7)`, falling outside
+            //    `file_wd` / `parent_wd` — ordering relative to
+            //    `IN_IGNORED` is intent-preserving, not load-bearing.
+            if rec.mask & libc::IN_Q_OVERFLOW != 0 {
+                tracing::warn!("inotify config-watcher: kernel queue overflow; signalling pulse");
+                real_seen = true;
+                continue;
+            }
+
+            // 2. IN_IGNORED: cleanup signal for a watch.
             if rec.mask & libc::IN_IGNORED != 0 {
                 if Some(rec.wd) == self.file_wd {
                     self.file_wd = None;
@@ -526,19 +542,7 @@ impl ConfigWatcher for InotifyConfigWatcher {
                 continue;
             }
 
-            // Defensive: kernel-emitted overflow signal. The config
-            // watcher's per-instance queue is normally not at risk
-            // (we generate a handful of events per editor save),
-            // but paranoia is cheap. Surface as a generic pulse so
-            // the driver's lstat filter takes the hit on uncertain
-            // state. wd is `-1` for IN_Q_OVERFLOW per
-            // `inotify(7)`, which falls outside our two known wds.
-            if rec.mask & libc::IN_Q_OVERFLOW != 0 {
-                tracing::warn!("inotify config-watcher: kernel queue overflow; signalling pulse");
-                real_seen = true;
-                continue;
-            }
-
+            // 3. Per-wd routing.
             if rec.wd == self.parent_wd {
                 if rec.name == self.config_basename.as_bytes() {
                     real_seen = true;

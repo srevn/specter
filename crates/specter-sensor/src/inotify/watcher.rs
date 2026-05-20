@@ -54,7 +54,7 @@ use slotmap::SecondaryMap;
 use specter_core::{ClassSet, FsEvent, OverflowScope, ResourceId, ResourceKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -105,11 +105,13 @@ pub struct InotifyWatcher {
     by_resource: SecondaryMap<ResourceId, InotifyEntry>,
 
     /// `wd → ResourceId`. inotify events don't carry userdata
-    /// (kqueue's `udata` analogue), so the watcher pays the storage to
-    /// route a record's `wd` back to the slot it belongs to. wd values
-    /// are dense small integers; `BTreeMap` O(log n) lookups are fine
-    /// at typical watch counts and avoid the `HashMap` ban from
-    /// `deny.toml` for sensor-side state.
+    /// (kqueue's `udata` analogue), so the watcher pays the storage
+    /// to route a record's `wd` back to the slot it belongs to. wd
+    /// values are dense small integers; at typical watch counts
+    /// `BTreeMap`'s `O(log n)` lookup sits well below the per-event
+    /// syscall cost (`read` / `inotify_add_watch` dominate by orders
+    /// of magnitude), and deterministic iteration is free for the
+    /// drain-time tracing.
     by_wd: BTreeMap<libc::c_int, ResourceId>,
 
     /// `wd`s in the "draining" state: `inotify_rm_watch` has been
@@ -143,12 +145,15 @@ pub struct InotifyWatcher {
     /// resource, must dedupe across the phase boundary or the engine
     /// would see a phantom second event.
     ///
-    /// Held as a struct field rather than a per-call local so the
-    /// shared horizon spans phases. Allocations recycle imperfectly
-    /// (`BTreeSet::clear` deallocates nodes), but moving it here is a
-    /// **correctness** fix for the cross-phase dedup, not an
-    /// allocation hygiene play.
-    seen: BTreeSet<(ResourceId, FsEvent)>,
+    /// `Vec` rather than `BTreeSet`: a typical burst yields ~20–50
+    /// distinct `(ResourceId, FsEvent)` pairs, well inside the
+    /// "linear scan beats logarithmic node-walk" regime — the
+    /// comparisons are cache-resident tuple compares. The
+    /// load-bearing property is [`Vec::clear`]'s capacity-preserving
+    /// reset: across the watcher's lifetime, only the first few
+    /// drains pay any allocation cost; subsequent calls reuse the
+    /// stabilised buffer.
+    seen: Vec<(ResourceId, FsEvent)>,
 }
 
 /// Per-resource cached install state — the `(wd, mask, kind)` triple
@@ -227,7 +232,7 @@ impl InotifyWatcher {
             read_buf: vec![0u8; READ_BUF_BYTES],
             drain_window,
             last_event_at: None,
-            seen: BTreeSet::new(),
+            seen: Vec::new(),
         })
     }
 
@@ -402,20 +407,23 @@ impl InotifyWatcher {
         self.commit_rewatch(r, &fd, install_mask, observed_kind, prior)
     }
 
-    /// Shared rewatch commit: install via `inotify_add_watch` on
-    /// `/proc/self/fd/N`, detect wd-swap (atomic rename of the path
-    /// between prior install and this re-add), guard against hardlink
-    /// aliasing, then atomically replace `r`'s [`InotifyEntry`].
+    /// Shared rewatch commit: install via
+    /// [`ffi::inotify_add_watch_fd`] (the fused `O_PATH` →
+    /// `/proc/self/fd/N` → `inotify_add_watch` helper), detect wd-swap
+    /// (atomic rename of the path between prior install and this
+    /// re-add), guard against hardlink aliasing, then atomically
+    /// replace `r`'s [`InotifyEntry`].
     ///
     /// `kind` is the value to store in the refreshed entry — the
     /// fast path passes the (invariant) `prior.kind`; the slow path
     /// passes the freshly observed kind.
     ///
-    /// Failure shape: `inotify_add_watch` errors propagate before any
-    /// state mutation. A successful add followed by hardlink-aliasing
-    /// rejection routes through [`Self::reject_aliased_install`],
-    /// which restores the aliased resource's mask and clears `r`'s
-    /// entry — the engine sees a clean unwatched state for `r`.
+    /// Failure shape: `inotify_add_watch_fd` errors propagate before
+    /// any state mutation. A successful add followed by
+    /// hardlink-aliasing rejection routes through
+    /// [`Self::reject_aliased_install`], which restores the aliased
+    /// resource's mask and clears `r`'s entry — the engine sees a
+    /// clean unwatched state for `r`.
     fn commit_rewatch(
         &mut self,
         r: ResourceId,
@@ -424,9 +432,7 @@ impl InotifyWatcher {
         kind: ResourceKind,
         prior: InotifyEntry,
     ) -> io::Result<()> {
-        let proc_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
-        let proc_path_ref = Path::new(&proc_path);
-        let wd = ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, install_mask)?;
+        let wd = ffi::inotify_add_watch_fd(&self.inotify_fd, fd, install_mask)?;
 
         // Inode-swap detection. A different wd means the path now
         // resolves to a different inode (atomic rename swapped the
@@ -465,7 +471,7 @@ impl InotifyWatcher {
         if let Some(&existing) = self.by_wd.get(&wd)
             && existing != r
         {
-            self.reject_aliased_install(existing, r, wd, proc_path_ref);
+            self.reject_aliased_install(existing, r, wd, fd);
             return Err(io::Error::from_raw_os_error(libc::EEXIST));
         }
 
@@ -553,23 +559,21 @@ impl InotifyWatcher {
         //    safety net.
         let install_mask = compute_install_mask(events, observed_kind);
 
-        // 5) Install via `/proc/self/fd/N`. The kernel's procfs
-        //    resolver returns the exact inode the fd refers to,
-        //    closing the TOCTOU window between fstat and add_watch
-        //    that a naive `inotify_add_watch(path)` would leave open.
-        let proc_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
-        let proc_path_ref = Path::new(&proc_path);
-        let wd = ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, install_mask)?;
+        // 5) Install via the fused FFI helper. The kernel's procfs
+        //    resolver returns the exact inode `fd` refers to, closing
+        //    the TOCTOU window between fstat and add_watch that a
+        //    naive `inotify_add_watch(path)` would leave open.
+        let wd = ffi::inotify_add_watch_fd(&self.inotify_fd, &fd, install_mask)?;
 
         // 6) Hardlink aliasing guard — see
         //    [`Self::reject_aliased_install`]. `fd` is intentionally
         //    still alive here so the helper can re-use the same
-        //    `/proc/self/fd/N` for the kernel-side mask restoration
-        //    on the existing resource's behalf.
+        //    `O_PATH` fd for the kernel-side mask restoration on the
+        //    existing resource's behalf.
         if let Some(&existing) = self.by_wd.get(&wd)
             && existing != r
         {
-            self.reject_aliased_install(existing, r, wd, proc_path_ref);
+            self.reject_aliased_install(existing, r, wd, &fd);
             return Err(io::Error::from_raw_os_error(libc::EEXIST));
         }
 
@@ -612,9 +616,9 @@ impl InotifyWatcher {
     /// semantics). A naive `inotify_rm_watch` would tear down the
     /// existing resource's kernel-side registration entirely; the
     /// safe recovery is to restore the existing resource's mask via
-    /// a follow-up `inotify_add_watch` on the same
-    /// `/proc/self/fd/N`. The restoration is best-effort; on failure
-    /// the existing resource's mask remains the rejected resource's
+    /// a follow-up [`ffi::inotify_add_watch_fd`] on the same
+    /// `O_PATH` fd. The restoration is best-effort; on failure the
+    /// existing resource's mask remains the rejected resource's
     /// requested mask until its next reconcile triggers a re-add —
     /// a documented v1 limitation, not a correctness regression.
     ///
@@ -625,21 +629,21 @@ impl InotifyWatcher {
     /// immutable borrow before the `self.by_resource.remove(r)`
     /// mutable borrow.
     ///
-    /// `proc_path_ref` references a `String` owned by the caller; the
-    /// caller must keep the underlying [`OwnedFd`] alive across this
-    /// call (the kernel resolves the magic-symlink path at syscall
-    /// time, and a closed fd would surface as `ENOENT`).
+    /// `fd` is the caller's `O_PATH` fd for the alias-causing path;
+    /// the caller must keep it alive across this call (the kernel
+    /// resolves the magic-symlink path at syscall time inside
+    /// [`ffi::inotify_add_watch_fd`], and a closed fd would surface
+    /// as `ENOENT`).
     fn reject_aliased_install(
         &mut self,
         existing: ResourceId,
         r: ResourceId,
         wd: libc::c_int,
-        proc_path_ref: &Path,
+        fd: &OwnedFd,
     ) {
         match self.by_resource.get(existing).copied() {
             Some(existing_entry) => {
-                if let Err(e) =
-                    ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, existing_entry.mask)
+                if let Err(e) = ffi::inotify_add_watch_fd(&self.inotify_fd, fd, existing_entry.mask)
                 {
                     tracing::warn!(
                         ?r,
@@ -834,11 +838,10 @@ impl FsWatcher for InotifyWatcher {
         deadline: Option<Instant>,
         out: &mut Vec<WatcherEvent>,
     ) -> Result<usize, WatchFailure> {
-        // Reset the dedup horizon. `clear()` deallocates the BTreeSet's
-        // node arena, but the residency cost (a handful of nodes per
-        // burst) is negligible — the move from local to struct field is
-        // for the cross-phase dedup correctness above, not allocation
-        // hygiene.
+        // Reset the dedup horizon. `Vec::clear` preserves capacity, so
+        // only the first few drains pay any allocation cost; subsequent
+        // calls reuse the stabilised buffer. See [`Self::seen`] for the
+        // cross-phase dedup correctness contract.
         self.seen.clear();
 
         // Phase 1: blocking drain to the engine's deadline.
@@ -1018,12 +1021,19 @@ impl InotifyWatcher {
 
             // 4. Normal event. Resolve wd → ResourceId.
             let Some(&r) = self.by_wd.get(&rec.wd) else {
-                // Unmapped wd reaching this branch is structurally
-                // unreachable: case 2 cleared by_wd synchronously on
-                // every IN_IGNORED, and `watch_inner` populates by_wd
-                // on every successful `inotify_add_watch`. A surviving
-                // miss means the kernel handed us a wd we never
-                // registered — a kernel quirk; log at trace and drop.
+                // Defensive guard against routing-table desync. Case 2
+                // clears `by_wd` synchronously on every `IN_IGNORED`,
+                // and `watch_inner` populates it on every successful
+                // `inotify_add_watch`; a surviving miss means the
+                // kernel handed us a wd we never registered — a
+                // kernel quirk. Drop the event in release; the
+                // debug_assert is the CI tripwire if this ever fires
+                // under tests.
+                debug_assert!(
+                    false,
+                    "inotify event on unmapped wd ({}); routing-table desync",
+                    rec.wd
+                );
                 tracing::trace!(
                     wd = rec.wd,
                     mask = format_args!("{:#x}", rec.mask),
@@ -1050,14 +1060,18 @@ impl InotifyWatcher {
             };
 
             // Per-batch dedup over `(ResourceId, FsEvent)`. First-write
-            // wins (`BTreeSet::insert` returns `false` on duplicates),
-            // so the kernel's `IN_MODIFY` precedes its `IN_CLOSE_WRITE`
-            // in the emitted stream — matching the natural FIFO drain
-            // order. The horizon spans phase 1 + phase 2 of one
-            // `poll_until` call; see `self.seen`'s docstring.
-            if !self.seen.insert((r, fs_event)) {
+            // wins, so the kernel's `IN_MODIFY` precedes its
+            // `IN_CLOSE_WRITE` in the emitted stream — matching the
+            // natural FIFO drain order. Linear scan rather than a
+            // sorted set: see [`Self::seen`] for the sizing rationale.
+            // The horizon spans phase 1 + phase 2 of one `poll_until`
+            // call; the field's docstring carries the cross-phase
+            // contract.
+            let key = (r, fs_event);
+            if self.seen.contains(&key) {
                 continue;
             }
+            self.seen.push(key);
 
             out.push(WatcherEvent::Fs {
                 resource: r,

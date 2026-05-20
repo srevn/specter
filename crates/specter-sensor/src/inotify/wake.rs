@@ -50,14 +50,17 @@ impl InotifyWakeHandle {
 impl WakeHandle for InotifyWakeHandle {
     fn wake(&self) {
         if let Err(e) = ffi::eventfd_write(&self.wake_fd, 1) {
-            // Reachable when the eventfd has been closed underneath us
-            // (last Arc dropped while a clone is still triggering). The
-            // handle itself stays sound; subsequent wakes silently hit
-            // the same dead fd. Logging at warn keeps the consumer-stale
-            // case visible in operational dashboards.
-            tracing::warn!(
+            // Reachable when the eventfd has been closed underneath
+            // us (last Arc dropped while a clone is still triggering).
+            // The handle itself stays sound; subsequent wakes silently
+            // hit the same dead fd — no consumer will drain the
+            // counter. Benign during shutdown (watcher dropped while a
+            // wake handle still triggers); log at `debug` rather than
+            // `warn` to avoid operational noise on a routine teardown
+            // race. Mirror of [`super::super::kqueue::wake`]'s twin.
+            tracing::debug!(
                 error = ?e,
-                "inotify wake() failed; consumer may be stale"
+                "inotify wake() syscall failed (typically watcher dropped); consumer stale"
             );
         }
     }

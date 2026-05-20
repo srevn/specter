@@ -44,14 +44,19 @@ impl KqueueWakeHandle {
 impl WakeHandle for KqueueWakeHandle {
     fn wake(&self) {
         if let Err(e) = ffi::trigger_user_event(&self.kq, self.wake_ident) {
-            // Reachable when the watcher's fd has been closed underneath
-            // us (last Arc dropped while a clone is still triggering).
-            // The handle itself stays sound; subsequent wakes silently
-            // hit the same dead fd.
-            tracing::warn!(
+            // Reachable when the watcher's kqueue fd has been closed
+            // underneath us (last Arc dropped while a clone is still
+            // triggering). The handle itself stays sound; subsequent
+            // wakes silently hit the same dead fd — no consumer will
+            // drain the resulting `NOTE_TRIGGER`. Benign during
+            // shutdown (watcher dropped while a wake handle still
+            // triggers); log at `debug` rather than `warn` to avoid
+            // operational noise on a routine teardown race. Mirror
+            // of [`super::super::inotify::wake`]'s twin.
+            tracing::debug!(
                 ident = self.wake_ident,
                 error = ?e,
-                "kqueue wake() failed; consumer may be stale"
+                "kqueue wake() syscall failed (typically watcher dropped); consumer stale"
             );
         }
     }

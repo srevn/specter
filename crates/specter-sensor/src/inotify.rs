@@ -8,16 +8,18 @@
 //! - [`wake`]: cross-thread interruption via eventfd.
 //! - [`watcher`]: state-bearing `FsWatcher` impl.
 //!
-//! 32-bit Linux is gated out at compile time. The `wd → ResourceId`
-//! mapping does not require pointer-width parity (the watcher pays a
-//! `BTreeMap` cell), but the kqueue sibling does, and we keep the rule
-//! uniform — every backend assumes a 64-bit address space, every test
-//! fixture is 64-bit.
+//! 32-bit Linux is gated out at compile time. The inotify watcher
+//! itself does not require pointer-width parity — `wd → ResourceId`
+//! routing pays a `BTreeMap` cell rather than stuffing the id into a
+//! kernel-supplied slot. The gate exists to keep the rule uniform
+//! with the kqueue sibling (which packs `ResourceId` into
+//! `kevent.udata`, a `*mut c_void`) so the test fixtures stay
+//! 64-bit-only across both backends.
 
 #[cfg(target_pointer_width = "32")]
 compile_error!(
-    "specter-sensor: 32-bit Linux is unsupported in v1 — keeping the \
-     pointer-width rule uniform with the kqueue branch."
+    "specter-sensor: 32-bit Linux is unsupported in v1 — kept uniform \
+     with the kqueue branch; see the module docs."
 );
 
 mod config_watch;

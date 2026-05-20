@@ -40,9 +40,11 @@
 use libc::c_int;
 
 /// Size of the fixed-width header preceding the variable-length name.
-/// Pinned at the type level so the iterator's prefix-decode and
-/// remainder-advance use one named constant.
-const HEADER_SIZE: usize = 16;
+/// Bound to [`libc::inotify_event`] so a future libc binding change
+/// (the kernel ABI itself is stable) becomes a compile-time concern
+/// rather than a silent drift between our parser and the kernel
+/// layout.
+const HEADER_SIZE: usize = std::mem::size_of::<libc::inotify_event>();
 
 /// One inotify record borrowed from the watcher's drain buffer.
 ///
