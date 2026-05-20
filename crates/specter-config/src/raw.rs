@@ -32,6 +32,7 @@ pub(crate) struct RawLogConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct RawWatch {
     pub name: String,
     pub path: String,

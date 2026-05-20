@@ -1137,63 +1137,114 @@ fn validate_scan(idx: usize, raw: &RawWatch) -> Result<ScanConfig, Vec<Validatio
     }
 }
 
-/// Validator for `[[watch]]` blocks whose `path` carries no glob
-/// discriminator characters (`*?[{`) — pure-literal anchors. The
-/// dispatcher in [`validate`] gates on [`PatternSpec::is_dynamic`]
-/// before invoking this, so a glob-bearing path cannot reach here.
+/// Per-attachment fields shared between [`SubSpec`] (static watches)
+/// and [`PromoterSpec`] (dynamic watches). Everything in this struct is
+/// independent of the path-vs-pattern dispatch: the same operator-
+/// supplied knobs (`name`, `actions`, `scope`, `settle`, etc.) carry
+/// the same meaning for both kinds of watch and run through the same
+/// validators. Materialised once by [`validate_watch_attachment`]; the
+/// two thin wrappers ([`validate_static_watch`] /
+/// [`validate_dynamic_watch`]) consume it via the `into_*_spec`
+/// projections after resolving their kind-specific anchor.
+struct WatchAttachmentFields {
+    name: CompactString,
+    program: Arc<ActionProgram>,
+    scope: EffectScope,
+    settle: Duration,
+    max_settle: Duration,
+    scan: ScanConfig,
+    events: ClassSet,
+    log_output: bool,
+    enabled: bool,
+}
+
+impl WatchAttachmentFields {
+    /// Move the validated common fields plus a resolved static anchor
+    /// into a [`SubSpec`]. Cannot fail — both inputs are already
+    /// validated by construction.
+    fn into_sub_spec(self, path: PathBuf) -> SubSpec {
+        SubSpec {
+            name: self.name,
+            path,
+            program: self.program,
+            scope: self.scope,
+            settle: self.settle,
+            max_settle: self.max_settle,
+            scan: self.scan,
+            events: self.events,
+            log_output: self.log_output,
+            enabled: self.enabled,
+        }
+    }
+
+    /// Move the validated common fields plus a resolved dynamic pattern
+    /// into a [`PromoterSpec`]. Mirror of [`Self::into_sub_spec`].
+    fn into_promoter_spec(self, pattern: PatternSpec) -> PromoterSpec {
+        PromoterSpec {
+            name: self.name,
+            pattern,
+            program: self.program,
+            scope: self.scope,
+            settle: self.settle,
+            max_settle: self.max_settle,
+            scan: self.scan,
+            events: self.events,
+            log_output: self.log_output,
+            enabled: self.enabled,
+        }
+    }
+}
+
+/// Validate the [`RawWatch`] fields that don't depend on the
+/// static/dynamic dispatch. Returns
+/// `Ok(WatchAttachmentFields)` when every sub-validator succeeds,
+/// `Err(Vec<ValidationIssue>)` accumulating every per-field failure.
 ///
-/// Validation runs every sub-validator unconditionally; every
-/// sub-validator returns a [`Result`] so the success path destructures
-/// the per-field values directly via a tuple match. There is no
-/// `.expect` on a validated field — `Ok` arm ⇔ value valid AND no
-/// errors collected, by construction.
-fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
+/// **Scope → events ordering** is load-bearing: [`parse_events_field`]
+/// reads scope to pick the scope-conditional default ([`ClassSet`]),
+/// so `validate_scope` must run first. On a scope failure the events
+/// parser falls back to the default scope ([`EffectScope::default`])
+/// to keep a phantom events error from cascading — the scope error
+/// already surfaces from `scope_r`.
+///
+/// Single source of validation for the common fields: the two thin
+/// wrappers ([`validate_static_watch`] / [`validate_dynamic_watch`])
+/// call this and then prepend their kind-specific anchor (path /
+/// pattern). The only differences across the two dispatch paths
+/// (anchor resolution and output type) live in the wrappers; this
+/// helper is path-agnostic by construction.
+fn validate_watch_attachment(
+    idx: usize,
+    raw: &RawWatch,
+) -> Result<WatchAttachmentFields, Vec<ValidationIssue>> {
     let name_r = validate_name(idx, &raw.name);
-    let path_r = validate_static_path(idx, &raw.path);
     let program_r = validate_actions(idx, &raw.actions);
     let scope_r = validate_scope(idx, raw.scope.as_deref());
     let settle_r = validate_settle(idx, raw.settle, raw.max_settle);
     let scan_r = validate_scan(idx, raw);
-    // Parse `events` after scope so the default resolver can read
-    // scope. If scope itself failed validation, fall back to the
-    // default scope for the events default — this avoids a cascade
-    // of phantom errors; the scope error is already pending in
-    // `scope_r`.
     let events_r = parse_events_field(
         raw.events.as_deref(),
         scope_r.as_ref().copied().unwrap_or_default(),
         idx,
     );
 
-    match (
-        name_r, path_r, program_r, scope_r, settle_r, scan_r, events_r,
-    ) {
-        (
-            Ok(()),
-            Ok(path),
-            Ok(program),
-            Ok(scope),
-            Ok((settle, max_settle)),
-            Ok(scan),
-            Ok(events),
-        ) => Ok(SubSpec {
-            name: CompactString::new(&raw.name),
-            path,
-            program,
-            scope,
-            settle,
-            max_settle,
-            scan,
-            events,
-            log_output: raw.log_output,
-            enabled: raw.enabled,
-        }),
-        (name_r, path_r, program_r, scope_r, settle_r, scan_r, events_r) => {
+    match (name_r, program_r, scope_r, settle_r, scan_r, events_r) {
+        (Ok(()), Ok(program), Ok(scope), Ok((settle, max_settle)), Ok(scan), Ok(events)) => {
+            Ok(WatchAttachmentFields {
+                name: CompactString::new(&raw.name),
+                program,
+                scope,
+                settle,
+                max_settle,
+                scan,
+                events,
+                log_output: raw.log_output,
+                enabled: raw.enabled,
+            })
+        }
+        (name_r, program_r, scope_r, settle_r, scan_r, events_r) => {
             let mut errors: Vec<ValidationIssue> = Vec::new();
             if let Err(e) = name_r {
-                errors.push(e);
-            }
-            if let Err(e) = path_r {
                 errors.push(e);
             }
             if let Err(es) = program_r {
@@ -1216,75 +1267,58 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
     }
 }
 
+/// Validator for `[[watch]]` blocks whose `path` carries no glob
+/// discriminator characters (`*?[{`) — pure-literal anchors. The
+/// dispatcher in [`validate`] gates on [`PatternSpec::is_dynamic`]
+/// before invoking this, so a glob-bearing path cannot reach here.
+///
+/// Thin composition: resolve the static anchor and the common
+/// attachment fields independently, then either project a [`SubSpec`]
+/// from both Oks or accumulate every failure across both halves.
+/// Cross-half error fan-in is preserved — a path failure does not
+/// short-circuit the attachment-side issues, and vice versa.
+fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
+    let path_r = validate_static_path(idx, &raw.path);
+    let fields_r = validate_watch_attachment(idx, raw);
+    match (path_r, fields_r) {
+        (Ok(path), Ok(fields)) => Ok(fields.into_sub_spec(path)),
+        (path_r, fields_r) => {
+            let mut errors: Vec<ValidationIssue> = Vec::new();
+            if let Err(e) = path_r {
+                errors.push(e);
+            }
+            if let Err(es) = fields_r {
+                errors.extend(es);
+            }
+            Err(errors)
+        }
+    }
+}
+
 /// Validator for `[[watch]]` blocks whose `path` carries at least one
 /// glob discriminator character (`*?[{`). Caller gates on
 /// [`PatternSpec::is_dynamic`]; the parser itself enforces the
 /// pattern's structural invariants (absolute, no `**`, no `.`/`..`,
 /// no empty segments, no Windows prefix).
 ///
-/// Validation shape mirrors [`validate_static_watch`]: every sub-
-/// validator runs and returns a [`Result`], results compose via tuple
-/// match, the success path destructures without `.expect()`.
+/// Mirror of [`validate_static_watch`] for the dynamic dispatch: same
+/// composition, same error fan-in, different anchor type
+/// ([`PatternSpec`] vs [`PathBuf`]) and output ([`PromoterSpec`] vs
+/// [`SubSpec`]).
 fn validate_dynamic_watch(
     idx: usize,
     raw: &RawWatch,
 ) -> Result<PromoterSpec, Vec<ValidationIssue>> {
-    let name_r = validate_name(idx, &raw.name);
     let pattern_r = validate_dynamic_pattern(idx, &raw.path);
-    let program_r = validate_actions(idx, &raw.actions);
-    let scope_r = validate_scope(idx, raw.scope.as_deref());
-    let settle_r = validate_settle(idx, raw.settle, raw.max_settle);
-    let scan_r = validate_scan(idx, raw);
-    let events_r = parse_events_field(
-        raw.events.as_deref(),
-        scope_r.as_ref().copied().unwrap_or_default(),
-        idx,
-    );
-
-    match (
-        name_r, pattern_r, program_r, scope_r, settle_r, scan_r, events_r,
-    ) {
-        (
-            Ok(()),
-            Ok(pattern),
-            Ok(program),
-            Ok(scope),
-            Ok((settle, max_settle)),
-            Ok(scan),
-            Ok(events),
-        ) => Ok(PromoterSpec {
-            name: CompactString::new(&raw.name),
-            pattern,
-            program,
-            scope,
-            settle,
-            max_settle,
-            scan,
-            events,
-            log_output: raw.log_output,
-            enabled: raw.enabled,
-        }),
-        (name_r, pattern_r, program_r, scope_r, settle_r, scan_r, events_r) => {
+    let fields_r = validate_watch_attachment(idx, raw);
+    match (pattern_r, fields_r) {
+        (Ok(pattern), Ok(fields)) => Ok(fields.into_promoter_spec(pattern)),
+        (pattern_r, fields_r) => {
             let mut errors: Vec<ValidationIssue> = Vec::new();
-            if let Err(e) = name_r {
-                errors.push(e);
-            }
             if let Err(e) = pattern_r {
                 errors.push(e);
             }
-            if let Err(es) = program_r {
-                errors.extend(es);
-            }
-            if let Err(e) = scope_r {
-                errors.push(e);
-            }
-            if let Err(es) = settle_r {
-                errors.extend(es);
-            }
-            if let Err(es) = scan_r {
-                errors.extend(es);
-            }
-            if let Err(es) = events_r {
+            if let Err(es) = fields_r {
                 errors.extend(es);
             }
             Err(errors)
