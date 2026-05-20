@@ -40,11 +40,14 @@ pub struct EnvVar<'a> {
 /// Process spawner — the single I/O seam between the actuator's
 /// (otherwise pure) state machine and the OS.
 ///
-/// Production = [`super::OsSpawner`] (`std::process::Command`); tests =
-/// `testkit::MockSpawner` (controllable). `Send + Sync` so the bin can
-/// hold one `Arc<dyn Spawner>` and share across the controller thread
-/// + any test orchestration.
-pub trait Spawner: Send + Sync {
+/// Production = [`super::OsSpawner`] (`std::process::Command`);
+/// tests = `testkit::MockSpawner`. The actuator controller is
+/// single-threaded and is the sole caller — `Send` lets the bin's
+/// `Box<dyn Spawner>` move into the actuator thread (see
+/// `specter-bin`'s `spawn_actuator_thread`); no caller ever shares
+/// `&dyn Spawner` across threads, so `Sync` is not part of the
+/// contract.
+pub trait Spawner: Send {
     /// Spawn a child for the given argv + env + cwd + stdio policy.
     /// Returns paired handles: the `waiter` (consumed by the wait thread)
     /// and the `signaler` (held by the controller, used for SIGTERM/SIGKILL).

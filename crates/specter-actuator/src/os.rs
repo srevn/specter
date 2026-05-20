@@ -8,14 +8,15 @@
 //! cwd is validated by `Command::spawn` at spawn time; failure
 //! surfaces as an `io::Result::Err`.
 //!
-//! `Command::spawn` is forced down the fork+exec path via a no-op
-//! [`CommandExt::pre_exec`] hook (see `OsSpawner::spawn`'s safety note).
-//! macOS `posix_spawn` — the default Rust std fast path on Darwin —
-//! returns `EBADF` when the parent process has more than ~10,200 open
-//! file descriptors (the kernel's `OPEN_MAX = 10240`); the kqueue
-//! watcher opens one `O_EVTONLY` fd per watched directory, so trees
-//! with more than ~10k directories trip it. fork+exec has no such
-//! cap and is the load-bearing fix for deep-tree workloads.
+//! On macOS, `Command::spawn` is forced down the fork+exec path via a
+//! no-op `pre_exec` hook — see [`disqualify_posix_spawn`] for the
+//! full rationale. macOS `posix_spawn` returns `EBADF` once the parent
+//! crosses ~10,200 open fds (`OPEN_MAX = 10240`), which deep kqueue
+//! watch trees trip on the first Effect spawn; fork+exec has no such
+//! cap. Linux glibc / FreeBSD / illumos already implement
+//! `posix_spawn` as fork+exec internally with no equivalent cap, so
+//! the hook (and its `unsafe` surface) is unnecessary there and the
+//! non-macOS arm of the helper is an empty stub.
 //!
 //! The PID-reuse race during shutdown signaling is *narrowed* — not
 //! eliminated — by two layers. [`OsChildWaiter::wait`] sets a shared
@@ -37,7 +38,7 @@ use crate::spawner::{
 use specter_core::{EffectOutcome, Termination};
 use std::io;
 use std::os::fd::OwnedFd;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -239,10 +240,10 @@ impl Spawner for OsSpawner {
 }
 
 /// Build the [`Command`] shared between [`OsSpawner::spawn`] and the
-/// per-stage spawn loop in [`OsSpawner::spawn_pipe`]. Centralises the
-/// pre-exec hook that disqualifies `posix_spawn` (so we always go
-/// through fork+exec — see the comment on the pre_exec hook below for
-/// the macOS fd-table rationale).
+/// per-stage spawn loop in [`OsSpawner::spawn_pipe`]. Routes through
+/// [`disqualify_posix_spawn`] on macOS to force the fork+exec path
+/// (see that fn for the fd-table rationale); on every other Unix the
+/// call is a compile-time no-op.
 ///
 /// # Env-handling contract: **additive**
 ///
@@ -291,22 +292,41 @@ fn build_command(
         .stdin(stdin)
         .stdout(stdout)
         .stderr(stderr);
-    // SAFETY: the pre_exec hook is an empty `Ok(())` — it performs no
-    // I/O, no allocation, no signal-unsafe work. Its sole purpose is
-    // to disqualify Rust std's `posix_spawn` fast path (which
-    // requires no pre_exec hook) so the spawn falls back to
-    // fork+exec. macOS `posix_spawn` returns EBADF once the parent
-    // crosses ~10,200 open file descriptors (the kernel's `OPEN_MAX`);
-    // the kqueue watcher opens one fd per watched directory, and
-    // trees of ~10k+ directories therefore trip the limit on the
-    // very first Effect spawn. fork+exec iterates the child's fd
-    // table without that cap.
+    disqualify_posix_spawn(&mut cmd);
+    cmd
+}
+
+/// Force [`Command::spawn`] down the fork+exec path on macOS by
+/// installing a no-op `pre_exec` hook (Rust std's `posix_spawn` fast
+/// path requires zero `pre_exec` hooks, so adding any hook disqualifies
+/// it).
+///
+/// macOS `posix_spawn` returns `EBADF` once the parent process holds
+/// more than ~10,200 open file descriptors (the kernel's
+/// `OPEN_MAX = 10240`); the kqueue watcher opens one `O_EVTONLY` fd
+/// per watched directory, so trees with ~10k+ directories trip it on
+/// the first Effect spawn. fork+exec iterates the child's fd table
+/// without that cap.
+///
+/// Linux glibc / FreeBSD / illumos already implement `posix_spawn` as
+/// fork+exec (or vfork+exec) internally with no equivalent cap, so
+/// the workaround — and the `unsafe` surface that comes with it — is
+/// unnecessary there; the non-macOS arm of this fn is an empty stub
+/// that the compiler eliminates.
+#[cfg(target_os = "macos")]
+fn disqualify_posix_spawn(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the hook is an empty `Ok(())` — no I/O, no allocation,
+    // no signal-unsafe work. Sole purpose is to disqualify posix_spawn
+    // so the spawn falls back to fork+exec.
     #[allow(unsafe_code)]
     unsafe {
         cmd.pre_exec(|| Ok(()));
     }
-    cmd
 }
+
+#[cfg(not(target_os = "macos"))]
+const fn disqualify_posix_spawn(_cmd: &mut Command) {}
 
 /// Construct an `OsChildWaiter` + `OsChildSignaler` pair from a
 /// freshly-spawned [`Child`]. They share an `Arc<AtomicBool>` `dead`
@@ -331,14 +351,30 @@ fn build_pair(child: Child) -> (u32, OsChildWaiter, OsChildSignaler) {
     )
 }
 
-/// Create one pipe with both ends CLOEXEC. macOS lacks `pipe2`; we use
-/// `nix::unistd::pipe` and set FD_CLOEXEC via `fcntl` on each end.
+/// Create one pipe with both ends CLOEXEC.
+///
+/// Linux gets a single `pipe2(O_CLOEXEC)` syscall — the kernel sets
+/// the flag atomically with fd creation, so a concurrent thread
+/// calling `fork+exec` (via `std::process::Command::spawn` from any
+/// non-actuator path) cannot inherit a not-yet-CLOEXEC pipe fd. macOS
+/// lacks `pipe2` (and `nix::unistd::pipe2` is gated off on Apple
+/// targets); we fall back to `pipe(2)` + per-fd `fcntl(F_SETFD,
+/// FD_CLOEXEC)`. The fallback retains a brief window between the pipe
+/// syscall and the fcntls in which a concurrent fork+exec could
+/// inherit the fds, but no such concurrent spawn path exists in v1.
 fn create_cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-    let (read_fd, write_fd) = nix::unistd::pipe().map_err(io_from_nix)?;
-    fcntl(&read_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io_from_nix)?;
-    fcntl(&write_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io_from_nix)?;
-    Ok((read_fd, write_fd))
+    #[cfg(target_os = "linux")]
+    {
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io_from_nix)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+        let (read_fd, write_fd) = nix::unistd::pipe().map_err(io_from_nix)?;
+        fcntl(&read_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io_from_nix)?;
+        fcntl(&write_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io_from_nix)?;
+        Ok((read_fd, write_fd))
+    }
 }
 
 /// Convert a [`nix::Error`] (which is `nix::errno::Errno`) into an
@@ -671,7 +707,7 @@ mod pipe_tests {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    #![allow(unsafe_code)] // mirrors the production site (`os.rs::OsSpawner::spawn`); the test exercises it.
+    #![allow(unsafe_code)] // mirrors the production site (`disqualify_posix_spawn`); the test exercises it.
 
     use super::*;
     use crate::spawner::Spawner;
