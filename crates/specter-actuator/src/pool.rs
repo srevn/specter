@@ -17,7 +17,7 @@ mod state;
 use crate::env::EnvSnapshot;
 use crate::spawner::Spawner;
 use crossbeam::channel::{Receiver, Sender};
-use specter_core::{CorrelationId, DedupKey, Effect, EffectOutcome, Input, SubId};
+use specter_core::{DedupKey, Effect, EffectOutcome, Input, SubId};
 use state::ActuatorState;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -46,7 +46,6 @@ pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 pub struct Reaped {
     pub key: DedupKey,
     pub sub: SubId,
-    pub correlation: CorrelationId,
     pub outcome: EffectOutcome,
 }
 
@@ -164,16 +163,10 @@ impl SubprocessActuator {
                 recv(hard_shutdown_rx) -> _ => { hard = true; break; }
             }
         }
-        self.shutdown(&engine_in, hard, &hard_shutdown_rx, spawner);
+        self.shutdown(&engine_in, hard, &hard_shutdown_rx);
     }
 
-    fn shutdown(
-        &mut self,
-        engine_in: &Sender<Input>,
-        hard: bool,
-        hard_shutdown_rx: &Receiver<()>,
-        spawner: &dyn Spawner,
-    ) {
+    fn shutdown(&mut self, engine_in: &Sender<Input>, hard: bool, hard_shutdown_rx: &Receiver<()>) {
         // Phase 1: SIGTERM all running.
         tracing::info!("shutdown phase 1: SIGTERM running children");
         for slot in self.state.slots.values() {
@@ -197,7 +190,7 @@ impl SubprocessActuator {
             }
             crossbeam::select! {
                 recv(self.reap_rx) -> r => match r {
-                    Ok(r) => self.state.handle_reap_no_pump(r, engine_in, spawner, &self.reap_tx),
+                    Ok(r) => self.state.handle_reap_drop(r, engine_in),
                     Err(crossbeam::channel::RecvError) => break,
                 },
                 recv(hard_shutdown_rx) -> _ => { grace = false; }
@@ -228,9 +221,7 @@ impl SubprocessActuator {
                 break;
             }
             match self.reap_rx.recv_timeout(final_deadline - now) {
-                Ok(r) => self
-                    .state
-                    .handle_reap_no_pump(r, engine_in, spawner, &self.reap_tx),
+                Ok(r) => self.state.handle_reap_drop(r, engine_in),
                 Err(
                     crossbeam::channel::RecvTimeoutError::Timeout
                     | crossbeam::channel::RecvTimeoutError::Disconnected,
