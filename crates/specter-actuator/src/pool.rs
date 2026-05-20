@@ -865,15 +865,15 @@ mod tests {
         // channel hop, an interleaved same-key submit could replace
         // `slot.running` before the synth drained, then the synth
         // would clobber the new job's state and leave the per-Sub
-        // counter desynced. The fix routes synth-Reaps directly
-        // through `handle_reap_inner` on the controller call stack.
+        // gate desynced. The fix routes synth-Failed dispatch directly
+        // through `advance_or_terminate` on the controller call stack.
         //
         // This test exercises the simpler post-failure observable:
         // after a spawn-failure on (Sub=7, Profile=1, Resource=1), a
         // follow-up Effect for the *same* Sub on (Profile=2,
-        // Resource=2) must spawn promptly. If `running_per_sub[7]`
-        // were stuck above zero, the per-Sub gate would defer the
-        // second submit indefinitely.
+        // Resource=2) must spawn promptly. If `running_subs` still
+        // contained Sub 7, the per-Sub gate would defer the second
+        // submit indefinitely.
         let mut h = Harness::new(4);
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
         h.submit(make_effect_perfile(7, 1, 1, 1));

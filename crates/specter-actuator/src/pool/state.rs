@@ -1,4 +1,4 @@
-//! Actuator state machine: slot map, ready queue, per-Sub running counter,
+//! Actuator state machine: slot map, ready queue, per-Sub running set,
 //! global semaphore.
 //!
 //! All mutations happen on the controller thread. The wait threads send
@@ -21,9 +21,9 @@
 //! (Exec/Pipe `on_failed = Terminate`; predicate `on_failed` ≠
 //! Terminate so the predicate outcome doesn't propagate).
 //!
-//! - **Per-Effect-stable** state (per-Sub counter bump, diff tmp file)
-//!   is owned by [`ActuatorState::start_plan`]: bump on plan start,
-//!   release on plan terminus.
+//! - **Per-Effect-stable** state (per-Sub set membership, diff tmp file)
+//!   is owned by [`ActuatorState::start_plan`]: insert on plan start,
+//!   remove on plan terminus.
 //! - **Per-op** state (permit, OS process, wait thread) is owned by
 //!   [`ActuatorState::spawn_step_with_permit`]: each op acquires a
 //!   fresh permit, the wait thread releases it on reap.
@@ -49,7 +49,7 @@ use crate::timer;
 use crossbeam::channel::Sender;
 use specter_core::program::{BranchTarget, ExecAction, SpawnBody};
 use specter_core::{DedupKey, Effect, EffectOutcome, Input, SubId, Termination};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -250,7 +250,20 @@ pub(crate) struct PlanContinuation {
 pub(crate) struct ActuatorState {
     pub slots: BTreeMap<DedupKey, Slot>,
     pub ready_queue: VecDeque<DedupKey>,
-    pub running_per_sub: BTreeMap<SubId, u32>,
+    /// Per-Sub serialization gate: the set of Subs whose plan is in
+    /// flight. [`Self::start_plan`] inserts on entry; [`Self::terminate_plan`]
+    /// removes on the live-plan exit; [`Self::pump`]'s fresh-plan arm
+    /// reads via `contains`. The pump's gate enforces at-most-one
+    /// concurrent fresh plan per Sub, so the set's cardinality per
+    /// member is structurally `{absent, present}` — set membership is
+    /// the exact shape (a counted multimap would over-type the gate).
+    ///
+    /// **Stale-Reaped arms do NOT touch this set**: they route through
+    /// [`Self::terminate_stale`], which performs engine accounting
+    /// only. A stale Reaped's `sub` may still own a live plan at a
+    /// different `DedupKey`; removing it here would silently clobber
+    /// the live plan's gate hold.
+    pub running_subs: BTreeSet<SubId>,
     pub permits: Permits,
     /// Captured operator env, threaded into every resolver call for
     /// `${env.<NAME>}` substitution. Shared by `Arc` because the
@@ -284,7 +297,7 @@ impl ActuatorState {
         Self {
             slots: BTreeMap::new(),
             ready_queue: VecDeque::new(),
-            running_per_sub: BTreeMap::new(),
+            running_subs: BTreeSet::new(),
             permits: Permits::new(concurrency),
             env_snapshot,
             shutdown_grace,
@@ -349,16 +362,20 @@ impl ActuatorState {
     pub fn handle_reap_drop(&mut self, reaped: super::Reaped, engine_in: &Sender<Input>) {
         tracing::trace!(?reaped.key, ?reaped.outcome, "reap drop");
         let super::Reaped { key, sub, outcome } = reaped;
-        // Consume the running job (if any) to harvest the diff tmp
-        // path for cleanup. The signaler / effect / waiter fields drop
-        // with the job — phase 1 already SIGTERMed; this thread has
-        // already reaped the child kernel-side, so dropping the
-        // signaler co-owner here is safe.
-        let diff_tmp_path = self.take_running(&key).and_then(|j| j.diff_tmp_path);
+        // Consume the running job (if present). The signaler / effect
+        // / waiter fields drop with the job — phase 1 already
+        // SIGTERMed; this thread has already reaped the child
+        // kernel-side, so dropping the signaler co-owner here is
+        // safe. Stale Reaped (running already taken) routes through
+        // `terminate_stale` — same shape as `reap_pump`'s stale arm.
+        let Some(job) = self.take_running(&key) else {
+            self.terminate_stale(key, sub, outcome, engine_in);
+            return;
+        };
         self.terminate_plan(
             key,
             sub,
-            diff_tmp_path.as_deref(),
+            job.diff_tmp_path.as_deref(),
             outcome,
             ReapPolicy::Drop,
             engine_in,
@@ -380,13 +397,15 @@ impl ActuatorState {
     ///    (carried outcome propagates) or [`BranchTarget::Escape`]
     ///    (terminate Ok regardless of carried outcome — the "branch,
     ///    not guard" outcome elision). `terminate_plan` emits one
-    ///    `EffectComplete`, decrements the per-Sub counter, cleans the
-    ///    diff tmp file, and re-queues the slot's `pending` (if any)
-    ///    or removes the slot.
+    ///    `EffectComplete`, removes the Sub from the per-Sub gate,
+    ///    cleans the diff tmp file, and re-queues the slot's `pending`
+    ///    (if any) or removes the slot.
     ///
-    /// **Defensive no-job**: a stale Reaped after slot removal falls
-    /// through directly to `terminate_plan` without a job — preserves
-    /// the "always emit EffectComplete" invariant for the engine.
+    /// **Defensive no-job**: a stale Reaped after slot removal routes
+    /// through [`Self::terminate_stale`] (not `terminate_plan`) —
+    /// emits `EffectComplete` for engine accounting without touching
+    /// the per-Sub gate (which a live plan for the same Sub may still
+    /// hold at a different key) or the tmp file.
     fn reap_pump(
         &mut self,
         reaped: super::Reaped,
@@ -398,9 +417,10 @@ impl ActuatorState {
         let super::Reaped { key, sub, outcome } = reaped;
         let Some(job) = self.take_running(&key) else {
             // Stale Reaped: slot already removed (or running already
-            // taken). Emit EffectComplete to keep engine accounting
-            // in lockstep.
-            self.terminate_plan(key, sub, None, outcome, ReapPolicy::Pump, engine_in);
+            // taken). Engine-accounting-only — see `terminate_stale`'s
+            // contract for why this can't go through `terminate_plan`
+            // under the set-membership gate.
+            self.terminate_stale(key, sub, outcome, engine_in);
             return;
         };
         let RunningJob {
@@ -572,26 +592,38 @@ impl ActuatorState {
         }
     }
 
-    /// Terminal arm of a plan: emit one `EffectComplete`, decrement
-    /// the per-Sub counter, clean the diff tmp file, and either re-queue
-    /// pending (Pump policy + non-empty pending) or remove the slot.
+    /// Terminal arm of a *live* plan: emit one `EffectComplete`, remove
+    /// the per-Sub gate hold, clean the diff tmp file, and either
+    /// re-queue pending (Pump policy + non-empty pending) or remove the
+    /// slot.
     ///
-    /// Called from four sites:
+    /// Called from three sites, every one of which has a paired
+    /// [`Self::start_plan`] bump for the same `(sub, key)`:
     ///
-    /// 1. [`Self::reap_pump`] stale-Reaped arm (no running job).
-    /// 2. [`Self::advance_or_terminate`] Terminate / Escape arms.
-    /// 3. [`Self::handle_reap_drop`] shutdown-drain teardown.
-    /// 4. [`Self::start_plan`] / [`Self::spawn_continuation`] spawn-
+    /// 1. [`Self::advance_or_terminate`] Terminate / Escape arms (the
+    ///    canonical live-plan exit after a real Reaped or a synth
+    ///    Failed).
+    /// 2. [`Self::handle_reap_drop`] shutdown-drain teardown when
+    ///    [`Self::take_running`] returns a live job.
+    /// 3. [`Self::start_plan`] / [`Self::spawn_continuation`] spawn-
     ///    failure paths route through [`Self::advance_or_terminate`]
-    ///    (which hits #2 above); on synth-Failed at cursor 0 the
+    ///    (which hits #1 above); on synth-Failed at cursor 0 the
     ///    `diff_tmp_path` is the caller's locally-scoped one, never
     ///    one taken back from `slot.running`.
     ///
+    /// **Stale-Reaped arms do NOT call here**: a Reaped without a
+    /// paired live `RunningJob` (slot absent or `slot.running` already
+    /// taken) routes through [`Self::terminate_stale`]. That path's
+    /// `sub` is *not* guaranteed to hold the per-Sub gate (a live
+    /// plan for the same Sub may own it on a different key), so a
+    /// blanket `running_subs.remove(&sub)` would silently clobber the
+    /// live plan's hold. Splitting "live plan teardown" from "engine
+    /// accounting only" lets the `running_subs.remove` here be total
+    /// — guarded by an unconditional `debug_assert!(was_present)` —
+    /// pinning the bump/remove pairing under the set-membership shape.
+    ///
     /// `diff_tmp_path` is taken by `Option<&Path>` because all callers
     /// retain ownership; cleanup just borrows for the unlink syscall.
-    /// The per-Sub counter decrement is `saturating_sub` against an
-    /// `Option<&mut u32>` so spawn-failure-before-counter-bump paths
-    /// (fresh plan whose step 0 spawn failed) are no-ops as desired.
     fn terminate_plan(
         &mut self,
         key: DedupKey,
@@ -606,18 +638,16 @@ impl ActuatorState {
             key,
             result: outcome,
         });
-        if let Some(c) = self.running_per_sub.get_mut(&sub) {
-            // The counter bump at `start_plan` precedes every spawn
-            // attempt for this Sub, including spawn-failure paths that
-            // route through `advance_or_terminate` → `terminate_plan`.
-            // A decrement without a prior bump would be a controller
-            // accounting bug; debug_assert tripwires it in tests.
-            debug_assert!(*c > 0, "running_per_sub decrement without prior bump");
-            *c -= 1;
-            if *c == 0 {
-                self.running_per_sub.remove(&sub);
-            }
-        }
+        // Live-plan teardown: every reachable call site has a paired
+        // `start_plan` insert for this Sub. `BTreeSet::remove` returns
+        // `false` only on an unpaired remove — a controller accounting
+        // bug, tripwired here. The set-membership shape makes the
+        // underflow that a `*c -= 1` admitted unrepresentable.
+        let was_present = self.running_subs.remove(&sub);
+        debug_assert!(
+            was_present,
+            "per-Sub gate underflow: terminate_plan for Sub not in running_subs (stale-Reaped path must route to terminate_stale)",
+        );
         if let Some(p) = diff_tmp_path {
             crate::tmp::cleanup(p);
         }
@@ -638,6 +668,57 @@ impl ActuatorState {
                 self.slots.remove(&key);
             }
         }
+    }
+
+    /// Engine-accounting-only terminal arm for a [`super::Reaped`] that
+    /// arrives without a paired live `RunningJob` ([`Self::take_running`]
+    /// returned `None` — slot absent or `slot.running` already taken).
+    /// Emits one `EffectComplete` so the engine's outstanding counter
+    /// stays in lockstep, then removes the slot (idempotent).
+    ///
+    /// Distinct from [`Self::terminate_plan`] in two ways:
+    ///
+    /// 1. **No per-Sub gate touch.** A stale Reaped's `sub` is not
+    ///    guaranteed to hold a gate entry. The Sub might own a live
+    ///    plan at a *different* `DedupKey` (the per-Sub gate is
+    ///    structurally at-most-one across all keys, but the gate's
+    ///    bump is paired to a specific `(sub, key)` plan — not to
+    ///    `sub` alone). A blanket `running_subs.remove(&sub)` here
+    ///    would silently clobber that live plan's hold, releasing
+    ///    the gate ahead of its real terminus.
+    /// 2. **No diff tmp cleanup.** Same reasoning: the live plan owns
+    ///    its tmp file; cleanup at the stale path would unlink under
+    ///    a live reader.
+    ///
+    /// **Production reachability.** Defensive: every successful spawn
+    /// installs `slot.running` and every wait-thread send is paired
+    /// with a `take_running` at the controller. The path fires only
+    /// against a manufactured `Slot::default` (no running) — see
+    /// `reap_pump_stale_for_unspawned_slot_clears_state` in the test
+    /// module. Production callers (real reap pipeline,
+    /// [`Self::handle_reap_drop`]) reach this arm only if the same
+    /// `Reaped` would otherwise have been delivered twice — a
+    /// controller invariant violation. The accounting emit + slot
+    /// remove keeps the engine in lockstep under that defensive case.
+    ///
+    /// In production the slot is `Slot::default()` (or absent) — never
+    /// carries pending — so the unconditional `slots.remove` here
+    /// drops no live state. `pending` becomes reachable only via
+    /// `handle_submit`, which is on the same single controller
+    /// thread; the stale Reaped path is a no-op against that arm.
+    fn terminate_stale(
+        &mut self,
+        key: DedupKey,
+        sub: SubId,
+        outcome: EffectOutcome,
+        engine_in: &Sender<Input>,
+    ) {
+        let _ = engine_in.send(Input::EffectComplete {
+            sub,
+            key,
+            result: outcome,
+        });
+        self.slots.remove(&key);
     }
 
     /// Spawn ready slots while permits + per-Sub gates allow.
@@ -692,7 +773,7 @@ impl ActuatorState {
             }
 
             // Fresh plan: per-Sub gate.
-            if self.running_per_sub.get(&sub).copied().unwrap_or(0) > 0 {
+            if self.running_subs.contains(&sub) {
                 self.blocked_scratch.push_back(key);
                 continue;
             }
@@ -734,17 +815,18 @@ impl ActuatorState {
         }
     }
 
-    /// Start a plan: materialise the diff tmp file (if needed), bump
-    /// the per-Sub counter, spawn instruction 0 with the given permit.
+    /// Start a plan: materialise the diff tmp file (if needed), insert
+    /// the Sub into the per-Sub gate, spawn instruction 0 with the
+    /// given permit.
     ///
-    /// **Per-Sub counter is bumped unconditionally** before the spawn
-    /// attempt — predicate spawn-failure semantics may continue the
-    /// plan via [`Self::advance_or_terminate`], and any in-progress
+    /// **The per-Sub gate is inserted unconditionally** before the
+    /// spawn attempt — predicate spawn-failure semantics may continue
+    /// the plan via [`Self::advance_or_terminate`], and any in-progress
     /// continuation needs the per-Sub gate to hold same-Sub fresh
     /// plans behind it. On failure, the dispatch loop's terminate
-    /// arms decrement normally; the controller is single-threaded so
-    /// the bump-then-decrement is atomic from any observer's
-    /// perspective.
+    /// arms remove the Sub via [`Self::terminate_plan`]; the
+    /// controller is single-threaded so the insert-then-remove is
+    /// atomic from any observer's perspective.
     ///
     /// On spawn failure, routes through [`Self::advance_or_terminate`]
     /// with a synthesised `EffectOutcome::Failed`. The dispatcher reads
@@ -792,13 +874,18 @@ impl ActuatorState {
             }
         });
 
-        // Counter bump symmetric with `terminate_plan`'s decrement;
-        // overflow would require billions of concurrent plans per Sub,
-        // which is structurally impossible (concurrency cap +
-        // per-Sub gate hold at most `permits.cap()` Subs at once).
-        let counter = self.running_per_sub.entry(sub).or_insert(0);
-        debug_assert!(*counter < u32::MAX, "running_per_sub counter overflow");
-        *counter += 1;
+        // Per-Sub gate insert symmetric with `terminate_plan`'s remove.
+        // The pump's gate (`running_subs.contains` in the fresh-plan
+        // arm) blocks any other start_plan for this Sub until the
+        // live plan terminates, so the insert is structurally
+        // first-of-its-kind. `BTreeSet::insert` returning `false`
+        // would mean the pump dispatched a fresh plan past its own
+        // gate — a controller bug, tripwired here.
+        let inserted = self.running_subs.insert(sub);
+        debug_assert!(
+            inserted,
+            "per-Sub gate violation: start_plan for Sub already in running_subs",
+        );
         match self.spawn_step_with_permit(
             &key,
             sub,
@@ -841,16 +928,16 @@ impl ActuatorState {
 
     /// Spawn the next instruction of a plan that was deferred via
     /// [`Slot::plan_continue`]. Distinct from [`Self::start_plan`]:
-    /// no per-Sub counter bump (already bumped at the original
+    /// no per-Sub gate insert (already held since the original
     /// `start_plan`), no tmp materialisation (path inherited from the
     /// `PlanContinuation`).
     ///
     /// On spawn failure, routes through [`Self::advance_or_terminate`]
     /// — predicate spawn-failure at the continuation's cursor jumps
     /// to its else-branch, exec/pipe spawn-failure propagates to
-    /// plan terminus. Either way the per-Sub counter (which is at +1
-    /// from the original start_plan) decrements at terminate, and
-    /// any subsequent advance reuses the inherited tmp path.
+    /// plan terminus. Either way the per-Sub gate (held since the
+    /// original `start_plan`) is released at terminate, and any
+    /// subsequent advance reuses the inherited tmp path.
     fn spawn_continuation(
         &mut self,
         key: DedupKey,
@@ -1447,11 +1534,11 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
 /// 2. Permit release precedes reap notification. Spawns for *other*
 ///    Subs can dispatch immediately on the freed permit even if the
 ///    reap channel is briefly saturated. Spawns for the *same* Sub
-///    still wait for the controller to drain `running_per_sub[sub]`
-///    when it processes the [`super::Reaped`] — by design (per-Sub
-///    serialization). The brief stale-counter window between
-///    `drop(permit)` and `handle_reap` is benign: same-Sub items
-///    defer one extra pump cycle, no over-spawning.
+///    still wait for the controller to drop `sub` from
+///    `running_subs` when it processes the [`super::Reaped`] — by
+///    design (per-Sub serialization). The brief stale-membership
+///    window between `drop(permit)` and `handle_reap` is benign:
+///    same-Sub items defer one extra pump cycle, no over-spawning.
 ///
 /// **Tmp-file cleanup is NOT this thread's responsibility.** The diff
 /// tmp file lives for the whole plan (multiple steps may read it) —
@@ -1857,9 +1944,10 @@ mod tests {
     }
 
     /// Stale-Reaped shape: slot exists with no running job and no
-    /// counter bump (today's spawn-failure-before-bump entry).
-    /// Terminal arm runs unconditionally — emits EffectComplete with
-    /// the reaped outcome, removes the slot, and leaves counters intact.
+    /// paired per-Sub gate hold. The stale arm routes through
+    /// `terminate_stale` — emits EffectComplete with the reaped
+    /// outcome, removes the slot, and does not touch `running_subs`
+    /// (no bump to undo).
     #[test]
     fn reap_pump_stale_for_unspawned_slot_clears_state() {
         let mut state = test_state(nz(2));
@@ -1883,8 +1971,8 @@ mod tests {
 
         assert!(state.slots.is_empty(), "slot removed");
         assert!(
-            state.running_per_sub.is_empty(),
-            "counter not underflowed by saturating_sub against absent entry",
+            state.running_subs.is_empty(),
+            "stale arm did not touch running_subs (no paired bump to undo)",
         );
         assert!(state.ready_queue.is_empty());
         match rx.try_recv() {
@@ -1904,10 +1992,68 @@ mod tests {
         }
     }
 
+    /// Stale-Reaped against an empty slot for `Sub A`, while a live
+    /// plan for the *same* `Sub A` holds `running_subs` at a
+    /// different (here unrelated) `DedupKey`. The stale arm must NOT
+    /// touch `running_subs` — clobbering the live plan's hold here
+    /// would release the per-Sub gate prematurely, letting a fresh
+    /// same-Sub plan dispatch alongside the live one (violates the
+    /// per-Sub serialization invariant).
+    ///
+    /// This pins the `terminate_stale` contract: engine accounting
+    /// emit + slot remove, no per-Sub gate touch, no tmp cleanup.
+    /// Co-located with the existing stale test so the pair documents
+    /// the two arms — empty-set and held-set — of the stale path.
+    #[test]
+    fn reap_pump_stale_does_not_release_per_sub_gate_for_live_plan() {
+        let mut state = test_state(nz(2));
+        let stale_key = perfile_key(20, 20, 20);
+        let sub = unique_sub_id(20);
+        // Live plan holds the per-Sub gate (no slot here — the
+        // stale arm only inspects `running_subs`, not the live key).
+        state.running_subs.insert(sub);
+        state.slots.insert(stale_key, Slot::default());
+        let (tx, rx) = unbounded::<Input>();
+        let (reap_tx, _reap_rx) = reap_channel();
+        let spawner = UnusedSpawner;
+
+        state.reap_pump(
+            Reaped {
+                key: stale_key,
+                sub,
+                outcome: EffectOutcome::Failed(Termination::Internal),
+            },
+            &tx,
+            &spawner,
+            &reap_tx,
+        );
+
+        assert!(!state.slots.contains_key(&stale_key), "stale slot removed");
+        assert!(
+            state.running_subs.contains(&sub),
+            "live plan's per-Sub gate hold preserved across stale Reaped",
+        );
+        match rx.try_recv() {
+            Ok(Input::EffectComplete {
+                sub: s,
+                key: k,
+                result,
+            }) => {
+                assert_eq!(s, sub);
+                assert_eq!(k, stale_key);
+                assert!(matches!(
+                    result,
+                    EffectOutcome::Failed(Termination::Internal)
+                ));
+            }
+            other => panic!("expected EffectComplete::Failed; got {other:?}"),
+        }
+    }
+
     /// Single-step plan, Failed outcome: terminal arm runs, signaler is
     /// dropped without sending SIGTERM/SIGKILL (the child already died,
-    /// we just got the reap), counter decrements to zero and entry is
-    /// removed.
+    /// we just got the reap), the per-Sub gate hold is released, and
+    /// the slot is removed.
     #[test]
     fn reap_pump_failed_single_step_decrements_and_removes() {
         let mut state = test_state(nz(2));
@@ -1921,7 +2067,7 @@ mod tests {
             ..Slot::default()
         };
         state.slots.insert(key, slot);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
@@ -1938,7 +2084,7 @@ mod tests {
         );
 
         assert!(state.slots.is_empty(), "slot removed");
-        assert!(state.running_per_sub.is_empty(), "counter cleared");
+        assert!(state.running_subs.is_empty(), "per-Sub gate cleared");
         assert_eq!(
             signaler.term.load(Ordering::SeqCst),
             0,
@@ -1969,7 +2115,7 @@ mod tests {
             ..Slot::default()
         };
         state.slots.insert(key, slot);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, _rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
@@ -1997,7 +2143,7 @@ mod tests {
             vec![&key],
             "key re-queued for next pump",
         );
-        assert!(state.running_per_sub.is_empty());
+        assert!(state.running_subs.is_empty());
     }
 
     /// Drop policy (shutdown phase) removes the slot regardless of
@@ -2017,7 +2163,7 @@ mod tests {
             ..Slot::default()
         };
         state.slots.insert(key, slot);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, _rx) = unbounded::<Input>();
 
         state.handle_reap_drop(
@@ -2030,7 +2176,7 @@ mod tests {
         );
 
         assert!(state.slots.is_empty(), "slot removed under Drop policy");
-        assert!(state.running_per_sub.is_empty());
+        assert!(state.running_subs.is_empty());
         assert!(state.ready_queue.is_empty(), "no re-queue under Drop");
     }
 
@@ -2039,7 +2185,7 @@ mod tests {
     /// Step Ok and not last: `reap_pump` takes the running, calls
     /// try_spawn_step which acquires a fresh permit and spawns
     /// instruction N+1. Slot.running is reinstalled with cursor
-    /// incremented; per-Sub counter stays at +1 (one bump per program,
+    /// incremented; per-Sub gate stays held (one insert per program,
     /// not per instruction); no EffectComplete is emitted.
     #[test]
     fn step_ok_not_last_advances_to_next_step() {
@@ -2060,7 +2206,7 @@ mod tests {
             ..Slot::default()
         };
         state.slots.insert(key, slot);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = ScriptedSpawner::new();
@@ -2083,10 +2229,9 @@ mod tests {
             .expect("slot preserved during advance");
         let running = slot_after.running.as_ref().expect("running reinstalled");
         assert_eq!(running.cursor, 1, "cursor advanced");
-        assert_eq!(
-            state.running_per_sub.get(&sub).copied(),
-            Some(1),
-            "per-Sub counter unchanged across step advance",
+        assert!(
+            state.running_subs.contains(&sub),
+            "per-Sub gate hold preserved across step advance",
         );
         assert!(rx.try_recv().is_err(), "no EffectComplete emitted mid-plan");
         // Drain the wait thread so the test doesn't hang on Drop.
@@ -2115,7 +2260,7 @@ mod tests {
             ..Slot::default()
         };
         state.slots.insert(key, slot);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
@@ -2132,7 +2277,7 @@ mod tests {
         );
 
         assert!(state.slots.is_empty(), "slot removed on terminal");
-        assert!(state.running_per_sub.is_empty(), "counter cleared");
+        assert!(state.running_subs.is_empty(), "per-Sub gate cleared");
         match rx.try_recv() {
             Ok(Input::EffectComplete { result, .. }) => assert!(matches!(
                 result,
@@ -2163,7 +2308,7 @@ mod tests {
             ..Slot::default()
         };
         state.slots.insert(key, slot);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
@@ -2180,7 +2325,7 @@ mod tests {
         );
 
         assert!(state.slots.is_empty(), "slot removed after last step");
-        assert!(state.running_per_sub.is_empty());
+        assert!(state.running_subs.is_empty());
         match rx.try_recv() {
             Ok(Input::EffectComplete { result, .. }) => {
                 assert!(matches!(result, EffectOutcome::Ok));
@@ -2192,7 +2337,7 @@ mod tests {
     /// Permit unavailable mid-program: try_spawn_step returns Deferred,
     /// the slot's plan_continue is set to (effect, cursor+1, diff),
     /// the slot is queued for the next pump cycle, no EffectComplete is
-    /// emitted, the counter stays at +1.
+    /// emitted, the per-Sub gate stays held.
     #[test]
     fn step_ok_not_last_with_no_permit_defers_via_plan_continue() {
         // cap=1 with another job already holding the only permit.
@@ -2217,7 +2362,7 @@ mod tests {
             ..Slot::default()
         };
         state.slots.insert(key, slot);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
@@ -2242,10 +2387,9 @@ mod tests {
         assert_eq!(cont.cursor, 1, "deferred at instruction 1");
         assert!(slot_after.in_ready_queue);
         assert_eq!(state.ready_queue.iter().collect::<Vec<_>>(), vec![&key]);
-        assert_eq!(
-            state.running_per_sub.get(&sub).copied(),
-            Some(1),
-            "counter stays at +1 across deferral",
+        assert!(
+            state.running_subs.contains(&sub),
+            "per-Sub gate hold preserved across deferral",
         );
         assert!(rx.try_recv().is_err(), "no EffectComplete on deferral");
     }
@@ -2271,7 +2415,7 @@ mod tests {
         };
         state.slots.insert(key, slot);
         state.ready_queue.push_back(key);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, _rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
@@ -2316,7 +2460,7 @@ mod tests {
             ..Slot::default()
         };
         state.slots.insert(key, slot);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
 
         state.handle_reap_drop(
@@ -2329,7 +2473,7 @@ mod tests {
         );
 
         assert!(state.slots.is_empty(), "slot removed under Drop");
-        assert!(state.running_per_sub.is_empty());
+        assert!(state.running_subs.is_empty());
         match rx.try_recv() {
             Ok(Input::EffectComplete { result, .. }) => {
                 assert!(matches!(result, EffectOutcome::Ok));
@@ -2339,8 +2483,8 @@ mod tests {
     }
 
     /// Spawn-failure on next step (try_spawn_step returns Failed):
-    /// terminate_plan runs with synthesised `Failed`, counter decrements,
-    /// slot removed.
+    /// terminate_plan runs with synthesised `Failed`, the per-Sub gate
+    /// is released, slot removed.
     #[test]
     fn step_ok_not_last_with_spawn_failure_synthesises_failed() {
         let mut state = test_state(nz(2));
@@ -2360,7 +2504,7 @@ mod tests {
             ..Slot::default()
         };
         state.slots.insert(key, slot);
-        state.running_per_sub.insert(sub, 1);
+        state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = ScriptedSpawner::new();
@@ -2378,7 +2522,7 @@ mod tests {
         );
 
         assert!(state.slots.is_empty(), "slot removed after synth Failed");
-        assert!(state.running_per_sub.is_empty(), "counter cleared");
+        assert!(state.running_subs.is_empty(), "per-Sub gate cleared");
         match rx.try_recv() {
             Ok(Input::EffectComplete { result, .. }) => assert!(matches!(
                 result,
