@@ -561,12 +561,18 @@ impl FsWatcher for InotifyWatcher {
     /// follow-up pass armed iff phase 1 returned events and the
     /// recency gate (`last_event_at`) is open.
     ///
-    /// **Recency gate (`last_event_at`).** Phase 2 enters iff:
+    /// **Phase-2 gate.** Phase 2 enters iff every term holds:
     /// 1. Phase 1 emitted ≥ 1 [`WatcherEvent`] (real events or a
     ///    queue-overflow record),
-    /// 2. The drain window is non-zero, AND
+    /// 2. The drain window is non-zero,
     /// 3. The prior drain that emitted events was within one drain
-    ///    window of `now`.
+    ///    window of `now`,
+    /// 4. **No wake fired in phase 1.** A wake observed alongside
+    ///    real events signals the bin pushed fresh `WatchOp`s through
+    ///    the channel; deferring the return to drain again would
+    ///    delay the bin's loop iteration. The watcher returns
+    ///    promptly so pending control-plane work is applied before
+    ///    the next blocking drain.
     ///
     /// Single-touch quiet workloads (W_edit) skip phase 2 entirely on
     /// every drain — the recency clock is stale. Sustained bursts
@@ -629,16 +635,16 @@ impl FsWatcher for InotifyWatcher {
         self.seen.clear();
 
         // Phase 1: blocking drain to the engine's deadline.
-        let n1 = self.poll_once(deadline, out)?;
+        let p1 = self.poll_once(deadline, out)?;
 
-        if n1 == 0 {
+        if p1.emitted == 0 {
             // Timeout / wake-only / IN_IGNORED-only batch. Don't
             // update `last_event_at` (no real activity observed) and
             // don't enter phase 2.
             return Ok(0);
         }
 
-        // Phase 2 gate. Compute recency against the *prior* drain's
+        // Phase-2 gate. Compute recency against the *prior* drain's
         // timestamp, then update so the next drain sees the new value.
         let now = Instant::now();
         let window = self.drain_window.get();
@@ -647,17 +653,21 @@ impl FsWatcher for InotifyWatcher {
             .is_some_and(|t| now.saturating_duration_since(t) < window);
         self.last_event_at = Some(now);
 
-        if recent && window > Duration::ZERO {
+        // Three terms: window enabled, recency, AND no concurrent
+        // wake. A wake observed alongside real events signals
+        // queued `WatchOp`s pending in the bin's channel — deferring
+        // to phase 2 would delay their application.
+        if recent && window > Duration::ZERO && !p1.wake_fired {
             // Bound phase 2 by the engine's deadline so timer cadence
             // is preserved — even a window-deferred drain must respect
             // the next settle timer.
             let phase2_deadline = now + window;
             let bounded = deadline.map_or(phase2_deadline, |d| d.min(phase2_deadline));
-            let n2 = self.poll_once(Some(bounded), out)?;
-            return Ok(n1 + n2);
+            let p2 = self.poll_once(Some(bounded), out)?;
+            return Ok(p1.emitted + p2.emitted);
         }
 
-        Ok(n1)
+        Ok(p1.emitted)
     }
 
     /// Capture a wake handle. Clones the watcher's `Arc<OwnedFd>` of
@@ -673,8 +683,9 @@ impl FsWatcher for InotifyWatcher {
 impl InotifyWatcher {
     /// One full drain pass: `epoll_wait` (bounded by `deadline`),
     /// optionally drain the wake-fd counter, optionally `read_inotify`
-    /// + per-record demux into `out`. Returns the count of
-    ///   [`WatcherEvent`]s pushed *this call*.
+    /// + per-record demux into `out`. Returns a [`PollOnceOutcome`]
+    /// carrying the [`WatcherEvent`] count pushed *this call* and
+    /// whether a wake fired during the `epoll_wait`.
     ///
     /// Called twice from [`Self::poll_until`]: phase 1 with the
     /// engine's deadline; phase 2 with a window-bounded deadline. The
@@ -686,13 +697,20 @@ impl InotifyWatcher {
     /// never clears it; only `poll_until` clears the horizon. Tests
     /// that drive `poll_once` directly must clear manually.
     ///
+    /// **Wake surfacing.** The `wake_fired` flag is the structural
+    /// signal that this drain consumed a wake — the eventfd counter
+    /// has been drained kernel-side and the bin has fresh control-plane
+    /// work queued. `poll_until` reads it to suppress phase 2; phase 2
+    /// itself ignores its own outcome's flag because no second deferred
+    /// drain follows it.
+    ///
     /// **Per-record demux.** See [`Self::poll_until`] for the case
     /// table — IN_Q_OVERFLOW, IN_IGNORED, draining-wd stale, normal.
     fn poll_once(
         &mut self,
         deadline: Option<Instant>,
         out: &mut Vec<WatcherEvent>,
-    ) -> Result<usize, WatchFailure> {
+    ) -> Result<PollOnceOutcome, WatchFailure> {
         // Two slots — one per epoll-registered fd. Both can be ready
         // at once (deadline + a concurrent wake + inotify data).
         // Deadline tracking (including `EINTR`-retry remaining-budget
@@ -703,7 +721,7 @@ impl InotifyWatcher {
 
         if n_ready == 0 {
             // Timeout — caller's deadline arrived with no fds ready.
-            return Ok(0);
+            return Ok(PollOnceOutcome::IDLE);
         }
 
         let mut wake_fired = false;
@@ -735,7 +753,10 @@ impl InotifyWatcher {
         if !inotify_data {
             // Wake-only return path. The bin's loop re-checks pending
             // `WatchOp`s + shutdown flag before the next `poll_until`.
-            return Ok(0);
+            return Ok(PollOnceOutcome {
+                emitted: 0,
+                wake_fired,
+            });
         }
 
         // Read pending records into the pre-allocated drain buffer.
@@ -745,7 +766,10 @@ impl InotifyWatcher {
         let n_bytes = ffi::read_inotify(&self.inotify_fd, &mut self.read_buf)
             .map_err(|e| WatchFailure::from_io(&e))?;
         if n_bytes == 0 {
-            return Ok(0);
+            return Ok(PollOnceOutcome {
+                emitted: 0,
+                wake_fired,
+            });
         }
 
         let mut emitted = 0usize;
@@ -833,9 +857,38 @@ impl InotifyWatcher {
             emitted += 1;
         }
 
-        tracing::trace!(emitted, n_bytes, "inotify drained");
-        Ok(emitted)
+        tracing::trace!(emitted, wake_fired, n_bytes, "inotify drained");
+        Ok(PollOnceOutcome {
+            emitted,
+            wake_fired,
+        })
     }
+}
+
+/// Return shape for [`InotifyWatcher::poll_once`]. Private to the
+/// module — a concession to `poll_once`'s two-phase composition,
+/// not part of the [`FsWatcher`] trait contract. Carries the count of
+/// [`WatcherEvent`]s pushed to `out` this call (`emitted`) and whether
+/// a wake fired during the underlying `epoll_wait` (`wake_fired`).
+///
+/// [`InotifyWatcher::poll_until`] reads `wake_fired` to suppress
+/// phase 2 — a wake observed concurrently with real events signals
+/// the bin has queued `WatchOp`s pending, and the watcher must
+/// return promptly so the bin's drain loop can apply them.
+#[derive(Debug, Clone, Copy)]
+struct PollOnceOutcome {
+    emitted: usize,
+    wake_fired: bool,
+}
+
+impl PollOnceOutcome {
+    /// Timeout / nothing-ready outcome. Used by `poll_once`'s
+    /// `n_ready == 0` early return so the per-arm `PollOnceOutcome {
+    /// .. }` literal isn't repeated across the file.
+    const IDLE: Self = Self {
+        emitted: 0,
+        wake_fired: false,
+    };
 }
 
 /// Compute the kernel-side `inotify_add_watch` mask, including the

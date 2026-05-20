@@ -248,11 +248,18 @@ impl FsWatcher for KqueueWatcher {
     /// kernel-coalesced event burst surface in one `poll_until`
     /// iteration instead of fragmenting across many.
     ///
-    /// **Recency gate (`last_event_at`).** Phase 2 enters iff:
+    /// **Phase-2 gate.** Phase 2 enters iff every term holds:
     /// 1. Phase 1 returned at least one **real** (non-wake) event,
-    /// 2. The drain window is non-zero, AND
-    /// 3. The prior drain that returned real events was within one
-    ///    drain window of `now` (`now - last_event_at < window`).
+    /// 2. Phase 1 had buffer space remaining (`n1 < EVENT_BATCH`),
+    /// 3. The drain window is non-zero,
+    /// 4. The prior drain that returned real events was within one
+    ///    drain window of `now` (`now - last_event_at < window`),
+    /// 5. **No wake fired in phase 1.** A wake observed alongside
+    ///    real events signals the bin pushed fresh `WatchOp`s through
+    ///    the channel; deferring the return to drain again would
+    ///    delay the bin's loop iteration. The watcher returns
+    ///    promptly so pending control-plane work is applied before
+    ///    the next blocking drain.
     ///
     /// Together these gates keep the latency cost out of the
     /// single-event-quiet-period path: the first event of a fresh
@@ -285,14 +292,24 @@ impl FsWatcher for KqueueWatcher {
         let n1 = ffi::kevent_drain(&self.kq, &mut events, deadline)
             .map_err(|e| WatchFailure::from_io(&e))?;
 
-        // Filter wake events for the recency check. A wake-only return
+        // Single pass over the drained batch: count real (non-wake)
+        // events and detect whether a wake fired. A wake-only return
         // means the bin pushed fresh `WatchOp`s through the channel —
         // file traffic hasn't materialised, so the burst-cadence
-        // heuristic mustn't update its timestamp on this drain.
-        let phase1_real = events[..n1]
-            .iter()
-            .filter(|ev| !ev.is_user_event(WAKE_IDENT))
-            .count();
+        // heuristic mustn't update its timestamp on this drain. A
+        // wake alongside real events signals the same pending
+        // control-plane work; phase 2 is suppressed so the return
+        // reaches the bin promptly.
+        let (phase1_real, phase1_woke) =
+            events[..n1]
+                .iter()
+                .fold((0usize, false), |(real, woke), ev| {
+                    if ev.is_user_event(WAKE_IDENT) {
+                        (real, true)
+                    } else {
+                        (real + 1, woke)
+                    }
+                });
 
         let n_total = if phase1_real > 0 {
             let now = Instant::now();
@@ -305,12 +322,12 @@ impl FsWatcher for KqueueWatcher {
                 .is_some_and(|t| now.saturating_duration_since(t) < window);
             self.last_event_at = Some(now);
 
-            // Phase 2 enters only if we have buffer space, the window
-            // is enabled, and the prior drain was within window. The
-            // buffer-full case still updates `last_event_at` above so
-            // the next iteration's recency gate opens — pent-up
-            // events drain on the follow-up call.
-            if n1 < EVENT_BATCH && recent && window > Duration::ZERO {
+            // Phase-2 gate: buffer space, window enabled, prior drain
+            // within window, AND no concurrent wake. The buffer-full
+            // case still updates `last_event_at` above so the next
+            // iteration's recency gate opens — pent-up events drain
+            // on the follow-up call.
+            if n1 < EVENT_BATCH && recent && window > Duration::ZERO && !phase1_woke {
                 // Cap the phase-2 deadline at `now + window`; an
                 // engine-supplied deadline already tighter than that
                 // wins (timer cadence is preserved even on a
