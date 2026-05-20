@@ -1714,7 +1714,7 @@ fn worker_prober_shutdown_returns_indexed_join_results() {
         indices,
         vec![0, 1, 2, 3],
         "shutdown must hand back workers in spawn order so each index \
-         lines up with its `specter-prober-N` thread name",
+         lines up with its `sp-prober-N` thread name",
     );
     for (i, r) in results {
         r.unwrap_or_else(|_| panic!("worker {i} panicked during clean shutdown"));

@@ -4,9 +4,13 @@
 //! # Lifecycle
 //!
 //! 1. [`WorkerProber::new(out, concurrency, shutdown_flag)`](WorkerProber::new)
-//!    spawns `concurrency.max(1)` threads named `specter-prober-{i}`.
-//!    Each holds clones of the queue receiver, the `engine_inbound`
-//!    sender, the expectation map, and the bin's shutdown flag.
+//!    spawns `concurrency.max(1)` threads named `sp-prober-{i}`. The
+//!    prefix is abbreviated (not the full `specter-prober-`) so the
+//!    name fits Linux's `TASK_COMM_LEN` (15 visible bytes + null) at
+//!    every legal `--probe-concurrency` value — preserving the index
+//!    in `/proc/<pid>/task/<tid>/comm`. Each worker holds clones of the
+//!    queue receiver, the `engine_inbound` sender, the expectation map,
+//!    and the bin's shutdown flag.
 //! 2. The bin maps each `ProbeOp::Probe` from the engine to
 //!    [`Prober::submit`]; each `ProbeOp::Cancel` to
 //!    [`Prober::cancel`].
@@ -174,7 +178,7 @@ impl WorkerProber {
             let expected_clone = Arc::clone(&expected);
             let shutdown_clone = Arc::clone(shutdown_flag);
             let spawned = thread::Builder::new()
-                .name(format!("specter-prober-{i}"))
+                .name(format!("sp-prober-{i}"))
                 .spawn(move || {
                     run_worker(&rx, &out_clone, &expected_clone, &shutdown_clone, run_probe);
                 });
@@ -217,7 +221,7 @@ impl WorkerProber {
     /// catch-unwind, which is a v1 bug to investigate.
     ///
     /// The index matches the spawn order (the thread is named
-    /// `specter-prober-{i}` for the same `i`), so post-mortem logs can
+    /// `sp-prober-{i}` for the same `i`), so post-mortem logs can
     /// correlate a panicking handle back to its thread name without
     /// reaching for thread-local state.
     #[must_use]
@@ -249,10 +253,10 @@ impl Prober for WorkerProber {
             let mut e = lock_expected(&self.expected);
             e.insert(req.owner(), req.correlation());
         }
-        if let Err(crossbeam::channel::SendError(req)) = self.queue_tx.send(req) {
+        if let Err(crossbeam::channel::SendError(dropped)) = self.queue_tx.send(req) {
             tracing::error!(
-                owner = ?req.owner(),
-                correlation = ?req.correlation(),
+                owner = ?dropped.owner(),
+                correlation = ?dropped.correlation(),
                 "prober queue closed; submit dropped",
             );
         }
@@ -260,7 +264,6 @@ impl Prober for WorkerProber {
 
     fn cancel(&self, owner: ProbeOwner) {
         lock_expected(&self.expected).remove(&owner);
-        tracing::trace!(?owner, "prober cancel");
     }
 }
 

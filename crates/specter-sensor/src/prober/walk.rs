@@ -361,6 +361,20 @@ pub(super) fn probe_subtree(
     }
 }
 
+/// Sentinel `captured_with` value stamped on every `DirSnapshot`
+/// returned from a [`probe_descent`] walk.
+///
+/// Descent dispatch never reads the field: the snapshot is consumed
+/// by `arc.entries.get(name)` and dropped before any
+/// [`specter_core::DirSnapshot::dir_hash`] computation could fold it
+/// in. Any value is therefore sound today. The constant exists so the
+/// call site reads as the named contract rather than a bare `0`,
+/// guarding a future caller that pulls a descent snapshot through a
+/// `dir_hash` comparison: an accidental collision with a real
+/// `Profile.config_hash` would be inferable from the name, not from
+/// re-deriving the obligation chain.
+const DESCENT_CAPTURED_WITH: u64 = 0;
+
 /// Descent prefix probe. Single-level enumeration of `target_path` with
 /// a hardcoded override config: `recursive=false`, `hidden=true`, no
 /// `exclude`, no `pattern`, no `max_depth`. The walker owns the override
@@ -378,10 +392,11 @@ pub(super) fn probe_subtree(
 /// stops at one level and `baseline=None` makes mtime-skip unreachable,
 /// so it never refuses a skip that could matter.
 ///
-/// `captured_with` is stamped as `0` — descent dispatch never reads the
-/// field (the snapshot is consumed by the engine and dropped before any
-/// consumer compares hashes), so the value is observationally
-/// irrelevant. Callers should not rely on a particular sentinel.
+/// `captured_with` is stamped as [`DESCENT_CAPTURED_WITH`] — descent
+/// dispatch never reads the field (the snapshot is consumed by the
+/// engine and dropped before any consumer compares hashes), so the
+/// value is observationally irrelevant. Callers should not rely on a
+/// particular sentinel.
 pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
     let cfg = ScanConfig::builder()
         .recursive(false)
@@ -392,7 +407,7 @@ pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
     match walk_root(
         target_path,
         &cfg,
-        0,
+        DESCENT_CAPTURED_WITH,
         None,
         &ProofObligation::WholeSubtree,
         false,
@@ -601,7 +616,12 @@ fn build_dir_child(
     ledger: &mut ProofLedger,
 ) -> ChildEntry {
     let fs_id = FsIdentity::from_metadata(cmeta);
-    if !ctx.should_recurse(depth + 1, cmeta.dev()) {
+    // Saturating: a recursion-based walker can never reach `u32::MAX`
+    // (the kernel's path-length limit caps depth far below that), but
+    // a future iterative walker could; computing once also kills the
+    // duplicate addition the two call sites would otherwise repeat.
+    let next_depth = depth.saturating_add(1);
+    if !ctx.should_recurse(next_depth, cmeta.dev()) {
         // Uncovered branch: not recursive, beyond max_depth, or cross-fs.
         // Walker stores the entry but does not recurse.
         return ChildEntry::Dir(DirChild::Uncovered(fs_id));
@@ -621,7 +641,7 @@ fn build_dir_child(
         child_path,
         root_meta,
         child_baseline,
-        depth + 1,
+        next_depth,
         ledger,
     );
     ChildEntry::Dir(DirChild::Covered(arc))

@@ -454,13 +454,22 @@ pub trait ConfigWatcher: Send {
 /// `engine_inbound` channel as `Input::ProbeResponse(...)`. `cancel` is
 /// best-effort: queued probes whose `(owner, correlation)` pair no
 /// longer matches the prober's per-owner expectation are skipped
-/// silently at worker-recv time. In-flight probes complete to
-/// completion; the engine discards their responses via
-/// stale-correlation discipline.
+/// silently at worker-recv time. In-flight probes complete; the engine
+/// discards their responses via stale-correlation discipline.
+///
+/// # Threading
 ///
 /// `Send + Sync` so the bin can hold an `Arc<dyn Prober>` (or
-/// `Arc<WorkerProber>`) and share it across threads — the engine driver
-/// thread submits, signal handlers may cancel.
+/// `Arc<WorkerProber>`) and share it across threads. v1 issues every
+/// `submit` and `cancel` from the bin's engine driver thread (the
+/// sole `StepOutput` forwarder); signal handlers route through
+/// channels and the shared shutdown flag into the engine step, never
+/// directly into the prober. The trait bounds reserve the option of
+/// future cross-thread sharing without breaking ABI; the
+/// implementation guarantees only that single-submitter discipline.
+/// The discipline is the correctness floor, not an optimisation —
+/// `submit` and `cancel` for the same owner do not commute (reordering
+/// loses the cancel and runs the stale correlation).
 pub trait Prober: Send + Sync {
     /// Queue a probe request. Returns immediately. The work item runs
     /// on a worker thread; the response is delivered via the
