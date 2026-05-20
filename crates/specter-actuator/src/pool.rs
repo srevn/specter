@@ -80,25 +80,38 @@ impl SubprocessActuator {
     /// crate resolves "default concurrency"; everything below
     /// `ActuatorState::new` receives a [`NonZeroUsize`] and trusts it.
     ///
-    /// Captures the current process env via `EnvSnapshot::capture` —
-    /// invoked exactly once per actuator. The snapshot is shared by
-    /// `Arc` across the resolver's per-step calls.
+    /// Captures three pieces of startup-immutable process state — the
+    /// env snapshot, the temp directory, and the actuator pid — once
+    /// here so the spawn path makes no `getenv` / `getpid` syscall per
+    /// Effect. All three live on [`ActuatorState`] for the actuator's
+    /// lifetime; the env snapshot is shared by `Arc` across resolver
+    /// calls, `temp_dir` is shared by `Arc<Path>` across
+    /// `DiffTmpFile::create` calls, and `actuator_pid` is a copy.
     #[must_use]
     pub fn new(concurrency: usize) -> Self {
         let resolved = resolve_concurrency(concurrency);
         let (reap_tx, reap_rx) = crossbeam::channel::bounded::<Reaped>(64);
         Self {
-            state: ActuatorState::new(resolved, Arc::new(EnvSnapshot::capture()), SHUTDOWN_GRACE),
+            state: ActuatorState::new(
+                resolved,
+                Arc::new(EnvSnapshot::capture()),
+                Arc::from(std::env::temp_dir().into_boxed_path()),
+                std::process::id(),
+                SHUTDOWN_GRACE,
+            ),
             reap_tx,
             reap_rx,
         }
     }
 
-    /// Test-only constructor with both a custom shutdown grace and a
-    /// preconstructed env snapshot. Used by tests that need to assert
-    /// shutdown timing or `${env.<NAME>}` resolution (strict-unset →
-    /// Failed, default rendering, etc.) without depending on the
-    /// ambient process env.
+    /// Test-only constructor with a custom shutdown grace and a
+    /// preconstructed env snapshot; `temp_dir` and `actuator_pid`
+    /// default to ambient process values. Used by tests that need
+    /// to assert shutdown timing or `${env.<NAME>}` resolution
+    /// (strict-unset → Failed, default rendering, etc.) without
+    /// depending on the ambient process env. For tests that *also*
+    /// need to override the tmp directory (F-LOW-2 regression
+    /// fence), see [`Self::new_with_grace_and_env_and_tmp`].
     ///
     /// Gated to match the test module (`cfg(all(test, feature = "testkit"))`)
     /// — without `testkit`, the test module that consumes this constructor
@@ -110,10 +123,33 @@ impl SubprocessActuator {
         grace: Duration,
         env: Arc<EnvSnapshot>,
     ) -> Self {
+        Self::new_with_grace_and_env_and_tmp(
+            concurrency,
+            grace,
+            env,
+            Arc::from(std::env::temp_dir().into_boxed_path()),
+            std::process::id(),
+        )
+    }
+
+    /// Test-only constructor that lets callers override every piece
+    /// of startup-immutable state — `temp_dir` and `actuator_pid`
+    /// alongside the env and grace. The single use is the
+    /// F-LOW-2 regression fence: assert that
+    /// `DiffTmpFile::create` reads from
+    /// `ActuatorState.temp_dir`, not `std::env::temp_dir()`.
+    #[cfg(all(test, feature = "testkit"))]
+    pub(crate) fn new_with_grace_and_env_and_tmp(
+        concurrency: usize,
+        grace: Duration,
+        env: Arc<EnvSnapshot>,
+        temp_dir: Arc<std::path::Path>,
+        actuator_pid: u32,
+    ) -> Self {
         let resolved = resolve_concurrency(concurrency);
         let (reap_tx, reap_rx) = crossbeam::channel::bounded::<Reaped>(64);
         Self {
-            state: ActuatorState::new(resolved, env, grace),
+            state: ActuatorState::new(resolved, env, temp_dir, actuator_pid, grace),
             reap_tx,
             reap_rx,
         }
@@ -256,7 +292,7 @@ mod tests {
         EffectOutcome, EffectTarget, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
         Termination,
     };
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -390,6 +426,37 @@ mod tests {
             grace: Duration,
             env: Arc<EnvSnapshot>,
         ) -> Self {
+            Self::spawn_controller(move || {
+                SubprocessActuator::new_with_grace_and_env(concurrency, grace, env)
+            })
+        }
+
+        /// Inject a custom `temp_dir` into the actuator state — the
+        /// only call site is the F-LOW-2 regression fence, which
+        /// pins `start_plan` reading from
+        /// `ActuatorState.temp_dir` rather than calling
+        /// `std::env::temp_dir()` per Effect.
+        fn new_with_grace_and_env_and_tmp(
+            concurrency: usize,
+            grace: Duration,
+            env: Arc<EnvSnapshot>,
+            temp_dir: Arc<Path>,
+        ) -> Self {
+            let pid = std::process::id();
+            Self::spawn_controller(move || {
+                SubprocessActuator::new_with_grace_and_env_and_tmp(
+                    concurrency,
+                    grace,
+                    env,
+                    temp_dir,
+                    pid,
+                )
+            })
+        }
+
+        /// Common backbone: spawn the controller thread around a
+        /// freshly-built actuator and wire the channels.
+        fn spawn_controller(build: impl FnOnce() -> SubprocessActuator + Send + 'static) -> Self {
             let (effects_tx, effects_rx) = bounded::<Effect>(1024);
             let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
             let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);
@@ -399,7 +466,7 @@ mod tests {
             let join = thread::Builder::new()
                 .name("test-actuator-controller".into())
                 .spawn(move || {
-                    let mut a = SubprocessActuator::new_with_grace_and_env(concurrency, grace, env);
+                    let mut a = build();
                     a.run(
                         effects_rx,
                         shutdown_rx,
@@ -942,6 +1009,65 @@ mod tests {
         h.submit(e);
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         assert!(s[0].env.iter().all(|(k, _)| k != "SPECTER_DIFF_PATH"));
+        h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
+        h.wait_for_effect_completes(1, Duration::from_secs(1));
+        h.shutdown();
+    }
+
+    /// F-LOW-2 regression fence: `start_plan` must read from
+    /// [`crate::pool::state::ActuatorState::temp_dir`] (captured
+    /// once at actuator startup) when handing
+    /// `DiffTmpFile::create` its `temp_dir` argument — not call
+    /// `std::env::temp_dir()` per Effect. With a custom temp_dir
+    /// distinct from the ambient one, a regression that reads from
+    /// the process env would land the tmp file under `$TMPDIR`
+    /// instead of the override, failing the prefix check below.
+    #[test]
+    fn diff_tmp_path_lives_under_actuator_state_temp_dir() {
+        use compact_str::CompactString;
+        use smallvec::smallvec;
+        use specter_core::{EntryKind, EntryRef, FsIdentity};
+
+        let custom = tempfile::tempdir().expect("custom tempdir");
+        let custom_arc: Arc<Path> = Arc::from(custom.path().to_path_buf().into_boxed_path());
+
+        let mut h = Harness::new_with_grace_and_env_and_tmp(
+            4,
+            Duration::from_secs(5),
+            empty_env(),
+            Arc::clone(&custom_arc),
+        );
+        let diff = Arc::new(Diff {
+            created: smallvec![EntryRef {
+                segment: CompactString::from("a.rs"),
+                kind: EntryKind::File,
+                fs_id: FsIdentity::synthetic(1, 0),
+            }],
+            ..Default::default()
+        });
+        let mut e = make_effect_perfile(1, 1, 1, 7);
+        let resource = e.sort_key().1;
+        let segment = CompactString::from(e.relative());
+        e.target = EffectTarget::PerFile {
+            resource,
+            segment,
+            diff: Arc::clone(&diff),
+        };
+        h.submit(e);
+
+        let s = h.wait_for_spawns(1, Duration::from_secs(1));
+        let path = s[0]
+            .env
+            .iter()
+            .find(|(k, _)| k == "SPECTER_DIFF_PATH")
+            .expect("SPECTER_DIFF_PATH set")
+            .1
+            .clone();
+        assert!(
+            Path::new(&path).starts_with(custom.path()),
+            "tmp path under custom temp_dir; got {path} vs {}",
+            custom.path().display(),
+        );
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(1));
         h.shutdown();

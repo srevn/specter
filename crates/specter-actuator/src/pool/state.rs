@@ -46,13 +46,14 @@ use crate::permits::{Permit, Permits};
 use crate::resolve::{self, CommandResolved};
 use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, Spawner, StageSpec};
 use crate::timer;
+use crate::tmp::DiffTmpFile;
 use crossbeam::channel::Sender;
 use specter_core::program::{BranchTarget, ExecAction, SpawnBody};
 use specter_core::{DedupKey, Effect, EffectOutcome, Input, SubId, Termination};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -197,10 +198,15 @@ pub(crate) struct Slot {
 ///   in [`ActuatorState::advance_or_terminate`] re-resolves op N+1's
 ///   argv + env from the same snapshot without re-fetching.
 /// - **`cursor`** — `u32` index into `effect.program.ops`.
-/// - **`diff_tmp_path`** — `Some` iff `start_plan` materialised a diff
-///   tmp file. Shared across all ops so every step reads the same
-///   `SPECTER_DIFF_PATH`; cleaned at plan terminus in
-///   [`ActuatorState::terminate_plan`].
+/// - **`diff_tmp`** — `Some` iff `start_plan` materialised a diff
+///   tmp file. The handle is co-owned by `Slot::running` and
+///   `Slot::plan_continue` across the plan's steps via
+///   `Arc<DiffTmpFile>`, so every step reads the same
+///   `SPECTER_DIFF_PATH`. The Arc's `Drop` impl unlinks the file
+///   when the last co-owner is dropped — at plan terminus, after
+///   the final [`ActuatorState::terminate_plan`] has emitted
+///   `EffectComplete`. See [`crate::tmp`] for the lifecycle
+///   invariant.
 ///
 /// `signaler` is `Arc<dyn>` so the controller's installed-side
 /// reference and the per-step timer thread's clone are independent
@@ -210,7 +216,7 @@ pub(crate) struct RunningJob {
     pub signaler: Arc<dyn ChildSignaler>,
     pub effect: Arc<Effect>,
     pub cursor: u32,
-    pub diff_tmp_path: Option<PathBuf>,
+    pub diff_tmp: Option<Arc<DiffTmpFile>>,
 }
 
 impl std::fmt::Debug for RunningJob {
@@ -228,11 +234,17 @@ impl std::fmt::Debug for RunningJob {
 /// available at advance time. The pump's plan-continue arm consumes
 /// this in priority over [`Slot::pending`] — same program, already
 /// admitted, just waiting on the global cap.
+///
+/// `diff_tmp` carries the plan-bound tmp handle across the
+/// permit-deferred boundary. On continuation, the next step's
+/// `RunningJob` clones the Arc into its own `diff_tmp` slot; the
+/// `PlanContinuation`'s Arc drops with the destructure that consumes
+/// it. The file persists because the new `RunningJob` holds a clone.
 #[derive(Debug)]
 pub(crate) struct PlanContinuation {
     pub effect: Arc<Effect>,
     pub cursor: u32,
-    pub diff_tmp_path: Option<PathBuf>,
+    pub diff_tmp: Option<Arc<DiffTmpFile>>,
 }
 
 #[derive(Debug)]
@@ -260,6 +272,19 @@ pub(crate) struct ActuatorState {
     /// test override case constructs a fresh snapshot rather than
     /// mutating the existing one.
     pub env_snapshot: Arc<EnvSnapshot>,
+    /// Captured operator `$TMPDIR` (`std::env::temp_dir`) at actuator
+    /// startup. Threaded into every [`DiffTmpFile::create`] call so
+    /// the spawn path makes no `getenv(TMPDIR)` syscall per Effect.
+    /// Lives at the same lifetime tier as [`Self::env_snapshot`];
+    /// shared by `Arc<Path>` for the same reason — immutable across
+    /// the actuator's lifetime.
+    pub temp_dir: Arc<Path>,
+    /// Captured `std::process::id()` at actuator startup. Used in
+    /// the tmp diff filename (`specter-{pid}-{corr:016x}.diff`) —
+    /// the actuator's daemon pid, not the spawned child's (which
+    /// isn't known until after `Command::spawn` but the env var
+    /// must be set *before* spawn).
+    pub actuator_pid: u32,
     /// SIGTERM → SIGKILL grace. Reads:
     /// - shutdown drain ([`super::SubprocessActuator::shutdown`]);
     /// - per-step timer thread grace ([`crate::timer::arm_timer`]).
@@ -281,6 +306,8 @@ impl ActuatorState {
     pub fn new(
         concurrency: NonZeroUsize,
         env_snapshot: Arc<EnvSnapshot>,
+        temp_dir: Arc<Path>,
+        actuator_pid: u32,
         shutdown_grace: Duration,
     ) -> Self {
         Self {
@@ -289,6 +316,8 @@ impl ActuatorState {
             running_subs: BTreeSet::new(),
             permits: Permits::new(concurrency),
             env_snapshot,
+            temp_dir,
+            actuator_pid,
             shutdown_grace,
             blocked_scratch: VecDeque::new(),
         }
@@ -361,14 +390,14 @@ impl ActuatorState {
             self.terminate_stale(key, sub, outcome, engine_in);
             return;
         };
-        self.terminate_plan(
-            key,
-            sub,
-            job.diff_tmp_path.as_deref(),
-            outcome,
-            ReapPolicy::Drop,
-            engine_in,
-        );
+        self.terminate_plan(key, sub, outcome, ReapPolicy::Drop, engine_in);
+        // `job` carries the live-plan's last `Arc<DiffTmpFile>` (the
+        // slot's `plan_continue` is structurally `None` while
+        // `running` is `Some`, so no second co-owner exists at this
+        // point). Dropping it explicitly after `terminate_plan` has
+        // emitted `EffectComplete` orders the on-disk unlink after
+        // the wire event — see [`DiffTmpFile::drop`].
+        drop(job);
     }
 
     /// The Pump-policy reap pipeline. Two main exits:
@@ -415,19 +444,11 @@ impl ActuatorState {
         let RunningJob {
             effect,
             cursor,
-            diff_tmp_path,
+            diff_tmp,
             ..
         } = job;
         self.advance_or_terminate(
-            key,
-            sub,
-            effect,
-            diff_tmp_path,
-            cursor,
-            outcome,
-            spawner,
-            reap_tx,
-            engine_in,
+            key, sub, effect, diff_tmp, cursor, outcome, spawner, reap_tx, engine_in,
         );
     }
 
@@ -476,7 +497,7 @@ impl ActuatorState {
         key: DedupKey,
         sub: SubId,
         effect: Arc<Effect>,
-        diff_tmp_path: Option<PathBuf>,
+        diff_tmp: Option<Arc<DiffTmpFile>>,
         mut cursor: u32,
         mut outcome: EffectOutcome,
         spawner: &dyn Spawner,
@@ -487,25 +508,11 @@ impl ActuatorState {
             let op = &effect.program.ops()[cursor as usize];
             match op.target(&outcome) {
                 BranchTarget::Terminate => {
-                    self.terminate_plan(
-                        key,
-                        sub,
-                        diff_tmp_path.as_deref(),
-                        outcome,
-                        ReapPolicy::Pump,
-                        engine_in,
-                    );
+                    self.terminate_plan(key, sub, outcome, ReapPolicy::Pump, engine_in);
                     return;
                 }
                 BranchTarget::Escape => {
-                    self.terminate_plan(
-                        key,
-                        sub,
-                        diff_tmp_path.as_deref(),
-                        EffectOutcome::Ok,
-                        ReapPolicy::Pump,
-                        engine_in,
-                    );
+                    self.terminate_plan(key, sub, EffectOutcome::Ok, ReapPolicy::Pump, engine_in);
                     return;
                 }
                 BranchTarget::Continue(next_idx) => {
@@ -523,18 +530,22 @@ impl ActuatorState {
                         sub,
                         &effect,
                         next,
-                        diff_tmp_path.as_deref(),
+                        diff_tmp.as_ref(),
                         spawner,
                         reap_tx,
                     ) {
                         Ok(()) => return,
                         Err(SpawnError::Deferred) => {
+                            // `diff_tmp` moves into PlanContinuation —
+                            // the Arc keeps the file alive across the
+                            // permit wait, and the next step's spawn
+                            // clones it back out.
                             self.queue_plan_continue(
                                 key,
                                 PlanContinuation {
                                     effect,
                                     cursor: next,
-                                    diff_tmp_path,
+                                    diff_tmp,
                                 },
                             );
                             return;
@@ -582,9 +593,8 @@ impl ActuatorState {
     }
 
     /// Terminal arm of a *live* plan: emit one `EffectComplete`, remove
-    /// the per-Sub gate hold, clean the diff tmp file, and either
-    /// re-queue pending (Pump policy + non-empty pending) or remove the
-    /// slot.
+    /// the per-Sub gate hold, and either re-queue pending (Pump policy
+    /// + non-empty pending) or remove the slot.
     ///
     /// Called from three sites, every one of which has a paired
     /// [`Self::start_plan`] bump for the same `(sub, key)`:
@@ -596,9 +606,16 @@ impl ActuatorState {
     ///    [`Self::take_running`] returns a live job.
     /// 3. [`Self::start_plan`] / [`Self::spawn_continuation`] spawn-
     ///    failure paths route through [`Self::advance_or_terminate`]
-    ///    (which hits #1 above); on synth-Failed at cursor 0 the
-    ///    `diff_tmp_path` is the caller's locally-scoped one, never
-    ///    one taken back from `slot.running`.
+    ///    (which hits #1 above).
+    ///
+    /// **Tmp-file cleanup is NOT this function's responsibility.** The
+    /// plan's `Arc<DiffTmpFile>` (if any) lives on the caller's stack
+    /// for the canonical exit (the local in
+    /// [`Self::advance_or_terminate`] / [`Self::handle_reap_drop`]) and
+    /// drops on the caller's scope exit. The file is unlinked by
+    /// [`crate::tmp::DiffTmpFile::drop`] when the last `Arc` co-owner
+    /// is dropped — see the [`RunningJob::diff_tmp`] doc for the
+    /// lifecycle.
     ///
     /// **Stale-Reaped arms do NOT call here**: a Reaped without a
     /// paired live `RunningJob` (slot absent or `slot.running` already
@@ -610,14 +627,10 @@ impl ActuatorState {
     /// accounting only" lets the `running_subs.remove` here be total
     /// — guarded by an unconditional `debug_assert!(was_present)` —
     /// pinning the bump/remove pairing under the set-membership shape.
-    ///
-    /// `diff_tmp_path` is taken by `Option<&Path>` because all callers
-    /// retain ownership; cleanup just borrows for the unlink syscall.
     fn terminate_plan(
         &mut self,
         key: DedupKey,
         sub: SubId,
-        diff_tmp_path: Option<&Path>,
         outcome: EffectOutcome,
         policy: ReapPolicy,
         engine_in: &Sender<Input>,
@@ -637,9 +650,6 @@ impl ActuatorState {
             was_present,
             "per-Sub gate underflow: terminate_plan for Sub not in running_subs (stale-Reaped path must route to terminate_stale)",
         );
-        if let Some(p) = diff_tmp_path {
-            crate::tmp::cleanup(p);
-        }
         // The slot may still exist (the reap pipeline already took
         // running; spawn-failure paths never installed it). Decide:
         // re-queue if pending under Pump, otherwise remove.
@@ -675,9 +685,12 @@ impl ActuatorState {
     ///    `sub` alone). A blanket `running_subs.remove(&sub)` here
     ///    would silently clobber that live plan's hold, releasing
     ///    the gate ahead of its real terminus.
-    /// 2. **No diff tmp cleanup.** Same reasoning: the live plan owns
-    ///    its tmp file; cleanup at the stale path would unlink under
-    ///    a live reader.
+    /// 2. **No diff tmp cleanup.** Same reasoning: the live plan
+    ///    owns the only `Arc<DiffTmpFile>` chain (via its
+    ///    `Slot::running` or `Slot::plan_continue`); the stale arm
+    ///    holds no Arc to drop, so unlink can't happen here — exactly
+    ///    what's needed to avoid pulling the file out from under a
+    ///    live reader.
     ///
     /// **Production reachability.** Defensive: every successful spawn
     /// installs `slot.running` and every wait-thread send is paired
@@ -845,18 +858,18 @@ impl ActuatorState {
         // Materialise the diff tmp file before the first instruction's
         // spawn so the resolver can slot SPECTER_DIFF_PATH into its
         // alphabetical position. Best-effort: on write failure proceed
-        // with `None`, the resolver omits the env var. The path lives
-        // for the whole plan's lifetime — every instruction shares it;
-        // cleaned exactly once at terminate_plan.
-        let diff_tmp_path = effect.diff().and_then(|diff| {
-            let path = crate::tmp::tmp_path(effect.correlation);
-            match crate::tmp::write_diff_file(&path, diff) {
-                Ok(()) => Some(path),
+        // with `None`, the resolver omits the env var. The handle is
+        // shared across every step of the plan via `Arc<DiffTmpFile>`;
+        // `DiffTmpFile::drop` unlinks the file when the last co-owner
+        // is dropped at plan terminus.
+        let diff_tmp: Option<Arc<DiffTmpFile>> = effect.diff().and_then(|diff| {
+            match DiffTmpFile::create(&self.temp_dir, self.actuator_pid, effect.correlation, diff) {
+                Ok(handle) => Some(Arc::new(handle)),
                 Err(e) => {
                     tracing::warn!(
-                        ?path,
+                        correlation = ?effect.correlation,
                         ?e,
-                        "tmp diff write failed; proceeding without SPECTER_DIFF_PATH"
+                        "tmp diff write failed; proceeding without SPECTER_DIFF_PATH",
                     );
                     None
                 }
@@ -880,7 +893,7 @@ impl ActuatorState {
             sub,
             &effect,
             0,
-            diff_tmp_path.as_deref(),
+            diff_tmp.as_ref(),
             permit,
             spawner,
             reap_tx,
@@ -904,7 +917,7 @@ impl ActuatorState {
                     key,
                     sub,
                     effect,
-                    diff_tmp_path,
+                    diff_tmp,
                     0,
                     EffectOutcome::Failed(Termination::Internal),
                     spawner,
@@ -940,14 +953,14 @@ impl ActuatorState {
         let PlanContinuation {
             effect,
             cursor,
-            diff_tmp_path,
+            diff_tmp,
         } = cont;
         match self.spawn_step_with_permit(
             &key,
             sub,
             &effect,
             cursor,
-            diff_tmp_path.as_deref(),
+            diff_tmp.as_ref(),
             permit,
             spawner,
             reap_tx,
@@ -964,7 +977,7 @@ impl ActuatorState {
                     key,
                     sub,
                     effect,
-                    diff_tmp_path,
+                    diff_tmp,
                     cursor,
                     EffectOutcome::Failed(Termination::Internal),
                     spawner,
@@ -1000,17 +1013,15 @@ impl ActuatorState {
         sub: SubId,
         effect: &Arc<Effect>,
         cursor: u32,
-        diff_path: Option<&Path>,
+        diff_tmp: Option<&Arc<DiffTmpFile>>,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
     ) -> Result<(), SpawnError> {
         let Some(permit) = self.permits.try_acquire() else {
             return Err(SpawnError::Deferred);
         };
-        self.spawn_step_with_permit(
-            key, sub, effect, cursor, diff_path, permit, spawner, reap_tx,
-        )
-        .map_err(SpawnError::Failed)
+        self.spawn_step_with_permit(key, sub, effect, cursor, diff_tmp, permit, spawner, reap_tx)
+            .map_err(SpawnError::Failed)
     }
 
     /// Spawn one op of a plan with a pre-acquired permit. Installs
@@ -1042,7 +1053,7 @@ impl ActuatorState {
         sub: SubId,
         effect: &Arc<Effect>,
         cursor: u32,
-        diff_path: Option<&Path>,
+        diff_tmp: Option<&Arc<DiffTmpFile>>,
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
@@ -1062,7 +1073,7 @@ impl ActuatorState {
                 now,
                 cwd,
                 capture_output,
-                diff_path,
+                diff_tmp,
                 permit,
                 spawner,
                 reap_tx,
@@ -1085,7 +1096,7 @@ impl ActuatorState {
                     now,
                     cwd,
                     capture_output,
-                    diff_path,
+                    diff_tmp,
                     permit,
                     spawner,
                     reap_tx,
@@ -1132,11 +1143,12 @@ impl ActuatorState {
         now: std::time::SystemTime,
         cwd: &Path,
         capture_output: bool,
-        diff_path: Option<&Path>,
+        diff_tmp: Option<&Arc<DiffTmpFile>>,
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
     ) -> Result<(), SpawnFailureCause> {
+        let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
         let (CommandResolved { argv }, env) =
             match resolve::resolve_step(effect, exec, now, diff_path, &self.env_snapshot) {
                 Ok(resolved) => resolved,
@@ -1181,7 +1193,6 @@ impl ActuatorState {
             .timeout()
             .map(|deadline| (deadline, Arc::clone(&signaler)));
         let signaler_for_wait = Arc::clone(&signaler);
-        let diff_tmp_path: Option<PathBuf> = diff_path.map(Path::to_path_buf);
         let slot = self
             .slots
             .get_mut(key)
@@ -1191,7 +1202,7 @@ impl ActuatorState {
             signaler,
             effect: Arc::clone(effect),
             cursor,
-            diff_tmp_path,
+            diff_tmp: diff_tmp.map(Arc::clone),
         });
 
         self.spawn_wait_thread_after_install(
@@ -1276,11 +1287,12 @@ impl ActuatorState {
         now: std::time::SystemTime,
         cwd: &Path,
         capture_output: bool,
-        diff_path: Option<&Path>,
+        diff_tmp: Option<&Arc<DiffTmpFile>>,
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
     ) -> Result<(), SpawnFailureCause> {
+        let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
         // Resolve every stage's argv + env. The result tuples own
         // the argv `Vec<String>` and the env `Vec<EnvVar<'_>>`; the
         // env's `Cow::Borrowed` slots borrow from `effect`, the
@@ -1342,7 +1354,6 @@ impl ActuatorState {
         // `PipeWaiter::wait` additionally backstop their own
         // `catch_unwind` sites with the per-stage signalers).
         let signaler_for_wait = Arc::clone(&combined_signaler);
-        let diff_tmp_path: Option<PathBuf> = diff_path.map(Path::to_path_buf);
         let slot = self
             .slots
             .get_mut(key)
@@ -1352,7 +1363,7 @@ impl ActuatorState {
             signaler: combined_signaler,
             effect: Arc::clone(effect),
             cursor,
-            diff_tmp_path,
+            diff_tmp: diff_tmp.map(Arc::clone),
         });
 
         self.spawn_wait_thread_after_install(
@@ -1556,9 +1567,13 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
 ///
 /// **Tmp-file cleanup is NOT this thread's responsibility.** The diff
 /// tmp file lives for the whole plan (multiple steps may read it) —
-/// the wait thread can't see "is this the last step", only the
-/// controller can. Cleanup runs in
-/// [`ActuatorState::terminate_plan`] exactly once per plan.
+/// the wait thread carries no `Arc<DiffTmpFile>` co-owner. The
+/// controller's `Slot::running` / `Slot::plan_continue` are the
+/// canonical co-owners; on plan terminus the last Arc drops at
+/// [`ActuatorState::advance_or_terminate`] / [`ActuatorState::handle_reap_drop`]
+/// function exit and [`crate::tmp::DiffTmpFile::drop`] unlinks.
+/// A wait-thread panic-unwind caught here cannot trigger an early
+/// unlink because no Arc lives on this side of the channel.
 #[allow(clippy::needless_pass_by_value)] // closure-spawned: arguments owned for the thread
 fn wait_loop(
     waiter: Box<dyn ChildWaiter>,
@@ -1643,6 +1658,8 @@ mod tests {
         ActuatorState::new(
             concurrency,
             Arc::new(EnvSnapshot::from_map::<_, &str, &str>([])),
+            Arc::from(std::env::temp_dir().into_boxed_path()),
+            std::process::id(),
             SHUTDOWN_GRACE,
         )
     }
@@ -1932,7 +1949,7 @@ mod tests {
             signaler,
             effect,
             cursor: 0,
-            diff_tmp_path: None,
+            diff_tmp: None,
         }
     }
 
@@ -2280,7 +2297,7 @@ mod tests {
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
-                diff_tmp_path: None,
+                diff_tmp: None,
             }),
             ..Slot::default()
         };
@@ -2334,7 +2351,7 @@ mod tests {
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
-                diff_tmp_path: None,
+                diff_tmp: None,
             }),
             ..Slot::default()
         };
@@ -2382,7 +2399,7 @@ mod tests {
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 2, // last instruction (0-indexed) of a 3-instruction program
-                diff_tmp_path: None,
+                diff_tmp: None,
             }),
             ..Slot::default()
         };
@@ -2436,7 +2453,7 @@ mod tests {
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
-                diff_tmp_path: None,
+                diff_tmp: None,
             }),
             ..Slot::default()
         };
@@ -2487,7 +2504,7 @@ mod tests {
             plan_continue: Some(PlanContinuation {
                 effect: Arc::clone(&effect),
                 cursor: 1,
-                diff_tmp_path: None,
+                diff_tmp: None,
             }),
             in_ready_queue: true,
             ..Slot::default()
@@ -2534,7 +2551,7 @@ mod tests {
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
-                diff_tmp_path: None,
+                diff_tmp: None,
             }),
             ..Slot::default()
         };
@@ -2578,7 +2595,7 @@ mod tests {
                 signaler: Arc::clone(&signaler) as Arc<dyn ChildSignaler>,
                 effect: Arc::clone(&effect),
                 cursor: 0,
-                diff_tmp_path: None,
+                diff_tmp: None,
             }),
             ..Slot::default()
         };

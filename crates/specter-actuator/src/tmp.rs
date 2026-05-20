@@ -1,10 +1,13 @@
 //! Tmp diff file lifecycle (`SPECTER_DIFF_PATH`).
 //!
-//! Path: `std::env::temp_dir().join("specter-{actuator_pid}-{corr:016x}.diff")`.
+//! Path: `temp_dir.join("specter-{actuator_pid}-{corr:016x}.diff")`.
 //! Actuator-pid is used (not the child pid; child pid isn't known until
 //! after `Command::spawn`, but the env var must be set *before* spawn).
 //! Correlation is hex-padded to 16 chars for stable lexicographic
-//! ordering.
+//! ordering. Both `temp_dir` and `actuator_pid` are captured once at
+//! actuator startup and held on
+//! [`crate::pool::state::ActuatorState`] — no per-Effect `getenv` or
+//! `getpid` syscall on the spawn path.
 //!
 //! Format (one entry per line, tab-separated, in this order):
 //!
@@ -21,6 +24,24 @@
 //! anchor-relative (`EntryRef.segment`); user scripts join with
 //! `$SPECTER_ANCHOR` for absolute.
 //!
+//! # Lifecycle
+//!
+//! [`DiffTmpFile::create`] is atomic from the caller's perspective:
+//! either the file is fully written and `sync_data`-flushed (`Ok`),
+//! or no file exists on disk (the `Err` arm runs a rollback unlink
+//! before returning). Callers treating `Err` as "no file to track"
+//! are correct by construction.
+//!
+//! The handle is shared across plan steps via `Arc<DiffTmpFile>`:
+//! every [`crate::pool::state::RunningJob`] /
+//! [`crate::pool::state::PlanContinuation`] co-owns the Arc, and the
+//! last drop — at plan terminus, after every step has reaped and
+//! [`crate::pool::state::ActuatorState::terminate_plan`] has
+//! returned — fires [`DiffTmpFile::drop`], which unlinks the file
+//! (best-effort, ENOENT-silent). The leak-on-process-crash case
+//! (no `Drop` runs on `process::exit`) is acceptable — a daemon
+//! crash is rare and tmpfiles.d / periodic sweeps catch the orphan.
+//!
 //! # Embedded-delimiter limitation
 //!
 //! v1's sensor walk accepts any filename byte except `/` and NUL —
@@ -36,53 +57,114 @@ use specter_core::{CorrelationId, Diff, EntryRef, Rename};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// Path for an Effect's diff tmp file.
-#[must_use]
-pub(crate) fn tmp_path(correlation: CorrelationId) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "specter-{pid}-{corr:016x}.diff",
-        pid = std::process::id(),
+/// Owned handle to an actuator-materialised diff tmp file.
+///
+/// Construction succeeds only when the file is fully written and
+/// `sync_data`-flushed; on any I/O error the partially-written file
+/// is rolled back (best-effort unlink) before [`Self::create`]
+/// returns. The handle's `Drop` impl unlinks the file (best-effort,
+/// ENOENT-silent) when the last `Arc<DiffTmpFile>` co-owner is
+/// dropped — see the module docs for the per-plan lifecycle.
+#[derive(Debug)]
+pub(crate) struct DiffTmpFile {
+    path: PathBuf,
+}
+
+impl DiffTmpFile {
+    /// Allocate a path under `temp_dir` and atomically materialise
+    /// the [`Diff`] into it. The file's name follows
+    /// `specter-{actuator_pid}-{correlation:016x}.diff` (hex-padded
+    /// correlation for stable lexicographic ordering across many
+    /// concurrent Effects in the same `temp_dir`). On any I/O error
+    /// during write or `sync_data`, the partial file is rolled back
+    /// via a best-effort unlink before `Err` returns.
+    pub(crate) fn create(
+        temp_dir: &Path,
+        actuator_pid: u32,
+        correlation: CorrelationId,
+        diff: &Diff,
+    ) -> io::Result<Self> {
+        let path = build_path(temp_dir, actuator_pid, correlation);
+        match write_inner(&path, diff) {
+            Ok(()) => Ok(Self { path }),
+            Err(e) => {
+                unlink_quiet(&path);
+                Err(e)
+            }
+        }
+    }
+
+    /// Borrow the on-disk path. The returned `&Path` is valid for as
+    /// long as any `Arc<Self>` co-owner of `*self` is alive — the
+    /// resolver borrows for one `resolve_step` call; `Slot::running`
+    /// / `Slot::plan_continue` co-own the Arc across the rest of
+    /// the plan.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for DiffTmpFile {
+    fn drop(&mut self) {
+        unlink_quiet(&self.path);
+    }
+}
+
+/// Build the tmp path. Pure function; the caller decides whether to
+/// create the file at the returned location.
+fn build_path(temp_dir: &Path, actuator_pid: u32, correlation: CorrelationId) -> PathBuf {
+    temp_dir.join(format!(
+        "specter-{actuator_pid}-{corr:016x}.diff",
         corr = correlation.as_u64(),
     ))
 }
 
-/// Write the [`Diff`] to `path` in the tab-separated diff format.
-pub(crate) fn write_diff_file(path: &Path, diff: &Diff) -> io::Result<()> {
-    let mut f = std::fs::File::create(path)?;
+/// Write the [`Diff`] to `path` in the tab-separated format
+/// documented in this module's header. The `BufWriter` coalesces
+/// the per-entry `writeln!` calls into one `write` syscall at flush
+/// time.
+fn write_inner(path: &Path, diff: &Diff) -> io::Result<()> {
+    let f = std::fs::File::create(path)?;
+    let mut buf = std::io::BufWriter::new(f);
     for e in &diff.created {
-        write_entry(&mut f, "created", e)?;
+        write_entry(&mut buf, "created", e)?;
     }
     for e in &diff.deleted {
-        write_entry(&mut f, "deleted", e)?;
+        write_entry(&mut buf, "deleted", e)?;
     }
     for e in &diff.modified {
-        write_entry(&mut f, "modified", e)?;
+        write_entry(&mut buf, "modified", e)?;
     }
     for r in &diff.renamed {
-        write_rename(&mut f, r)?;
+        write_rename(&mut buf, r)?;
     }
+    // `into_inner` flushes the buffer; an IntoInnerError carries the
+    // flush failure as its inner `io::Error`.
+    let f = buf
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
     f.sync_data()?;
     Ok(())
 }
 
-fn write_entry(f: &mut std::fs::File, kind: &str, e: &EntryRef) -> io::Result<()> {
+fn write_entry<W: Write>(w: &mut W, kind: &str, e: &EntryRef) -> io::Result<()> {
     writeln!(
-        f,
+        w,
         "{kind}\t{seg}\t{inode}",
         seg = e.segment,
         inode = e.fs_id.inode(),
     )
 }
 
-fn write_rename(f: &mut std::fs::File, r: &Rename) -> io::Result<()> {
+fn write_rename<W: Write>(w: &mut W, r: &Rename) -> io::Result<()> {
     writeln!(
-        f,
+        w,
         "renamed_from\t{seg}\t{inode}",
         seg = r.from.segment,
         inode = r.from.fs_id.inode(),
     )?;
     writeln!(
-        f,
+        w,
         "renamed_to\t{seg}\t{inode}",
         seg = r.to.segment,
         inode = r.to.fs_id.inode(),
@@ -90,9 +172,10 @@ fn write_rename(f: &mut std::fs::File, r: &Rename) -> io::Result<()> {
     Ok(())
 }
 
-/// Best-effort cleanup. Logs at warn on non-NotFound errors; ENOENT
-/// (already gone) is silent.
-pub(crate) fn cleanup(path: &Path) {
+/// Best-effort unlink. Logs at `warn` on non-`NotFound` errors;
+/// ENOENT (already gone) is silent so the [`DiffTmpFile::drop`]
+/// arm tolerates a concurrent external unlink.
+fn unlink_quiet(path: &Path) {
     if let Err(e) = std::fs::remove_file(path)
         && e.kind() != io::ErrorKind::NotFound
     {
@@ -108,7 +191,6 @@ mod tests {
     use compact_str::CompactString;
     use smallvec::smallvec;
     use specter_core::{CorrelationId, Diff, EntryKind, EntryRef, FsIdentity, Rename};
-    use std::io::Read;
 
     fn entry(seg: &str, inode: u64) -> EntryRef {
         EntryRef {
@@ -118,35 +200,36 @@ mod tests {
         }
     }
 
+    /// Pins F-LOW-2 + filename pattern: `create` MUST use its
+    /// `temp_dir`, `actuator_pid`, and `correlation` arguments to
+    /// build the on-disk path. A regression that reads from
+    /// `std::env::temp_dir()` or `std::process::id()` would fail this
+    /// test (custom temp_dir + custom pid won't appear in the
+    /// resulting path).
     #[test]
-    fn tmp_path_includes_pid_and_correlation() {
-        let p = tmp_path(CorrelationId::from(0xab));
-        let s = p.to_string_lossy();
-        assert!(s.contains(&format!("specter-{}-", std::process::id())));
-        assert!(s.ends_with("00000000000000ab.diff"));
+    fn create_uses_provided_temp_dir_pid_and_correlation_in_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handle =
+            DiffTmpFile::create(dir.path(), 42, CorrelationId::from(0xab), &Diff::default())
+                .expect("create");
+        let path = handle.path();
+        assert!(
+            path.starts_with(dir.path()),
+            "tmp file under provided temp_dir: got {} vs {}",
+            path.display(),
+            dir.path().display(),
+        );
+        let name = path
+            .file_name()
+            .expect("name")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(name, "specter-42-00000000000000ab.diff");
     }
 
     #[test]
-    fn write_diff_file_writes_created_lines() {
+    fn create_writes_all_categories_in_tab_separated_format() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.diff");
-        let diff = Diff {
-            created: smallvec![entry("a.rs", 1), entry("b.rs", 2)],
-            ..Default::default()
-        };
-        write_diff_file(&path, &diff).expect("write");
-        let mut s = String::new();
-        std::fs::File::open(&path)
-            .unwrap()
-            .read_to_string(&mut s)
-            .unwrap();
-        assert_eq!(s, "created\ta.rs\t1\ncreated\tb.rs\t2\n");
-    }
-
-    #[test]
-    fn write_diff_file_writes_all_categories_in_order() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("d.diff");
         let diff = Diff {
             created: smallvec![entry("c1", 1)],
             deleted: smallvec![entry("d1", 2)],
@@ -156,20 +239,17 @@ mod tests {
                 to: entry("to", 4),
             }],
         };
-        write_diff_file(&path, &diff).expect("write");
-        let mut s = String::new();
-        std::fs::File::open(&path)
-            .unwrap()
-            .read_to_string(&mut s)
-            .unwrap();
-        let expected = "created\tc1\t1\ndeleted\td1\t2\nmodified\tm1\t3\nrenamed_from\tfrom\t4\nrenamed_to\tto\t4\n";
-        assert_eq!(s, expected);
+        let handle =
+            DiffTmpFile::create(dir.path(), 1, CorrelationId::from(0), &diff).expect("create");
+        let body = std::fs::read_to_string(handle.path()).expect("read");
+        let expected = "created\tc1\t1\ndeleted\td1\t2\nmodified\tm1\t3\n\
+                        renamed_from\tfrom\t4\nrenamed_to\tto\t4\n";
+        assert_eq!(body, expected);
     }
 
     #[test]
-    fn write_diff_file_writes_rename_pair_consecutively() {
+    fn create_writes_rename_pair_consecutively() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("r.diff");
         let diff = Diff {
             renamed: smallvec![
                 Rename {
@@ -183,13 +263,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        write_diff_file(&path, &diff).expect("write");
-        let mut s = String::new();
-        std::fs::File::open(&path)
-            .unwrap()
-            .read_to_string(&mut s)
-            .unwrap();
-        let lines: Vec<&str> = s.lines().collect();
+        let handle =
+            DiffTmpFile::create(dir.path(), 1, CorrelationId::from(0), &diff).expect("create");
+        let body = std::fs::read_to_string(handle.path()).expect("read");
+        let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines.len(), 4);
         assert!(lines[0].starts_with("renamed_from\ta\t"));
         assert!(lines[1].starts_with("renamed_to\tA\t"));
@@ -198,37 +275,67 @@ mod tests {
     }
 
     #[test]
-    fn write_diff_file_uses_segment_as_relative_path() {
+    fn create_uses_segment_as_relative_path() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rel.diff");
         let diff = Diff {
             created: smallvec![entry("src/sub/a.c", 7)],
             ..Default::default()
         };
-        write_diff_file(&path, &diff).expect("write");
-        let mut s = String::new();
-        std::fs::File::open(&path)
-            .unwrap()
-            .read_to_string(&mut s)
-            .unwrap();
-        assert!(s.contains("src/sub/a.c"));
-        assert!(!s.contains("/abs"));
+        let handle =
+            DiffTmpFile::create(dir.path(), 1, CorrelationId::from(0), &diff).expect("create");
+        let body = std::fs::read_to_string(handle.path()).expect("read");
+        assert!(body.contains("src/sub/a.c"));
+        assert!(!body.contains("/abs"));
+    }
+
+    /// On any I/O failure during write, the `Err` arm must roll back
+    /// the partial file before returning. Without rollback, a
+    /// caller treating `Err` as "no file to track" would leak the
+    /// partial. Forcing the failure: pass a `temp_dir` whose
+    /// "directory" is a regular file — `File::create` returns
+    /// ENOTDIR on the child path.
+    #[test]
+    fn create_returns_err_and_leaves_no_file_on_write_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("not_a_dir");
+        std::fs::write(&blocker, "x").expect("write blocker");
+        let bad_temp = blocker.as_path();
+        let result = DiffTmpFile::create(bad_temp, 1, CorrelationId::from(0), &Diff::default());
+        assert!(
+            result.is_err(),
+            "create must fail when temp_dir is a regular file",
+        );
+        let expected_path = bad_temp.join("specter-1-0000000000000000.diff");
+        assert!(
+            !expected_path.exists(),
+            "no partial file left on disk after Err: {}",
+            expected_path.display(),
+        );
     }
 
     #[test]
-    fn cleanup_silent_on_already_gone() {
+    fn drop_unlinks_existing_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("never_existed.diff");
-        cleanup(&path); // no panic
+        let handle =
+            DiffTmpFile::create(dir.path(), 1, CorrelationId::from(0xc0), &Diff::default())
+                .expect("create");
+        let path = handle.path().to_path_buf();
+        assert!(path.exists(), "file exists pre-drop");
+        drop(handle);
+        assert!(!path.exists(), "file unlinked on drop");
     }
 
+    /// ENOENT-silent contract: a concurrent external unlink between
+    /// create and drop must not panic the daemon thread. Pins the
+    /// `unlink_quiet` arm in [`DiffTmpFile::drop`].
     #[test]
-    fn cleanup_removes_existing_file() {
+    fn drop_silent_when_file_already_unlinked() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("exists.diff");
-        std::fs::write(&path, "x").unwrap();
-        assert!(path.exists());
-        cleanup(&path);
+        let handle = DiffTmpFile::create(dir.path(), 1, CorrelationId::from(0), &Diff::default())
+            .expect("create");
+        let path = handle.path().to_path_buf();
+        std::fs::remove_file(&path).expect("preremove");
         assert!(!path.exists());
+        drop(handle);
     }
 }
