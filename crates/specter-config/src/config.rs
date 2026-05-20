@@ -403,7 +403,16 @@ fn log_config_loaded(cfg: &Config, path: &Path) {
 fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
 
-    let log = validate_log(raw.log.as_ref(), &mut errors);
+    // Log errors land first in the output (operator-facing ordering).
+    // On the failure path the default `LogConfig` is irrelevant —
+    // `errors.is_empty()` below short-circuits to `Err`.
+    let log = match validate_log(raw.log.as_ref()) {
+        Ok(log) => log,
+        Err(mut errs) => {
+            errors.append(&mut errs);
+            LogConfig::default()
+        }
+    };
 
     let mut watches: Vec<SubSpec> = Vec::new();
     let mut promoters: Vec<PromoterSpec> = Vec::new();
@@ -450,13 +459,19 @@ fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError>
     }
 }
 
-/// Resolve the `[log]` block. Field-level errors push into `errors`; the
-/// returned [`LogConfig`] uses defaults for any field that failed
-/// validation so the rest of the config can keep parsing.
-fn validate_log(raw: Option<&RawLogConfig>, errors: &mut Vec<ValidationIssue>) -> LogConfig {
+/// Resolve the `[log]` block. Returns `Ok(LogConfig)` when every
+/// field validates; `Err(Vec<ValidationIssue>)` collects every
+/// field-level failure (level / destination / path can each
+/// independently fail, so multi-issue is the right shape).
+///
+/// Field omission (no `[log]` table) resolves to `Ok(LogConfig::default())` —
+/// the documented "use defaults" path, distinct from a parse failure.
+fn validate_log(raw: Option<&RawLogConfig>) -> Result<LogConfig, Vec<ValidationIssue>> {
     let Some(raw) = raw else {
-        return LogConfig::default();
+        return Ok(LogConfig::default());
     };
+
+    let mut errors: Vec<ValidationIssue> = Vec::new();
 
     let level = match raw.level.as_deref() {
         None => LogLevel::Info,
@@ -516,10 +531,14 @@ fn validate_log(raw: Option<&RawLogConfig>, errors: &mut Vec<ValidationIssue>) -
         }
     };
 
-    LogConfig {
-        level,
-        destination,
-        path,
+    if errors.is_empty() {
+        Ok(LogConfig {
+            level,
+            destination,
+            path,
+        })
+    } else {
+        Err(errors)
     }
 }
 
@@ -527,23 +546,23 @@ fn validate_log(raw: Option<&RawLogConfig>, errors: &mut Vec<ValidationIssue>) -
 /// empty (rejected as [`IssueKind::Empty`]) and `@`-bearing
 /// (rejected as [`IssueKind::InvalidName`] — `@` is reserved for the
 /// engine's synthesized `<promoter_name>@<resolved_path>` shape).
+/// Single-issue by construction — at most one failure mode per call.
 ///
 /// Both static and dynamic validators call this so the rule lives in
 /// one place. Duplicate-name detection is handled at the outer
 /// dispatch loop (it spans both kinds and so cannot be a per-watch
 /// helper concern).
-fn validate_name(idx: usize, raw_name: &str, errors: &mut Vec<ValidationIssue>) {
+fn validate_name(idx: usize, raw_name: &str) -> Result<(), ValidationIssue> {
     if raw_name.is_empty() {
-        errors.push(ValidationIssue::new(
+        return Err(ValidationIssue::new(
             Some(idx),
             "name",
             IssueKind::Empty,
             "name must not be empty".to_owned(),
         ));
-        return;
     }
     if raw_name.contains('@') {
-        errors.push(ValidationIssue::new(
+        return Err(ValidationIssue::new(
             Some(idx),
             "name",
             IssueKind::InvalidName,
@@ -554,23 +573,18 @@ fn validate_name(idx: usize, raw_name: &str, errors: &mut Vec<ValidationIssue>) 
             ),
         ));
     }
+    Ok(())
 }
 
-/// Validate the `actions` array. Returns `Some(Arc<ActionProgram>)`
-/// when every action lexes cleanly.
+/// Validate the `actions` array and lower the resulting AST into the
+/// engine's bytecode IR. The [`Result`] shape ties the validated program
+/// to the absence of errors at the type level — callers cannot reach
+/// for the `Arc` without first resolving the failure case.
 ///
-/// Errors accumulate into `errors`; one issue per offending action /
-/// argv slot. The function returns `None` when *any* part of the
-/// program failed validation — partial programs are not handed back,
-/// since a half-built program in the engine would be observably worse
-/// than none at all.
-///
-/// Returns `Ok(Arc<ActionProgram>)` on success, `Err(Vec<ValidationIssue>)`
-/// on any failure — the [`Result`] shape ties the validated program to
-/// the absence of errors at the type level, so callers cannot reach for
-/// the `Arc` without first resolving the failure case. This rules out
-/// the historical "validator returned `None` without pushing an issue
-/// ⇒ caller `.expect()` panics" foot-gun.
+/// The empty-input case (`actions = []`) is rejected as
+/// [`IssueKind::EmptyActions`]; partial programs are never handed back
+/// (a half-built program in the engine would be observably worse than
+/// none at all).
 ///
 /// The returned Arc is the same allocation the engine's `Sub.program`
 /// and every emitted `Effect.program` references — one shared
@@ -588,61 +602,48 @@ fn validate_actions(
         )]);
     }
 
-    let mut errors: Vec<ValidationIssue> = Vec::new();
-    let Some(tree) = validate_action_list(idx, "actions", raw_actions, &mut errors) else {
-        // `validate_action_list` populated `errors` for every failed
-        // element; the empty case is the caller-side bug we're
-        // type-protecting against — assert to surface a regression
-        // loudly in debug, then return whatever was collected.
-        debug_assert!(
-            !errors.is_empty(),
-            "validate_action_list returned None without pushing an issue",
-        );
-        return Err(errors);
-    };
-    match lower_to_program(&tree) {
-        Ok(program) => Ok(program),
-        Err(e) => {
-            errors.push(ValidationIssue::from_program_error(
-                &e,
-                Some(idx),
-                "actions",
-            ));
-            Err(errors)
-        }
-    }
+    let tree = validate_action_list(idx, "actions", raw_actions)?;
+    lower_to_program(&tree).map_err(|e| {
+        vec![ValidationIssue::from_program_error(
+            &e,
+            Some(idx),
+            "actions",
+        )]
+    })
 }
 
 /// Recursive validation of a `[RawAction]` slice. `path` is the
 /// breadcrumb-style label of the slice within the watch — `"actions"`
-/// at the top, `"actions[0].then"` inside a then-branch, etc. The
-/// returned `Vec<Action>` is `Some` iff every element validated; on
-/// any failure the per-element errors are recorded and the function
-/// returns `None`.
+/// at the top, `"actions[0].then"` inside a then-branch, etc. Returns
+/// `Ok(Vec<Action>)` iff every element validated; on any failure the
+/// per-element errors are collected and the function returns `Err`.
 ///
 /// Empty input is the *caller's* responsibility to reject (only the
 /// top-level `actions = []` carries [`IssueKind::EmptyActions`];
 /// nested empty arrays are rejected via [`IssueKind::EmptyConditional`]
 /// against the enclosing conditional). This function is silent on
-/// emptiness — it returns `Some(Vec::new())` in that case so the
+/// emptiness — it returns `Ok(Vec::new())` in that case so the
 /// caller can fold the empty branch into the AST as `None` (no else)
 /// or apply the conditional-level check.
 fn validate_action_list(
     watch_idx: usize,
     path: &str,
     raw_actions: &[RawAction],
-    errors: &mut Vec<ValidationIssue>,
-) -> Option<Vec<Action>> {
+) -> Result<Vec<Action>, Vec<ValidationIssue>> {
     let mut tree: Vec<Action> = Vec::with_capacity(raw_actions.len());
-    let mut any_failed = false;
+    let mut errors: Vec<ValidationIssue> = Vec::new();
     for (j, raw) in raw_actions.iter().enumerate() {
         let child_path = format!("{path}[{j}]");
-        match validate_one_action(watch_idx, &child_path, raw, errors) {
-            Some(action) => tree.push(action),
-            None => any_failed = true,
+        match validate_one_action(watch_idx, &child_path, raw) {
+            Ok(action) => tree.push(action),
+            Err(mut es) => errors.append(&mut es),
         }
     }
-    if any_failed { None } else { Some(tree) }
+    if errors.is_empty() {
+        Ok(tree)
+    } else {
+        Err(errors)
+    }
 }
 
 /// Validate a single action entry. The "exactly one variant set" rule
@@ -658,23 +659,21 @@ fn validate_one_action(
     watch_idx: usize,
     path: &str,
     raw: &RawAction,
-    errors: &mut Vec<ValidationIssue>,
-) -> Option<Action> {
+) -> Result<Action, Vec<ValidationIssue>> {
     let is_exec = raw.exec.is_some();
     let is_pipe = raw.pipe.is_some();
     let is_conditional = raw.when.is_some() || raw.then.is_some() || raw.otherwise.is_some();
     let variants_set = usize::from(is_exec) + usize::from(is_pipe) + usize::from(is_conditional);
     if variants_set == 0 {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::ActionMissingVariant,
             format!("{path}: must specify a variant (`exec`, `pipe`, or `when`/`then`)"),
-        ));
-        return None;
+        )]);
     }
     if variants_set > 1 {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::ActionAmbiguousVariant,
@@ -682,15 +681,14 @@ fn validate_one_action(
                 "{path}: must specify exactly one variant \
                  (`exec`, `pipe`, and `when`/`then` are mutually exclusive)",
             ),
-        ));
-        return None;
+        )]);
     }
     // `timeout` at the action level applies only to `exec`. Predicates
     // (`when`) carry their own per-step `timeout` inside the nested
     // `RawExec`; `pipe` stages each carry their own on the nested
     // `RawExec` of each stage.
     if raw.timeout.is_some() && !is_exec {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::TimeoutNotApplicable,
@@ -698,18 +696,16 @@ fn validate_one_action(
                 "{path}: top-level `timeout` requires `exec` \
                  (predicates set `when.timeout`; pipe stages each set their own `timeout`)",
             ),
-        ));
-        return None;
+        )]);
     }
     if let Some(argv) = raw.exec.as_deref() {
-        return validate_exec_argv(watch_idx, path, "exec", argv, raw.timeout, errors)
-            .map(Action::Exec);
+        return validate_exec_argv(watch_idx, path, "exec", argv, raw.timeout).map(Action::Exec);
     }
     if let Some(stages) = raw.pipe.as_deref() {
-        return validate_pipe(watch_idx, path, stages, errors);
+        return validate_pipe(watch_idx, path, stages);
     }
     if is_conditional {
-        return validate_conditional(watch_idx, path, raw, errors);
+        return validate_conditional(watch_idx, path, raw);
     }
     unreachable!("variants_set ∈ {{1}} and exec/pipe/conditional are exhaustive in v1")
 }
@@ -734,19 +730,17 @@ fn validate_pipe(
     watch_idx: usize,
     path: &str,
     stages: &[RawExec],
-    errors: &mut Vec<ValidationIssue>,
-) -> Option<Action> {
+) -> Result<Action, Vec<ValidationIssue>> {
     if stages.is_empty() {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::EmptyPipe,
             format!("{path}.pipe must have at least two stages (got 0)"),
-        ));
-        return None;
+        )]);
     }
     if stages.len() < 2 {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::SingleStagePipe,
@@ -754,24 +748,24 @@ fn validate_pipe(
                 "{path}.pipe must have at least two stages \
                  (single stages should use top-level `exec` directly)",
             ),
-        ));
-        return None;
+        )]);
     }
     let mut validated: Vec<ExecAction> = Vec::with_capacity(stages.len());
-    let mut any_failed = false;
+    let mut errors: Vec<ValidationIssue> = Vec::new();
     for (idx, stage) in stages.iter().enumerate() {
         let stage_path = format!("{path}.pipe[{idx}]");
-        match validate_raw_exec(watch_idx, &stage_path, stage, errors) {
-            Some(exec) => validated.push(exec),
-            None => any_failed = true,
+        match validate_raw_exec(watch_idx, &stage_path, stage) {
+            Ok(exec) => validated.push(exec),
+            Err(mut es) => errors.append(&mut es),
         }
     }
-    if any_failed {
-        return None;
+    if errors.is_empty() {
+        Ok(Action::Pipe {
+            stages: Arc::from(validated),
+        })
+    } else {
+        Err(errors)
     }
-    Some(Action::Pipe {
-        stages: Arc::from(validated),
-    })
 }
 
 /// Validate the `when` / `then` / `else` triple on a [`RawAction`].
@@ -792,14 +786,13 @@ fn validate_conditional(
     watch_idx: usize,
     path: &str,
     raw: &RawAction,
-    errors: &mut Vec<ValidationIssue>,
-) -> Option<Action> {
+) -> Result<Action, Vec<ValidationIssue>> {
     let when_raw = raw.when.as_ref();
     let then_raw = raw.then.as_deref();
     let otherwise_raw = raw.otherwise.as_deref();
 
     if when_raw.is_none() || then_raw.is_none() {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::ConditionalIncomplete,
@@ -814,8 +807,7 @@ fn validate_conditional(
                     ""
                 },
             ),
-        ));
-        return None;
+        )]);
     }
     let when_raw = when_raw.expect("checked Some directly above");
     let then_raw = then_raw.expect("checked Some directly above");
@@ -825,7 +817,7 @@ fn validate_conditional(
     // per-empty-branch issues (which is exactly nothing in that case).
     let else_empty = otherwise_raw.is_none_or(<[RawAction]>::is_empty);
     if then_raw.is_empty() && else_empty {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::EmptyConditional,
@@ -833,51 +825,65 @@ fn validate_conditional(
                 "{path}: conditional has empty `then` and no `else` body \
                  (predicate would have no observable effect)",
             ),
-        ));
-        return None;
+        )]);
     }
 
     let when_path = format!("{path}.when");
-    let when = validate_raw_exec(watch_idx, &when_path, when_raw, errors);
+    let when_r = validate_raw_exec(watch_idx, &when_path, when_raw);
 
     let then_path = format!("{path}.then");
-    let then = validate_action_list(watch_idx, &then_path, then_raw, errors);
+    let then_r = validate_action_list(watch_idx, &then_path, then_raw);
 
     // `Some(empty)` normalises to `None` so the AST shape matches the
     // lowering precondition (`Some(_)` ⇒ non-empty body). Lowering also
     // handles empty defensively, but normalising here keeps the AST
     // the canonical form.
-    let otherwise = match otherwise_raw {
+    let otherwise_r: Result<Option<Vec<Action>>, Vec<ValidationIssue>> = match otherwise_raw {
         Some(body) if !body.is_empty() => {
-            let path = format!("{path}.else");
-            validate_action_list(watch_idx, &path, body, errors).map(Some)
+            let p = format!("{path}.else");
+            validate_action_list(watch_idx, &p, body).map(Some)
         }
-        Some(_) | None => Some(None),
+        Some(_) | None => Ok(None),
     };
 
-    Some(Action::Conditional {
-        when: when?,
-        then: then?.into_boxed_slice(),
-        otherwise: otherwise?.map(Vec::into_boxed_slice),
-    })
+    match (when_r, then_r, otherwise_r) {
+        (Ok(when), Ok(then), Ok(otherwise)) => Ok(Action::Conditional {
+            when,
+            then: then.into_boxed_slice(),
+            otherwise: otherwise.map(Vec::into_boxed_slice),
+        }),
+        (when_r, then_r, otherwise_r) => {
+            let mut errors: Vec<ValidationIssue> = Vec::new();
+            if let Err(es) = when_r {
+                errors.extend(es);
+            }
+            if let Err(es) = then_r {
+                errors.extend(es);
+            }
+            if let Err(es) = otherwise_r {
+                errors.extend(es);
+            }
+            Err(errors)
+        }
+    }
 }
 
 /// Validate the nested-exec table used inside a conditional predicate
-/// (`when = { exec = [...], timeout = "..." }`). Delegates to
-/// [`validate_exec_argv`] under the path label `"<path>.exec"` so
-/// argv-slot errors quote the surrounding action's location.
+/// (`when = { exec = [...], timeout = "..." }`) and pipe stages.
+/// Delegates to [`validate_exec_argv`] under the path label
+/// `"<path>.exec"` so argv-slot errors quote the surrounding action's
+/// location.
 fn validate_raw_exec(
     watch_idx: usize,
     path: &str,
     raw: &RawExec,
-    errors: &mut Vec<ValidationIssue>,
-) -> Option<ExecAction> {
-    validate_exec_argv(watch_idx, path, "exec", &raw.exec, raw.timeout, errors)
+) -> Result<ExecAction, Vec<ValidationIssue>> {
+    validate_exec_argv(watch_idx, path, "exec", &raw.exec, raw.timeout)
 }
 
 /// Validate one `exec = [...]` argv plus its optional `timeout`. Each
 /// empty slot or parse failure yields one [`ValidationIssue`]; the
-/// function returns `None` on any failure so the partial argv can't
+/// function returns `Err` on any failure so the partial argv can't
 /// reach the engine.
 ///
 /// `timeout` is the operator-supplied per-step deadline (humantime
@@ -891,28 +897,26 @@ fn validate_raw_exec(
 /// `path` is the surrounding action's breadcrumb (e.g.,
 /// `"actions[0]"` or `"actions[0].then[1]"`); `argv_field` is the
 /// field name of the argv slot within that action — `"exec"` for both
-/// top-level exec and predicate-exec; future `pipe` stages will pass
-/// `"pipe[i].exec"`. The error detail joins them with `.` so the
-/// path is unambiguous.
+/// top-level exec and predicate-exec, `"pipe[i].exec"` for pipe
+/// stages. The error detail joins them with `.` so the path is
+/// unambiguous.
 fn validate_exec_argv(
     watch_idx: usize,
     path: &str,
     argv_field: &str,
     raw_argv: &[String],
     timeout: Option<Duration>,
-    errors: &mut Vec<ValidationIssue>,
-) -> Option<ExecAction> {
+) -> Result<ExecAction, Vec<ValidationIssue>> {
     if raw_argv.is_empty() {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(watch_idx),
             "actions",
             IssueKind::EmptyArgv,
             format!("{path}.{argv_field} must have at least one slot"),
-        ));
-        return None;
+        )]);
     }
     let mut argv: Vec<ArgTemplate> = Vec::with_capacity(raw_argv.len());
-    let mut any_failed = false;
+    let mut errors: Vec<ValidationIssue> = Vec::new();
     for (k, slot) in raw_argv.iter().enumerate() {
         if slot.is_empty() {
             errors.push(ValidationIssue::new(
@@ -921,7 +925,6 @@ fn validate_exec_argv(
                 IssueKind::EmptyArgv,
                 format!("{path}.{argv_field}[{k}] is empty"),
             ));
-            any_failed = true;
             continue;
         }
         match template::parse_arg(slot) {
@@ -933,7 +936,6 @@ fn validate_exec_argv(
                     IssueKind::UnknownPlaceholder,
                     format!("{path}.{argv_field}[{k}]: {e}"),
                 ));
-                any_failed = true;
             }
         }
     }
@@ -949,19 +951,17 @@ fn validate_exec_argv(
                  (omit the field for `no deadline`)",
             ),
         ));
-        any_failed = true;
     }
-    if any_failed {
-        None
+    if errors.is_empty() {
+        Ok(ExecAction::new(argv, timeout))
     } else {
-        Some(ExecAction::new(argv, timeout))
+        Err(errors)
     }
 }
 
-/// Validate `settle` / `max_settle`. Returns `(settle, max_settle)`
-/// always — invalid values flow through with their raw value so the
-/// caller can carry on collecting field-level errors; the issues are
-/// surfaced to the operator on the error path.
+/// Validate `settle` / `max_settle`. Returns `Ok((settle, max_settle))`
+/// when both pass; `Err(Vec<ValidationIssue>)` accumulates both
+/// failures when they fire concurrently.
 ///
 /// - `settle` defaults to [`DEFAULT_SETTLE`] when omitted; rejected
 ///   with [`IssueKind::SettleTooSmall`] when zero.
@@ -974,8 +974,8 @@ fn validate_settle(
     idx: usize,
     raw_settle: Option<Duration>,
     raw_max_settle: Option<Duration>,
-    errors: &mut Vec<ValidationIssue>,
-) -> (Duration, Duration) {
+) -> Result<(Duration, Duration), Vec<ValidationIssue>> {
+    let mut errors: Vec<ValidationIssue> = Vec::new();
     let settle = raw_settle.unwrap_or(DEFAULT_SETTLE);
     if settle.is_zero() {
         errors.push(ValidationIssue::new(
@@ -1004,7 +1004,11 @@ fn validate_settle(
         }
         None => DEFAULT_MAX_SETTLE,
     };
-    (settle, max_settle)
+    if errors.is_empty() {
+        Ok((settle, max_settle))
+    } else {
+        Err(errors)
+    }
 }
 
 /// Validate `scope`. Returns `Ok(EffectScope)` on success; `Err` with
@@ -1069,11 +1073,12 @@ fn validate_dynamic_pattern(idx: usize, raw_path: &str) -> Result<PatternSpec, V
 
 /// Validate the `[[watch]]` block's scan-config knobs (`recursive`,
 /// `hidden`, `max_depth`, `pattern`, `exclude`) — orthogonal to the
-/// path-vs-pattern dispatch. Always returns a [`ScanConfig`]; invalid
-/// values are recorded in `errors` and the offending field falls back
-/// to its default so downstream consumers never see a half-built
-/// builder.
-fn validate_scan(idx: usize, raw: &RawWatch, errors: &mut Vec<ValidationIssue>) -> ScanConfig {
+/// path-vs-pattern dispatch. Returns `Ok(ScanConfig)` when every
+/// field validates; `Err(Vec<ValidationIssue>)` accumulates per-field
+/// failures (max_depth, pattern, and each exclude glob can fire
+/// independently).
+fn validate_scan(idx: usize, raw: &RawWatch) -> Result<ScanConfig, Vec<ValidationIssue>> {
+    let mut errors: Vec<ValidationIssue> = Vec::new();
     if raw.max_depth == Some(0) {
         errors.push(ValidationIssue::new(
             Some(idx),
@@ -1119,7 +1124,11 @@ fn validate_scan(idx: usize, raw: &RawWatch, errors: &mut Vec<ValidationIssue>) 
         sb = sb.excludes(compiled);
     }
 
-    sb.build()
+    if errors.is_empty() {
+        Ok(sb.build())
+    } else {
+        Err(errors)
+    }
 }
 
 /// Validator for `[[watch]]` blocks whose `path` carries no glob
@@ -1127,42 +1136,41 @@ fn validate_scan(idx: usize, raw: &RawWatch, errors: &mut Vec<ValidationIssue>) 
 /// dispatcher in [`validate`] gates on [`PatternSpec::is_dynamic`]
 /// before invoking this, so a glob-bearing path cannot reach here.
 ///
-/// Validation runs every sub-validator unconditionally and collects
-/// every issue before returning. The success path destructures the
-/// per-field [`Result`]s via a tuple match — there is no `.expect`
-/// on a validated field, so a future regression that produces a
-/// `None`/`Err` without a corresponding issue surfaces as an `Err`,
-/// not a panic.
+/// Validation runs every sub-validator unconditionally; every
+/// sub-validator returns a [`Result`] so the success path destructures
+/// the per-field values directly via a tuple match. There is no
+/// `.expect` on a validated field — `Ok` arm ⇔ value valid AND no
+/// errors collected, by construction.
 fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
-    let mut errors: Vec<ValidationIssue> = Vec::new();
-
-    validate_name(idx, &raw.name, &mut errors);
-
+    let name_r = validate_name(idx, &raw.name);
     let path_r = validate_static_path(idx, &raw.path);
     let program_r = validate_actions(idx, &raw.actions);
     let scope_r = validate_scope(idx, raw.scope.as_deref());
-    let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
+    let settle_r = validate_settle(idx, raw.settle, raw.max_settle);
+    let scan_r = validate_scan(idx, raw);
     // Parse `events` after scope so the default resolver can read
     // scope. If scope itself failed validation, fall back to the
     // default scope for the events default — this avoids a cascade
     // of phantom errors; the scope error is already pending in
     // `scope_r`.
-    let events = parse_events_field(
+    let events_r = parse_events_field(
         raw.events.as_deref(),
         scope_r.as_ref().copied().unwrap_or_default(),
         idx,
-        &mut errors,
     );
-    let scan = validate_scan(idx, raw, &mut errors);
 
-    // Applicative collection: the Ok arm destructures all three
-    // per-field Results into their values directly — no .expect()
-    // and no panic site. The guard catches the case where the Result-
-    // returning validators all succeeded but a side-effect validator
-    // (validate_name, validate_settle, validate_scan, parse_events_field,
-    // the glob-char guard above) pushed an issue.
-    match (path_r, program_r, scope_r) {
-        (Ok(path), Ok(program), Ok(scope)) if errors.is_empty() => Ok(SubSpec {
+    match (
+        name_r, path_r, program_r, scope_r, settle_r, scan_r, events_r,
+    ) {
+        (
+            Ok(()),
+            Ok(path),
+            Ok(program),
+            Ok(scope),
+            Ok((settle, max_settle)),
+            Ok(scan),
+            Ok(events),
+        ) => Ok(SubSpec {
             name: CompactString::new(&raw.name),
             path,
             program,
@@ -1174,7 +1182,11 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
             log_output: raw.log_output.unwrap_or(false),
             enabled: raw.enabled.unwrap_or(true),
         }),
-        (path_r, program_r, scope_r) => {
+        (name_r, path_r, program_r, scope_r, settle_r, scan_r, events_r) => {
+            let mut errors: Vec<ValidationIssue> = Vec::new();
+            if let Err(e) = name_r {
+                errors.push(e);
+            }
             if let Err(e) = path_r {
                 errors.push(e);
             }
@@ -1183,6 +1195,15 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
             }
             if let Err(e) = scope_r {
                 errors.push(e);
+            }
+            if let Err(es) = settle_r {
+                errors.extend(es);
+            }
+            if let Err(es) = scan_r {
+                errors.extend(es);
+            }
+            if let Err(es) = events_r {
+                errors.extend(es);
             }
             Err(errors)
         }
@@ -1196,30 +1217,36 @@ fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<Vali
 /// no empty segments, no Windows prefix).
 ///
 /// Validation shape mirrors [`validate_static_watch`]: every sub-
-/// validator runs, results are collected via tuple match, and the
-/// success path destructures without `.expect()`.
+/// validator runs and returns a [`Result`], results compose via tuple
+/// match, the success path destructures without `.expect()`.
 fn validate_dynamic_watch(
     idx: usize,
     raw: &RawWatch,
 ) -> Result<PromoterSpec, Vec<ValidationIssue>> {
-    let mut errors: Vec<ValidationIssue> = Vec::new();
-
-    validate_name(idx, &raw.name, &mut errors);
-
+    let name_r = validate_name(idx, &raw.name);
     let pattern_r = validate_dynamic_pattern(idx, &raw.path);
     let program_r = validate_actions(idx, &raw.actions);
     let scope_r = validate_scope(idx, raw.scope.as_deref());
-    let (settle, max_settle) = validate_settle(idx, raw.settle, raw.max_settle, &mut errors);
-    let events = parse_events_field(
+    let settle_r = validate_settle(idx, raw.settle, raw.max_settle);
+    let scan_r = validate_scan(idx, raw);
+    let events_r = parse_events_field(
         raw.events.as_deref(),
         scope_r.as_ref().copied().unwrap_or_default(),
         idx,
-        &mut errors,
     );
-    let scan = validate_scan(idx, raw, &mut errors);
 
-    match (pattern_r, program_r, scope_r) {
-        (Ok(pattern), Ok(program), Ok(scope)) if errors.is_empty() => Ok(PromoterSpec {
+    match (
+        name_r, pattern_r, program_r, scope_r, settle_r, scan_r, events_r,
+    ) {
+        (
+            Ok(()),
+            Ok(pattern),
+            Ok(program),
+            Ok(scope),
+            Ok((settle, max_settle)),
+            Ok(scan),
+            Ok(events),
+        ) => Ok(PromoterSpec {
             name: CompactString::new(&raw.name),
             pattern,
             program,
@@ -1231,7 +1258,11 @@ fn validate_dynamic_watch(
             log_output: raw.log_output.unwrap_or(false),
             enabled: raw.enabled.unwrap_or(true),
         }),
-        (pattern_r, program_r, scope_r) => {
+        (name_r, pattern_r, program_r, scope_r, settle_r, scan_r, events_r) => {
+            let mut errors: Vec<ValidationIssue> = Vec::new();
+            if let Err(e) = name_r {
+                errors.push(e);
+            }
             if let Err(e) = pattern_r {
                 errors.push(e);
             }
@@ -1241,6 +1272,15 @@ fn validate_dynamic_watch(
             if let Err(e) = scope_r {
                 errors.push(e);
             }
+            if let Err(es) = settle_r {
+                errors.extend(es);
+            }
+            if let Err(es) = scan_r {
+                errors.extend(es);
+            }
+            if let Err(es) = events_r {
+                errors.extend(es);
+            }
             Err(errors)
         }
     }
@@ -1248,41 +1288,40 @@ fn validate_dynamic_watch(
 
 /// Parse the optional TOML `events = [...]` array into a [`ClassSet`].
 ///
-/// - Field omitted → scope-conditional default
+/// - Field omitted → `Ok` with the scope-conditional default
 ///   ([`ClassSet::DEFAULT_SUBTREE_ROOT`] for `subtree-root`,
 ///   [`ClassSet::DEFAULT_PER_FILE`] for `per-stable-file`).
-/// - Empty array → [`IssueKind::EventsEmpty`]. "I want zero classes" can
-///   only be a typo; toggling a watch off is removal-by-name.
-/// - Unknown value → [`IssueKind::InvalidEnum`].
-/// - Repeated value → [`IssueKind::DuplicateEventClass`].
+/// - Empty array → `Err` with [`IssueKind::EventsEmpty`]. "I want zero
+///   classes" can only be a typo; toggling a watch off is removal-by-name.
+/// - Unknown value → `Err` with [`IssueKind::InvalidEnum`] (one per).
+/// - Repeated value → `Err` with [`IssueKind::DuplicateEventClass`]
+///   (one per extra occurrence).
 ///
-/// Issues accumulate into `errors`; the partial [`ClassSet`] returned on
-/// the error path is discarded by the caller.
+/// Per-value errors accumulate so a single load surfaces every issue.
 fn parse_events_field(
     raw: Option<&[String]>,
     scope: EffectScope,
     idx: usize,
-    errors: &mut Vec<ValidationIssue>,
-) -> ClassSet {
+) -> Result<ClassSet, Vec<ValidationIssue>> {
     let Some(values) = raw else {
-        return match scope {
+        return Ok(match scope {
             EffectScope::SubtreeRoot => ClassSet::DEFAULT_SUBTREE_ROOT,
             EffectScope::PerStableFile => ClassSet::DEFAULT_PER_FILE,
-        };
+        });
     };
 
     if values.is_empty() {
-        errors.push(ValidationIssue::new(
+        return Err(vec![ValidationIssue::new(
             Some(idx),
             "events",
             IssueKind::EventsEmpty,
             "events array must not be empty (omit the field to take the \
              scope-conditional default)"
                 .to_owned(),
-        ));
-        return ClassSet::EMPTY;
+        )]);
     }
 
+    let mut errors: Vec<ValidationIssue> = Vec::new();
     let mut out = ClassSet::EMPTY;
     for v in values {
         let bit = match v.as_str() {
@@ -1325,7 +1364,11 @@ fn parse_events_field(
         }
         out |= bit;
     }
-    out
+    if errors.is_empty() {
+        Ok(out)
+    } else {
+        Err(errors)
+    }
 }
 
 #[cfg(test)]
