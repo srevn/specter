@@ -234,12 +234,18 @@ impl Spawner for MockSpawner {
                 signals: Arc::clone(&self.signals),
             }));
         }
-        let stage_signalers: Box<[Arc<dyn ChildSignaler>]> = stage_signalers.into_boxed_slice();
-        let combined: Arc<dyn ChildSignaler> =
-            Arc::new(crate::pipe::CombinedSignaler::new(stage_signalers.clone()));
+        // Mirror `OsSpawner::spawn_pipe`: one `Arc<[_]>` backs the
+        // aggregating waiter, the combined signaler, and the
+        // controller's `stage_signalers` handle. Tests reading
+        // `handles.stage_signalers.len()` see the same shape as
+        // production.
+        let stage_signalers: Arc<[Arc<dyn ChildSignaler>]> = Arc::from(stage_signalers);
+        let combined: Arc<dyn ChildSignaler> = Arc::new(crate::pipe::CombinedSignaler::new(
+            Arc::clone(&stage_signalers),
+        ));
         let waiter: Box<dyn ChildWaiter> = Box::new(crate::pipe::PipeWaiter::new(
             stage_waiters,
-            stage_signalers.clone(),
+            Arc::clone(&stage_signalers),
         ));
         Ok(PipeSpawnHandles {
             last_pid,

@@ -122,6 +122,13 @@ pub struct StageSpec<'a> {
 /// path and (in the aggregating waiter) the SIGTERM-cascade-on-first-
 /// failure path; `stage_signalers` are `Arc<dyn>` so the per-stage
 /// timer threads can co-own with the waiter without ceremony.
+///
+/// The slice container itself is `Arc<[_]>` (not `Box<[_]>`) so a
+/// single heap allocation backs all three downstream co-owners — the
+/// aggregating [`crate::pipe::PipeWaiter`], the
+/// [`crate::pipe::CombinedSignaler`], and the controller's local
+/// `stage_signalers` handle — at the cost of one refcount bump per
+/// co-owner instead of cloning the slice three times.
 pub struct PipeSpawnHandles {
     /// Pid of the *last* stage — what an operator inspecting the
     /// pipe via `ps` would call "the pid of this pipe". The actuator
@@ -138,8 +145,10 @@ pub struct PipeSpawnHandles {
     /// Per-stage signalers, parallel-indexed with the input stage
     /// slice. The controller hands each one to its per-stage timer
     /// thread; not all stages need a timer (only those whose
-    /// `ExecAction.timeout` is set).
-    pub stage_signalers: Box<[Arc<dyn ChildSignaler>]>,
+    /// `ExecAction.timeout` is set). Shares its heap allocation with
+    /// the aggregating waiter and the combined signaler via
+    /// `Arc::clone`.
+    pub stage_signalers: Arc<[Arc<dyn ChildSignaler>]>,
 }
 
 impl std::fmt::Debug for PipeSpawnHandles {

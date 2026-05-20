@@ -220,22 +220,24 @@ impl Spawner for OsSpawner {
             "last iter does not create a pipe; prev_read must be consumed by the loop",
         );
 
-        // Build the aggregating waiter and combined signaler. Per-stage
-        // signalers ride out to the PipeSpawnHandles so the controller
-        // can arm per-stage timers.
-        let combined: Arc<dyn ChildSignaler> = Arc::new(CombinedSignaler::new(
-            stage_signalers.clone().into_boxed_slice(),
-        ));
-        let waiter: Box<dyn ChildWaiter> = Box::new(PipeWaiter::new(
-            stage_waiters,
-            stage_signalers.clone().into_boxed_slice(),
-        ));
+        // Collapse the per-stage signaler `Vec` into a single
+        // `Arc<[...]>` heap allocation backing all three downstream
+        // co-owners: the aggregating waiter, the combined signaler,
+        // and the controller's local handle that rides out on
+        // `PipeSpawnHandles`. Each consumer takes its share via
+        // `Arc::clone` — one refcount bump per consumer instead of
+        // re-allocating the slice three times.
+        let stage_signalers: Arc<[Arc<dyn ChildSignaler>]> = Arc::from(stage_signalers);
+        let combined: Arc<dyn ChildSignaler> =
+            Arc::new(CombinedSignaler::new(Arc::clone(&stage_signalers)));
+        let waiter: Box<dyn ChildWaiter> =
+            Box::new(PipeWaiter::new(stage_waiters, Arc::clone(&stage_signalers)));
 
         Ok(PipeSpawnHandles {
             last_pid,
             waiter,
             combined_signaler: combined,
-            stage_signalers: stage_signalers.into_boxed_slice(),
+            stage_signalers,
         })
     }
 }

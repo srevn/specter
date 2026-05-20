@@ -41,11 +41,11 @@ use std::thread;
 /// operator triaging "some stages didn't terminate" sees every cause,
 /// not just the first.
 pub(crate) struct CombinedSignaler {
-    stages: Box<[Arc<dyn ChildSignaler>]>,
+    stages: Arc<[Arc<dyn ChildSignaler>]>,
 }
 
 impl CombinedSignaler {
-    pub(crate) fn new(stages: Box<[Arc<dyn ChildSignaler>]>) -> Self {
+    pub(crate) fn new(stages: Arc<[Arc<dyn ChildSignaler>]>) -> Self {
         Self { stages }
     }
 }
@@ -145,13 +145,13 @@ impl ChildSignaler for CombinedSignaler {
 /// before returning).
 pub(crate) struct PipeWaiter {
     waiters: Vec<Box<dyn ChildWaiter>>,
-    signalers: Box<[Arc<dyn ChildSignaler>]>,
+    signalers: Arc<[Arc<dyn ChildSignaler>]>,
 }
 
 impl PipeWaiter {
     pub(crate) fn new(
         waiters: Vec<Box<dyn ChildWaiter>>,
-        signalers: Box<[Arc<dyn ChildSignaler>]>,
+        signalers: Arc<[Arc<dyn ChildSignaler>]>,
     ) -> Self {
         debug_assert_eq!(
             waiters.len(),
@@ -475,7 +475,7 @@ mod tests {
         }
     }
 
-    fn boxed_probes_into_signalers(probes: &[Arc<Probe>]) -> Box<[Arc<dyn ChildSignaler>]> {
+    fn probes_into_signalers(probes: &[Arc<Probe>]) -> Arc<[Arc<dyn ChildSignaler>]> {
         probes
             .iter()
             .map(|p| Arc::clone(p) as Arc<dyn ChildSignaler>)
@@ -580,7 +580,7 @@ mod tests {
         let p0 = Arc::new(Probe::new());
         let p1 = Arc::new(Probe::new());
         let p2 = Arc::new(Probe::new());
-        let signalers = boxed_probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]);
+        let signalers = probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]);
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(StaticWaiter {
@@ -620,12 +620,12 @@ mod tests {
         let p0 = Arc::new(Probe::new());
         let (p1, p1_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
         let (p2, p2_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
-        let signalers: Box<[Arc<dyn ChildSignaler>]> = vec![
+        let signalers: Arc<[Arc<dyn ChildSignaler>]> = vec![
             Arc::clone(&p0) as Arc<dyn ChildSignaler>,
             Arc::clone(&p1) as Arc<dyn ChildSignaler>,
             Arc::clone(&p2) as Arc<dyn ChildSignaler>,
         ]
-        .into_boxed_slice();
+        .into();
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(StaticWaiter {
@@ -671,12 +671,12 @@ mod tests {
         let (p0, p0_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
         let (p1, p1_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
         let p2 = Arc::new(Probe::new());
-        let signalers: Box<[Arc<dyn ChildSignaler>]> = vec![
+        let signalers: Arc<[Arc<dyn ChildSignaler>]> = vec![
             Arc::clone(&p0) as Arc<dyn ChildSignaler>,
             Arc::clone(&p1) as Arc<dyn ChildSignaler>,
             Arc::clone(&p2) as Arc<dyn ChildSignaler>,
         ]
-        .into_boxed_slice();
+        .into();
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(p0_waiter),
             Box::new(p1_waiter),
@@ -731,11 +731,11 @@ mod tests {
     fn blocked_first_stage_unblocked_by_cascade_does_not_deadlock() {
         let (p0, p0_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));
         let p1 = Arc::new(Probe::new());
-        let signalers: Box<[Arc<dyn ChildSignaler>]> = vec![
+        let signalers: Arc<[Arc<dyn ChildSignaler>]> = vec![
             Arc::clone(&p0) as Arc<dyn ChildSignaler>,
             Arc::clone(&p1) as Arc<dyn ChildSignaler>,
         ]
-        .into_boxed_slice();
+        .into();
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(p0_waiter),
             Box::new(StaticWaiter {
@@ -777,7 +777,7 @@ mod tests {
         let p0 = Arc::new(Probe::new());
         let p1 = Arc::new(Probe::new());
         let p2 = Arc::new(Probe::new());
-        let signalers = boxed_probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]);
+        let signalers = probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]);
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(StaticWaiter {
@@ -819,7 +819,7 @@ mod tests {
         let p1 = Arc::new(Probe::new());
         // p1 already dead before the cascade decision.
         p1.mark_dead();
-        let signalers = boxed_probes_into_signalers(&[p0.clone(), p1.clone()]);
+        let signalers = probes_into_signalers(&[p0.clone(), p1.clone()]);
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
             Box::new(StaticWaiter {
@@ -847,11 +847,8 @@ mod tests {
         let p0 = Arc::new(Probe::new());
         let p1 = Arc::new(Probe::new());
         let p2 = Arc::new(Probe::new());
-        let combined = CombinedSignaler::new(boxed_probes_into_signalers(&[
-            p0.clone(),
-            p1.clone(),
-            p2.clone(),
-        ]));
+        let combined =
+            CombinedSignaler::new(probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]));
 
         combined.signal_term().unwrap();
         combined.signal_term().unwrap();
@@ -868,8 +865,7 @@ mod tests {
     fn combined_signaler_is_dead_requires_all_stages_dead() {
         let p0 = Arc::new(Probe::new());
         let p1 = Arc::new(Probe::new());
-        let combined =
-            CombinedSignaler::new(boxed_probes_into_signalers(&[p0.clone(), p1.clone()]));
+        let combined = CombinedSignaler::new(probes_into_signalers(&[p0.clone(), p1.clone()]));
         assert!(!combined.is_dead());
         p0.mark_dead();
         assert!(!combined.is_dead(), "one alive ⇒ combined not dead");
