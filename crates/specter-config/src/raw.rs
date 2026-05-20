@@ -203,36 +203,3 @@ impl<'de> serde::Deserialize<'de> for HumantimeDuration {
         humantime_serde::deserialize(deserializer).map(HumantimeDuration)
     }
 }
-
-#[cfg(test)]
-impl RawWatch {
-    /// Construct a `RawWatch` directly for tests that exercise the
-    /// validator helpers without routing through TOML deserialization
-    /// (e.g., the `validate_static_watch` defensive `is_dynamic`
-    /// re-check, which is unreachable through the dispatcher).
-    pub(crate) fn for_test(name: String, path: String, exec: Vec<String>) -> Self {
-        Self {
-            name,
-            path,
-            actions: vec![RawAction {
-                exec: Some(exec),
-                pipe: None,
-                when: None,
-                then: None,
-                otherwise: None,
-                timeout: None,
-            }],
-            recursive: None,
-            pattern: None,
-            exclude: None,
-            hidden: None,
-            settle: None,
-            max_settle: None,
-            scope: None,
-            max_depth: None,
-            events: None,
-            log_output: None,
-            enabled: None,
-        }
-    }
-}

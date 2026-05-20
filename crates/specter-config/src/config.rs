@@ -356,20 +356,7 @@ impl Config {
 
     fn from_str_inner(s: &str, path: Option<&Path>) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(s).map_err(|e| ConfigError::parse(path, &e))?;
-        match validate(&raw, path) {
-            Ok(cfg) => Ok(cfg),
-            Err(e) => {
-                if let ConfigError::Validate { errors, .. } = &e {
-                    for issue in errors {
-                        tracing::warn!(
-                            path = ?path.map(Path::display),
-                            "{issue}",
-                        );
-                    }
-                }
-                Err(e)
-            }
-        }
+        validate(&raw, path)
     }
 }
 
@@ -1136,11 +1123,9 @@ fn validate_scan(idx: usize, raw: &RawWatch, errors: &mut Vec<ValidationIssue>) 
 }
 
 /// Validator for `[[watch]]` blocks whose `path` carries no glob
-/// discriminator characters (`*?[{`) — pure-literal anchors. Caller
-/// (the dispatcher in [`validate`]) gates on
-/// [`PatternSpec::is_dynamic`] before invoking this; the inner
-/// `is_dynamic` check is defense-in-depth for direct test callers
-/// that bypass the dispatcher.
+/// discriminator characters (`*?[{`) — pure-literal anchors. The
+/// dispatcher in [`validate`] gates on [`PatternSpec::is_dynamic`]
+/// before invoking this, so a glob-bearing path cannot reach here.
 ///
 /// Validation runs every sub-validator unconditionally and collects
 /// every issue before returning. The success path destructures the
@@ -1150,28 +1135,6 @@ fn validate_scan(idx: usize, raw: &RawWatch, errors: &mut Vec<ValidationIssue>) 
 /// not a panic.
 fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
-    let issue = |field: &'static str, kind: IssueKind, detail: String| {
-        ValidationIssue::new(Some(idx), field, kind, detail)
-    };
-
-    // Defense-in-depth: the dispatcher decides static vs. dynamic on
-    // `is_dynamic(path)`. Bypassing the dispatcher (test surface) and
-    // landing here with a glob-bearing path is a contract violation;
-    // surface it as a dedicated kind so the breach is observable in
-    // error output rather than masquerading as `NonAbsolute` /
-    // `NotCanonical` further down.
-    if PatternSpec::is_dynamic(&raw.path) {
-        errors.push(issue(
-            "path",
-            IssueKind::PathContainsGlobChars,
-            format!(
-                "path `{}` contains a glob discriminator character \
-                 (`*?[{{`); this entry should have been routed to the \
-                 dynamic validator",
-                raw.path,
-            ),
-        ));
-    }
 
     validate_name(idx, &raw.name, &mut errors);
 
@@ -2307,27 +2270,6 @@ mod tests {
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.promoters.len(), 1);
         assert_eq!(cfg.promoters[0].pattern.literal_prefix_len(), 1);
-    }
-
-    /// The static validator's defensive `is_dynamic` re-check fires
-    /// only for direct internal callers (tests bypass the dispatcher).
-    /// The production dispatch path never lands here. Tested via the
-    /// validator function directly, mirroring the defense-in-depth
-    /// contract.
-    #[test]
-    fn static_validator_rejects_glob_path_via_defensive_check() {
-        // Construct a `RawWatch` by hand so we bypass the dispatcher.
-        let raw = crate::raw::RawWatch::for_test(
-            "name".to_owned(),
-            "/var/log/*".to_owned(),
-            vec!["echo".to_owned()],
-        );
-        let errors = super::validate_static_watch(0, &raw).unwrap_err();
-        let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
-        assert!(
-            kinds.contains(&IssueKind::PathContainsGlobChars),
-            "got {kinds:?}",
-        );
     }
 }
 

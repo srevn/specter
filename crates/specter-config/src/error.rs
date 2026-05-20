@@ -59,22 +59,9 @@ pub enum IssueKind {
     InvalidName,
     /// `path` of a dynamic `[[watch]]` failed `PatternSpec::parse` —
     /// any of `**`, `.`/`..`, empty segment, non-absolute, Windows
-    /// prefix, or a malformed glob segment. A pure-literal `path`
-    /// ([`specter_core::PatternError::NotDynamic`]) reaches the parser
-    /// only via dispatcher bypass — production gates on
-    /// `PatternSpec::is_dynamic` upstream, making this the structural
-    /// dual of [`Self::PathContainsGlobChars`]. Detail carries the
+    /// prefix, or a malformed glob segment. Detail carries the
     /// rendered [`specter_core::PatternError`] message.
     InvalidPattern,
-    /// Defense-in-depth: `validate_static_watch` was reached with a
-    /// path containing one of the four glob discriminator characters
-    /// (`*?[{`). Production paths gate on `PatternSpec::is_dynamic`
-    /// upstream, so this kind is unreachable through the dispatcher;
-    /// it surfaces only when an internal caller bypasses the dispatch
-    /// (e.g., a future test that invokes the static validator
-    /// directly). Distinct from [`Self::InvalidPattern`] so the
-    /// dispatcher's contract is observable in error output.
-    PathContainsGlobChars,
     /// `actions[i].timeout` is set on an action variant that doesn't
     /// support a top-level timeout. v1: only `exec` accepts it. Future
     /// variants (`pipe`, `conditional`) set timeouts on their stages /
@@ -221,7 +208,6 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::DuplicateEventClass => "duplicate-event-class",
         IssueKind::InvalidName => "invalid-name",
         IssueKind::InvalidPattern => "invalid-pattern",
-        IssueKind::PathContainsGlobChars => "path-contains-glob-chars",
         IssueKind::TimeoutNotApplicable => "timeout-not-applicable",
         IssueKind::TimeoutZero => "timeout-zero",
         IssueKind::ConditionalIncomplete => "conditional-incomplete",
