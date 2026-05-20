@@ -478,6 +478,13 @@ impl ChildSignaler for OsChildSignaler {
     fn is_dead(&self) -> bool {
         self.dead.is_dead()
     }
+    fn mark_dead(&self) {
+        // Trait-level publish — delegates to the shared DeadFlag that
+        // OsChildWaiter::wait and Self::reap_blocking also write. All
+        // three writers are idempotent against the same one-shot
+        // ratchet.
+        self.dead.mark_dead();
+    }
 }
 
 #[allow(clippy::cast_possible_wrap)]

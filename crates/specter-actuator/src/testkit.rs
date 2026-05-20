@@ -318,4 +318,10 @@ impl ChildSignaler for MockChildSignaler {
     fn is_dead(&self) -> bool {
         self.dead.is_dead()
     }
+    fn mark_dead(&self) {
+        // Trait-level publish — delegates to the shared DeadFlag the
+        // MockChildWaiter writes after its rx.recv() returns. Idempotent
+        // against the waiter's own mark and against reap_blocking.
+        self.dead.mark_dead();
+    }
 }

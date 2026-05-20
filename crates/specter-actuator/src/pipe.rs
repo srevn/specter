@@ -101,6 +101,20 @@ impl ChildSignaler for CombinedSignaler {
         // done" probe.
         self.stages.iter().all(|s| s.is_dead())
     }
+
+    fn mark_dead(&self) {
+        // Symmetric with `is_dead`: a pipe-level `mark_dead` publishes
+        // into every per-stage signaler's ratchet so the wrapper-layer
+        // backstop (`PipeWaiter::wait`'s outer `catch_unwind` in
+        // `wait_loop`) closes the PID-reuse window for the whole pipe
+        // with one call, even when no per-stage closure ran (i.e. the
+        // aggregating waiter itself panicked before spawning the
+        // per-stage threads). Idempotent against every per-stage
+        // writer.
+        for s in self.stages.iter() {
+            s.mark_dead();
+        }
+    }
 }
 
 /// Aggregating waiter for a pipe.
@@ -196,6 +210,14 @@ impl ChildWaiter for PipeWaiter {
                 continue;
             }
             let tx_stage = tx.clone();
+            // Per-stage dead-ratchet backstop: pair the closure with
+            // its own stage signaler so the post-`catch_unwind` publish
+            // covers a panicking per-stage waiter impl that didn't
+            // reach its own write site. Idempotent against the
+            // production happy-path mark inside `OsChildWaiter::wait`
+            // and against the outer `wait_loop` backstop (which fans
+            // out via `CombinedSignaler::mark_dead`).
+            let signaler_stage = Arc::clone(&signalers[idx]);
             let spawn_result = thread::Builder::new()
                 // pthread_setname_np on Linux truncates at 15+null;
                 // "act-pipe-NN" is 11 chars even at idx=99, leaving
@@ -207,6 +229,7 @@ impl ChildWaiter for PipeWaiter {
                         Ok(Ok(o)) => o,
                         Ok(Err(_)) | Err(_) => EffectOutcome::Failed(Termination::Internal),
                     };
+                    signaler_stage.mark_dead();
                     // Channel is unbounded and owned by the
                     // aggregator (this function); send cannot block,
                     // and a Disconnected error here would only happen
@@ -438,9 +461,6 @@ mod tests {
                 kill: AtomicU32::new(0),
             }
         }
-        fn mark_dead(&self) {
-            self.dead.mark_dead();
-        }
     }
 
     impl ChildSignaler for Probe {
@@ -458,6 +478,9 @@ mod tests {
         }
         fn is_dead(&self) -> bool {
             self.dead.is_dead()
+        }
+        fn mark_dead(&self) {
+            self.dead.mark_dead();
         }
     }
 
@@ -550,6 +573,9 @@ mod tests {
         }
         fn is_dead(&self) -> bool {
             self.dead.is_dead()
+        }
+        fn mark_dead(&self) {
+            self.dead.mark_dead();
         }
     }
 
@@ -871,5 +897,72 @@ mod tests {
         assert!(!combined.is_dead(), "one alive ⇒ combined not dead");
         p1.mark_dead();
         assert!(combined.is_dead(), "all dead ⇒ combined dead");
+    }
+
+    /// `mark_dead` on the combined signaler fans the write out to
+    /// every per-stage flag. The wrapper-layer backstop in
+    /// `pool::state::wait_loop` relies on this fan-out to close the
+    /// whole pipe's PID-reuse window with a single call.
+    #[test]
+    fn combined_signaler_mark_dead_fans_out_to_all_stages() {
+        let p0 = Arc::new(Probe::new());
+        let p1 = Arc::new(Probe::new());
+        let p2 = Arc::new(Probe::new());
+        let combined =
+            CombinedSignaler::new(probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]));
+
+        combined.mark_dead();
+
+        assert!(p0.is_dead());
+        assert!(p1.is_dead());
+        assert!(p2.is_dead());
+    }
+
+    /// Single-use waiter that panics inside `wait()`. Models a custom
+    /// [`ChildWaiter`] impl that never reaches its own happy-path
+    /// `mark_dead` write — the per-stage `catch_unwind` backstop
+    /// inside [`PipeWaiter::wait`] is the only writer that can flip
+    /// the paired signaler's flag.
+    struct PanickingWaiter;
+
+    impl ChildWaiter for PanickingWaiter {
+        fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
+            panic!("PanickingWaiter: intentional panic to exercise per-stage backstop");
+        }
+    }
+
+    /// N=3 pipe with stage 1's waiter panicking. The per-stage
+    /// `catch_unwind` inside [`PipeWaiter::wait`] must publish
+    /// `mark_dead` on stage 1's signaler even though the panicking
+    /// waiter never reached its own self-mark. Without the backstop a
+    /// racing controller signal could land on a recycled PID.
+    #[test]
+    fn pipe_per_stage_marks_dead_on_panicking_stage_waiter() {
+        let p0 = Arc::new(Probe::new());
+        let p1 = Arc::new(Probe::new());
+        let p2 = Arc::new(Probe::new());
+        let signalers = probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]);
+
+        let waiters: Vec<Box<dyn ChildWaiter>> = vec![
+            Box::new(StaticWaiter {
+                outcome: Ok(EffectOutcome::Ok),
+                dead: Arc::clone(&p0),
+            }),
+            Box::new(PanickingWaiter),
+            Box::new(StaticWaiter {
+                outcome: Ok(EffectOutcome::Ok),
+                dead: Arc::clone(&p2),
+            }),
+        ];
+        let _ = Box::new(PipeWaiter::new(waiters, signalers))
+            .wait()
+            .unwrap();
+
+        assert!(
+            p1.is_dead(),
+            "stage 1's signaler must be marked dead by the per-stage \
+             `catch_unwind` backstop even though `PanickingWaiter` panicked \
+             before any self-mark",
+        );
     }
 }

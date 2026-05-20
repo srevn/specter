@@ -1177,15 +1177,21 @@ impl ActuatorState {
             signaler,
         } = handles;
 
-        // The signaler Arc is also handed to the optional per-step
-        // timer thread below; cloning before the move into RunningJob
-        // keeps the controller's installed-side reference live
-        // regardless of whether the timer is armed.
+        // The signaler Arc has up to three co-owners: the installed
+        // [`RunningJob::signaler`] (consumed by shutdown / recovery),
+        // the optional per-step timer thread (drops on natural
+        // completion via the `is_dead` short-circuit), and the wait
+        // thread (publishes the dead-ratchet backstop after
+        // `catch_unwind`). Clone the two extras here, then move the
+        // original into `RunningJob` — keeps the controller's
+        // install-side reference live regardless of whether either
+        // sibling spawn succeeds.
         let timer_spec: Option<TimerSpec> = exec.timeout().map(|deadline| TimerSpec {
             deadline,
             grace: self.shutdown_grace,
             signaler: Arc::clone(&signaler),
         });
+        let signaler_for_wait = Arc::clone(&signaler);
         let diff_tmp_path: Option<PathBuf> = diff_path.map(Path::to_path_buf);
         let slot = self
             .slots
@@ -1199,7 +1205,16 @@ impl ActuatorState {
             diff_tmp_path,
         });
 
-        self.spawn_wait_thread_after_install(key, sub, pid, cursor, waiter, permit, reap_tx)?;
+        self.spawn_wait_thread_after_install(
+            key,
+            sub,
+            pid,
+            cursor,
+            waiter,
+            signaler_for_wait,
+            permit,
+            reap_tx,
+        )?;
 
         // Per-step timer: spawn AFTER the wait thread is alive so the
         // wait thread's `dead` flag is the natural-completion signal
@@ -1374,6 +1389,14 @@ impl ActuatorState {
             })
             .collect();
 
+        // Clone the combined signaler for the wait-thread's
+        // dead-ratchet backstop before moving the original into
+        // `RunningJob`. `CombinedSignaler::mark_dead` fans out to every
+        // per-stage flag, so this single Arc covers the whole pipe at
+        // the outer `wait_loop` layer (per-stage closures inside
+        // `PipeWaiter::wait` additionally backstop their own
+        // `catch_unwind` sites with the per-stage signalers).
+        let signaler_for_wait = Arc::clone(&combined_signaler);
         let diff_tmp_path: Option<PathBuf> = diff_path.map(Path::to_path_buf);
         let slot = self
             .slots
@@ -1387,7 +1410,16 @@ impl ActuatorState {
             diff_tmp_path,
         });
 
-        self.spawn_wait_thread_after_install(key, sub, last_pid, cursor, waiter, permit, reap_tx)?;
+        self.spawn_wait_thread_after_install(
+            key,
+            sub,
+            last_pid,
+            cursor,
+            waiter,
+            signaler_for_wait,
+            permit,
+            reap_tx,
+        )?;
         // `stage_signalers` (the install-time local Arc handles) drop
         // here; the aggregating waiter and any armed timer threads
         // keep the per-stage signalers alive through reap.
@@ -1435,6 +1467,18 @@ impl ActuatorState {
     /// operator-facing "the pid of this pipe"). The `key` is needed
     /// to look up the slot in the recovery branch.
     ///
+    /// `signaler` is a clone of the same [`Arc`] the controller
+    /// installed on [`RunningJob::signaler`]. The wait thread owns it
+    /// solely to publish the dead-ratchet backstop after the
+    /// `catch_unwind` of [`ChildWaiter::wait`] — see [`wait_loop`]
+    /// for the protocol contract. Cloning at the call site (rather
+    /// than at the [`SpawnHandles`] origin) keeps the controller's
+    /// install-side reference live regardless of whether the
+    /// spawn-the-wait-thread step succeeds; on `Builder::spawn`
+    /// failure the closure-owned clone drops, the recovery branch
+    /// drives the install-side clone through SIGKILL +
+    /// `reap_blocking`, and nothing leaks.
+    ///
     /// The function is `&mut self` because the recovery branch
     /// mutates `self.slots[key].running`. The slot lookup is an
     /// `expect` for the same reason as `spawn_exec_with_permit`:
@@ -1448,6 +1492,7 @@ impl ActuatorState {
         pid: u32,
         cursor: u32,
         waiter: Box<dyn ChildWaiter>,
+        signaler: Arc<dyn ChildSignaler>,
         permit: Permit,
         reap_tx: &Sender<super::Reaped>,
     ) -> Result<(), SpawnFailureCause> {
@@ -1459,7 +1504,7 @@ impl ActuatorState {
             // unscathed. macOS allows 64 bytes.
             .name(format!("act-wait-{pid}"))
             .spawn(move || {
-                wait_loop(waiter, wait_key, sub, permit, reap_tx_for_thread);
+                wait_loop(waiter, signaler, wait_key, sub, permit, reap_tx_for_thread);
             })
         {
             tracing::error!(
@@ -1521,17 +1566,33 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
     }
 }
 
-/// Wait-thread body. Block on `waiter.wait()`; on return, release the
-/// permit and send a [`super::Reaped`] to the controller.
+/// Wait-thread body. Block on `waiter.wait()`; on return, publish the
+/// dead-ratchet backstop, release the permit, and send a
+/// [`super::Reaped`] to the controller.
 ///
-/// Two orderings are load-bearing:
+/// Three orderings are load-bearing:
 ///
 /// 1. The waiter sets `dead = true` (production impl) before returning,
 ///    so a controller signal racing this thread observes `dead = true`
 ///    and short-circuits — preventing a stale signal against a reaped
-///    (and possibly pid-reused) child.
+///    (and possibly pid-reused) child. This is the canonical *early*
+///    publish.
 ///
-/// 2. Permit release precedes reap notification. Spawns for *other*
+/// 2. [`ChildSignaler::mark_dead`] runs after the `catch_unwind`
+///    *unconditionally*, regardless of the wait outcome. This is the
+///    additive wrapper-layer backstop: a panicking `wait` impl never
+///    reaches its own publish, and even a clean `Err` return can leave
+///    a custom impl that publishes only on the happy path racing
+///    PID-reuse. Calling `mark_dead` here closes the window at the
+///    protocol layer; idempotent against the waiter's own early
+///    publish on the happy path. For the pipe shape, the wrapping
+///    signaler is the [`crate::pipe::CombinedSignaler`] and the call
+///    fans out to every per-stage flag so the outer backstop closes
+///    every stage's window even when [`crate::pipe::PipeWaiter::wait`]
+///    aggregated correctly; the per-stage closures inside `PipeWaiter`
+///    additionally backstop their own catch_unwind sites.
+///
+/// 3. Permit release precedes reap notification. Spawns for *other*
 ///    Subs can dispatch immediately on the freed permit even if the
 ///    reap channel is briefly saturated. Spawns for the *same* Sub
 ///    still wait for the controller to drop `sub` from
@@ -1548,6 +1609,7 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
 #[allow(clippy::needless_pass_by_value)] // closure-spawned: arguments owned for the thread
 fn wait_loop(
     waiter: Box<dyn ChildWaiter>,
+    signaler: Arc<dyn ChildSignaler>,
     key: DedupKey,
     sub: SubId,
     permit: Permit,
@@ -1564,8 +1626,21 @@ fn wait_loop(
             EffectOutcome::Failed(Termination::Internal)
         }
     };
+    // Backstop publish: idempotent against the waiter's own happy-path
+    // mark. Closes the PID-reuse window even when the impl panicked
+    // before reaching its own write site. See comment 2 above for the
+    // full ordering contract.
+    signaler.mark_dead();
     drop(permit);
-    let _ = reap_tx.send(super::Reaped { key, sub, outcome });
+    if let Err(e) = reap_tx.send(super::Reaped { key, sub, outcome }) {
+        // The controller has shut down ahead of us (post-shutdown
+        // orphan: shutdown's drain closed `reap_rx`; the wait thread
+        // is the only `Reaped` writer). The reap is no longer
+        // interesting — emit at `debug!` so a future refactor that
+        // splits the controller / reap-channel lifetime is observable
+        // in operator logs instead of silently swallowed.
+        tracing::debug!(?key, ?e, "reap_tx send after controller exit");
+    }
 }
 
 #[inline]
@@ -1847,6 +1922,9 @@ mod tests {
         fn is_dead(&self) -> bool {
             self.dead.is_dead()
         }
+        fn mark_dead(&self) {
+            self.dead.mark_dead();
+        }
     }
 
     /// Counts SIGTERM / SIGKILL / reap_blocking invocations; never
@@ -1880,6 +1958,15 @@ mod tests {
             // circuit inert under these tests — the timer's signal
             // path is what's being asserted, not the short-circuit.
             false
+        }
+        fn mark_dead(&self) {
+            // No-op: paired with the always-`false` `is_dead` above.
+            // The lifecycle ratchet is intentionally inert in this
+            // fixture so signal-count assertions don't get masked by
+            // the wait-thread / wrapper backstops that publish here on
+            // a real signaler. Tests using this fixture don't drive
+            // [`super::wait_loop`] and never observe `is_dead == true`,
+            // so leaving both methods inert is the consistent shape.
         }
     }
 
@@ -1940,6 +2027,45 @@ mod tests {
             signaler.term.load(Ordering::SeqCst),
             0,
             "recovery never sends SIGTERM; it's a hard-fail path",
+        );
+    }
+
+    /// `wait_loop` wraps the waiter in `catch_unwind` and publishes
+    /// `signaler.mark_dead()` after the catch. The trait-level
+    /// backstop is the only writer that can flip the dead-ratchet
+    /// when the waiter panics before reaching its own self-mark —
+    /// without it a racing controller signal could land on a
+    /// recycled PID.
+    #[test]
+    fn wait_loop_marks_dead_on_panicking_waiter() {
+        struct PanickingWaiter;
+        impl ChildWaiter for PanickingWaiter {
+            fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
+                panic!("PanickingWaiter: intentional panic to exercise wait_loop backstop");
+            }
+        }
+
+        let key = perfile_key(60, 60, 60);
+        let sub = unique_sub_id(60);
+        let signaler: Arc<dyn ChildSignaler> = Arc::new(ScriptedSignaler {
+            dead: crate::lifecycle::DeadFlag::new(),
+        });
+        let permits = crate::permits::Permits::new(nz(1));
+        let permit = permits.try_acquire().expect("permit available");
+        let (reap_tx, _reap_rx) = reap_channel();
+
+        super::wait_loop(
+            Box::new(PanickingWaiter),
+            Arc::clone(&signaler),
+            key,
+            sub,
+            permit,
+            reap_tx,
+        );
+
+        assert!(
+            signaler.is_dead(),
+            "wait_loop's backstop must publish `mark_dead` even when `wait` panicked",
         );
     }
 

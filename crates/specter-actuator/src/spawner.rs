@@ -211,6 +211,14 @@ pub trait ChildWaiter: Send {
 /// from the actual `kill(2)` is collapsed to `Ok(())` as a defense-in-
 /// depth layer.
 ///
+/// The lifecycle ratchet — [`Self::is_dead`] (read) paired with
+/// [`Self::mark_dead`] (write) — is the protocol-level surface. The
+/// `ChildWaiter` impl is the canonical early publisher
+/// ([`OsChildWaiter::wait`] marks dead before returning); wrapper
+/// sites that `catch_unwind` a waiter call [`Self::mark_dead`] as a
+/// backstop in case the impl panicked before reaching its own
+/// publish.
+///
 /// Neither layer fully closes the PID-reuse race: between `child.wait()`
 /// returning (kernel reaps the zombie; pid eligible for reuse) and the
 /// waiter setting the shared flag, a brief window exists where a signal
@@ -219,6 +227,8 @@ pub trait ChildWaiter: Send {
 /// syscall returns success. The window is small but live on systems
 /// with high pid pressure; v2 may switch to process descriptors
 /// (pidfd / pdfork).
+///
+/// [`OsChildWaiter::wait`]: super::os
 pub trait ChildSignaler: Send + Sync {
     /// Send SIGTERM. ESRCH (child already gone) is collapsed to `Ok(())`.
     /// Short-circuits to `Ok(())` if the paired waiter has already
@@ -249,12 +259,30 @@ pub trait ChildSignaler: Send + Sync {
     /// paired waiter provides on the normal path.
     fn reap_blocking(&self) -> io::Result<()>;
     /// `true` once the paired waiter has reported completion (or
-    /// [`Self::reap_blocking`] has run). Lets co-owning threads short-
-    /// circuit on natural completion — used by the per-step timer
-    /// thread to skip SIGTERM/SIGKILL when a child finishes within its
-    /// deadline. Reads the same shared dead-flag the
-    /// `signal_term` / `signal_kill` short-circuits consult; exposed as
-    /// its own method so callers don't have to issue a no-op signal to
-    /// probe the state.
+    /// [`Self::reap_blocking`] / [`Self::mark_dead`] has run). Lets co-
+    /// owning threads short-circuit on natural completion — used by
+    /// the per-step timer thread to skip SIGTERM/SIGKILL when a child
+    /// finishes within its deadline. Reads the same shared dead-flag
+    /// the `signal_term` / `signal_kill` short-circuits consult;
+    /// exposed as its own method so callers don't have to issue a
+    /// no-op signal to probe the state.
     fn is_dead(&self) -> bool;
+    /// Publish "paired child is reaped; signal syscalls would race PID
+    /// reuse." Idempotent — the underlying flag is a one-shot ratchet.
+    ///
+    /// The protocol-level write that pairs with [`Self::is_dead`].
+    /// Wrapper sites that `catch_unwind` a [`ChildWaiter::wait`]
+    /// invocation (the controller's `wait_loop`, and the per-stage
+    /// closures inside [`crate::pipe::PipeWaiter`]) call this after
+    /// the catch, so a panicking waiter impl that didn't reach its
+    /// own write site still publishes — closing the PID-reuse window
+    /// at the protocol layer. On the happy path the
+    /// [`ChildWaiter::wait`] impl is the early publisher; this
+    /// trait-level write is the additive backstop, idempotent against
+    /// it.
+    ///
+    /// [`crate::pipe::CombinedSignaler::mark_dead`] fans the call out
+    /// to every per-stage signaler, so a pipe-level wrapper closes
+    /// the window for all stages with one call.
+    fn mark_dead(&self);
 }

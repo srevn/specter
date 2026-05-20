@@ -125,9 +125,6 @@ mod tests {
                 when: Mutex::new(Vec::new()),
             }
         }
-        fn mark_dead(&self) {
-            self.dead.store(true, Ordering::SeqCst);
-        }
         fn record(&self, label: &'static str) {
             self.when.lock().unwrap().push((label, Instant::now()));
         }
@@ -155,6 +152,9 @@ mod tests {
         }
         fn is_dead(&self) -> bool {
             self.dead.load(Ordering::SeqCst)
+        }
+        fn mark_dead(&self) {
+            self.dead.store(true, Ordering::SeqCst);
         }
     }
 
