@@ -114,13 +114,17 @@
 //!
 //! # Single rendering pass per resolve
 //!
-//! `format_now(now)` and the `${specter.parent}` string are computed
-//! exactly once at the top of [`resolve_step`] and threaded through
-//! both `substitute_argv` and `build_env`. The `${specter.time}` argv
-//! slot and `SPECTER_TIME` env value, plus `${specter.parent}` and
-//! `SPECTER_PARENT`, share the same source string by construction — no
-//! risk of one surface formatting differently from the other under
-//! future edits.
+//! All four shared single-value derivations — `${specter.path}` /
+//! `SPECTER_PATH`, `${specter.anchor}` / `SPECTER_ANCHOR`,
+//! `${specter.parent}` / `SPECTER_PARENT`, and `${specter.time}` /
+//! `SPECTER_TIME` — are rendered exactly once at the top of
+//! [`resolve_step`] and threaded through both `substitute_argv` and
+//! `build_env`. The argv and env surfaces share the same source string
+//! for each placeholder by construction — no risk of one surface
+//! formatting differently from the other under future edits. The
+//! `Option<&Diff>` carrying the diff-derived placeholders is unpacked
+//! the same way, so a pipe's per-stage resolves and an argv template's
+//! per-arg loops both see the same `Arc` deref once.
 
 use crate::env::EnvSnapshot;
 use crate::spawner::EnvVar;
@@ -182,6 +186,30 @@ impl std::fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
+/// Bundle of the four single-value derivations [`resolve_step`] renders
+/// once and threads through [`substitute_argv`] and [`build_env`]. The
+/// argv and env surfaces share the same byte sequence for each
+/// placeholder by construction — no second source-of-truth can drift
+/// under future edits.
+///
+/// `path_lossy` and `parent_lossy` are owned today (matching the env
+/// surface's existing allocate-once policy); `anchor_lossy` borrows
+/// from `effect.anchor_path` on its UTF-8 fast path. The unified
+/// `Cow<'a, str>` shape lets [`build_env`] move each field directly
+/// into `EnvVar<'a>::value` regardless of which arm is present.
+struct Derived<'a> {
+    /// `${specter.path}` / `SPECTER_PATH`.
+    path_lossy: Cow<'a, str>,
+    /// `${specter.anchor}` / `SPECTER_ANCHOR`.
+    anchor_lossy: Cow<'a, str>,
+    /// `${specter.parent}` / `SPECTER_PARENT`. Empty when
+    /// `target_path.parent()` is `None` (Subtree scope at filesystem
+    /// root).
+    parent_lossy: Cow<'a, str>,
+    /// `${specter.time}` / `SPECTER_TIME` — RFC 3339 second-precision.
+    time_str: String,
+}
+
 /// Resolve one [`ExecAction`] step against its owning [`Effect`] —
 /// rendering argv plus the standard `SPECTER_*` env-var set. See module
 /// docs.
@@ -204,23 +232,24 @@ pub(crate) fn resolve_step<'a>(
     diff_path: Option<&'a Path>,
     env_snapshot: &EnvSnapshot,
 ) -> Result<(CommandResolved, Vec<EnvVar<'a>>), ResolveError> {
-    // Materialise once, share with both surfaces.
+    // Unpack the `Arc<Diff>` once and thread `Option<&Diff>` through both
+    // surfaces — pipe stages otherwise pay the same Arc deref per stage,
+    // and per-arg argv loops pay it per template.
     let target_path = effect.target_path();
-    let parent_str = parent_string(&target_path);
-    let time_str = format_now(now);
+    let diff: Option<&'a Diff> = effect.diff().map(|d| &**d);
 
-    let argv = substitute_argv(
-        exec,
-        effect,
-        &target_path,
-        &parent_str,
-        &time_str,
-        env_snapshot,
-    )?;
-    // Argv done with `parent_str` / `time_str` — move them into the env
-    // vec as `Cow::Owned` instead of cloning at the SPECTER_PARENT /
-    // SPECTER_TIME push sites.
-    let env = build_env(effect, &target_path, parent_str, time_str, diff_path);
+    // Materialise the four shared single-value derivations once.
+    let derived = Derived {
+        path_lossy: Cow::Owned(target_path.to_string_lossy().into_owned()),
+        anchor_lossy: effect.anchor_path.to_string_lossy(),
+        parent_lossy: Cow::Owned(parent_string(&target_path)),
+        time_str: format_now(now),
+    };
+
+    let argv = substitute_argv(exec, effect, &derived, diff, env_snapshot)?;
+    // `build_env` consumes `derived` — each field moves into the env vec
+    // instead of being cloned at the per-key push site.
+    let env = build_env(effect, derived, diff, diff_path);
     Ok((CommandResolved { argv }, env))
 }
 
@@ -279,9 +308,8 @@ const SUBSTITUTE_SCRATCH_CAPACITY: usize = 64;
 fn substitute_argv(
     exec: &ExecAction,
     effect: &Effect,
-    target_path: &Path,
-    parent_str: &str,
-    time_str: &str,
+    derived: &Derived<'_>,
+    diff: Option<&Diff>,
     env_snapshot: &EnvSnapshot,
 ) -> Result<Vec<String>, ResolveError> {
     let template = exec.argv();
@@ -291,10 +319,8 @@ fn substitute_argv(
         substitute_one(
             arg,
             effect,
-            target_path,
-            parent_str,
-            time_str,
-            effect.diff().map(|d| &**d),
+            derived,
+            diff,
             env_snapshot,
             &mut argv,
             &mut scratch,
@@ -317,9 +343,7 @@ fn substitute_argv(
 fn substitute_one(
     arg: &ArgTemplate,
     effect: &Effect,
-    target_path: &Path,
-    parent_str: &str,
-    time_str: &str,
+    derived: &Derived<'_>,
     diff: Option<&Diff>,
     env_snapshot: &EnvSnapshot,
     out: &mut Vec<String>,
@@ -331,12 +355,12 @@ fn substitute_one(
         match part {
             ArgPart::Literal(s) => scratch.push_str(s),
             ArgPart::Placeholder(p) => match p {
-                Placeholder::Path => scratch.push_str(&target_path.to_string_lossy()),
+                Placeholder::Path => scratch.push_str(&derived.path_lossy),
                 Placeholder::Relative => scratch.push_str(effect.relative()),
-                Placeholder::Anchor => scratch.push_str(&effect.anchor_path.to_string_lossy()),
+                Placeholder::Anchor => scratch.push_str(&derived.anchor_lossy),
                 Placeholder::Watch => scratch.push_str(&effect.sub_name),
-                Placeholder::Parent => scratch.push_str(parent_str),
-                Placeholder::Time => scratch.push_str(time_str),
+                Placeholder::Parent => scratch.push_str(&derived.parent_lossy),
+                Placeholder::Time => scratch.push_str(&derived.time_str),
                 Placeholder::Created
                 | Placeholder::Deleted
                 | Placeholder::Modified
@@ -530,27 +554,31 @@ fn format_now(now: SystemTime) -> String {
 /// golden-test stability and operator predictability (e.g., `env | sort`
 /// matches positional `getenv` reads).
 ///
-/// `target_path`, `parent_str`, `time_str` are pre-rendered in
-/// [`resolve_step`] so this function and [`substitute_argv`] share the
-/// same byte sequences for `${specter.path}` / `SPECTER_PATH`,
-/// `${specter.parent}` / `SPECTER_PARENT`, and `${specter.time}` /
-/// `SPECTER_TIME` respectively. `parent_str` and `time_str` arrive
-/// by-value and move into the env vec via `Cow::Owned`.
+/// `derived` carries the four single-value derivations [`resolve_step`]
+/// pre-rendered (`path_lossy`, `anchor_lossy`, `parent_lossy`,
+/// `time_str`); each field moves into the env vec at its `SPECTER_*`
+/// push site so this function and [`substitute_argv`] emit identical
+/// bytes for the corresponding placeholders.
 ///
 /// Values are `Cow<'a, str>` so fields already living on the [`Effect`]
-/// (anchor path lossy, `target_relative`, `sub_name`) and the
-/// `diff_path` argument are emitted as `Cow::Borrowed`; values
-/// synthesised here (`event_kind` is a literal, multi-value joins,
-/// formatted correlation, `target_path` lossy, `parent_str`,
-/// `time_str`) are emitted as `Cow::Owned`. Keys are always
-/// `&'static str`.
+/// (`target_relative`, `sub_name`), the `diff_path` argument, and the
+/// `anchor_lossy` field's UTF-8 fast path are emitted as
+/// `Cow::Borrowed`; values synthesised here (`event_kind` literal,
+/// multi-value joins, formatted correlation) and the owned arms of
+/// `derived` (`path_lossy`, `parent_lossy`, `time_str`) are emitted as
+/// `Cow::Owned`. Keys are always `&'static str`.
 fn build_env<'a>(
     effect: &'a Effect,
-    target_path: &Path,
-    parent_str: String,
-    time_str: String,
+    derived: Derived<'a>,
+    diff: Option<&Diff>,
     diff_path: Option<&'a Path>,
 ) -> Vec<EnvVar<'a>> {
+    let Derived {
+        path_lossy,
+        anchor_lossy,
+        parent_lossy,
+        time_str,
+    } = derived;
     // `event_kind` derives from the fire shape — Subtree/PerFile agree
     // with the originating Sub's EffectScope by construction, so there
     // is no second source-of-truth to consult.
@@ -558,14 +586,13 @@ fn build_env<'a>(
         EffectTarget::Subtree { .. } => "dir-subtree",
         EffectTarget::PerFile { .. } => "file",
     };
-    let diff = effect.diff().map(|d| &**d);
     // 15 keys + optional SPECTER_DIFF_PATH. Pre-size to avoid the
     // resize churn under push.
     let cap = if diff_path.is_some() { 16 } else { 15 };
     let mut env: Vec<EnvVar<'a>> = Vec::with_capacity(cap);
     env.push(EnvVar {
         key: "SPECTER_ANCHOR",
-        value: effect.anchor_path.to_string_lossy(),
+        value: anchor_lossy,
     });
     env.push(EnvVar {
         key: "SPECTER_CORRELATION",
@@ -603,11 +630,11 @@ fn build_env<'a>(
     });
     env.push(EnvVar {
         key: "SPECTER_PARENT",
-        value: Cow::Owned(parent_str),
+        value: parent_lossy,
     });
     env.push(EnvVar {
         key: "SPECTER_PATH",
-        value: Cow::Owned(target_path.to_string_lossy().into_owned()),
+        value: path_lossy,
     });
     env.push(EnvVar {
         key: "SPECTER_RELATIVE_PATH",
