@@ -1059,7 +1059,7 @@ impl ActuatorState {
         reap_tx: &Sender<super::Reaped>,
     ) -> Result<(), SpawnFailureCause> {
         let now = std::time::SystemTime::now();
-        let cwd: &Path = resolve::compute_cwd(&effect.anchor_path, effect.anchor_kind);
+        let cwd: &Path = resolve::compute_cwd(effect);
         let capture_output = effect.capture_output;
 
         let op = &effect.program.ops()[cursor as usize];

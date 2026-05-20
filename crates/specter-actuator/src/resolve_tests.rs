@@ -19,6 +19,7 @@ use specter_core::{
     EntryRef, ExecAction, FsIdentity, Placeholder, ProfileId, Rename, ResourceId, ResourceKind,
     SubId,
 };
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -1259,6 +1260,104 @@ fn env_order_with_diff_path_is_alphabetical() {
             .value,
         "/tmp/specter-1234-deadbeef.diff"
     );
+}
+
+// ---------- Cow borrow discipline ----------
+//
+// When `Effect::target_path` is `Cow::Borrowed` (Subtree fire),
+// `SPECTER_PATH` / `SPECTER_PARENT` propagate the borrow into
+// `Cow::Borrowed` on the UTF-8 fast path; when it is `Cow::Owned`
+// (PerFile fire), both fields own. The two assertions below pin one
+// Subtree case (path + parent in one resolve) and one PerFile case so
+// a future regression that forces an unconditional `into_owned()` on
+// either field surfaces in the test suite. The empty-multivalue
+// short-circuit gets its own small assertion since the borrow-vs-owned
+// property there is independent of `target_path`.
+
+#[test]
+fn env_specter_path_and_parent_borrow_for_subtree() {
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/proj/sub"),
+        "",
+        false,
+        CorrelationId::from(1),
+        None,
+    );
+    let (_, env) = resolve(&e);
+    let path = env.iter().find(|e| e.key == "SPECTER_PATH").unwrap();
+    let parent = env.iter().find(|e| e.key == "SPECTER_PARENT").unwrap();
+    assert!(
+        matches!(path.value, Cow::Borrowed(_)),
+        "Subtree SPECTER_PATH should borrow from effect.anchor_path on the UTF-8 fast path",
+    );
+    assert!(
+        matches!(parent.value, Cow::Borrowed(_)),
+        "Subtree SPECTER_PARENT should borrow from effect.anchor_path on the UTF-8 fast path",
+    );
+    assert_eq!(path.value, "/proj/sub");
+    assert_eq!(parent.value, "/proj");
+}
+
+#[test]
+fn env_specter_path_and_parent_own_for_perfile() {
+    // PerFile `target_path = anchor.join(segment)` is a freshly-joined
+    // `PathBuf` living only on the resolve stack; both fields must own
+    // their bytes for the env vec to outlive the resolve call.
+    let e = make_effect(
+        "x",
+        EffectScope::PerStableFile,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/proj"),
+        "a.c",
+        false,
+        CorrelationId::from(1),
+        None,
+    );
+    let (_, env) = resolve(&e);
+    let path = env.iter().find(|e| e.key == "SPECTER_PATH").unwrap();
+    let parent = env.iter().find(|e| e.key == "SPECTER_PARENT").unwrap();
+    assert!(matches!(path.value, Cow::Owned(_)));
+    assert!(matches!(parent.value, Cow::Owned(_)));
+    assert_eq!(path.value, "/proj/a.c");
+    assert_eq!(parent.value, "/proj");
+}
+
+#[test]
+fn env_multivalue_borrows_empty_string_when_no_entries() {
+    // `env_multivalue` short-circuits the empty case to
+    // `Cow::Borrowed("")` instead of allocating an empty `String`. The
+    // no-diff resolve emits six empty multi-value env vars; this saves
+    // six `String::new()` allocations per resolve on the common path
+    // for Subs that don't reference diff placeholders. One probe per
+    // category is enough — they all route through the same helper.
+    let e = make_effect(
+        "x",
+        EffectScope::SubtreeRoot,
+        vec![arg(vec![lit("noop")])],
+        Path::new("/p"),
+        "",
+        false,
+        CorrelationId::from(1),
+        None,
+    );
+    let (_, env) = resolve(&e);
+    for k in [
+        "SPECTER_CREATED",
+        "SPECTER_DELETED",
+        "SPECTER_MODIFIED",
+        "SPECTER_RENAMED_FROM",
+        "SPECTER_RENAMED_TO",
+        "SPECTER_EXCLUDED",
+    ] {
+        let v = env.iter().find(|e| e.key == k).unwrap();
+        assert!(
+            matches!(v.value, Cow::Borrowed(_)),
+            "{k} must be Cow::Borrowed when its source list is empty",
+        );
+    }
 }
 
 // ---------- ${env.<NAME>} ----------
