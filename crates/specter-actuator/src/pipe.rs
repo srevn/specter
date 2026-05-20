@@ -410,18 +410,22 @@ mod tests {
     //! exercised by their respective test suites; here we just pin
     //! the aggregation rules.
     use super::{CombinedSignaler, PipeWaiter};
+    use crate::lifecycle::DeadFlag;
     use crate::spawner::{ChildSignaler, ChildWaiter};
     use crossbeam::channel::{Receiver, Sender, bounded};
     use specter_core::{EffectOutcome, Termination};
     use std::io;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{Duration, Instant};
 
     /// Per-stage probe: counts every signal call so the cascade
-    /// assertions can pin which stages received SIGTERM.
+    /// assertions can pin which stages received SIGTERM. Holds a
+    /// [`DeadFlag`] paired with a [`StaticWaiter`] (or
+    /// [`BlockingWaiter`]) so the test fixture mirrors the production
+    /// pairing shape exactly.
     struct Probe {
-        dead: AtomicBool,
+        dead: DeadFlag,
         term: AtomicU32,
         kill: AtomicU32,
     }
@@ -429,13 +433,13 @@ mod tests {
     impl Probe {
         fn new() -> Self {
             Self {
-                dead: AtomicBool::new(false),
+                dead: DeadFlag::new(),
                 term: AtomicU32::new(0),
                 kill: AtomicU32::new(0),
             }
         }
         fn mark_dead(&self) {
-            self.dead.store(true, Ordering::SeqCst);
+            self.dead.mark_dead();
         }
     }
 
@@ -449,11 +453,11 @@ mod tests {
             Ok(())
         }
         fn reap_blocking(&self) -> io::Result<()> {
-            self.dead.store(true, Ordering::SeqCst);
+            self.dead.mark_dead();
             Ok(())
         }
         fn is_dead(&self) -> bool {
-            self.dead.load(Ordering::SeqCst)
+            self.dead.is_dead()
         }
     }
 
@@ -492,7 +496,7 @@ mod tests {
     /// "stage 1 reports Ok" would make cascade assertions
     /// nondeterministic.
     struct BlockingProbe {
-        dead: AtomicBool,
+        dead: DeadFlag,
         term: AtomicU32,
         kill: AtomicU32,
         return_outcome: EffectOutcome,
@@ -511,7 +515,7 @@ mod tests {
             // needs one.
             let (tx, rx) = bounded::<()>(1);
             let probe = Arc::new(Self {
-                dead: AtomicBool::new(false),
+                dead: DeadFlag::new(),
                 term: AtomicU32::new(0),
                 kill: AtomicU32::new(0),
                 return_outcome,
@@ -540,12 +544,12 @@ mod tests {
             Ok(())
         }
         fn reap_blocking(&self) -> io::Result<()> {
-            self.dead.store(true, Ordering::SeqCst);
+            self.dead.mark_dead();
             let _ = self.unblock.try_send(());
             Ok(())
         }
         fn is_dead(&self) -> bool {
-            self.dead.load(Ordering::SeqCst)
+            self.dead.is_dead()
         }
     }
 
@@ -565,7 +569,7 @@ mod tests {
             // bug. Collapse rather than panic so the surrounding
             // PipeWaiter still aggregates a Failed outcome.
             let _ = self.rx.recv();
-            self.probe.dead.store(true, Ordering::SeqCst);
+            self.probe.dead.mark_dead();
             Ok(self.probe.return_outcome.clone())
         }
     }

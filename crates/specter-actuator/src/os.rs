@@ -19,18 +19,20 @@
 //! non-macOS arm of the helper is an empty stub.
 //!
 //! The PID-reuse race during shutdown signaling is *narrowed* — not
-//! eliminated — by two layers. [`OsChildWaiter::wait`] sets a shared
-//! `Arc<AtomicBool>` immediately after `child.wait()` returns; a
-//! controller signal observing `dead == true` short-circuits and never
-//! issues a `kill(2)`. The kernel reaps the zombie inside `child.wait()`,
-//! so the pid is eligible for reuse the moment `wait()` returns; a small
-//! window remains before the flag store is visible to the controller. In
-//! that window ESRCH-collapse does *not* save us: the (reused) pid points
-//! at a real, unrelated process and `kill(2)` returns success against it.
-//! On busy systems with high pid pressure (CI runners, build servers) the
-//! race is small but live; v2 may switch to process descriptors (Linux
-//! pidfd, FreeBSD pdfork) to eliminate it entirely.
+//! eliminated — by two layers. [`OsChildWaiter::wait`] marks a shared
+//! [`crate::lifecycle::DeadFlag`] immediately after `child.wait()`
+//! returns; a controller signal observing `is_dead == true` short-
+//! circuits and never issues a `kill(2)`. The kernel reaps the zombie
+//! inside `child.wait()`, so the pid is eligible for reuse the moment
+//! `wait()` returns; a small window remains before the flag store is
+//! visible to the controller. In that window ESRCH-collapse does *not*
+//! save us: the (reused) pid points at a real, unrelated process and
+//! `kill(2)` returns success against it. On busy systems with high pid
+//! pressure (CI runners, build servers) the race is small but live; v2
+//! may switch to process descriptors (Linux pidfd, FreeBSD pdfork) to
+//! eliminate it entirely.
 
+use crate::lifecycle::DeadFlag;
 use crate::pipe::{CombinedSignaler, PipeWaiter};
 use crate::spawner::{
     ChildSignaler, ChildWaiter, EnvVar, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
@@ -42,7 +44,6 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Production `Spawner`.
 ///
@@ -329,10 +330,10 @@ fn disqualify_posix_spawn(cmd: &mut Command) {
 const fn disqualify_posix_spawn(_cmd: &mut Command) {}
 
 /// Construct an `OsChildWaiter` + `OsChildSignaler` pair from a
-/// freshly-spawned [`Child`]. They share an `Arc<AtomicBool>` `dead`
-/// flag so a controller-side signal observing `dead == true` short-
-/// circuits the syscall (closes the PID-reuse race at the protocol
-/// layer; ESRCH-collapse is the syscall fallback).
+/// freshly-spawned [`Child`]. They share a [`DeadFlag`] so a controller-
+/// side signal observing `is_dead == true` short-circuits the syscall
+/// (closes the PID-reuse race at the protocol layer; ESRCH-collapse is
+/// the syscall fallback).
 ///
 /// Returns concrete types — the caller wraps in `Box<dyn>` for the
 /// waiter (single-consumer at wait time) and `Arc<dyn>` for the signaler
@@ -340,12 +341,12 @@ const fn disqualify_posix_spawn(_cmd: &mut Command) {}
 /// clones it into any per-step timer thread).
 fn build_pair(child: Child) -> (u32, OsChildWaiter, OsChildSignaler) {
     let pid = child.id();
-    let dead = Arc::new(AtomicBool::new(false));
+    let dead = DeadFlag::new();
     (
         pid,
         OsChildWaiter {
             child,
-            dead: Arc::clone(&dead),
+            dead: dead.clone(),
         },
         OsChildSignaler { pid, dead },
     )
@@ -409,18 +410,18 @@ fn rollback_partial_pipe(signalers: &[Arc<dyn ChildSignaler>]) {
 
 struct OsChildWaiter {
     child: Child,
-    dead: Arc<AtomicBool>,
+    dead: DeadFlag,
 }
 
 impl ChildWaiter for OsChildWaiter {
     fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
         let mut child = self.child;
         let result = child.wait();
-        // Set dead unconditionally before returning, so the controller
+        // Mark dead unconditionally before returning, so the controller
         // sees a coherent "child reaped, signals are no-ops" state
         // regardless of wait success or failure (closes PID-reuse race
         // at the protocol layer; ESRCH-collapse is the syscall fallback).
-        self.dead.store(true, Ordering::SeqCst);
+        self.dead.mark_dead();
         let status = result?;
         Ok(if status.success() {
             EffectOutcome::Ok
@@ -439,18 +440,18 @@ impl ChildWaiter for OsChildWaiter {
 
 struct OsChildSignaler {
     pid: u32,
-    dead: Arc<AtomicBool>,
+    dead: DeadFlag,
 }
 
 impl ChildSignaler for OsChildSignaler {
     fn signal_term(&self) -> io::Result<()> {
-        if self.dead.load(Ordering::SeqCst) {
+        if self.dead.is_dead() {
             return Ok(());
         }
         signal_pid(self.pid, nix::sys::signal::Signal::SIGTERM)
     }
     fn signal_kill(&self) -> io::Result<()> {
-        if self.dead.load(Ordering::SeqCst) {
+        if self.dead.is_dead() {
             return Ok(());
         }
         signal_pid(self.pid, nix::sys::signal::Signal::SIGKILL)
@@ -460,19 +461,20 @@ impl ChildSignaler for OsChildSignaler {
         // The recovery branch shouldn't see this in production (the
         // waiter was dropped without running), but it keeps the
         // method idempotent under any caller misuse.
-        if self.dead.load(Ordering::SeqCst) {
+        if self.dead.is_dead() {
             return Ok(());
         }
-        reap_pid(self.pid)?;
-        // Mirror OsChildWaiter::wait: set `dead` after the kernel
-        // releases the zombie so later signal calls short-circuit
-        // (closes the PID-reuse race the same way the wait thread
-        // would on the normal path).
-        self.dead.store(true, Ordering::SeqCst);
-        Ok(())
+        // Mirror OsChildWaiter::wait: mark dead unconditionally after
+        // waitpid returns (success OR failure) so any subsequent
+        // signaler call short-circuits at the protocol layer. The
+        // previous shape only stored on the Ok branch, leaving the
+        // Err branch racing PID-reuse against the underlying syscall.
+        let result = reap_pid(self.pid);
+        self.dead.mark_dead();
+        result
     }
     fn is_dead(&self) -> bool {
-        self.dead.load(Ordering::SeqCst)
+        self.dead.is_dead()
     }
 }
 

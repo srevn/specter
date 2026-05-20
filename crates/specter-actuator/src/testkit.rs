@@ -8,6 +8,7 @@
 //! shutdown logic be tested deterministically without forking real
 //! children.
 
+use crate::lifecycle::DeadFlag;
 use crate::spawner::{
     ChildSignaler, ChildWaiter, EnvVar, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
 };
@@ -16,7 +17,7 @@ use specter_core::EffectOutcome;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Recorded spawn — what the controller passed to
@@ -136,7 +137,7 @@ impl MockSpawner {
         env: Vec<(String, String)>,
         cwd: PathBuf,
         capture_output: bool,
-    ) -> (u32, Receiver<EffectOutcome>, Arc<AtomicBool>) {
+    ) -> (u32, Receiver<EffectOutcome>, DeadFlag) {
         let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = bounded::<EffectOutcome>(1);
         self.completions.lock().unwrap().insert(pid, tx);
@@ -147,7 +148,7 @@ impl MockSpawner {
             cwd,
             capture_output,
         });
-        (pid, rx, Arc::new(AtomicBool::new(false)))
+        (pid, rx, DeadFlag::new())
     }
 
     /// Owned `Vec<(String, String)>` mirror of the spawner's
@@ -184,7 +185,7 @@ impl Spawner for MockSpawner {
             pid,
             waiter: Box::new(MockChildWaiter {
                 rx,
-                dead: Arc::clone(&dead),
+                dead: dead.clone(),
             }),
             signaler: Arc::new(MockChildSignaler {
                 pid,
@@ -225,7 +226,7 @@ impl Spawner for MockSpawner {
             last_pid = pid;
             stage_waiters.push(Box::new(MockChildWaiter {
                 rx,
-                dead: Arc::clone(&dead),
+                dead: dead.clone(),
             }));
             stage_signalers.push(Arc::new(MockChildSignaler {
                 pid,
@@ -251,15 +252,15 @@ impl Spawner for MockSpawner {
 
 struct MockChildWaiter {
     rx: Receiver<EffectOutcome>,
-    dead: Arc<AtomicBool>,
+    dead: DeadFlag,
 }
 
 impl ChildWaiter for MockChildWaiter {
     fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
         let result = self.rx.recv();
-        // Mirror OsChildWaiter — set dead unconditionally before
+        // Mirror OsChildWaiter — mark dead unconditionally before
         // returning so the protocol contract holds even on error.
-        self.dead.store(true, Ordering::SeqCst);
+        self.dead.mark_dead();
         match result {
             Ok(o) => Ok(o),
             Err(_) => Err(io::Error::new(
@@ -272,13 +273,13 @@ impl ChildWaiter for MockChildWaiter {
 
 struct MockChildSignaler {
     pid: u32,
-    dead: Arc<AtomicBool>,
+    dead: DeadFlag,
     signals: Arc<Mutex<Vec<SignalRecord>>>,
 }
 
 impl ChildSignaler for MockChildSignaler {
     fn signal_term(&self) -> io::Result<()> {
-        if self.dead.load(Ordering::SeqCst) {
+        if self.dead.is_dead() {
             return Ok(());
         }
         self.signals
@@ -288,7 +289,7 @@ impl ChildSignaler for MockChildSignaler {
         Ok(())
     }
     fn signal_kill(&self) -> io::Result<()> {
-        if self.dead.load(Ordering::SeqCst) {
+        if self.dead.is_dead() {
             return Ok(());
         }
         self.signals
@@ -298,17 +299,17 @@ impl ChildSignaler for MockChildSignaler {
         Ok(())
     }
     fn reap_blocking(&self) -> io::Result<()> {
-        if self.dead.load(Ordering::SeqCst) {
+        if self.dead.is_dead() {
             return Ok(());
         }
         self.signals
             .lock()
             .unwrap()
             .push(SignalRecord::Reap(self.pid));
-        self.dead.store(true, Ordering::SeqCst);
+        self.dead.mark_dead();
         Ok(())
     }
     fn is_dead(&self) -> bool {
-        self.dead.load(Ordering::SeqCst)
+        self.dead.is_dead()
     }
 }

@@ -32,6 +32,8 @@
 #[cfg(unix)]
 mod env;
 #[cfg(unix)]
+mod lifecycle;
+#[cfg(unix)]
 mod os;
 #[cfg(unix)]
 mod permits;

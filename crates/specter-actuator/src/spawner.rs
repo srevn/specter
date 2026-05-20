@@ -5,9 +5,10 @@
 //! owns the `Child` for the duration of the wait, while the controller
 //! thread may need to send signals to the same child during shutdown.
 //! [`ChildWaiter`] is owned by the wait thread; [`ChildSignaler`] is
-//! owned by the controller; both share an `Arc<AtomicBool>` (production
-//! impl detail) so signals to a reaped child short-circuit instead of
-//! racing PID-reuse.
+//! owned by the controller; both share a one-shot lifecycle flag (the
+//! `crate::lifecycle::DeadFlag` protocol primitive in production *and*
+//! in the test mock) so signals to a reaped child short-circuit at the
+//! protocol layer instead of racing PID-reuse.
 
 use specter_core::EffectOutcome;
 use std::borrow::Cow;
@@ -155,8 +156,10 @@ impl std::fmt::Debug for PipeSpawnHandles {
 /// The `waiter` is moved to the wait thread (consumed via `Box<Self>`
 /// at wait-call time); the `signaler` stays on the controller, used at
 /// shutdown to deliver SIGTERM and (after the grace window) SIGKILL.
-/// Production impls share an `Arc<AtomicBool>` between the two so
-/// post-reap signals are no-ops (closes the PID-reuse race).
+/// The pair shares a one-shot lifecycle flag (production and mock both
+/// use the `crate::lifecycle::DeadFlag` newtype) so post-reap signals
+/// are no-ops at the protocol layer — closes the PID-reuse race
+/// independently of the kernel-level ESRCH-collapse fallback.
 ///
 /// `signaler` is `Arc<dyn>` because the controller installs the signaler
 /// into the per-job `RunningJob::signaler` slot and *also* clones it
@@ -194,9 +197,10 @@ pub trait ChildWaiter: Send {
 ///
 /// `Send + Sync` lets the controller move signaler boxes between
 /// thread-local maps without ceremony. Implementations short-circuit
-/// when their paired waiter has already returned (the production impl
-/// uses an `Arc<AtomicBool>`); ESRCH from the actual `kill(2)` is
-/// collapsed to `Ok(())` as a defense-in-depth layer.
+/// when their paired waiter has already returned (production and the
+/// test mock both use the shared `crate::lifecycle::DeadFlag`); ESRCH
+/// from the actual `kill(2)` is collapsed to `Ok(())` as a defense-in-
+/// depth layer.
 ///
 /// Neither layer fully closes the PID-reuse race: between `child.wait()`
 /// returning (kernel reaps the zombie; pid eligible for reuse) and the
@@ -229,7 +233,8 @@ pub trait ChildSignaler: Send + Sync {
     /// existed) is collapsed to `Ok(())` so the recovery path is
     /// idempotent. `EINTR` is retried internally.
     ///
-    /// Production impls set the shared `dead` flag on success so any
+    /// Production impls mark the shared dead-flag unconditionally after
+    /// the underlying `waitpid` returns (success OR failure) so any
     /// later `signal_term` / `signal_kill` against the (reusable) pid
     /// short-circuits at the protocol layer — same guarantee the
     /// paired waiter provides on the normal path.
@@ -238,9 +243,9 @@ pub trait ChildSignaler: Send + Sync {
     /// [`Self::reap_blocking`] has run). Lets co-owning threads short-
     /// circuit on natural completion — used by the per-step timer
     /// thread to skip SIGTERM/SIGKILL when a child finishes within its
-    /// deadline. Mirrors the same `dead` flag the existing
-    /// short-circuits in `signal_term` / `signal_kill` consult; exposed
-    /// as its own method so callers don't have to issue a no-op signal
-    /// to probe the state.
+    /// deadline. Reads the same shared dead-flag the
+    /// `signal_term` / `signal_kill` short-circuits consult; exposed as
+    /// its own method so callers don't have to issue a no-op signal to
+    /// probe the state.
     fn is_dead(&self) -> bool;
 }

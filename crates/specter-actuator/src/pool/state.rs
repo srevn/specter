@@ -1733,12 +1733,12 @@ mod tests {
             self.spawns.lock().unwrap().push(pid);
             let (tx, rx) = crossbeam::channel::bounded::<EffectOutcome>(1);
             self.completions.lock().unwrap().insert(pid, tx);
-            let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let dead = crate::lifecycle::DeadFlag::new();
             Ok(SpawnHandles {
                 pid,
                 waiter: Box::new(ScriptedWaiter {
                     rx,
-                    dead: Arc::clone(&dead),
+                    dead: dead.clone(),
                 }),
                 signaler: Arc::new(ScriptedSignaler { dead }),
             })
@@ -1760,27 +1760,27 @@ mod tests {
     }
     struct ScriptedWaiter {
         rx: crossbeam::channel::Receiver<EffectOutcome>,
-        dead: Arc<std::sync::atomic::AtomicBool>,
+        dead: crate::lifecycle::DeadFlag,
     }
     impl ChildWaiter for ScriptedWaiter {
         fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
             let r = self.rx.recv();
-            self.dead.store(true, Ordering::SeqCst);
+            self.dead.mark_dead();
             r.map_err(|_| io::Error::other("waiter channel dropped"))
         }
     }
     struct ScriptedSignaler {
-        dead: Arc<std::sync::atomic::AtomicBool>,
+        dead: crate::lifecycle::DeadFlag,
     }
     impl ChildSignaler for ScriptedSignaler {
         fn signal_term(&self) -> io::Result<()> {
-            if self.dead.load(Ordering::SeqCst) {
+            if self.dead.is_dead() {
                 return Ok(());
             }
             Ok(())
         }
         fn signal_kill(&self) -> io::Result<()> {
-            if self.dead.load(Ordering::SeqCst) {
+            if self.dead.is_dead() {
                 return Ok(());
             }
             Ok(())
@@ -1790,11 +1790,11 @@ mod tests {
             // channel; this method is the recovery-path only and
             // should not be invoked under the tests that use this
             // stub. A no-op is correct for shape-only conformance.
-            self.dead.store(true, Ordering::SeqCst);
+            self.dead.mark_dead();
             Ok(())
         }
         fn is_dead(&self) -> bool {
-            self.dead.load(Ordering::SeqCst)
+            self.dead.is_dead()
         }
     }
 
