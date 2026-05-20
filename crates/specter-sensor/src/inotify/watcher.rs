@@ -29,16 +29,23 @@
 //!
 //! Each entry caches `(wd, mask, kind)`: the watch descriptor returned
 //! by `inotify_add_watch`, the kernel-side mask we last installed, and
-//! the fstat-verified inode shape from fresh-watch time. The triple is
-//! stored as a single struct (not three parallel maps keyed by
-//! `ResourceId`) so every install path writes it atomically and every
-//! teardown clears it atomically — the "forgot to update one of three
-//! maps" failure mode is unrepresentable. Mirror of kqueue's
-//! `KqueueEntry { fd, fflags, kind }`.
+//! the fstat-verified inode shape (established at fresh-watch time;
+//! refreshed only on the slow path of [`InotifyWatcher::rewatch_inner`]
+//! — see its docstring). The triple is stored as a single struct (not
+//! three parallel maps keyed by `ResourceId`) so every install path
+//! writes it atomically and every teardown clears it atomically — the
+//! "forgot to update one of three maps" failure mode is
+//! unrepresentable. Mirror of kqueue's `KqueueEntry { fd, fflags, kind }`.
 //!
 //! A re-`watch()` with an unchanged mask short-circuits without a
-//! syscall — the kernel's "replace mask" semantics on an existing path
-//! produce the same bits, so the call is a noop.
+//! kernel install. The fast path (cached kind is `File` / `Dir`)
+//! short-circuits with **zero syscalls** — the cache predicts the
+//! install mask from `events × cached_kind` and the kernel's "replace
+//! mask" semantics on an existing path would produce identical bits.
+//! The slow path (cached kind is `Unknown`, the rare socket / fifo /
+//! device case) reopens and `fstat`s before the short-circuit check
+//! because the Unknown-collapse mask cannot be trusted to match the
+//! live inode shape. See [`InotifyWatcher::rewatch_inner`].
 
 use crate::inotify::wake::InotifyWakeHandle;
 use crate::inotify::{ffi, normalize, record, translate};
@@ -145,7 +152,7 @@ pub struct InotifyWatcher {
 }
 
 /// Per-resource cached install state — the `(wd, mask, kind)` triple
-/// installed at fresh-watch time.
+/// installed at fresh-watch time and updated atomically on rewatch.
 ///
 /// - `wd` is the watch descriptor returned by `inotify_add_watch`.
 ///   Stable across same-inode re-installs (the kernel's "replace mask"
@@ -154,19 +161,30 @@ pub struct InotifyWatcher {
 /// - `mask` is the exact bits last passed to `inotify_add_watch`,
 ///   including install-time directional flags like `IN_ONLYDIR` for
 ///   Dir watches. A re-`watch()` recomputes the mask from the user's
-///   `events` set and the cached kind; an unchanged mask short-circuits
-///   without a syscall — the kernel's "replace mask" semantics on an
-///   existing path would produce identical bits.
-/// - `kind` is the fstat-verified inode shape at fresh-watch time,
-///   closing the TOCTOU window between the engine's
-///   `WatchOp::Watch.kind` and the kernel's path-resolution at install
-///   time. Consumed by
-///   [`crate::inotify::normalize::mask_to_fs_event`] to disambiguate
-///   `IN_MODIFY` on Dir vs File defensive paths.
+///   `events` set and the cached / observed kind; an unchanged mask
+///   short-circuits without a kernel install (zero syscalls on the
+///   fast path, one open + fstat pair on the slow path — see
+///   [`InotifyWatcher::rewatch_inner`]).
+/// - `kind` is the fstat-verified inode shape, closing the TOCTOU
+///   window between the engine's `WatchOp::Watch.kind` and the kernel's
+///   path-resolution at install time. Established at fresh-watch time
+///   and refreshed only on the slow path of
+///   [`InotifyWatcher::rewatch_inner`] — the rare case where the
+///   fresh-watch fstat returned `Unknown` (socket / fifo / device
+///   target). The fast path treats the cached kind as invariant: an
+///   inode swap surfaces as `IN_DELETE_SELF` / `IN_UNMOUNT` on the
+///   prior wd, the watcher's `poll_until` clears `by_resource[r]` via
+///   the `IN_IGNORED` cleanup arm, and the engine's next `Watch`
+///   re-runs the open + fstat + classify chain through fresh-watch.
+///   Consumed by [`crate::inotify::normalize::mask_to_fs_event`] to
+///   disambiguate `IN_MODIFY` on Dir vs File defensive paths.
 ///
 /// Stored as a single struct so the triple is atomic: every install
 /// path writes all three fields together, every teardown clears them
-/// together. Mirror of kqueue's `KqueueEntry { fd, fflags, kind }`.
+/// together. Mirror of kqueue's `KqueueEntry { fd, fflags, kind }` —
+/// inotify's `kind` is *almost* invariant the way kqueue's strictly is;
+/// the asymmetry tracks the underlying substrate (inotify reopens per
+/// rewatch via `/proc/self/fd/N`; kqueue binds an fd per resource).
 #[derive(Debug, Clone, Copy)]
 struct InotifyEntry {
     wd: libc::c_int,
@@ -245,18 +263,39 @@ impl InotifyWatcher {
     /// Re-register `r`'s entry against the path. Engine triggers this
     /// when `Resource.events_union` changes at non-zero refcount.
     ///
-    /// The cached install mask short-circuits when unchanged. On a
-    /// changed mask, the watcher reopens the path, fstat-verifies the
-    /// inode shape against the cached kind, and installs via
-    /// `inotify_add_watch` on a fresh `/proc/self/fd/N`. An inode-swap
-    /// is detected via the `wd != prior.wd` check (atomic rename
-    /// swapped the path between the prior install and this re-add)
-    /// and the prior wd is drained — kernel-side `IN_IGNORED` arrives
-    /// later in the drain stream and reaps the flag.
+    /// Splits on the cached kind:
     ///
-    /// Doesn't take the engine-supplied `kind` — the cached kind
-    /// (from fresh-watch's fstat verification, invariant for the
-    /// entry's lifetime) is the authoritative value.
+    /// - **Fast path** (`cached_kind ∈ { File, Dir }`). The cache is
+    ///   structurally reliable: an inode swap under the path queues
+    ///   `IN_DELETE_SELF` / `IN_UNMOUNT` on the prior wd, the next
+    ///   `poll_until` drain reaps `by_resource[r]` via the
+    ///   `IN_IGNORED` cleanup arm, and a subsequent `Watch` re-enters
+    ///   through `fresh_watch_inner` — so re-entry to *this* function
+    ///   means the cached kind still matches the live inode. The
+    ///   install mask is predictable from `events × cached_kind`; an
+    ///   unchanged mask short-circuits with **zero syscalls**. A
+    ///   changed mask reopens to detect the rare same-kind atomic
+    ///   rename (the wd-swap window between unlink and the drain),
+    ///   verifies the kind via `matches_or_unknown` (a kind flip
+    ///   surfaces as `ENOTDIR` so the engine reseeds via descent),
+    ///   and commits.
+    ///
+    /// - **Slow path** (`cached_kind == Unknown`). Fresh-watch's fstat
+    ///   classified the inode as non-Dir / non-regular (socket / fifo
+    ///   / device). The Unknown-collapse install mask is File-shape
+    ///   (via [`ResourceKind::effective`]); if an inode swap mutates
+    ///   the path to a Dir / File without an intervening drain,
+    ///   predicting the mask from `cached_kind == Unknown` would
+    ///   silently install File-shape bits on a Dir (missing
+    ///   `IN_CREATE` / `IN_DELETE` / `IN_MOVED_*` / `IN_ONLYDIR`).
+    ///   This branch always reopens + fstats first, derives the
+    ///   install mask from the observed kind, and refreshes the
+    ///   cached kind on commit. No `matches_or_unknown` gate —
+    ///   `Unknown` is the wildcard.
+    ///
+    /// Doesn't take the engine-supplied `kind` — the cached / observed
+    /// value is the source of truth on rewatch (kqueue's rewatch is
+    /// the same shape by construction; inotify mirrors it).
     ///
     /// # Precondition
     ///
@@ -270,6 +309,25 @@ impl InotifyWatcher {
             .copied()
             .expect("rewatch_inner invoked without existing entry");
         let cached_kind = prior.kind;
+
+        if matches!(cached_kind, ResourceKind::Unknown) {
+            return self.rewatch_slow_unknown(r, path, events, prior);
+        }
+        self.rewatch_fast_known(r, path, events, prior)
+    }
+
+    /// Fast-path rewatch for `cached_kind ∈ { File, Dir }`. Predicts
+    /// the install mask from the cache; short-circuits with zero
+    /// syscalls on no diff. See [`Self::rewatch_inner`] for the
+    /// branch's structural invariants.
+    fn rewatch_fast_known(
+        &mut self,
+        r: ResourceId,
+        path: &Path,
+        events: ClassSet,
+        prior: InotifyEntry,
+    ) -> io::Result<()> {
+        let cached_kind = prior.kind;
         let install_mask = compute_install_mask(events, cached_kind);
         if install_mask == prior.mask {
             tracing::trace!(
@@ -281,11 +339,15 @@ impl InotifyWatcher {
             return Ok(());
         }
 
-        // Re-open + fstat. The cached_kind is the engine's
-        // authoritative classification for `r`; verify the inode
-        // shape hasn't mutated under the path. A disagreement maps
-        // to `ENOTDIR` (path-fatal) so the engine reseeds via descent
-        // rather than installing a kind-incoherent watch.
+        // Reopen + fstat. Verifies the inode shape hasn't mutated
+        // under the path during the wd-swap window (rare; bounded by
+        // the bin's drain cadence). `matches_or_unknown` enforces
+        // `observed == cached_kind` here — the `Unknown` wildcard
+        // self-branch is excluded by this function's entry condition,
+        // so the gate trips iff the inode actually flipped kind. A
+        // disagreement maps to `ENOTDIR` (path-fatal); the engine
+        // reseeds via descent rather than installing a kind-incoherent
+        // watch.
         let fd = ffi::open_o_path(path)?;
         let observed_kind = ffi::fstat_kind(&fd)?;
         if !cached_kind.matches_or_unknown(observed_kind) {
@@ -299,6 +361,69 @@ impl InotifyWatcher {
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
         }
 
+        // Gate passed ⇒ `observed_kind == cached_kind` (gate excludes
+        // the Unknown-wildcard arm on this branch), so the predicted
+        // `install_mask` is the install mask. Cache stays at
+        // `cached_kind`.
+        self.commit_rewatch(r, &fd, install_mask, cached_kind, prior)
+    }
+
+    /// Slow-path rewatch for `cached_kind == Unknown`. Always reopens
+    /// and fstats to derive the install mask from the live inode
+    /// shape; refreshes the cached kind on commit. See
+    /// [`Self::rewatch_inner`] for why the fast-path optimization is
+    /// unsound here.
+    fn rewatch_slow_unknown(
+        &mut self,
+        r: ResourceId,
+        path: &Path,
+        events: ClassSet,
+        prior: InotifyEntry,
+    ) -> io::Result<()> {
+        let fd = ffi::open_o_path(path)?;
+        let observed_kind = ffi::fstat_kind(&fd)?;
+        let install_mask = compute_install_mask(events, observed_kind);
+
+        // Genuine noop: mask unchanged AND the inode is still
+        // non-classifiable. Skip the kernel install; the cache stays
+        // at Unknown so the next rewatch re-checks. The mask-equal
+        // check alone is not sufficient — a flip from Unknown to File
+        // can produce the same File-shape mask but must still refresh
+        // the cached kind so future rewatches take the fast path.
+        if install_mask == prior.mask && matches!(observed_kind, ResourceKind::Unknown) {
+            tracing::trace!(
+                ?r,
+                ?events,
+                mask = format_args!("{install_mask:#x}"),
+                "inotify re-watch noop (mask unchanged; cached kind still Unknown)"
+            );
+            return Ok(());
+        }
+        self.commit_rewatch(r, &fd, install_mask, observed_kind, prior)
+    }
+
+    /// Shared rewatch commit: install via `inotify_add_watch` on
+    /// `/proc/self/fd/N`, detect wd-swap (atomic rename of the path
+    /// between prior install and this re-add), guard against hardlink
+    /// aliasing, then atomically replace `r`'s [`InotifyEntry`].
+    ///
+    /// `kind` is the value to store in the refreshed entry — the
+    /// fast path passes the (invariant) `prior.kind`; the slow path
+    /// passes the freshly observed kind.
+    ///
+    /// Failure shape: `inotify_add_watch` errors propagate before any
+    /// state mutation. A successful add followed by hardlink-aliasing
+    /// rejection routes through [`Self::reject_aliased_install`],
+    /// which restores the aliased resource's mask and clears `r`'s
+    /// entry — the engine sees a clean unwatched state for `r`.
+    fn commit_rewatch(
+        &mut self,
+        r: ResourceId,
+        fd: &OwnedFd,
+        install_mask: u32,
+        kind: ResourceKind,
+        prior: InotifyEntry,
+    ) -> io::Result<()> {
         let proc_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
         let proc_path_ref = Path::new(&proc_path);
         let wd = ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, install_mask)?;
@@ -344,17 +469,13 @@ impl InotifyWatcher {
             return Err(io::Error::from_raw_os_error(libc::EEXIST));
         }
 
-        // Commit the new (wd, mask, kind) triple atomically. Kind is
-        // preserved from the prior entry — the re-watch path never
-        // refreshes the cached kind (it stays at whatever fresh-watch's
-        // fstat established). An inode-swap with a kind flip would
-        // have failed the `matches_or_unknown` gate above.
+        // Commit the new (wd, mask, kind) triple atomically.
         self.by_resource.insert(
             r,
             InotifyEntry {
                 wd,
                 mask: install_mask,
-                kind: cached_kind,
+                kind,
             },
         );
         self.by_wd.insert(wd, r);
@@ -363,7 +484,9 @@ impl InotifyWatcher {
             wd,
             old_mask = format_args!("{:#x}", prior.mask),
             new_mask = format_args!("{install_mask:#x}"),
-            "inotify rewatch (mask changed)"
+            old_kind = ?prior.kind,
+            new_kind = ?kind,
+            "inotify rewatch (mask or kind changed)"
         );
         Ok(())
     }

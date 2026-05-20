@@ -238,6 +238,96 @@ fn rewatch_with_same_mask_preserves_registration() {
     drop(w);
 }
 
+/// Slow-path rewatch over a `cached_kind == Unknown` entry must derive
+/// the install mask from the *observed* inode shape, not from the
+/// stale Unknown cache. F-HIGH-1 regression guard.
+///
+/// Setup mirrors the audit's lifecycle: fresh-watch a Unix domain
+/// socket (`fstat` collapses non-Dir / non-regular kinds to `Unknown`),
+/// unlink + recreate a Dir at the same path *without* an intervening
+/// drain so `by_resource[r]` keeps its Unknown cache, then rewatch
+/// with events that force `compute_install_mask` to differ under
+/// `cached_kind = Unknown`. The broken behaviour collapses
+/// `STRUCTURE | METADATA × Unknown` to File-shape (`effective = File`
+/// drops STRUCTURE; only `IN_ATTRIB` is added) and installs that on
+/// the Dir — silently dropping `IN_CREATE | IN_DELETE | IN_MOVED_*`.
+/// The fix reopens + fstats first, derives the mask from `observed =
+/// Dir`, and installs `IN_CREATE` etc., so a child file create fires
+/// `StructureChanged` on `r`.
+#[test]
+fn rewatch_after_unknown_cache_with_kind_flip_installs_observed_mask() {
+    use std::os::unix::net::UnixListener;
+
+    let tmp = TempDir::new().unwrap();
+    let anchor = tmp.path().join("anchor");
+
+    // Bind a Unix domain socket at `anchor`. The fstat of an
+    // `O_PATH` fd over a socket inode returns `Unknown` (S_IFSOCK is
+    // neither S_IFDIR nor S_IFREG), so the watcher caches
+    // `kind = Unknown` on commit.
+    let listener = UnixListener::bind(&anchor).expect("bind unix socket");
+
+    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut sm = SlotMap::<ResourceId, ()>::with_key();
+    let r = sm.insert(());
+
+    // Engine kind is also `Unknown` (descent-placeholder default for
+    // an unprobed slot); `ClassSet::EMPTY` keeps the prior mask at
+    // identity-floor + defence so the rewatch step is guaranteed to
+    // change the mask.
+    w.watch(r, &anchor, ResourceKind::Unknown, ClassSet::EMPTY)
+        .expect("fresh-watch on socket should succeed under Unknown wildcard");
+
+    // Replace the socket with a directory at the same path. Dropping
+    // the listener closes its socket fd; `remove_file` unlinks the
+    // inode (kernel queues IN_DELETE_SELF + IN_IGNORED on the prior
+    // wd); `create_dir` installs a fresh Dir inode at `anchor`.
+    //
+    // No `poll_until` between these steps and the rewatch below —
+    // draining would consume the IN_IGNORED, the `IN_IGNORED` arm in
+    // `poll_once` would clear `by_resource[r]`, and the next watch
+    // would route through fresh-watch (not rewatch). The bug only
+    // bites when rewatch re-enters with the Unknown cache intact.
+    drop(listener);
+    std::fs::remove_file(&anchor).unwrap();
+    std::fs::create_dir(&anchor).unwrap();
+
+    // Rewatch with `STRUCTURE | METADATA`. Under `cached_kind =
+    // Unknown` (broken path), `STRUCTURE` collapses to no-op
+    // (effective File is structure-blind) and `METADATA` adds
+    // `IN_ATTRIB` — install mask differs from the prior, forcing the
+    // pre-fix code to reopen and install the File-shape mask on the
+    // Dir. Under the fix, the slow path observes `Dir`, computes the
+    // Dir-shape mask (`IN_CREATE | IN_DELETE | IN_MOVED_* | IN_ATTRIB
+    // | IN_ONLYDIR` over the identity floor), and refreshes the cached
+    // kind to Dir.
+    w.watch(
+        r,
+        &anchor,
+        ResourceKind::Unknown,
+        ClassSet::STRUCTURE | ClassSet::METADATA,
+    )
+    .expect("rewatch over Unknown→Dir swap should install Dir-shape mask");
+
+    // Child file create — only fires `StructureChanged` on `r` if
+    // the install carried `IN_CREATE` on the Dir wd.
+    std::fs::write(anchor.join("child.txt"), "x").unwrap();
+    let out = drain_until(
+        &mut w,
+        |(rid, e)| *rid == r && *e == FsEvent::StructureChanged,
+        Duration::from_secs(2),
+    );
+    assert!(
+        out.iter()
+            .any(|(rid, e)| *rid == r && *e == FsEvent::StructureChanged),
+        "post Unknown→Dir rewatch, child create should fire StructureChanged \
+         (proves the install mask carried IN_CREATE — i.e., the observed kind \
+         drove `compute_install_mask`, not the stale Unknown cache); got {out:?}"
+    );
+
+    drop(w);
+}
+
 /// `unwatch` clears the per-resource cache so a subsequent fresh `watch`
 /// re-installs from scratch. Cache-lifecycle invariant.
 #[test]
