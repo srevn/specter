@@ -25,9 +25,9 @@
 //!    borrow — no allocation on the lookup path.
 //!
 //! Specter never `setenv`s internally, so the snapshot doesn't go stale
-//! under our own code. An operator wanting live re-reads on SIGHUP would
-//! need to swap this for a `dyn EnvSource` and propagate re-captures
-//! through the actuator's existing `Arc<EnvSnapshot>` swap point.
+//! under our own code. A future SIGHUP-reload pipeline would capture a
+//! fresh `EnvSnapshot` and replace `ActuatorState.env_snapshot` from the
+//! controller thread; no swap point exists today, reload is v2 work.
 //!
 //! Non-UTF-8 entries are dropped at capture time and logged at
 //! `tracing::warn!`. The lexer [`crate::spawner`]'s upstream grammar

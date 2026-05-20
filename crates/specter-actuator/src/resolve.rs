@@ -99,6 +99,9 @@
 //! The env-side surface carries segments only — inodes and rename pairing
 //! live in the line-oriented `SPECTER_DIFF_PATH` tmp file.
 //!
+//! Segments carrying `\n` corrupt the newline-joined value — see
+//! [`crate::tmp`]'s module-level note on embedded delimiters.
+//!
 //! # Single-pass multi-value dispatch
 //!
 //! Both surfaces — argv prefix-tiling and env newline-joining — funnel

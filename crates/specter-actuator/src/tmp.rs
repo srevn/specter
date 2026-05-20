@@ -20,6 +20,17 @@
 //! renames preserve inode in v1's single-mount probes). Path is
 //! anchor-relative (`EntryRef.segment`); user scripts join with
 //! `$SPECTER_ANCHOR` for absolute.
+//!
+//! # Embedded-delimiter limitation
+//!
+//! v1's sensor walk accepts any filename byte except `/` and NUL —
+//! including `\n` and `\t`. Segments carrying these bytes corrupt both
+//! this file's tab-separated format and the resolver's newline-joined
+//! `SPECTER_{CREATED,DELETED,MODIFIED,RENAMED_FROM,RENAMED_TO,EXCLUDED}`
+//! env vars. Operators with such filenames in watched trees should
+//! parse `SPECTER_DIFF_PATH` records defensively (e.g., a
+//! NUL-terminated reader) or constrain their watch roots. v2 will
+//! switch to NUL-separated env vars and escape-encoded tmp records.
 
 use specter_core::{CorrelationId, Diff, EntryRef, Rename};
 use std::io::{self, Write};
@@ -27,7 +38,7 @@ use std::path::{Path, PathBuf};
 
 /// Path for an Effect's diff tmp file.
 #[must_use]
-pub fn tmp_path(correlation: CorrelationId) -> PathBuf {
+pub(crate) fn tmp_path(correlation: CorrelationId) -> PathBuf {
     std::env::temp_dir().join(format!(
         "specter-{pid}-{corr:016x}.diff",
         pid = std::process::id(),
@@ -36,7 +47,7 @@ pub fn tmp_path(correlation: CorrelationId) -> PathBuf {
 }
 
 /// Write the [`Diff`] to `path` in the tab-separated diff format.
-pub fn write_diff_file(path: &Path, diff: &Diff) -> io::Result<()> {
+pub(crate) fn write_diff_file(path: &Path, diff: &Diff) -> io::Result<()> {
     let mut f = std::fs::File::create(path)?;
     for e in &diff.created {
         write_entry(&mut f, "created", e)?;
@@ -81,7 +92,7 @@ fn write_rename(f: &mut std::fs::File, r: &Rename) -> io::Result<()> {
 
 /// Best-effort cleanup. Logs at warn on non-NotFound errors; ENOENT
 /// (already gone) is silent.
-pub fn cleanup(path: &Path) {
+pub(crate) fn cleanup(path: &Path) {
     if let Err(e) = std::fs::remove_file(path)
         && e.kind() != io::ErrorKind::NotFound
     {
