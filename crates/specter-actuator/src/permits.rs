@@ -10,7 +10,7 @@
 //! processed mid-block. The pump defers slots whose acquire failed back
 //! to a transient buffer, restoring FIFO at end-of-pump.
 
-use crossbeam::channel::{Receiver, Sender, bounded};
+use crossbeam::channel::{Receiver, Sender, TrySendError, bounded};
 use std::num::NonZeroUsize;
 
 /// Counting semaphore.
@@ -55,6 +55,7 @@ impl Permits {
 }
 
 /// RAII permit guard. Releases on drop.
+#[must_use]
 #[derive(Debug)]
 pub struct Permit {
     tx: Sender<()>,
@@ -62,14 +63,18 @@ pub struct Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        // `try_send` is non-blocking: under our invariant the channel
-        // can never be at capacity here (we hold one of N tokens, so at
-        // most N-1 sit in the channel). On `Full(_)` the invariant has
-        // been broken (e.g. a double-drop in a buggy wrapper) and we
-        // discard the token rather than deadlock. On `Disconnected(_)`
-        // the [`Permits`] has been dropped — the token vanishes with
-        // the already-gone semaphore (actuator teardown).
-        let _ = self.tx.try_send(());
+        // Under our invariant we hold one of N tokens, so the channel
+        // can never be at capacity here. `Full` ⇒ double-drop or
+        // accounting bug — `debug_assert` in dev, silent in release
+        // (discard the token rather than deadlock). `Disconnected` ⇒
+        // [`Permits`] dropped first (actuator teardown); the token
+        // vanishes with the already-gone semaphore.
+        if self.tx.try_send(()) == Err(TrySendError::Full(())) {
+            debug_assert!(
+                false,
+                "Permit::drop: channel at capacity; double-drop or accounting bug",
+            );
+        }
     }
 }
 

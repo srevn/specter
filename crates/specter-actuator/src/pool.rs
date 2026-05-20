@@ -34,7 +34,7 @@ pub const DEFAULT_CONCURRENCY: usize = 0;
 /// Read by:
 /// - [`SubprocessActuator::shutdown`] (the SIGTERM → grace → SIGKILL
 ///   sequence).
-/// - [`crate::timer::spawn_timer`] (per-step deadline enforcement).
+/// - [`crate::timer::arm_timer`] (per-step deadline enforcement).
 ///
 /// Default for production; tests may override via
 /// [`SubprocessActuator::new_with_grace`] /

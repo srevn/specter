@@ -608,9 +608,8 @@ impl Engine {
             ProbeOwner::Promoter(qid) => {
                 // Descent / enumeration are path-only; no proof
                 // obligation, no kind dispatch, so an immutable `get`
-                // suffices. The
-                // enumeration slot's tag is the proxy target the
-                // path-only wire cannot echo back.
+                // suffices. The enumeration slot's tag is the proxy
+                // target the path-only wire cannot echo back.
                 let q = self.promoters.get(qid)?;
                 let correlation = q.state().probe_correlation()?;
                 let target = match q.state() {

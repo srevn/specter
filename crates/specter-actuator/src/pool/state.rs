@@ -132,17 +132,6 @@ enum SpawnFailureCause {
     WaitThread,
 }
 
-/// Parameter bundle for arming a per-step timer thread. Bundled as an
-/// `Option<TimerSpec>` at the install site so the arm-or-skip intent
-/// is declarative: `Some(spec) ⇒ arm; None ⇒ skip`. Replaces a trio
-/// of loose locals (`timeout`, `timer_grace`, `timer_signaler`) that
-/// the previous shape carried in parallel — easy to typo-mismatch.
-struct TimerSpec {
-    deadline: Duration,
-    grace: Duration,
-    signaler: Arc<dyn ChildSignaler>,
-}
-
 /// Per-`DedupKey` actuator slot.
 ///
 /// At most one in-flight child ([`running`]) plus a single
@@ -273,7 +262,7 @@ pub(crate) struct ActuatorState {
     pub env_snapshot: Arc<EnvSnapshot>,
     /// SIGTERM → SIGKILL grace. Reads:
     /// - shutdown drain ([`super::SubprocessActuator::shutdown`]);
-    /// - per-step timer thread grace ([`crate::timer::spawn_timer`]).
+    /// - per-step timer thread grace ([`crate::timer::arm_timer`]).
     ///
     /// Pinned in one place so the two paths can't drift on the
     /// constant.
@@ -1185,12 +1174,12 @@ impl ActuatorState {
         // `catch_unwind`). Clone the two extras here, then move the
         // original into `RunningJob` — keeps the controller's
         // install-side reference live regardless of whether either
-        // sibling spawn succeeds.
-        let timer_spec: Option<TimerSpec> = exec.timeout().map(|deadline| TimerSpec {
-            deadline,
-            grace: self.shutdown_grace,
-            signaler: Arc::clone(&signaler),
-        });
+        // sibling spawn succeeds. The timer clone is conditional
+        // (only paid when `exec.timeout().is_some()`) and pairs the
+        // cloned Arc with its deadline so the two can't drift apart.
+        let timer_arm: Option<(Duration, Arc<dyn ChildSignaler>)> = exec
+            .timeout()
+            .map(|deadline| (deadline, Arc::clone(&signaler)));
         let signaler_for_wait = Arc::clone(&signaler);
         let diff_tmp_path: Option<PathBuf> = diff_path.map(Path::to_path_buf);
         let slot = self
@@ -1216,34 +1205,21 @@ impl ActuatorState {
             reap_tx,
         )?;
 
-        // Per-step timer: spawn AFTER the wait thread is alive so the
+        // Per-step timer: arm AFTER the wait thread is alive so the
         // wait thread's `dead` flag is the natural-completion signal
-        // the timer short-circuits on. Best-effort — see
-        // [`crate::timer`] module docs for the spawn-failure policy.
-        if let Some(spec) = timer_spec {
-            // Thread name budget: Linux pthread_setname_np truncates
-            // to 15 chars + null, so we shape the name around what
-            // `ps -T` / `gdb info threads` can render without
-            // truncation. `c{cursor}-pid{pid}` fits a 9-char pid
-            // unscathed. The sub identifier is intentionally omitted
-            // — adding it would push the name past the Linux ceiling.
-            // Sub/key cross-reference is via `tracing` logs keyed on
-            // the same `pid` (the `tracing::debug!` line below emits
-            // ?key + pid; live system inspection follows pid → log
-            // for the sub identity).
-            let timer_name = format!("c{cursor}-pid{pid}");
-            if let Err(e) =
-                timer::spawn_timer(&timer_name, spec.deadline, spec.grace, spec.signaler)
-            {
-                tracing::error!(
-                    ?key,
+        // the timer short-circuits on. Best-effort + log-and-proceed
+        // policy lives inside [`timer::arm_timer`].
+        if let Some((deadline, timer_signaler)) = timer_arm {
+            timer::arm_timer(
+                deadline,
+                self.shutdown_grace,
+                timer_signaler,
+                timer::TimerContext::Exec {
+                    key: *key,
                     cursor,
                     pid,
-                    timeout = ?exec.timeout(),
-                    ?e,
-                    "per-step timer thread spawn failed; deadline not enforced",
-                );
-            }
+                },
+            );
         }
 
         tracing::debug!(?key, cursor, pid, "spawned instruction");
@@ -1358,37 +1334,6 @@ impl ActuatorState {
             stage_signalers,
         } = handles;
 
-        // Pre-clone the per-stage Arcs that the optional per-stage
-        // timer threads will hold. `stage_signalers` is a local
-        // owning the Box<[Arc<...>]> — each `Arc::clone` here mints
-        // a fresh handle for the timer thread; the locals' Arcs drop
-        // when this function returns, leaving the timer threads (and
-        // the aggregating PipeWaiter, which has its own per-stage
-        // clones) as the per-stage signaler co-owners.
-        //
-        // `filter_map` collects only the stages that carry a timeout —
-        // most pipes don't, and reserving slot space for absent specs
-        // would waste a `Vec<Option<…>>` over `Vec<(usize, …)>`. The
-        // `usize` is the stage index so the consumer loop can name
-        // threads by stage.
-        let timer_specs: Vec<(usize, TimerSpec)> = stages
-            .iter()
-            .zip(stage_signalers.iter())
-            .enumerate()
-            .filter_map(|(idx, (stage, signaler))| {
-                stage.timeout().map(|deadline| {
-                    (
-                        idx,
-                        TimerSpec {
-                            deadline,
-                            grace: self.shutdown_grace,
-                            signaler: Arc::clone(signaler),
-                        },
-                    )
-                })
-            })
-            .collect();
-
         // Clone the combined signaler for the wait-thread's
         // dead-ratchet backstop before moving the original into
         // `RunningJob`. `CombinedSignaler::mark_dead` fans out to every
@@ -1420,25 +1365,33 @@ impl ActuatorState {
             permit,
             reap_tx,
         )?;
-        // `stage_signalers` (the install-time local Arc handles) drop
-        // here; the aggregating waiter and any armed timer threads
-        // keep the per-stage signalers alive through reap.
-        drop(stage_signalers);
 
-        // Per-stage timers. Best-effort: a spawn-failure for one
-        // stage's timer leaves that stage without a deadline but the
-        // rest of the pipe and the other timers are unaffected.
-        for (idx, spec) in timer_specs {
-            let timer_name = format!("pipe-c{cursor}-s{idx}-pid{last_pid}");
-            if let Err(e) =
-                timer::spawn_timer(&timer_name, spec.deadline, spec.grace, spec.signaler)
-            {
-                tracing::error!(
-                    ?key,
-                    cursor,
-                    stage = idx,
-                    ?e,
-                    "per-stage timer thread spawn failed; deadline not enforced",
+        // Per-stage timers: arm AFTER the wait thread is alive so the
+        // wait thread's per-stage `dead` flags are the natural-
+        // completion signal each timer short-circuits on. The wait-
+        // thread `?` above also ensures we don't arm timers for a pipe
+        // with no waiter (would leave undrained orphans).
+        //
+        // Best-effort + log-and-proceed policy lives inside
+        // [`timer::arm_timer`]. The per-stage `Arc::clone(sig)` is paid
+        // only on stages that carry a timeout — most pipes don't.
+        // `stage_signalers` (the install-time local `Arc` handles) drop
+        // at function exit; the aggregating waiter and any armed timer
+        // threads keep the per-stage signalers alive through reap.
+        for (idx, (stage, sig)) in stages.iter().zip(stage_signalers.iter()).enumerate() {
+            if let Some(deadline) = stage.timeout() {
+                let stage = u32::try_from(idx)
+                    .expect("pipe stage count is bounded by spawn arity (≤ u32::MAX)");
+                timer::arm_timer(
+                    deadline,
+                    self.shutdown_grace,
+                    Arc::clone(sig),
+                    timer::TimerContext::PipeStage {
+                        key: *key,
+                        cursor,
+                        stage,
+                        pid: last_pid,
+                    },
                 );
             }
         }
