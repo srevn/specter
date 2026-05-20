@@ -96,6 +96,15 @@ pub enum IssueKind {
     /// validator rejects it so the operator's intent is unambiguous;
     /// `exec = [...]` at the action's top level is the right shape.
     SingleStagePipe,
+    /// `actions[i]` nests `when` / `then` / `else` past the validator's
+    /// recursion bound (see `MAX_CONDITIONAL_DEPTH` in `config.rs`).
+    /// Surfaces before any further descent at the offending level —
+    /// keeps adversarial inputs from blowing the validator's stack
+    /// without constraining sensible operator workflows (real configs
+    /// rarely exceed five levels). Independent of the underlying TOML
+    /// parser's own recursion limit (a separate, parser-version-
+    /// dependent concern).
+    ConditionalNestedTooDeep,
     /// Internal lowering invariant violation — an unpatched edge, a
     /// backward branch, or an out-of-bounds target leaked from the
     /// lowering pass. Unreachable from a correct lowering, surfaced as
@@ -214,6 +223,7 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::EmptyConditional => "empty-conditional",
         IssueKind::EmptyPipe => "empty-pipe",
         IssueKind::SingleStagePipe => "single-stage-pipe",
+        IssueKind::ConditionalNestedTooDeep => "conditional-nested-too-deep",
         IssueKind::LoweringInternal => "lowering-internal",
     }
 }

@@ -27,6 +27,16 @@ pub(crate) const DEFAULT_MAX_SETTLE: Duration = Duration::from_hours(1);
 /// nonsense of `max_settle ≤ settle` (a single settle round would
 /// already exceed it).
 const MAX_SETTLE_FLOOR_FACTOR: u32 = 4;
+/// Hard cap on `[[watch.actions]]` conditional nesting depth. Each
+/// `when` / `then` / `else` triple descends one level of validator
+/// recursion; [`validate_action_list`] short-circuits with
+/// [`IssueKind::ConditionalNestedTooDeep`] when the depth bound is
+/// exceeded, keeping the validator's stack consumption finite under
+/// adversarial input. Sensible operator configs are ≤5 levels deep,
+/// so `32` is generous defense-in-depth, not a real workflow
+/// constraint. The bound is parser-independent — the underlying TOML
+/// crate's own recursion limit is a separate concern.
+const MAX_CONDITIONAL_DEPTH: u8 = 32;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
@@ -608,7 +618,7 @@ fn validate_actions(
         )]);
     }
 
-    let tree = validate_action_list(idx, "actions", raw_actions)?;
+    let tree = validate_action_list(idx, "actions", raw_actions, 0)?;
     lower_to_program(&tree).map_err(|e| {
         vec![ValidationIssue::from_program_error(
             &e,
@@ -631,16 +641,36 @@ fn validate_actions(
 /// emptiness — it returns `Ok(Vec::new())` in that case so the
 /// caller can fold the empty branch into the AST as `None` (no else)
 /// or apply the conditional-level check.
+///
+/// `depth` is the conditional nesting level of *this* slice: `0` at
+/// the [`validate_actions`] entry, incremented by `1` each time
+/// [`validate_conditional`] recurses into a `then` / `else` body.
+/// When `depth` exceeds [`MAX_CONDITIONAL_DEPTH`] the function
+/// short-circuits with [`IssueKind::ConditionalNestedTooDeep`]
+/// *before* iterating — adversarial inputs cannot drive the validator
+/// past the bound, and the lowering pass downstream can rely on the
+/// guarantee without a mirror check.
 fn validate_action_list(
     watch_idx: usize,
     path: &str,
     raw_actions: &[RawAction],
+    depth: u8,
 ) -> Result<Vec<Action>, Vec<ValidationIssue>> {
+    if depth > MAX_CONDITIONAL_DEPTH {
+        return Err(vec![ValidationIssue::new(
+            Some(watch_idx),
+            "actions",
+            IssueKind::ConditionalNestedTooDeep,
+            format!(
+                "{path}: conditional nesting exceeds the maximum depth of {MAX_CONDITIONAL_DEPTH}",
+            ),
+        )]);
+    }
     let mut tree: Vec<Action> = Vec::with_capacity(raw_actions.len());
     let mut errors: Vec<ValidationIssue> = Vec::new();
     for (j, raw) in raw_actions.iter().enumerate() {
         let child_path = format!("{path}[{j}]");
-        match validate_one_action(watch_idx, &child_path, raw) {
+        match validate_one_action(watch_idx, &child_path, raw, depth) {
             Ok(action) => tree.push(action),
             Err(mut es) => errors.append(&mut es),
         }
@@ -660,11 +690,15 @@ fn validate_action_list(
 /// `path` is the action's breadcrumb-style label
 /// (`"actions[0]"`, `"actions[0].then[1]"`, etc). Error messages
 /// quote it so operators can locate the offending entry without
-/// re-counting nested arrays.
+/// re-counting nested arrays. `depth` is the conditional nesting
+/// level of the enclosing slice — passed unchanged to
+/// [`validate_conditional`], which bumps it by `1` before descending
+/// into `then` / `else`.
 fn validate_one_action(
     watch_idx: usize,
     path: &str,
     raw: &RawAction,
+    depth: u8,
 ) -> Result<Action, Vec<ValidationIssue>> {
     let is_exec = raw.exec.is_some();
     let is_pipe = raw.pipe.is_some();
@@ -711,7 +745,7 @@ fn validate_one_action(
         return validate_pipe(watch_idx, path, stages);
     }
     if is_conditional {
-        return validate_conditional(watch_idx, path, raw);
+        return validate_conditional(watch_idx, path, raw, depth);
     }
     unreachable!("variants_set ∈ {{1}} and exec/pipe/conditional are exhaustive in v1")
 }
@@ -787,11 +821,15 @@ fn validate_pipe(
 ///
 /// Per-branch errors (argv shape, nested action variants, etc.) are
 /// collected alongside the structural errors so a single config-load
-/// surfaces every issue.
+/// surfaces every issue. `depth` is the nesting level of the slice
+/// this conditional lives in; recursion into `then` / `else` advances
+/// it by `1` so [`validate_action_list`]'s
+/// [`MAX_CONDITIONAL_DEPTH`] gate sees the descending count.
 fn validate_conditional(
     watch_idx: usize,
     path: &str,
     raw: &RawAction,
+    depth: u8,
 ) -> Result<Action, Vec<ValidationIssue>> {
     let when_raw = raw.when.as_ref();
     let then_raw = raw.then.as_deref();
@@ -838,7 +876,7 @@ fn validate_conditional(
     let when_r = validate_raw_exec(watch_idx, &when_path, when_raw);
 
     let then_path = format!("{path}.then");
-    let then_r = validate_action_list(watch_idx, &then_path, then_raw);
+    let then_r = validate_action_list(watch_idx, &then_path, then_raw, depth + 1);
 
     // `Some(empty)` normalises to `None` so the AST shape matches the
     // lowering precondition (`Some(_)` ⇒ non-empty body). Lowering also
@@ -847,7 +885,7 @@ fn validate_conditional(
     let otherwise_r: Result<Option<Vec<Action>>, Vec<ValidationIssue>> = match otherwise_raw {
         Some(body) if !body.is_empty() => {
             let p = format!("{path}.else");
-            validate_action_list(watch_idx, &p, body).map(Some)
+            validate_action_list(watch_idx, &p, body, depth + 1).map(Some)
         }
         Some(_) | None => Ok(None),
     };
