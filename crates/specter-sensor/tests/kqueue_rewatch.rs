@@ -1,8 +1,8 @@
-//! Re-registration on mask change — the per-FD `registered_fflags`
+//! Re-registration on mask change — the per-entry `KqueueEntry.fflags`
 //! cache + `EV_ADD`-overwrites-fflags semantics.
 //!
 //! These tests exercise [`KqueueWatcher::watch`]'s re-watch path: a
-//! second `watch()` call on a resource that already holds an `OwnedFd`.
+//! second `watch()` call on a resource that already holds an entry.
 //! The watcher diffs the cached fflags against the translator's output
 //! for the new `(events, kind)` and re-registers via `EV_ADD` when
 //! they differ. macOS / FreeBSD only.

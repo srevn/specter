@@ -27,12 +27,18 @@
 //!
 //! # Per-resource entry cache
 //!
-//! Each entry caches `(wd, mask)`: the watch descriptor returned by
-//! `inotify_add_watch` and the kernel-side mask we last installed. A
-//! re-`watch()` with an unchanged mask short-circuits without a
+//! Each entry caches `(wd, mask, kind)`: the watch descriptor returned
+//! by `inotify_add_watch`, the kernel-side mask we last installed, and
+//! the fstat-verified inode shape from fresh-watch time. The triple is
+//! stored as a single struct (not three parallel maps keyed by
+//! `ResourceId`) so every install path writes it atomically and every
+//! teardown clears it atomically — the "forgot to update one of three
+//! maps" failure mode is unrepresentable. Mirror of kqueue's
+//! `KqueueEntry { fd, fflags, kind }`.
+//!
+//! A re-`watch()` with an unchanged mask short-circuits without a
 //! syscall — the kernel's "replace mask" semantics on an existing path
-//! produce the same bits, so the call is a noop. Mirrors kqueue's
-//! `registered_fflags` discipline.
+//! produce the same bits, so the call is a noop.
 
 use crate::inotify::wake::InotifyWakeHandle;
 use crate::inotify::{ffi, normalize, record, translate};
@@ -81,10 +87,14 @@ pub struct InotifyWatcher {
     /// only `poll_until` reads from it; wake handles never touch it.
     epoll_fd: OwnedFd,
 
-    /// `ResourceId → (wd, mask)`. Populated by `watch()` on successful
-    /// install, cleared by `unwatch()`. The mask cache lets a
-    /// re-`watch()` skip the syscall when the install mask is unchanged
-    /// (mirror of kqueue's `registered_fflags`).
+    /// `ResourceId → (wd, mask, kind)`. Populated by `watch()` on
+    /// successful install, cleared by `unwatch()`. The mask cache lets
+    /// a re-`watch()` skip the syscall when the install mask is
+    /// unchanged (mirror of kqueue's `fflags` discipline); the kind
+    /// cache is consumed by
+    /// [`crate::inotify::normalize::mask_to_fs_event`] for File-vs-Dir
+    /// disambiguation. See [`InotifyEntry`] for the field-level
+    /// lifecycle.
     by_resource: SecondaryMap<ResourceId, InotifyEntry>,
 
     /// `wd → ResourceId`. inotify events don't carry userdata
@@ -94,14 +104,6 @@ pub struct InotifyWatcher {
     /// at typical watch counts and avoid the `HashMap` ban from
     /// `deny.toml` for sensor-side state.
     by_wd: BTreeMap<libc::c_int, ResourceId>,
-
-    /// Per-resource kind cache. Populated at fresh-watch time from the
-    /// `fstat` of the freshly opened fd — closing the TOCTOU window
-    /// between the engine's `WatchOp::Watch.kind` and the
-    /// kernel's path-resolution at install time. Used by
-    /// [`crate::inotify::normalize::mask_to_fs_event`] to disambiguate
-    /// `IN_MODIFY` on Dir vs File defensive paths.
-    kinds: SecondaryMap<ResourceId, ResourceKind>,
 
     /// `wd`s in the "draining" state: `inotify_rm_watch` has been
     /// called but the kernel's `IN_IGNORED` for that wd has not yet
@@ -142,18 +144,34 @@ pub struct InotifyWatcher {
     seen: BTreeSet<(ResourceId, FsEvent)>,
 }
 
-/// Per-resource cached install state.
+/// Per-resource cached install state — the `(wd, mask, kind)` triple
+/// installed at fresh-watch time.
 ///
-/// `mask` is the exact bits passed to `inotify_add_watch` (including
-/// install-time directional flags like `IN_ONLYDIR` for Dir watches).
-/// A re-`watch()` recomputes the mask from the user's `events` set and
-/// the cached kind; an unchanged mask short-circuits without a syscall
-/// — the kernel's "replace mask" semantics on an existing path would
-/// produce identical bits.
+/// - `wd` is the watch descriptor returned by `inotify_add_watch`.
+///   Stable across same-inode re-installs (the kernel's "replace mask"
+///   semantics return the same wd); changes on inode-swap — see the
+///   `wd != prior.wd` branch in the re-watch path.
+/// - `mask` is the exact bits last passed to `inotify_add_watch`,
+///   including install-time directional flags like `IN_ONLYDIR` for
+///   Dir watches. A re-`watch()` recomputes the mask from the user's
+///   `events` set and the cached kind; an unchanged mask short-circuits
+///   without a syscall — the kernel's "replace mask" semantics on an
+///   existing path would produce identical bits.
+/// - `kind` is the fstat-verified inode shape at fresh-watch time,
+///   closing the TOCTOU window between the engine's
+///   `WatchOp::Watch.kind` and the kernel's path-resolution at install
+///   time. Consumed by
+///   [`crate::inotify::normalize::mask_to_fs_event`] to disambiguate
+///   `IN_MODIFY` on Dir vs File defensive paths.
+///
+/// Stored as a single struct so the triple is atomic: every install
+/// path writes all three fields together, every teardown clears them
+/// together. Mirror of kqueue's `KqueueEntry { fd, fflags, kind }`.
 #[derive(Debug, Clone, Copy)]
 struct InotifyEntry {
     wd: libc::c_int,
     mask: u32,
+    kind: ResourceKind,
 }
 
 impl InotifyWatcher {
@@ -187,7 +205,6 @@ impl InotifyWatcher {
             epoll_fd,
             by_resource: SecondaryMap::new(),
             by_wd: BTreeMap::new(),
-            kinds: SecondaryMap::new(),
             draining_wds: BTreeSet::new(),
             read_buf: vec![0u8; READ_BUF_BYTES],
             drain_window,
@@ -196,47 +213,21 @@ impl InotifyWatcher {
         })
     }
 
-    /// Internal `watch` body returning the raw `io::Error` set; the
-    /// trait wrapper maps that into a typed [`WatchFailure`] at the
-    /// boundary so `?` propagation across the open / fstat / add_watch
-    /// chain stays uniform.
+    /// Internal `watch` body — dispatches by entry presence. The trait
+    /// wrapper maps the inner `io::Error` set into a typed
+    /// [`WatchFailure`] at the boundary so `?` propagation across the
+    /// open / fstat / add_watch chain stays uniform.
     ///
-    /// # Branches
+    /// - `by_resource[r]` populated → [`Self::rewatch_inner`]
+    ///   (re-register on the same `ResourceId`, with inode-swap
+    ///   detection).
+    /// - `by_resource[r]` empty → [`Self::fresh_watch_inner`] (open +
+    ///   fstat verify + install).
     ///
-    /// - **Re-watch** — `r` already holds an entry. Triggered by the
-    ///   engine when `Resource.events_union` changes at non-zero
-    ///   refcount. The cached mask short-circuits when unchanged; an
-    ///   inode-swap is detected via the `wd != prior.wd`
-    ///   check (atomic rename swapped the path between the prior
-    ///   install and this re-add) and the prior wd is drained.
-    ///
-    /// - **Fresh-watch** — `r` has no entry. Triggered on the 0→1
-    ///   `watch_demand` edge. Race-free install via
-    ///   [`ffi::open_o_path`] + `/proc/self/fd/N`: the fd binds to a
-    ///   specific inode, and `inotify_add_watch` on the magic-symlink
-    ///   path resolves to
-    ///   that inode regardless of intervening renames at `path`. The
-    ///   fstat verification then matches the engine's expected
-    ///   `kind`; a kind disagreement maps to `ENOTDIR`, which the
-    ///   trait wrapper classifies as [`WatchFailure::Resource`] so
-    ///   the engine routes through the path-fatal recovery channel.
-    ///
-    /// # Hardlink aliasing
-    ///
-    /// Two `ResourceId`s pointing to the same inode receive the same
-    /// `wd` from the kernel — there is one kernel-side watch entry
-    /// per `(inotify_fd, inode)` pair (per `inotify(7)`'s "the
-    /// existing watch is updated" semantics). v1 rejects the second
-    /// attachment but the rejection branch *restores* the existing
-    /// resource's mask via a follow-up `inotify_add_watch` on the
-    /// same `/proc/self/fd/N`: the kernel's "replace mask" semantics
-    /// have just clobbered the existing watch with our new mask, and
-    /// a naive `inotify_rm_watch` would tear down the existing
-    /// resource's kernel-side registration entirely. The restoration
-    /// is best-effort; on failure the existing
-    /// resource's mask remains the rejected resource's mask until its
-    /// next reconcile triggers a re-add — a documented v1 limitation,
-    /// not a correctness regression.
+    /// The engine-supplied `kind` is structurally irrelevant on
+    /// rewatch (both backends ignore it; the cached / observed value
+    /// is the source of truth). The split makes this explicit at the
+    /// call boundary — [`Self::rewatch_inner`] does not take `kind`.
     fn watch_inner(
         &mut self,
         r: ResourceId,
@@ -244,98 +235,167 @@ impl InotifyWatcher {
         kind: ResourceKind,
         events: ClassSet,
     ) -> io::Result<()> {
-        // ── Re-watch path ───────────────────────────────────────────
-        if let Some(prior) = self.by_resource.get(r).copied() {
-            let cached_kind = self.kinds.get(r).copied().unwrap_or(ResourceKind::Unknown);
-            let new_mask = compute_install_mask(events, cached_kind);
-            if new_mask == prior.mask {
-                tracing::trace!(
-                    ?r,
-                    ?events,
-                    mask = format_args!("{new_mask:#x}"),
-                    "inotify re-watch noop (mask unchanged)"
-                );
-                return Ok(());
-            }
+        if self.by_resource.contains_key(r) {
+            self.rewatch_inner(r, path, events)
+        } else {
+            self.fresh_watch_inner(r, path, kind, events)
+        }
+    }
 
-            // Re-open + fstat. The cached_kind is the engine's
-            // authoritative classification for `r`; verify the inode
-            // shape hasn't mutated under the path. A disagreement
-            // maps to `ENOTDIR` (path-fatal) so the engine reseeds
-            // via descent rather than installing a kind-incoherent
-            // watch.
-            let fd = ffi::open_o_path(path)?;
-            let observed_kind = ffi::fstat_kind(&fd)?;
-            if !cached_kind.matches_or_unknown(observed_kind) {
-                tracing::warn!(
-                    ?r,
-                    ?path,
-                    expected = ?cached_kind,
-                    observed = ?observed_kind,
-                    "inotify re-watch kind mismatch — cached != fstat"
-                );
-                return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
-            }
-
-            let proc_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
-            let proc_path_ref = Path::new(&proc_path);
-            let wd = ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, new_mask)?;
-
-            // Inode-swap detection. A different wd means the path now
-            // resolves to a different inode (atomic rename swapped
-            // the path between the prior install and this re-add).
-            // Mark the prior wd as draining so any pre-rm events on
-            // it are dropped from the next `poll_until` iteration —
-            // the kernel's `IN_IGNORED` arrives later in the drain
-            // stream and reaps the flag.
-            if wd != prior.wd {
-                tracing::debug!(
-                    ?r,
-                    old_wd = prior.wd,
-                    new_wd = wd,
-                    "inotify rewatch resolved to different inode"
-                );
-                self.draining_wds.insert(prior.wd);
-                self.by_wd.remove(&prior.wd);
-                if let Err(e) = ffi::inotify_rm_watch(&self.inotify_fd, prior.wd) {
-                    // EINVAL ⇒ kernel already reaped the wd (the old
-                    // inode was deleted out from under us). The
-                    // `IN_IGNORED` was queued synchronously and will
-                    // arrive on the drain stream; `draining_wds`
-                    // covers the gap.
-                    if e.raw_os_error() != Some(libc::EINVAL) {
-                        tracing::warn!(
-                            ?r,
-                            wd = prior.wd,
-                            error = ?e,
-                            "inotify_rm_watch on prior (inode-swap) failed"
-                        );
-                    }
-                }
-            }
-
-            // Hardlink aliasing guard.
-            if let Some(&existing) = self.by_wd.get(&wd)
-                && existing != r
-            {
-                self.reject_aliased_install(existing, r, wd, proc_path_ref);
-                return Err(io::Error::from_raw_os_error(libc::EEXIST));
-            }
-
-            self.by_resource
-                .insert(r, InotifyEntry { wd, mask: new_mask });
-            self.by_wd.insert(wd, r);
-            tracing::debug!(
+    /// Re-register `r`'s entry against the path. Engine triggers this
+    /// when `Resource.events_union` changes at non-zero refcount.
+    ///
+    /// The cached install mask short-circuits when unchanged. On a
+    /// changed mask, the watcher reopens the path, fstat-verifies the
+    /// inode shape against the cached kind, and installs via
+    /// `inotify_add_watch` on a fresh `/proc/self/fd/N`. An inode-swap
+    /// is detected via the `wd != prior.wd` check (atomic rename
+    /// swapped the path between the prior install and this re-add)
+    /// and the prior wd is drained — kernel-side `IN_IGNORED` arrives
+    /// later in the drain stream and reaps the flag.
+    ///
+    /// Doesn't take the engine-supplied `kind` — the cached kind
+    /// (from fresh-watch's fstat verification, invariant for the
+    /// entry's lifetime) is the authoritative value.
+    ///
+    /// # Precondition
+    ///
+    /// `by_resource[r]` must be populated. The dispatcher
+    /// [`Self::watch_inner`] enforces this; calling this directly with
+    /// an empty entry panics.
+    fn rewatch_inner(&mut self, r: ResourceId, path: &Path, events: ClassSet) -> io::Result<()> {
+        let prior = self
+            .by_resource
+            .get(r)
+            .copied()
+            .expect("rewatch_inner invoked without existing entry");
+        let cached_kind = prior.kind;
+        let install_mask = compute_install_mask(events, cached_kind);
+        if install_mask == prior.mask {
+            tracing::trace!(
                 ?r,
-                wd,
-                old_mask = format_args!("{:#x}", prior.mask),
-                new_mask = format_args!("{new_mask:#x}"),
-                "inotify rewatch (mask changed)"
+                ?events,
+                mask = format_args!("{install_mask:#x}"),
+                "inotify re-watch noop (mask unchanged)"
             );
             return Ok(());
         }
 
-        // ── Fresh-watch path ────────────────────────────────────────
+        // Re-open + fstat. The cached_kind is the engine's
+        // authoritative classification for `r`; verify the inode
+        // shape hasn't mutated under the path. A disagreement maps
+        // to `ENOTDIR` (path-fatal) so the engine reseeds via descent
+        // rather than installing a kind-incoherent watch.
+        let fd = ffi::open_o_path(path)?;
+        let observed_kind = ffi::fstat_kind(&fd)?;
+        if !cached_kind.matches_or_unknown(observed_kind) {
+            tracing::warn!(
+                ?r,
+                ?path,
+                expected = ?cached_kind,
+                observed = ?observed_kind,
+                "inotify re-watch kind mismatch — cached != fstat"
+            );
+            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+        }
+
+        let proc_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+        let proc_path_ref = Path::new(&proc_path);
+        let wd = ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, install_mask)?;
+
+        // Inode-swap detection. A different wd means the path now
+        // resolves to a different inode (atomic rename swapped the
+        // path between the prior install and this re-add). Mark the
+        // prior wd as draining so any pre-rm events on it are dropped
+        // from the next `poll_until` iteration — the kernel's
+        // `IN_IGNORED` arrives later in the drain stream and reaps
+        // the flag.
+        if wd != prior.wd {
+            tracing::debug!(
+                ?r,
+                old_wd = prior.wd,
+                new_wd = wd,
+                "inotify rewatch resolved to different inode"
+            );
+            self.draining_wds.insert(prior.wd);
+            self.by_wd.remove(&prior.wd);
+            if let Err(e) = ffi::inotify_rm_watch(&self.inotify_fd, prior.wd) {
+                // EINVAL ⇒ kernel already reaped the wd (the old
+                // inode was deleted out from under us). The
+                // `IN_IGNORED` was queued synchronously and will
+                // arrive on the drain stream; `draining_wds` covers
+                // the gap.
+                if e.raw_os_error() != Some(libc::EINVAL) {
+                    tracing::warn!(
+                        ?r,
+                        wd = prior.wd,
+                        error = ?e,
+                        "inotify_rm_watch on prior (inode-swap) failed"
+                    );
+                }
+            }
+        }
+
+        // Hardlink aliasing guard — see [`Self::reject_aliased_install`].
+        if let Some(&existing) = self.by_wd.get(&wd)
+            && existing != r
+        {
+            self.reject_aliased_install(existing, r, wd, proc_path_ref);
+            return Err(io::Error::from_raw_os_error(libc::EEXIST));
+        }
+
+        // Commit the new (wd, mask, kind) triple atomically. Kind is
+        // preserved from the prior entry — the re-watch path never
+        // refreshes the cached kind (it stays at whatever fresh-watch's
+        // fstat established). An inode-swap with a kind flip would
+        // have failed the `matches_or_unknown` gate above.
+        self.by_resource.insert(
+            r,
+            InotifyEntry {
+                wd,
+                mask: install_mask,
+                kind: cached_kind,
+            },
+        );
+        self.by_wd.insert(wd, r);
+        tracing::debug!(
+            ?r,
+            wd,
+            old_mask = format_args!("{:#x}", prior.mask),
+            new_mask = format_args!("{install_mask:#x}"),
+            "inotify rewatch (mask changed)"
+        );
+        Ok(())
+    }
+
+    /// First-install for `r` on the 0→1 `watch_demand` edge.
+    ///
+    /// Race-free install via [`ffi::open_o_path`] + `/proc/self/fd/N`:
+    /// the fd binds to a specific inode, and `inotify_add_watch` on
+    /// the magic-symlink path resolves to that inode regardless of
+    /// intervening renames at `path`. The fstat verification then
+    /// matches the engine's expected `kind`; a kind disagreement maps
+    /// to `ENOTDIR`, which the trait wrapper classifies as
+    /// [`WatchFailure::Resource`] so the engine routes through the
+    /// path-fatal recovery channel.
+    ///
+    /// On hardlink aliasing (a second `ResourceId` resolving to the
+    /// same inode as an existing entry), the kernel returns the
+    /// already-allocated wd; the install is rejected and
+    /// [`Self::reject_aliased_install`] restores the existing
+    /// resource's mask.
+    ///
+    /// # Precondition
+    ///
+    /// `by_resource[r]` must be empty. The dispatcher
+    /// [`Self::watch_inner`] enforces this.
+    fn fresh_watch_inner(
+        &mut self,
+        r: ResourceId,
+        path: &Path,
+        kind: ResourceKind,
+        events: ClassSet,
+    ) -> io::Result<()> {
         // 1) Open with `O_PATH | O_NOFOLLOW`. The fd binds to a
         //    specific inode regardless of subsequent renames at
         //    `path`. `O_PATH` permits `fstat` even without read
@@ -368,7 +428,7 @@ impl InotifyWatcher {
         //    Dir-ness and the `/proc/self/fd/N` install is race-free,
         //    but the kernel-side guard is a free belt-and-braces
         //    safety net.
-        let mask = compute_install_mask(events, observed_kind);
+        let install_mask = compute_install_mask(events, observed_kind);
 
         // 5) Install via `/proc/self/fd/N`. The kernel's procfs
         //    resolver returns the exact inode the fd refers to,
@@ -376,12 +436,13 @@ impl InotifyWatcher {
         //    that a naive `inotify_add_watch(path)` would leave open.
         let proc_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
         let proc_path_ref = Path::new(&proc_path);
-        let wd = ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, mask)?;
+        let wd = ffi::inotify_add_watch(&self.inotify_fd, proc_path_ref, install_mask)?;
 
-        // 6) Hardlink aliasing guard. `fd` is intentionally still
-        //    alive here so `reject_aliased_install` can re-use the
-        //    same `/proc/self/fd/N` for the kernel-side mask
-        //    restoration on the existing resource's behalf.
+        // 6) Hardlink aliasing guard — see
+        //    [`Self::reject_aliased_install`]. `fd` is intentionally
+        //    still alive here so the helper can re-use the same
+        //    `/proc/self/fd/N` for the kernel-side mask restoration
+        //    on the existing resource's behalf.
         if let Some(&existing) = self.by_wd.get(&wd)
             && existing != r
         {
@@ -389,33 +450,57 @@ impl InotifyWatcher {
             return Err(io::Error::from_raw_os_error(libc::EEXIST));
         }
 
-        // 7) Commit. `fd` drops at end of scope; the kernel watches
-        //    the inode the fd resolved to at `add_watch` time,
-        //    independent of fd lifetime (per `inotify(7)`).
-        self.by_resource.insert(r, InotifyEntry { wd, mask });
+        // 7) Commit the (wd, mask, kind) triple atomically. `fd`
+        //    drops at end of scope; the kernel watches the inode the
+        //    fd resolved to at `add_watch` time, independent of fd
+        //    lifetime (per `inotify(7)`).
+        self.by_resource.insert(
+            r,
+            InotifyEntry {
+                wd,
+                mask: install_mask,
+                kind: observed_kind,
+            },
+        );
         self.by_wd.insert(wd, r);
-        self.kinds.insert(r, observed_kind);
         tracing::debug!(
             ?r,
             ?path,
             kind = ?observed_kind,
             ?events,
             wd,
-            mask = format_args!("{mask:#x}"),
+            mask = format_args!("{install_mask:#x}"),
             "inotify watch"
         );
         Ok(())
     }
 
-    /// Common epilogue for the two hardlink-aliasing rejection sites.
+    /// Common epilogue for the two hardlink-aliasing rejection sites
+    /// (one in [`Self::fresh_watch_inner`], one in
+    /// [`Self::rewatch_inner`]).
     ///
-    /// Restores `existing`'s kernel-side mask via a follow-up
-    /// `inotify_add_watch` on the same `/proc/self/fd/N`, then clears
-    /// every map keyed by `r` so the engine sees a clean
-    /// "unwatched-and-unknown" state on retry. The two re-add and
-    /// remove steps are separate so the borrow checker tolerates the
-    /// intermediate `&self.by_resource` immutable borrow before the
-    /// `self.by_resource.remove(r)` mutable borrow.
+    /// Two `ResourceId`s pointing to the same inode receive the same
+    /// `wd` from the kernel — there is one kernel-side watch entry
+    /// per `(inotify_fd, inode)` pair (per `inotify(7)`'s "the
+    /// existing watch is updated" semantics). v1 rejects the second
+    /// attachment, but the just-issued `inotify_add_watch` has
+    /// already clobbered the existing watch's mask with the new
+    /// resource's requested mask (the kernel's "replace mask"
+    /// semantics). A naive `inotify_rm_watch` would tear down the
+    /// existing resource's kernel-side registration entirely; the
+    /// safe recovery is to restore the existing resource's mask via
+    /// a follow-up `inotify_add_watch` on the same
+    /// `/proc/self/fd/N`. The restoration is best-effort; on failure
+    /// the existing resource's mask remains the rejected resource's
+    /// requested mask until its next reconcile triggers a re-add —
+    /// a documented v1 limitation, not a correctness regression.
+    ///
+    /// After the mask-restore, this helper clears `r`'s entry so the
+    /// engine sees a clean "unwatched-and-unknown" state on retry.
+    /// The mask-restore and removal steps are separate so the borrow
+    /// checker tolerates the intermediate `&self.by_resource`
+    /// immutable borrow before the `self.by_resource.remove(r)`
+    /// mutable borrow.
     ///
     /// `proc_path_ref` references a `String` owned by the caller; the
     /// caller must keep the underlying [`OwnedFd`] alive across this
@@ -457,10 +542,10 @@ impl InotifyWatcher {
 
         // r either had no install (fresh-watch) or had its prior wd
         // drained (re-watch with inode swap). No new watch is bound
-        // to r — remove every entry so the engine's clamp →
-        // re-resolve flow starts from a clean slate.
+        // to r — remove the entry so the engine's clamp → re-resolve
+        // flow starts from a clean slate. `remove` is idempotent on
+        // the fresh-watch case where no entry was ever inserted.
         self.by_resource.remove(r);
-        self.kinds.remove(r);
     }
 }
 
@@ -489,10 +574,11 @@ impl FsWatcher for InotifyWatcher {
     /// `IN_IGNORED` arrives later in the drain stream and reaps the
     /// flag.
     ///
-    /// Idempotent on stale ids — clearing the `kinds` side map before
-    /// the `by_resource` removal is safe regardless of whether `r` was
-    /// actually held; the kernel-side `rm_watch` only runs when
-    /// `by_resource` had an entry to remove.
+    /// Idempotent on stale ids — the early-return guard short-circuits
+    /// when `by_resource` has no entry. The `(wd, mask, kind)` triple
+    /// lives in one struct, so a single `remove(r)` covers all three
+    /// pieces; the kernel-side `rm_watch` only runs when there was an
+    /// entry to remove.
     ///
     /// `EINVAL` from `rm_watch` is benign: the kernel had already
     /// reaped the wd (the inode was deleted out from under us) and
@@ -501,10 +587,8 @@ impl FsWatcher for InotifyWatcher {
     /// events queued before the kernel's reap are dropped, and the
     /// `IN_IGNORED` consumption clears the flag.
     fn unwatch(&mut self, r: ResourceId) {
-        self.kinds.remove(r);
         let Some(entry) = self.by_resource.remove(r) else {
-            // Stale id — every map keyed by `r` is now empty (or was
-            // already empty); no kernel-side work to do.
+            // Stale id — no entry, no kernel-side work to do.
             return;
         };
 
@@ -683,7 +767,7 @@ impl FsWatcher for InotifyWatcher {
 impl InotifyWatcher {
     /// One full drain pass: `epoll_wait` (bounded by `deadline`),
     /// optionally drain the wake-fd counter, optionally `read_inotify`
-    /// + per-record demux into `out`. Returns a [`PollOnceOutcome`]
+    /// with per-record demux into `out`. Returns a [`PollOnceOutcome`]
     /// carrying the [`WatcherEvent`] count pushed *this call* and
     /// whether a wake fired during the `epoll_wait`.
     ///
@@ -791,13 +875,12 @@ impl InotifyWatcher {
                     // because the watched inode was deleted/unmounted
                     // (the preceding IN_DELETE_SELF / IN_UNMOUNT
                     // already emitted Removed / Revoked to the engine).
-                    // Clear per-resource state so a subsequent
-                    // `unwatch(r)` from the engine's tear-down sees the
-                    // stale-id branch and short-circuits, and so a
-                    // future kernel-side wd reuse cannot mis-attribute
-                    // events through a stale `by_wd[wd]` mapping.
+                    // Clear the entry so a subsequent `unwatch(r)` from
+                    // the engine's tear-down sees the stale-id branch
+                    // and short-circuits, and so a future kernel-side
+                    // wd reuse cannot mis-attribute events through a
+                    // stale `by_wd[wd]` mapping.
                     self.by_resource.remove(r);
-                    self.kinds.remove(r);
                 }
                 continue;
             }
@@ -826,12 +909,15 @@ impl InotifyWatcher {
                 continue;
             };
 
-            // Cached-kind miss falls back to Unknown — consistent with
-            // the kqueue branch's defensive routing for events on a
-            // resource whose `kinds` slot was cleared between the
-            // kernel's queue-add and our drain (e.g., race against a
-            // spontaneous IN_IGNORED in the same batch).
-            let kind = self.kinds.get(r).copied().unwrap_or(ResourceKind::Unknown);
+            // Cached-kind miss falls back to Unknown — consistent
+            // with the kqueue branch's defensive routing for events
+            // on a resource whose entry was cleared between the
+            // kernel's queue-add and our drain (e.g., a spontaneous
+            // IN_IGNORED arm earlier in the same batch).
+            let kind = self
+                .by_resource
+                .get(r)
+                .map_or(ResourceKind::Unknown, |e| e.kind);
             let Some(fs_event) = normalize::mask_to_fs_event(rec.mask, kind) else {
                 // No actionable bit — registration ack with only
                 // orientation flags (IN_ISDIR), or a defensive

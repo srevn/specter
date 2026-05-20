@@ -76,8 +76,8 @@ fn delete_self_then_in_ignored_clears_per_resource_state() {
     std::fs::remove_file(&path).unwrap();
 
     // Drain the `Removed` event. The drain loop also consumes the
-    // `IN_IGNORED` (case 2 in `poll_until`), which clears
-    // `by_resource[r]` / `kinds[r]` and removes the wd from `by_wd`.
+    // `IN_IGNORED` (case 2 in `poll_until`), which clears the
+    // `by_resource[r]` entry and removes the wd from `by_wd`.
     let out = drain_until(
         &mut w,
         |(rid, e)| *rid == r && *e == FsEvent::Removed,
