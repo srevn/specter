@@ -138,20 +138,23 @@ pub fn run(cli: Cli) -> ExitCode {
     // Channels.
     let mut chans = Channels::new();
 
+    // Shutdown coordination. Constructed before the prober so workers
+    // can capture the flag at spawn time; the signal thread, the
+    // watcher / config-watcher loops, and the bin's shutdown sequence
+    // all clone it in below.
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+
     // Prober (workers spawn inside `WorkerProber::new`).
     let probe_concurrency = cli
         .probe_concurrency
         .map_or(specter_sensor::DEFAULT_CONCURRENCY, |n| n as usize);
-    let prober = match WorkerProber::new(&chans.sensor_in_tx, probe_concurrency) {
+    let prober = match WorkerProber::new(&chans.sensor_in_tx, probe_concurrency, &shutdown_flag) {
         Ok(p) => Arc::new(p),
         Err(e) => {
             tracing::error!(?e, "prober init failed");
             return ExitCode::from(1);
         }
     };
-
-    // Shutdown coordination.
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
 
     // Signal thread (registers handlers immediately).
     let signal_handle = spawn_signal_thread(
@@ -263,22 +266,30 @@ pub fn run(cli: Cli) -> ExitCode {
     let exit_reason = driver.run();
     tracing::info!(?exit_reason, "engine driver exited");
 
-    // Shutdown sequence.
-    drop(driver); // releases driver's clones (engine, prober, wake_handle, txs).
-
-    // Belt + braces: ensure both watchers exit even if the engine
-    // driver returned via Disconnected (signal thread didn't fire).
-    // The wake handles held by `App` are the linchpin — without
-    // them the watchers' blocking `poll_until` / `wait` would
-    // never return.
+    // Shutdown sequence — broadcast intent before tearing the driver
+    // down, so every consumer of `shutdown_flag` observes `true`
+    // synchronously with the channel disconnects that drive its exit.
+    // The wake handles held by `App` are still the linchpin for the
+    // watchers' blocking syscalls; the flag is the load-bearing hint
+    // for the prober workers' `out.send`-failure log severity.
     //
-    // Order is load-bearing: store the flag before waking so the
-    // watcher thread, which checks `shutdown_flag` at the *top* of
-    // its loop, observes the new value when its `wait` returns
-    // (`Ok(false)`) and exits cleanly. A wake before the store
-    // would race the loop's flag read against the watcher's
-    // `wait`-return path.
+    // Order is load-bearing on two edges:
+    //
+    // 1. **Flag before `drop(driver)`.** `drop(driver)` releases
+    //    `sensor_in_rx`; the next `out.send` from a worker mid-probe
+    //    fails synchronously. The worker reads `shutdown_flag` on
+    //    that path to discriminate clean teardown (`debug!`) from
+    //    mid-runtime engine loss (`warn!`). Publishing the flag
+    //    first means the channel-internal acquire on the worker side
+    //    observes a flag already set to `true`.
+    //
+    // 2. **Flag before wake.** The watcher / config-watcher loops
+    //    check `shutdown_flag` at the *top* of their bodies. A wake
+    //    before the store would race the loop's flag read against
+    //    the `wait`-return path; flag-first guarantees the next
+    //    iteration sees `true` and exits cleanly.
     shutdown_flag.store(true, Ordering::SeqCst);
+    drop(driver); // releases driver's clones (engine, prober, wake_handle, txs).
     wake_handle.wake();
     if let Some((_, ref cw_wake)) = config_watcher_handles {
         cw_wake.wake();

@@ -11,12 +11,20 @@ use specter_core::{Input, ProbeCorrelation, ProbeOwner, ProbeRequest, ProfileId}
 use specter_sensor::{Prober, WorkerProber};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn fresh_profile_ids(n: usize) -> Vec<ProfileId> {
     let mut sm = SlotMap::<ProfileId, ()>::with_key();
     (0..n).map(|_| sm.insert(())).collect()
+}
+
+/// Fresh shutdown flag for tests that don't drive the bin's shutdown
+/// sequence — the flag stays `false`; behavioural assertions don't
+/// depend on the value.
+fn fresh_shutdown_flag() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
 }
 
 fn anchor_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
@@ -34,7 +42,7 @@ fn single_worker_drains_more_than_concurrency_serially() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 1).unwrap();
+    let prober = WorkerProber::new(&tx, 1, &fresh_shutdown_flag()).unwrap();
     let pids = fresh_profile_ids(5);
 
     for (i, p) in pids.iter().enumerate() {
@@ -71,7 +79,7 @@ fn pool_with_four_workers_handles_burst() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 4).unwrap();
+    let prober = WorkerProber::new(&tx, 4, &fresh_shutdown_flag()).unwrap();
     let pids = fresh_profile_ids(20);
 
     for (i, p) in pids.iter().enumerate() {
