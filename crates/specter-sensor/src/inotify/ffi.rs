@@ -21,6 +21,16 @@
 //! kernel may have drained on a prior iteration in concurrent corner
 //! cases). The `EAGAIN` short-circuit returns `Ok(0)` rather than
 //! propagating an error — empty drain on a wake is a normal outcome.
+//!
+//! ## Deadline tracking
+//!
+//! The wait primitive ([`epoll_wait`]) takes an `Option<Instant>` — not
+//! a pre-computed millisecond timeout — and owns deadline tracking
+//! across `EINTR` retries. The remaining budget is recomputed inside
+//! the retry loop on every iteration so wall-clock progress between
+//! syscall re-entries is preserved. This is the only layer that *can*
+//! re-derive the remaining budget, so deadline math belongs here
+//! rather than at every caller (mirror of [`crate::kqueue::ffi`]).
 
 #![allow(unsafe_code)]
 
@@ -35,7 +45,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Convert a `Path` into a NUL-terminated C string for syscalls. Embedded
 /// NULs (impossible from a real Linux path component but defensible from
@@ -295,20 +305,36 @@ pub(super) fn epoll_register(epoll: &OwnedFd, fd: &OwnedFd, token: u64) -> io::R
     Ok(())
 }
 
-/// Block on `epoll_wait` until at least one fd is ready or `timeout_ms`
-/// elapses. Returns the count of populated slots in `out`. `EINTR`
-/// retries internally so signal delivery during the wait is invisible
-/// to the watcher.
+/// Block on `epoll_wait` until at least one fd is ready or the
+/// deadline elapses. Returns the count of populated slots in `out`.
+/// `EINTR` retries internally so signal delivery during the wait is
+/// invisible to the watcher.
 ///
-/// `timeout_ms = -1` blocks indefinitely; `timeout_ms = 0` is a
-/// non-blocking poll. Convert from `Duration` via [`duration_to_ms`].
+/// `deadline = None` blocks indefinitely (`timeout_ms = -1`); `Some(d)`
+/// arms the kernel-side wait at a per-iteration millisecond timeout
+/// re-derived from `d.saturating_duration_since(Instant::now())`. The
+/// remaining budget is recomputed inside the retry loop so an
+/// `EINTR` re-entry does not re-arm the full original budget — the
+/// caller's deadline is total wall-clock budget, not per-syscall.
+///
+/// A `Some(d)` with `d <= Instant::now()` collapses to a zero timeout
+/// (non-blocking poll); `epoll_wait(2)` returns immediately with `0`
+/// fds ready if none are.
 pub(super) fn epoll_wait(
     epoll: &OwnedFd,
     out: &mut [epoll_event],
-    timeout_ms: c_int,
+    deadline: Option<Instant>,
 ) -> io::Result<usize> {
     let maxevents = c_int::try_from(out.len()).unwrap_or(c_int::MAX);
     loop {
+        // Re-derive the remaining budget on every iteration so an
+        // `EINTR` retry resumes against wall-clock progress, not the
+        // original deadline budget. `None` keeps the indefinite block
+        // (`-1` per `epoll_wait(2)`).
+        let timeout_ms = match deadline {
+            None => -1,
+            Some(d) => duration_to_ms(d.saturating_duration_since(Instant::now())),
+        };
         // SAFETY: `out` is a mutable slice of `epoll_event`; the kernel
         // writes whole `epoll_event` values into the first `n` (returned)
         // slots and treats the rest as undefined. The slice's start
@@ -331,8 +357,83 @@ pub(super) fn epoll_wait(
 /// `epoll_wait`. Saturates at `c_int::MAX` (~24 days) — well above any
 /// engine-supplied deadline; saturation here is documentary, not
 /// load-bearing.
-#[must_use]
-pub(super) fn duration_to_ms(d: Duration) -> c_int {
+fn duration_to_ms(d: Duration) -> c_int {
     let ms = d.as_millis().min(c_int::MAX as u128);
     c_int::try_from(ms).unwrap_or(c_int::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{duration_to_ms, epoll_create, epoll_wait};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn duration_to_ms_zero_yields_zero() {
+        assert_eq!(duration_to_ms(Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn duration_to_ms_one_ms_rounds_down() {
+        assert_eq!(duration_to_ms(Duration::from_millis(1)), 1);
+        assert_eq!(duration_to_ms(Duration::from_micros(999)), 0);
+    }
+
+    /// `epoll_wait` with a past deadline must non-blocking-poll: the
+    /// per-iteration `saturating_duration_since` inside the retry
+    /// loop clamps the elapsed budget to `Duration::ZERO`, which
+    /// `duration_to_ms` encodes as `0`. Empty epoll instance ⇒
+    /// kernel returns `0` ready fds immediately.
+    ///
+    /// Pins the deadline-honoured-across-`EINTR` conversion path. We
+    /// cannot reliably inject `EINTR` in a portable test; the
+    /// past-deadline + empty-instance path exercises the same
+    /// conversion every retry iteration uses, so any regression in
+    /// the per-iter recompute surfaces as a long block here.
+    #[test]
+    fn epoll_wait_past_deadline_returns_promptly() {
+        let epoll = epoll_create().expect("epoll");
+        let mut out = [libc::epoll_event { events: 0, u64: 0 }; 2];
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("1s before Instant::now() is representable");
+        let start = Instant::now();
+        let n = epoll_wait(&epoll, &mut out, Some(past)).expect("wait ok");
+        let elapsed = start.elapsed();
+        assert_eq!(n, 0, "no fds were registered");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "past deadline must non-blocking-poll; took {elapsed:?}"
+        );
+    }
+
+    /// `epoll_wait` with a finite future deadline must honour it on
+    /// an empty instance: the wait blocks ≈ `deadline - now`, then
+    /// returns `0` ready fds. Companion to
+    /// `epoll_wait_past_deadline_returns_promptly` — exercises the
+    /// `Some(d)` branch with a non-zero remaining budget.
+    #[test]
+    fn epoll_wait_honours_future_deadline() {
+        let epoll = epoll_create().expect("epoll");
+        let mut out = [libc::epoll_event { events: 0, u64: 0 }; 2];
+        let budget = Duration::from_millis(60);
+        let start = Instant::now();
+        let n = epoll_wait(&epoll, &mut out, Some(start + budget)).expect("wait ok");
+        let elapsed = start.elapsed();
+        assert_eq!(n, 0, "no fds were registered");
+        // Lower bound is loose: `epoll_wait` rounds the budget down to
+        // whole milliseconds; the kernel may also return slightly
+        // early on some hosts, so we allow ~10ms slack.
+        assert!(
+            elapsed >= budget.saturating_sub(Duration::from_millis(10)),
+            "wait should approach deadline; took {elapsed:?} for {budget:?}"
+        );
+        // Upper bound: the wait must not significantly exceed the
+        // deadline. A regression in the per-iteration recompute (e.g.
+        // re-arming the original budget on `EINTR`) would show up as
+        // a multi-window overrun here.
+        assert!(
+            elapsed < budget + Duration::from_millis(150),
+            "wait should not significantly exceed deadline; took {elapsed:?} for {budget:?}"
+        );
+    }
 }

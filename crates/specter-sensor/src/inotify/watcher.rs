@@ -693,16 +693,12 @@ impl InotifyWatcher {
         deadline: Option<Instant>,
         out: &mut Vec<WatcherEvent>,
     ) -> Result<usize, WatchFailure> {
-        // `None` blocks indefinitely (-1); `Some(d)` past the deadline
-        // saturates to `Duration::ZERO` ⇒ `0 ms` non-blocking poll.
-        let timeout_ms = deadline.map_or(-1, |d| {
-            ffi::duration_to_ms(d.saturating_duration_since(Instant::now()))
-        });
-
         // Two slots — one per epoll-registered fd. Both can be ready
         // at once (deadline + a concurrent wake + inotify data).
+        // Deadline tracking (including `EINTR`-retry remaining-budget
+        // recompute) lives inside `epoll_wait`.
         let mut epoll_events = [libc::epoll_event { events: 0, u64: 0 }; 2];
-        let n_ready = ffi::epoll_wait(&self.epoll_fd, &mut epoll_events, timeout_ms)
+        let n_ready = ffi::epoll_wait(&self.epoll_fd, &mut epoll_events, deadline)
             .map_err(|e| WatchFailure::from_io(&e))?;
 
         if n_ready == 0 {

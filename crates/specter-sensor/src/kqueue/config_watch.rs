@@ -41,11 +41,16 @@
 //! # Opportunistic re-open
 //!
 //! The file fd is dropped on terminal flags. The watcher does not own
-//! a state machine for "waiting for recreate" — the next parent
-//! `NOTE_WRITE` event simply triggers [`Self::try_reopen`]. Failure
-//! (`ENOENT` because recreate hasn't happened yet, or any other errno)
-//! logs at `warn!` and the next parent event retries. Two `if
-//! self.file_fd.is_none() { ... }` lines, no state machine.
+//! a state machine for "waiting for recreate" — after each drained
+//! batch [`Self::wait`] checks the *final* `file_fd` state and calls
+//! [`Self::try_reopen`] iff a real event landed and the fd is now
+//! `None`. The decision is post-loop, so the kqueue-unspecified
+//! intra-batch order of the parent's `NOTE_WRITE` and the file's
+//! terminal `NOTE_DELETE`/`NOTE_RENAME`/`NOTE_REVOKE` is irrelevant:
+//! every ordering converges on the same post-state. `try_reopen` is
+//! idempotent (`is_some()` short-circuit) and `ENOENT`-fast, so a call
+//! on a not-yet-recreated file is cheap and the next real event
+//! retries.
 //!
 //! # Drop semantics
 //!
@@ -304,25 +309,28 @@ impl ConfigWatcher for KqueueConfigWatcher {
     ///   fires (`NOTE_DELETE` / `NOTE_RENAME` / `NOTE_REVOKE`), the
     ///   file fd is dropped. The kernel auto-removes the vnode
     ///   registration on close.
-    /// - **`PARENT_UDATA`** — `real_seen = true`. If `file_fd` is
-    ///   currently `None`, attempt `try_reopen` in the same pass —
-    ///   coalesced delete-recreate bursts therefore restore the watch
-    ///   within a single drain.
+    /// - **`PARENT_UDATA`** — `real_seen = true`. No inline reopen —
+    ///   see the post-loop recovery below.
     /// - **Other udata** — logged at `trace!`. Should not occur given
     ///   we only register the two known idents on this kqueue, but the
     ///   defensive arm beats a panic on a future kernel surprise.
     ///
-    /// `EINTR` is retried inside `ffi::kevent_drain`. Any other
-    /// `io::Error` propagates verbatim — the bin's wrapper logs at
-    /// `error!` and exits the watcher thread; SIGHUP-only operation
-    /// continues.
+    /// After the per-event loop, `try_reopen` runs iff a real event
+    /// landed *and* the final `file_fd` state is `None`. The recovery
+    /// decision is therefore independent of the kqueue-unspecified
+    /// intra-batch ordering of the parent's `NOTE_WRITE` and the
+    /// file's terminal `NOTE_DELETE`/`NOTE_RENAME`/`NOTE_REVOKE`: both
+    /// orderings (and fragments split across batches) converge on the
+    /// same post-loop state.
+    ///
+    /// `EINTR` is retried inside `ffi::kevent_drain`, which also owns
+    /// the deadline tracking across retries (the remaining budget is
+    /// recomputed per iteration). Any other `io::Error` propagates
+    /// verbatim — the bin's wrapper logs at `error!` and exits the
+    /// watcher thread; SIGHUP-only operation continues.
     fn wait(&mut self, deadline: Option<Instant>) -> io::Result<bool> {
-        let timeout = deadline.map(|d| {
-            let dur = d.saturating_duration_since(Instant::now());
-            ffi::duration_to_timespec(dur)
-        });
         let mut events = [ffi::Kevent::zeroed(); EVENT_BATCH];
-        let n = ffi::kevent_drain(&self.kq, &mut events, timeout)?;
+        let n = ffi::kevent_drain(&self.kq, &mut events, deadline)?;
 
         let mut real_seen = false;
         for ev in &events[..n] {
@@ -334,20 +342,17 @@ impl ConfigWatcher for KqueueConfigWatcher {
                     let f = ev.fflags();
                     if f & (libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE) != 0 {
                         // Drop the fd — kernel removes the vnode reg.
-                        // try_reopen runs on the next parent event;
-                        // this pass may already include that event in
-                        // the same batch (delete + parent NOTE_WRITE
-                        // coalesce), so the recovery can complete in
-                        // one drain.
+                        // The post-loop recovery (below) restores it on
+                        // the *next* observation iff `file_fd` is still
+                        // `None`; a coalesced delete + parent
+                        // `NOTE_WRITE` batch completes recovery in this
+                        // same drain.
                         self.file_fd = None;
                     }
                     real_seen = true;
                 }
                 PARENT_UDATA => {
                     real_seen = true;
-                    if self.file_fd.is_none() {
-                        self.try_reopen();
-                    }
                 }
                 other => {
                     tracing::trace!(
@@ -356,6 +361,16 @@ impl ConfigWatcher for KqueueConfigWatcher {
                     );
                 }
             }
+        }
+
+        // Order-independent recovery: decide against the *final* state
+        // of `file_fd`. Parent-knote-before-file-knote,
+        // file-knote-before-parent-knote, both, neither — every
+        // intra-batch ordering converges here. `try_reopen` is
+        // idempotent and `ENOENT`-fast, so a call on a not-yet-recreated
+        // file is cheap and the next real event retries.
+        if real_seen && self.file_fd.is_none() {
+            self.try_reopen();
         }
         Ok(real_seen)
     }
@@ -434,6 +449,60 @@ mod tests {
 
         let r = w.wait(Some(watchdog())).expect("wait ok");
         assert!(r, "atomic save must wake the watcher (Ok(true))");
+
+        // Post-loop recovery against the batch's final state: a
+        // coalesced delete + parent NOTE_WRITE batch restores
+        // `file_fd` in this same wait regardless of intra-batch
+        // ordering. A kernel-split fragment can leave `file_fd`
+        // holding a stale (but `Some`) fd; the end-to-end
+        // `atomic_save_then_in_place_edit` test catches that mode.
+        assert!(w.file_fd.is_some(), "atomic save must leave a live file fd");
+    }
+
+    /// End-to-end check that an atomic save followed by an in-place
+    /// edit on the recreated file surfaces a second pulse. Requires
+    /// the post-loop recovery to install a live file fd on the new
+    /// inode against any intra-batch ordering of the file's terminal
+    /// knote and the parent's `NOTE_WRITE`; a stranded `file_fd = None`
+    /// (or a stale fd on the dead inode) would silently swallow the
+    /// in-place edit and block the second `wait` past the watchdog.
+    #[test]
+    fn atomic_save_then_in_place_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = dir.path().join("specter.toml");
+        fs::write(&cfg, b"a").expect("write seed");
+
+        let mut w = KqueueConfigWatcher::new(&cfg).expect("watcher init");
+        drain_quiet(&mut w);
+
+        // Atomic save: write staging, rename over. Both knotes (file
+        // terminal + parent NOTE_WRITE) fire on this kqueue in
+        // kernel-unspecified relative order.
+        let tmp = dir.path().join("specter.toml.tmp");
+        fs::write(&tmp, b"b").expect("write tmp");
+        fs::rename(&tmp, &cfg).expect("atomic rename");
+
+        assert!(
+            w.wait(Some(watchdog())).expect("wait ok"),
+            "atomic save must wake the watcher (Ok(true))"
+        );
+        // Drain any trailing fragments so subsequent state reflects
+        // the watcher's settled post-save view.
+        drain_quiet(&mut w);
+        assert!(
+            w.file_fd.is_some(),
+            "post-loop reopen must restore the file fd on the new inode"
+        );
+
+        // In-place edit on the recreated file pulses iff the file fd
+        // points at the new inode (rather than the unlinked old one
+        // or being null).
+        fs::write(&cfg, b"c").expect("in-place edit on recreated file");
+        let r = w.wait(Some(watchdog())).expect("wait ok");
+        assert!(
+            r,
+            "in-place edit on recreated file must wake the watcher (Ok(true))"
+        );
     }
 
     #[test]

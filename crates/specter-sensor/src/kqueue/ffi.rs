@@ -6,6 +6,16 @@
 //! `&mut [Kevent]` to `kevent(2)` as a `*mut libc::kevent`. Accessors
 //! return raw `flags` / `fflags` / `udata`; the `udata` token is opaque
 //! at this layer — consumers encode/decode at their own boundary.
+//!
+//! ## Deadline tracking
+//!
+//! The wait primitives ([`kevent_drain`]) take an `Option<Instant>` —
+//! not a pre-computed `timespec` — and own deadline tracking across
+//! `EINTR` retries. The remaining budget is recomputed inside the retry
+//! loop on every iteration so wall-clock progress between syscall
+//! re-entries is preserved. This is the only layer that *can* re-derive
+//! the remaining budget, so deadline math belongs here rather than at
+//! every caller.
 
 #![allow(unsafe_code)]
 
@@ -13,6 +23,7 @@ use libc::{c_int, kevent, kqueue, timespec};
 use std::io::{self, Error};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::time::Instant;
 
 /// One `libc::kevent` slot. Constructed via `Kevent::zeroed()` for output
 /// arrays and via the per-op builders (`vnode_register`, etc.) for input
@@ -133,25 +144,47 @@ fn vnode_change(
     kevent_change(kq, &ev.0)
 }
 
-/// Drain pending events into `out`. Retries on `EINTR`. `timeout = None`
-/// blocks indefinitely; `Some(ts)` arms the kernel-side wait. Returns
-/// the number of slots in `out` populated by the kernel.
+/// Drain pending events into `out`. Retries on `EINTR`.
+///
+/// `deadline = None` blocks indefinitely (null `timespec`); `Some(d)`
+/// arms the kernel-side wait at a per-iteration `timespec` re-derived
+/// from `d.saturating_duration_since(Instant::now())`. The remaining
+/// budget is recomputed inside the retry loop so a signal-induced
+/// `EINTR` re-entry does not re-arm the full original budget — the
+/// caller's deadline is total wall-clock budget, not per-syscall.
+///
+/// A `Some(d)` with `d <= Instant::now()` collapses to a zero timespec
+/// (non-blocking poll); `kevent(2)` returns immediately with `0` events
+/// if no events are pending.
+///
+/// Returns the number of slots in `out` populated by the kernel.
 pub(super) fn kevent_drain(
     kq: &OwnedFd,
     out: &mut [Kevent],
-    timeout: Option<timespec>,
+    deadline: Option<Instant>,
 ) -> io::Result<usize> {
-    let len = out.len();
-    let len_c: c_int = c_int::try_from(len).unwrap_or(c_int::MAX);
+    let len_c: c_int = c_int::try_from(out.len()).unwrap_or(c_int::MAX);
     loop {
-        let timeout_ptr = timeout
-            .as_ref()
-            .map_or(std::ptr::null(), std::ptr::from_ref);
-        // SAFETY: `out` is a `&mut [Kevent]` of length `len`; `Kevent` is
-        // `#[repr(transparent)]` over `libc::kevent`, so the slice's start
-        // pointer is a valid `*mut libc::kevent` for `len` elements. The
-        // kernel writes only the first `n` (returned) slots and treats
-        // the rest as undefined; callers consume only `out[..n]`.
+        // Re-derive the remaining budget on every iteration so an
+        // `EINTR` retry resumes against wall-clock progress, not the
+        // original deadline budget. `None` keeps the indefinite block
+        // via a null timespec pointer; the `Some` arm holds the
+        // freshly-built `timespec` on the stack across the syscall.
+        let ts;
+        let timeout_ptr = match deadline {
+            None => std::ptr::null(),
+            Some(d) => {
+                ts = duration_to_timespec(d.saturating_duration_since(Instant::now()));
+                std::ptr::from_ref(&ts)
+            }
+        };
+        // SAFETY: `out` is a `&mut [Kevent]` of length `out.len()`;
+        // `Kevent` is `#[repr(transparent)]` over `libc::kevent`, so the
+        // slice's start pointer is a valid `*mut libc::kevent` for
+        // `len_c` elements. The kernel writes only the first `n`
+        // (returned) slots and treats the rest as undefined; callers
+        // consume only `out[..n]`. `timeout_ptr` is either NULL or
+        // points to `ts` whose binding outlives the syscall.
         let n = unsafe {
             kevent(
                 kq.as_raw_fd(),
@@ -209,7 +242,7 @@ fn kevent_change(kq: &OwnedFd, ev: &libc::kevent) -> io::Result<()> {
 ///   to `u64::MAX` seconds.
 /// - `subsec_nanos()` returns `u32` capped at `999_999_999`.
 #[allow(clippy::cast_possible_wrap)]
-pub(super) fn duration_to_timespec(dur: std::time::Duration) -> timespec {
+fn duration_to_timespec(dur: std::time::Duration) -> timespec {
     timespec {
         tv_sec: dur.as_secs() as libc::time_t,
         tv_nsec: libc::c_long::from(dur.subsec_nanos() as i32),
@@ -218,8 +251,8 @@ pub(super) fn duration_to_timespec(dur: std::time::Duration) -> timespec {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kevent, duration_to_timespec};
-    use std::time::Duration;
+    use super::{Kevent, duration_to_timespec, kevent_drain, kqueue_new};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn duration_to_timespec_zero_yields_zero_components() {
@@ -251,6 +284,64 @@ mod tests {
         assert!(
             !ev.is_user_event(0xDEAD_BEEF),
             "zero-init does not look like a user event"
+        );
+    }
+
+    /// `kevent_drain` with a past deadline must non-blocking-poll: the
+    /// per-iteration `saturating_duration_since` inside the retry loop
+    /// clamps the elapsed budget to `Duration::ZERO`, which
+    /// `duration_to_timespec` encodes as a zero `timespec`. Empty
+    /// queue ⇒ kernel returns `0` events immediately.
+    ///
+    /// Pins the deadline-honoured-across-`EINTR` conversion path. We
+    /// cannot reliably inject `EINTR` in a portable test; the
+    /// past-deadline + empty-queue path exercises the same conversion
+    /// every retry iteration uses, so any regression in the per-iter
+    /// recompute surfaces as a long block here.
+    #[test]
+    fn kevent_drain_past_deadline_returns_promptly() {
+        let kq = kqueue_new().expect("kqueue");
+        let mut out = [Kevent::zeroed(); 4];
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("1s before Instant::now() is representable");
+        let start = Instant::now();
+        let n = kevent_drain(&kq, &mut out, Some(past)).expect("drain ok");
+        let elapsed = start.elapsed();
+        assert_eq!(n, 0, "no events were registered");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "past deadline must non-blocking-poll; took {elapsed:?}"
+        );
+    }
+
+    /// `kevent_drain` with a finite future deadline must honour it on
+    /// an empty queue: the wait blocks ≈ `deadline - now`, then
+    /// returns `0` events. Companion to
+    /// `kevent_drain_past_deadline_returns_promptly` — exercises the
+    /// `Some(d)` branch with a non-zero remaining budget.
+    #[test]
+    fn kevent_drain_honours_future_deadline() {
+        let kq = kqueue_new().expect("kqueue");
+        let mut out = [Kevent::zeroed(); 4];
+        let budget = Duration::from_millis(60);
+        let start = Instant::now();
+        let n = kevent_drain(&kq, &mut out, Some(start + budget)).expect("drain ok");
+        let elapsed = start.elapsed();
+        assert_eq!(n, 0, "no events were registered");
+        // Lower bound is loose: `kevent` may return slightly early on
+        // some kernels, but it must approach the deadline.
+        assert!(
+            elapsed >= budget.saturating_sub(Duration::from_millis(10)),
+            "wait should approach deadline; took {elapsed:?} for {budget:?}"
+        );
+        // Upper bound: the wait must not significantly exceed the
+        // deadline. A regression in the per-iteration recompute (e.g.
+        // re-arming the original budget on `EINTR`) would show up as
+        // a multi-window overrun here.
+        assert!(
+            elapsed < budget + Duration::from_millis(150),
+            "wait should not significantly exceed deadline; took {elapsed:?} for {budget:?}"
         );
     }
 }

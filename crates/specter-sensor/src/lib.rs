@@ -374,9 +374,10 @@ pub trait ConfigWatcher: Send {
     /// or (d) a syscall error occurs (returns `Err`).
     ///
     /// Production passes `None` — block forever; the watcher has no
-    /// timers of its own. The deadline is a kernel-level pass-through
-    /// (`kevent` / `epoll_wait` already accept the timespec); tests use
-    /// `Some(deadline)` as a watchdog without spawning a wake-thread.
+    /// timers of its own. A `Some(deadline)` threads through to the
+    /// backend's wait primitive (`kevent` / `epoll_wait`), which owns
+    /// the per-iteration remaining-budget recompute across `EINTR`;
+    /// tests use it as a watchdog without spawning a wake-thread.
     /// Settle and lstat-vs-meta filtering are driver-side concerns
     /// regardless.
     ///

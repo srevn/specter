@@ -52,18 +52,31 @@
 //!
 //! # Opportunistic re-open
 //!
-//! When a parent record arrives with `name == config_basename` and
-//! `file_wd` is `None`, [`Self::try_reopen`] runs after the per-call
-//! record loop finishes. The call is **deferred** rather than inline
-//! because [`record::parse`] borrows [`Self::read_buf`] for the
-//! iterator's lifetime; a `&mut self` method invocation inside the
-//! loop would conflict with that borrow. Disjoint-field NLL handles
-//! the field-level mutations on `file_wd` / `parent_wd` etc. inline,
-//! but a method call on `&mut self` widens to the whole struct.
+//! After each drained batch, [`Self::wait`] runs [`Self::try_reopen`]
+//! iff a basename-matched parent record was observed *and* the final
+//! `file_wd` state is `None`. The decision is post-loop, so the
+//! intra-batch ordering of the parent's `IN_MOVED_TO` /
+//! `IN_CREATE` and the file's `IN_IGNORED` (the kernel reap of the
+//! old wd) is irrelevant — every ordering, including atomic-save
+//! fragments split across batches, converges on the same post-state.
+//!
+//! Post-loop is also a borrow-checker concession: [`record::parse`]
+//! borrows [`Self::read_buf`] for the iterator's lifetime; a
+//! `&mut self` method invocation inside the loop would conflict with
+//! that borrow. Disjoint-field NLL handles the field-level mutation
+//! on `file_wd` (Copy `Option<i32>`) inline; the post-loop
+//! `try_reopen` call runs after the borrow ends.
+//!
+//! `saw_basename_parent` (not bare `real_seen`) gates the recovery
+//! because file-side records nulling `file_wd` mid-batch are not a
+//! recovery signal *unless* a parent event also confirms "the
+//! basename is back." A lone `IN_DELETE_SELF`/`IN_IGNORED` without a
+//! parent record means the file is gone and the recreate has not yet
+//! happened; reopening on that signal alone is premature.
 //!
 //! Failure (`ENOENT` because recreate has not happened yet, any other
-//! errno) logs at `warn!` and the next parent event retries — two
-//! `if file_wd.is_none() { try_reopen(); }` lines, no state machine.
+//! errno) logs at `warn!` and the next basename-matched parent event
+//! retries.
 //!
 //! # IN_IGNORED disposition
 //!
@@ -410,10 +423,9 @@ impl ConfigWatcher for InotifyConfigWatcher {
     /// elapses, or a wake fires). Per-record dispatch:
     ///
     /// - **`IN_IGNORED` on `file_wd`** — kernel reaped the file
-    ///   watch. Nullify `self.file_wd`; subsequent parent events in
-    ///   the same batch may already trigger `try_reopen` (deferred
-    ///   to after the loop — see module docs on the borrow
-    ///   discipline).
+    ///   watch. Nullify `self.file_wd`; the post-loop recovery
+    ///   (below) restores it iff a basename-matched parent record
+    ///   also fired in this batch.
     /// - **`IN_IGNORED` on `parent_wd`** — kernel reaped the parent
     ///   watch. Return `Err` immediately; the bin exits the watcher
     ///   thread.
@@ -422,8 +434,8 @@ impl ConfigWatcher for InotifyConfigWatcher {
     ///   means kernel-side reap of a wd we already nullified.
     /// - **Parent record** (`rec.wd == parent_wd`) — basename
     ///   filter: `rec.name == config_basename` ⇒ `real_seen = true`
-    ///   and arm `try_reopen` if `file_wd` is `None`. Mismatched
-    ///   basename drops at the watcher edge.
+    ///   and `saw_basename_parent = true`. Mismatched basename
+    ///   drops at the watcher edge.
     /// - **File record** (`rec.wd == file_wd`) — `real_seen = true`.
     ///   The driver's lstat-vs-`FileMeta` filter at the convergence
     ///   point decides whether the change was substantive.
@@ -431,19 +443,21 @@ impl ConfigWatcher for InotifyConfigWatcher {
     ///   v1 (only two registrations), but defensive against a
     ///   future kernel surprise.
     ///
-    /// `EINTR` is retried inside the FFI helpers. Any other
-    /// `io::Error` propagates verbatim — the bin's wrapper logs at
-    /// `error!` and exits the watcher thread; SIGHUP-only operation
-    /// continues.
+    /// After the per-record loop, `try_reopen` runs iff a
+    /// basename-matched parent record was observed *and* the final
+    /// `file_wd` state is `None`. The recovery decision is therefore
+    /// independent of intra-batch ordering (and atomic-save fragment
+    /// splits across batches) — see the module's "Opportunistic
+    /// re-open" section.
+    ///
+    /// `EINTR` is retried inside the FFI helpers, which also own
+    /// deadline tracking across retries (the remaining budget is
+    /// recomputed per iteration). Any other `io::Error` propagates
+    /// verbatim — the bin's wrapper logs at `error!` and exits the
+    /// watcher thread; SIGHUP-only operation continues.
     fn wait(&mut self, deadline: Option<Instant>) -> io::Result<bool> {
-        // `None` blocks indefinitely (-1); `Some(d)` past the
-        // deadline saturates to `Duration::ZERO` ⇒ `0 ms`
-        // non-blocking poll.
-        let timeout_ms = deadline.map_or(-1, |d| {
-            ffi::duration_to_ms(d.saturating_duration_since(Instant::now()))
-        });
         let mut epoll_events = [libc::epoll_event { events: 0, u64: 0 }; EPOLL_BATCH];
-        let n_ready = ffi::epoll_wait(&self.epoll_fd, &mut epoll_events, timeout_ms)?;
+        let n_ready = ffi::epoll_wait(&self.epoll_fd, &mut epoll_events, deadline)?;
 
         if n_ready == 0 {
             // Deadline arrived with nothing ready. Wake / event
@@ -493,13 +507,13 @@ impl ConfigWatcher for InotifyConfigWatcher {
         }
 
         let mut real_seen = false;
-        let mut needs_reopen = false;
+        let mut saw_basename_parent = false;
 
         // The iterator borrows `self.read_buf` for the loop scope.
         // Disjoint-field NLL allows mutations on `self.file_wd`
         // (Copy `Option<i32>`) inline; `self.try_reopen()` is a
-        // `&mut self` method call that would conflict — defer it
-        // via `needs_reopen` and run it after the loop.
+        // `&mut self` method call that would conflict — it runs
+        // post-loop, after the borrow ends.
         for rec in record::parse(&self.read_buf[..n_bytes]) {
             if rec.mask & libc::IN_IGNORED != 0 {
                 if Some(rec.wd) == self.file_wd {
@@ -528,9 +542,7 @@ impl ConfigWatcher for InotifyConfigWatcher {
             if rec.wd == self.parent_wd {
                 if rec.name == self.config_basename.as_bytes() {
                     real_seen = true;
-                    if self.file_wd.is_none() {
-                        needs_reopen = true;
-                    }
+                    saw_basename_parent = true;
                 }
                 // Unmatched basename: dropped at the watcher edge.
             } else if Some(rec.wd) == self.file_wd {
@@ -542,7 +554,16 @@ impl ConfigWatcher for InotifyConfigWatcher {
             // already consumed in this same batch.
         }
 
-        if needs_reopen {
+        // Order-independent recovery: decide against the *final*
+        // state of `file_wd`. A basename-matched parent record is
+        // the proof "the watched basename is back"; a bare
+        // file-side `IN_IGNORED` without a parent event is not a
+        // recovery signal (the file is gone, recreate hasn't
+        // happened yet), so we gate on `saw_basename_parent` rather
+        // than the weaker `real_seen`. `try_reopen` is idempotent
+        // and `ENOENT`-fast; a call on a not-yet-recreated file is
+        // cheap and the next basename-matched parent event retries.
+        if saw_basename_parent && self.file_wd.is_none() {
             self.try_reopen();
         }
         Ok(real_seen)
@@ -618,6 +639,63 @@ mod tests {
 
         let r = w.wait(Some(watchdog())).expect("wait ok");
         assert!(r, "atomic save must wake the watcher (Ok(true))");
+
+        // Post-loop recovery against the batch's final state: a
+        // coalesced batch containing the parent's basename-matched
+        // `IN_MOVED_TO` plus the file wd's `IN_IGNORED` restores
+        // `file_wd` in this same wait regardless of intra-batch
+        // ordering. A kernel-split fragment can leave `file_wd`
+        // holding a stale (but `Some`) wd; the end-to-end
+        // `atomic_save_then_in_place_edit` test catches that mode.
+        assert!(w.file_wd.is_some(), "atomic save must leave a live file wd");
+    }
+
+    /// End-to-end check that an atomic save followed by an in-place
+    /// edit on the recreated file surfaces a second pulse. Requires
+    /// the post-loop recovery to install a live file wd on the new
+    /// inode against any intra-batch ordering of the basename-matched
+    /// parent record and the file wd's `IN_IGNORED`; a stranded
+    /// `file_wd = None` (or a stale wd on the dead inode) would
+    /// silently swallow the in-place edit and block the second
+    /// `wait` past the watchdog.
+    #[test]
+    fn atomic_save_then_in_place_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = dir.path().join("specter.toml");
+        fs::write(&cfg, b"a").expect("write seed");
+
+        let mut w = InotifyConfigWatcher::new(&cfg).expect("watcher init");
+        drain_quiet(&mut w);
+
+        // Atomic save: write staging, rename over. The kernel emits
+        // `IN_MOVED_FROM`(staging) + `IN_MOVED_TO`(basename) on the
+        // parent and `IN_MOVE_SELF` + `IN_IGNORED` on the file's wd,
+        // possibly across multiple batches.
+        let tmp = dir.path().join("specter.toml.tmp");
+        fs::write(&tmp, b"b").expect("write tmp");
+        fs::rename(&tmp, &cfg).expect("atomic rename");
+
+        assert!(
+            w.wait(Some(watchdog())).expect("wait ok"),
+            "atomic save must wake the watcher (Ok(true))"
+        );
+        // Drain any trailing fragments so subsequent state reflects
+        // the watcher's settled post-save view.
+        drain_quiet(&mut w);
+        assert!(
+            w.file_wd.is_some(),
+            "post-loop reopen must restore the file wd on the new inode"
+        );
+
+        // In-place edit on the recreated file pulses iff the file wd
+        // points at the new inode (rather than the unlinked old one
+        // or being null).
+        fs::write(&cfg, b"c").expect("in-place edit on recreated file");
+        let r = w.wait(Some(watchdog())).expect("wait ok");
+        assert!(
+            r,
+            "in-place edit on recreated file must wake the watcher (Ok(true))"
+        );
     }
 
     #[test]
