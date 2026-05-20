@@ -30,7 +30,7 @@ use std::sync::Arc;
 /// the watcher's kqueue. Idempotent on consecutive wakes within one
 /// `poll_until` window.
 #[derive(Debug, Clone)]
-pub struct KqueueWakeHandle {
+pub(crate) struct KqueueWakeHandle {
     kq: Arc<OwnedFd>,
     wake_ident: usize,
 }

@@ -34,7 +34,7 @@ use std::sync::Arc;
 /// single `eventfd_read` consumes atomically. Idempotent on consecutive
 /// wakes within one `poll_until` window.
 #[derive(Debug, Clone)]
-pub struct InotifyWakeHandle {
+pub(crate) struct InotifyWakeHandle {
     wake_fd: Arc<OwnedFd>,
 }
 

@@ -29,5 +29,4 @@ mod wake;
 mod watcher;
 
 pub use config_watch::InotifyConfigWatcher;
-pub use wake::InotifyWakeHandle;
 pub use watcher::InotifyWatcher;

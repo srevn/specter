@@ -1,8 +1,9 @@
 //! kqueue-backed `FsWatcher` + `ConfigWatcher` — macOS / FreeBSD only.
 //!
-//! Layered:
-//! - [`ffi`]: thin libc wrappers (the only `unsafe` surface).
-//! - [`fd`]: path → `OwnedFd` open + `fstat` kind detection.
+//! Layered (mirror of [`crate::inotify`]):
+//! - [`ffi`]: thin libc wrappers (the only `unsafe` surface). Holds
+//!   both the `kevent`-side primitives and the path → `OwnedFd` /
+//!   `fstat`-kind helpers.
 //! - [`normalize`]: kqueue flags → `FsEvent`.
 //! - [`wake`]: cross-thread interruption via `EVFILT_USER`.
 //! - [`watcher`]: state-bearing `FsWatcher` impl (engine-side).
@@ -27,7 +28,6 @@ compile_error!(
 );
 
 mod config_watch;
-mod fd;
 mod ffi;
 mod normalize;
 mod translate;
@@ -35,5 +35,4 @@ mod wake;
 mod watcher;
 
 pub use config_watch::KqueueConfigWatcher;
-pub use wake::KqueueWakeHandle;
 pub use watcher::KqueueWatcher;

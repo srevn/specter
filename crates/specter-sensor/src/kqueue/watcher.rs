@@ -31,7 +31,7 @@
 //! non-empty → empty edge or `Tree::vacate`'s terminus emission).
 
 use crate::kqueue::wake::KqueueWakeHandle;
-use crate::kqueue::{fd, ffi, normalize, translate};
+use crate::kqueue::{ffi, normalize, translate};
 use crate::{DrainWindow, FsWatcher, WakeHandle, WatchFailure, WatchFailureExt, WatcherEvent};
 use slotmap::{Key, KeyData, SecondaryMap};
 use specter_core::{ClassSet, ResourceId, ResourceKind};
@@ -179,8 +179,8 @@ impl KqueueWatcher {
         // 3) Translate. 4) Register. 5) Insert. Each step's failure
         // drops anything earlier (the OwnedFd auto-closes) so a
         // partially-failed `watch` leaves zero state.
-        let fd = fd::open_for_watch(path)?;
-        let observed_kind = fd::stat_kind(&fd)?;
+        let fd = ffi::open_for_watch(path)?;
+        let observed_kind = ffi::stat_kind(&fd)?;
         if !kind.matches_or_unknown(observed_kind) {
             tracing::warn!(
                 ?r,

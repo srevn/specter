@@ -69,8 +69,8 @@
 
 use crate::ConfigWatcher;
 use crate::WakeHandle;
+use crate::kqueue::ffi;
 use crate::kqueue::wake::KqueueWakeHandle;
-use crate::kqueue::{fd, ffi};
 use std::ffi::OsString;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -222,7 +222,7 @@ impl KqueueConfigWatcher {
         let kq = Arc::new(ffi::kqueue_new()?);
         ffi::register_user_event(&kq, WAKE_IDENT)?;
 
-        let parent_fd = fd::open_for_watch(&parent_path)?;
+        let parent_fd = ffi::open_for_watch(&parent_path)?;
         ffi::register_vnode(&kq, &parent_fd, PARENT_UDATA, PARENT_FFLAGS)?;
 
         // The TOCTOU window here is the price of `Config::from_path_with_meta`
@@ -232,7 +232,7 @@ impl KqueueConfigWatcher {
         // the bin's post-init `FileMeta::from_path` lstat compares
         // against the captured meta to drive an immediate
         // `reload_signal_tx` pulse if the on-disk state diverged.
-        let file_fd = match fd::open_for_watch(&canonical) {
+        let file_fd = match ffi::open_for_watch(&canonical) {
             Ok(fd) => {
                 ffi::register_vnode(&kq, &fd, FILE_UDATA, FILE_FFLAGS)?;
                 Some(fd)
@@ -266,7 +266,7 @@ impl KqueueConfigWatcher {
             return;
         }
         let path = self.parent_path.join(&self.config_basename);
-        match fd::open_for_watch(&path) {
+        match ffi::open_for_watch(&path) {
             Ok(fd) => match ffi::register_vnode(&self.kq, &fd, FILE_UDATA, FILE_FFLAGS) {
                 Ok(()) => {
                     tracing::debug!(

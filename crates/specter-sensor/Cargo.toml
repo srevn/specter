@@ -15,11 +15,11 @@ compact_str.workspace = true
 crossbeam.workspace   = true
 slotmap.workspace     = true
 tracing.workspace     = true
-nix.workspace  = true
 libc.workspace = true
 
 [dev-dependencies]
 specter-core       = { path = "../specter-core", features = ["testkit"] }
+nix.workspace      = true
 tempfile.workspace = true
 
 [lints]

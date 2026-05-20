@@ -1,11 +1,25 @@
-//! Thin `libc::kevent` wrappers — the lone `unsafe` surface in this
-//! crate. Each function below is a direct syscall; module-level
-//! `#[allow(unsafe_code)]` keeps the audit boundary at the file edge.
+//! Thin libc wrappers — the lone `unsafe` surface in this module.
+//! Module-level `#[allow(unsafe_code)]` keeps the audit boundary at
+//! the file edge; every direct syscall in the kqueue backend lives
+//! here. Mirror of [`crate::inotify::ffi`]'s discipline.
 //!
-//! The `Kevent` newtype is `#[repr(transparent)]` so we can hand a
-//! `&mut [Kevent]` to `kevent(2)` as a `*mut libc::kevent`. Accessors
-//! return raw `flags` / `fflags` / `udata`; the `udata` token is opaque
-//! at this layer — consumers encode/decode at their own boundary.
+//! The surface is two-flavoured:
+//!
+//! - **kqueue primitives** ([`kqueue_new`], [`register_user_event`],
+//!   [`register_vnode`], [`kevent_drain`], [`trigger_user_event`]).
+//!   The `Kevent` newtype is `#[repr(transparent)]` so we can hand a
+//!   `&mut [Kevent]` to `kevent(2)` as a `*mut libc::kevent`.
+//!   Accessors return raw `flags` / `fflags` / `udata`; the `udata`
+//!   token is opaque at this layer — consumers encode/decode at their
+//!   own boundary.
+//!
+//! - **Path-to-FD primitives** ([`open_for_watch`], [`stat_kind`]).
+//!   The watcher's race-free install pattern: open with the
+//!   platform's "event-only" flag, `fstat` to discover the kind. The
+//!   inotify backend integrates the same shape directly into its
+//!   `ffi` module ([`crate::inotify::ffi::open_o_path`] /
+//!   [`crate::inotify::ffi::fstat_kind`]); we mirror that here so the
+//!   `unsafe` surface per backend is one file.
 //!
 //! ## Deadline tracking
 //!
@@ -20,9 +34,13 @@
 #![allow(unsafe_code)]
 
 use libc::{c_int, kevent, kqueue, timespec};
+use specter_core::ResourceKind;
+use std::ffi::CString;
 use std::io::{self, Error};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::time::Instant;
 
 /// One `libc::kevent` slot. Constructed via `Kevent::zeroed()` for output
@@ -247,6 +265,58 @@ fn duration_to_timespec(dur: std::time::Duration) -> timespec {
         tv_sec: dur.as_secs() as libc::time_t,
         tv_nsec: libc::c_long::from(dur.subsec_nanos() as i32),
     }
+}
+
+/// Open `path` with the kqueue-friendly flag set for the current
+/// target. macOS uses `O_EVTONLY` (Darwin-private flag for "open for
+/// event monitoring only" — won't pin the file against `unlink`);
+/// FreeBSD falls back to `O_RDONLY`. Both unconditionally apply
+/// `O_NOFOLLOW` — symlinks at the anchor path fail with `ELOOP`
+/// rather than silently traversing. v1 has no follow-symlinks opt-in.
+///
+/// Errors propagate verbatim (`EMFILE` / `ENFILE` / `ENOENT` /
+/// `EACCES` / `ELOOP` are the FD-pressure / pending-path / symlink
+/// cases the engine surfaces via `WatchOpRejected`).
+pub(super) fn open_for_watch(path: &Path) -> io::Result<OwnedFd> {
+    let cstr = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::other("path contains NUL byte"))?;
+
+    #[cfg(target_os = "macos")]
+    let flags = libc::O_EVTONLY | libc::O_NOFOLLOW;
+
+    #[cfg(target_os = "freebsd")]
+    let flags = libc::O_RDONLY | libc::O_NOFOLLOW;
+
+    // SAFETY: `cstr` is a valid NUL-terminated C string for the
+    // duration of the call; `flags` is a valid `O_*` bit set. `open`
+    // returns a non-negative fd or -1 on error.
+    let raw = unsafe { libc::open(cstr.as_ptr(), flags) };
+    if raw < 0 {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: `raw >= 0` ⇒ `open` handed us a fresh fd we now own.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+/// Stat the open fd to determine `ResourceKind`. Used by the watcher's
+/// per-resource kind cache — `NOTE_WRITE` on a Dir means structural
+/// change; on a File, content modification.
+pub(super) fn stat_kind(fd: &OwnedFd) -> io::Result<ResourceKind> {
+    let mut s = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `fd` is a valid open fd; `s` is a writable
+    // `*mut libc::stat`. `fstat` returns 0 on success, populating `s`.
+    let n = unsafe { libc::fstat(fd.as_raw_fd(), s.as_mut_ptr()) };
+    if n < 0 {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: `fstat` returned 0 above, so every field of `s` is now
+    // initialized.
+    let s = unsafe { s.assume_init() };
+    Ok(match s.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => ResourceKind::Dir,
+        libc::S_IFREG => ResourceKind::File,
+        _ => ResourceKind::Unknown,
+    })
 }
 
 #[cfg(test)]

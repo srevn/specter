@@ -21,7 +21,7 @@ deny = [
     "signal-hook",
     "signal-hook-registry",
   ] },
-  { name = "nix", wrappers = ["specter-sensor", "specter-actuator"] },
+  { name = "nix", wrappers = ["specter-actuator"] },
   { name = "specter-engine",   wrappers = ["specter-bin"] },
   { name = "specter-sensor",   wrappers = ["specter-bin"] },
   { name = "specter-actuator", wrappers = ["specter-bin"] },

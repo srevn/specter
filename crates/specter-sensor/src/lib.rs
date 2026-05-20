@@ -296,6 +296,32 @@ pub trait FsWatcher: Send {
     /// — symmetric with [`watch`](Self::watch). The bin treats a
     /// `poll_until` failure as terminal for the watcher thread (no
     /// recovery path).
+    ///
+    /// # Lifecycle invariants the implementor must honour
+    ///
+    /// - **Intra-batch order independence.** Recovery decisions that
+    ///   span a single drained batch (e.g., the post-loop reopen
+    ///   after an atomic-save coalesces terminal + parent records
+    ///   into one drain) must be made *after* the per-record loop,
+    ///   against the batch's final state. The kernel's record order
+    ///   within one drain is unspecified across both backends; per-
+    ///   arm decisions that read intermediate state are order-
+    ///   sensitive bugs.
+    ///
+    /// - **Wake suppresses deferred drain.** When a
+    ///   [`WakeHandle::wake`] fires concurrently with real events in
+    ///   the same drain, the watcher must return promptly without
+    ///   arming a second deferred drain. A wake means "control-plane
+    ///   work pending in the bin's channel"; deferring it would
+    ///   delay the bin's loop iteration for up to the full drain
+    ///   window.
+    ///
+    /// - **Deadline honoured across `EINTR`.** A `Some(deadline)`
+    ///   is *total wall-clock budget*, not a per-syscall budget.
+    ///   The implementor's `EINTR` retry loop must recompute the
+    ///   remaining budget on every iteration; a re-armed full
+    ///   original budget would multiply the effective deadline by
+    ///   the number of interruptions.
     fn poll_until(
         &mut self,
         deadline: Option<Instant>,
@@ -387,6 +413,29 @@ pub trait ConfigWatcher: Send {
     /// `EINTR` is retried internally. Other syscall errors propagate;
     /// the bin's wrapper logs at `error!` and exits the watcher thread.
     /// SIGHUP-only operation continues to work.
+    ///
+    /// # Lifecycle invariants the implementor must honour
+    ///
+    /// - **Intra-batch order independence.** File-loss recovery
+    ///   decisions (the post-loop reopen after an atomic-save's
+    ///   coalesced parent + file-terminal records) must be made
+    ///   *after* the per-record loop, against the batch's final
+    ///   state. The kernel's record order within one drain is
+    ///   unspecified across both backends; per-arm decisions reading
+    ///   intermediate state would strand the watcher under one
+    ///   batch ordering and recover under the other.
+    ///
+    /// - **Wake produces `Ok(false)`.** A wake-only drain reports
+    ///   "nothing substantive observed"; the bin's wrapper loops
+    ///   and re-checks shutdown. Mixing the wake into the truthy
+    ///   pulse would force an unnecessary engine-side settle cycle.
+    ///
+    /// - **Deadline honoured across `EINTR`.** A `Some(deadline)`
+    ///   is *total wall-clock budget*, not a per-syscall budget.
+    ///   The implementor's `EINTR` retry loop must recompute the
+    ///   remaining budget on every iteration; a re-armed full
+    ///   original budget would multiply the effective deadline by
+    ///   the number of interruptions.
     fn wait(&mut self, deadline: Option<Instant>) -> io::Result<bool>;
 
     /// Capture a wake handle for cross-thread interruption of an
@@ -430,13 +479,13 @@ pub trait Prober: Send + Sync {
 mod kqueue;
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-pub use kqueue::{KqueueConfigWatcher, KqueueWakeHandle, KqueueWatcher};
+pub use kqueue::{KqueueConfigWatcher, KqueueWatcher};
 
 #[cfg(target_os = "linux")]
 mod inotify;
 
 #[cfg(target_os = "linux")]
-pub use inotify::{InotifyConfigWatcher, InotifyWakeHandle, InotifyWatcher};
+pub use inotify::{InotifyConfigWatcher, InotifyWatcher};
 
 #[cfg(unix)]
 mod prober;
