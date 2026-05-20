@@ -107,52 +107,46 @@ enum Completeness {
     Incomplete,
 }
 
-/// Non-observation accounting for one subtree probe — the *total*
-/// record of every way [`snapshot_dir`] can yield a snapshot that is
-/// not a faithful complete read. [`certify`] folds it against the
-/// obligation into a [`ProofAuthority`].
+/// Non-observation accounting for one subtree probe — the record of
+/// every way [`snapshot_dir`] can yield a snapshot that is not a
+/// faithful complete read. [`certify`] folds it against the obligation
+/// into a [`ProofAuthority`].
 ///
-/// Asymmetric by design: `degraded` is the sole release-mode
-/// correctness input; `skipped` is written **only** in the
-/// skip-predicate-regression case (a skip succeeding at an
-/// obligation-at-or-under frame, which the obligation-aware predicate
-/// refuses in correct operation) — a pure tripwire, zero hot-path
-/// allocation on the common off-chain skip.
+/// Written only by [`snapshot_dir`]'s degrade choke: a frame whose own
+/// read was unfaithful (the [`Completeness::Incomplete`] arm of
+/// [`enumerate_dir`]). The mtime-skip predicate
+/// ([`WalkContext::try_mtime_skip`]) refuses to skip at any frame on
+/// an obligation chain by construction, so a sound off-chain skip is
+/// not a non-observation and is never recorded.
 #[derive(Default)]
 struct ProofLedger {
-    skipped: BTreeSet<Arc<Path>>,
     degraded: BTreeSet<Arc<Path>>,
 }
 
 /// Fold the non-observation ledger against the obligation into the
 /// response's [`ProofAuthority`].
 ///
-/// Unidirectional: `Undischarged` iff a skipped/degraded frame `f` lies
+/// Unidirectional: `Undischarged` iff a degraded frame `f` lies
 /// at-or-**above** an obligation path `p` (`p.starts_with(f)`) — a hole
-/// on a chain we had to prove. `f` at-or-below `p` is the sound
-/// off-chain skip and must **not** flag. `WholeSubtree` (no trusted
-/// prior) treats any frame anywhere as a hole — the existential is
-/// correct there. `first_unread` is the obligation path whose proof we
-/// could not discharge.
+/// on a chain we had to prove. `f` at-or-below `p` sits off-chain and
+/// must **not** flag. `WholeSubtree` (no trusted prior) treats any
+/// degraded frame anywhere as a hole — the existential is correct
+/// there. `first_unread` is the obligation path whose proof we could
+/// not discharge (`Chains`) or the offending frame itself
+/// (`WholeSubtree`, where no obligation path exists to name).
 fn certify(obligation: &ProofObligation, l: &ProofLedger) -> ProofAuthority {
     match obligation {
         ProofObligation::Chains(paths) => paths
             .iter()
-            .find(|p| {
-                l.skipped
-                    .iter()
-                    .chain(&l.degraded)
-                    .any(|f| p.starts_with(f))
-            })
+            .find(|p| l.degraded.iter().any(|f| p.starts_with(f)))
             .map_or(ProofAuthority::Authoritative, |p| {
                 ProofAuthority::Undischarged {
                     first_unread: Arc::clone(p),
                 }
             }),
         ProofObligation::WholeSubtree => {
-            l.skipped
+            l.degraded
                 .iter()
-                .chain(&l.degraded)
                 .next()
                 .map_or(ProofAuthority::Authoritative, |f| {
                     ProofAuthority::Undischarged {
@@ -187,14 +181,14 @@ impl WalkContext<'_> {
             && child_dev == self.root_dev
     }
 
-    /// Returns `Some(Arc::clone(baseline))` when the directory with
-    /// freshly-`lstat`ed `root_meta` is observationally identical to
-    /// the baseline subtree. Three predicates folded:
+    /// Returns `Some(Arc::clone(baseline))` when the directory at
+    /// `path` with freshly-`lstat`ed `root_meta` is observationally
+    /// identical to the baseline subtree. Three predicates folded:
     /// - `!self.forced` (no defensive bypass), AND
-    /// - `!obligation_at_or_under` (this frame is not on a proof
-    ///   obligation — computed once by the caller and threaded in so
-    ///   the predicate stays pure and the obligation set is scanned
-    ///   exactly once per frame), AND
+    /// - `!self.obligation_at_or_under(path)` (this frame is not on a
+    ///   proof obligation; the obligation set is scanned at most once
+    ///   per call, and not at all when `self.forced` short-circuits),
+    ///   AND
     /// - `baseline.root_meta == *root_meta` (mtime + inode + device).
     ///
     /// On `Some`, the caller short-circuits one whole recursion frame:
@@ -204,11 +198,11 @@ impl WalkContext<'_> {
     #[must_use]
     fn try_mtime_skip(
         &self,
+        path: &Path,
         root_meta: &DirMeta,
         baseline: Option<&Arc<DirSnapshot>>,
-        obligation_at_or_under: bool,
     ) -> Option<Arc<DirSnapshot>> {
-        if self.forced || obligation_at_or_under {
+        if self.forced || self.obligation_at_or_under(path) {
             return None;
         }
         let prior = baseline?;
@@ -415,18 +409,12 @@ pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
 /// 2. [`build_dir_child`], with a `cmeta`-derived `root_meta` for a
 ///    covered subdir dirent.
 ///
-/// **Owns both [`ProofLedger`] chokes** (`enumerate_dir` reports,
-/// `snapshot_dir` accumulates):
-/// - *Skip choke.* The obligation set is scanned **once per frame**
-///   (`obligation_at_or_under`) and threaded into
-///   [`WalkContext::try_mtime_skip`] so the predicate stays pure.
-///   `try_mtime_skip` returns `None` whenever the frame is on an
-///   obligation, so reaching the skip arm with `obligation_at_or_under`
-///   still true is a skip-predicate regression — the sole writer of
-///   `ledger.skipped`. Correct operation never inserts (zero hot-path
-///   alloc on the common off-chain skip).
-/// - *Degrade choke.* An `Incomplete` level (this frame's own read was
-///   not faithful) writes `ledger.degraded`.
+/// **Owns the [`ProofLedger`] degrade choke** (`enumerate_dir`
+/// reports, `snapshot_dir` accumulates): an `Incomplete` level (this
+/// frame's own read was not faithful) writes `ledger.degraded`. The
+/// mtime-skip arm is recorded nowhere — the obligation guard inside
+/// [`WalkContext::try_mtime_skip`] makes a sound skip not a
+/// non-observation by construction.
 ///
 /// Infallible by construction. Any failure inside the recursive
 /// [`enumerate_dir`] routes through the `Covered(empty_or_partial_arc)`
@@ -443,12 +431,8 @@ fn snapshot_dir(
     depth: u32,
     ledger: &mut ProofLedger,
 ) -> Arc<DirSnapshot> {
-    let obligation_at_or_under = ctx.obligation_at_or_under(path);
-    if let Some(skipped) = ctx.try_mtime_skip(&root_meta, baseline, obligation_at_or_under) {
-        if obligation_at_or_under {
-            ledger.skipped.insert(Arc::from(path));
-        }
-        return skipped;
+    if let Some(prior) = ctx.try_mtime_skip(path, &root_meta, baseline) {
+        return prior;
     }
     let (entries, completeness) =
         enumerate_dir(ctx, path, baseline.map(Arc::as_ref), depth, ledger);
