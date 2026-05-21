@@ -1,11 +1,12 @@
 //! The coverage relation and the reconfirm query derived from it.
 //!
 //! [`covers`] walks the segment chain from `profile.resource` (the
-//! anchor) down to the candidate `target`, evaluating `max_depth`, the
-//! `recursive` flag, the exclude globs, and the file pattern (with
-//! directory bypass) along the way. It is the gate for two things in
-//! the engine: whether an `FsEvent` at `R` should drive `P`'s burst,
-//! and whether `R` contributes to `P`'s `watch_demand`.
+//! anchor) down to the candidate `target`, delegating each prefix's
+//! in-scope test to [`specter_core::ScanConfig::accepts`] — the single
+//! source of the scope predicate, shared with the walker. It is the
+//! gate for two things in the engine: whether an `FsEvent` at `R`
+//! should drive `P`'s burst, and whether `R` contributes to `P`'s
+//! `watch_demand`.
 //!
 //! [`nearest_covering_ancestor`] is its transitive derivation, and
 //! [`has_active_standard_descendant`] (via [`chain_reaches`]) is the
@@ -28,16 +29,22 @@ use std::path::PathBuf;
 /// **Depth-0 (`target == profile.resource`).** Always `true`. The anchor
 /// is part of the Profile's scope by construction — `FsEvent`s at the
 /// anchor must drive the anchor's burst, so coverage at the anchor
-/// is unconditional. Pattern, exclude, depth, and recursive checks all
-/// bypass at this depth.
+/// is unconditional. [`ScanConfig::accepts`] bypasses every filter at
+/// depth 0 by the same rule.
 ///
 /// **Descendants.** Build the cumulative relative path segment-by-segment
-/// from `profile.resource` to `target`. At each step, test the cumulative
-/// `Path` against every exclude glob — `target` matches `target/foo` at
-/// depth 1, `target/**` matches the same path at depth 2, and the two
-/// styles coexist. The file pattern matches the *full* relative path of
-/// `target`, only when `target.kind == File`; directories bypass the
-/// pattern.
+/// from `profile.resource` to `target`, calling `accepts` at each
+/// prefix. Intermediate prefixes are typed [`ResourceKind::Dir`] (the
+/// Tree invariant: a non-Dir parent can't have children); the final
+/// prefix's kind is `target`'s own kind, collapsed to `File` for
+/// unprobed slots ([`Resource::kind_or_file`], matching the backend-
+/// mask convention shared with `fs_event_to_class` and the kqueue /
+/// inotify translators). A failure at any prefix short-circuits.
+///
+/// Per-prefix evaluation through the same predicate the walker
+/// consumes is what makes pattern/exclude/depth/recursive/hidden
+/// semantics co-evolve across the two callers — drift is structurally
+/// impossible.
 ///
 /// Returns `false` if `target` is not on the descendant chain of
 /// `profile.resource` (sibling, ancestor, or unrelated subtree), or if
@@ -81,61 +88,41 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
     }
     rev.reverse();
 
-    let depth = u32::try_from(rev.len()).unwrap_or(u32::MAX);
+    let total = rev.len();
+    // Hoist `target`'s kind out of the per-prefix loop — every
+    // intermediate prefix is `Dir` (Tree invariant), only the final
+    // prefix's kind feeds the pattern arm of `accepts`. `kind_or_file`
+    // collapses unprobed slots to File-shape, matching the backend-
+    // mask convention shared with `fs_event_to_class` and the kqueue /
+    // inotify translators — a freshly-touched file in the window
+    // between `create_child`'s slot materialization and the follow-up
+    // probe is still pattern-filtered (raw-`kind` Unknown would have
+    // bypassed the pattern).
+    let target_kind = tree
+        .get(target)
+        .map_or(ResourceKind::File, Resource::kind_or_file);
 
-    if let Some(max) = profile.config().max_depth
-        && depth > max
-    {
-        return false;
-    }
-    if depth > 1 && !profile.config().recursive {
-        return false;
-    }
-
-    // Unprobed slots collapse to File-shape (the backend-mask
-    // convention shared by `fs_event_to_class`, the kqueue / inotify
-    // translators, and `recompute_events_union`). The prior raw-`kind`
-    // form let Unknown bypass the pattern entirely — a file freshly
-    // touched in the window between create_child's slot materialization
-    // and a follow-up event would slip the user's pattern filter. The
-    // kind lookup stays gated behind `pattern.is_some()` — the closure
-    // runs only on `Some`, matching the prior `if let Some(pat)` cost.
-    let pattern = profile.config().pattern.as_ref().filter(|_| {
-        matches!(
-            tree.get(target)
-                .map_or(ResourceKind::File, Resource::kind_or_file),
-            ResourceKind::File
-        )
-    });
-    let exclude = &profile.config().exclude;
-
+    let config = profile.config();
     // One incremental build into the engine-owned `scratch` (capacity
     // retained across calls; `clear()` per call so the cross-call
-    // residue is never observable). The exclude walk tests every
-    // cumulative prefix, and its terminal state *is* the full relative
-    // path — the pattern matches that directly, so the two prior
-    // `PathBuf::new()` allocations + rebuilds collapse to one cleared
-    // reuse. Skipped wholesale when neither exclude nor pattern applies
-    // (the prior zero-work fast path is preserved). An early `return`
-    // mid-walk leaves `scratch` dirty; the next entry's `clear()` is
-    // the reset — `scratch` is per-call logically, per-step physically.
-    if !exclude.is_empty() || pattern.is_some() {
-        scratch.clear();
-        for seg in &rev {
-            scratch.push(seg);
-            for excl in exclude {
-                if excl.matches_path(scratch.as_path()) {
-                    return false;
-                }
-            }
-        }
-        if let Some(pat) = pattern
-            && !pat.matches_path(scratch.as_path())
-        {
+    // residue is never observable). `scratch.as_path()` after `push` is
+    // the cumulative relative path the predicate consumes — the same
+    // shape the walker passes (`child_path.strip_prefix(anchor_path)`).
+    // An early `return` mid-walk leaves `scratch` dirty; the next
+    // entry's `clear()` is the reset.
+    scratch.clear();
+    for (i, seg) in rev.iter().enumerate() {
+        scratch.push(seg);
+        let depth = u32::try_from(i + 1).unwrap_or(u32::MAX);
+        let kind = if i + 1 == total {
+            target_kind
+        } else {
+            ResourceKind::Dir
+        };
+        if !config.accepts(scratch.as_path(), kind, depth) {
             return false;
         }
     }
-
     true
 }
 
@@ -734,6 +721,63 @@ mod tests {
         assert!(
             !covers(&profile, inside, &tree, &mut PathBuf::new()),
             "`target/foo` matches `target/**` — contents excluded",
+        );
+    }
+
+    /// Load-bearing regression pin for the predicate unification.
+    /// Pre-fix, `covers` reimplemented its own filter and missed the
+    /// `hidden` gate — an FS event at a `.hidden` descendant drove the
+    /// parent Profile's burst even when the walker had filtered the
+    /// dirent out of the snapshot. Multi-Profile setups with mixed
+    /// `hidden` settings ended up with spurious wake-ups + spurious
+    /// watch contributions. After the migration both consumers share
+    /// `ScanConfig::accepts`, so `hidden=false` rejects the segment at
+    /// every depth.
+    ///
+    /// The basename test is per-segment by construction (the predicate
+    /// is called at every prefix on the chain anchor → target). Both
+    /// "hidden at depth 1" and "hidden at depth 2" are exercised here
+    /// because they hit different short-circuit arms of the chain
+    /// walker: a depth-1 hidden segment rejects at the first iteration;
+    /// a depth-2 case proves the cumulative-path walk doesn't lose the
+    /// gate when a non-hidden depth-1 segment precedes it.
+    #[test]
+    fn covers_rejects_hidden_segments_when_hidden_false() {
+        let mut tree = Tree::new();
+        let (root, profile) = anchor(&mut tree, "root", recursive_unbounded());
+        let hidden_dir = tree
+            .ensure_child(root, ".hidden", ResourceRole::User)
+            .expect("test live parent");
+        mark(&mut tree, hidden_dir, ResourceKind::Dir);
+        let inside_hidden = tree
+            .ensure_child(hidden_dir, "leaf.rs", ResourceRole::User)
+            .expect("test live parent");
+        mark(&mut tree, inside_hidden, ResourceKind::File);
+        let sub = tree
+            .ensure_child(root, "src", ResourceRole::User)
+            .expect("test live parent");
+        mark(&mut tree, sub, ResourceKind::Dir);
+        let hidden_under_sub = tree
+            .ensure_child(sub, ".secret", ResourceRole::User)
+            .expect("test live parent");
+        mark(&mut tree, hidden_under_sub, ResourceKind::Dir);
+
+        assert!(
+            !covers(&profile, hidden_dir, &tree, &mut PathBuf::new()),
+            "depth-1 hidden segment must be rejected"
+        );
+        assert!(
+            !covers(&profile, inside_hidden, &tree, &mut PathBuf::new()),
+            "descendant of a hidden segment is also out of scope"
+        );
+        assert!(
+            covers(&profile, sub, &tree, &mut PathBuf::new()),
+            "sanity: a non-hidden sibling stays covered"
+        );
+        assert!(
+            !covers(&profile, hidden_under_sub, &tree, &mut PathBuf::new()),
+            "depth-2 hidden segment must be rejected — the per-segment \
+             basename test reaches every prefix"
         );
     }
 

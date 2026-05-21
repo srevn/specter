@@ -38,10 +38,11 @@
 //! is refused: subdir entries with a `dev` differing from the root anchor's
 //! `dev` are emitted as `DirChild::Uncovered(fs_id)` (uncovered-by-mount).
 //!
-//! `exclude` and `pattern` are tested against the *cumulative relative path*
-//! from the anchor (`subdir/file.c`, not just `file.c`). This matches the
-//! engine's `coverage::covers`, keeping walker behaviour consistent with
-//! the predicate the engine consumes.
+//! Per-dirent scope filtering is delegated to
+//! [`ScanConfig::accepts_structural`] (pre-`lstat`) plus the pattern arm
+//! inline (post-`lstat`, when `is_dir` is known). `covers` (engine) calls
+//! the full [`ScanConfig::accepts`]; both consume the same predicate body,
+//! keeping walker and engine in lockstep across every scope axis.
 
 use compact_str::CompactString;
 use specter_core::{
@@ -171,9 +172,13 @@ impl WalkContext<'_> {
     /// ENOTDIR mid-walk) surfaces as `Covered(empty_or_partial_arc)`
     /// instead, via [`enumerate_dir`]'s benign-empty contract.
     ///
-    /// Mirrors the engine's `coverage::covers(profile, R)` predicate,
-    /// modulo the cross-filesystem gate (which `covers` does not
-    /// consult — the engine's `Tree` doesn't carry `device`).
+    /// Cross-filesystem refusal is walker-specific (the engine's `Tree`
+    /// slots don't carry `device`, so `ScanConfig::accepts` cannot fold
+    /// it). The `recursive` and `max_depth` gates here exactly mirror
+    /// what `ScanConfig::accepts` enforces per dirent — kept inline
+    /// because this decision is *whether to descend into the subtree*
+    /// (a recursion-edge concern) rather than *whether to include the
+    /// dirent in the snapshot*; the two are deliberately separate.
     #[must_use]
     fn should_recurse(&self, depth_after_descent: u32, child_dev: u64) -> bool {
         self.config.recursive
@@ -377,11 +382,13 @@ const DESCENT_CAPTURED_WITH: u64 = 0;
 
 /// Descent prefix probe. Single-level enumeration of `target_path` with
 /// a hardcoded override config: `recursive=false`, `hidden=true`, no
-/// `exclude`, no `pattern`, no `max_depth`. The walker owns the override
-/// config because the engine's user-facing filters would mask the very
-/// segment descent is searching for; descent dispatch reads
-/// `arc.entries.get(name)` directly and (for Profile descent) discards
-/// the snapshot.
+/// `exclude`, no `pattern`, no `max_depth`. The override config is what
+/// drives the unified [`ScanConfig::accepts_structural`] predicate to
+/// admit *every* dirent — descent is searching for the next path
+/// segment, so the engine's user-facing filters (which would mask the
+/// very segment we're looking for) deliberately collapse to no-ops
+/// here. Descent dispatch reads `arc.entries.get(name)` directly and
+/// (for Profile descent) discards the snapshot.
 ///
 /// Returns [`ProbeOutcome::DirEnumerated`] — a structural query is not
 /// a quiescence observation, so it carries **no** [`ProofAuthority`].
@@ -505,6 +512,14 @@ fn enumerate_dir(
         }
     };
 
+    // Each dirent's depth is one below the directory's own — depth-0
+    // here means we're enumerating the anchor itself (dirents land at
+    // depth 1). Saturating add keeps the predicate well-typed at
+    // pathological depths; `should_recurse` (the recursion edge that
+    // produces the recursive calls into this function) already caps
+    // descent at `max_depth`, so reaching `u32::MAX` here is purely
+    // defensive.
+    let entry_depth = depth.saturating_add(1);
     for dirent_result in read_dir {
         let dirent = match dirent_result {
             Ok(d) => d,
@@ -529,9 +544,6 @@ fn enumerate_dir(
             completeness = Completeness::Incomplete;
             continue;
         };
-        if !ctx.config.hidden && name_str.starts_with('.') {
-            continue;
-        }
         let Ok(rel) = child_path.strip_prefix(ctx.anchor_path) else {
             tracing::trace!(
                 ?child_path,
@@ -540,7 +552,14 @@ fn enumerate_dir(
             completeness = Completeness::Incomplete;
             continue;
         };
-        if ctx.config.exclude.iter().any(|g| g.matches_path(rel)) {
+        // Pre-`lstat` scope gate: hidden / exclude / recursive /
+        // max_depth (the last two are no-ops at this site — the
+        // walker only reaches dirents at depths `should_recurse` has
+        // already cleared — but the same predicate runs for `covers`
+        // where they bite). Skipping here saves the per-dirent `lstat`
+        // syscall on excluded subtrees (a `target/` tree in a Cargo
+        // project is thousands of dirents).
+        if !ctx.config.accepts_structural(rel, entry_depth) {
             continue;
         }
         let cmeta = match std::fs::symlink_metadata(&child_path) {
@@ -571,11 +590,12 @@ fn enumerate_dir(
         };
         let is_dir = cmeta.file_type().is_dir();
 
-        // Pattern semantics: directories are always covered (we descend
-        // through them); files (and symlinks/other) are gated by the
-        // pattern.
-        if let Some(pat) = &ctx.config.pattern
-            && !is_dir
+        // Pattern arm of `accepts`, run post-`lstat` now that `is_dir`
+        // is known. Kept inline (rather than calling `accepts` again
+        // and re-evaluating the structural gates) — the pre-`lstat`
+        // gate above has already discharged the structural half.
+        if !is_dir
+            && let Some(pat) = &ctx.config.pattern
             && !pat.matches_path(rel)
         {
             continue;

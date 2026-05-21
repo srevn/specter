@@ -14,6 +14,7 @@
 //! reads `source` directly via `core::hash::hasher`.
 
 use crate::hash::hasher;
+use crate::resource::ResourceKind;
 use crate::sub::ClassSet;
 use compact_str::CompactString;
 use globset::{Glob, GlobMatcher};
@@ -93,6 +94,105 @@ impl ScanConfig {
     #[must_use]
     pub fn builder() -> ScanConfigBuilder {
         ScanConfigBuilder::default()
+    }
+
+    /// True iff an entry at cumulative relative path `rel` of `kind` at
+    /// `depth` (anchor = 0, direct child = 1, …) is in scope.
+    ///
+    /// The single source of the scope predicate. Two callers, one body:
+    /// - [`crate::coverage`] (engine, in `specter-engine`) tests every
+    ///   prefix from anchor → target — `kind` is in hand, single call.
+    /// - The walker (`specter-sensor::prober`) tests each dirent —
+    ///   `kind` is only known after `lstat`, so it splits the predicate
+    ///   via [`Self::accepts_structural`] (pre-`lstat`) plus the
+    ///   pattern arm of this method (post-`lstat`); see that method's
+    ///   doc for the rationale.
+    ///
+    /// **Depth 0 bypasses every filter.** The anchor is part of the
+    /// Profile's scope by construction. For `depth > 0` the body folds
+    /// `max_depth`, `recursive`, `hidden` (last-segment basename test),
+    /// `exclude` (full-`rel` test), and `pattern` (final-`File` only —
+    /// directories are always covered; we descend through them).
+    ///
+    /// **Fold-completeness ratchet.** Like [`compute_config_hash`], this
+    /// predicate destructures `ScanConfig` exhaustively: a new field is
+    /// a compile error here until it is folded in. The two parallel
+    /// ratchets keep the partition key and the filter semantics
+    /// co-evolving across every future axis.
+    #[must_use]
+    pub fn accepts(&self, rel: &Path, kind: ResourceKind, depth: u32) -> bool {
+        if !self.accepts_structural(rel, depth) {
+            return false;
+        }
+        // Pattern applies to files only; directories are always covered
+        // (the walker descends through them, and `covers` checks them as
+        // intermediate prefixes). `ResourceKind::Unknown` is collapsed by
+        // upstream callers (`Resource::kind_or_file`, `From<EntryKind>`)
+        // before reaching this method.
+        if matches!(kind, ResourceKind::File)
+            && let Some(pat) = &self.pattern
+            && !pat.matches_path(rel)
+        {
+            return false;
+        }
+        true
+    }
+
+    /// The kind-independent half of [`Self::accepts`]. Folds the four
+    /// gates that don't need a `ResourceKind`: `max_depth`, `recursive`,
+    /// `hidden`, and `exclude`.
+    ///
+    /// Exists for the walker, which doesn't know `is_dir` until after
+    /// the per-dirent `lstat`. Calling [`Self::accepts`] there with a
+    /// guessed kind would either skip a covered Dir (guess `File` +
+    /// `pattern.matches == false`) or admit a pattern-violating File
+    /// (guess `Dir`). Splitting lets the walker reject hidden / excluded
+    /// dirents pre-`lstat` — saving the syscall on a `target/` tree in a
+    /// Cargo project (thousands of excluded dirents) — and gate the
+    /// pattern arm post-`lstat` against the known kind. `covers` has
+    /// `kind` in hand and calls [`Self::accepts`] directly.
+    ///
+    /// Destructuring is exhaustive for the same fold-completeness reason
+    /// as [`Self::accepts`]: a new structural field forces a compile
+    /// error here, not a silent bypass.
+    #[must_use]
+    pub fn accepts_structural(&self, rel: &Path, depth: u32) -> bool {
+        // Exhaustive destructure — a new field is a compile error until
+        // it's folded into this body (or, if kind-dependent, into the
+        // `accepts` arm). `pattern` lives here only to discharge the
+        // destructure; the pattern gate runs in `accepts`, which means
+        // a new kind-dependent field would still need its own arm
+        // there. A new structural field gets a `&` clause below.
+        let Self {
+            recursive,
+            hidden,
+            exclude,
+            pattern: _,
+            max_depth,
+        } = self;
+        if depth == 0 {
+            return true;
+        }
+        if let Some(max) = *max_depth
+            && depth > max
+        {
+            return false;
+        }
+        if depth > 1 && !*recursive {
+            return false;
+        }
+        if !*hidden
+            && rel
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|s| s.starts_with('.'))
+        {
+            return false;
+        }
+        if exclude.iter().any(|g| g.matches_path(rel)) {
+            return false;
+        }
+        true
     }
 }
 
@@ -276,8 +376,10 @@ impl ProfileIdentity {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClassSet, ConfigError, GlobPattern, ProfileIdentity, ScanConfig, compute_config_hash,
+        ClassSet, ConfigError, GlobPattern, ProfileIdentity, ResourceKind, ScanConfig,
+        compute_config_hash,
     };
+    use std::path::Path;
     use std::time::Duration;
 
     fn glob(source: &str) -> GlobPattern {
@@ -563,6 +665,118 @@ mod tests {
     }
 
     const GOLDEN_HASH: u64 = 0x35A4_7E13_BE87_7324;
+
+    /// Fold-completeness ratchet for [`ScanConfig::accepts`]. Mirrors
+    /// [`hash_discriminates_every_populated_field`]: a fully-populated
+    /// `ScanConfig` plus a neutral target; toggling each filter field
+    /// must move at least one `accepts` verdict on a small test grid.
+    ///
+    /// The exhaustive destructure inside `accepts_structural` makes a
+    /// new field a *compile error* until folded; this test makes the
+    /// fold *discriminate*, so the ratchet cannot be satisfied by
+    /// folding a new field as a constant.
+    ///
+    /// Not itself ratcheted: a new field still needs a new mutation
+    /// closure here. The compile error from the destructure is the
+    /// forcing function that drives the author to add it; this test
+    /// then guards that the fold actually discriminates.
+    #[test]
+    fn accepts_reads_every_field() {
+        fn populated() -> ScanConfig {
+            ScanConfig::builder()
+                .recursive(true)
+                .hidden(true)
+                .exclude(glob("excluded"))
+                .pattern(glob("*.rs"))
+                .max_depth(Some(7))
+                .build()
+        }
+
+        fn verdicts(cfg: &ScanConfig, probes: &[(&str, ResourceKind, u32)]) -> Vec<bool> {
+            probes
+                .iter()
+                .map(|(rel, kind, depth)| cfg.accepts(Path::new(rel), *kind, *depth))
+                .collect()
+        }
+
+        fn shifted(
+            base_v: &[bool],
+            cfg: &ScanConfig,
+            probes: &[(&str, ResourceKind, u32)],
+        ) -> bool {
+            verdicts(cfg, probes) != base_v
+        }
+
+        // Grid of probes: (rel, kind, depth). Each probe is chosen so a
+        // *single* field toggle shifts its verdict — the other fields
+        // are picked to "pass" so the predicate stops on the field
+        // under test. Verdicts overlap by design (the predicate
+        // short-circuits), so a probe that's already rejected by a
+        // *different* field cannot discriminate.
+        let probes: &[(&str, ResourceKind, u32)] = &[
+            ("foo.rs", ResourceKind::File, 5),
+            (".hidden_dir", ResourceKind::Dir, 1),
+            ("foo.rs", ResourceKind::File, 7),
+            ("excluded", ResourceKind::Dir, 1),
+            ("foo.txt", ResourceKind::File, 1),
+        ];
+
+        let base = populated();
+        let base_v = verdicts(&base, probes);
+
+        let mut mut_recursive = populated();
+        mut_recursive.recursive = false;
+        assert!(
+            shifted(&base_v, &mut_recursive, probes),
+            "recursive must discriminate"
+        );
+
+        let mut mut_hidden = populated();
+        mut_hidden.hidden = false;
+        assert!(
+            shifted(&base_v, &mut_hidden, probes),
+            "hidden must discriminate"
+        );
+
+        let mut_exclude = ScanConfig::builder()
+            .recursive(true)
+            .hidden(true)
+            .pattern(glob("*.rs"))
+            .max_depth(Some(7))
+            .build();
+        assert!(
+            shifted(&base_v, &mut_exclude, probes),
+            "exclude must discriminate"
+        );
+
+        let mut_pattern = ScanConfig::builder()
+            .recursive(true)
+            .hidden(true)
+            .exclude(glob("excluded"))
+            .max_depth(Some(7))
+            .build();
+        assert!(
+            shifted(&base_v, &mut_pattern, probes),
+            "pattern must discriminate"
+        );
+
+        let mut mut_max_depth = populated();
+        mut_max_depth.max_depth = Some(6);
+        assert!(
+            shifted(&base_v, &mut_max_depth, probes),
+            "max_depth must discriminate"
+        );
+
+        // Anchor-depth (`depth == 0`) bypasses every filter
+        // unconditionally. Pinning the load-bearing "anchor is in scope
+        // by construction" property at the predicate's first line, so
+        // a future structural rewrite that drops the short-circuit
+        // surfaces as a localised failure here.
+        assert!(
+            base.accepts(Path::new(""), ResourceKind::Dir, 0),
+            "depth 0 must accept regardless of filters"
+        );
+    }
 
     /// Pins the compiler-generated `Option<u32>` `derive(Hash)`
     /// discriminant encoding that `compute_config_hash` reproduces
