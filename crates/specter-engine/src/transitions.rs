@@ -3063,7 +3063,6 @@ impl Engine {
         let resource = p.resource;
         let baseline_snap = p.baseline();
         let current_snap = p.current();
-        let pattern = p.config().pattern.clone();
         // Read the cached anchor classification. `None` falls back to
         // `Dir` — the actuator's `compute_cwd` then anchors at the path
         // itself; if the actuator's later `chdir` discovers the path
@@ -3167,7 +3166,6 @@ impl Engine {
                         sub_id,
                         resource,
                         effect_forced,
-                        pattern.as_ref(),
                         &diff,
                         &anchor_path,
                         anchor_kind,
@@ -3184,8 +3182,6 @@ impl Engine {
     /// Per-Diff-entry Effect emission for a `PerStableFile` Sub. Walks
     /// `created`, `modified`, and `renamed.to`; deleted entries do **not**
     /// fire (running a per-file command on a deleted file makes no sense).
-    /// The pattern filter is the Profile's `ScanConfig.pattern` — multiple
-    /// Subs sharing one Profile share its pattern by design.
     ///
     /// Resource materialization: the diff entry's slot is resolved via
     /// `reconcile`'s `lookup_descendant`-style walk; if the slot isn't yet
@@ -3201,7 +3197,6 @@ impl Engine {
         sub_id: SubId,
         anchor: ResourceId,
         forced: bool,
-        pattern: Option<&specter_core::GlobPattern>,
         diff: &Arc<specter_core::Diff>,
         anchor_path: &Arc<Path>,
         anchor_kind: ResourceKind,
@@ -3216,8 +3211,6 @@ impl Engine {
 
         // Collect matching segments + kinds in a single pass, in the order
         // expected — created, then modified, then renamed.to.
-        // `EntryRef` carries `kind`; pattern matching applies to Files only
-        // (Dirs bypass the pattern per the `covers` predicate).
         let entries = diff
             .created
             .iter()
@@ -3235,18 +3228,11 @@ impl Engine {
             ) {
                 continue;
             }
-            if let Some(pat) = pattern {
-                let path = std::path::PathBuf::from(entry.segment.as_str());
-                if !pat.matches_path(&path) {
-                    continue;
-                }
-            }
             // `walk_pair`/`graft` runs before this and materialises every
             // covered diff entry; lookup is the happy path. Fall back to
             // `ensure_descendant` for defense — covers the rare case where
-            // reconcile filtered the entry but the Sub's pattern matches
-            // it (e.g., reconcile gates Watch on Dir, not on
-            // pattern-matching files).
+            // reconcile filtered the entry (e.g., reconcile gates Watch
+            // on Dir, not on every leaf the Sub can fire against).
             let resource = match lookup_descendant(&self.tree, anchor, entry.segment.as_str()) {
                 Some(r) => r,
                 None => match ensure_descendant(
