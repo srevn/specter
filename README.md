@@ -2,47 +2,30 @@
 
 > Prove the absence of change.
 
-Specter watches paths, debounces bursts of events, and fires commands
-when the tree settles — not when "something happened," but when
-**nothing has happened for long enough** that the tree is observably
-stable. Built around three pure actors:
+Specter watches paths and fires commands when the tree settles —
+not when "something happened," but when **nothing has happened for
+long enough** that the tree is observably stable. Commands run
+against a snapshot that includes every change up to the quiescent
+point.
 
-- **Engine** — a deterministic step machine. Owns the path tree,
-  per-Profile state machines, and the timer heap. Pure: no I/O, no
-  threads, no `HashMap`.
-- **Sensor** — kqueue watcher (BSD / macOS) plus a worker pool that
-  performs directory walks. Linux/inotify is a planned port; the
-  factory seam is in place.
-- **Actuator** — subprocess pool. Spawns commands, coalesces by
-  `DedupKey`, reaps children, reports completions.
+Conventional file-watch tools fire on every kernel event. The result
+is a flurry of redundant runs against partially-written files.
+Specter inverts that contract:
 
-A single bin (`specter`) wires them with bounded channels, signal
-handling, hot config reload, and the `EngineDriver::tick` loop.
-
-**Status:** alpha — single-user, no backwards-compat guarantees yet.
-Tested on macOS and FreeBSD.
-
-## Why Specter?
-
-Conventional file-watch tools fire on every kernel event. The result is
-a flurry of redundant runs against partially-written files. Specter
-inverts the contract: events restart a settle timer; reactions fire
-**only after the burst has decayed**, against a snapshot of the tree
-that includes every change up to that quiescent point.
-
-Concretely:
-
-- Coarse file-tree settling — no double-fires on `git checkout`,
+- **Coarse file-tree settling** — no double-fires on `git checkout`,
   multi-file editor saves, or build outputs writing dozens of
   artifacts.
-- Hierarchical content hashing — re-running the same edit (saving
+- **Hierarchical content hashing** — re-running the same edit (saving
   with no changes, touching mtime, idempotent reformatters) does not
   re-fire the command.
-- Self-event absorption — the reaction itself usually writes inside
-  the watched tree; Specter folds those events into the post-fire
-  rebase rather than treating them as a fresh burst.
-- A built-in `--config` reload pipeline (SIGHUP) and supervisor
-  templates for systemd / launchd / FreeBSD `daemon(8)`.
+- **Self-event absorption** — the reaction itself usually writes
+  inside the watched tree; Specter folds those events into the
+  post-fire rebase rather than treating them as a fresh burst.
+- **Hot config reload** via SIGHUP, plus supervisor templates for
+  systemd / launchd / FreeBSD `daemon(8)`.
+
+Under the hood, a pure engine drives a kqueue/inotify sensor (BSD,
+macOS, Linux) and a subprocess actuator over bounded channels.
 
 ## Build & install
 
@@ -339,7 +322,7 @@ actions = [{ exec = ["sh", "-c", "build.sh 2>&1 | tee /tmp/last && curl -d @/tmp
 crates/
   specter-core      # types, snapshot, diff, traits — pure
   specter-engine    # Engine::step — pure, depends only on core
-  specter-sensor    # kqueue watcher + worker prober pool
+  specter-sensor    # kqueue/inotify watcher + worker prober pool
   specter-actuator  # subprocess pool, coalescing, env vars
   specter-config    # TOML + CLI parse / validate / diff
   specter-bin       # wiring, signals, hot reload, drain order

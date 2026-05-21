@@ -3,7 +3,7 @@ resolver = "3"
 members  = ["crates/*"]
 
 [workspace.package]
-version      = "0.2.7"
+version      = "0.3.0"
 edition      = "2024"
 rust-version = "1.95"
 license      = "MIT OR Apache-2.0"
@@ -33,7 +33,7 @@ crossbeam = "0.8"
 # config / bin
 serde              = { version = "1", features = ["derive"] }
 toml               = "1"
-clap               = { version = "4", features = ["derive", "env"] }
+clap               = { version = "4", features = ["derive", "env", "wrap_help"] }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender   = "0.2"

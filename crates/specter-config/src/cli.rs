@@ -1,14 +1,36 @@
 use crate::config::{LogDestination, LogLevel};
 use clap::Parser;
+use clap::builder::{
+    Styles,
+    styling::{AnsiColor, Style},
+};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+
+const HEADING: Style = AnsiColor::Yellow.on_default().bold();
+const LITERAL: Style = AnsiColor::Cyan.on_default().bold();
+const PLACEHOLDER: Style = AnsiColor::Green.on_default();
+
+const STYLES: Styles = Styles::styled()
+    .header(HEADING)
+    .usage(HEADING)
+    .literal(LITERAL)
+    .placeholder(PLACEHOLDER);
+
+fn banner() -> String {
+    format!(
+        "{}specter{} — prove the absence of change",
+        LITERAL.render(),
+        LITERAL.render_reset(),
+    )
+}
 
 #[derive(Debug, Parser)]
 #[command(
     name = "specter",
     version,
-    about = "Prove the absence of change",
-    long_about = None,
+    about = banner(),
+    styles = STYLES,
 )]
 #[must_use]
 pub struct Cli {
@@ -16,45 +38,54 @@ pub struct Cli {
     #[arg(long, short = 'c')]
     pub config: PathBuf,
 
-    /// Override `[log] level` from config (cli wins).
+    /// Override log level from config.
     #[arg(long, value_enum)]
     pub log_level: Option<LogLevel>,
 
-    /// Override `[log] destination` from config (cli wins). When `file`,
-    /// the resolved path must come from either `--log-path` or
-    /// `[log] path` in the config.
+    /// Override log destination from config.
+    ///
+    /// When `file`, the resolved path must come from either `--log-path`
+    /// or `[log] path` in the config.
     #[arg(long, value_enum)]
     pub log_destination: Option<LogDestination>,
 
-    /// Override `[log] path` (must be absolute). Only meaningful when the
-    /// resolved destination is `file`.
+    /// Override log file path (must be absolute).
+    ///
+    /// Only meaningful when the resolved destination is `file`.
     #[arg(long)]
     pub log_path: Option<PathBuf>,
 
-    /// Global cap on concurrent Effect spawns. Omit for default (`2 × num_cpus`).
+    /// Global cap on concurrent Effect spawns.
+    ///
+    /// Omit for default (`2 × num_cpus`).
     #[arg(long, value_parser = clap::value_parser!(NonZeroUsize))]
     pub concurrency: Option<NonZeroUsize>,
 
-    /// Worker count for the Prober pool. Omit for default (4).
+    /// Worker count for the Prober pool.
+    ///
+    /// Omit for default (4).
     #[arg(long, value_parser = clap::value_parser!(NonZeroUsize))]
     pub probe_concurrency: Option<NonZeroUsize>,
 
-    /// Disable the config-file auto-reload watcher; SIGHUP remains the
-    /// only reload trigger.
+    /// Disable the config-file auto-reload watcher.
+    ///
+    /// SIGHUP remains the only reload trigger.
     ///
     /// Default-on auto-reload covers the common-case operator workflow
     /// (edit + save the running daemon's config and have it pick up
     /// the change). Disable when the config lives on a filesystem
     /// where the watcher's preconditions don't hold:
     ///
-    /// - **Network filesystems** (NFS, SMB, CIFS, FUSE-over-network) —
+    /// - Network filesystems (NFS, SMB, CIFS, FUSE-over-network) —
     ///   fanotify / inotify / kqueue do not deliver kernel events for
     ///   server-side mutations; the watcher would init successfully
     ///   but never fire.
-    /// - **Symlink-leaf retargeted post-startup** — `canonicalize` runs
+    ///
+    /// - Symlink-leaf retargeted post-startup — `canonicalize` runs
     ///   once at watcher init; a later retarget at the leaf leaves the
     ///   watcher pinned to the original inode.
-    /// - **Parent dir replaced underneath the watch** — the parent fd
+    ///
+    /// - Parent dir replaced underneath the watch — the parent fd
     ///   pins the original parent inode but observes nothing further
     ///   on the new dir.
     ///
