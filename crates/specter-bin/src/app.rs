@@ -30,6 +30,7 @@ use specter_sensor::{
     ConfigWatcher, DrainWindow, FsWatcher, WakeHandle, WatcherEvent, WorkerProber,
     default_config_watcher, default_watcher,
 };
+use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -139,7 +140,7 @@ pub fn run(cli: Cli) -> ExitCode {
     // Prober (workers spawn inside `WorkerProber::new`).
     let probe_concurrency = cli
         .probe_concurrency
-        .map_or(specter_sensor::DEFAULT_CONCURRENCY, |n| n as usize);
+        .map_or(specter_sensor::DEFAULT_CONCURRENCY, NonZeroUsize::get);
     let prober = match WorkerProber::new(&chans.sensor_in_tx, probe_concurrency, &shutdown_flag) {
         Ok(p) => Arc::new(p),
         Err(e) => {
@@ -165,7 +166,7 @@ pub fn run(cli: Cli) -> ExitCode {
     // Actuator thread.
     let actuator_concurrency = cli
         .concurrency
-        .map_or(specter_actuator::DEFAULT_CONCURRENCY, |n| n as usize);
+        .map_or(specter_actuator::DEFAULT_CONCURRENCY, NonZeroUsize::get);
     let actuator_handle = spawn_actuator_thread(actuator_concurrency, chans.take_actuator_side());
 
     // Engine driver — main thread.

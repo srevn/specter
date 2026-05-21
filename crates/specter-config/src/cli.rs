@@ -1,5 +1,6 @@
 use crate::config::{LogDestination, LogLevel};
 use clap::Parser;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -9,6 +10,7 @@ use std::path::PathBuf;
     about = "Prove the absence of change",
     long_about = None,
 )]
+#[must_use]
 pub struct Cli {
     /// Path to TOML config (required).
     #[arg(long, short = 'c')]
@@ -30,12 +32,12 @@ pub struct Cli {
     pub log_path: Option<PathBuf>,
 
     /// Global cap on concurrent Effect spawns. Omit for default (`2 × num_cpus`).
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
-    pub concurrency: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(NonZeroUsize))]
+    pub concurrency: Option<NonZeroUsize>,
 
     /// Worker count for the Prober pool. Omit for default (4).
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
-    pub probe_concurrency: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(NonZeroUsize))]
+    pub probe_concurrency: Option<NonZeroUsize>,
 
     /// Disable the config-file auto-reload watcher; SIGHUP remains the
     /// only reload trigger.
@@ -64,7 +66,7 @@ pub struct Cli {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, NonZeroUsize};
     use crate::config::LogLevel;
     use clap::{CommandFactory, Parser};
 
@@ -117,7 +119,7 @@ mod tests {
     #[test]
     fn concurrency_positive_accepted() {
         let cli = parse(&["specter", "--config", "/foo", "--concurrency", "16"]).unwrap();
-        assert_eq!(cli.concurrency, Some(16));
+        assert_eq!(cli.concurrency, NonZeroUsize::new(16));
     }
 
     #[test]
@@ -129,7 +131,7 @@ mod tests {
     #[test]
     fn probe_concurrency_positive_accepted() {
         let cli = parse(&["specter", "--config", "/foo", "--probe-concurrency", "8"]).unwrap();
-        assert_eq!(cli.probe_concurrency, Some(8));
+        assert_eq!(cli.probe_concurrency, NonZeroUsize::new(8));
     }
 
     #[test]

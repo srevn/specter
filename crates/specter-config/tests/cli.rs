@@ -2,6 +2,7 @@
 
 use clap::{CommandFactory, Parser};
 use specter_config::Cli;
+use std::num::NonZeroUsize;
 
 #[test]
 fn parse_full_set_of_flags() {
@@ -18,8 +19,8 @@ fn parse_full_set_of_flags() {
     ])
     .unwrap();
     assert_eq!(cli.config, std::path::Path::new("/etc/specter.toml"));
-    assert_eq!(cli.concurrency, Some(8));
-    assert_eq!(cli.probe_concurrency, Some(16));
+    assert_eq!(cli.concurrency, NonZeroUsize::new(8));
+    assert_eq!(cli.probe_concurrency, NonZeroUsize::new(16));
 }
 
 #[test]
