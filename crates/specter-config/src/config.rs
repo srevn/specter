@@ -75,9 +75,10 @@ impl LogConfig {
     /// Precedence is symmetric for every field: `CLI > config > default`.
     /// When destination resolves to [`LogDestination::File`] but no path
     /// was supplied (neither CLI nor config), returns
-    /// [`ConfigError::Validate`] with [`IssueKind::Empty`] on `log.path`.
-    /// CLI-supplied paths must be absolute (matching the config-time
-    /// rule), or the same error surfaces with [`IssueKind::NonAbsolute`].
+    /// [`ConfigError::Validate`] with [`IssueKind::EmptyLogPath`] on
+    /// `log.path`. CLI-supplied paths must be absolute (matching the
+    /// config-time rule), or the same error surfaces with
+    /// [`IssueKind::NonAbsolute`].
     pub fn merge_cli(
         mut self,
         level: Option<LogLevel>,
@@ -123,8 +124,8 @@ impl LogConfig {
 /// config-load flow). The structural rule lives here once; callers
 /// don't recheck it.
 ///
-/// `empty_hint` is appended to the [`IssueKind::Empty`] detail when
-/// File is paired with no path. The CLI flow passes
+/// `empty_hint` is appended to the [`IssueKind::EmptyLogPath`] detail
+/// when File is paired with no path. The CLI flow passes
 /// `" (provide --log-path or `[log] path` in the config)"` so the
 /// operator sees both override sites; the config-load flow passes the
 /// empty string for the bare structural rule.
@@ -138,7 +139,7 @@ fn validate_log_path(
         (LogDestination::File, None) => Err(ValidationIssue::new(
             None,
             "log.path",
-            IssueKind::Empty,
+            IssueKind::EmptyLogPath,
             format!("log.path is required when destination = \"file\"{empty_hint}"),
         )),
         (LogDestination::File, Some(p)) if p.is_absolute() => Ok(Some(p.to_path_buf())),
@@ -621,7 +622,7 @@ fn validate_log(raw: &RawLogConfig) -> Result<LogConfig, Vec<ValidationIssue>> {
 }
 
 /// Validate the `name` field. Two failures are mutually exclusive:
-/// empty (rejected as [`IssueKind::Empty`]) and `@`-bearing
+/// empty (rejected as [`IssueKind::EmptyName`]) and `@`-bearing
 /// (rejected as [`IssueKind::InvalidName`] — `@` is reserved for the
 /// engine's synthesized `<promoter_name>@<resolved_path>` shape).
 /// Single-issue by construction — at most one failure mode per call.
@@ -635,7 +636,7 @@ fn validate_name(idx: usize, raw_name: &str) -> Result<(), ValidationIssue> {
         return Err(ValidationIssue::new(
             Some(idx),
             "name",
-            IssueKind::Empty,
+            IssueKind::EmptyName,
             "name must not be empty".to_owned(),
         ));
     }
@@ -1593,7 +1594,7 @@ mod tests {
         let err = Config::from_str("[log]\ndestination = \"file\"").unwrap_err();
         let errors = validation_errors(err);
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].kind, IssueKind::Empty);
+        assert_eq!(errors[0].kind, IssueKind::EmptyLogPath);
         assert_eq!(errors[0].field, "log.path");
     }
 
@@ -1755,7 +1756,7 @@ mod tests {
         let toml = format!(
             "[[watch]]\nname = \"\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]"
         );
-        assert_only_kind(&toml, IssueKind::Empty);
+        assert_only_kind(&toml, IssueKind::EmptyName);
     }
 
     #[test]
@@ -1982,7 +1983,7 @@ mod tests {
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
         let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
-        assert!(kinds.contains(&IssueKind::Empty));
+        assert!(kinds.contains(&IssueKind::EmptyName));
         assert!(kinds.contains(&IssueKind::NonAbsolute));
         assert!(kinds.contains(&IssueKind::EmptyArgv));
         assert!(kinds.contains(&IssueKind::SettleTooSmall));
@@ -2231,22 +2232,22 @@ mod tests {
         assert_only_kind(toml, IssueKind::InvalidName);
     }
 
-    /// Empty static name still surfaces as `Empty` (not `InvalidName`)
-    /// — the helper short-circuits empty before checking `@`.
+    /// Empty static name surfaces as `EmptyName` (not `InvalidName`) —
+    /// the helper short-circuits empty before checking `@`.
     #[test]
-    fn empty_static_name_emits_empty_kind_not_invalid_name() {
+    fn empty_static_name_emits_empty_name_kind_not_invalid_name() {
         let toml = format!(
             "[[watch]]\nname = \"\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]"
         );
-        assert_only_kind(&toml, IssueKind::Empty);
+        assert_only_kind(&toml, IssueKind::EmptyName);
     }
 
-    /// Empty dynamic name surfaces as `Empty` for the same reason.
+    /// Empty dynamic name surfaces as `EmptyName` for the same reason.
     #[test]
-    fn empty_dynamic_name_emits_empty_kind_not_invalid_name() {
+    fn empty_dynamic_name_emits_empty_name_kind_not_invalid_name() {
         let toml =
             "[[watch]]\nname = \"\"\npath = \"/var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
-        assert_only_kind(toml, IssueKind::Empty);
+        assert_only_kind(toml, IssueKind::EmptyName);
     }
 
     // ---- Auto-detect dispatch ----
@@ -2457,7 +2458,7 @@ mod tests {
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
         let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
-        assert!(kinds.contains(&IssueKind::Empty));
+        assert!(kinds.contains(&IssueKind::EmptyName));
         assert!(kinds.contains(&IssueKind::InvalidPattern));
         assert!(kinds.contains(&IssueKind::EmptyArgv));
         assert!(kinds.contains(&IssueKind::SettleTooSmall));

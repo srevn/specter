@@ -28,7 +28,43 @@ pub struct ValidationIssue {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum IssueKind {
-    Empty,
+    /// User-supplied `[[watch]] name` is empty. Distinct from
+    /// [`Self::EmptyLogPath`] (the file-destination path) and
+    /// [`Self::EmptyPath`] (the watch path) so operator-triage
+    /// categories stay one-to-one with their fields.
+    EmptyName,
+    /// `[log] destination = "file"` with no `[log] path` (and no
+    /// `--log-path` CLI override). The `path` field is required iff
+    /// the destination resolves to `File`. Distinct from
+    /// [`Self::EmptyName`] and [`Self::EmptyPath`].
+    EmptyLogPath,
+    /// `[[watch]] path` is empty. Maps from
+    /// [`PathError::Empty`](crate::path::PathError::Empty). Distinct
+    /// from [`Self::EmptyName`] and [`Self::EmptyLogPath`] so
+    /// operator-triage categories stay one-to-one with their fields.
+    EmptyPath,
+    /// `[[watch]] path` contains a `..` component (anywhere). Maps
+    /// from [`PathError::ContainsParentDir`](crate::path::PathError::ContainsParentDir).
+    /// The operator must supply a literal absolute path without
+    /// parent-dir traversal — `..` segments would silently change
+    /// filesystem semantics by collapsing one symlink boundary.
+    PathContainsParentDir,
+    /// `[[watch]] path` canonicalisation hit a non-`NotFound` `io::Error`
+    /// — `PermissionDenied` (EACCES), symlink loop (ELOOP), non-directory
+    /// in path (ENOTDIR), EIO, etc. Maps from
+    /// [`PathError::Inaccessible`](crate::path::PathError::Inaccessible).
+    /// The detail line carries the cursor at fault and the underlying
+    /// error so operators can distinguish the failure class without
+    /// reaching for `strace` / `dtruss`.
+    PathInaccessible,
+    /// `[[watch]] path` canonicalised to a buffer carrying non-UTF-8
+    /// segments — typically via symlink resolution onto a non-UTF-8
+    /// byte path. Maps from
+    /// [`PathError::NonUtf8`](crate::path::PathError::NonUtf8). The
+    /// engine's [`specter_core::Tree::parse_attach_path`] gate would
+    /// reject the path; surface up-front so the validator's contract
+    /// ("ok ⇒ engine accepts the path") holds.
+    NonUtf8Path,
     /// `actions = []` — at least one entry required.
     EmptyActions,
     /// `actions[i]` carries no variant (e.g., `actions = [{}]`) — none
@@ -55,7 +91,7 @@ pub enum IssueKind {
     /// Currently emitted when `name` contains `@`, which the engine
     /// reserves for the synthesized `<promoter_name>@<resolved_path>`
     /// shape of dynamic Subs. Distinct from
-    /// [`Self::Empty`] (empty name) and [`Self::DuplicateName`].
+    /// [`Self::EmptyName`] (empty name) and [`Self::DuplicateName`].
     InvalidName,
     /// `path` of a dynamic `[[watch]]` failed `PatternSpec::parse` —
     /// any of `**`, `.`/`..`, empty segment, non-absolute, Windows
@@ -199,7 +235,12 @@ impl fmt::Display for ValidationIssue {
 
 const fn kind_label(k: IssueKind) -> &'static str {
     match k {
-        IssueKind::Empty => "empty",
+        IssueKind::EmptyName => "empty-name",
+        IssueKind::EmptyLogPath => "empty-log-path",
+        IssueKind::EmptyPath => "empty-path",
+        IssueKind::PathContainsParentDir => "path-contains-parent-dir",
+        IssueKind::PathInaccessible => "path-inaccessible",
+        IssueKind::NonUtf8Path => "non-utf8-path",
         IssueKind::EmptyActions => "empty-actions",
         IssueKind::ActionMissingVariant => "action-missing-variant",
         IssueKind::ActionAmbiguousVariant => "action-ambiguous-variant",

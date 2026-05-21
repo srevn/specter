@@ -24,10 +24,10 @@ fn assert_kinds(toml: &str, expected: &[IssueKind]) {
 }
 
 #[test]
-fn issue_kind_empty_for_blank_name() {
+fn issue_kind_empty_name() {
     let toml =
         format!("[[watch]]\nname = \"\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]");
-    assert_kinds(&toml, &[IssueKind::Empty]);
+    assert_kinds(&toml, &[IssueKind::EmptyName]);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn kitchen_sink_collects_five_distinct_issues() {
     assert_eq!(errors.len(), 5, "got {errors:?}");
     let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
     for expected in [
-        IssueKind::Empty,
+        IssueKind::EmptyName,
         IssueKind::NonAbsolute,
         IssueKind::EmptyArgv,
         IssueKind::SettleTooSmall,
