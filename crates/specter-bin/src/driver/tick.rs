@@ -82,6 +82,7 @@ impl EngineDriver {
     /// being fatal — the graceful drain above is the *only* sanctioned
     /// path to a probe-free engine; catching a `step` panic would
     /// bypass it and resume on torn-down probe state.
+    #[must_use]
     pub fn tick(&mut self) -> TickOutcome {
         let now = Instant::now();
 

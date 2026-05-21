@@ -36,16 +36,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-// Test-only re-exports: the in-place `mod tests` block below still
-// resolves these names through `super::*` until it is relocated; the
-// slimmed production spine no longer references them directly.
-#[cfg(test)]
-use specter_config::FileMeta;
-#[cfg(test)]
-use specter_core::StepOutput;
-#[cfg(test)]
-use std::time::Duration;
-
 /// Reason the driver loop exited. Returned from [`EngineDriver::run`].
 ///
 /// v1 has only the `Shutdown` variant — every path that could exit the
@@ -158,7 +148,10 @@ impl EngineDriver {
     /// prober receive ops as the engine emits them — a single
     /// startup-sized `ConfigDiff` would batch the entire attach into
     /// one output and stall the watcher behind the post-call
-    /// `forward`.
+    /// `forward`. Hot-reload (in `reload.rs`) deliberately uses the
+    /// inverse pattern — a single batched `Input::ConfigDiff` — because
+    /// reload diffs are typically small. Revisit if those diffs grow
+    /// large enough to stall the watcher behind a single `forward`.
     ///
     /// No bin-side reconciliation: the engine owns `name → id`
     /// resolution through its registries' `by_name` indices. The
@@ -221,6 +214,7 @@ impl EngineDriver {
     /// returns the engine holds no armed probe, so dropping it is
     /// silent and [`TickOutcome::Shutdown`] means "drained, safe to
     /// tear down".
+    #[must_use]
     fn begin_shutdown(&mut self) -> TickOutcome {
         let out = self.engine.cancel_all_in_flight_probes();
         self.forward(out);

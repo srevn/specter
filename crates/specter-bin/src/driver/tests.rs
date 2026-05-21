@@ -3,17 +3,24 @@
 //! SIGHUP / auto-reload settle pipeline, and the `forward`
 //! wake-per-send protocol.
 //!
-//! Wired by `#[cfg(test)] mod tests;` in `driver.rs`; `super::*`
-//! resolves against the driver spine.
+//! Wired by `#[cfg(test)] mod tests;` in `driver.rs`. Imports below
+//! are explicit (no `use super::*;`) so the driver spine carries no
+//! cfg(test)-only re-exports — the test surface is what this file
+//! references, nothing more.
 
-use super::*;
+use super::{EngineDriver, TickOutcome};
+use crate::app::CliLogOverrides;
 use crate::channels::{ActuatorSide, Channels, WatcherSide};
+use crate::loader::Loader;
 use crossbeam::channel::Sender;
-use specter_config::Config;
-use specter_core::{Input, SubId};
+use specter_config::{Config, FileMeta};
+use specter_core::{Input, StepOutput, SubId};
+use specter_engine::Engine;
 use specter_sensor::FsWatcher;
 use specter_sensor::testkit::{MockFsWatcher, MockProber, MockWaker};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Sentinel meta used in fixtures whose config file may not exist
 /// on disk. Inode 0 is reserved by every supported kernel and
@@ -246,7 +253,7 @@ fn reload_with_invalid_path_logs_and_keeps_config() {
 
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
     // Current config preserved.
     assert_eq!(rig.driver.loader.current_config, config);
 }
@@ -278,7 +285,7 @@ actions   = [{{ exec = ["true"] }}]
 
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     // No changes → the attached Sub is the same identity (no
     // reap/re-attach churned its SubId).
@@ -332,7 +339,7 @@ settle    = "100ms"
     std::fs::write(&cfg_path, &new_text).unwrap();
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     // Both Subs now attached in the engine.
     assert!(rig.driver.engine.subs().find_by_name("a").is_some());
@@ -377,7 +384,7 @@ actions   = [{{ exec = ["true"] }}]
     std::fs::write(&cfg_path, &new_text).unwrap();
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     assert!(rig.driver.engine.subs().find_by_name("a").is_some());
     assert!(rig.driver.engine.subs().find_by_name("b").is_none());
@@ -726,7 +733,7 @@ actions   = [{{ exec = ["true"] }}]
     std::fs::write(&cfg_path, &new_text).unwrap();
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
 }
@@ -759,7 +766,7 @@ actions   = [{{ exec = ["true"] }}]
     std::fs::write(&cfg_path, &new_text).unwrap();
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     assert!(rig.driver.engine.promoters().find_by_name("logs").is_none());
 }
@@ -806,7 +813,7 @@ actions   = [{{ exec = ["echo"] }}]
     std::fs::write(&cfg_path, &new_text).unwrap();
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     let new_pid = rig
         .driver
@@ -855,7 +862,7 @@ actions   = [{{ exec = ["true"] }}]
     std::fs::write(&cfg_path, &new_text).unwrap();
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     assert!(
         rig.driver.engine.subs().find_by_name("foo").is_none(),
@@ -903,7 +910,7 @@ actions   = [{{ exec = ["true"] }}]
     std::fs::write(&cfg_path, &new_text).unwrap();
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     assert!(
         rig.driver.engine.promoters().find_by_name("foo").is_none(),
@@ -1008,7 +1015,7 @@ settle    = "100ms"
 
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     assert_eq!(
         rig.driver.loader.config_meta, expected_meta,
@@ -1068,7 +1075,7 @@ actions   = [{{ exec = ["true"] }}]
 
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     assert_eq!(
         rig.driver.loader.config_meta, expected_meta,
@@ -1112,7 +1119,7 @@ fn reload_parse_failure_does_not_rotate_meta() {
 
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     assert_eq!(
         rig.driver.loader.config_meta, pre_reload_meta,
@@ -1142,7 +1149,7 @@ fn config_event_pulse_via_tick_arms_settle_window() {
     let before_tick = Instant::now();
     rig.config_event_tx.try_send(()).expect("pulse send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
-    rig.driver.tick();
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     let armed = rig
         .driver
@@ -1173,7 +1180,9 @@ fn repeat_config_pulses_via_tick_defer_settle_expiry() {
     let mut rig = rig_for(config, cfg_path);
 
     rig.config_event_tx.try_send(()).expect("first pulse");
-    rig.driver.tick();
+    // Drain-side check only — `tick`'s outcome is incidental (no
+    // shutdown queued); the test asserts on `config_settle_until`.
+    let _ = rig.driver.tick();
     let t1 = rig.driver.config_settle_until.expect("first settle armed");
 
     // Yield enough time for `Instant::now()` to advance — `tick()`
@@ -1183,7 +1192,7 @@ fn repeat_config_pulses_via_tick_defer_settle_expiry() {
     std::thread::sleep(Duration::from_millis(2));
 
     rig.config_event_tx.try_send(()).expect("second pulse");
-    rig.driver.tick();
+    let _ = rig.driver.tick();
     let t2 = rig.driver.config_settle_until.expect("second settle armed");
 
     assert!(
@@ -1506,7 +1515,7 @@ actions   = [{{ exec = ["true"] }}]
 
     // Drain arms settle.
     rig.config_event_tx.try_send(()).expect("pulse send");
-    rig.driver.tick();
+    let _ = rig.driver.tick();
     let armed = rig.driver.config_settle_until.expect("drain armed settle");
 
     // Force-expire via the helper. (Skirts the 100ms wall-clock
