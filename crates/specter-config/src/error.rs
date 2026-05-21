@@ -172,12 +172,28 @@ impl fmt::Display for ConfigError {
                 None => write!(f, "parse error: {message}"),
             },
             Self::Validate { path, errors } => {
-                let prefix = path
-                    .as_ref()
-                    .map_or_else(|| "<inline>".to_owned(), |p| p.display().to_string());
-                writeln!(f, "{prefix}: {} validation error(s):", errors.len())?;
-                for e in errors {
-                    writeln!(f, "  {e}")?;
+                // `Path::display()` implements `Display`, so write the
+                // header through the formatter directly instead of
+                // routing through a transient `String` allocation. The
+                // `<inline>` literal stands in for the file-less
+                // (string-source) case where `Config::from_str` is the
+                // entry point.
+                let n = errors.len();
+                match path {
+                    Some(p) => writeln!(f, "{}: {n} validation error(s):", p.display())?,
+                    None => writeln!(f, "<inline>: {n} validation error(s):")?,
+                }
+                // Trailing-newline hygiene: `writeln!` every issue except
+                // the last, which uses `write!`. The outer printer adds
+                // the final newline (println / eprintln / tracing).
+                // `split_last` returns `None` only on an empty slice — a
+                // shape the constructor never produces, but we degrade
+                // gracefully (header alone) rather than panic.
+                if let Some((last, rest)) = errors.split_last() {
+                    for e in rest {
+                        writeln!(f, "  {e}")?;
+                    }
+                    write!(f, "  {last}")?;
                 }
                 Ok(())
             }
