@@ -23,10 +23,14 @@ use std::collections::BTreeMap;
 /// semantics meaningfully changed; merging across the boundary would
 /// hide that.
 ///
-/// Determinism: each side's `removed` is sorted by name (defensive —
-/// already name-ordered, built from a `BTreeMap`'s keys); `modified`
-/// is sorted by name (load-bearing — built from source-order
-/// `active_*`); `added` preserves new-source order.
+/// Determinism: each side's `removed` is name-ordered structurally —
+/// it is built from a `BTreeMap`'s `keys()` iterator (ascending by
+/// API contract), so the order is established at construction and a
+/// debug-mode `is_sorted` check pins the invariant without paying for
+/// a runtime sort. `modified` is name-sorted load-bearing — built from
+/// source-order `active_*`, sorted at the end via `sort_unstable_by`
+/// (names are unique by validation, so stability is unobservable).
+/// `added` preserves new-source order.
 #[must_use]
 pub fn diff(old: &Config, new: &Config) -> WatchRegistryDiff {
     WatchRegistryDiff {
@@ -71,14 +75,19 @@ fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
         }
     }
 
-    // `removed` is collected from a `BTreeMap`'s keys and so is already
-    // name-ordered — the sort is defensive, pinning determinism against
-    // a future change of source collection. `modified` is built from
-    // source-order `active_watches()`, so its name sort is the
-    // load-bearing one: replay stability keys on config content, never
-    // slotmap mint order.
-    removed.sort_unstable();
-    modified.sort_by(|a, b| a.params.name.cmp(&b.params.name));
+    // `removed` is collected from a `BTreeMap`'s keys, so it is already
+    // name-ordered by construction — the debug assertion pins the
+    // invariant without paying for a runtime sort. `modified` is built
+    // from source-order `active_watches()` and is the load-bearing
+    // sort: replay stability keys on config content, never slotmap
+    // mint order. Names are unique by validation, so `sort_unstable_by`
+    // is observably indistinguishable from a stable sort and strictly
+    // cheaper.
+    debug_assert!(
+        removed.is_sorted(),
+        "removed must inherit BTreeMap key order",
+    );
+    modified.sort_unstable_by(|a, b| a.params.name.cmp(&b.params.name));
 
     SubRegistryDiff {
         added,
@@ -116,11 +125,15 @@ fn diff_promoters(old: &Config, new: &Config) -> PromoterRegistryDiff {
         }
     }
 
-    // Sort rationale mirrors `diff_subs`: `removed` defensive
-    // (BTreeMap-keyed, already name-ordered), `modified` load-bearing
-    // (source-order `active_promoters()`).
-    removed.sort_unstable();
-    modified.sort_by(|a, b| a.name.cmp(&b.name));
+    // Sort rationale mirrors `diff_subs`: `removed` is BTreeMap-keyed
+    // and so already name-ordered (debug-only assertion pins the
+    // invariant); `modified` is load-bearing on `active_promoters()`
+    // source order and uses `sort_unstable_by` since names are unique.
+    debug_assert!(
+        removed.is_sorted(),
+        "removed must inherit BTreeMap key order",
+    );
+    modified.sort_unstable_by(|a, b| a.name.cmp(&b.name));
 
     PromoterRegistryDiff {
         added,

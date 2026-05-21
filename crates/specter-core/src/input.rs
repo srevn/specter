@@ -181,3 +181,48 @@ pub struct WatchRegistryDiff {
     pub subs: SubRegistryDiff,
     pub promoters: PromoterRegistryDiff,
 }
+
+impl WatchRegistryDiff {
+    /// True iff both halves carry no changes — pure delegation to
+    /// [`SubRegistryDiff::is_empty`] and [`PromoterRegistryDiff::is_empty`].
+    /// The reload pipeline uses this as the "skip the engine step" gate;
+    /// keeping the predicate behind one method ensures future bucket
+    /// additions stay covered without touching call sites.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.subs.is_empty() && self.promoters.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SubRegistryDiff, WatchRegistryDiff};
+    use crate::promoter::PromoterRegistryDiff;
+    use compact_str::CompactString;
+
+    /// Composition contract: empty halves yield an empty whole; a single
+    /// populated bucket on either half flips the aggregate predicate.
+    #[test]
+    fn watch_registry_diff_is_empty_composes_both_halves() {
+        let empty = WatchRegistryDiff::default();
+        assert!(empty.is_empty());
+
+        let only_sub_side = WatchRegistryDiff {
+            subs: SubRegistryDiff {
+                removed: vec![CompactString::from("a")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!only_sub_side.is_empty());
+
+        let only_promoter_side = WatchRegistryDiff {
+            promoters: PromoterRegistryDiff {
+                removed: vec![CompactString::from("a")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!only_promoter_side.is_empty());
+    }
+}

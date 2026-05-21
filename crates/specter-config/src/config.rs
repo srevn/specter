@@ -338,6 +338,31 @@ impl Config {
         self.promoters.iter().filter(|p| p.enabled)
     }
 
+    /// Names of every operator-suppressed entry — the complement of
+    /// [`Self::active_watches`] and [`Self::active_promoters`]
+    /// flattened to the names the runtime needs for tracing. Returns
+    /// `(watches, promoters)`, each in source order. Sole consumers
+    /// are the startup-info log and the per-load `"config loaded"`
+    /// summary — both want the same `?disabled_*` payload, so routing
+    /// them through one helper keeps the two surfaces from drifting
+    /// apart when the underlying spec shape evolves.
+    #[must_use]
+    pub fn disabled_names(&self) -> (Vec<&str>, Vec<&str>) {
+        let watches = self
+            .watches
+            .iter()
+            .filter(|s| !s.enabled)
+            .map(|s| s.name.as_str())
+            .collect();
+        let promoters = self
+            .promoters
+            .iter()
+            .filter(|p| !p.enabled)
+            .map(|p| p.name.as_str())
+            .collect();
+        (watches, promoters)
+    }
+
     /// Parse a TOML string into a validated `Config`.
     ///
     /// Inherent name shadows `std::str::FromStr::from_str` (which is
@@ -414,18 +439,7 @@ impl std::str::FromStr for Config {
 /// isn't watch X firing?" can grep the log for the watch's name in
 /// the disabled lists rather than re-reading the TOML.
 fn log_config_loaded(cfg: &Config, path: &Path) {
-    let disabled_watches: Vec<&str> = cfg
-        .watches
-        .iter()
-        .filter(|s| !s.enabled)
-        .map(|s| s.name.as_str())
-        .collect();
-    let disabled_promoters: Vec<&str> = cfg
-        .promoters
-        .iter()
-        .filter(|p| !p.enabled)
-        .map(|p| p.name.as_str())
-        .collect();
+    let (disabled_watches, disabled_promoters) = cfg.disabled_names();
     tracing::info!(
         path = %path.display(),
         watches = cfg.watches.len(),
@@ -1645,6 +1659,26 @@ mod tests {
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.promoters.len(), 1);
         assert!(!cfg.promoters[0].enabled);
+    }
+
+    /// `disabled_names` is the structural complement of `active_*` —
+    /// each name appears in exactly one of the two views. Asserting
+    /// both in a single fixture pins the partition so a future
+    /// refactor of either filter cannot drift the two summaries apart.
+    #[test]
+    fn disabled_names_partitions_complement_of_active_in_source_order() {
+        let toml = format!(
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n\
+             [[watch]]\nname = \"b\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\nenabled = false\n\
+             [[watch]]\nname = \"c\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n\
+             [[watch]]\nname = \"d\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\nenabled = false\n\
+             [[watch]]\nname = \"e\"\npath = \"/srv/*\"\nactions = [{{ exec = [\"echo\"] }}]\nenabled = false\n\
+             [[watch]]\nname = \"f\"\npath = \"/srv/*\"\nactions = [{{ exec = [\"echo\"] }}]\n",
+        );
+        let cfg = Config::from_str(&toml).unwrap();
+        let (disabled_watches, disabled_promoters) = cfg.disabled_names();
+        assert_eq!(disabled_watches, vec!["b", "d"]);
+        assert_eq!(disabled_promoters, vec!["e"]);
     }
 
     #[test]

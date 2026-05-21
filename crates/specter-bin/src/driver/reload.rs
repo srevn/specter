@@ -124,13 +124,7 @@ impl EngineDriver {
         self.apply_log_reload(&new_log_resolved);
 
         let diff = self.compute_watch_diff(&new_config);
-        let no_sub_changes = diff.subs.added.is_empty()
-            && diff.subs.removed.is_empty()
-            && diff.subs.modified.is_empty();
-        let no_promoter_changes = diff.promoters.added.is_empty()
-            && diff.promoters.removed.is_empty()
-            && diff.promoters.modified.is_empty();
-        if no_sub_changes && no_promoter_changes {
+        if diff.is_empty() {
             tracing::info!("config reload: no watch changes");
             self.loader.current_config = new_config;
             self.loader.current_log = new_log_resolved;

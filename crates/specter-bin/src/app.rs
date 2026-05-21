@@ -94,18 +94,7 @@ pub fn run(cli: Cli) -> ExitCode {
     // an operator booting Specter with a mostly-disabled config sees
     // *which* entries are suppressed at startup, not just a watch
     // count that omits them.
-    let disabled_watches: Vec<&str> = initial_config
-        .watches
-        .iter()
-        .filter(|s| !s.enabled)
-        .map(|s| s.name.as_str())
-        .collect();
-    let disabled_promoters: Vec<&str> = initial_config
-        .promoters
-        .iter()
-        .filter(|p| !p.enabled)
-        .map(|p| p.name.as_str())
-        .collect();
+    let (disabled_watches, disabled_promoters) = initial_config.disabled_names();
     tracing::info!(
         level = ?log_cfg.level,
         destination = ?log_cfg.destination,

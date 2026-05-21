@@ -729,6 +729,17 @@ pub struct PromoterRegistryDiff {
     pub modified: Vec<PromoterAttachRequest>,
 }
 
+impl PromoterRegistryDiff {
+    /// True iff every bucket is empty — the Promoter-side analogue of
+    /// [`SubRegistryDiff::is_empty`](crate::SubRegistryDiff::is_empty).
+    /// Composed with the Sub side via
+    /// [`WatchRegistryDiff::is_empty`](crate::WatchRegistryDiff::is_empty).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.modified.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -878,13 +889,17 @@ mod tests {
     }
 
     /// Diff is plain data — exercise field construction so changes to
-    /// the shape break this test loudly.
+    /// the shape break this test loudly. The aggregate
+    /// [`PromoterRegistryDiff::is_empty`] reduces the three checks to
+    /// one and is asserted in lockstep so a future bucket addition that
+    /// forgets to extend the helper trips both checks together.
     #[test]
     fn promoter_registry_diff_default_is_empty() {
         let d = PromoterRegistryDiff::default();
         assert!(d.added.is_empty());
         assert!(d.removed.is_empty());
         assert!(d.modified.is_empty());
+        assert!(d.is_empty());
     }
 
     #[test]
@@ -910,6 +925,7 @@ mod tests {
         assert_eq!(d.added.len(), 1);
         assert_eq!(d.removed.len(), 1);
         assert_eq!(d.modified.len(), 1);
+        assert!(!d.is_empty());
     }
 
     /// Sanity-check that PrefixPending can carry a DescentState — proves

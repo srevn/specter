@@ -168,6 +168,18 @@ pub struct SubRegistryDiff {
     pub modified: Vec<SubAttachRequest>,
 }
 
+impl SubRegistryDiff {
+    /// True iff every bucket is empty — the "no Sub-side changes"
+    /// short-circuit the reload pipeline tests before handing the diff
+    /// to the engine. Single point of truth: future bucket additions
+    /// (the validate-then-act split into `modified_identity` /
+    /// `modified_params`) extend this method, never the callers.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.modified.is_empty()
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum EffectScope {
     #[default]
@@ -544,11 +556,12 @@ impl SubRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionProgram, EffectScope, Sub, SubParams, SubRegistry};
+    use super::{ActionProgram, EffectScope, Sub, SubParams, SubRegistry, SubRegistryDiff};
     use crate::ids::{ProfileId, PromoterId, SubId};
     use crate::program::{
         ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder, SpawnBody,
     };
+    use compact_str::CompactString;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -979,6 +992,21 @@ mod tests {
             std::ptr::eq(before, Arc::as_ptr(&sub.program)),
             "Sub::from_request must not allocate a new ActionProgram",
         );
+    }
+
+    /// Diff is plain data — pins the `Default` shape and the
+    /// [`SubRegistryDiff::is_empty`] contract in one place. A populated
+    /// bucket flips the predicate to `false`, so the AND-over-buckets
+    /// impl stays load-bearing under future field growth.
+    #[test]
+    fn sub_registry_diff_is_empty_predicate() {
+        let mut d = SubRegistryDiff::default();
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified.is_empty());
+        assert!(d.is_empty(), "default is empty");
+        d.removed.push(CompactString::from("a"));
+        assert!(!d.is_empty(), "populated bucket flips is_empty");
     }
 }
 
