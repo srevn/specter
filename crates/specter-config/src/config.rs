@@ -1236,6 +1236,14 @@ fn validate_scan(idx: usize, raw: &RawWatch) -> Result<ScanConfig, Vec<Validatio
                     format!("`{p}`: {message}"),
                 ));
             }
+            Err(core::ConfigError::UnreachableGlob { reason, .. }) => {
+                errors.push(ValidationIssue::new(
+                    Some(idx),
+                    "pattern",
+                    IssueKind::UnreachableGlob,
+                    format!("`{p}`: {reason}"),
+                ));
+            }
         }
     }
     if let Some(excs) = raw.exclude.as_deref() {
@@ -1249,6 +1257,14 @@ fn validate_scan(idx: usize, raw: &RawWatch) -> Result<ScanConfig, Vec<Validatio
                         "exclude",
                         IssueKind::InvalidGlob,
                         format!("`{ex}`: {message}"),
+                    ));
+                }
+                Err(core::ConfigError::UnreachableGlob { reason, .. }) => {
+                    errors.push(ValidationIssue::new(
+                        Some(idx),
+                        "exclude",
+                        IssueKind::UnreachableGlob,
+                        format!("`{ex}`: {reason}"),
                     ));
                 }
             }
@@ -1874,6 +1890,41 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, IssueKind::InvalidGlob);
         assert!(errors[0].detail.contains("[bad"));
+    }
+
+    /// `GlobPattern::compile` rejects four shapes the walker would
+    /// silently treat as no-ops; this test pins that they surface as
+    /// distinct `IssueKind::UnreachableGlob` errors per offending
+    /// entry, on both the `pattern` and `exclude` fields. The
+    /// gitignore-style `target/` typo (the worst footgun — silently
+    /// excludes nothing) is the headline case.
+    #[test]
+    fn unreachable_globs_rejected_per_offending_entry() {
+        let toml = minimal_toml(
+            "pattern = \"/foo\"\n\
+             exclude = [\"target/\", \".\", \"\", \"good/**\", \"*.rs\", \"**\"]\n",
+        );
+        let err = Config::from_str(&toml).unwrap_err();
+        let errors = validation_errors(err);
+        // pattern + 3 exclude (target/, ., empty) = 4 issues.
+        assert_eq!(errors.len(), 4, "got {errors:#?}");
+        assert!(
+            errors.iter().all(|e| e.kind == IssueKind::UnreachableGlob),
+            "every issue should be UnreachableGlob: {errors:#?}",
+        );
+        // Field assignment is preserved (pattern issue lists pattern,
+        // exclude issues list exclude) — operator triage needs the
+        // distinction.
+        let pattern_issue = errors
+            .iter()
+            .find(|e| e.field == "pattern")
+            .expect("pattern issue present");
+        assert!(pattern_issue.detail.contains("/foo"));
+        assert_eq!(
+            errors.iter().filter(|e| e.field == "exclude").count(),
+            3,
+            "exclude must carry one issue per offending entry",
+        );
     }
 
     #[test]

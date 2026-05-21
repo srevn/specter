@@ -34,11 +34,27 @@ pub struct GlobPattern {
 }
 
 impl GlobPattern {
-    /// Compile a glob pattern. Returns [`ConfigError::InvalidGlob`] with the
-    /// `globset` error message rendered into a `String` (the original
-    /// `globset::Error` is not `Clone`).
+    /// Compile a glob pattern. Two failure paths:
+    ///
+    /// - [`ConfigError::UnreachableGlob`] — the source is syntactically
+    ///   *valid* per `globset` but cannot match any non-empty relative
+    ///   path under the walker's anchor-relative semantics (empty,
+    ///   `"."`/`".."`, leading `/`, trailing `/` without `**`). Rejected
+    ///   at the floor so every downstream consumer of a compiled
+    ///   `GlobPattern` is one that can potentially match something —
+    ///   the gitignore-canonical `target/` footgun in particular fails
+    ///   fast rather than silently doing nothing.
+    /// - [`ConfigError::InvalidGlob`] — `globset` rejected the source
+    ///   itself (unbalanced brackets, malformed alternation, etc.).
+    ///   The `globset::Error` is not `Clone`, so its display message is
+    ///   rendered into a `String`.
+    ///
+    /// The unreachability check runs *before* `globset::Glob::new` so
+    /// the variants are unambiguous: if `globset` accepts it, the only
+    /// remaining failure is structural unreachability, and vice versa.
     pub fn compile(source: impl Into<CompactString>) -> Result<Self, ConfigError> {
         let source: CompactString = source.into();
+        validate_source_reachability(source.as_str())?;
         let glob = Glob::new(&source).map_err(|e| ConfigError::InvalidGlob {
             source: source.to_string(),
             message: e.to_string(),
@@ -260,7 +276,59 @@ impl ScanConfigBuilder {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigError {
+    /// `globset` rejected the glob source (e.g. unbalanced brackets,
+    /// malformed alternation). `message` is the rendered
+    /// `globset::Error` text (the original is not `Clone`).
     InvalidGlob { source: String, message: String },
+    /// The glob is syntactically valid per `globset` but cannot match
+    /// any non-empty relative path in the walker's semantics. Surfaced
+    /// at the [`GlobPattern::compile`] floor so a typo (`target/` vs
+    /// `target/**`) or a misunderstanding (leading `/` in a relative-
+    /// path glob) fails fast rather than silently doing nothing.
+    /// `reason` is an operator-facing explanation of the specific
+    /// shape that's unreachable.
+    UnreachableGlob { source: String, reason: String },
+}
+
+/// Reject globs that `globset` would happily compile but that cannot
+/// match any non-empty relative path the walker produces. The four
+/// shapes are empirically derived against `globset` 0.4 — each parses
+/// as a valid `Glob`, but their matchers return false on every
+/// plausible input. Catching them here is the cheapest way to give the
+/// operator a "this glob does nothing" error instead of a silent
+/// no-op.
+///
+/// Universal-match globs (`**`, `**/*`) are deliberately not rejected:
+/// they're equivalent to no pattern, which is sometimes the intended
+/// shape (e.g. for the exclude list's "match everything below" form
+/// `<name>/**`).
+fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
+    // Bytes test on the tail-`/` arm: `ends_with(char)` is cheap, and
+    // the `!ends_with("**")` clause keeps `**` (universal-match) and
+    // `<name>/**` (a valid exclude shape) out of the rejection set.
+    let reason = match s {
+        "" => Some("glob is empty — matches no entry"),
+        "." | ".." => Some(
+            "lone `.` or `..` matches nothing — globs are matched against entry paths \
+             relative to the anchor, which never equal `.` or `..`",
+        ),
+        s if s.starts_with('/') => Some(
+            "leading `/` makes the glob absolute, but glob patterns are matched against \
+             paths relative to the watch anchor — drop the `/` (e.g. `foo/**`, not `/foo/**`)",
+        ),
+        s if s.ends_with('/') && !s.ends_with("**") => Some(
+            "trailing `/` matches no entry — use `<name>/**` to exclude contents, or \
+             `<name>` to match the directory itself (gitignore-style `target/` is not supported)",
+        ),
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        return Err(ConfigError::UnreachableGlob {
+            source: s.to_owned(),
+            reason: reason.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Canonical hash of `(ScanConfig, max_settle, events)` — the
@@ -392,7 +460,9 @@ mod tests {
     #[test]
     fn glob_compile_failure_returns_invalid_glob() {
         let err = GlobPattern::compile("[invalid").expect_err("malformed glob must fail");
-        let ConfigError::InvalidGlob { source, message } = err;
+        let ConfigError::InvalidGlob { source, message } = err else {
+            panic!("expected InvalidGlob, got {err:?}");
+        };
         assert_eq!(source, "[invalid");
         assert!(!message.is_empty());
     }

@@ -105,10 +105,23 @@ impl std::error::Error for PatternError {}
 /// cross-error coupling explicit and exhaustiveness-checked — a future
 /// `ConfigError` variant forces a new arm here, where an inline
 /// single-arm `match` would have silently compiled through.
+///
+/// [`ConfigError::UnreachableGlob`] is folded into
+/// [`PatternError::InvalidGlob`] with `message = reason`: every shape
+/// `GlobPattern::compile` rejects as unreachable is *already* caught by
+/// [`PatternSpec::parse`]'s earlier gates (`EmptyPattern`,
+/// `EmptySegment`, `NonAbsolute`, `NonCanonical`,
+/// `GlobstarUnsupported`), so the arm is structurally unreachable from
+/// this conversion site — but the exhaustive match keeps the coupling
+/// from drifting if a future `ConfigError` variant lands.
 impl From<ConfigError> for PatternError {
     fn from(e: ConfigError) -> Self {
         match e {
             ConfigError::InvalidGlob { source, message } => Self::InvalidGlob { source, message },
+            ConfigError::UnreachableGlob { source, reason } => Self::InvalidGlob {
+                source,
+                message: reason,
+            },
         }
     }
 }
