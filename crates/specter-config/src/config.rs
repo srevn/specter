@@ -85,7 +85,7 @@ impl LogConfig {
     /// visible source as `<inline>` (the [`ConfigError::Validate`]
     /// fallback when no file path is associated). The bin caller owns
     /// the CLI-source context in the format string instead — see
-    /// `specter-bin`'s `App::run` and `EngineDriver::parse_and_resolve_log`.
+    /// `specter-bin`'s `App::run` and `EngineDriver::apply_log_reload`.
     pub fn merge_cli(
         mut self,
         level: Option<LogLevel>,

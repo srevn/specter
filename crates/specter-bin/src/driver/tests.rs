@@ -1141,29 +1141,139 @@ actions   = [{{ exec = ["true"] }}]
     );
 }
 
-/// Parse-fail must **not** rotate `loader.config_meta`. Rotating
-/// on failure would suppress the auto-reload retry loop: the next
-/// pulse's lstat-vs-stored-meta check would compare the (still
-/// broken) on-disk file against the freshly-stored meta from the
-/// failed attempt, decide "unchanged," and never retry. Pins the
-/// negative invariant.
+/// Parse-fail with a SUCCESSFUL post-fail lstat MUST rotate
+/// `loader.config_meta` to the post-fail value. Closes the
+/// chmod-EACCES recovery loop:
+///
+/// 1. operator chmod 000 → daemon EACCES on parse → meta rotates
+///    to the mode-000 lstat
+/// 2. operator chmod 644 → next pulse's lstat (mode-644) differs
+///    from stored → re-fires `handle_reload`
+///
+/// Without this rotation, stored meta would freeze at the
+/// pre-tighten state and auto-recovery would silently break —
+/// `FileMeta` keys on mode/uid/gid precisely so chmod-only
+/// transitions surface.
+///
+/// This test exercises the parse-fail polarity via malformed TOML
+/// (file exists → post-fail lstat succeeds); chmod-EACCES is the
+/// same code path with a different errno. The complementary
+/// post-fail-lstat-fails polarity (meta preserved) is pinned by
+/// the auto-reload settle-expiry tests against unreachable paths.
 #[test]
-fn reload_parse_failure_does_not_rotate_meta() {
-    // `/dev/null/no/such/file.toml` — a guaranteed-ENOTDIR path
-    // (because `/dev/null` is a character device, not a directory).
-    // The reload pipeline observes a parse-fail equivalent.
-    let cfg_path = PathBuf::from("/dev/null/no/such/file.toml");
-    let config = Config::from_str("").expect("empty config parses");
-    let mut rig = rig_for(config, cfg_path);
-    let pre_reload_meta = rig.driver.loader.config_meta;
+fn reload_parse_failure_rotates_meta_when_post_fail_lstat_succeeds() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let v1_text = format!(
+        r#"
+[[watch]]
+name      = "a"
+path      = "{}"
+actions   = [{{ exec = ["true"] }}]
+"#,
+        tmp.path().display(),
+    );
+    std::fs::write(&cfg_path, &v1_text).unwrap();
+    let v1_meta = FileMeta::from_path(&cfg_path).expect("v1 lstat ok");
+    let v1_config = Config::from_str(&v1_text).expect("v1 parses");
+
+    let mut rig = rig_for(v1_config.clone(), cfg_path.clone());
+    rig.driver.loader.config_meta = v1_meta;
+
+    // Overwrite with malformed TOML — parse fails, but the file
+    // still exists so the post-fail lstat succeeds. Sleep first so
+    // mtime advances at least one nanosecond past `v1_meta` on
+    // coarse-resolution filesystems.
+    std::thread::sleep(Duration::from_millis(10));
+    std::fs::write(&cfg_path, "not valid toml [[[").unwrap();
+    let v2_lstat = FileMeta::from_path(&cfg_path).expect("v2 lstat ok");
+    assert_ne!(
+        v1_meta, v2_lstat,
+        "v2 must lstat-differ from v1 — otherwise the rotation \
+         couldn't be observed",
+    );
 
     rig.reload_tx.try_send(()).expect("reload send");
     rig.shutdown_tx.try_send(()).expect("shutdown send");
     assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 
     assert_eq!(
-        rig.driver.loader.config_meta, pre_reload_meta,
-        "parse-fail must not rotate meta — would suppress retry pulses",
+        rig.driver.loader.config_meta, v2_lstat,
+        "parse-fail with successful post-fail lstat rotates meta — \
+         closes the chmod-EACCES recovery loop",
+    );
+    assert_eq!(
+        rig.driver.loader.current_config, v1_config,
+        "parse-fail preserves the running config — only meta advanced",
+    );
+}
+
+/// A reload whose requested destination/path differs from the
+/// running runtime values MUST NOT rotate the running shape into
+/// `loader.current_log` — the appender doesn't move in v1, so the
+/// rotated value reflects what is *applied* (the running shape),
+/// not what was requested.
+///
+/// Load-bearing structural invariant behind the phantom-warning
+/// fix: the next reload's `apply_log_reload` compares against this
+/// preserved running shape, so a destination flip-back to the
+/// daemon's startup value sees `applied == requested` and refrains
+/// from re-firing "restart to apply" on every reload until restart.
+/// Asserting the shape invariant pins the cause; the warning
+/// suppression is a downstream consequence.
+#[test]
+fn reload_with_destination_mismatch_preserves_running_log() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let log_path = tmp.path().join("specter.log");
+
+    let v_file = format!(
+        r#"
+[log]
+destination = "file"
+path        = "{}"
+level       = "info"
+"#,
+        log_path.display(),
+    );
+    let v_stderr = r#"
+[log]
+destination = "stderr"
+level       = "info"
+"#;
+
+    std::fs::write(&cfg_path, &v_file).unwrap();
+    let initial = Config::from_str(&v_file).expect("initial parses");
+    let initial_log = initial.log.clone();
+
+    let mut rig = rig_for(initial, cfg_path.clone());
+    rig.driver.loader.config_meta = FileMeta::from_path(&cfg_path).expect("v1 lstat ok");
+
+    // Sanity: rig starts with the file-destination running shape.
+    assert_eq!(
+        rig.driver.loader.current_log.destination,
+        specter_config::LogDestination::File,
+    );
+
+    // Edit to `dest = stderr`. `apply_log_reload` sees a mismatch
+    // (requested stderr, running file), logs the "restart to apply"
+    // error, and returns the *running* shape unchanged. The rotation
+    // writes that running shape into `current_log`, so the
+    // destination field stays at File across this reload.
+    std::thread::sleep(Duration::from_millis(10));
+    std::fs::write(&cfg_path, v_stderr).unwrap();
+    rig.reload_tx.try_send(()).expect("reload send");
+    rig.shutdown_tx.try_send(()).expect("shutdown send");
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
+
+    assert_eq!(
+        rig.driver.loader.current_log.destination,
+        specter_config::LogDestination::File,
+        "destination request must not rotate the running destination",
+    );
+    assert_eq!(
+        rig.driver.loader.current_log.path, initial_log.path,
+        "running path preserved alongside the destination",
     );
 }
 

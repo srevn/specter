@@ -336,35 +336,6 @@ impl ReopenHandle {
     }
 }
 
-/// Type alias for `LogConfig` reload outcome — the driver tracks
-/// what changed in the new config to decide which hooks to fire.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum LogReloadKind {
-    /// Level changed; everything else identical.
-    LevelOnly,
-    /// Destination or path changed; v1 cannot hot-reload these — the
-    /// driver logs an `error!` instructing the operator to restart.
-    DestinationChanged,
-    /// No change.
-    Unchanged,
-}
-
-impl LogReloadKind {
-    /// Compare two [`LogConfig`]s. The comparison is total: any change
-    /// to `destination` or `path` returns [`Self::DestinationChanged`]
-    /// even when `level` also moved.
-    #[must_use]
-    pub fn diff(old: &LogConfig, new: &LogConfig) -> Self {
-        if old.destination != new.destination || old.path != new.path {
-            Self::DestinationChanged
-        } else if old.level != new.level {
-            Self::LevelOnly
-        } else {
-            Self::Unchanged
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,63 +448,5 @@ mod tests {
     fn noop_handle_has_no_file_path() {
         let h = ObservabilityHandle::noop();
         assert!(h.file_path().is_none());
-    }
-
-    #[test]
-    fn log_reload_kind_unchanged_when_identical() {
-        let a = LogConfig::default();
-        let b = LogConfig::default();
-        assert_eq!(LogReloadKind::diff(&a, &b), LogReloadKind::Unchanged);
-    }
-
-    #[test]
-    fn log_reload_kind_level_only_when_only_level_differs() {
-        let a = LogConfig {
-            level: LogLevel::Info,
-            destination: LogDestination::Stderr,
-            path: None,
-        };
-        let b = LogConfig {
-            level: LogLevel::Debug,
-            destination: LogDestination::Stderr,
-            path: None,
-        };
-        assert_eq!(LogReloadKind::diff(&a, &b), LogReloadKind::LevelOnly);
-    }
-
-    #[test]
-    fn log_reload_kind_destination_changed_when_destination_changes() {
-        let a = LogConfig {
-            level: LogLevel::Info,
-            destination: LogDestination::Stderr,
-            path: None,
-        };
-        let b = LogConfig {
-            level: LogLevel::Info,
-            destination: LogDestination::File,
-            path: Some(PathBuf::from("/var/log/x.log")),
-        };
-        assert_eq!(
-            LogReloadKind::diff(&a, &b),
-            LogReloadKind::DestinationChanged,
-        );
-    }
-
-    #[test]
-    fn log_reload_kind_destination_changed_when_path_changes() {
-        let a = LogConfig {
-            level: LogLevel::Info,
-            destination: LogDestination::File,
-            path: Some(PathBuf::from("/var/log/a.log")),
-        };
-        let b = LogConfig {
-            level: LogLevel::Info,
-            destination: LogDestination::File,
-            path: Some(PathBuf::from("/var/log/b.log")),
-        };
-        assert_eq!(
-            LogReloadKind::diff(&a, &b),
-            LogReloadKind::DestinationChanged,
-        );
     }
 }

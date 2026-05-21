@@ -21,8 +21,7 @@
 //! meta-rotation discipline converges across both pulse sources.
 
 use super::EngineDriver;
-use crate::observability::LogReloadKind;
-use specter_config::{Config, FileMeta};
+use specter_config::{Config, FileMeta, LogConfig};
 use specter_core::Input;
 use std::ops::ControlFlow;
 use std::time::Instant;
@@ -115,11 +114,14 @@ impl EngineDriver {
     /// bypass it.
     ///
     /// **Log-side dispatch.** The `[log]` block is re-resolved (CLI
-    /// overrides re-applied); [`Self::apply_log_changes`] then
-    /// dispatches on the `LogConfig` diff: a level-only change calls
+    /// overrides re-applied) and applied per-field via
+    /// [`Self::apply_log_reload`]: a level change calls
     /// `obs_handle.set_level`; a destination / path change logs an
     /// `error!` instructing the operator to restart (v1 doesn't
-    /// hot-reload destinations).
+    /// hot-reload destinations). The actually-applied state rotates
+    /// into [`crate::loader::Loader::current_log`] — so a destination
+    /// flip-back compares runtime-vs-runtime on the next reload and
+    /// avoids a phantom "restart to apply" warning.
     ///
     /// **Meta rotation discipline.** `loader.config_meta` rotates on
     /// every observed file state: [`crate::loader::Loader::rotate_apply`]
@@ -148,8 +150,7 @@ impl EngineDriver {
             return ControlFlow::Continue(());
         };
 
-        let new_log_resolved = self.parse_and_resolve_log(&new_config);
-        self.apply_log_changes(&new_log_resolved);
+        let applied_log = self.apply_log_reload(&new_config);
 
         let diff = self.compute_watch_diff(&new_config);
         let outcome = if diff.is_empty() {
@@ -187,8 +188,7 @@ impl EngineDriver {
             self.forward(out)
         };
 
-        self.loader
-            .rotate_apply(new_config, new_log_resolved, new_meta);
+        self.loader.rotate_apply(new_config, applied_log, new_meta);
 
         outcome
     }
@@ -243,31 +243,96 @@ impl EngineDriver {
     }
 
     /// Resolve `new_config.log` with CLI overrides re-applied (CLI
-    /// wins, matching startup precedence). On validation failure
-    /// (e.g., a freshly-edited config sets `destination = "file"`
-    /// without a `path`), log the error and return the running log
-    /// snapshot so the watch-side reload can still proceed
-    /// independently.
+    /// wins, matching startup precedence) and apply per-field against
+    /// the running runtime state. Returns the *actually-applied*
+    /// [`LogConfig`] — the shape that rotates into
+    /// [`crate::loader::Loader::current_log`].
     ///
-    /// `merge_cli` surfaces a bare [`specter_config::ValidationIssue`];
-    /// the structured `error` field renders the issue's `Display` directly
-    /// (`<field>: <detail> (<kind>)`), without the `<inline>: N validation
-    /// error(s)` envelope the [`specter_config::ConfigError::Validate`]
-    /// shape would impose on a CLI-merge failure.
-    pub(super) fn parse_and_resolve_log(&self, new_config: &Config) -> specter_config::LogConfig {
-        match new_config.log.clone().merge_cli(
+    /// Per-field discipline — level and destination dispatch
+    /// independently, no enum intermediate:
+    ///
+    /// - **level** — hot-reloadable. When the request differs from
+    ///   runtime, calls `obs_handle.set_level`. On `Ok` the applied
+    ///   level is the new one; on `Err` it falls back to the running
+    ///   value (with an `error!` log).
+    /// - **destination / path** — NOT hot-reloadable in v1. When the
+    ///   request differs from runtime, logs an `error!` instructing
+    ///   the operator to restart. The applied destination / path are
+    ///   always the running values; the appender does not move.
+    ///
+    /// On `merge_cli` validation failure (operator typo, missing
+    /// `path` under `destination = "file"`), logs the issue and
+    /// returns the running log unchanged — the watch-side reload can
+    /// still proceed independently. `merge_cli` surfaces a bare
+    /// [`specter_config::ValidationIssue`]; the structured `error`
+    /// field renders the issue's `Display` directly
+    /// (`<field>: <detail> (<kind>)`), without the `<inline>: N
+    /// validation error(s)` envelope the
+    /// [`specter_config::ConfigError::Validate`] shape would impose on
+    /// a CLI-merge failure.
+    ///
+    /// The applied-state framing closes a phantom-warning class:
+    /// because the rotated `current_log` carries the running shape, a
+    /// destination flip-back compares runtime-vs-runtime on the next
+    /// reload and reports no change — instead of comparing
+    /// requested-vs-running and re-firing "restart to apply" on every
+    /// flip. The trade-off is that a *sustained* mismatch (operator
+    /// requests a new destination and leaves it that way) re-fires
+    /// the warning on every reload until restart — accepted because
+    /// the warning is correct on every firing and reload frequency is
+    /// operator-bounded.
+    fn apply_log_reload(&self, new_config: &Config) -> LogConfig {
+        let requested = match new_config.log.clone().merge_cli(
             self.cli_log_overrides.level,
             self.cli_log_overrides.destination,
             self.cli_log_overrides.path.clone(),
         ) {
-            Ok(c) => c,
+            Ok(r) => r,
             Err(issue) => {
                 tracing::error!(
                     issue = %issue,
                     "log reload failed; keeping running log config",
                 );
-                self.loader.current_log.clone()
+                return self.loader.current_log.clone();
             }
+        };
+
+        let running = &self.loader.current_log;
+
+        let applied_level = if requested.level == running.level {
+            running.level
+        } else {
+            match self.obs_handle.set_level(requested.level) {
+                Ok(()) => {
+                    tracing::info!(
+                        new_level = ?requested.level,
+                        "log level updated via SIGHUP",
+                    );
+                    requested.level
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = ?e,
+                        "log level reload failed; keeping prior level",
+                    );
+                    running.level
+                }
+            }
+        };
+
+        if requested.destination != running.destination || requested.path != running.path {
+            tracing::error!(
+                new_destination = ?requested.destination,
+                new_path = ?requested.path.as_ref().map(|p| p.display().to_string()),
+                "log destination / path change is not hot-reloadable in v1; \
+                 restart specter to apply",
+            );
+        }
+
+        LogConfig {
+            level: applied_level,
+            destination: running.destination,
+            path: running.path.clone(),
         }
     }
 
@@ -279,38 +344,5 @@ impl EngineDriver {
         new_config: &Config,
     ) -> specter_core::WatchRegistryDiff {
         specter_config::diff(&self.loader.current_config, new_config)
-    }
-
-    /// Dispatch on a freshly-resolved [`specter_config::LogConfig`]
-    /// vs. the running one. Three branches:
-    ///
-    /// - **Unchanged** — no-op (reopen at the top of
-    ///   [`Self::handle_reload`] is what keeps logrotate working).
-    /// - **LevelOnly** — call `set_level`.
-    /// - **DestinationChanged** — log an `error!` instructing the
-    ///   operator to restart (v1 doesn't hot-reload destinations).
-    fn apply_log_changes(&self, new_log: &specter_config::LogConfig) {
-        let kind = LogReloadKind::diff(&self.loader.current_log, new_log);
-        match kind {
-            LogReloadKind::Unchanged => {}
-            LogReloadKind::LevelOnly => match self.obs_handle.set_level(new_log.level) {
-                Ok(()) => tracing::info!(
-                    new_level = ?new_log.level,
-                    "log level updated via SIGHUP",
-                ),
-                Err(e) => tracing::error!(
-                    error = ?e,
-                    "log level reload failed; keeping prior level",
-                ),
-            },
-            LogReloadKind::DestinationChanged => {
-                tracing::error!(
-                    new_destination = ?new_log.destination,
-                    new_path = ?new_log.path.as_ref().map(|p| p.display().to_string()),
-                    "log destination / path change is not hot-reloadable in v1; \
-                     restart specter to apply",
-                );
-            }
-        }
     }
 }
