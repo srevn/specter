@@ -14,10 +14,11 @@ use crate::channels::{ActuatorSide, Channels, WatcherSide};
 use crate::loader::Loader;
 use crossbeam::channel::Sender;
 use specter_config::{Config, FileMeta};
-use specter_core::{Input, StepOutput, SubId};
+use specter_core::{Input, StepOutput, SubId, WatchOp};
 use specter_engine::Engine;
 use specter_sensor::FsWatcher;
 use specter_sensor::testkit::{MockFsWatcher, MockProber, MockWaker};
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,6 +64,11 @@ struct TestRig {
     /// driver's `Select` arm would observe Disconnected). Tests
     /// `try_send(())` here to simulate watcher pulses.
     config_event_tx: Sender<()>,
+    /// Cloned `watch_ops_tx`. The driver holds its own clone via
+    /// `engine_side`; tests that need to fill the bounded channel
+    /// from the outside use this one. The watcher-side `watch_ops_rx`
+    /// stays the sole receiver.
+    watch_ops_tx: Sender<WatchOp>,
 }
 
 fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
@@ -72,6 +78,7 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let reload_tx = chans.reload_signal_tx.clone();
     let shutdown_tx = chans.shutdown_engine_tx.clone();
     let config_event_tx = chans.config_event_tx.clone();
+    let watch_ops_tx = chans.watch_ops_tx.clone();
     let actuator_side = chans.take_actuator_side();
     let watcher_side = chans.take_watcher_side();
     let engine_side = chans.take_engine_side();
@@ -112,6 +119,7 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
         reload_tx,
         shutdown_tx,
         config_event_tx,
+        watch_ops_tx,
     }
 }
 
@@ -152,7 +160,7 @@ fn run_initial_attach_attaches_static_sub_and_emits_watch_op() {
     let config = config_with_one_watch(tmp.path());
     let mut rig = rig_for(config, cfg_path);
 
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
 
     // One Sub was attached → the engine's static `by_name` index
     // resolves that operator name to a live SubId.
@@ -219,7 +227,13 @@ fn sensor_in_disconnect_returns_shutdown() {
 }
 
 #[test]
-fn effect_in_disconnect_continues() {
+fn effect_in_disconnect_shuts_down() {
+    // Every inbound drain is Terminal on Disconnect. Previously
+    // `effect_in_rx` Disconnect was silently treated as `Empty`
+    // (crossbeam's `Select::ready_timeout` then reports the same arm
+    // as immediately-ready, busy-looping the driver until SIGTERM).
+    // This test pins the corrected policy: disconnect alone drives
+    // the tick to `Shutdown`, no shutdown pulse required.
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
@@ -237,9 +251,7 @@ fn effect_in_disconnect_continues() {
     drop(shutdown_actuator_rx);
     drop(hard_shutdown_actuator_rx);
 
-    // Effect channel disconnected — tick treats it as "no completions",
-    // does not shut down the engine. Use shutdown to exit cleanly.
-    rig.shutdown_tx.try_send(()).expect("shutdown send");
+    // No shutdown_tx pulse — the disconnect alone must drive Shutdown.
     assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
 }
 
@@ -275,7 +287,7 @@ actions   = [{{ exec = ["true"] }}]
     let initial = Config::from_str(&cfg_text).expect("test config");
 
     let mut rig = rig_for(initial.clone(), cfg_path);
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     let sid_before = rig
         .driver
         .engine
@@ -331,7 +343,7 @@ settle    = "100ms"
     let initial = Config::from_str(&initial_text).expect("initial parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.subs().find_by_name("a").is_some());
     assert!(rig.driver.engine.subs().find_by_name("b").is_none());
 
@@ -377,7 +389,7 @@ actions   = [{{ exec = ["true"] }}]
     let initial = Config::from_str(&initial_text).expect("initial parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.subs().find_by_name("a").is_some());
     assert!(rig.driver.engine.subs().find_by_name("b").is_some());
 
@@ -455,8 +467,16 @@ fn forward_wakes_after_each_send_to_break_full_channel_deadlock() {
         driver,
         watcher_side,
         waker,
+        watch_ops_tx,
         ..
     } = rig;
+    // `..` defers drop of unmatched fields to end of scope (partial-move
+    // semantics retain them on the residual `rig` storage). The rig's
+    // `watch_ops_tx` clone targets the same bounded channel the drainer
+    // recvs on; leaving it alive past `drop(driver)` would keep the
+    // drainer's `recv()` blocked. Drop it eagerly so the engine-side
+    // clone is the only remaining producer when the driver dies.
+    drop(watch_ops_tx);
 
     // Drain in a thread so the bounded channel can flow; without a
     // drainer this test would block at the channel-bound boundary even
@@ -482,9 +502,13 @@ fn forward_wakes_after_each_send_to_break_full_channel_deadlock() {
         });
     }
 
-    driver.forward(out);
-    drop(driver); // release engine-side `watch_ops_tx` so the drainer exits.
-    drop(watcher_side.sensor_in_tx); // release the watcher-side clone too.
+    let outcome = driver.forward(out);
+    assert_eq!(
+        outcome,
+        ControlFlow::Continue(()),
+        "every send succeeded; no shutdown was signalled",
+    );
+    drop(driver); // last `watch_ops_tx` released; drainer's recv() disconnects.
 
     let received = drainer.join().expect("drainer thread panicked");
     assert_eq!(received, n_ops, "all ops must reach the watcher");
@@ -538,7 +562,7 @@ fn run_initial_attach_attaches_static_only_config() {
     let config = config_with_one_watch(tmp.path());
     let mut rig = rig_for(config, cfg_path);
 
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
 
     // Engine's static `by_name` resolves the operator name; no
     // Promoter was created.
@@ -569,7 +593,7 @@ fn run_initial_attach_registers_promoter_for_dynamic_watch() {
     let config = config_with_one_promoter(tmp.path());
     let mut rig = rig_for(config, cfg_path);
 
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
 
     // No static Sub; the engine's Promoter registry carries the
     // dynamic entry under its operator name.
@@ -619,7 +643,7 @@ settle    = "50ms"
     let config = Config::from_str(&cfg_text).expect("mixed config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
 
     assert!(rig.driver.engine.subs().find_by_name("build").is_some());
     assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
@@ -677,7 +701,7 @@ enabled   = false
     let config = Config::from_str(&cfg_text).expect("disabled mix parses");
     let mut rig = rig_for(config, cfg_path);
 
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
 
     let subs = rig.driver.engine.subs();
     let promoters = rig.driver.engine.promoters();
@@ -727,7 +751,7 @@ actions   = [{{ exec = ["true"] }}]
     let initial = Config::from_str(&initial_text).expect("initial parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.promoters().is_empty());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
@@ -760,7 +784,7 @@ actions   = [{{ exec = ["true"] }}]
     let initial = Config::from_str(&initial_text).expect("initial parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
@@ -802,7 +826,7 @@ actions   = [{{ exec = ["echo"] }}]
     let initial = Config::from_str(&initial_text).expect("initial parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     let old_pid = rig
         .driver
         .engine
@@ -855,7 +879,7 @@ actions   = [{{ exec = ["true"] }}]
     let initial = Config::from_str(&initial_text).expect("initial parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
     assert!(rig.driver.engine.promoters().is_empty());
 
@@ -903,7 +927,7 @@ actions   = [{{ exec = ["true"] }}]
     let initial = Config::from_str(&initial_text).expect("initial parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.subs().is_empty());
     assert!(rig.driver.engine.promoters().find_by_name("foo").is_some());
 
@@ -1002,7 +1026,7 @@ settle    = "100ms"
     let initial = Config::from_str(&v1_text).expect("v1 parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     assert_eq!(
         rig.driver.loader.config_meta,
         dummy_meta(),
@@ -1053,7 +1077,7 @@ actions   = [{{ exec = ["true"] }}]
     let initial = Config::from_str(&cfg_text).expect("v1 parses");
 
     let mut rig = rig_for(initial.clone(), cfg_path.clone());
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     let sid_before = rig
         .driver
         .engine
@@ -1211,8 +1235,7 @@ fn apply_config_settle_expiry_no_op_when_unarmed() {
     let mut rig = rig_for(config.clone(), cfg_path);
 
     let snapshot_meta = rig.driver.loader.config_meta;
-    rig.driver.apply_config_settle_expiry(Instant::now());
-
+    let _ = rig.driver.apply_config_settle_expiry(Instant::now());
     assert_eq!(rig.driver.config_settle_until, None);
     assert_eq!(
         rig.driver.loader.config_meta, snapshot_meta,
@@ -1234,7 +1257,7 @@ fn apply_config_settle_expiry_no_op_within_window() {
     let deadline = now + Duration::from_millis(50);
     rig.driver.config_settle_until = Some(deadline);
 
-    rig.driver.apply_config_settle_expiry(now);
+    let _ = rig.driver.apply_config_settle_expiry(now);
 
     assert_eq!(
         rig.driver.config_settle_until,
@@ -1262,7 +1285,7 @@ fn apply_config_settle_expiry_fires_at_exact_deadline() {
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
 
-    rig.driver.apply_config_settle_expiry(deadline);
+    let _ = rig.driver.apply_config_settle_expiry(deadline);
 
     assert_eq!(
         rig.driver.config_settle_until, None,
@@ -1300,7 +1323,7 @@ actions   = [{{ exec = ["true"] }}]
     // Seed loader.config_meta to the real on-disk lstat so the
     // helper's `m != self.loader.config_meta` returns false.
     rig.driver.loader.config_meta = real_meta;
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     let sid_snapshot = rig
         .driver
         .engine
@@ -1312,9 +1335,9 @@ actions   = [{{ exec = ["true"] }}]
     // `now >= deadline` branch.
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
-    rig.driver
+    let _ = rig
+        .driver
         .apply_config_settle_expiry(deadline + Duration::from_millis(1));
-
     // Settle slot consumed even on a silent drop (the deadline was
     // serviced; future pulses arm a fresh window).
     assert_eq!(rig.driver.config_settle_until, None);
@@ -1368,7 +1391,7 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(v1_config, cfg_path.clone());
     rig.driver.loader.config_meta = v1_meta;
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.subs().find_by_name("a").is_some());
     assert!(rig.driver.engine.subs().find_by_name("b").is_none());
 
@@ -1403,9 +1426,9 @@ actions   = [{{ exec = ["true"] }}]
     // Force settle expiry.
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
-    rig.driver
+    let _ = rig
+        .driver
         .apply_config_settle_expiry(deadline + Duration::from_millis(1));
-
     // Reload happened: settle consumed, meta rotated to the
     // post-edit identity, config now has v2's "b" watch.
     assert_eq!(rig.driver.config_settle_until, None);
@@ -1456,9 +1479,9 @@ fn apply_config_settle_expiry_treats_missing_path_as_changed() {
 
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
-    rig.driver
+    let _ = rig
+        .driver
         .apply_config_settle_expiry(deadline + Duration::from_millis(1));
-
     // Settle slot is consumed even when lstat fails — the helper
     // doesn't loop on its own; the next external pulse arms a
     // fresh window.
@@ -1493,7 +1516,7 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(v1_config, cfg_path.clone());
     rig.driver.loader.config_meta = v1_meta;
-    rig.driver.run_initial_attach();
+    let _ = rig.driver.run_initial_attach();
 
     // Edit the file.
     std::thread::sleep(Duration::from_millis(10));
@@ -1521,9 +1544,9 @@ actions   = [{{ exec = ["true"] }}]
     // Force-expire via the helper. (Skirts the 100ms wall-clock
     // wait that an end-to-end-with-tick test would need; the
     // helper's contract is identical regardless of who calls it.)
-    rig.driver
+    let _ = rig
+        .driver
         .apply_config_settle_expiry(armed + Duration::from_millis(1));
-
     assert_eq!(rig.driver.config_settle_until, None);
     assert!(
         rig.driver.engine.subs().find_by_name("b").is_some(),
@@ -1540,4 +1563,142 @@ actions   = [{{ exec = ["true"] }}]
     // that here before the rig drops.
     rig.shutdown_tx.try_send(()).expect("shutdown send");
     assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
+}
+
+// ===== Outbound disconnect + shutdown-race + attach-break drain =====
+//
+// Defensive Terminal symmetry on the other inbound arms (`reload_signal_rx`,
+// `config_event_rx`) is covered structurally by
+// `effect_in_disconnect_shuts_down` — the three `Disconnected` match arms
+// in `tick.rs` are byte-identical.
+
+/// A downstream `watch_ops_tx` disconnect is a kernel-drift hazard —
+/// the engine's state would silently diverge from the watcher's view,
+/// wedging future bursts in `Verifying` against stale baselines. It
+/// is terminal: `forward`'s per-send `crossbeam::select!` observes
+/// `Err` on the disconnected send arm and returns `Break`, which
+/// routes the tick through `begin_shutdown`.
+#[test]
+fn watch_ops_disconnect_shuts_down() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    // Capture the attach request before `config` moves into the rig.
+    let req = config
+        .active_watches()
+        .next()
+        .expect("one active watch")
+        .to_attach_request();
+    let mut rig = rig_for(config, cfg_path);
+
+    // Disconnect `watch_ops_rx` (and drop the watcher-side
+    // `sensor_in_tx` clone; the rig keeps its own clone for the
+    // AttachSub queue below). The driver's `watch_ops_tx` clone in
+    // `engine_side` is still alive — sends from `forward` will
+    // observe Err, not Disconnected-on-send-side.
+    let WatcherSide {
+        watch_ops_rx,
+        sensor_in_tx,
+    } = rig.watcher_side;
+    drop(watch_ops_rx);
+    drop(sensor_in_tx);
+
+    // Queue an AttachSub via `sensor_in_tx`. `drain_sensor`'s barrier
+    // arm runs `engine.step`, which emits a Watch op; `forward`'s
+    // select! send arm fires with `Err`, `forward` returns `Break`,
+    // `drain_sensor` returns `Break(())`, and `tick` routes through
+    // `begin_shutdown`.
+    rig.sensor_in_tx
+        .send(Input::AttachSub(req))
+        .expect("attach send");
+
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
+}
+
+/// A full `watch_ops_tx` (bounded(1024)) combined with a queued
+/// shutdown pulse must not deadlock. The per-send `crossbeam::select!`
+/// in `forward` races `send` vs `recv(shutdown_engine_rx)` — the
+/// queued shutdown wins and `forward` returns `Break` without
+/// dropping into a blocking send.
+#[test]
+fn forward_shutdown_wins_when_full_channel_signaled() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let rig = rig_for(config, cfg_path);
+    let TestRig {
+        driver,
+        watcher_side,
+        shutdown_tx,
+        watch_ops_tx,
+        ..
+    } = rig;
+
+    // Fill `watch_ops_tx` to capacity from the test's clone. The
+    // driver's clone targets the same bounded channel, so a
+    // subsequent send from `forward` would block.
+    for _ in 0..1024 {
+        watch_ops_tx
+            .try_send(WatchOp::Unwatch {
+                resource: specter_core::ResourceId::default(),
+            })
+            .expect("first 1024 fit");
+    }
+
+    // Pre-pulse the shutdown receiver so its select arm is
+    // immediately ready when `forward` races.
+    shutdown_tx.try_send(()).expect("shutdown pulse");
+
+    // Non-empty `StepOutput`: the send arm would block on a full
+    // channel; the recv-on-shutdown arm wins and `Break` is returned.
+    let mut out = StepOutput::default();
+    out.watch_ops.push(WatchOp::Watch {
+        resource: specter_core::ResourceId::default(),
+        path: Arc::from(PathBuf::from("/p/0")),
+        kind: specter_core::ResourceKind::Unknown,
+        events: specter_core::ClassSet::EMPTY,
+    });
+    let outcome = driver.forward(out);
+    assert_eq!(outcome, ControlFlow::Break(()));
+
+    // Drop in safe order: `watcher_side` outlived `forward` so the
+    // bounded channel was full-and-blocking, not full-and-disconnected.
+    drop(driver);
+    drop(watcher_side);
+}
+
+/// When `run_initial_attach`'s `forward` returns `Break`, the
+/// Seed-Verifying probe slot armed by the just-attached Profile must
+/// be disarmed before returning — otherwise dropping the driver
+/// would trip `ProbeSlot::drop`'s linear-edge tripwire. The
+/// assertion is structural: `drop(rig.driver)` must not panic.
+#[test]
+fn run_initial_attach_break_drains_probes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+
+    // Disconnect `watch_ops_rx` before attach. The first `forward`
+    // inside `run_initial_attach` hits a disconnected `watch_ops_tx`
+    // and returns `Break`; `run_initial_attach` then calls
+    // `begin_shutdown` and returns `Break`.
+    let WatcherSide {
+        watch_ops_rx,
+        sensor_in_tx,
+    } = rig.watcher_side;
+    drop(watch_ops_rx);
+    drop(sensor_in_tx);
+
+    let outcome = rig.driver.run_initial_attach();
+    assert_eq!(
+        outcome,
+        ControlFlow::Break(()),
+        "watch_ops disconnect during attach ⇒ Break",
+    );
+
+    // begin_shutdown ran inside run_initial_attach; the probe slot
+    // armed by the attached Seed is disarmed. Dropping the driver
+    // here must not trip the `ProbeSlot::drop` linear-edge tripwire.
+    drop(rig.driver);
 }

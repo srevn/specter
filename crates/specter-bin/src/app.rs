@@ -255,9 +255,17 @@ pub fn run(cli: Cli) -> ExitCode {
     );
     drop(chans); // originals release; per-thread clones keep channels alive.
 
-    driver.run_initial_attach();
-    let exit_reason = driver.run();
-    tracing::info!(?exit_reason, "engine driver exited");
+    if driver.run_initial_attach().is_break() {
+        // Shutdown observed during initial attach (operator signal
+        // mid-startup or a downstream channel disconnect). The driver
+        // has already drained its in-flight probes via
+        // `begin_shutdown`, so dropping it below is safe — skip the
+        // main loop and route directly to the shared teardown.
+        tracing::info!("shutdown observed during initial attach; engine drained");
+    } else {
+        let exit_reason = driver.run();
+        tracing::info!(?exit_reason, "engine driver exited");
+    }
 
     // Shutdown sequence — broadcast intent before tearing the driver
     // down, so every consumer of `shutdown_flag` observes `true`

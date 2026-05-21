@@ -3,47 +3,74 @@
 //!
 //! [`EngineDriver::forward`] ships every [`StepOutput`] onward:
 //! `watch_ops` → `watch_ops_tx` with a `wake_handle.wake()` per
-//! successful send (the bounded-channel deadlock the per-send wake
-//! defends against is documented on the method); `probe_ops` →
-//! `prober.submit` / `cancel`; `effects` → `effects_tx`;
-//! `diagnostics` → [`log_diagnostic`]. `log_diagnostic` is the
-//! per-variant hand-mapping of a [`Diagnostic`] to a tracing event;
-//! its severities are the operator-facing catalogue.
+//! successful send; `probe_ops` → `prober.submit` / `cancel`;
+//! `effects` → `effects_tx`; `diagnostics` → [`log_diagnostic`].
+//! Every channel send races `shutdown_engine_rx` so a queued shutdown
+//! pulse pre-empts back-pressure (a full bounded channel cannot wedge
+//! the tick on SIGTERM). Per-channel disconnect policy is explicit at
+//! the call site; the rationale lives on the method.
+//!
+//! `log_diagnostic` is the per-variant hand-mapping of a [`Diagnostic`]
+//! to a tracing event; its severities are the operator-facing catalogue.
 
 use super::EngineDriver;
 use specter_core::{Diagnostic, ProbeOp, StepOutput};
+use std::ops::ControlFlow;
 
 impl EngineDriver {
     /// Push a [`StepOutput`] to its downstream consumers.
     ///
-    /// `watch_ops` queue to `watch_ops_tx` and `wake_handle.wake()` fires
-    /// after **every** successful send. The wake-per-send protocol is
-    /// load-bearing: `watch_ops_tx` is bounded(1024), and a single Seed
-    /// burst against a large tree can produce 10k+ Watch ops in one
-    /// `StepOutput`. With a "wake once at end of loop" rule, the engine
-    /// would fill the channel, block on `Sender::send` at op 1025, and
-    /// never reach the end-of-loop wake — leaving the watcher asleep in
-    /// `kevent` forever. Wakes coalesce kernel-side via `EVFILT_USER`'s
-    /// `EV_CLEAR`, so the per-send cost is one `kevent` syscall (~1µs)
-    /// regardless of whether the watcher is awake. `probe_ops` dispatch
-    /// directly to the prober per owner — [`StepOutput::into_parts`]
-    /// yields them as an owner-keyed map (at most one op per owner *by
-    /// construction*), the producer-side image of the prober's own
+    /// **Per-channel policy.** The two outbound channels carry
+    /// different failure modes, so they get different disconnect
+    /// responses:
+    ///
+    /// - `watch_ops_tx` is **terminal** on disconnect. Engine state
+    ///   diverging from the kernel's view is a correctness break —
+    ///   bursts would wedge in `Verifying` against stale baselines.
+    ///   We log at `error!` and return [`ControlFlow::Break`] so the
+    ///   tick routes through `begin_shutdown` (probe drain) on its way
+    ///   out.
+    /// - `effects_tx` is **degradable** on disconnect. The engine's
+    ///   state machine remains coherent against `gate_deadline`
+    ///   recovery (a hung actuator force-transitions
+    ///   `Awaiting → Rebasing`); advisory loss of a single effect is
+    ///   acceptable. We log at `warn!` and drop the effect, and the
+    ///   forward continues.
+    ///
+    /// **Shutdown-races-block on every send.** Each send is wrapped in
+    /// a `crossbeam::select!` against `shutdown_engine_rx`. A queued
+    /// shutdown pulse therefore pre-empts a `bounded(1024)` channel
+    /// even when its consumer is wedged — the back-pressure deadlock
+    /// on SIGTERM cannot recur. A worst-case shutdown observed
+    /// mid-stream loses **one** op (the value moved into the
+    /// unselected `send` arm is dropped): `WatchOp::{Watch, Unwatch}`
+    /// loss is benign (the kernel reclaims fds at process exit); an
+    /// `Effect` loss falls under the same advisory-drop policy as the
+    /// disconnect arm above.
+    ///
+    /// **Wake-per-send survives.** The wake fires only on the `Ok`
+    /// branch of the `watch_ops_tx` send arm — the contract the
+    /// `forward_wakes_after_each_send_to_break_full_channel_deadlock`
+    /// regression test pins. The shutdown-arm-wins path does not wake,
+    /// because the driver is exiting and a kqueue wake on a closing
+    /// watcher is at best wasted, at worst racing the join.
+    ///
+    /// **Probe ops dispatch directly.** [`StepOutput::into_parts`]
+    /// yields an owner-keyed map (at most one op per owner by
+    /// construction), the producer-side image of the prober's own
     /// `expected` map. So the prober's non-commuting `submit` /
     /// `cancel` never see a superseded same-owner pair: the shape
     /// collapses it before the wire. Probe *correctness* is the
     /// engine's — a stale or superseded response folds to
     /// `StaleProbeResponse` at its response gate, never this drain's.
-    /// `effects` queue to `effects_tx`. `diagnostics` log per variant
-    /// via [`log_diagnostic`].
     ///
-    /// `Send` errors on disconnected channels are warn-logged and
-    /// dropped — the only path here is a downstream-thread crash mid-
-    /// shutdown. Takes `&self` because every downstream send is
-    /// channel-based or trait-object dispatch (`Sender::send`,
-    /// `Prober::submit`, `WakeHandle::wake`, `tracing::*`) — none
-    /// requires `&mut self`.
-    pub(in crate::driver) fn forward(&self, out: StepOutput) {
+    /// Takes `&self` because every downstream send is channel-based or
+    /// trait-object dispatch (`Sender::send`, `Prober::submit`,
+    /// `WakeHandle::wake`, `tracing::*`) — none requires `&mut self`.
+    /// The `select!` macro borrows distinct `self.sides.*` fields
+    /// immutably, so a single shared borrow on `self` carries each
+    /// arm without splitting.
+    pub(super) fn forward(&self, out: StepOutput) -> ControlFlow<()> {
         // Terminal-consumer drain: `out` is already resealed (every
         // `StepOutput`-returning entry point sorts before returning), so
         // a single by-value destructure preserves the sort and the
@@ -51,9 +78,15 @@ impl EngineDriver {
         let (watch_ops, probe_ops, effects, diagnostics) = out.into_parts();
 
         for op in watch_ops {
-            match self.sides.watch_ops_tx.send(op) {
-                Ok(()) => self.wake_handle.wake(),
-                Err(_) => tracing::warn!("watch_ops channel disconnected; dropping op"),
+            crossbeam::select! {
+                send(self.sides.watch_ops_tx, op) -> res => match res {
+                    Ok(()) => self.wake_handle.wake(),
+                    Err(_) => {
+                        tracing::error!("watch_ops disconnected; shutting down");
+                        return ControlFlow::Break(());
+                    }
+                },
+                recv(self.sides.shutdown_engine_rx) -> _ => return ControlFlow::Break(()),
             }
         }
 
@@ -65,14 +98,19 @@ impl EngineDriver {
         }
 
         for eff in effects {
-            if self.sides.effects_tx.send(eff).is_err() {
-                tracing::warn!("effects channel disconnected; dropping effect");
+            crossbeam::select! {
+                send(self.sides.effects_tx, eff) -> res => if res.is_err() {
+                    tracing::warn!("effects disconnected; dropping effect");
+                },
+                recv(self.sides.shutdown_engine_rx) -> _ => return ControlFlow::Break(()),
             }
         }
 
         for diag in diagnostics {
             log_diagnostic(&diag);
         }
+
+        ControlFlow::Continue(())
     }
 }
 
@@ -85,7 +123,7 @@ impl EngineDriver {
 /// severity. `ProfileReaped` and `ReapPendingCancelled` are `info`
 /// (informational; the Profile was reaped — see `via` for the
 /// trigger — or the deferred reap was pre-empted by a revival).
-pub(in crate::driver) fn log_diagnostic(d: &Diagnostic) {
+pub(super) fn log_diagnostic(d: &Diagnostic) {
     match d {
         Diagnostic::StaleProbeResponse { owner, correlation } => tracing::warn!(
             ?owner,

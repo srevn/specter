@@ -37,13 +37,26 @@
 //! lands on this thread, and effect drain stays tight by following
 //! both reload sources.
 //!
+//! **Disconnect policy.** Every inbound drain uses an explicit
+//! `try_recv` match: `Empty` breaks the loop, `Disconnected` returns
+//! [`TickOutcome::Shutdown`] via [`EngineDriver::begin_shutdown`].
+//! `sensor_in_rx` Disconnect is canonically Terminal (the sole truth
+//! source for fs state); `reload_signal_rx`, `config_event_rx`, and
+//! `effect_in_rx` are defensively Terminal — their producers'
+//! deaths also drop `shutdown_engine_tx` (signal thread) or the
+//! channel the engine needs to make further progress (actuator), so
+//! the canonical shutdown converges either way. A `forward` that
+//! observes shutdown mid-stream (via the per-send race in
+//! [`super::forward::EngineDriver::forward`]) propagates `Break`
+//! upward and joins the same `begin_shutdown` exit.
+//!
 //! `Select::ready_timeout` is a *peek* primitive — the message stays in
 //! its channel and the next iteration's `try_recv` drain re-imposes
 //! the drain ordering. The deadline math feeds `next_deadline` from the
 //! engine's timer heap; `None` (no timers armed) maps to a 1-day fallback.
 
 use super::{EngineDriver, TickOutcome};
-use crossbeam::channel::Select;
+use crossbeam::channel::{Select, TryRecvError};
 use specter_core::{FsEvent, Input, ResourceId};
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
@@ -87,10 +100,11 @@ impl EngineDriver {
         let now = Instant::now();
 
         // Drain sensor inputs, collapsing same-tick redundant recency
-        // hints. `Break` ⇒ `sensor_in` disconnected and the
-        // cancel-first probe drain already ran inside `drain_sensor`.
-        if let ControlFlow::Break(outcome) = self.drain_sensor(now) {
-            return outcome;
+        // hints. `Break` ⇒ either `sensor_in` is disconnected or a
+        // downstream `forward` raced shutdown; both route through the
+        // shared `begin_shutdown` exit below.
+        if self.drain_sensor(now).is_break() {
+            return self.begin_shutdown();
         }
 
         // Drain expired timers. The engine hands back a `TimerEntry`
@@ -106,12 +120,22 @@ impl EngineDriver {
                 },
                 now,
             );
-            self.forward(out);
+            if self.forward(out).is_break() {
+                return self.begin_shutdown();
+            }
         }
 
         // Drain reload pulses (file I/O on this thread).
-        while self.sides.reload_signal_rx.try_recv().is_ok() {
-            self.handle_reload(now);
+        loop {
+            match self.sides.reload_signal_rx.try_recv() {
+                Ok(()) => {
+                    if self.handle_reload(now).is_break() {
+                        return self.begin_shutdown();
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return self.begin_shutdown(),
+            }
         }
 
         // Drain auto-reload pulses (re-arm settle per pulse), then
@@ -123,16 +147,35 @@ impl EngineDriver {
         // deferring the reload until the edits actually settle.
         // Inverting (expiry-then-drain) would fire a reload in the
         // middle of an in-flight burst.
-        while self.sides.config_event_rx.try_recv().is_ok() {
-            self.config_settle_until = Some(now + CONFIG_SETTLE);
+        loop {
+            match self.sides.config_event_rx.try_recv() {
+                Ok(()) => {
+                    self.config_settle_until = Some(now + CONFIG_SETTLE);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return self.begin_shutdown(),
+            }
         }
-        self.apply_config_settle_expiry(now);
+        if self.apply_config_settle_expiry(now).is_break() {
+            return self.begin_shutdown();
+        }
 
-        // Drain effect completions. Disconnect tolerated (engine remains
-        // functional against sensor + timers).
-        while let Ok(input) = self.sides.effect_in_rx.try_recv() {
-            let out = self.engine.step(input, now);
-            self.forward(out);
+        // Drain effect completions. Disconnected here is terminal:
+        // the actuator thread is the sole producer, so its death
+        // means outstanding effects will never reap and further
+        // engine progress is wedged on `gate_deadline` recovery
+        // alone — shut down instead.
+        loop {
+            match self.sides.effect_in_rx.try_recv() {
+                Ok(input) => {
+                    let out = self.engine.step(input, now);
+                    if self.forward(out).is_break() {
+                        return self.begin_shutdown();
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return self.begin_shutdown(),
+            }
         }
 
         // Block until any source readies or timer fires. Deadlines come
@@ -160,9 +203,11 @@ impl EngineDriver {
             // Wakes the driver from a long block when a config-event
             // pulse arrives. The actual pulse handling lives in the
             // per-tick drain above; this arm is purely for unblocking.
-            // The sender side must remain alive across the block — a
-            // Disconnected rx here would crossbeam-report as
-            // immediately-ready and busy-loop the driver.
+            // A Disconnected rx wakes the block immediately and the
+            // next iteration's drain returns Shutdown (terminal).
+            // Production keeps `_config_event_keepalive` on
+            // `App::run`'s stack so `--no-config-watch` doesn't route
+            // through that path at startup.
             let _i_config = sel.recv(&self.sides.config_event_rx);
             let i_shutdown = sel.recv(&self.sides.shutdown_engine_rx);
             matches!(sel.ready_timeout(timeout), Ok(idx) if idx == i_shutdown)
@@ -222,11 +267,12 @@ impl EngineDriver {
     /// barrier — never a second unbounded buffer behind the unbounded
     /// `sensor_in` channel.
     ///
-    /// [`ControlFlow::Break`] ⇒ every `sensor_in` sender is gone; the
-    /// cancel-first probe drain ([`Self::begin_shutdown`]) has
-    /// already run and the carried [`TickOutcome::Shutdown`] must be
-    /// returned by [`Self::tick`].
-    fn drain_sensor(&mut self, now: Instant) -> ControlFlow<TickOutcome> {
+    /// [`ControlFlow::Break`] ⇒ either `sensor_in` is disconnected or
+    /// a downstream `forward` raced shutdown. The caller
+    /// ([`Self::tick`]) routes the carrier through
+    /// [`Self::begin_shutdown`] at the one tick-level boundary, the
+    /// same shape the other lifecycle helpers here use.
+    fn drain_sensor(&mut self, now: Instant) -> ControlFlow<()> {
         let mut seen: BTreeSet<(ResourceId, FsEvent)> = BTreeSet::new();
         loop {
             match self.sides.sensor_in_rx.try_recv() {
@@ -236,7 +282,9 @@ impl EngineDriver {
                     // provably redundant — dropped before step/forward.
                     if seen.insert((resource, event)) {
                         let out = self.engine.step(Input::FsEvent { resource, event }, now);
-                        self.forward(out);
+                        if self.forward(out).is_break() {
+                            return ControlFlow::Break(());
+                        }
                     }
                 }
                 Ok(other) => {
@@ -244,14 +292,12 @@ impl EngineDriver {
                     // input. Drop the horizon, step verbatim, in order.
                     seen.clear();
                     let out = self.engine.step(other, now);
-                    self.forward(out);
+                    if self.forward(out).is_break() {
+                        return ControlFlow::Break(());
+                    }
                 }
-                Err(crossbeam::channel::TryRecvError::Empty) => {
-                    return ControlFlow::Continue(());
-                }
-                Err(crossbeam::channel::TryRecvError::Disconnected) => {
-                    return ControlFlow::Break(self.begin_shutdown());
-                }
+                Err(TryRecvError::Empty) => return ControlFlow::Continue(()),
+                Err(TryRecvError::Disconnected) => return ControlFlow::Break(()),
             }
         }
     }

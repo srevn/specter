@@ -32,6 +32,7 @@ use crate::observability::ObservabilityHandle;
 use specter_core::Input;
 use specter_engine::Engine;
 use specter_sensor::{Prober, WakeHandle};
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -157,7 +158,18 @@ impl EngineDriver {
     /// resolution through its registries' `by_name` indices. The
     /// `SubAttached` / `PromoterAttached` diagnostics are pure operator
     /// narration, logged via `forward`.
-    pub fn run_initial_attach(&mut self) {
+    ///
+    /// Returns [`ControlFlow::Break`] if any `forward` observed
+    /// shutdown (operator pulse mid-attach or `watch_ops_tx`
+    /// disconnect). On `Break` we run [`Self::begin_shutdown`] before
+    /// returning — an attached Sub leaves the Profile in a
+    /// Seed-Verifying state with an armed `ProbeSlot`, and a caller
+    /// that just drops the driver would trip
+    /// `ProbeSlot::drop`'s linear-edge tripwire. Containing the
+    /// probe drain inside `run_initial_attach` keeps the lifecycle
+    /// discipline encapsulated; the caller (`app.rs`) stays a thin
+    /// branch on the `ControlFlow` return.
+    pub(crate) fn run_initial_attach(&mut self) -> ControlFlow<()> {
         let now = Instant::now();
         // Snapshot the active spec lists: `self.engine.step` needs
         // `&mut self`, so the `&self` borrow on `loader.current_config`
@@ -177,13 +189,20 @@ impl EngineDriver {
         for spec in watch_specs {
             let req = spec.to_attach_request();
             let out = self.engine.step(Input::AttachSub(req), now);
-            self.forward(out);
+            if self.forward(out).is_break() {
+                let _ = self.begin_shutdown();
+                return ControlFlow::Break(());
+            }
         }
         for spec in promoter_specs {
             let req = spec.to_attach_request();
             let out = self.engine.step(Input::AttachPromoter(req), now);
-            self.forward(out);
+            if self.forward(out).is_break() {
+                let _ = self.begin_shutdown();
+                return ControlFlow::Break(());
+            }
         }
+        ControlFlow::Continue(())
     }
 
     /// Loop wrapping [`Self::tick`] until shutdown.
@@ -217,7 +236,22 @@ impl EngineDriver {
     #[must_use]
     fn begin_shutdown(&mut self) -> TickOutcome {
         let out = self.engine.cancel_all_in_flight_probes();
-        self.forward(out);
+        // INVARIANT: cancel_all_in_flight_probes emits exclusively
+        // `ProbeOp::Cancel` ops (see `engine::probe::cancel_owner_probe`
+        // — the disarm-then-`Cancel` choke this drain iterates over).
+        // `watch_ops` and `effects` are therefore structurally empty,
+        // so `forward`'s outbound `crossbeam::select!` arms never
+        // execute on this `StepOutput`; the `ControlFlow` return is
+        // structurally `Continue`. The cancels dispatch through
+        // `forward`'s probe arm directly to the prober (no channel,
+        // no shutdown race), so the discard is intentional. A future
+        // refactor adding non-probe ops to
+        // `cancel_all_in_flight_probes` must thread `Break` here.
+        debug_assert!(
+            out.watch_ops.is_empty() && out.effects().is_empty(),
+            "cancel_all_in_flight_probes must emit only ProbeOp::Cancel",
+        );
+        let _ = self.forward(out);
         TickOutcome::Shutdown
     }
 }

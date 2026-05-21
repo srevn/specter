@@ -24,6 +24,7 @@ use super::EngineDriver;
 use crate::observability::LogReloadKind;
 use specter_config::{Config, FileMeta};
 use specter_core::Input;
+use std::ops::ControlFlow;
 use std::time::Instant;
 
 impl EngineDriver {
@@ -48,16 +49,25 @@ impl EngineDriver {
     /// directly with a synthetic `now`, avoiding real-time sleeps
     /// across the settle window. Production callers go through
     /// `tick`, which always passes `Instant::now()`.
-    pub(super) fn apply_config_settle_expiry(&mut self, now: Instant) {
+    ///
+    /// Returns [`ControlFlow::Break`] iff [`Self::handle_reload`]
+    /// observed shutdown (its `forward` raced the
+    /// `shutdown_engine_rx` arm, or `watch_ops_tx` disconnected
+    /// mid-apply). The caller is responsible for the probe drain —
+    /// [`super::tick::EngineDriver::tick`] routes the carrier through
+    /// `begin_shutdown`.
+    pub(super) fn apply_config_settle_expiry(&mut self, now: Instant) -> ControlFlow<()> {
         let Some(deadline) = self.config_settle_until else {
-            return;
+            return ControlFlow::Continue(());
         };
         if now < deadline {
-            return;
+            return ControlFlow::Continue(());
         }
         self.config_settle_until = None;
         if self.config_meta_changed() {
-            self.handle_reload(now);
+            self.handle_reload(now)
+        } else {
+            ControlFlow::Continue(())
         }
     }
 
@@ -128,22 +138,31 @@ impl EngineDriver {
     /// If the post-fail lstat itself fails (parent dir gone, etc.),
     /// the existing meta is preserved — [`Self::config_meta_changed`]'s
     /// "Err = treat as changed" semantics keep the retry loop alive.
-    pub(super) fn handle_reload(&mut self, now: Instant) {
+    ///
+    /// Returns the [`ControlFlow`] from the apply-branch `forward` so
+    /// a shutdown observed mid-apply (operator signal or
+    /// `watch_ops_tx` disconnect) propagates back to the caller.
+    /// The loader rotation runs even on the `Break` path: the engine
+    /// has the diff applied, so the loader matches the engine on the
+    /// way out, and the driver is about to shut down anyway — keeping
+    /// the rotation in front of the return is the clearer invariant.
+    pub(super) fn handle_reload(&mut self, now: Instant) -> ControlFlow<()> {
         self.reopen_log_file();
 
         let Some((new_config, new_meta)) = self.read_and_parse_config() else {
             if let Ok(post_fail_meta) = FileMeta::from_path(&self.config_path) {
                 self.loader.config_meta = post_fail_meta;
             }
-            return;
+            return ControlFlow::Continue(());
         };
 
         let new_log_resolved = self.parse_and_resolve_log(&new_config);
         self.apply_log_changes(&new_log_resolved);
 
         let diff = self.compute_watch_diff(&new_config);
-        if diff.is_empty() {
+        let outcome = if diff.is_empty() {
             tracing::info!("config reload: no watch changes");
+            ControlFlow::Continue(())
         } else {
             // Snapshot the change-counts for the post-apply summary
             // log before the diff moves into the engine. Name-keyed:
@@ -173,12 +192,14 @@ impl EngineDriver {
                 promoters_modified = promoter_modified_n,
                 "config reload applied",
             );
-            self.forward(out);
-        }
+            self.forward(out)
+        };
 
         self.loader.current_config = new_config;
         self.loader.current_log = new_log_resolved;
         self.loader.config_meta = new_meta;
+
+        outcome
     }
 
     /// Re-open the log file destination so `logrotate`'s
