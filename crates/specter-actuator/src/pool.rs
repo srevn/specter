@@ -166,6 +166,14 @@ impl SubprocessActuator {
     /// phase 2's grace becomes a near-zero wait before phase 3 SIGKILLs
     /// everything still alive.
     ///
+    /// `hard_shutdown_done_tx` is the back-channel to the signal
+    /// thread: the actuator pulses it once at the close of phase 3
+    /// SIGKILL fanout (trigger-agnostic — pulse fires whenever phase 3
+    /// runs, regardless of soft/hard origin). On the hard-exit path
+    /// the signal thread waits for this pulse (or the sender-drop
+    /// that follows thread exit) before `process::exit(130)`, so the
+    /// parent never aborts mid-fanout and leaves orphans on PID 1.
+    ///
     /// Channels are taken by value: the controller owns them for the
     /// lifetime of [`Self::run`], so the caller hands off and is freed
     /// from any borrow-tracking.
@@ -177,6 +185,7 @@ impl SubprocessActuator {
         hard_shutdown_rx: Receiver<()>,
         engine_in: Sender<Input>,
         spawner: &dyn Spawner,
+        hard_shutdown_done_tx: Sender<()>,
     ) {
         let mut hard = false;
         loop {
@@ -199,10 +208,16 @@ impl SubprocessActuator {
                 recv(hard_shutdown_rx) -> _ => { hard = true; break; }
             }
         }
-        self.shutdown(&engine_in, hard, &hard_shutdown_rx);
+        self.shutdown(&engine_in, hard, &hard_shutdown_rx, &hard_shutdown_done_tx);
     }
 
-    fn shutdown(&mut self, engine_in: &Sender<Input>, hard: bool, hard_shutdown_rx: &Receiver<()>) {
+    fn shutdown(
+        &mut self,
+        engine_in: &Sender<Input>,
+        hard: bool,
+        hard_shutdown_rx: &Receiver<()>,
+        hard_shutdown_done_tx: &Sender<()>,
+    ) {
         // Phase 1: SIGTERM all running.
         tracing::info!("shutdown phase 1: SIGTERM running children");
         for slot in self.state.slots.values() {
@@ -233,7 +248,18 @@ impl SubprocessActuator {
                 default(deadline - now) => break,
             }
         }
-        // Phase 3: SIGKILL stragglers.
+        // Phase 3: SIGKILL stragglers, then pulse the back-channel.
+        // Trigger-agnostic: the pulse semantics are "phase 3 ran", not
+        // "phase 3 ran because of hard". The signal thread only reads
+        // on the hard-exit path; a soft-shutdown pulse fills the
+        // bounded(1) slot, nobody drains it, no semantic impact.
+        //
+        // Pulse-before-phase-4: SIGKILL is uninterruptible, so the
+        // kernel will reap regardless of whether the actuator finishes
+        // phase 4's reap drain. Waiting for phase 4 would bottleneck
+        // the signal thread's `recv_timeout` on a 5s reap-drain
+        // deadline; pulsing here releases it within microseconds of
+        // the last `signal_kill`.
         if self.has_running() {
             tracing::info!("shutdown phase 3: SIGKILL stragglers");
             for slot in self.state.slots.values() {
@@ -243,6 +269,7 @@ impl SubprocessActuator {
                     tracing::debug!(pid = job.pid, ?e, "SIGKILL failed");
                 }
             }
+            let _ = hard_shutdown_done_tx.try_send(());
         }
         // Phase 4: drain remaining reaps. SIGKILL is uninterruptible
         // (kernel guarantee), so the wait threads must return
@@ -401,6 +428,7 @@ mod tests {
         effects_tx: Sender<Effect>,
         shutdown_tx: Sender<()>,
         hard_shutdown_tx: Sender<()>,
+        hard_shutdown_done_rx: Receiver<()>,
         engine_in: Receiver<Input>,
         spawner: Arc<MockSpawner>,
         join: Option<thread::JoinHandle<()>>,
@@ -460,6 +488,7 @@ mod tests {
             let (effects_tx, effects_rx) = bounded::<Effect>(1024);
             let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
             let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);
+            let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
             let (engine_tx, engine_rx) = unbounded::<Input>();
             let spawner = Arc::new(MockSpawner::new());
             let spawner_clone = Arc::clone(&spawner);
@@ -473,6 +502,7 @@ mod tests {
                         hard_shutdown_rx,
                         engine_tx,
                         spawner_clone.as_ref(),
+                        hard_shutdown_done_tx,
                     );
                 })
                 .expect("spawn controller");
@@ -480,6 +510,7 @@ mod tests {
                 effects_tx,
                 shutdown_tx,
                 hard_shutdown_tx,
+                hard_shutdown_done_rx,
                 engine_in: engine_rx,
                 spawner,
                 join: Some(join),
@@ -798,9 +829,11 @@ mod tests {
         // Operator double-Ctrl-C: the signal thread fires
         // `hard_shutdown_actuator_tx` *before* `exit_fn(130)`. The actuator
         // must SIGTERM all running children (phase 1), bypass the 5s grace
-        // wait (phase 2), and SIGKILL stragglers (phase 3). With a long
-        // grace (5s) configured, this test asserts that the SIGKILL lands
-        // *well* before the grace would have elapsed.
+        // wait (phase 2), SIGKILL stragglers (phase 3), and emit the
+        // `hard_shutdown_done_tx` pulse so the signal thread can proceed
+        // with `process::exit` instead of relying on a sleep heuristic.
+        // With a long grace (5s) configured, this test asserts that
+        // SIGKILL lands *well* before the grace would have elapsed.
         let mut h = Harness::new_with_grace(4, Duration::from_secs(5));
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
@@ -844,6 +877,13 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "hard-shutdown bypassed the grace period (elapsed: {elapsed:?})"
+        );
+        // Phase 3 SIGKILL fanout pulse must reach the back-channel —
+        // the signal thread's `recv_timeout` proof that the kernel has
+        // been told to kill everyone, no sleep-heuristic required.
+        assert!(
+            h.hard_shutdown_done_rx.try_recv().is_ok(),
+            "phase 3 fanout pulse must reach hard_shutdown_done_rx"
         );
     }
 

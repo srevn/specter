@@ -261,11 +261,13 @@ fn effect_in_disconnect_shuts_down() {
         shutdown_actuator_rx,
         hard_shutdown_actuator_rx,
         effect_in_tx,
+        hard_shutdown_done_tx,
     } = rig.actuator_side;
     drop(effect_in_tx);
     drop(effects_rx);
     drop(shutdown_actuator_rx);
     drop(hard_shutdown_actuator_rx);
+    drop(hard_shutdown_done_tx);
 
     // No shutdown_tx pulse — the disconnect alone must drive Shutdown.
     assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);

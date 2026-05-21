@@ -671,6 +671,11 @@ pub(crate) fn apply_watch_op<W: FsWatcher>(
 /// the resolved concurrency, runs the controller blocking until either
 /// `effects_rx` disconnects or `shutdown_actuator_rx` fires.
 ///
+/// `sides.hard_shutdown_done_tx` is the back-channel the actuator
+/// pulses after phase 3 SIGKILL fanout; the signal thread waits on
+/// its paired receiver before `process::exit(130)` so the parent
+/// never aborts mid-fanout.
+///
 /// Returns [`io::Error`] on `thread::Builder::spawn` failure; the
 /// caller translates to a startup-fail [`ExitCode`], same shape as
 /// every other init path in [`run`].
@@ -690,6 +695,7 @@ fn spawn_actuator_thread(
                     sides.hard_shutdown_actuator_rx,
                     sides.effect_in_tx,
                     spawner.as_ref(),
+                    sides.hard_shutdown_done_tx,
                 );
             }));
             if let Err(payload) = result {

@@ -56,6 +56,7 @@ pub struct Harness {
     pub effects_tx: Sender<Effect>,
     pub shutdown_tx: Sender<()>,
     pub hard_shutdown_tx: Sender<()>,
+    pub hard_shutdown_done_rx: Receiver<()>,
     pub engine_in: Receiver<Input>,
     pub join: Option<thread::JoinHandle<()>>,
 }
@@ -65,6 +66,7 @@ impl Harness {
         let (effects_tx, effects_rx) = bounded::<Effect>(1024);
         let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
         let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);
+        let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
         let (engine_tx, engine_rx) = unbounded::<Input>();
         let join = thread::Builder::new()
             .name("test-actuator-controller".into())
@@ -77,6 +79,7 @@ impl Harness {
                     hard_shutdown_rx,
                     engine_tx,
                     spawner.as_ref(),
+                    hard_shutdown_done_tx,
                 );
             })
             .expect("spawn controller");
@@ -84,6 +87,7 @@ impl Harness {
             effects_tx,
             shutdown_tx,
             hard_shutdown_tx,
+            hard_shutdown_done_rx,
             engine_in: engine_rx,
             join: Some(join),
         }

@@ -132,6 +132,14 @@ pub struct WatcherSide {
 }
 
 /// Receivers + sender clones the actuator thread owns.
+///
+/// `hard_shutdown_done_tx` is the back-channel to the signal thread:
+/// the actuator pulses it once at the close of phase 3 (SIGKILL
+/// fanout), signalling that every running child has been told to die.
+/// The signal thread waits on the paired receiver in [`SignalSide`]
+/// before calling `process::exit(130)` — without this confirmation,
+/// the parent could die while the actuator was still mid-fanout,
+/// leaving stubborn children as PID-1 orphans.
 #[derive(Debug)]
 #[must_use]
 pub struct ActuatorSide {
@@ -139,22 +147,22 @@ pub struct ActuatorSide {
     pub shutdown_actuator_rx: Receiver<()>,
     pub hard_shutdown_actuator_rx: Receiver<()>,
     pub effect_in_tx: Sender<Input>,
+    pub hard_shutdown_done_tx: Sender<()>,
 }
 
-/// Sender clones the signal thread owns. The signal thread never reads
-/// from any channel — it only fans signals out to the other actors.
-///
-/// All fields are senders by design (`_tx` postfix is the workspace
-/// convention); the `struct_field_names` lint is silenced for that
-/// reason.
+/// Channel halves the signal thread owns. Four senders fan signals
+/// out to the engine / actuator / reload pipeline; one receiver
+/// observes the actuator's phase-3 confirmation pulse so the hard-exit
+/// path can wait for SIGKILL fanout to complete before calling
+/// `process::exit(130)`.
 #[derive(Debug)]
 #[must_use]
-#[allow(clippy::struct_field_names)]
 pub struct SignalSide {
     pub reload_signal_tx: Sender<()>,
     pub shutdown_engine_tx: Sender<()>,
     pub shutdown_actuator_tx: Sender<()>,
     pub hard_shutdown_actuator_tx: Sender<()>,
+    pub hard_shutdown_done_rx: Receiver<()>,
 }
 
 /// Sender clone the auto-reload config watcher thread owns.
@@ -195,6 +203,12 @@ impl Channels {
         let (shutdown_engine_tx, shutdown_engine_rx) = bounded(1);
         let (shutdown_actuator_tx, shutdown_actuator_rx) = bounded(1);
         let (hard_shutdown_actuator_tx, hard_shutdown_actuator_rx) = bounded(1);
+        // `bounded(1)`: the actuator emits exactly one pulse per
+        // shutdown (after phase 3 SIGKILL fanout). Soft-shutdown emits
+        // it too — nobody drains it, the slot fills, no semantic
+        // impact. The signal thread drains via `recv_timeout` only on
+        // the hard-exit path.
+        let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded(1);
 
         Self {
             engine: EnginePieces {
@@ -214,12 +228,14 @@ impl Channels {
                 shutdown_actuator_rx,
                 hard_shutdown_actuator_rx,
                 effect_in_tx,
+                hard_shutdown_done_tx,
             },
             signal: SignalSide {
                 reload_signal_tx,
                 shutdown_engine_tx,
                 shutdown_actuator_tx,
                 hard_shutdown_actuator_tx,
+                hard_shutdown_done_rx,
             },
         }
     }

@@ -1,12 +1,13 @@
 //! Signal-hook iterator + dispatch.
 //!
-//! [`spawn_signal_thread`] starts the `specter-signal` thread; the
-//! thread's body installs handlers for SIGHUP / SIGINT / SIGTERM via
-//! `signal_hook::iterator::Signals`, then loops `signals.forever()`
-//! routing each signal through [`dispatch_signal`]. The dispatch is
-//! pulled into a free function so sibling tests can drive it directly
-//! without going through `Signals::forever` (which registers
-//! process-wide handlers — fragile under cargo test parallelism).
+//! [`spawn_signal_thread`] starts the `specter-signal` thread around a
+//! pre-constructed [`Signals`] (registered in `App::run`'s prologue —
+//! see [`crate::app::run`] for the why). The thread's body loops
+//! `signals.forever()` routing each signal through [`dispatch_signal`].
+//! The dispatch is pulled into a free function so sibling tests can
+//! drive it directly without going through `Signals::forever` (which
+//! registers process-wide handlers — fragile under cargo test
+//! parallelism).
 //!
 //! Behavior:
 //! - **SIGHUP** → `reload_signal_tx.try_send(())`. Bounded(1) coalesces
@@ -19,13 +20,15 @@
 //!   `poll_until`. Records `first_term = Some(now)`.
 //! - **SIGINT / SIGTERM (second within `HARD_EXIT_WINDOW`)** →
 //!   pre-empt the actuator's 5s SIGTERM grace via
-//!   `hard_shutdown_actuator_tx`, briefly yield so phase 3 (SIGKILL
-//!   stragglers) lands before the parent dies, then call the
-//!   injectable `exit_fn` (default: `std::process::exit(130)`). Without
-//!   the pre-empt,
-//!   stubborn children that ignored phase 1's SIGTERM survive as orphans
-//!   reparented to PID 1. The injectable `exit_fn` parameter lets tests
-//!   assert escalation without killing the test runner.
+//!   `hard_shutdown_actuator_tx`, wait for the actuator's phase 3
+//!   confirmation pulse (or sender-drop, or
+//!   [`HARD_SHUTDOWN_CONFIRM_TIMEOUT`] fallback) on
+//!   `hard_shutdown_done_rx`, then call the injectable `exit_fn`
+//!   (default: `std::process::exit(130)`). Without the pre-empt and
+//!   confirmation, stubborn children that ignored phase 1's SIGTERM
+//!   survive as orphans reparented to PID 1. The injectable `exit_fn`
+//!   parameter lets tests assert escalation without killing the test
+//!   runner.
 //!
 //! After the 2-second window, a fresh termination signal *replaces*
 //! `first_term` — the next signal can re-escalate against the new
@@ -46,6 +49,23 @@ pub(crate) const HARD_EXIT_WINDOW: Duration = Duration::from_secs(2);
 
 /// Exit code conventionally used for "killed by SIGINT" (128 + 2).
 pub(crate) const HARD_EXIT_CODE: i32 = 130;
+
+/// Upper bound on how long the signal thread waits for the actuator's
+/// phase 3 confirmation pulse before calling `exit_fn` regardless.
+///
+/// Healthy phase 3 fanout is microseconds per child (a `kill(2)`
+/// syscall); the pulse arrives well inside this window. The timeout
+/// is the bound for a *wedged* actuator — a wait thread deadlocked,
+/// a panic during the fanout, etc. — past which the parent must die
+/// even without confirmation: the kernel reaps surviving children
+/// on parent exit, and an orphan window > a few hundred milliseconds
+/// is already operator-visible.
+///
+/// `200ms` is 4× the historical 50ms sleep heuristic, generous enough
+/// for cross-thread hop + SIGKILL syscalls on a large child set under
+/// scheduler contention, tight enough to keep double-Ctrl-C
+/// responsive.
+pub(crate) const HARD_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Outcome of a single [`dispatch_signal`] call. Production code
 /// ignores it; tests assert on it.
@@ -113,18 +133,31 @@ where
             if let Some(prev) = state.first_term
                 && now.duration_since(prev) < HARD_EXIT_WINDOW
             {
-                eprintln!("specter: second termination within 2s — exiting hard");
+                // Synchronous stderr — `process::exit` below skips
+                // destructors, so the tracing-appender's worker thread
+                // dies with the process. `eprintln!` lands the line
+                // before exit; `tracing::*` could be silently dropped.
+                eprintln!(
+                    "specter: second termination within {}s — exiting hard",
+                    HARD_EXIT_WINDOW.as_secs(),
+                );
                 // Pre-empt the actuator's SIGTERM grace so it
                 // SIGKILLs running children before we abort the
                 // process — otherwise stubborn children survive as
                 // PID-1 orphans.
                 let _ = side.hard_shutdown_actuator_tx.try_send(());
-                // Brief yield so the actuator's `select!` observes
-                // the hard-shutdown signal and reaches phase 3
-                // (SIGKILL) before `exit_fn` aborts the process.
-                // 50ms is enough margin for the cross-thread hop +
-                // SIGKILL syscall on every running child.
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                // Wait for the actuator's "phase 3 SIGKILL fanout
+                // complete" pulse. Three terminal paths, all OK:
+                //   - `Ok(())` — confirmation received; the kernel
+                //     has been told to kill every running child.
+                //   - `Err(Disconnected)` — actuator thread already
+                //     exited (sender dropped); kernel reap pending,
+                //     parent safe to die.
+                //   - `Err(Timeout)` — fallback bound for a wedged
+                //     actuator; parent dies, kernel reaps on exit.
+                let _ = side
+                    .hard_shutdown_done_rx
+                    .recv_timeout(HARD_SHUTDOWN_CONFIRM_TIMEOUT);
                 exit_fn(HARD_EXIT_CODE);
                 return SignalOutcome::HardExitTriggered;
             }
@@ -208,7 +241,13 @@ mod tests {
         }
     }
 
-    /// Build the dispatch fixtures: channels, flag, mock waker, exit recorder.
+    /// Build the dispatch fixtures: channels, flag, mock waker, exit
+    /// recorder. The whole [`Channels`] bundle survives the fixture
+    /// call so every paired sender/receiver in the topology stays
+    /// connected (the rx for `reload_signal_tx`, `shutdown_engine_tx`,
+    /// `shutdown_actuator_tx`, `hard_shutdown_actuator_tx` lives on
+    /// `EnginePieces` / `ActuatorSide`, so a partial-move would resolve
+    /// those `try_send` calls as `Disconnected`).
     fn fixture() -> (Channels, Arc<AtomicBool>, MockFsWatcher, Arc<ExitRecorder>) {
         let chans = Channels::new();
         let flag = Arc::new(AtomicBool::new(false));
@@ -286,6 +325,16 @@ mod tests {
     fn second_sigint_within_window_triggers_hard_exit() {
         let (chans, flag, watcher, recorder) = fixture();
         let side = chans.signal;
+        // Pre-plant the actuator's "phase 3 complete" pulse so the
+        // dispatch's `recv_timeout` returns `Ok(())` immediately —
+        // models the production fast path where the actuator confirms
+        // before the signal thread parks. Without this, the test would
+        // wait the full `HARD_SHUTDOWN_CONFIRM_TIMEOUT`.
+        chans
+            .actuator
+            .hard_shutdown_done_tx
+            .try_send(())
+            .expect("plant pulse");
         let wake = watcher.wake_handle();
         let mut state = SignalState::default();
 
@@ -307,12 +356,21 @@ mod tests {
     #[test]
     fn hard_exit_pre_empts_actuator_shutdown_grace() {
         // The signal thread must fire `hard_shutdown_actuator_tx` BEFORE
-        // calling `exit_fn(130)` so the actuator pre-empts its 5s SIGTERM
-        // grace and SIGKILLs running children. Without this signal,
-        // stubborn children (those that ignored phase 1's SIGTERM) survive
-        // as PID-1 orphans after `process::exit`.
+        // waiting on `hard_shutdown_done_rx`, then call `exit_fn(130)`.
+        // The pre-empt lets the actuator SIGKILL stragglers; the
+        // back-channel pulse is the confirmation that fanout completed,
+        // replacing the historical 50ms sleep heuristic.
         let (chans, flag, watcher, recorder) = fixture();
         let side = chans.signal;
+        // Plant the confirmation pulse so dispatch proceeds without
+        // waiting `HARD_SHUTDOWN_CONFIRM_TIMEOUT` (the timeout path is
+        // covered structurally: any of pulse / disconnect / timeout
+        // end at `exit_fn`).
+        chans
+            .actuator
+            .hard_shutdown_done_tx
+            .try_send(())
+            .expect("plant pulse");
         let wake = watcher.wake_handle();
         let mut state = SignalState::default();
 
