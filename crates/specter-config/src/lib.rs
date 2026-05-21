@@ -19,5 +19,4 @@ pub use config::{Config, LogConfig, LogDestination, LogLevel, PromoterSpec, SubS
 pub use diff::diff;
 pub use error::{ConfigError, IssueKind, ValidationIssue};
 pub use file_meta::FileMeta;
-pub use path::{PathError, canonicalize_lenient};
 pub use template::{TemplateError, parse_arg};

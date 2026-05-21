@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 /// [`IssueKind`](crate::error::IssueKind)s rather than collapsing
 /// through a single arm.
 #[derive(Debug)]
-pub enum PathError {
+pub(crate) enum PathError {
     /// Input failed `Path::is_absolute()`. Pre-normalisation rejects
     /// without touching the filesystem.
     NotAbsolute,
@@ -88,7 +88,7 @@ impl std::error::Error for PathError {
 ///    The engine's path gate requires UTF-8 — symlink resolution can
 ///    surface non-UTF-8 segments that the structural check (UTF-8 by
 ///    construction from TOML) can't see.
-pub fn canonicalize_lenient(input: &Path) -> Result<PathBuf, PathError> {
+pub(crate) fn canonicalize_lenient(input: &Path) -> Result<PathBuf, PathError> {
     normalize_structure(input)?;
     let resolved = resolve_filesystem(input)?;
     enforce_utf8(resolved)
