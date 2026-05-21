@@ -1,11 +1,42 @@
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+/// Typed failure mode of [`canonicalize_lenient`].
+///
+/// Each variant maps to exactly one operator-actionable cause; the
+/// validator translates them into specific
+/// [`IssueKind`](crate::error::IssueKind)s rather than collapsing
+/// through a single arm.
 #[derive(Debug)]
 pub enum PathError {
+    /// Input failed `Path::is_absolute()`. Pre-normalisation rejects
+    /// without touching the filesystem.
     NotAbsolute,
+    /// Input's `OsStr` is empty. Pre-normalisation rejects before any
+    /// further structural check.
     Empty,
-    Io(std::io::Error),
+    /// Input contains a `..` component (anywhere — leading, middle, or
+    /// trailing). Pre-normalisation rejects before any I/O; the operator
+    /// must supply a literal absolute path without parent-dir traversal.
+    ///
+    /// `.` is intentionally **not** rejected: `Path::components` already
+    /// normalises away every `.` except leading, and a leading `.` makes
+    /// the path non-absolute (caught above). The remaining accepted
+    /// shape (`/foo/./bar` ≡ `/foo/bar`) is harmless — the kernel treats
+    /// `.` as a no-op during canonicalisation.
+    ContainsParentDir,
+    /// `canonicalize` surfaced a non-`NotFound` `io::Error` — `PermissionDenied`,
+    /// symlink loop, `NotADirectory`, EIO, etc. `at` carries the cursor
+    /// at the point of failure (equal to the input on a top-level fail,
+    /// a deeper ancestor on a mid-walk fail), and `source` preserves the
+    /// raw `io::Error` for the operator-visible detail line.
+    Inaccessible { at: PathBuf, source: std::io::Error },
+    /// The canonicalised buffer carries one or more non-UTF-8 segments —
+    /// typically via symlink resolution onto a non-UTF-8 byte path. The
+    /// engine's [`specter_core::Tree::parse_attach_path`] gate requires
+    /// UTF-8; the validator rejects up front rather than passing the
+    /// buck. `resolved` is the canonical buffer with the offending bytes.
+    NonUtf8 { resolved: PathBuf },
 }
 
 impl fmt::Display for PathError {
@@ -13,15 +44,25 @@ impl fmt::Display for PathError {
         match self {
             Self::NotAbsolute => write!(f, "path is not absolute"),
             Self::Empty => write!(f, "path is empty"),
-            Self::Io(e) => write!(f, "io error: {e}"),
+            Self::ContainsParentDir => write!(f, "path contains `..` component"),
+            Self::Inaccessible { at, source } => {
+                write!(f, "`{}` is inaccessible: {source}", at.display())
+            }
+            Self::NonUtf8 { resolved } => {
+                write!(
+                    f,
+                    "canonical path `{}` is not valid UTF-8",
+                    resolved.display()
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for PathError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let Self::Io(e) = self {
-            Some(e)
+        if let Self::Inaccessible { source, .. } = self {
+            Some(source)
         } else {
             None
         }
@@ -29,56 +70,124 @@ impl std::error::Error for PathError {
 }
 
 /// Canonicalize as much of `input` as exists, leaving the trailing
-/// non-existent components literal. Always returns an absolute path.
+/// non-existent components literal. Always returns an absolute, UTF-8
+/// path on success.
 ///
-/// Algorithm: try `canonicalize(input)`; on `NotFound`, walk up the parent
-/// chain until a parent canonicalizes; reattach the missing tail. Symlinked
-/// existing prefixes resolve through; pending leaves stay literal. Other
-/// `io::Error` kinds (`PermissionDenied`, etc.) propagate immediately.
+/// Internally three phases:
+///
+/// 1. **Structural pre-normalisation** ([`normalize_structure`]): no
+///    I/O — rejects empty, non-absolute, and `..`-bearing inputs.
+///    The downstream phases rely on its post-condition (every cursor
+///    has a `file_name`; walk-up terminates at root).
+/// 2. **Filesystem resolution** ([`resolve_filesystem`]): walks the
+///    parent chain via in-place `cursor.pop()` until `canonicalize`
+///    succeeds; reattaches the missing tail. Non-`NotFound` errors
+///    collapse to [`PathError::Inaccessible`] carrying the cursor at
+///    fault.
+/// 3. **UTF-8 enforcement** ([`enforce_utf8`]): post-resolution check.
+///    The engine's path gate requires UTF-8 — symlink resolution can
+///    surface non-UTF-8 segments that the structural check (UTF-8 by
+///    construction from TOML) can't see.
 pub fn canonicalize_lenient(input: &Path) -> Result<PathBuf, PathError> {
+    normalize_structure(input)?;
+    let resolved = resolve_filesystem(input)?;
+    enforce_utf8(resolved)
+}
+
+/// Pure structural pre-normalisation — no I/O. Rejects empty,
+/// non-absolute, and `..`-bearing inputs.
+///
+/// Post-condition for downstream phases: any cursor derived from
+/// `input` by `pop()` has a `Some` `file_name` (the only path shape
+/// with `None` `file_name` after absoluteness — a trailing `..` — is
+/// rejected here), and walk-up always reaches the filesystem root,
+/// which canonicalises. Both invariants are load-bearing for
+/// [`resolve_filesystem`]'s loop termination.
+///
+/// `Component::CurDir` is intentionally accepted: `Path::components`
+/// normalises `.` away in every non-leading position and a leading `.`
+/// fails `is_absolute()` above, so `CurDir` reaches us only in shapes
+/// already vetted as harmless.
+fn normalize_structure(input: &Path) -> Result<(), PathError> {
     if input.as_os_str().is_empty() {
         return Err(PathError::Empty);
     }
     if !input.is_absolute() {
         return Err(PathError::NotAbsolute);
     }
-
-    match std::fs::canonicalize(input) {
-        Ok(p) => return Ok(p),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(PathError::Io(e)),
-    }
-
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    let mut cursor: PathBuf = input.to_owned();
-    loop {
-        let Some(parent) = cursor.parent() else {
-            return Err(PathError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no canonical ancestor",
-            )));
-        };
-        let Some(name) = cursor.file_name() else {
-            return Err(PathError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path component is not a regular file name (e.g. ends in `..`)",
-            )));
-        };
-        tail.push(name.to_owned());
-        let parent = parent.to_owned();
-        match std::fs::canonicalize(&parent) {
-            Ok(canon_parent) => {
-                let mut result = canon_parent;
-                for seg in tail.iter().rev() {
-                    result.push(seg);
-                }
-                return Ok(result);
-            }
-            Err(inner) if inner.kind() == std::io::ErrorKind::NotFound => {
-                cursor = parent;
-            }
-            Err(inner) => return Err(PathError::Io(inner)),
+    for c in input.components() {
+        match c {
+            Component::ParentDir => return Err(PathError::ContainsParentDir),
+            // Exhaustive remainder: forward-compat against future
+            // `Component` variants. `Prefix` is Windows-only; never
+            // appears on Unix targets but matched explicitly so a new
+            // variant fails to compile rather than silently passes.
+            Component::CurDir
+            | Component::RootDir
+            | Component::Normal(_)
+            | Component::Prefix(_) => {}
         }
+    }
+    Ok(())
+}
+
+/// Walk up the parent chain until canonicalisation succeeds; reattach
+/// the popped tail. `cursor` mutates in place via `pop()`; the only
+/// per-iteration allocation is the popped `OsString` pushed onto `tail`.
+///
+/// Pre-normalisation guarantees:
+/// - `cursor.file_name()` returns `Some` until `pop()` returns `false`.
+/// - `pop()` returns `false` only at the filesystem root, which always
+///   canonicalises — so the loop terminates without ever needing the
+///   defensive fallback below.
+fn resolve_filesystem(input: &Path) -> Result<PathBuf, PathError> {
+    let mut cursor = input.to_owned();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match std::fs::canonicalize(&cursor) {
+            Ok(mut canon) => {
+                for seg in tail.iter().rev() {
+                    canon.push(seg);
+                }
+                return Ok(canon);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let name = cursor
+                    .file_name()
+                    .expect("pre-normalisation: cursor has a file_name until pop returns false")
+                    .to_owned();
+                tail.push(name);
+                if !cursor.pop() {
+                    // Unreachable on Unix post-normalisation: `pop()`
+                    // returns false only at the filesystem root, and
+                    // the root always canonicalises. Defend the release
+                    // build with a typed error rather than panicking.
+                    debug_assert!(false, "walk-up reached root via NotFound chain");
+                    return Err(PathError::Inaccessible {
+                        at: cursor,
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "no canonical ancestor",
+                        ),
+                    });
+                }
+            }
+            Err(source) => return Err(PathError::Inaccessible { at: cursor, source }),
+        }
+    }
+}
+
+/// Post-resolution UTF-8 check. Symlink resolution can surface a
+/// non-UTF-8 segment that the engine's
+/// [`specter_core::Tree::parse_attach_path`] gate would reject; catch
+/// it here so the validator's contract ("ok ⇒ engine accepts the
+/// path") holds. Original TOML input is UTF-8 by construction, so the
+/// only way this fails is through symlink resolution.
+fn enforce_utf8(p: PathBuf) -> Result<PathBuf, PathError> {
+    if p.to_str().is_some() {
+        Ok(p)
+    } else {
+        Err(PathError::NonUtf8 { resolved: p })
     }
 }
 
@@ -107,6 +216,24 @@ mod tests {
     fn tilde_path_rejected_as_non_absolute() {
         let err = canonicalize_lenient(Path::new("~/foo")).unwrap_err();
         assert!(matches!(err, PathError::NotAbsolute));
+    }
+
+    #[test]
+    fn parent_dir_component_rejected() {
+        let err = canonicalize_lenient(Path::new("/srv/missing/..")).unwrap_err();
+        assert!(matches!(err, PathError::ContainsParentDir), "got {err:?}");
+    }
+
+    /// `.` is intentionally accepted by pre-norm because `Path::components`
+    /// normalises it away in every non-leading position. The kernel
+    /// canonicalises the input as if the `.` were absent.
+    #[test]
+    fn cur_dir_component_silently_normalized() {
+        let td = tempfile::tempdir().unwrap();
+        let canon = canon_tempdir(&td);
+        let with_dot = td.path().join(".").join("missing-leaf");
+        let result = canonicalize_lenient(&with_dot).unwrap();
+        assert_eq!(result, canon.join("missing-leaf"));
     }
 
     #[test]
@@ -177,5 +304,68 @@ mod tests {
 
         let result = canonicalize_lenient(&link).unwrap();
         assert_eq!(result, canon.join("dangling"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_midpath_treated_as_pending() {
+        use std::os::unix::fs::symlink;
+
+        let td = tempfile::tempdir().unwrap();
+        let canon = canon_tempdir(&td);
+        let dangling = canon.join("dangling");
+        symlink(canon.join("never-exists"), &dangling).unwrap();
+        let pending = dangling.join("leaf");
+
+        // Walk-up pops past the dangling symlink (which fails NotFound
+        // because its target doesn't exist) and reattaches the literal
+        // tail under the existing ancestor.
+        let result = canonicalize_lenient(&pending).unwrap();
+        assert!(
+            result.ends_with(Path::new("dangling/leaf")),
+            "got {}",
+            result.display(),
+        );
+        assert!(result.is_absolute(), "got {}", result.display());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_directory_traversal_rejected_as_inaccessible() {
+        // `/regular-file/missing` triggers ENOTDIR — a non-`NotFound`
+        // `io::Error` — which collapses to `Inaccessible`. Exercises the
+        // operator-facing F-HIGH-1 arm without root-skip gymnastics.
+        // EACCES via `chmod 0` follows the same code path; verified
+        // manually per the plan's §12 gate.
+        let td = tempfile::tempdir().unwrap();
+        let canon = canon_tempdir(&td);
+        let file = canon.join("regular-file");
+        std::fs::write(&file, b"hi").unwrap();
+        let bad = file.join("nonexistent-child");
+
+        let err = canonicalize_lenient(&bad).unwrap_err();
+        assert!(matches!(err, PathError::Inaccessible { .. }), "got {err:?}");
+    }
+
+    /// Non-UTF-8 must surface via the `enforce_utf8` arm. Linux-only:
+    /// ext4 / tmpfs accept raw bytes in filenames; APFS rejects
+    /// non-UTF-8 at the FS layer, so we can't construct the scenario on
+    /// macOS.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_canonical_result_rejected() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        let td = tempfile::tempdir().unwrap();
+        let canon = canon_tempdir(&td);
+        let bad_name = std::ffi::OsStr::from_bytes(b"non\xffutf8");
+        let bad_dir = canon.join(bad_name);
+        std::fs::create_dir(&bad_dir).expect("non-UTF-8 dir create");
+        let link = canon.join("link");
+        symlink(&bad_dir, &link).expect("symlink to non-UTF-8 target");
+
+        let err = canonicalize_lenient(&link).unwrap_err();
+        assert!(matches!(err, PathError::NonUtf8 { .. }), "got {err:?}");
     }
 }
