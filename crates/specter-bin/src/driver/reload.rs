@@ -122,22 +122,14 @@ impl EngineDriver {
     /// hot-reload destinations).
     ///
     /// **Meta rotation discipline.** `loader.config_meta` rotates on
-    /// **every** observed file state — both successful reads (empty
-    /// diff and apply diff) **and** parse / open failures
-    /// (best-effort post-failure lstat). The success-branch rotation
-    /// uses the meta captured atomically with the parsed bytes
-    /// ([`Config::from_path_with_meta`]), so the auto-reload
-    /// settle-expiry filter doesn't loop against an already-applied
-    /// edit. The parse-fail rotation closes the chmod-EACCES recovery
-    /// hole: with mode/uid/gid as the access-side fingerprint (see
-    /// [`FileMeta`]), stored meta would freeze at the pre-tighten
-    /// value if parse-fail preserved it, and the post-loosen lstat
-    /// would compare equal — silently breaking auto-recovery. The
-    /// post-fail lstat captures the locked-out state instead, so the
-    /// recovery chmod's lstat differs and re-fires `handle_reload`.
-    /// If the post-fail lstat itself fails (parent dir gone, etc.),
-    /// the existing meta is preserved — [`Self::config_meta_changed`]'s
-    /// "Err = treat as changed" semantics keep the retry loop alive.
+    /// every observed file state: [`crate::loader::Loader::rotate_apply`]
+    /// on success (both empty-diff and apply-diff branches converge
+    /// there) and [`crate::loader::Loader::rotate_meta_only`] on
+    /// parse-fail with a successful post-fail lstat — the methods
+    /// carry the per-branch rationale. If the post-fail lstat itself
+    /// fails (parent dir gone, etc.), the existing meta is preserved
+    /// — [`Self::config_meta_changed`]'s "Err = treat as changed"
+    /// semantics keep the retry loop alive on the next pulse.
     ///
     /// Returns the [`ControlFlow`] from the apply-branch `forward` so
     /// a shutdown observed mid-apply (operator signal or
@@ -151,7 +143,7 @@ impl EngineDriver {
 
         let Some((new_config, new_meta)) = self.read_and_parse_config() else {
             if let Ok(post_fail_meta) = FileMeta::from_path(&self.config_path) {
-                self.loader.config_meta = post_fail_meta;
+                self.loader.rotate_meta_only(post_fail_meta);
             }
             return ControlFlow::Continue(());
         };
@@ -195,9 +187,8 @@ impl EngineDriver {
             self.forward(out)
         };
 
-        self.loader.current_config = new_config;
-        self.loader.current_log = new_log_resolved;
-        self.loader.config_meta = new_meta;
+        self.loader
+            .rotate_apply(new_config, new_log_resolved, new_meta);
 
         outcome
     }

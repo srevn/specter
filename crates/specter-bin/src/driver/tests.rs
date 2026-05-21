@@ -109,7 +109,11 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     // tests assert the *driver*'s reload-pipeline behaviour, not the
     // subscriber's filter state.
     let obs_handle = crate::observability::ObservabilityHandle::noop();
-    let loader = Loader::new(config, log_cfg, dummy_meta());
+    let loader = Loader {
+        current_config: config,
+        current_log: log_cfg,
+        config_meta: dummy_meta(),
+    };
     let driver = EngineDriver::new(
         Engine::new(),
         loader,

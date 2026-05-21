@@ -19,7 +19,7 @@
 
 use crate::channels::{Channels, ConfigWatcherSide};
 use crate::driver::EngineDriver;
-use crate::loader::{Loader, WATCHER_DRAIN_WINDOW};
+use crate::loader::Loader;
 use crate::observability;
 use crate::signals::spawn_signal_thread;
 use crossbeam::channel::bounded;
@@ -37,6 +37,29 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+/// Fixed trailing-latency window for the watcher's deferred-drain pass.
+///
+/// **Not an inbound-volume lever.** Inbound volume is owned by driver
+/// same-tick coalescing (accumulate regime) and per-event engine cost
+/// (keeps-up regime); one watcher-side scalar provably cannot serve a
+/// per-Profile volume constraint, so this knob no longer scales with
+/// `settle`. It is purely the latency budget the watcher trades for
+/// batch granularity on its second drain pass — see
+/// [`specter_sensor::DrainWindow`] for the deferred-drain semantics.
+///
+/// `50ms` is the top of the historical `[10ms, 50ms]` band — the value
+/// default-`settle` configs already resolved to. The watcher's recency
+/// gate skips the second drain for single touches in quiet periods, so
+/// a quiet-period edit pays none of this. Fixed in v1 per the
+/// project's "minimal config surface" alpha rule.
+///
+/// Lives next to its sole consumer ([`run`] hands it to
+/// [`default_watcher`] at startup) — `Loader` is bin-side reload state
+/// and never reads this constant, so colocation with the watcher
+/// initialisation is the clearer home.
+const WATCHER_DRAIN_WINDOW: Duration = Duration::from_millis(50);
 
 /// Run the bin against `cli`.
 ///
@@ -112,12 +135,16 @@ pub fn run(cli: Cli) -> ExitCode {
         "specter starting"
     );
 
-    // Fixed trailing-latency window for the watcher's deferred-drain
-    // pass — handed to the watcher and never mutated again. The
-    // inbound-volume lever moved off the watcher (driver same-tick
-    // coalescing + per-event engine cost own it), so there is no
-    // hot-reload rotation and the driver no longer holds a handle.
-    let loader = Loader::new(initial_config, log_cfg, initial_meta);
+    // Bin-side reload state — handed to the engine driver and mutated
+    // only via `Loader::rotate_apply` / `Loader::rotate_meta_only`
+    // (the sole-writer claim on `Loader`'s module rustdoc). The
+    // struct-literal construction here is the one production site
+    // outside those rotation methods that touches the fields.
+    let loader = Loader {
+        current_config: initial_config,
+        current_log: log_cfg,
+        config_meta: initial_meta,
+    };
 
     // Kqueue (or Linux inotify, when that backend lands) + wake handle.
     let watcher = match default_watcher(DrainWindow::new(WATCHER_DRAIN_WINDOW)) {
@@ -947,6 +974,21 @@ mod tests {
         assert!(
             config_event_rx.try_recv().is_err(),
             "no second pulse — coalesced"
+        );
+    }
+
+    /// The watcher's deferred-drain window is a fixed trailing-latency
+    /// constant — no longer config-derived. Pins the value and its
+    /// in-band placement so a future change is a conscious latency
+    /// decision, not accidental drift. The historical band was
+    /// `[10ms, 50ms]`; `50ms` is the prior default-`settle` resolution.
+    #[test]
+    fn watcher_drain_window_is_fixed_at_band_ceiling() {
+        assert_eq!(WATCHER_DRAIN_WINDOW, Duration::from_millis(50));
+        assert!(
+            WATCHER_DRAIN_WINDOW >= Duration::from_millis(10)
+                && WATCHER_DRAIN_WINDOW <= Duration::from_millis(50),
+            "constant must stay within the historical trailing-latency band",
         );
     }
 }
