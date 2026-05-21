@@ -41,12 +41,16 @@
 //! `try_recv` match: `Empty` breaks the loop, `Disconnected` returns
 //! [`TickOutcome::Shutdown`] via [`EngineDriver::begin_shutdown`].
 //! `sensor_in_rx` Disconnect is canonically Terminal (the sole truth
-//! source for fs state); `reload_signal_rx`, `config_event_rx`, and
-//! `effect_in_rx` are defensively Terminal — their producers'
-//! deaths also drop `shutdown_engine_tx` (signal thread) or the
-//! channel the engine needs to make further progress (actuator), so
-//! the canonical shutdown converges either way. A `forward` that
-//! observes shutdown mid-stream (via the per-send race in
+//! source for fs state); `reload_signal_rx`, `config_event_rx` (when
+//! present), and `effect_in_rx` are defensively Terminal — their
+//! producers' deaths also drop `shutdown_engine_tx` (signal thread)
+//! or the channel the engine needs to make further progress
+//! (actuator), so the canonical shutdown converges either way. The
+//! auto-reload arm is gated on `Option<Receiver>`: under
+//! `--no-config-watch` or a watcher-init failure neither the drain
+//! nor the `Select` arm registers, so a missing producer is the
+//! absence of a wire rather than a disconnected wire. A `forward`
+//! that observes shutdown mid-stream (via the per-send race in
 //! [`super::forward::EngineDriver::forward`]) propagates `Break`
 //! upward and joins the same `begin_shutdown` exit.
 //!
@@ -140,20 +144,26 @@ impl EngineDriver {
 
         // Drain auto-reload pulses (re-arm settle per pulse), then
         // check whether the settle window has elapsed and (on
-        // confirmed meta drift) run handle_reload. Order matters:
-        // drain-then-expiry implements "settle resets per pulse" — a
-        // pulse arriving in the same tick as a stale deadline pushes
-        // the deadline forward, so a sustained editor burst keeps
-        // deferring the reload until the edits actually settle.
-        // Inverting (expiry-then-drain) would fire a reload in the
-        // middle of an in-flight burst.
-        loop {
-            match self.sides.config_event_rx.try_recv() {
-                Ok(()) => {
-                    self.config_settle_until = Some(now + CONFIG_SETTLE);
+        // confirmed meta drift) run handle_reload. Gated on the
+        // option: under `--no-config-watch` or a watcher-init failure
+        // the engine bundle carries no receiver, so neither the
+        // drain nor the Select arm exists — a disconnected receiver
+        // can't busy-loop the tick because the receiver itself isn't
+        // there. Order matters: drain-then-expiry implements
+        // "settle resets per pulse" — a pulse arriving in the same
+        // tick as a stale deadline pushes the deadline forward, so a
+        // sustained editor burst keeps deferring the reload until the
+        // edits actually settle. Inverting (expiry-then-drain) would
+        // fire a reload in the middle of an in-flight burst.
+        if let Some(rx) = &self.sides.config_event_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(()) => {
+                        self.config_settle_until = Some(now + CONFIG_SETTLE);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => return self.begin_shutdown(),
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return self.begin_shutdown(),
             }
         }
         if self.apply_config_settle_expiry(now).is_break() {
@@ -200,15 +210,20 @@ impl EngineDriver {
             let _i_sensor = sel.recv(&self.sides.sensor_in_rx);
             let _i_effect = sel.recv(&self.sides.effect_in_rx);
             let _i_reload = sel.recv(&self.sides.reload_signal_rx);
-            // Wakes the driver from a long block when a config-event
-            // pulse arrives. The actual pulse handling lives in the
-            // per-tick drain above; this arm is purely for unblocking.
-            // A Disconnected rx wakes the block immediately and the
-            // next iteration's drain returns Shutdown (terminal).
-            // Production keeps `_config_event_keepalive` on
-            // `App::run`'s stack so `--no-config-watch` doesn't route
-            // through that path at startup.
-            let _i_config = sel.recv(&self.sides.config_event_rx);
+            // Auto-reload wakes the driver from a long block when a
+            // config-event pulse arrives. The arm registers only when
+            // the engine bundle carries a receiver — i.e., the config
+            // watcher thread spawned successfully. Under
+            // `--no-config-watch` (or a watcher init failure) the arm
+            // is omitted entirely, so crossbeam's `Select::ready_timeout`
+            // cannot report a non-existent (or disconnected) receiver
+            // as immediately-ready. The shutdown arm's `i_shutdown` is
+            // computed at registration, so the `idx == i_shutdown`
+            // comparison below is index-agnostic — it works whether
+            // the auto-reload arm sits at slot 3 (off) or 4 (on).
+            if let Some(rx) = self.sides.config_event_rx.as_ref() {
+                sel.recv(rx);
+            }
             let i_shutdown = sel.recv(&self.sides.shutdown_engine_rx);
             matches!(sel.ready_timeout(timeout), Ok(idx) if idx == i_shutdown)
         };

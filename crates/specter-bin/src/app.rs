@@ -17,11 +17,12 @@
 //!    tick can emit Effects.
 //! 5. **Engine driver** runs on the main thread.
 
-use crate::channels::Channels;
+use crate::channels::{Channels, ConfigWatcherSide};
 use crate::driver::EngineDriver;
 use crate::loader::{Loader, WATCHER_DRAIN_WINDOW};
 use crate::observability;
 use crate::signals::spawn_signal_thread;
+use crossbeam::channel::bounded;
 use specter_actuator::{SubprocessActuator, default_spawner};
 use specter_config::{Cli, Config, FileMeta};
 use specter_core::{Input, WatchOp};
@@ -128,8 +129,10 @@ pub fn run(cli: Cli) -> ExitCode {
     };
     let wake_handle: Box<dyn WakeHandle> = watcher.wake_handle();
 
-    // Channels.
-    let mut chans = Channels::new();
+    // Channels — allocates every unconditional pair into per-thread
+    // bundles. Each bundle below partial-moves into its consumer; no
+    // dispenser remainder survives the spawn sequence.
+    let chans = Channels::new();
 
     // Shutdown coordination. Constructed before the prober so workers
     // can capture the flag at spawn time; the signal thread, the
@@ -137,11 +140,18 @@ pub fn run(cli: Cli) -> ExitCode {
     // all clone it in below.
     let shutdown_flag = Arc::new(AtomicBool::new(false));
 
-    // Prober (workers spawn inside `WorkerProber::new`).
+    // Prober (workers spawn inside `WorkerProber::new`). The constructor
+    // borrows the watcher bundle's `sensor_in_tx` and clones it once
+    // per worker internally; the borrow ends here, leaving the bundle
+    // free to move into the watcher thread below.
     let probe_concurrency = cli
         .probe_concurrency
         .map_or(specter_sensor::DEFAULT_CONCURRENCY, NonZeroUsize::get);
-    let prober = match WorkerProber::new(&chans.sensor_in_tx, probe_concurrency, &shutdown_flag) {
+    let prober = match WorkerProber::new(
+        &chans.watcher.sensor_in_tx,
+        probe_concurrency,
+        &shutdown_flag,
+    ) {
         Ok(p) => Arc::new(p),
         Err(e) => {
             tracing::error!(?e, "prober init failed");
@@ -149,25 +159,29 @@ pub fn run(cli: Cli) -> ExitCode {
         }
     };
 
+    // Capture the startup-TOCTOU sender clone before `chans.signal`
+    // moves into the signal thread. Field-level `Sender::clone` —
+    // `SignalSide` itself does not impl `Clone`. The clone is
+    // released below once the auto-reload branch has had its chance
+    // to fire the startup pulse, so the channel's sender refcount
+    // reflects the steady-state graph for the rest of the process.
+    let toctou_reload_tx = chans.signal.reload_signal_tx.clone();
+
     // Signal thread (registers handlers immediately).
     let signal_handle = spawn_signal_thread(
-        chans.signal_side(),
+        chans.signal,
         Arc::clone(&shutdown_flag),
         wake_handle.clone(),
     );
 
     // Watcher thread.
-    let watcher_handle = spawn_watcher_thread(
-        watcher,
-        chans.take_watcher_side(),
-        Arc::clone(&shutdown_flag),
-    );
+    let watcher_handle = spawn_watcher_thread(watcher, chans.watcher, Arc::clone(&shutdown_flag));
 
     // Actuator thread.
     let actuator_concurrency = cli
         .concurrency
         .map_or(specter_actuator::DEFAULT_CONCURRENCY, NonZeroUsize::get);
-    let actuator_handle = spawn_actuator_thread(actuator_concurrency, chans.take_actuator_side());
+    let actuator_handle = spawn_actuator_thread(actuator_concurrency, chans.actuator);
 
     // Engine driver — main thread.
     let config_path = cli.config;
@@ -180,16 +194,13 @@ pub fn run(cli: Cli) -> ExitCode {
     // Auto-reload — config-watcher init (default-on; opt-out via
     // `--no-config-watch` / `SPECTER_NO_CONFIG_WATCH`).
     //
-    // **Keepalive discipline.** Always project a `config_event_tx`
-    // clone onto the stack regardless of whether the watcher is
-    // spawned (`--no-config-watch`, init failure, or watcher-thread
-    // exit on `Err`). Without this, the engine's `config_event_rx`
-    // would observe Disconnected on every path that doesn't keep a
-    // live producer; crossbeam's `Select::ready_timeout` reports
-    // disconnected arms as immediately-ready, busy-looping the
-    // driver tick. The keepalive on the stack outlives the driver
-    // (which holds the rx); when `App::run` returns, both halves
-    // drop together and the channel cleanly tears down.
+    // The `config_event` channel pair is allocated inline below
+    // *only* when the config watcher thread will spawn. Under
+    // `--no-config-watch` (or a watcher init failure) the engine
+    // bundle's `config_event_rx` is `None`, and the driver's tick
+    // skips both the drain and the `Select` arm — crossbeam can't
+    // report a non-existent receiver as ready, so no keepalive
+    // sender on the stack is required.
     //
     // **Startup-TOCTOU close** (when the watcher initialises). The
     // bin's `Config::from_path_with_meta` captured `(initial_config,
@@ -202,21 +213,21 @@ pub fn run(cli: Cli) -> ExitCode {
     // edit completed before registration). A single
     // `FileMeta::from_path` lstat after watcher init catches the
     // race: if the on-disk identity differs from `initial_meta`,
-    // queue a SIGHUP-style pulse on `reload_signal_tx` so the
-    // driver's first tick handles it immediately (no settle delay,
-    // unlike steady-state pulses). The driver's `handle_reload`
-    // re-reads the file with a fresh atomic capture and rotates
-    // `loader.config_meta` to the post-edit identity.
-    let _config_event_keepalive = chans.config_watcher_side().config_event_tx;
-    let config_watcher_handles = if cli.no_config_watch {
+    // queue a SIGHUP-style pulse on the captured `toctou_reload_tx`
+    // clone so the driver's first tick handles it immediately (no
+    // settle delay, unlike steady-state pulses). The driver's
+    // `handle_reload` re-reads the file with a fresh atomic capture
+    // and rotates `loader.config_meta` to the post-edit identity.
+    let (config_event_rx, config_watcher_handles) = if cli.no_config_watch {
         tracing::info!("auto-reload disabled via --no-config-watch");
-        None
+        (None, None)
     } else {
         match default_config_watcher(&config_path) {
             Ok(watcher) => {
+                let (config_event_tx, config_event_rx) = bounded::<()>(1);
                 match FileMeta::from_path(&config_path) {
                     Ok(post_init_meta) if post_init_meta != initial_meta => {
-                        if chans.reload_signal_tx.try_send(()).is_ok() {
+                        if toctou_reload_tx.try_send(()).is_ok() {
                             tracing::info!(
                                 "config changed during startup; reload queued via SIGHUP path"
                             );
@@ -231,17 +242,21 @@ pub fn run(cli: Cli) -> ExitCode {
                 let cw_wake = watcher.wake_handle();
                 let cw_handle = spawn_config_watcher_thread(
                     watcher,
-                    chans.config_watcher_side(),
+                    ConfigWatcherSide { config_event_tx },
                     Arc::clone(&shutdown_flag),
                 );
-                Some((cw_handle, cw_wake))
+                (Some(config_event_rx), Some((cw_handle, cw_wake)))
             }
             Err(e) => {
-                tracing::warn!(?e, "config watcher init failed; SIGHUP-only reload",);
-                None
+                tracing::warn!(?e, "config watcher init failed; SIGHUP-only reload");
+                (None, None)
             }
         }
     };
+    // Startup race window closed — release the TOCTOU clone so the
+    // reload-signal channel's sender refcount tracks the steady-state
+    // graph (signal thread + the driver's own clones, no stragglers).
+    drop(toctou_reload_tx);
 
     let mut driver = EngineDriver::new(
         Engine::new(),
@@ -249,11 +264,13 @@ pub fn run(cli: Cli) -> ExitCode {
         config_path,
         cli_log_overrides,
         obs_handle,
-        chans.take_engine_side(),
+        chans.engine.finalize(config_event_rx),
         prober.clone(),
         wake_handle.clone(),
     );
-    drop(chans); // originals release; per-thread clones keep channels alive.
+    // `chans` is now fully partial-moved (every field consumed); it
+    // drops silently at end-of-scope with no remainder. The per-thread
+    // bundles' clones keep each channel alive across the driver loop.
 
     if driver.run_initial_attach().is_break() {
         // Shutdown observed during initial attach (operator signal
@@ -619,7 +636,8 @@ fn spawn_actuator_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::Channels;
+    use crate::channels::{Channels, ConfigWatcherSide};
+    use crossbeam::channel::bounded;
     use slotmap::SlotMap;
     use specter_core::{ClassSet, ResourceId, ResourceKind, WatchFailure};
     use specter_sensor::testkit::MockFsWatcher;
@@ -634,8 +652,8 @@ mod tests {
 
     #[test]
     fn apply_watch_op_watch_calls_watcher() {
-        let mut chans = Channels::new();
-        let sides = chans.take_watcher_side();
+        let chans = Channels::new();
+        let sides = chans.watcher;
         let mut watcher = MockFsWatcher::new();
         let r = fresh_resource_id();
         // Connected channel: the return is Continue; these tests assert
@@ -655,8 +673,9 @@ mod tests {
 
     #[test]
     fn apply_watch_op_watch_failure_emits_rejection() {
-        let mut chans = Channels::new();
-        let sides = chans.take_watcher_side();
+        let chans = Channels::new();
+        let watcher_sides = chans.watcher;
+        let engine_side = chans.engine.finalize(None);
         let mut watcher = MockFsWatcher::new();
         let r = fresh_resource_id();
         // EMFILE = 24 on macOS / FreeBSD / Linux. Hard-coded so the
@@ -672,10 +691,9 @@ mod tests {
                 kind: ResourceKind::Unknown,
                 events: ClassSet::EMPTY,
             },
-            &sides.sensor_in_tx,
+            &watcher_sides.sensor_in_tx,
         );
         // Reject delivered to engine inbound.
-        let engine_side = chans.take_engine_side();
         let recv = engine_side.sensor_in_rx.try_recv().expect("rejection sent");
         match recv {
             Input::WatchOpRejected { failure, .. } => {
@@ -687,8 +705,8 @@ mod tests {
 
     #[test]
     fn apply_watch_op_unwatch_clears_state() {
-        let mut chans = Channels::new();
-        let sides = chans.take_watcher_side();
+        let chans = Channels::new();
+        let sides = chans.watcher;
         let mut watcher = MockFsWatcher::new();
         let r = fresh_resource_id();
         watcher
@@ -711,13 +729,15 @@ mod tests {
 
     #[test]
     fn watcher_loop_drains_ops_and_exits_on_shutdown_flag() {
-        let mut chans = Channels::new();
-        let sides = chans.take_watcher_side();
+        let chans = Channels::new();
+        // Stage a watch op into the bounded channel before the watcher
+        // bundle moves; the loop drains it on the first iteration via
+        // `watch_ops_rx.try_recv` Empty.
+        let watch_ops_tx = chans.engine.watch_ops_tx.clone();
+        let sides = chans.watcher;
         let mut watcher = MockFsWatcher::new();
         let r = fresh_resource_id();
-        // Queue an op + an event before entering the loop.
-        chans
-            .watch_ops_tx
+        watch_ops_tx
             .try_send(WatchOp::Watch {
                 resource: r,
                 path: Arc::from(std::path::Path::new("/tmp")),
@@ -736,12 +756,16 @@ mod tests {
 
     #[test]
     fn watcher_loop_exits_on_disconnect() {
-        let mut chans = Channels::new();
-        let sides = chans.take_watcher_side();
+        let chans = Channels::new();
+        let sides = chans.watcher;
         let mut watcher = MockFsWatcher::new();
-        // Drop watch_ops_tx (and the rest of chans) — the loop's try_recv
-        // returns Disconnected and the loop exits.
-        drop(chans);
+        // Drop the engine bundle (sole holder of `watch_ops_tx`) — the
+        // loop's try_recv returns Disconnected and the loop exits. The
+        // signal / actuator bundles also drop here, releasing their
+        // half of the unconditional channels.
+        drop(chans.engine);
+        drop(chans.actuator);
+        drop(chans.signal);
         let flag = Arc::new(AtomicBool::new(false));
         watcher_loop(&mut watcher, &sides, &flag);
     }
@@ -789,13 +813,20 @@ mod tests {
         }
     }
 
+    /// Allocate a [`ConfigWatcherSide`] paired with its receiver. The
+    /// config-event channel is no longer materialised by
+    /// [`Channels::new`]; it is the conditional auto-reload edge
+    /// `App::run` allocates inline. Tests below mirror that pattern.
+    fn config_watcher_pair() -> (ConfigWatcherSide, crossbeam::channel::Receiver<()>) {
+        let (config_event_tx, config_event_rx) = bounded::<()>(1);
+        (ConfigWatcherSide { config_event_tx }, config_event_rx)
+    }
+
     /// `Ok(true)` arrival emits exactly one pulse on `config_event_tx`.
     /// Verifies the loop body's "watch event ⇒ try_send" mapping.
     #[test]
     fn config_watcher_loop_emits_pulse_on_ok_true() {
-        let mut chans = Channels::new();
-        let sides = chans.config_watcher_side();
-        let engine = chans.take_engine_side();
+        let (sides, config_event_rx) = config_watcher_pair();
         let mut watcher = ScriptedConfigWatcher {
             outcomes: std::iter::once(Ok(true)).collect(),
             ..Default::default()
@@ -829,7 +860,7 @@ mod tests {
         });
         // Drained pulse delivered.
         assert!(
-            engine.config_event_rx.try_recv().is_ok(),
+            config_event_rx.try_recv().is_ok(),
             "Ok(true) ⇒ pulse on config_event_rx"
         );
     }
@@ -839,9 +870,7 @@ mod tests {
     /// exits without any pulse on the channel.
     #[test]
     fn config_watcher_loop_no_pulse_on_ok_false() {
-        let mut chans = Channels::new();
-        let sides = chans.config_watcher_side();
-        let engine = chans.take_engine_side();
+        let (sides, config_event_rx) = config_watcher_pair();
         let mut watcher = ScriptedConfigWatcher {
             outcomes: std::iter::once(Ok(false)).collect(),
             ..Default::default()
@@ -855,19 +884,14 @@ mod tests {
             });
             config_watcher_loop(&mut watcher, &sides, &flag);
         });
-        assert!(
-            engine.config_event_rx.try_recv().is_err(),
-            "Ok(false) ⇒ no pulse"
-        );
+        assert!(config_event_rx.try_recv().is_err(), "Ok(false) ⇒ no pulse");
     }
 
     /// `Err` from `wait` ⇒ the loop logs and exits — without pulsing,
     /// without panicking.
     #[test]
     fn config_watcher_loop_exits_on_err() {
-        let mut chans = Channels::new();
-        let sides = chans.config_watcher_side();
-        let engine = chans.take_engine_side();
+        let (sides, config_event_rx) = config_watcher_pair();
         let mut watcher = ScriptedConfigWatcher {
             outcomes: std::iter::once(Err(std::io::Error::other("synthetic"))).collect(),
             ..Default::default()
@@ -876,10 +900,7 @@ mod tests {
         // No flag flip needed — Err exits immediately.
         config_watcher_loop(&mut watcher, &sides, &flag);
         assert_eq!(watcher.wait_calls, 1, "single wait, then Err");
-        assert!(
-            engine.config_event_rx.try_recv().is_err(),
-            "no pulse on Err"
-        );
+        assert!(config_event_rx.try_recv().is_err(), "no pulse on Err");
     }
 
     /// Top-of-loop shutdown check: with the flag pre-set to `true`, the
@@ -888,8 +909,7 @@ mod tests {
     /// thread to the loop top.
     #[test]
     fn config_watcher_loop_exits_immediately_on_pre_set_flag() {
-        let chans = Channels::new();
-        let sides = chans.config_watcher_side();
+        let (sides, _config_event_rx) = config_watcher_pair();
         let mut watcher = ScriptedConfigWatcher::default();
         let flag = Arc::new(AtomicBool::new(true));
         config_watcher_loop(&mut watcher, &sides, &flag);
@@ -906,9 +926,7 @@ mod tests {
     /// loop body.
     #[test]
     fn config_watcher_loop_coalesces_under_pressure() {
-        let mut chans = Channels::new();
-        let sides = chans.config_watcher_side();
-        let engine = chans.take_engine_side();
+        let (sides, config_event_rx) = config_watcher_pair();
         // Three Ok(true) — only one pulse fits in the bounded(1) slot.
         let mut watcher = ScriptedConfigWatcher {
             outcomes: [Ok(true), Ok(true), Ok(true)].into_iter().collect(),
@@ -925,9 +943,9 @@ mod tests {
         });
         // Exactly one pulse drained — the other two coalesced at the
         // bounded(1) slot via `try_send` Full.
-        assert!(engine.config_event_rx.try_recv().is_ok(), "first pulse");
+        assert!(config_event_rx.try_recv().is_ok(), "first pulse");
         assert!(
-            engine.config_event_rx.try_recv().is_err(),
+            config_event_rx.try_recv().is_err(),
             "no second pulse — coalesced"
         );
     }

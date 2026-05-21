@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn sighup_sends_reload_pulse() {
         let (chans, flag, watcher, recorder) = fixture();
-        let side = chans.signal_side();
+        let side = chans.signal;
         let wake = watcher.wake_handle();
         let mut state = SignalState::default();
         let outcome = dispatch_signal(
@@ -223,7 +223,7 @@ mod tests {
             |c| recorder.record(c),
         );
         assert_eq!(outcome, SignalOutcome::ReloadRequested);
-        assert!(chans.reload_signal_tx.is_full(), "pulse queued");
+        assert!(side.reload_signal_tx.is_full(), "pulse queued");
         assert!(!flag.load(Ordering::SeqCst));
         assert_eq!(recorder.taken(), None);
     }
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn sigterm_first_initiates_shutdown() {
         let (chans, flag, watcher, recorder) = fixture();
-        let side = chans.signal_side();
+        let side = chans.signal;
         let wake = watcher.wake_handle();
         let waker = Arc::clone(&watcher.waker);
         let mut state = SignalState::default();
@@ -247,8 +247,8 @@ mod tests {
         assert_eq!(outcome, SignalOutcome::ShutdownInitiated);
         assert!(state.first_term.is_some());
         assert!(flag.load(Ordering::SeqCst));
-        assert!(chans.shutdown_engine_tx.is_full());
-        assert!(chans.shutdown_actuator_tx.is_full());
+        assert!(side.shutdown_engine_tx.is_full());
+        assert!(side.shutdown_actuator_tx.is_full());
         assert_eq!(*waker.woken.lock().unwrap(), 1);
         assert_eq!(recorder.taken(), None);
     }
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn sigint_first_initiates_shutdown() {
         let (chans, flag, watcher, recorder) = fixture();
-        let side = chans.signal_side();
+        let side = chans.signal;
         let wake = watcher.wake_handle();
         let mut state = SignalState::default();
         let outcome = dispatch_signal(
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn second_sigint_within_window_triggers_hard_exit() {
         let (chans, flag, watcher, recorder) = fixture();
-        let side = chans.signal_side();
+        let side = chans.signal;
         let wake = watcher.wake_handle();
         let mut state = SignalState::default();
 
@@ -302,7 +302,7 @@ mod tests {
         // stubborn children (those that ignored phase 1's SIGTERM) survive
         // as PID-1 orphans after `process::exit`.
         let (chans, flag, watcher, recorder) = fixture();
-        let side = chans.signal_side();
+        let side = chans.signal;
         let wake = watcher.wake_handle();
         let mut state = SignalState::default();
 
@@ -312,7 +312,7 @@ mod tests {
         });
         // First SIGINT does NOT fire hard-shutdown.
         assert!(
-            chans.hard_shutdown_actuator_tx.is_empty(),
+            side.hard_shutdown_actuator_tx.is_empty(),
             "first SIGINT must not preempt grace"
         );
 
@@ -324,7 +324,7 @@ mod tests {
         // Second SIGINT enqueued the hard-shutdown signal so the actuator
         // can SIGKILL its children before the parent exits.
         assert!(
-            !chans.hard_shutdown_actuator_tx.is_empty(),
+            !side.hard_shutdown_actuator_tx.is_empty(),
             "second SIGINT must fire hard_shutdown_actuator_tx"
         );
     }
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn second_sigint_outside_window_does_not_escalate() {
         let (chans, flag, watcher, recorder) = fixture();
-        let side = chans.signal_side();
+        let side = chans.signal;
         let wake = watcher.wake_handle();
         let mut state = SignalState::default();
 
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn unknown_signal_is_ignored() {
         let (chans, flag, watcher, recorder) = fixture();
-        let side = chans.signal_side();
+        let side = chans.signal;
         let wake = watcher.wake_handle();
         let mut state = SignalState::default();
         let outcome = dispatch_signal(
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn redundant_sighup_coalesces_at_bounded_channel() {
         let (chans, flag, watcher, recorder) = fixture();
-        let side = chans.signal_side();
+        let side = chans.signal;
         let wake = watcher.wake_handle();
         let mut state = SignalState::default();
         let now = Instant::now();
@@ -383,6 +383,6 @@ mod tests {
             });
         }
         // bounded(1) — exactly one pulse queued; the rest dropped silently.
-        assert_eq!(chans.reload_signal_tx.len(), 1);
+        assert_eq!(side.reload_signal_tx.len(), 1);
     }
 }

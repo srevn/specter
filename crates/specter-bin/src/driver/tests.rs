@@ -72,17 +72,29 @@ struct TestRig {
 }
 
 fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
-    let mut chans = Channels::new();
-    let sensor_in_tx = chans.sensor_in_tx.clone();
-    let effect_in_tx = chans.effect_in_tx.clone();
-    let reload_tx = chans.reload_signal_tx.clone();
-    let shutdown_tx = chans.shutdown_engine_tx.clone();
-    let config_event_tx = chans.config_event_tx.clone();
-    let watch_ops_tx = chans.watch_ops_tx.clone();
-    let actuator_side = chans.take_actuator_side();
-    let watcher_side = chans.take_watcher_side();
-    let engine_side = chans.take_engine_side();
-    drop(chans);
+    let chans = Channels::new();
+    // Field-level clones for the test's producer-side handles. Each
+    // clone targets the same underlying channel as the bundle field
+    // it's lifted off; the bundle moves below, the clones stay.
+    let sensor_in_tx = chans.watcher.sensor_in_tx.clone();
+    let effect_in_tx = chans.actuator.effect_in_tx.clone();
+    let reload_tx = chans.signal.reload_signal_tx.clone();
+    let shutdown_tx = chans.signal.shutdown_engine_tx.clone();
+    let watch_ops_tx = chans.engine.watch_ops_tx.clone();
+
+    // Auto-reload — the rig always exercises the wired-on path,
+    // mirroring `App::run`'s inline allocation. Tests that need the
+    // arm absent can construct an `EngineSide` via
+    // `EnginePieces::finalize(None)` directly.
+    let (config_event_tx, config_event_rx) = crossbeam::channel::bounded::<()>(1);
+
+    let actuator_side = chans.actuator;
+    let watcher_side = chans.watcher;
+    let engine_side = chans.engine.finalize(Some(config_event_rx));
+    // `chans.signal`'s only role for the rig was the two clones
+    // captured above (`reload_tx` / `shutdown_tx`); the bundle itself
+    // drops at end-of-scope when `chans` does. Senders surviving
+    // through clones keep each channel alive across the driver loop.
 
     let watcher = MockFsWatcher::new();
     let waker = Arc::clone(&watcher.waker);
