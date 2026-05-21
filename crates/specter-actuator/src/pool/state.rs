@@ -635,6 +635,16 @@ impl ActuatorState {
         policy: ReapPolicy,
         engine_in: &Sender<Input>,
     ) {
+        // `let _` deliberately drops the `SendError`: a closed
+        // `engine_in` means the engine has been torn down. The
+        // actuator's `run` loop observes that fact via one of its own
+        // exits (`effects_rx` Disconnected, `shutdown_actuator_rx`,
+        // `hard_shutdown_actuator_rx`) and breaks out — the swallow
+        // keeps per-step accounting consistent until then. Mirrors
+        // the engine driver's `effects_tx` degradable-on-disconnect
+        // policy in `specter-bin`'s `forward.rs`: both directions of
+        // the engine ↔ actuator channel degrade rather than escalate,
+        // and the actuator cannot persist with the engine dead.
         let _ = engine_in.send(Input::EffectComplete {
             sub,
             key,
@@ -715,6 +725,9 @@ impl ActuatorState {
         outcome: EffectOutcome,
         engine_in: &Sender<Input>,
     ) {
+        // Same drop-on-disconnect policy as [`Self::terminate_plan`]
+        // — see that site's rustdoc for the cross-actor symmetry
+        // rationale.
         let _ = engine_in.send(Input::EffectComplete {
             sub,
             key,
