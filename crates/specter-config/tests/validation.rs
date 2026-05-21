@@ -50,6 +50,39 @@ fn issue_kind_non_absolute() {
 }
 
 #[test]
+fn issue_kind_empty_path() {
+    let toml = "[[watch]]\nname = \"a\"\npath = \"\"\nactions = [{ exec = [\"echo\"] }]";
+    assert_kinds(toml, &[IssueKind::EmptyPath]);
+}
+
+#[test]
+fn issue_kind_path_contains_parent_dir() {
+    let toml = "[[watch]]\nname = \"a\"\npath = \"/srv/..\"\nactions = [{ exec = [\"echo\"] }]";
+    assert_kinds(toml, &[IssueKind::PathContainsParentDir]);
+}
+
+/// `/<regular-file>/missing` surfaces ENOTDIR from the kernel — a
+/// non-`NotFound` `io::Error` — which routes through
+/// [`PathError::Inaccessible`] to [`IssueKind::PathInaccessible`].
+/// Exercises the same arm `chmod 0` (EACCES) hits, without the
+/// root-skip gymnastics; the EACCES surface is verified manually per
+/// the audit's §12 operator gate.
+#[cfg(unix)]
+#[test]
+fn issue_kind_path_inaccessible() {
+    let td = tempfile::tempdir().unwrap();
+    let canon = td.path().canonicalize().unwrap();
+    let file = canon.join("regular-file");
+    std::fs::write(&file, b"hi").unwrap();
+    let bad = file.join("missing-child");
+    let toml = format!(
+        "[[watch]]\nname = \"a\"\npath = \"{}\"\nactions = [{{ exec = [\"echo\"] }}]",
+        bad.display(),
+    );
+    assert_kinds(&toml, &[IssueKind::PathInaccessible]);
+}
+
+#[test]
 fn issue_kind_invalid_glob_pattern() {
     let toml = format!(
         "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\npattern = \"[bad\""

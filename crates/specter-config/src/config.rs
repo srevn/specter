@@ -1,7 +1,7 @@
 use crate::action::{Action, lower_to_program};
 use crate::error::{ConfigError, IssueKind, ValidationIssue};
 use crate::file_meta::FileMeta;
-use crate::path::canonicalize_lenient;
+use crate::path::{PathError, canonicalize_lenient};
 use crate::raw::{RawAction, RawConfig, RawExec, RawLogConfig, RawWatch};
 use crate::template;
 use compact_str::CompactString;
@@ -1140,26 +1140,52 @@ fn validate_scope(idx: usize, raw_scope: Option<&str>) -> Result<EffectScope, Va
     }
 }
 
-/// Validate a static watch's `path`: absolute, lenient-canonicalisable.
-/// Returns `Ok(PathBuf)` on success; `Err(ValidationIssue)` on either
-/// "not absolute" or "canonicalisation failed" — single-issue by
-/// construction.
+/// Validate a static watch's `path`: lenient-canonicalisable, with one
+/// typed [`IssueKind`] per [`PathError`] variant. Returns `Ok(PathBuf)`
+/// on success; `Err(ValidationIssue)` carrying the operator-actionable
+/// category — single-issue by construction (one input, one possible
+/// failure mode per call).
+///
+/// Routes [`PathError`] → [`IssueKind`] symmetrically: structural and
+/// I/O failures each land in their own arm so operators can triage
+/// "permissions" from "typo in `..`" from "no such file" without
+/// inspecting the error detail string. The earlier `is_absolute()`
+/// prefilter is gone — `canonicalize_lenient` already enforces the
+/// rule and routes the failure through `PathError::NotAbsolute` here.
 fn validate_static_path(idx: usize, raw_path: &str) -> Result<PathBuf, ValidationIssue> {
-    if !Path::new(raw_path).is_absolute() {
-        return Err(ValidationIssue::new(
-            Some(idx),
-            "path",
-            IssueKind::NonAbsolute,
-            format!("path `{raw_path}` must be absolute"),
-        ));
-    }
     canonicalize_lenient(Path::new(raw_path)).map_err(|e| {
-        ValidationIssue::new(
-            Some(idx),
-            "path",
-            IssueKind::NotCanonical,
-            format!("`{raw_path}`: {e}"),
-        )
+        let (kind, detail) = match &e {
+            PathError::NotAbsolute => (
+                IssueKind::NonAbsolute,
+                format!("path `{raw_path}` must be absolute"),
+            ),
+            PathError::Empty => (IssueKind::EmptyPath, "path must not be empty".to_owned()),
+            PathError::ContainsParentDir => (
+                IssueKind::PathContainsParentDir,
+                format!(
+                    "path `{raw_path}` must not contain `..` components — \
+                     provide a literal absolute path",
+                ),
+            ),
+            PathError::Inaccessible { at, source } => {
+                let at_display = at.display().to_string();
+                let detail = if at_display == raw_path {
+                    format!("path `{raw_path}` is inaccessible: {source}")
+                } else {
+                    format!("path `{raw_path}` is inaccessible at `{at_display}`: {source}")
+                };
+                (IssueKind::PathInaccessible, detail)
+            }
+            PathError::NonUtf8 { resolved } => (
+                IssueKind::NonUtf8Path,
+                format!(
+                    "path `{raw_path}` resolves to a non-UTF-8 buffer `{}` — \
+                     engine requires UTF-8",
+                    resolved.display(),
+                ),
+            ),
+        };
+        ValidationIssue::new(Some(idx), "path", kind, detail)
     })
 }
 

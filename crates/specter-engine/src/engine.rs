@@ -239,7 +239,7 @@ impl Engine {
     ///    absolute and UTF-8. [`Tree::parse_attach_path`] is the canonical gate; it
     ///    rejects non-absolute paths, non-UTF-8 segments, `.` / `..`
     ///    components, Windows path prefixes, and empty segments. The
-    ///    bin layer's `canonicalize_lenient` already enforces absolute
+    ///    config layer's `canonicalize_lenient` already enforces absolute
     ///    paths for TOML-loaded configs, but hot-reload
     ///    `ConfigDiff::added` constructs `SubAttachRequest` from a
     ///    different path; the gate keeps the engine's contract
