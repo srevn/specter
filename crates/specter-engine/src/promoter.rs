@@ -54,7 +54,7 @@
 //!   authoritative source for the dispatch key across every outcome.
 
 use crate::Engine;
-use crate::descent::{MaterializeResult, kind_from_entry};
+use crate::descent::MaterializeResult;
 use crate::probe::ProbeRoute;
 use crate::refcounts::{add_watch, sub_watch};
 use compact_str::{CompactString, format_compact};
@@ -1013,8 +1013,7 @@ impl Engine {
                     .ensure_child(target, name_str, ResourceRole::User)
                     .expect("promoter target held alive by anchor / proxy_promoters")
             });
-            self.tree
-                .set_kind(anchor_resource, kind_from_entry(child_kind));
+            self.tree.set_kind(anchor_resource, child_kind.into());
             let promote_path: Arc<Path> = match target_path {
                 Some(p) => Arc::from(p.join(name_str)),
                 None => Arc::from(Path::new("")),
@@ -1037,8 +1036,7 @@ impl Engine {
                     .ensure_child(target, name_str, ResourceRole::User)
                     .expect("promoter target held alive by anchor / proxy_promoters")
             });
-            self.tree
-                .set_kind(child_resource, kind_from_entry(child_kind));
+            self.tree.set_kind(child_resource, child_kind.into());
             self.register_proxy(promoter_id, child_resource, next_index, out);
         }
     }
@@ -1244,7 +1242,7 @@ impl Engine {
         out.diagnostics.push(Diagnostic::PromotionKindObserved {
             promoter: promoter_id,
             path: promote_path,
-            kind: kind_from_entry(observed_kind),
+            kind: observed_kind.into(),
         });
 
         // Fan-out warning — one-shot per Promoter lifetime, the count

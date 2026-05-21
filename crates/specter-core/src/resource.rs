@@ -204,6 +204,25 @@ pub enum ResourceKind {
     Unknown,
 }
 
+impl From<crate::snapshot::EntryKind> for ResourceKind {
+    /// Project a diff-side leaf kind into the Tree's slot kind. The
+    /// non-directory flavors (`Symlink`, `Other`) fold into [`Self::File`]
+    /// — a slot occupies one file inode regardless of which flavor of
+    /// non-directory it carries; the kqueue / inotify translators and
+    /// [`Resource::kind_or_file`] use the same convention. Single
+    /// declaration of the projection — call sites use `.into()` /
+    /// `ResourceKind::from(k)` so the mapping never drifts across
+    /// re-implementations.
+    fn from(k: crate::snapshot::EntryKind) -> Self {
+        match k {
+            crate::snapshot::EntryKind::Dir => Self::Dir,
+            crate::snapshot::EntryKind::File
+            | crate::snapshot::EntryKind::Symlink
+            | crate::snapshot::EntryKind::Other => Self::File,
+        }
+    }
+}
+
 impl ResourceKind {
     /// "Effective" kind for backend-mask decisions: [`Self::Unknown`]
     /// collapses to [`Self::File`].

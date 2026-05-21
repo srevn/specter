@@ -383,8 +383,7 @@ impl crate::Engine {
                     "descent prefix held alive by ProfileDescent / PromoterPrefix contribution",
                 ),
         };
-        self.tree
-            .set_kind(new_resource, kind_from_entry(entry_kind));
+        self.tree.set_kind(new_resource, entry_kind.into());
 
         if is_terminal {
             // Per-owner terminal action. Profile materialises its anchor
@@ -570,7 +569,7 @@ impl crate::Engine {
             .get(profile_id)
             .map_or(ClassSet::EMPTY, specter_core::Profile::events);
 
-        let anchor_kind = kind_from_entry(entry_kind);
+        let anchor_kind = ResourceKind::from(entry_kind);
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.materialize_anchor(anchor_kind);
         }
@@ -781,13 +780,6 @@ impl crate::Engine {
         // The choke reads the correlation back off the descent slot and
         // resolves the prefix target off state.
         self.emit_owner_probe(owner, out);
-    }
-}
-
-pub(crate) const fn kind_from_entry(k: EntryKind) -> ResourceKind {
-    match k {
-        EntryKind::File | EntryKind::Symlink | EntryKind::Other => ResourceKind::File,
-        EntryKind::Dir => ResourceKind::Dir,
     }
 }
 

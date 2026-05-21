@@ -308,11 +308,9 @@ pub(crate) fn apply_diff_to_tree(
         .iter()
         .chain(diff.renamed.iter().map(|r| &r.to));
     for entry in phase_2 {
-        let res_kind = match entry.kind {
-            EntryKind::Dir => ResourceKind::Dir,
-            EntryKind::File | EntryKind::Symlink | EntryKind::Other => ResourceKind::File,
-        };
-        let Some(resource) = ensure_descendant(tree, base, entry.segment.as_str(), res_kind) else {
+        let Some(resource) =
+            ensure_descendant(tree, base, entry.segment.as_str(), entry.kind.into())
+        else {
             continue;
         };
         let want_watch = covers(profile, resource, tree, scratch)

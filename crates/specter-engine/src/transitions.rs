@@ -3253,7 +3253,7 @@ impl Engine {
                     &mut self.tree,
                     anchor,
                     entry.segment.as_str(),
-                    kind_from_entry(entry.kind),
+                    entry.kind.into(),
                 ) {
                     Some(r) => r,
                     None => continue,
@@ -3730,21 +3730,6 @@ const fn fs_event_to_class(event: FsEvent, kind: ResourceKind) -> ClassSet {
                 ClassSet::CONTENT
             }
         }
-    }
-}
-
-/// Map a diff `EntryKind` to a Tree `ResourceKind`. `Symlink` and `Other`
-/// fold into `File` (the slot occupies one file inode regardless of which
-/// flavor of non-directory it is); `Dir` maps cleanly. Mirrors
-/// `reconcile::kind_from`; kept here so `transitions` doesn't depend on
-/// `reconcile`'s private items beyond the explicitly-shared
-/// `ensure_descendant` / `lookup_descendant` pair.
-const fn kind_from_entry(k: specter_core::EntryKind) -> ResourceKind {
-    match k {
-        specter_core::EntryKind::File
-        | specter_core::EntryKind::Symlink
-        | specter_core::EntryKind::Other => ResourceKind::File,
-        specter_core::EntryKind::Dir => ResourceKind::Dir,
     }
 }
 
