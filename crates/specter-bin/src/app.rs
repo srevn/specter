@@ -5,10 +5,14 @@
 //! attach, enters the main loop, and runs the shutdown sequence
 //! on exit.
 //!
-//! Spawn order is load-bearing:
-//! 1. **Signals first** — `Signals::new` registers handlers immediately,
-//!    so SIGTERM/SIGHUP arriving during init don't fall through to the
-//!    kernel default.
+//! Init order is load-bearing:
+//! 1. **Signal handlers first** — [`signals::register_signal_handlers`]
+//!    installs `sa_sigaction` for SIGHUP / SIGINT / SIGTERM before any
+//!    other production action runs. A signal arriving during the rest
+//!    of init is captured by signal-hook's internal pipe and surfaces
+//!    on the signal thread's first iteration; without this lift,
+//!    SIGTERM during config load would fall through to the kernel
+//!    default (immediate process death) and bypass orderly shutdown.
 //! 2. **Prober next** — workers must be ready to receive probes before
 //!    initial attach emits the first `ProbeOp::Probe`.
 //! 3. **Watcher** — `KqueueWatcher::new` must succeed; the wake handle
@@ -21,7 +25,7 @@ use crate::channels::{Channels, ConfigWatcherSide};
 use crate::driver::EngineDriver;
 use crate::loader::Loader;
 use crate::observability;
-use crate::signals::spawn_signal_thread;
+use crate::signals::{register_signal_handlers, spawn_signal_thread};
 use crossbeam::channel::bounded;
 use specter_actuator::{SubprocessActuator, default_spawner};
 use specter_config::{Cli, Config, FileMeta};
@@ -75,6 +79,22 @@ const WATCHER_DRAIN_WINDOW: Duration = Duration::from_millis(50);
 /// dropped); the `needless_pass_by_value` allow documents the intent.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run(cli: Cli) -> ExitCode {
+    // Register signal handlers before any other production action.
+    // signal-hook's `sa_sigaction` captures any signal arriving during
+    // the rest of init into its internal pipe (owned by the returned
+    // `Signals`); the signal thread drains the pipe when it starts.
+    // SIGTERM during config load is now bounded by "queued until
+    // signal thread runs" rather than "kernel-default kill" — see the
+    // module rustdoc for the init-order rationale. `eprintln!` not
+    // `tracing::error!`: the subscriber isn't installed yet.
+    let signals = match register_signal_handlers() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("specter: signal-hook init failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
     // Load config (fail-fast, pre-tracing). `from_path_with_meta`
     // captures `FileMeta` atomically with the bytes via a single `File`
     // handle — closing the startup TOCTOU between the content read
@@ -195,12 +215,23 @@ pub fn run(cli: Cli) -> ExitCode {
     // reflects the steady-state graph for the rest of the process.
     let toctou_reload_tx = chans.signal.reload_signal_tx.clone();
 
-    // Signal thread (registers handlers immediately).
-    let signal_handle = spawn_signal_thread(
+    // Signal thread (drains the pre-registered signal queue). The
+    // `Signals` constructed at the top of `run` moves in here; any
+    // signal that arrived during init is already queued in
+    // signal-hook's internal pipe and surfaces on the first
+    // `signals.forever()` iteration.
+    let signal_handle = match spawn_signal_thread(
+        signals,
         chans.signal,
         Arc::clone(&shutdown_flag),
         wake_handle.clone(),
-    );
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(?e, "failed to spawn signal thread");
+            return ExitCode::from(1);
+        }
+    };
 
     // Watcher thread.
     let watcher_handle =

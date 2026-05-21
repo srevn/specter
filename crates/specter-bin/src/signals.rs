@@ -38,10 +38,33 @@ use crate::channels::SignalSide;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use specter_sensor::WakeHandle;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+/// The signal set the bin handles end-to-end: SIGHUP for reload,
+/// SIGINT / SIGTERM for shutdown (with double-tap escalation). Pinned
+/// in one place so the registration site ([`crate::app::run`]'s
+/// prologue) and the signal thread's iterator can't drift apart.
+pub(crate) const HANDLED_SIGNALS: [i32; 3] = [SIGHUP, SIGINT, SIGTERM];
+
+/// Register `sa_sigaction` handlers for [`HANDLED_SIGNALS`] and return
+/// the [`Signals`] iterator the signal thread will eventually drain.
+///
+/// Called from `App::run`'s prologue — *before* config load,
+/// observability init, and channel allocation. The kernel installs
+/// the handlers synchronously: any signal arriving in the
+/// initialisation window after this call is captured by signal-hook's
+/// internal pipe (owned by the returned `Signals`) and surfaces on
+/// the first `signals.forever()` iteration once the signal thread
+/// runs. Without this lift, every line of init ran with SIGTERM's
+/// kernel-default disposition (immediate process death) — see
+/// [`crate::app::run`] for the longer rationale.
+pub(crate) fn register_signal_handlers() -> io::Result<Signals> {
+    Signals::new(HANDLED_SIGNALS)
+}
 
 /// Max gap between two terminations before the second escalates to a
 /// hard exit. Operator pressing Ctrl-C twice in <2s → "I'm done waiting."
@@ -173,31 +196,28 @@ where
     }
 }
 
-/// Spawn the signal thread. Registers SIGHUP / SIGINT / SIGTERM
-/// process-wide. Returns a [`JoinHandle`] the bin holds for graceful
-/// shutdown (in v1, the signal thread is allowed to outlive the process
-/// — `signal_hook::iterator::Signals` doesn't expose a programmatic
-/// teardown that doesn't race with in-flight signals).
+/// Spawn the signal thread around a pre-registered [`Signals`]
+/// iterator (constructed by [`register_signal_handlers`] in
+/// `App::run`'s prologue). The thread loops `signals.forever()`,
+/// routing each signal through [`dispatch_signal`].
 ///
-/// On `Signals::new` failure (rare — only `EAGAIN` from the
-/// thread-private signal mask, basically a fork-bomb scenario), the
-/// inner closure logs and returns; the bin proceeds without signal
-/// handling and exits via Ctrl-C's kernel-default action.
+/// Returns a [`JoinHandle`] the bin holds for graceful shutdown (in
+/// v1, the signal thread is allowed to outlive the process —
+/// `signal_hook::iterator::Signals` doesn't expose a programmatic
+/// teardown that doesn't race with in-flight signals), or
+/// [`io::Error`] on `thread::Builder::spawn` failure. The caller
+/// translates the error to a startup-fail [`std::process::ExitCode`],
+/// mirroring the uniform "startup failure → exit 1" contract every
+/// other init path in [`crate::app::run`] honours.
 pub(crate) fn spawn_signal_thread(
+    mut signals: Signals,
     side: SignalSide,
     shutdown_flag: Arc<AtomicBool>,
     wake_handle: Box<dyn WakeHandle>,
-) -> JoinHandle<()> {
+) -> io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("specter-signal".into())
         .spawn(move || {
-            let mut signals = match Signals::new([SIGHUP, SIGINT, SIGTERM]) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(?e, "signal-hook init failed; signal handling disabled");
-                    return;
-                }
-            };
             let mut state = SignalState::default();
             for sig in signals.forever() {
                 let outcome = dispatch_signal(
@@ -215,7 +235,6 @@ pub(crate) fn spawn_signal_thread(
                 }
             }
         })
-        .expect("spawn signal thread")
 }
 
 #[cfg(test)]
