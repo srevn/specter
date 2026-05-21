@@ -201,6 +201,12 @@ impl EngineDriver {
     /// without a `path`), log the error and return the running log
     /// snapshot so the watch-side reload can still proceed
     /// independently.
+    ///
+    /// `merge_cli` surfaces a bare [`specter_config::ValidationIssue`];
+    /// the structured `error` field renders the issue's `Display` directly
+    /// (`<field>: <detail> (<kind>)`), without the `<inline>: N validation
+    /// error(s)` envelope the [`specter_config::ConfigError::Validate`]
+    /// shape would impose on a CLI-merge failure.
     pub(in crate::driver) fn parse_and_resolve_log(
         &self,
         new_config: &Config,
@@ -211,9 +217,9 @@ impl EngineDriver {
             self.cli_log_overrides.path.clone(),
         ) {
             Ok(c) => c,
-            Err(e) => {
+            Err(issue) => {
                 tracing::error!(
-                    error = %e,
+                    issue = %issue,
                     "log reload failed; keeping running log config",
                 );
                 self.loader.current_log.clone()

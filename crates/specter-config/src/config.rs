@@ -74,17 +74,24 @@ impl LogConfig {
     ///
     /// Precedence is symmetric for every field: `CLI > config > default`.
     /// When destination resolves to [`LogDestination::File`] but no path
-    /// was supplied (neither CLI nor config), returns
-    /// [`ConfigError::Validate`] with [`IssueKind::EmptyLogPath`] on
-    /// `log.path`. CLI-supplied paths must be absolute (matching the
-    /// config-time rule), or the same error surfaces with
-    /// [`IssueKind::NonAbsolute`].
+    /// was supplied (neither CLI nor config), returns a [`ValidationIssue`]
+    /// with [`IssueKind::EmptyLogPath`] on `log.path`. CLI-supplied paths
+    /// must be absolute (matching the config-time rule), or the same
+    /// error surfaces with [`IssueKind::NonAbsolute`].
+    ///
+    /// Returns the bare [`ValidationIssue`] rather than wrapping it in
+    /// [`ConfigError::Validate`]: this entry point is the CLI-merge
+    /// flow, not a TOML parse; wrapping would mislabel the operator-
+    /// visible source as `<inline>` (the [`ConfigError::Validate`]
+    /// fallback when no file path is associated). The bin caller owns
+    /// the CLI-source context in the format string instead — see
+    /// `specter-bin`'s `App::run` and `EngineDriver::parse_and_resolve_log`.
     pub fn merge_cli(
         mut self,
         level: Option<LogLevel>,
         destination: Option<LogDestination>,
         path: Option<PathBuf>,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, ValidationIssue> {
         if let Some(l) = level {
             self.level = l;
         }
@@ -94,20 +101,12 @@ impl LogConfig {
         if let Some(p) = path {
             self.path = Some(p);
         }
-        match validate_log_path(
+        self.path = validate_log_path(
             self.destination,
             self.path.as_deref(),
             " (provide --log-path or `[log] path` in the config)",
-        ) {
-            Ok(p) => {
-                self.path = p;
-                Ok(self)
-            }
-            Err(issue) => Err(ConfigError::Validate {
-                path: None,
-                errors: vec![issue],
-            }),
-        }
+        )?;
+        Ok(self)
     }
 }
 
@@ -1540,10 +1539,11 @@ fn parse_events_field(
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, LogDestination, LogLevel, SubAttachAnchor, SubSpec};
+    use super::{Config, LogConfig, LogDestination, LogLevel, SubAttachAnchor, SubSpec};
     use crate::error::{ConfigError, IssueKind};
     use specter_core::program::SpawnBody;
     use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
+    use std::path::PathBuf;
     use std::time::Duration;
 
     const ROOT: &str = "/";
@@ -1668,6 +1668,30 @@ mod tests {
             cfg.log.path.is_none(),
             "path is dropped for stderr destination"
         );
+    }
+
+    /// A relative `--log-path` overrides into a `LogDestination::File`
+    /// fixture; `merge_cli` returns the bare typed
+    /// [`crate::error::ValidationIssue`] (no `Vec`, no
+    /// [`ConfigError::Validate`] envelope) so the bin caller can
+    /// format the CLI-merge context in its own `eprintln!` without
+    /// the `<inline>:` prefix that the config-layer error type
+    /// would impose. Pinning the field / kind here documents the
+    /// post-Bundle-B contract: CLI-merge failures bypass
+    /// [`ConfigError`] entirely.
+    #[test]
+    fn merge_cli_relative_log_path_yields_non_absolute_issue() {
+        let cfg = LogConfig {
+            level: LogLevel::Info,
+            destination: LogDestination::File,
+            path: None,
+        };
+        let issue = cfg
+            .merge_cli(None, None, Some(PathBuf::from("relative-log.txt")))
+            .unwrap_err();
+        assert!(issue.watch_index.is_none());
+        assert_eq!(issue.field, "log.path");
+        assert_eq!(issue.kind, IssueKind::NonAbsolute);
     }
 
     #[test]

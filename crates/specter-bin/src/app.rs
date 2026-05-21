@@ -65,14 +65,17 @@ pub fn run(cli: Cli) -> ExitCode {
     };
 
     // Tracing — CLI overrides applied on top of `[log]` (cli wins).
+    // `merge_cli` returns a bare `ValidationIssue` (not wrapped in
+    // `ConfigError::Validate`): the issue's own `Display` carries the
+    // field + detail + kind, so we forward it verbatim.
     let log_cfg = match initial_config.log.clone().merge_cli(
         cli.log_level,
         cli.log_destination,
         cli.log_path.clone(),
     ) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("specter: log config invalid:\n{e}");
+        Err(issue) => {
+            eprintln!("specter: log config invalid: {issue}");
             return ExitCode::from(1);
         }
     };
